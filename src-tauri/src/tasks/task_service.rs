@@ -3532,6 +3532,8 @@ mod tests {
                     error_count: 0,
                     warning_count: 0,
                     info_count: 0,
+                    coverage: None,
+                    findings_by_type: Default::default(),
                 },
             )
             .unwrap();
@@ -4312,6 +4314,8 @@ mod tests {
             error_count: 0,
             warning_count: 1,
             info_count: 2,
+            coverage: None,
+            findings_by_type: Default::default(),
         };
 
         let error = service
@@ -4367,6 +4371,8 @@ mod tests {
                     error_count: 0,
                     warning_count: 0,
                     info_count: 1,
+                    coverage: None,
+                    findings_by_type: Default::default(),
                 },
             )
         });

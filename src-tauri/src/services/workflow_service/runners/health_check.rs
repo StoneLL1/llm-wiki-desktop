@@ -13,8 +13,9 @@ use crate::models::lint::{
 use crate::models::paths::ProjectContext;
 use crate::models::task::TaskStatus;
 use crate::models::workflow::{
-    HealthCheckMode, WorkflowErrorSummary, WorkflowKind, WorkflowPrerequisiteAction,
-    WorkflowResult, WorkflowRoute, WorkflowRun, WorkflowScope,
+    HealthCheckMode, WorkflowErrorSummary, WorkflowHealthCoverageSummary, WorkflowKind,
+    WorkflowPrerequisiteAction, WorkflowProjectMutationState, WorkflowResult, WorkflowRoute,
+    WorkflowRun, WorkflowScope,
 };
 use crate::services::{
     health_source_paths, AgentService, LintService, LlmService, LocalLintPhase, SearchService,
@@ -422,6 +423,17 @@ where
 
     sink.start(COMPLETE).map_err(task_error)?;
     sink.complete(COMPLETE).map_err(task_error)?;
+    let coverage = WorkflowHealthCoverageSummary {
+        mode: report.mode.clone(),
+        scanned_pages: report.coverage.scanned_pages as u64,
+        deep_covered_pages: report.coverage.deep_covered_pages.map(|count| count as u64),
+        deep_truncated: report.coverage.deep_truncated,
+    };
+    let result_findings_by_type = report
+        .findings_by_type
+        .iter()
+        .map(|(kind, count)| (kind.clone(), *count as u64))
+        .collect();
     let (_, next) = sink
         .finish(WorkflowResult::HealthCheck {
             report_id: Some(report.report_id),
@@ -429,6 +441,8 @@ where
             error_count: error_count as u64,
             warning_count: warning_count as u64,
             info_count: info_count as u64,
+            coverage: Some(coverage),
+            findings_by_type: result_findings_by_type,
         })
         .map_err(task_error)?;
     Ok(next)
@@ -850,6 +864,7 @@ fn finish_error(
                 } else {
                     None
                 },
+                project_mutation_state: WorkflowProjectMutationState::NotModified,
             },
         )
     };

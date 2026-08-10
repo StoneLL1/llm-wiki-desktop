@@ -8,9 +8,9 @@ use llm_wiki_desktop_lib::models::workflow::{
     WorkflowFilesystemAccess, WorkflowGitPolicy, WorkflowGitState, WorkflowKind,
     WorkflowOutputSummary, WorkflowPendingAction, WorkflowPersistenceMode, WorkflowPreparation,
     WorkflowPrerequisite, WorkflowPrerequisiteAction, WorkflowProjectAccessSummary,
-    WorkflowProjectTrust, WorkflowRetryLink, WorkflowRoute, WorkflowRouteSelection, WorkflowRun,
-    WorkflowScope, WorkflowSourceVersionRef, WorkflowStage, WorkflowStageStatus,
-    WorkflowStartOutcome, WORKFLOW_SCHEMA_VERSION,
+    WorkflowProjectMutationState, WorkflowProjectTrust, WorkflowRetryLink, WorkflowRoute,
+    WorkflowRouteSelection, WorkflowRun, WorkflowScope, WorkflowSourceVersionRef, WorkflowStage,
+    WorkflowStageStatus, WorkflowStartOutcome, WORKFLOW_SCHEMA_VERSION,
 };
 use llm_wiki_desktop_lib::tasks::TaskService;
 use serde_json::{json, Value};
@@ -301,10 +301,12 @@ fn error_summary_uses_localization_key_and_typed_recovery_action() {
         recoverable: true,
         user_action_required: true,
         suggested_action: Some(WorkflowPrerequisiteAction::ConfigureExecutionRoute),
+        project_mutation_state: WorkflowProjectMutationState::NotModified,
     };
     let value = serde_json::to_value(error).unwrap();
     assert_eq!(value["messageKey"], "workflows.error.routeUnavailable");
     assert_eq!(value["suggestedAction"], "configure_execution_route");
+    assert_eq!(value["projectMutationState"], "not_modified");
     assert!(value.get("message").is_none());
 }
 

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::errors::BackendError;
 use crate::models::compile::{
-    CompileCandidate, CompileConsumptionRecord, CompileManifest, CompileRoute,
+    CompileCandidate, CompileConsumptionRecord, CompileFile, CompileManifest, CompileRoute,
     ResolvedCompileRoute, SourceVersionRef,
 };
 use crate::models::confirmation::{
@@ -16,8 +16,9 @@ use crate::models::paths::ProjectContext;
 use crate::models::task::TaskStatus;
 use crate::models::workflow::{
     UpdateWikiMode, WorkflowCandidateReference, WorkflowDecisionCounts, WorkflowDecisionReview,
-    WorkflowErrorSummary, WorkflowFileDiff, WorkflowKind, WorkflowPendingAction,
-    WorkflowPrerequisiteAction, WorkflowResult, WorkflowRoute, WorkflowRun, WorkflowScope,
+    WorkflowErrorSummary, WorkflowFileDiff, WorkflowFileDiffKind, WorkflowFileDiffPage,
+    WorkflowKind, WorkflowPendingAction, WorkflowPrerequisiteAction, WorkflowProjectMutationState,
+    WorkflowResult, WorkflowRoute, WorkflowRun, WorkflowScope,
 };
 use crate::services::import_v2::source_registry::SourceRegistry;
 use crate::services::{
@@ -1060,12 +1061,14 @@ fn apply_persisted_update_wiki_candidate(
                     "appliedPaths": applied_paths,
                 })));
             }
-            services
+            let _ = services
                 .compile
                 .task_service
-                .set_task_cancellable(task_id, true)
-                .map_err(task_error)?;
-            return Err(error);
+                .set_task_cancellable(task_id, true);
+            return Err(mark_update_wiki_error_after_successful_rollback(
+                error,
+                &applied_paths,
+            ));
         }
     };
     let mut rollback_paths = affected_paths.clone();
@@ -1096,7 +1099,7 @@ fn apply_persisted_update_wiki_candidate(
             services,
             &error,
         )?;
-        return Err(error);
+        return Err(mark_update_wiki_error_rolled_back(error));
     }
     let pending_result = WorkflowResult::UpdateWiki {
         created: summary.created.len() as u64,
@@ -1118,7 +1121,7 @@ fn apply_persisted_update_wiki_candidate(
             services,
             &error,
         )?;
-        return Err(error);
+        return Err(mark_update_wiki_error_rolled_back(error));
     }
     let final_commit = match record_compile_result(
         context,
@@ -1140,7 +1143,7 @@ fn apply_persisted_update_wiki_candidate(
                 services,
                 &error,
             )?;
-            return Err(error);
+            return Err(mark_update_wiki_error_rolled_back(error));
         }
     };
     let committed_result = WorkflowResult::UpdateWiki {
@@ -1389,11 +1392,10 @@ fn rollback_after_apply(
             "appliedPaths": applied_paths,
         })));
     }
-    services
+    let _ = services
         .compile
         .task_service
-        .set_task_cancellable(task_id, true)
-        .map_err(task_error)?;
+        .set_task_cancellable(task_id, true);
     Ok(())
 }
 
@@ -1411,6 +1413,81 @@ fn applied_paths_from_error(error: &BackendError) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn mark_update_wiki_error_rolled_back(error: BackendError) -> BackendError {
+    mark_update_wiki_error_mutation_state(error, WorkflowProjectMutationState::RolledBack)
+}
+
+fn mark_update_wiki_error_after_successful_rollback(
+    error: BackendError,
+    applied_paths: &[String],
+) -> BackendError {
+    let state = if matches!(
+        error.code.as_str(),
+        "WORKFLOW_APPLY_ROLLBACK_FAILED" | "WORKFLOW_ROLLBACK_CONFLICT"
+    ) {
+        WorkflowProjectMutationState::Modified
+    } else if applied_paths.is_empty() {
+        WorkflowProjectMutationState::NotModified
+    } else {
+        WorkflowProjectMutationState::RolledBack
+    };
+    mark_update_wiki_error_mutation_state(error, state)
+}
+
+fn mark_update_wiki_error_mutation_state(
+    mut error: BackendError,
+    state: WorkflowProjectMutationState,
+) -> BackendError {
+    let mut details = match error.details.take() {
+        Some(serde_json::Value::Object(details)) => details,
+        Some(details) => {
+            let mut object = serde_json::Map::new();
+            object.insert("originalDetails".into(), details);
+            object
+        }
+        None => serde_json::Map::new(),
+    };
+    details.insert(
+        "workflowProjectMutationState".into(),
+        serde_json::Value::String(
+            match state {
+                WorkflowProjectMutationState::NotModified => "not_modified",
+                WorkflowProjectMutationState::Modified => "modified",
+                WorkflowProjectMutationState::RolledBack => "rolled_back",
+                WorkflowProjectMutationState::Unknown => "unknown",
+            }
+            .into(),
+        ),
+    );
+    error.details = Some(serde_json::Value::Object(details));
+    error
+}
+
+fn project_mutation_state_for_update_error(error: &BackendError) -> WorkflowProjectMutationState {
+    if let Some(state) = error
+        .details
+        .as_ref()
+        .and_then(|details| details.get("workflowProjectMutationState"))
+        .and_then(serde_json::Value::as_str)
+    {
+        match state {
+            "not_modified" => WorkflowProjectMutationState::NotModified,
+            "modified" => WorkflowProjectMutationState::Modified,
+            "rolled_back" => WorkflowProjectMutationState::RolledBack,
+            _ => WorkflowProjectMutationState::Unknown,
+        }
+    } else if error.code.contains("STALE") || error.code.contains("BASELINE") {
+        WorkflowProjectMutationState::NotModified
+    } else if matches!(
+        error.code.as_str(),
+        "WORKFLOW_APPLY_ROLLBACK_FAILED" | "WORKFLOW_ROLLBACK_CONFLICT"
+    ) {
+        WorkflowProjectMutationState::Modified
+    } else {
+        WorkflowProjectMutationState::Unknown
+    }
 }
 
 fn finish_error(
@@ -1482,6 +1559,7 @@ fn finish_error(
                 } else {
                     None
                 },
+                project_mutation_state: project_mutation_state_for_update_error(&error),
             },
         )
     };
@@ -1632,44 +1710,332 @@ pub(crate) fn update_wiki_decision_review_summary_for_workflow(
     update_wiki_decision_review_from_descriptor(project_root, descriptor, false)
 }
 
-pub(crate) fn update_wiki_file_diff_for_workflow(
+pub(crate) fn update_wiki_review_can_inline(
+    summary: &WorkflowDecisionReview,
+    max_file_bytes: usize,
+    max_review_bytes: usize,
+) -> bool {
+    if summary
+        .file_diffs
+        .iter()
+        .any(|file| file.kind == WorkflowFileDiffKind::ThreeWay || file.diff_bytes > max_file_bytes)
+    {
+        return false;
+    }
+    let metadata_bytes =
+        serde_json::to_vec(summary).map_or(max_review_bytes + 1, |value| value.len());
+    let diff_bytes = summary
+        .file_diffs
+        .iter()
+        .try_fold(0usize, |total, file| total.checked_add(file.diff_bytes));
+    diff_bytes
+        .is_some_and(|diff_bytes| metadata_bytes.saturating_add(diff_bytes) <= max_review_bytes)
+}
+
+pub(crate) fn update_wiki_file_diff_page_for_workflow(
     task_id: &str,
     project_root: &std::path::Path,
     workflow: &crate::models::workflow::WorkflowExecutionState,
     file_id: &str,
-) -> Option<WorkflowFileDiff> {
-    let index = usize::from_str_radix(file_id.strip_prefix("file-")?, 16).ok()?;
-    let descriptor = load_update_wiki_candidate_for_workflow(task_id, project_root, workflow)?;
+    start: usize,
+    limit: usize,
+) -> Result<Option<WorkflowFileDiffPage>, BackendError> {
+    let Some(index) = file_id
+        .strip_prefix("file-")
+        .and_then(|value| usize::from_str_radix(value, 16).ok())
+    else {
+        return Ok(None);
+    };
+    let Some(descriptor) = load_update_wiki_candidate_for_workflow(task_id, project_root, workflow)
+    else {
+        return Ok(None);
+    };
+    let context = ProjectContext::new("workflow-review", project_root.to_path_buf())
+        .with_resolved_layout()
+        .map_err(|error| BackendError::new("WORKFLOW_DIFF_NOT_FOUND", error.message, true, true))?;
     let files = &descriptor.candidate.manifest.files;
     if let Some(file) = files.get(index) {
-        let diff = CompileService::candidate_diff(&CompileManifest {
-            files: vec![file.clone()],
-            deletions: Vec::new(),
-            summary: descriptor.candidate.manifest.summary.clone(),
-        });
-        return Some(WorkflowFileDiff {
+        let kind = workflow_file_diff_kind(&descriptor, &file.path);
+        let page = paginate_workflow_file_diff_source(
+            &context,
+            &descriptor,
+            &file.path,
+            Some(&file.content),
+            kind,
+            start,
+            limit,
+        )?;
+        return Ok(Some(WorkflowFileDiffPage {
             file_id: file_id.to_string(),
             path: file.path.clone(),
-            diff_bytes: diff.len(),
-            diff: Some(diff),
-        });
+            kind,
+            ..page
+        }));
     }
-    let deletion = descriptor
+    let Some(deletion) = descriptor
         .candidate
         .manifest
         .deletions
-        .get(index.checked_sub(files.len())?)?;
-    let diff = CompileService::candidate_diff(&CompileManifest {
-        files: Vec::new(),
-        deletions: vec![deletion.clone()],
-        summary: descriptor.candidate.manifest.summary.clone(),
-    });
-    Some(WorkflowFileDiff {
+        .get(index.checked_sub(files.len()).unwrap_or(usize::MAX))
+    else {
+        return Ok(None);
+    };
+    let kind = workflow_file_diff_kind(&descriptor, deletion);
+    let page = paginate_workflow_file_diff_source(
+        &context,
+        &descriptor,
+        deletion,
+        None,
+        kind,
+        start,
+        limit,
+    )?;
+    Ok(Some(WorkflowFileDiffPage {
         file_id: file_id.to_string(),
         path: deletion.clone(),
-        diff_bytes: diff.len(),
-        diff: Some(diff),
-    })
+        kind,
+        ..page
+    }))
+}
+
+fn paginate_workflow_file_diff_source(
+    context: &ProjectContext,
+    descriptor: &PersistedUpdateWikiCandidate,
+    path: &str,
+    candidate: Option<&str>,
+    kind: WorkflowFileDiffKind,
+    start: usize,
+    limit: usize,
+) -> Result<WorkflowFileDiffPage, BackendError> {
+    let mut page = VirtualDiffPageBuilder::new(start, limit);
+    if kind == WorkflowFileDiffKind::ThreeWay {
+        let checkpoint = descriptor.checkpoint_hash.as_deref().ok_or_else(|| {
+            BackendError::new(
+                "WORKFLOW_DIFF_NOT_FOUND",
+                "The three-way workflow baseline is unavailable.",
+                true,
+                true,
+            )
+        })?;
+        let baseline = GitService::file_at_checkpoint(context, checkpoint, path)?;
+        let absolute = context.resolve_project_path(path)?;
+        let current = if absolute.try_exists().map_err(|error| {
+            BackendError::new("WORKFLOW_DIFF_READ_FAILED", error.to_string(), true, true)
+        })? {
+            Some(FileStore.read_markdown(context, path)?)
+        } else {
+            None
+        };
+        let current_hash = current
+            .as_deref()
+            .map(|content| hex_sha256(content.as_bytes()));
+        if current_hash.as_ref() != descriptor.current_hashes.get(path) {
+            return Err(BackendError::new(
+                "WORKFLOW_OUTPUT_BASELINE_CHANGED",
+                "The reviewed workflow file changed after this candidate was prepared.",
+                true,
+                true,
+            ));
+        }
+        page.push("```diff\n");
+        push_three_way_section(&mut page, "baseline", path, baseline.as_deref());
+        push_three_way_section(&mut page, "current", path, current.as_deref());
+        push_three_way_section(&mut page, "candidate", path, candidate);
+        page.push("\n```");
+    } else {
+        let current_hash = FileStore.file_hash_if_exists(context, path)?;
+        if current_hash.as_ref() != descriptor.current_hashes.get(path) {
+            return Err(BackendError::new(
+                "WORKFLOW_OUTPUT_BASELINE_CHANGED",
+                "The reviewed workflow file changed after this candidate was prepared.",
+                true,
+                true,
+            ));
+        }
+        page.push("```diff\n");
+        if let Some(content) = candidate {
+            page.push(&format!("--- {path} (current)\n+++ {path} (candidate)\n"));
+            for line in content.lines() {
+                if page.is_full() {
+                    page.mark_remaining();
+                    break;
+                }
+                page.push("+");
+                page.push(line);
+                page.push("\n");
+            }
+        } else {
+            page.push(&format!("--- {path}\n+++ /dev/null\n"));
+        }
+        page.push("```");
+    }
+    page.finish(kind)
+}
+
+fn push_three_way_section(
+    page: &mut VirtualDiffPageBuilder,
+    label: &str,
+    path: &str,
+    content: Option<&str>,
+) {
+    page.push(&format!("--- {label}/{path}\n"));
+    let content = content.unwrap_or("<file absent>");
+    page.push(content);
+    if !content.ends_with('\n') {
+        page.push("\n");
+    }
+}
+
+struct VirtualDiffPageBuilder {
+    start: usize,
+    limit: usize,
+    position: usize,
+    start_valid: bool,
+    has_remaining: bool,
+    diff: String,
+}
+
+impl VirtualDiffPageBuilder {
+    fn new(start: usize, limit: usize) -> Self {
+        Self {
+            start,
+            limit: limit.max(1),
+            position: 0,
+            start_valid: start == 0,
+            has_remaining: false,
+            diff: String::with_capacity(limit.min(256 * 1024)),
+        }
+    }
+
+    fn push(&mut self, segment: &str) {
+        let segment_start = self.position;
+        let segment_end = segment_start.saturating_add(segment.len());
+        if self.start == segment_start || self.start == segment_end {
+            self.start_valid = true;
+        } else if self.start > segment_start && self.start < segment_end {
+            self.start_valid = segment.is_char_boundary(self.start - segment_start);
+        }
+        if self.start < segment_end && self.diff.len() < self.limit {
+            let local_start = self.start.saturating_sub(segment_start).min(segment.len());
+            if segment.is_char_boundary(local_start) {
+                let remaining = self.limit - self.diff.len();
+                let mut local_end = local_start.saturating_add(remaining).min(segment.len());
+                while local_end > local_start && !segment.is_char_boundary(local_end) {
+                    local_end -= 1;
+                }
+                if local_end == local_start && local_start < segment.len() {
+                    local_end =
+                        local_start + segment[local_start..].chars().next().unwrap().len_utf8();
+                }
+                self.diff.push_str(&segment[local_start..local_end]);
+            }
+        }
+        self.position = segment_end;
+    }
+
+    fn is_full(&self) -> bool {
+        self.diff.len() >= self.limit
+    }
+
+    fn mark_remaining(&mut self) {
+        self.has_remaining = true;
+    }
+
+    fn finish(mut self, kind: WorkflowFileDiffKind) -> Result<WorkflowFileDiffPage, BackendError> {
+        if self.start == self.position {
+            self.start_valid = true;
+        }
+        if self.start > self.position || !self.start_valid {
+            return Err(BackendError::new(
+                "WORKFLOW_DIFF_CURSOR_INVALID",
+                "The workflow diff cursor is invalid.",
+                true,
+                false,
+            ));
+        }
+        let next = self.start.saturating_add(self.diff.len());
+        let truncated = self.has_remaining || next < self.position;
+        Ok(WorkflowFileDiffPage {
+            file_id: String::new(),
+            path: String::new(),
+            kind,
+            diff: self.diff,
+            next_cursor: truncated.then_some(next),
+            truncated,
+        })
+    }
+}
+
+fn workflow_file_diff_kind(
+    descriptor: &PersistedUpdateWikiCandidate,
+    path: &str,
+) -> WorkflowFileDiffKind {
+    if descriptor.current_hashes.get(path) != descriptor.baseline_hashes.get(path)
+        && descriptor.checkpoint_hash.is_some()
+    {
+        WorkflowFileDiffKind::ThreeWay
+    } else {
+        WorkflowFileDiffKind::TwoWay
+    }
+}
+
+fn materialize_workflow_file_diff(
+    context: &ProjectContext,
+    descriptor: &PersistedUpdateWikiCandidate,
+    path: &str,
+    candidate: Option<&str>,
+    kind: WorkflowFileDiffKind,
+) -> Option<String> {
+    if kind == WorkflowFileDiffKind::ThreeWay {
+        let checkpoint = descriptor.checkpoint_hash.as_deref()?;
+        let baseline = GitService::file_at_checkpoint(context, checkpoint, path).ok()?;
+        let absolute = context.resolve_project_path(path).ok()?;
+        let current = if absolute.try_exists().ok()? {
+            Some(FileStore.read_markdown(context, path).ok()?)
+        } else {
+            None
+        };
+        return Some(render_three_way_comparison(
+            path,
+            baseline.as_deref(),
+            current.as_deref(),
+            candidate,
+        ));
+    }
+    Some(CompileService::candidate_diff(&CompileManifest {
+        files: candidate
+            .map(|content| CompileFile {
+                path: path.to_string(),
+                content: content.to_string(),
+            })
+            .into_iter()
+            .collect(),
+        deletions: candidate
+            .is_none()
+            .then(|| path.to_string())
+            .into_iter()
+            .collect(),
+        summary: descriptor.candidate.manifest.summary.clone(),
+    }))
+}
+
+fn render_three_way_comparison(
+    path: &str,
+    baseline: Option<&str>,
+    current: Option<&str>,
+    candidate: Option<&str>,
+) -> String {
+    fn section(label: &str, path: &str, content: Option<&str>) -> String {
+        let content = content.unwrap_or("<file absent>");
+        let separator = if content.ends_with('\n') { "" } else { "\n" };
+        format!("--- {label}/{path}\n{content}{separator}")
+    }
+    format!(
+        "```diff\n{}{}{}\n```",
+        section("baseline", path, baseline),
+        section("current", path, current),
+        section("candidate", path, candidate),
+    )
 }
 
 fn update_wiki_decision_review_from_descriptor(
@@ -1694,23 +2060,29 @@ fn update_wiki_decision_review_from_descriptor(
         overwritten: summary.conflicted.len() as u32,
         deleted: summary.deleted.len() as u32,
     };
-    let user_edits_detected = descriptor
-        .current_hashes
-        .iter()
-        .any(|(path, current)| descriptor.baseline_hashes.get(path) != Some(current));
+    let user_edits_detected = workflow_user_edits_detected(
+        &descriptor.candidate.manifest,
+        &descriptor.baseline_hashes,
+        &descriptor.current_hashes,
+    );
     let mut file_diffs = descriptor
         .candidate
         .manifest
         .files
         .iter()
         .map(|file| {
-            let diff = include_diffs.then(|| {
-                CompileService::candidate_diff(&CompileManifest {
-                    files: vec![file.clone()],
-                    deletions: Vec::new(),
-                    summary: descriptor.candidate.manifest.summary.clone(),
+            let kind = workflow_file_diff_kind(&descriptor, &file.path);
+            let diff = include_diffs
+                .then(|| {
+                    materialize_workflow_file_diff(
+                        &context,
+                        &descriptor,
+                        &file.path,
+                        Some(&file.content),
+                        kind,
+                    )
                 })
-            });
+                .flatten();
             WorkflowFileDiff {
                 file_id: String::new(),
                 path: file.path.clone(),
@@ -1719,17 +2091,15 @@ fn update_wiki_decision_review_from_descriptor(
                     String::len,
                 ),
                 diff,
+                kind,
             }
         })
         .collect::<Vec<_>>();
     file_diffs.extend(descriptor.candidate.manifest.deletions.iter().map(|path| {
-        let diff = include_diffs.then(|| {
-            CompileService::candidate_diff(&CompileManifest {
-                files: Vec::new(),
-                deletions: vec![path.clone()],
-                summary: descriptor.candidate.manifest.summary.clone(),
-            })
-        });
+        let kind = workflow_file_diff_kind(&descriptor, path);
+        let diff = include_diffs
+            .then(|| materialize_workflow_file_diff(&context, &descriptor, path, None, kind))
+            .flatten();
         WorkflowFileDiff {
             file_id: String::new(),
             path: path.clone(),
@@ -1737,6 +2107,7 @@ fn update_wiki_decision_review_from_descriptor(
                 .as_ref()
                 .map_or_else(|| candidate_file_diff_len(path, None), String::len),
             diff,
+            kind,
         }
     }));
     Some(WorkflowDecisionReview {
@@ -1745,6 +2116,19 @@ fn update_wiki_decision_review_from_descriptor(
         user_edits_detected,
         file_diffs,
     })
+}
+
+fn workflow_user_edits_detected(
+    manifest: &CompileManifest,
+    baseline_hashes: &HashMap<String, String>,
+    current_hashes: &HashMap<String, String>,
+) -> bool {
+    manifest
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .chain(manifest.deletions.iter().map(String::as_str))
+        .any(|path| baseline_hashes.get(path) != current_hashes.get(path))
 }
 
 fn candidate_file_diff_len(path: &str, content: Option<&str>) -> usize {
@@ -1770,6 +2154,124 @@ mod batch6_diff_summary_tests {
     use super::*;
 
     #[test]
+    fn deleted_worktree_file_is_reported_as_a_user_edit() {
+        let manifest = CompileManifest {
+            files: Vec::new(),
+            deletions: vec!["wiki/deleted.md".into()],
+            summary: String::new(),
+        };
+        let baseline = HashMap::from([
+            ("wiki/deleted.md".to_string(), "baseline".to_string()),
+            ("wiki/unaffected.md".to_string(), "unaffected".to_string()),
+        ]);
+        let current = HashMap::new();
+
+        assert!(workflow_user_edits_detected(&manifest, &baseline, &current));
+    }
+
+    #[test]
+    fn unaffected_baseline_files_do_not_report_user_edits() {
+        let manifest = CompileManifest {
+            files: vec![crate::models::compile::CompileFile::new(
+                "wiki/affected.md",
+                "candidate",
+            )],
+            deletions: Vec::new(),
+            summary: String::new(),
+        };
+        let baseline = HashMap::from([
+            ("wiki/affected.md".to_string(), "same".to_string()),
+            ("wiki/unaffected.md".to_string(), "other".to_string()),
+        ]);
+        let current = HashMap::from([("wiki/affected.md".to_string(), "same".to_string())]);
+
+        assert!(!workflow_user_edits_detected(
+            &manifest, &baseline, &current
+        ));
+    }
+
+    #[test]
+    fn successful_update_rollback_is_reported_explicitly() {
+        let error = BackendError::new("WRITE_FAILED", "write failed", true, true);
+        let marked = mark_update_wiki_error_rolled_back(error);
+
+        assert_eq!(
+            project_mutation_state_for_update_error(&marked),
+            WorkflowProjectMutationState::RolledBack
+        );
+
+        let untouched = mark_update_wiki_error_after_successful_rollback(
+            BackendError::new("WRITE_FAILED", "write failed", true, true),
+            &[],
+        );
+        assert_eq!(
+            project_mutation_state_for_update_error(&untouched),
+            WorkflowProjectMutationState::NotModified
+        );
+
+        let restored = mark_update_wiki_error_after_successful_rollback(
+            BackendError::new("WRITE_FAILED", "write failed", true, true),
+            &["wiki/page.md".into()],
+        );
+        assert_eq!(
+            project_mutation_state_for_update_error(&restored),
+            WorkflowProjectMutationState::RolledBack
+        );
+
+        for applied_paths in [Vec::new(), vec!["wiki/page.md".into()]] {
+            let recovery_failed = mark_update_wiki_error_after_successful_rollback(
+                BackendError::new(
+                    "WORKFLOW_APPLY_ROLLBACK_FAILED",
+                    "recovery failed",
+                    false,
+                    true,
+                ),
+                &applied_paths,
+            );
+            assert_eq!(
+                project_mutation_state_for_update_error(&recovery_failed),
+                WorkflowProjectMutationState::Modified
+            );
+        }
+    }
+
+    #[test]
+    fn virtual_diff_pages_copy_only_the_requested_chunk() {
+        let content = "甲".repeat(200_000);
+        let mut builder = VirtualDiffPageBuilder::new(0, 4096);
+        builder.push("```diff\n");
+        builder.push(&content);
+        builder.push("\n```");
+        let first = builder.finish(WorkflowFileDiffKind::ThreeWay).unwrap();
+
+        assert!(first.truncated);
+        assert!(first.diff.len() <= 4098);
+        assert_eq!(first.next_cursor, Some(first.diff.len()));
+    }
+
+    #[test]
+    fn three_way_reviews_are_always_lazy() {
+        let review = WorkflowDecisionReview {
+            reason: "review".into(),
+            counts: WorkflowDecisionCounts::default(),
+            user_edits_detected: true,
+            file_diffs: vec![WorkflowFileDiff {
+                file_id: "file-00000000".into(),
+                path: "wiki/page.md".into(),
+                diff_bytes: 1,
+                diff: None,
+                kind: WorkflowFileDiffKind::ThreeWay,
+            }],
+        };
+
+        assert!(!update_wiki_review_can_inline(
+            &review,
+            256 * 1024,
+            1024 * 1024
+        ));
+    }
+
+    #[test]
     fn summary_diff_lengths_match_materialized_diffs_without_retaining_diff_text() {
         let file = crate::models::compile::CompileFile::new(
             "wiki/规模/页面.md",
@@ -1792,6 +2294,27 @@ mod batch6_diff_summary_tests {
             summary: String::new(),
         });
         assert_eq!(candidate_file_diff_len(deletion, None), materialized.len());
+    }
+
+    #[test]
+    fn three_way_comparison_keeps_baseline_current_and_candidate_distinct() {
+        let rendered = render_three_way_comparison(
+            "wiki/冲突.md",
+            Some("baseline text\n"),
+            Some("user text\n"),
+            Some("candidate text\n"),
+        );
+        assert!(rendered.contains("--- baseline/wiki/冲突.md\nbaseline text"));
+        assert!(rendered.contains("--- current/wiki/冲突.md\nuser text"));
+        assert!(rendered.contains("--- candidate/wiki/冲突.md\ncandidate text"));
+
+        let deletion = render_three_way_comparison(
+            "wiki/删除.md",
+            Some("baseline"),
+            Some("user changed"),
+            None,
+        );
+        assert!(deletion.contains("--- candidate/wiki/删除.md\n<file absent>"));
     }
 }
 

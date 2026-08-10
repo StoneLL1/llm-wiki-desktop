@@ -21,8 +21,8 @@ use crate::models::paths::ProjectContext;
 use crate::models::task::TaskStatus;
 use crate::models::workflow::{
     WorkflowArtifactType, WorkflowCandidateReference, WorkflowErrorSummary, WorkflowExecutionState,
-    WorkflowKind, WorkflowPendingAction, WorkflowPrerequisiteAction, WorkflowResult, WorkflowRoute,
-    WorkflowRun, WorkflowScope,
+    WorkflowKind, WorkflowPendingAction, WorkflowPrerequisiteAction, WorkflowProjectMutationState,
+    WorkflowResult, WorkflowRoute, WorkflowRun, WorkflowScope,
 };
 use crate::services::{
     AgentService, ExportService, FileStore, GitService, LlmService, SearchService, SecretService,
@@ -52,6 +52,31 @@ type StartCallback = dyn Fn(WorkflowRun) + Send + Sync;
 
 pub struct GenerateContentRunner {
     start_callback: Arc<StartCallback>,
+}
+
+#[cfg(test)]
+mod ui3_mutation_state_tests {
+    use super::*;
+
+    #[test]
+    fn generate_rollback_state_distinguishes_success_and_failure() {
+        assert_eq!(
+            generate_rollback_mutation_state(false, false, false),
+            WorkflowProjectMutationState::NotModified
+        );
+        assert_eq!(
+            generate_rollback_mutation_state(true, true, true),
+            WorkflowProjectMutationState::RolledBack
+        );
+        assert_eq!(
+            generate_rollback_mutation_state(true, false, true),
+            WorkflowProjectMutationState::Modified
+        );
+        assert_eq!(
+            generate_rollback_mutation_state(true, true, false),
+            WorkflowProjectMutationState::Modified
+        );
+    }
 }
 
 impl GenerateContentRunner {
@@ -430,6 +455,7 @@ where
                 artifact_type,
                 record_id: Some(record_id.clone()),
                 output_paths: vec![output_path.clone()],
+                artifact_count: Some(1),
                 validation_passed: true,
             })
             .map_err(task_error)?;
@@ -946,6 +972,7 @@ pub fn confirm_generate_content_overwrite(
             next: None,
         })?;
     let mut appended_record_id = None;
+    let mut content_written = false;
     let apply = (|| {
         services.export_service.write_html_checked(
             context,
@@ -953,6 +980,7 @@ pub fn confirm_generate_content_overwrite(
             &candidate.html,
             WriteMode::OverwriteIfHashMatches(expected_hash),
         )?;
+        content_written = true;
         let record = ExportService::new_validated_record(
             export_type_for_scope(&candidate.scope)?,
             candidate.title.clone(),
@@ -1005,6 +1033,7 @@ pub fn confirm_generate_content_overwrite(
                 artifact_type,
                 record_id: Some(record_id),
                 output_paths: vec![candidate.output_path.clone()],
+                artifact_count: Some(1),
                 validation_passed: true,
             })
             .map_err(task_error)?;
@@ -1019,21 +1048,38 @@ pub fn confirm_generate_content_overwrite(
             Ok((completed, next))
         }
         Err(error) => {
-            if let Some(record_id) = appended_record_id.as_deref() {
-                let _ = services.export_service.remove_record_if_matches(
-                    context,
-                    record_id,
-                    &candidate.output_path,
-                    &candidate.preview.content_hash,
-                );
-            }
-            let _ = services.export_service.write_html_checked(
-                context,
-                &candidate.output_path,
-                &previous_html,
-                WriteMode::OverwriteIfHashMatches(candidate.preview.content_hash.clone()),
-            );
-            Err(fail_confirmed_overwrite(task_id, services, error))
+            let (record_restored, content_restored) = if content_written {
+                let record_restored = appended_record_id.as_deref().is_none_or(|record_id| {
+                    services.export_service.remove_record_if_matches(
+                        context,
+                        record_id,
+                        &candidate.output_path,
+                        &candidate.preview.content_hash,
+                    ) == Ok(true)
+                });
+                let content_restored = services
+                    .export_service
+                    .write_html_checked(
+                        context,
+                        &candidate.output_path,
+                        &previous_html,
+                        WriteMode::OverwriteIfHashMatches(candidate.preview.content_hash.clone()),
+                    )
+                    .is_ok();
+                (record_restored, content_restored)
+            } else {
+                (true, true)
+            };
+            Err(fail_confirmed_overwrite_with_state(
+                task_id,
+                services,
+                error,
+                generate_rollback_mutation_state(
+                    content_written,
+                    record_restored,
+                    content_restored,
+                ),
+            ))
         }
     }
 }
@@ -1048,6 +1094,34 @@ fn fail_confirmed_overwrite(
     task_id: &str,
     services: &GenerateContentExecutionServices<'_>,
     error: BackendError,
+) -> GenerateContentConfirmationFailure {
+    fail_confirmed_overwrite_with_state(
+        task_id,
+        services,
+        error,
+        WorkflowProjectMutationState::NotModified,
+    )
+}
+
+fn generate_rollback_mutation_state(
+    content_written: bool,
+    record_restored: bool,
+    content_restored: bool,
+) -> WorkflowProjectMutationState {
+    if !content_written {
+        WorkflowProjectMutationState::NotModified
+    } else if record_restored && content_restored {
+        WorkflowProjectMutationState::RolledBack
+    } else {
+        WorkflowProjectMutationState::Modified
+    }
+}
+
+fn fail_confirmed_overwrite_with_state(
+    task_id: &str,
+    services: &GenerateContentExecutionServices<'_>,
+    error: BackendError,
+    project_mutation_state: WorkflowProjectMutationState,
 ) -> GenerateContentConfirmationFailure {
     if services
         .task_service
@@ -1070,6 +1144,7 @@ fn fail_confirmed_overwrite(
                 recoverable: error.recoverable,
                 user_action_required: error.user_action_required,
                 suggested_action: Some(WorkflowPrerequisiteAction::PrepareAgain),
+                project_mutation_state,
             },
         )
         .ok()
@@ -1650,6 +1725,7 @@ fn finish_error(
                 } else {
                     None
                 },
+                project_mutation_state: WorkflowProjectMutationState::Unknown,
             },
         )
     };

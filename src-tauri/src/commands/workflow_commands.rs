@@ -7,7 +7,8 @@ use crate::errors::BackendError;
 use crate::models::confirmation::{ConfirmationExecution, PendingActionType, StoredPendingAction};
 use crate::models::workflow::{
     WorkflowDecisionCounts, WorkflowDecisionReview, WorkflowDisplayStatus, WorkflowErrorSummary,
-    WorkflowFileDiff, WorkflowKind, WorkflowPreparation, WorkflowPrerequisiteAction,
+    WorkflowFileDiff, WorkflowFileDiffKind, WorkflowFileDiffPage, WorkflowKind,
+    WorkflowPreparation, WorkflowPrerequisiteAction, WorkflowProjectMutationState,
     WorkflowRouteSelection, WorkflowRun, WorkflowRunHistoryPage, WorkflowRunPage, WorkflowScope,
     WorkflowStartOutcome, WorkflowsOverview,
 };
@@ -99,16 +100,6 @@ pub struct WorkflowFileDiffRequest {
     pub cursor: Option<usize>,
     #[serde(default = "default_diff_chunk_bytes")]
     pub limit_bytes: usize,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkflowFileDiffPage {
-    pub file_id: String,
-    pub path: String,
-    pub diff: String,
-    pub next_cursor: Option<usize>,
-    pub truncated: bool,
 }
 
 const DEFAULT_DIFF_CHUNK_BYTES: usize = 64 * 1024;
@@ -387,52 +378,70 @@ pub fn get_workflow_file_diff(
             "The pending workflow action changed before this diff was read.",
         ));
     }
-    let file = state.with_workflow_access(&context, |_| {
-        if run.kind == WorkflowKind::UpdateWiki {
-            validate_workflow_confirmation(&state, &context, &run, pending)?;
-            let workflow = state
-                .task_service
-                .workflow_execution_state(&run.task_id)
-                .ok_or_else(|| {
-                    workflow_error(
-                        "WORKFLOW_CANDIDATE_STALE",
-                        "The persisted workflow candidate is no longer valid.",
-                    )
-                })?;
-            crate::services::update_wiki_file_diff_for_workflow(
-                &run.task_id,
-                &context.root,
-                &workflow,
-                &request.file_id,
-            )
-            .ok_or_else(|| {
-                workflow_error(
-                    "WORKFLOW_DIFF_NOT_FOUND",
-                    "The requested workflow diff does not exist.",
-                )
-            })
-        } else {
-            let review = normalize_decision_review_files(hydrate_workflow_confirmation(
-                &state, &context, &run, pending, true,
-            )?);
-            review
-                .file_diffs
-                .into_iter()
-                .find(|file| file.file_id == request.file_id)
-                .ok_or_else(|| {
-                    workflow_error(
-                        "WORKFLOW_DIFF_NOT_FOUND",
-                        "The requested workflow diff does not exist.",
-                    )
-                })
-        }
-    })?;
     let start = request.cursor.unwrap_or(0);
     let limit = if request.limit_bytes == 0 {
         DEFAULT_DIFF_CHUNK_BYTES
     } else {
         request.limit_bytes.clamp(1, MAX_DIFF_CHUNK_BYTES)
     };
+    if run.kind == WorkflowKind::UpdateWiki {
+        let mut bounded_limit = limit;
+        loop {
+            let page = state.with_workflow_access(&context, |_| {
+                validate_workflow_confirmation(&state, &context, &run, pending)?;
+                let workflow = state
+                    .task_service
+                    .workflow_execution_state(&run.task_id)
+                    .ok_or_else(|| {
+                        workflow_error(
+                            "WORKFLOW_CANDIDATE_STALE",
+                            "The persisted workflow candidate is no longer valid.",
+                        )
+                    })?;
+                crate::services::update_wiki_file_diff_page_for_workflow(
+                    &run.task_id,
+                    &context.root,
+                    &workflow,
+                    &request.file_id,
+                    start,
+                    bounded_limit,
+                )?
+                .ok_or_else(|| {
+                    workflow_error(
+                        "WORKFLOW_DIFF_NOT_FOUND",
+                        "The requested workflow diff does not exist.",
+                    )
+                })
+            })?;
+            if serde_json::to_vec(&page)
+                .is_ok_and(|payload| payload.len() <= MAX_DIFF_RESPONSE_BYTES)
+            {
+                return Ok(page);
+            }
+            if bounded_limit == 1 {
+                return Err(workflow_error(
+                    "WORKFLOW_DIFF_RESPONSE_TOO_LARGE",
+                    "The workflow diff metadata exceeds the response size limit.",
+                ));
+            }
+            bounded_limit = (bounded_limit / 2).max(1);
+        }
+    }
+    let file = state.with_workflow_access(&context, |_| {
+        let review = normalize_decision_review_files(hydrate_workflow_confirmation(
+            &state, &context, &run, pending, true,
+        )?);
+        review
+            .file_diffs
+            .into_iter()
+            .find(|file| file.file_id == request.file_id)
+            .ok_or_else(|| {
+                workflow_error(
+                    "WORKFLOW_DIFF_NOT_FOUND",
+                    "The requested workflow diff does not exist.",
+                )
+            })
+    })?;
     paginate_workflow_diff(file, start, limit)
 }
 
@@ -472,6 +481,7 @@ fn paginate_workflow_diff(
         WorkflowFileDiffPage {
             file_id: file.file_id.clone(),
             path: file.path.clone(),
+            kind: file.kind,
             diff: diff[start..end].to_string(),
             next_cursor: truncated.then_some(end),
             truncated,
@@ -554,6 +564,7 @@ pub(crate) fn interrupt_unconfirmable_workflow(
                 recoverable: false,
                 user_action_required: true,
                 suggested_action: Some(WorkflowPrerequisiteAction::PrepareAgain),
+                project_mutation_state: WorkflowProjectMutationState::Unknown,
             },
         )
         .map_err(|message| workflow_error("WORKFLOW_CONFIRMATION_RECOVERY_FAILED", message))
@@ -598,6 +609,7 @@ fn hydrate_workflow_confirmation(
                     .unwrap_or_else(|| "candidate".into()),
                 diff_bytes: diff.len(),
                 diff: Some(diff.clone()),
+                kind: WorkflowFileDiffKind::TwoWay,
             }]
         })
         .unwrap_or_default();
@@ -629,7 +641,11 @@ fn hydrate_workflow_confirmation(
                     "The persisted workflow candidate is no longer valid.",
                 )
             })?;
-            if update_wiki_review_can_inline(&summary) {
+            if crate::services::update_wiki_review_can_inline(
+                &summary,
+                LARGE_DIFF_BYTES,
+                LARGE_REVIEW_BYTES,
+            ) {
                 crate::services::update_wiki_decision_review_for_workflow(
                     &run.task_id,
                     &context.root,
@@ -653,24 +669,6 @@ fn hydrate_workflow_confirmation(
             file_diffs,
         })
     }
-}
-
-fn update_wiki_review_can_inline(summary: &WorkflowDecisionReview) -> bool {
-    if summary
-        .file_diffs
-        .iter()
-        .any(|file| file.diff_bytes > LARGE_DIFF_BYTES)
-    {
-        return false;
-    }
-    let metadata_bytes =
-        serde_json::to_vec(summary).map_or(LARGE_REVIEW_BYTES + 1, |value| value.len());
-    let diff_bytes = summary
-        .file_diffs
-        .iter()
-        .try_fold(0usize, |total, file| total.checked_add(file.diff_bytes));
-    diff_bytes
-        .is_some_and(|diff_bytes| metadata_bytes.saturating_add(diff_bytes) <= LARGE_REVIEW_BYTES)
 }
 
 fn validate_workflow_confirmation(
@@ -973,6 +971,7 @@ pub fn confirm_workflow_action(
                         recoverable: false,
                         user_action_required: true,
                         suggested_action: Some(WorkflowPrerequisiteAction::PrepareAgain),
+                        project_mutation_state: WorkflowProjectMutationState::NotModified,
                     },
                 )
                 .map_err(|message| workflow_error("WORKFLOW_CONFIRMATION_FAILED", message))?;
@@ -1234,6 +1233,7 @@ mod batch6_tests {
                     path: format!("wiki/规模/页面-{index:04}.md"),
                     diff_bytes: 0,
                     diff: Some("x".repeat(20 * 1024)),
+                    kind: WorkflowFileDiffKind::TwoWay,
                 })
                 .collect(),
         };
@@ -1262,14 +1262,24 @@ mod batch6_tests {
                     path: format!("wiki/page-{index}.md"),
                     diff_bytes: *size,
                     diff: None,
+                    kind: WorkflowFileDiffKind::TwoWay,
                 })
                 .collect(),
         };
-        assert!(update_wiki_review_can_inline(&review(&[1024, 2048])));
-        assert!(!update_wiki_review_can_inline(&review(&[
-            LARGE_DIFF_BYTES + 1
-        ])));
-        assert!(!update_wiki_review_can_inline(&review(&[200 * 1024; 6])));
+        let can_inline = |review: &WorkflowDecisionReview| {
+            crate::services::update_wiki_review_can_inline(
+                review,
+                LARGE_DIFF_BYTES,
+                LARGE_REVIEW_BYTES,
+            )
+        };
+        assert!(can_inline(&review(&[1024, 2048])));
+        assert!(!can_inline(&review(&[LARGE_DIFF_BYTES + 1])));
+        assert!(!can_inline(&review(&[200 * 1024; 6])));
+
+        let mut three_way = review(&[1]);
+        three_way.file_diffs[0].kind = WorkflowFileDiffKind::ThreeWay;
+        assert!(!can_inline(&three_way));
     }
 
     #[test]
@@ -1279,6 +1289,7 @@ mod batch6_tests {
             path: "wiki/中文/很长的路径.md".into(),
             diff_bytes: 12,
             diff: Some("甲乙丙丁".into()),
+            kind: WorkflowFileDiffKind::TwoWay,
         };
         let first = paginate_workflow_diff(file.clone(), 0, 5).unwrap();
         assert_eq!(first.diff, "甲");
@@ -1296,6 +1307,7 @@ mod batch6_tests {
             path: format!("wiki/{}\\page.md", "路径".repeat(256)),
             diff_bytes: 400 * 1024,
             diff: Some("\"\\\n\t".repeat(100 * 1024)),
+            kind: WorkflowFileDiffKind::TwoWay,
         };
         let first = paginate_workflow_diff(file, 0, MAX_DIFF_CHUNK_BYTES).unwrap();
         assert!(first.truncated);
@@ -1310,6 +1322,7 @@ mod batch6_tests {
             path: "wiki/中文.md".into(),
             diff_bytes: 8,
             diff: Some("中文🚀".into()),
+            kind: WorkflowFileDiffKind::TwoWay,
         };
         let first = paginate_workflow_diff(file, 0, 1).unwrap();
         assert_eq!(first.diff, "中");

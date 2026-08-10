@@ -18,7 +18,7 @@ vi.mock("../../services/workflowApi", () => ({
   getWorkflowFileDiff: workflowApiMocks.getWorkflowFileDiff,
 }));
 
-import type { WorkflowPreparation, WorkflowRun, WorkflowsOverview } from "../../types/workflow";
+import type { WorkflowFileDiffPage, WorkflowPreparation, WorkflowRun, WorkflowsOverview } from "../../types/workflow";
 import { WorkflowPipeline } from "./WorkflowPipeline";
 import { WorkflowPreparationView } from "./WorkflowPreparationView";
 import { WorkflowTaskDetail } from "./WorkflowTaskDetail";
@@ -47,6 +47,14 @@ const overview: WorkflowsOverview = {
     { kind: "generate_content", state: "needs_prerequisite", recommended: false, activeTaskId: null, activeContinuationRequired: false, lastCompletedAt: null, lastCompletedTaskId: null, prerequisite: null },
   ],
 };
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
 
 function workflowRun(overrides: Partial<WorkflowRun> & Pick<WorkflowRun, "taskId" | "kind" | "displayStatus">): WorkflowRun {
   return {
@@ -676,7 +684,8 @@ describe("Workflows overview", () => {
   it("renders indeterminate counts without claiming 100 percent completion", () => {
     render(<WorkflowPipeline stages={(["pending", "running", "completed", "failed", "waiting", "skipped"] as const).map((status, index) => ({ id: status, ordinal: index + 1, status, labelKey: status, startedAt: null, completedAt: null, currentItem: status === "running" ? "wiki/中文.md" : null, progress: status === "running" ? { current: 3, total: null } : null, decision: null }))} />);
     expect(screen.getByText("workflows.progress.current")).toBeInTheDocument();
-    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "workflows.pipeline.overallProgress" })).not.toHaveAttribute("value");
+    expect(screen.queryByRole("progressbar", { name: "running" })).not.toBeInTheDocument();
     expect(screen.getAllByRole("listitem")).toHaveLength(6);
     expect(WORKFLOW_STATUSES).toEqual(["queued", "running", "waiting_for_confirmation", "completed", "failed", "cancelled", "interrupted"]);
   });
@@ -966,6 +975,7 @@ describe("Workflows overview", () => {
       scope: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [] }, route: null, fingerprint: "f", baselineFingerprint: "b",
       stages: [], currentStageId: null, queuePosition: null, continuationRequired: false, retry: null,
       pendingAction: { id: "action-a", actionType: "batch_rewrite", riskLevel: "high", affectedPaths: ["wiki/甲.md", "wiki/乙.md"], candidate: null, expiresAt: null, checkpointHash: "abc123" }, result: null, error: null,
+      decisionReview: { reason: "review", counts: { created: 0, modified: 2, overwritten: 0, deleted: 0 }, userEditsDetected: false, fileDiffs: [] },
       startedAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:00:00Z", completedAt: null,
     };
     render(<WorkflowTaskDetail run={waiting} controller={controller} queuedRuns={[]} onOpenLogs={vi.fn()} />);
@@ -975,7 +985,52 @@ describe("Workflows overview", () => {
     expect(controller.confirm).toHaveBeenCalledWith("waiting-a", "action-a");
   });
 
-  it("keeps confirmation mutations enabled while read-only detail hydration is pending", () => {
+  it("presents confirmation risk and action types as localized product language in review order", () => {
+    const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
+    const waiting = workflowRun({
+      taskId: "waiting-localized",
+      kind: "update_wiki",
+      displayStatus: "waiting_for_confirmation",
+      pendingAction: {
+        id: "action-localized",
+        actionType: "batch_rewrite",
+        riskLevel: "high",
+        affectedPaths: ["wiki/冲突.md"],
+        candidate: null,
+        expiresAt: null,
+        checkpointHash: "checkpoint-123",
+      },
+      decisionReview: {
+        reason: "External edits overlap this candidate.",
+        counts: { created: 0, modified: 1, overwritten: 1, deleted: 0 },
+        userEditsDetected: true,
+        fileDiffs: [{ path: "wiki/冲突.md", diff: "baseline / current / candidate", kind: "three_way" }],
+      },
+    });
+
+    const { container } = render(<WorkflowTaskDetail run={waiting} controller={controller} queuedRuns={[]} onOpenLogs={vi.fn()} />);
+
+    expect(screen.getByText("workflows.risk.high")).toBeInTheDocument();
+    expect(screen.getByText("workflows.actionType.batch_rewrite")).toBeInTheDocument();
+    expect(screen.queryByText("high")).not.toBeInTheDocument();
+    expect(screen.queryByText("batch_rewrite")).not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("workflows.attention.userEditsConflict");
+    expect(screen.getByRole("button", { name: "workflows.action.applyChanges" })).toHaveTextContent("workflows.action.applyChanges");
+
+    const reason = screen.getByText("External edits overlap this candidate.");
+    const counts = container.querySelector(".workflow-decision-counts")!;
+    const paths = screen.getByRole("region", { name: "workflows.attention.paths" });
+    const edits = screen.getByRole("alert");
+    const checkpoint = screen.getByText("checkpoint-123").closest(".workflow-decision-checkpoint")!;
+    const diff = screen.getByRole("group", { name: "workflows.diff.threeWay" });
+    expect(reason.compareDocumentPosition(counts) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(counts.compareDocumentPosition(paths) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(paths.compareDocumentPosition(edits) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(edits.compareDocumentPosition(checkpoint) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(checkpoint.compareDocumentPosition(diff) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("blocks apply while authoritative decision review hydration is pending", () => {
     const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
     const waiting = {
       schemaVersion: 1, taskId: "waiting-hydrate", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "update_wiki", displayStatus: "waiting_for_confirmation",
@@ -991,8 +1046,10 @@ describe("Workflows overview", () => {
 
     render(<WorkflowTaskDetail run={waiting} controller={controller} queuedRuns={[]} onOpenLogs={vi.fn()} />);
 
-    expect(screen.getByRole("button", { name: /workflows.action.applyChanges/ })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /workflows.action.applyChanges/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: "workflows.action.discard" })).toBeEnabled();
+    expect(screen.getByRole("status")).toHaveTextContent("workflows.attention.reviewLoading");
+    expect(screen.queryByText("workflows.result.no")).not.toBeInTheDocument();
   });
 
   it("prepares a recommended next workflow without starting it", () => {
@@ -1008,6 +1065,138 @@ describe("Workflows overview", () => {
     fireEvent.click(screen.getByRole("button", { name: "workflows.action.prepareNext" }));
     expect(controller.prepare).toHaveBeenCalledWith("health_check");
     expect(controller.startPrepared).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      name: "update wiki",
+      run: workflowRun({
+        taskId: "result-update",
+        kind: "update_wiki",
+        displayStatus: "completed",
+        completedAt: "2026-08-10T08:02:00Z",
+        route: { kind: "byok", provider: "open_ai", model: "gpt-5", routeRevision: "route-a" },
+        result: {
+          kind: "update_wiki",
+          created: 2,
+          updated: 3,
+          skipped: 4,
+          deleted: 0,
+          conflicted: 0,
+          affectedPaths: ["wiki/a.md"],
+          checkpointHash: "checkpoint-a",
+          finalCommit: "commit-a",
+          internalSecret: "must-not-render",
+        } as WorkflowRun["result"],
+      }),
+      title: "workflows.result.update_wiki.title",
+      action: "workflows.action.viewUpdates",
+    },
+    {
+      name: "health check",
+      run: workflowRun({
+        taskId: "result-health",
+        kind: "health_check",
+        displayStatus: "completed",
+        scope: { kind: "health_check", mode: "local_quick" },
+        completedAt: "2026-08-10T08:02:00Z",
+        route: { kind: "local", routeRevision: "local" },
+        result: {
+          kind: "health_check",
+          reportId: "report-a",
+          persistent: true,
+          errorCount: 1,
+          warningCount: 2,
+          infoCount: 3,
+          coverage: { mode: "local_quick", scannedPages: 42, deepCoveredPages: null, deepTruncated: false },
+          findingsByType: { missing_frontmatter: 2, dead_link: 1 },
+        },
+      }),
+      title: "workflows.result.health_check.title",
+      action: "workflows.action.openLintResults",
+    },
+    {
+      name: "generated content",
+      run: workflowRun({
+        taskId: "result-generate",
+        kind: "generate_content",
+        displayStatus: "completed",
+        scope: { kind: "generate_content", artifactType: "project_report", pagePaths: [], outputPath: null },
+        completedAt: "2026-08-10T08:02:00Z",
+        route: { kind: "byok", provider: "open_ai", model: "gpt-5", routeRevision: "route-b" },
+        result: { kind: "generate_content", artifactType: "project_report", recordId: "record-a", outputPaths: ["exports/report.html"], artifactCount: 7, validationPassed: true },
+      }),
+      title: "workflows.result.generate_content.title",
+      action: "workflows.action.viewGeneratedResult",
+    },
+  ])("renders the $name typed result presenter without generic object dumping", ({ run, title, action }) => {
+    const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
+
+    render(<WorkflowTaskDetail run={run} controller={controller} queuedRuns={[]} onOpenLogs={vi.fn()} />);
+
+    expect(screen.getByRole("region", { name: title })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: action })).toBeInTheDocument();
+    expect(screen.getByText("workflows.result.duration")).toBeInTheDocument();
+    expect(screen.getByText("workflows.result.route")).toBeInTheDocument();
+    expect(screen.queryByText("must-not-render")).not.toBeInTheDocument();
+    if (run.result?.kind === "health_check") {
+      expect(screen.getByText("workflows.result.findingTypes")).toBeInTheDocument();
+      expect(screen.getByText("lint.issueType.missing_frontmatter")).toBeInTheDocument();
+      expect(screen.getByText("workflows.result.scannedPages")).toBeInTheDocument();
+    }
+    if (run.result?.kind === "generate_content") {
+      expect(screen.getByText("7")).toBeInTheDocument();
+    }
+  });
+
+  it("separates failed and cancelled recovery while keeping logs subordinate", () => {
+    const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
+    const failed = workflowRun({
+      taskId: "failed-pipeline",
+      kind: "update_wiki",
+      displayStatus: "failed",
+      currentStageId: "apply",
+      stages: [
+        { id: "prepare", ordinal: 1, status: "completed", labelKey: "stage.prepare", startedAt: "2026-08-10T08:00:00Z", completedAt: "2026-08-10T08:00:05Z", currentItem: null, progress: null, decision: null },
+        { id: "apply", ordinal: 2, status: "failed", labelKey: "stage.apply", startedAt: "2026-08-10T08:00:05Z", completedAt: "2026-08-10T08:00:08Z", currentItem: "wiki/a.md", progress: null, decision: null },
+      ],
+      error: { code: "APPLY_FAILED", messageKey: "workflows.error.updateWikiFailed", recoverable: true, userActionRequired: true, suggestedAction: "prepare_again" },
+    });
+    const view = render(<WorkflowTaskDetail run={failed} controller={controller} queuedRuns={[]} onOpenLogs={vi.fn()} />);
+
+    const failureRegion = screen.getByRole("region", { name: "workflows.failure.title" });
+    expect(failureRegion).toHaveTextContent("workflows.failure.mutation.unknown");
+    expect(within(failureRegion).getByText("stage.apply")).toBeInTheDocument();
+    expect(within(failureRegion).queryByText("apply")).not.toBeInTheDocument();
+    expect(screen.getByText("workflows.prerequisiteAction.prepare_again")).toBeInTheDocument();
+    expect(view.container.querySelector('details[data-stage-status="failed"]')).toHaveAttribute("open");
+    const logs = screen.getByText("workflows.logs.title").closest("details")!;
+    expect(logs).not.toHaveAttribute("open");
+
+    view.rerender(<WorkflowTaskDetail run={{ ...failed, displayStatus: "interrupted" }} controller={controller} queuedRuns={[]} onOpenLogs={vi.fn()} />);
+    expect(screen.getByRole("status")).toHaveTextContent("workflows.interrupted.title");
+    expect(screen.queryByRole("region", { name: "workflows.failure.title" })).not.toBeInTheDocument();
+
+    view.rerender(<WorkflowTaskDetail run={workflowRun({ taskId: "cancelled-pipeline", kind: "update_wiki", displayStatus: "cancelled" })} controller={controller} queuedRuns={[]} onOpenLogs={vi.fn()} />);
+    expect(screen.getByRole("status")).toHaveTextContent("workflows.cancelled.description");
+    expect(screen.queryByRole("region", { name: "workflows.failure.title" })).not.toBeInTheDocument();
+  });
+
+  it("exposes truthful overall and stage progress with expanded current work and real duration", () => {
+    const stages: WorkflowRun["stages"] = [
+      { id: "done", ordinal: 1, status: "completed", labelKey: "stage.done", startedAt: "2026-08-10T08:00:00Z", completedAt: "2026-08-10T08:00:05Z", currentItem: null, progress: null, decision: null },
+      { id: "current", ordinal: 2, status: "running", labelKey: "stage.current", startedAt: "2026-08-10T08:00:05Z", completedAt: null, currentItem: "wiki/非常长的路径/页面.md", progress: { current: 8, total: 14 }, decision: null },
+      { id: "future", ordinal: 3, status: "pending", labelKey: "stage.future", startedAt: null, completedAt: null, currentItem: null, progress: null, decision: null },
+    ];
+
+    const { container } = render(<WorkflowPipeline stages={stages} currentStageId="current" displayStatus="running" />);
+
+    const overall = screen.getByRole("progressbar", { name: "workflows.pipeline.overallProgress" });
+    expect(overall).toHaveAttribute("aria-valuetext", "workflows.pipeline.overallValue");
+    expect(container.querySelector('details[data-stage-status="running"]')).toHaveAttribute("open");
+    expect(container.querySelector('details[data-stage-status="completed"]')).not.toHaveAttribute("open");
+    expect(screen.getByText("workflows.duration.seconds")).toBeInTheDocument();
+    expect(screen.getByText("wiki/非常长的路径/页面.md")).toHaveAttribute("title", "wiki/非常长的路径/页面.md");
   });
 
   it("disables the recommended preparation action while its own request is pending", () => {
@@ -1068,6 +1257,7 @@ describe("Workflows overview", () => {
     workflowApiMocks.getWorkflowFileDiff.mockResolvedValue({
       fileId: "file-00000000",
       path: "wiki/中文/长路径.md",
+      kind: "two_way",
       diff: "@@ first chunk @@",
       nextCursor: null,
       truncated: false,
@@ -1077,7 +1267,7 @@ describe("Workflows overview", () => {
       schemaVersion: 1, taskId: "waiting-diff", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "update_wiki", displayStatus: "waiting_for_confirmation",
       scope: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [] }, route: null, fingerprint: "f", baselineFingerprint: "b", stages: [], currentStageId: null, queuePosition: null, continuationRequired: false, retry: null,
       pendingAction: { id: "action-a", actionType: "batch_rewrite", riskLevel: "high", affectedPaths: ["wiki/中文/长路径.md"], candidate: { kind: "task_owned", candidateId: "candidate-a" }, expiresAt: null, checkpointHash: null },
-      decisionReview: { reason: "review", counts: { created: 0, modified: 1, overwritten: 0, deleted: 0 }, userEditsDetected: false, fileDiffs: [{ fileId: "file-00000000", path: "wiki/中文/长路径.md", diffBytes: 300_000, diff: null }] },
+      decisionReview: { reason: "review", counts: { created: 0, modified: 1, overwritten: 0, deleted: 0 }, userEditsDetected: false, fileDiffs: [{ fileId: "file-00000000", path: "wiki/中文/长路径.md", diffBytes: 300_000, diff: null, kind: "two_way" }] },
       result: null, error: null, startedAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:01:00Z", completedAt: null,
     } satisfies WorkflowRun;
 
@@ -1096,6 +1286,65 @@ describe("Workflows overview", () => {
       limitBytes: 64 * 1024,
     }));
     expect(await screen.findByText("@@ first chunk @@")).toBeInTheDocument();
+  });
+
+  it("blocks Apply and offers prepare-again when a lazy diff snapshot is stale", async () => {
+    workflowApiMocks.getWorkflowFileDiff.mockRejectedValue({
+      code: "WORKFLOW_OUTPUT_BASELINE_CHANGED",
+      message: "changed",
+    });
+    const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "filterHistory", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
+    const waiting = {
+      schemaVersion: 1, taskId: "waiting-stale", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "update_wiki", displayStatus: "waiting_for_confirmation",
+      scope: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [] }, route: null, fingerprint: "f", baselineFingerprint: "b", stages: [], currentStageId: null, queuePosition: null, continuationRequired: false, retry: null,
+      pendingAction: { id: "action-stale", actionType: "batch_rewrite", riskLevel: "high", affectedPaths: ["wiki/stale.md"], candidate: { kind: "task_owned", candidateId: "candidate-stale" }, expiresAt: null, checkpointHash: "checkpoint" },
+      decisionReview: { reason: "review", counts: { created: 0, modified: 1, overwritten: 0, deleted: 0 }, userEditsDetected: false, fileDiffs: [{ fileId: "file-00000000", path: "wiki/stale.md", diffBytes: 300_000, diff: null, kind: "three_way" }] },
+      result: null, error: null, startedAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:01:00Z", completedAt: null,
+    } satisfies WorkflowRun;
+
+    const view = render(<WorkflowTaskDetail run={waiting} controller={controller} queuedRuns={[]} onOpenLogs={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "workflows.action.applyChanges" })).toBeEnabled();
+
+    fireEvent.click(view.container.querySelector(".workflow-file-diff summary")!);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "workflows.action.applyChanges" })).toBeDisabled());
+    expect(screen.getAllByText("workflows.diff.stale").length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.prepareAgain" }));
+    expect(controller.adjustAndPrepare).toHaveBeenCalledWith(waiting);
+  });
+
+  it("does not leak a delayed lazy diff response across task identities", async () => {
+    const first = deferred<WorkflowFileDiffPage>();
+    workflowApiMocks.getWorkflowFileDiff
+      .mockReturnValueOnce(first.promise)
+      .mockResolvedValueOnce({
+        fileId: "file-00000000",
+        path: "wiki/b.md",
+        kind: "two_way",
+        diff: "task-b-diff",
+        nextCursor: null,
+        truncated: false,
+      });
+    const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "filterHistory", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
+    const createRun = (taskId: string, path: string): WorkflowRun => workflowRun({
+      taskId,
+      kind: "update_wiki",
+      displayStatus: "waiting_for_confirmation",
+      pendingAction: { id: `action-${taskId}`, actionType: "batch_rewrite", riskLevel: "high", affectedPaths: [path], candidate: { kind: "task_owned", candidateId: `candidate-${taskId}` }, expiresAt: null, checkpointHash: null },
+      decisionReview: { reason: "review", counts: { created: 0, modified: 1, overwritten: 0, deleted: 0 }, userEditsDetected: false, fileDiffs: [{ fileId: "file-00000000", path, diffBytes: 300_000, diff: null, kind: "two_way" }] },
+    });
+    const view = render(<WorkflowTaskDetail run={createRun("task-a", "wiki/a.md")} controller={controller} queuedRuns={[]} onOpenLogs={vi.fn()} />);
+
+    fireEvent.click(view.container.querySelector(".workflow-file-diff summary")!);
+    await waitFor(() => expect(workflowApiMocks.getWorkflowFileDiff).toHaveBeenCalledTimes(1));
+
+    view.rerender(<WorkflowTaskDetail run={createRun("task-b", "wiki/b.md")} controller={controller} queuedRuns={[]} onOpenLogs={vi.fn()} />);
+    fireEvent.click(view.container.querySelector(".workflow-file-diff summary")!);
+    expect(await screen.findByText("task-b-diff")).toBeInTheDocument();
+
+    first.resolve({ fileId: "file-00000000", path: "wiki/a.md", kind: "two_way", diff: "task-a-diff", nextCursor: null, truncated: false });
+    await waitFor(() => expect(screen.queryByText("task-a-diff")).not.toBeInTheDocument());
+    expect(screen.getByText("task-b-diff")).toBeInTheDocument();
   });
 
   it("groups 10,000 attempts in linear time while preserving stable attempt order", () => {
