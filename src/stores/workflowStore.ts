@@ -116,7 +116,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         overview,
         identityGuard,
         overviewStatus: "ready" as WorkflowOverviewStatus,
-        runs: sortRuns(mergeRunSnapshots(identityChanged ? [] : state.runs, overview.recentRuns ?? legacyFullRuns)),
+        runs: sortRuns(mergeRunSnapshots(identityChanged ? [] : state.runs, legacyFullRuns)),
         historyRuns: sortHistoryRuns(runs),
         historyCursor,
         ...(identityChanged

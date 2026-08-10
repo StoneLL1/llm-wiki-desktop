@@ -335,11 +335,41 @@ export interface WorkflowOverviewRow {
   prerequisite: WorkflowPrerequisite | null;
 }
 
+export interface WorkflowHealthContextSummary {
+  taskId: string;
+  completedAt: string;
+  errorCount: number;
+  warningCount: number;
+  infoCount: number;
+}
+
+export interface WorkflowArtifactContextSummary {
+  taskId: string;
+  completedAt: string;
+  artifactType: WorkflowArtifactType;
+}
+
+export interface WorkflowQueueContextItem {
+  taskId: string;
+  kind: WorkflowKind;
+  queuePosition: number | null;
+  startedAt: string;
+}
+
+export interface WorkflowContextSummary {
+  pendingSourceCount: number;
+  lastHealth: WorkflowHealthContextSummary | null;
+  recentArtifact: WorkflowArtifactContextSummary | null;
+  queueCount: number;
+  queuedRuns: WorkflowQueueContextItem[];
+}
+
 export interface WorkflowsOverview {
   schemaVersion: number;
   projectAccess: WorkflowProjectAccessSummary | null;
   rows: WorkflowOverviewRow[];
-  recentRuns?: WorkflowRun[];
+  recentRuns?: WorkflowRunSummary[];
+  contextSummary?: WorkflowContextSummary;
 }
 
 export type WorkflowStartOutcome =

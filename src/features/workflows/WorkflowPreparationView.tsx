@@ -266,7 +266,7 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
         {t("workflows.action.back")}
       </button>
       <div className="workflows-intro">
-        <h2>{t("workflows.preparation.title", { workflow: t(workflowKindKey(preparation.kind)) })}</h2>
+        <h2 data-workflow-surface-title tabIndex={-1}>{t("workflows.preparation.title", { workflow: t(workflowKindKey(preparation.kind)) })}</h2>
         <p>{t("workflows.preparation.description")}</p>
       </div>
 

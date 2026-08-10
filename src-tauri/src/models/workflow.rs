@@ -566,13 +566,52 @@ pub struct WorkflowOverviewRow {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct WorkflowHealthContextSummary {
+    pub task_id: String,
+    pub completed_at: String,
+    pub error_count: u64,
+    pub warning_count: u64,
+    pub info_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowArtifactContextSummary {
+    pub task_id: String,
+    pub completed_at: String,
+    pub artifact_type: WorkflowArtifactType,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowQueueContextItem {
+    pub task_id: String,
+    pub kind: WorkflowKind,
+    pub queue_position: Option<u32>,
+    pub started_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowContextSummary {
+    pub pending_source_count: usize,
+    pub last_health: Option<WorkflowHealthContextSummary>,
+    pub recent_artifact: Option<WorkflowArtifactContextSummary>,
+    pub queue_count: usize,
+    pub queued_runs: Vec<WorkflowQueueContextItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkflowsOverview {
     #[serde(default = "workflow_schema_version")]
     pub schema_version: u32,
     pub project_access: Option<WorkflowProjectAccessSummary>,
     pub rows: Vec<WorkflowOverviewRow>,
     #[serde(default)]
-    pub recent_runs: Vec<WorkflowRun>,
+    pub recent_runs: Vec<WorkflowRunSummary>,
+    #[serde(default)]
+    pub context_summary: Option<WorkflowContextSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useNavigationStore } from "../../stores/navigationStore";
@@ -44,14 +44,54 @@ vi.mock("./WorkspaceRouter", () => ({
   WorkspaceRouter: ({ activeView, importWorkflow }: {
     activeView: string;
     importWorkflow: { addPaths: (paths: string[]) => void };
-  }) => (
-    <div data-testid="workspace-router">
-      router:{activeView}
-      <button onClick={() => importWorkflow.addPaths(["C:/source.pdf"])}>
-        Import through router
-      </button>
-    </div>
-  ),
+  }) => {
+    const workflowSurface = useWorkflowStore((state) => state.surface);
+    return (
+      <div className={activeView === "workflows" ? "workflows-view" : undefined} data-testid="workspace-router">
+        router:{activeView}
+        {activeView === "workflows" ? (
+          <>
+            <h2 data-workflow-surface-title tabIndex={-1}>
+              surface:{workflowSurface}
+            </h2>
+            {workflowSurface === "overview" ? (
+              <>
+                <button
+                  aria-label="Open workflow preparation"
+                  data-workflow-return-key="row:update_wiki:prepare"
+                  onClick={() => useWorkflowStore.setState({ surface: "preparation" })}
+                >
+                  Prepare workflow
+                </button>
+                <button aria-label="View Update Wiki" data-workflow-return-key="attention:run-a" onClick={() => useWorkflowStore.setState({ surface: "detail" })}>
+                  View attention run
+                </button>
+                <button aria-label="View Update Wiki" data-workflow-return-key="row:update_wiki:run-a" onClick={() => useWorkflowStore.setState({ surface: "detail" })}>
+                  View row run
+                </button>
+                <aside id="right-context-panel">
+                  <button
+                    aria-label="Open queued workflow run"
+                    data-workflow-return-key="context-queue:run-a"
+                    onClick={() => useWorkflowStore.setState({ surface: "detail" })}
+                  >
+                    Queued workflow
+                  </button>
+                </aside>
+              </>
+            ) : (
+              <button onClick={() => useWorkflowStore.setState({ surface: "overview" })}>
+                Back to workflow overview
+              </button>
+            )}
+          </>
+        ) : null}
+        <button onClick={() => importWorkflow.addPaths(["C:/source.pdf"])}>
+          Import through router
+        </button>
+      </div>
+    );
+  },
 }));
 vi.mock("../../features/settings/SettingsDialog", () => ({
   SettingsDialog: ({
@@ -262,6 +302,115 @@ describe("WorkspaceController", () => {
     fireEvent.click(screen.getByRole("button", { name: "Workflow history" }));
 
     expect(useWorkflowStore.getState().surface).toBe("history");
+  });
+
+  it("focuses each new workflow surface title and restores the history trigger on return", async () => {
+    useNavigationStore.setState({ activeView: "workflows" });
+
+    render(<WorkspaceController />);
+    const historyTrigger = screen.getByRole("button", { name: "Workflow history" });
+    historyTrigger.focus();
+    fireEvent.click(historyTrigger);
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "surface:history" })).toHaveFocus());
+
+    act(() => useWorkflowStore.getState().setSurface("overview"));
+    await waitFor(() => expect(historyTrigger).toHaveFocus());
+  });
+
+  it("restores a workflow row trigger after returning from preparation", async () => {
+    useNavigationStore.setState({ activeView: "workflows" });
+    render(<WorkspaceController />);
+
+    const trigger = screen.getByRole("button", { name: "Open workflow preparation" });
+    trigger.focus();
+    fireEvent.click(trigger);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "surface:preparation" })).toHaveFocus());
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to workflow overview" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Open workflow preparation" })).toHaveFocus());
+  });
+
+  it("restores a right-panel queue trigger after returning from task detail", async () => {
+    useNavigationStore.setState({ activeView: "workflows" });
+    render(<WorkspaceController />);
+
+    const trigger = screen.getByRole("button", { name: "Open queued workflow run" });
+    trigger.focus();
+    fireEvent.click(trigger);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "surface:detail" })).toHaveFocus());
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to workflow overview" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Open queued workflow run" })).toHaveFocus());
+  });
+
+  it("restores the exact workflow trigger when accessible labels are duplicated", async () => {
+    useNavigationStore.setState({ activeView: "workflows" });
+    render(<WorkspaceController />);
+
+    const [, rowTrigger] = screen.getAllByRole("button", { name: "View Update Wiki" });
+    rowTrigger!.focus();
+    fireEvent.click(rowTrigger!);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "surface:detail" })).toHaveFocus());
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to workflow overview" }));
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "View Update Wiki" })[1]).toHaveFocus());
+  });
+
+  it("does not restore a workflow trigger into a replacement project", async () => {
+    useNavigationStore.setState({ activeView: "workflows" });
+    useWorkflowStore.getState().activateProject("project-a\0D:/a");
+    render(<WorkspaceController />);
+
+    const trigger = screen.getByRole("button", { name: "Open workflow preparation" });
+    trigger.focus();
+    fireEvent.click(trigger);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "surface:preparation" })).toHaveFocus());
+
+    act(() => useWorkflowStore.getState().activateProject("project-b\0D:/b"));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "surface:overview" })).toHaveFocus());
+    expect(screen.getByRole("button", { name: "Open workflow preparation" })).not.toHaveFocus();
+  });
+
+  it("does not restore a workflow trigger after same-root identity replacement", async () => {
+    useNavigationStore.setState({ activeView: "workflows" });
+    useWorkflowStore.getState().activateProject("project-a\0D:/a");
+    useWorkflowStore.setState({
+      identityGuard: { canonicalIdentityKey: "identity-old", identityRevision: "revision-old" },
+    });
+    render(<WorkspaceController />);
+
+    const trigger = screen.getByRole("button", { name: "Open workflow preparation" });
+    trigger.focus();
+    fireEvent.click(trigger);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "surface:preparation" })).toHaveFocus());
+
+    act(() => useWorkflowStore.setState({
+      surface: "overview",
+      identityGuard: { canonicalIdentityKey: "identity-new", identityRevision: "revision-new" },
+    }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "surface:overview" })).toHaveFocus());
+    expect(screen.getByRole("button", { name: "Open workflow preparation" })).not.toHaveFocus();
+  });
+
+  it("does not restore the history trigger after same-root identity replacement", async () => {
+    useNavigationStore.setState({ activeView: "workflows" });
+    useWorkflowStore.getState().activateProject("project-a\0D:/a");
+    useWorkflowStore.setState({
+      identityGuard: { canonicalIdentityKey: "identity-old", identityRevision: "revision-old" },
+    });
+    render(<WorkspaceController />);
+
+    const historyTrigger = screen.getByRole("button", { name: "Workflow history" });
+    fireEvent.click(historyTrigger);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "surface:history" })).toHaveFocus());
+
+    act(() => useWorkflowStore.setState({
+      surface: "overview",
+      identityGuard: { canonicalIdentityKey: "identity-new", identityRevision: "revision-new" },
+    }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "surface:overview" })).toHaveFocus());
+    expect(historyTrigger).not.toHaveFocus();
   });
 
   it("returns an open-project workflow prerequisite to the project workbench", () => {

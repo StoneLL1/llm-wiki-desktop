@@ -60,7 +60,7 @@ export function WorkflowHistoryView({ runs, onBack, onOpen, onLoadMore, onFilter
 
   return <div className="workflow-history">
     <button className="workflow-back" onClick={onBack} type="button"><ArrowLeft aria-hidden="true" size={14} />{t("workflows.action.back")}</button>
-    <div className="workflows-intro"><h2>{t("workflows.history.title")}</h2><p>{t("workflows.history.description")}</p></div>
+    <div className="workflows-intro"><h2 data-workflow-surface-title tabIndex={-1}>{t("workflows.history.title")}</h2><p>{t("workflows.history.description")}</p></div>
     <div className="workflow-filters"><label>{t("workflows.history.kind")}<select onChange={(event) => updateFilters(event.target.value === "all" ? null : event.target.value as WorkflowKind, historyStatus)} value={kind}><option value="all">{t("workflows.filter.all")}</option>{WORKFLOW_KINDS.map((value) => <option key={value} value={value}>{t(workflowKindKey(value))}</option>)}</select></label><label>{t("workflows.history.status")}<select onChange={(event) => updateFilters(historyKind, event.target.value === "all" ? null : event.target.value as WorkflowDisplayStatus)} value={status}><option value="all">{t("workflows.filter.all")}</option>{WORKFLOW_STATUSES.map((value) => <option key={value} value={value}>{t(workflowStatusKey(value))}</option>)}</select></label></div>
     <div
       aria-label={t("workflows.history.title")}

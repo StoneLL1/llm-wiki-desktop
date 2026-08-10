@@ -23,7 +23,16 @@ describe("responsive UI CSS contracts", () => {
     expect(styles).toContain("@media (max-width: 1180px)");
     expect(styles).toContain("@media (max-width: 820px)");
     expect(styles).toContain("@media (max-width: 760px)");
-    expect(styles).toContain(".right-panel__backdrop");
+    expect(styles).toContain(".right-panel-overlay");
+    expect(styles).not.toContain(".right-panel__backdrop");
+  });
+
+  it("uses semantic text colors and a viewport-clamped narrow context dialog", () => {
+    expect(styles).toContain("--danger-text");
+    expect(styles).toContain("--warning-text");
+    expect(styles).toMatch(/\.right-panel-overlay__surface\s*\{[^}]*width:\s*clamp\(/s);
+    expect(styles).toMatch(/\.workflow-error-banner\s*\{[^}]*color:\s*var\(--danger-text\)/s);
+    expect(styles).toMatch(/\.workflow-prerequisite\.is-blocking\s*\{[^}]*color:\s*var\(--danger-text\)/s);
   });
 
   it("allows dense toolbars to wrap translated labels", () => {
@@ -85,6 +94,14 @@ describe("responsive UI CSS contracts", () => {
     expect(styles).not.toContain(".app-sidebar nav button");
     expect(styles).not.toContain('.resize-handle[data-pane-id="sidebar"] { display: none; }');
     expect(styles).toMatch(/@media \(max-width: 820px\)[\s\S]*grid-template-columns:\s*var\(--sidebar-w-current\) 6px minmax\(0, 1fr\)/s);
+    expect(styles).toMatch(/@media \(max-width: 820px\)[\s\S]*\.app-shell\s*\{[^}]*--sidebar-w-current:\s*var\(--sidebar-collapsed-w\)/s);
+  });
+
+  it("wraps the narrow workflow controls without expanding the shell horizontally", () => {
+    expect(styles).toMatch(/\.app-shell\s*\{[^}]*overflow:\s*hidden/s);
+    expect(styles).toMatch(/@media \(max-width: 820px\)[\s\S]*\.workflow-filters\s*\{[^}]*flex-wrap:\s*wrap/s);
+    expect(styles).toMatch(/@media \(max-width: 820px\)[\s\S]*\.workflow-actions\s*\{[^}]*align-items:\s*stretch/s);
+    expect(styles).toMatch(/\.workflow-context-path\s*\{[^}]*overflow:\s*hidden/s);
   });
 
   it("uses the splitter as the single visual boundary next to the sidebar", () => {

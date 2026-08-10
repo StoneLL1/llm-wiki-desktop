@@ -29,6 +29,8 @@ import { attentionRun, groupWorkflowAttempts, WORKFLOW_STATUSES } from "./workfl
 import { WorkflowsRightPanel } from "./WorkflowsRightPanel";
 import { useProjectStore } from "../../stores/projectStore";
 import { useWorkflowStore } from "../../stores/workflowStore";
+import enLocale from "../../i18n/locales/en.json";
+import zhLocale from "../../i18n/locales/zh-CN.json";
 
 const overview: WorkflowsOverview = {
   schemaVersion: 1,
@@ -46,6 +48,13 @@ const overview: WorkflowsOverview = {
     { kind: "health_check", state: "ready", recommended: false, activeTaskId: null, activeContinuationRequired: false, lastCompletedAt: null, lastCompletedTaskId: null, prerequisite: null },
     { kind: "generate_content", state: "needs_prerequisite", recommended: false, activeTaskId: null, activeContinuationRequired: false, lastCompletedAt: null, lastCompletedTaskId: null, prerequisite: null },
   ],
+  contextSummary: {
+    pendingSourceCount: 0,
+    lastHealth: null,
+    recentArtifact: null,
+    queueCount: 0,
+    queuedRuns: [],
+  },
 };
 
 function deferred<T>() {
@@ -752,11 +761,220 @@ describe("Workflows overview", () => {
 
     useWorkflowStore.setState({ surface: "history" });
     view.rerender(<WorkflowsRightPanel />);
-    expect(screen.getByText("workflows.context.project")).toBeInTheDocument();
+    expect(screen.getByText("workflows.context.history")).toBeInTheDocument();
+    expect(screen.queryByText("workflows.context.project")).not.toBeInTheDocument();
     expect(screen.queryByText("stale-se")).not.toBeInTheDocument();
   });
 
-  it("keeps long English context labels and actions keyboard reachable at 200 percent text size", () => {
+  it("renders complete, surface-owned right-panel facts without leaking stale preparation actions", () => {
+    const run = workflowRun({
+      taskId: "detail-run",
+      kind: "generate_content",
+      displayStatus: "waiting_for_confirmation",
+      route: { kind: "byok", provider: "ollama", model: "qwen", routeRevision: "route-a" },
+      scope: {
+        kind: "generate_content",
+        artifactType: "project_report",
+        pagePaths: [],
+        outputPath: "exports/项目报告.html",
+      },
+      stages: [{
+        id: "write-export",
+        ordinal: 8,
+        status: "waiting",
+        labelKey: "workflows.stage.generateContent.writeExport",
+        startedAt: "2026-08-10T08:00:00Z",
+        completedAt: null,
+        currentItem: "exports/项目报告.html",
+        progress: null,
+        decision: null,
+      }],
+      currentStageId: "write-export",
+      pendingAction: {
+        id: "action-a",
+        actionType: "overwrite_file",
+        riskLevel: "high",
+        affectedPaths: ["exports/项目报告.html"],
+        candidate: null,
+        expiresAt: null,
+        checkpointHash: "checkpoint-a",
+      },
+    });
+    const preparation = {
+      schemaVersion: 1,
+      preparationId: "prep-context",
+      preparationRevision: "prep-context-revision",
+      projectAccess: overview.projectAccess!,
+      kind: "update_wiki",
+      scope: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [] },
+      baseline: { fingerprint: "baseline", capturedAt: "2026-08-10T08:00:00Z", itemCount: 12 },
+      route: { kind: "byok", provider: "ollama", model: "qwen", routeRevision: "route-b" },
+      prerequisites: [{ code: "DIRTY_GIT", messageKey: "workflows.prerequisite.resolveDirtyGit", blocking: true, action: "resolve_dirty_git" }],
+      output: { labelKey: "workflows.output.wiki", location: "wiki", mayChangeWiki: true },
+      gitPolicy: "required_before_write",
+      requiresScopeConfirmation: false,
+      quickRerunEligible: false,
+    } satisfies WorkflowPreparation;
+    useProjectStore.setState({ currentProject: projectSummary });
+    useWorkflowStore.getState().activateProject("project-a\0D:/a");
+    useWorkflowStore.setState({
+      overview: { ...overview, recentRuns: [run] },
+      runs: [run],
+      preparation,
+      surface: "preparation",
+    });
+
+    const view = render(<WorkflowsRightPanel />);
+    expect(screen.getByText("workflows.context.prerequisites")).toBeInTheDocument();
+    expect(screen.getByText("workflows.prerequisite.resolveDirtyGit")).toBeInTheDocument();
+    expect(screen.getByText("workflows.git.required_before_write")).toBeInTheDocument();
+    expect(screen.getByText("wiki")).toHaveAttribute("title", "wiki");
+    expect(screen.queryByText("workflows.context.queue")).not.toBeInTheDocument();
+
+    useWorkflowStore.setState({ surface: "detail", selectedTaskId: run.taskId, preparation: null });
+    view.rerender(<WorkflowsRightPanel />);
+    expect(screen.getByText("workflows.context.currentStage")).toBeInTheDocument();
+    expect(screen.getByText("workflows.stage.generateContent.writeExport")).toBeInTheDocument();
+    expect(screen.getByText("workflows.stageStatus.waiting")).toBeInTheDocument();
+    expect(screen.getByText("workflows.status.waiting_for_confirmation")).toBeInTheDocument();
+    expect(screen.getByText("workflows.gitState.clean")).toBeInTheDocument();
+    expect(screen.getByText("exports/项目报告.html")).toHaveAttribute("title", "exports/项目报告.html");
+    expect(screen.queryByText("waiting_for_confirmation")).not.toBeInTheDocument();
+    expect(screen.queryByText("overwrite_file")).not.toBeInTheDocument();
+
+    const completedUpdate = workflowRun({
+      taskId: "completed-update",
+      kind: "update_wiki",
+      displayStatus: "completed",
+      scope: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [] },
+      stages: [{
+        id: "record-result",
+        ordinal: 9,
+        status: "completed",
+        labelKey: "workflows.stage.updateWiki.recordResult",
+        startedAt: "2026-08-10T08:00:00Z",
+        completedAt: "2026-08-10T08:01:00Z",
+        currentItem: null,
+        progress: null,
+        decision: null,
+      }],
+      currentStageId: "record-result",
+      result: {
+        kind: "update_wiki",
+        created: 0,
+        updated: 1,
+        skipped: 0,
+        deleted: 0,
+        conflicted: 0,
+        affectedPaths: ["wiki/page.md"],
+        checkpointHash: "checkpoint-completed",
+        finalCommit: "commit-completed",
+      },
+    });
+    useWorkflowStore.setState({ runs: [completedUpdate], selectedTaskId: completedUpdate.taskId });
+    view.rerender(<WorkflowsRightPanel />);
+    expect(screen.getByText("wiki/page.md")).toHaveAttribute("title", "wiki/page.md");
+    expect(screen.getByText("checkpoint-completed")).toBeInTheDocument();
+    expect(screen.getByText("commit-completed")).toBeInTheDocument();
+    expect(screen.getByText("workflows.stageStatus.completed")).toBeInTheDocument();
+
+    useWorkflowStore.setState({
+      surface: "history",
+      selectedTaskId: null,
+      historyKind: "generate_content",
+      historyStatus: "completed",
+      historyRuns: [{
+        schemaVersion: 1,
+        taskId: "history-a",
+        projectId: "project-a",
+        canonicalIdentityKey: "identity-a",
+        identityRevision: "revision-a",
+        kind: "generate_content",
+        displayStatus: "completed",
+        retry: null,
+        startedAt: "2026-08-09T08:00:00Z",
+        updatedAt: "2026-08-09T08:01:00Z",
+        completedAt: "2026-08-09T08:01:00Z",
+      }],
+    });
+    view.rerender(<WorkflowsRightPanel />);
+    expect(screen.getByText("workflows.context.history")).toBeInTheDocument();
+    expect(screen.getByText("workflows.kind.generate_content")).toBeInTheDocument();
+    expect(screen.getByText("workflows.status.completed")).toBeInTheDocument();
+    expect(screen.queryByText("workflows.context.preparation")).not.toBeInTheDocument();
+    expect(screen.queryByText("workflows.context.queue")).not.toBeInTheDocument();
+  });
+
+  it("renders full-project overview facts only from the backend context summary", () => {
+    const queuedRuns = Array.from({ length: 5 }, (_, index) => ({
+      taskId: `summary-queue-${index}`,
+      kind: "update_wiki" as const,
+      queuePosition: index + 1,
+      startedAt: `2026-08-10T0${index}:00:00Z`,
+    }));
+    const staleGenericRun = workflowRun({
+      taskId: "stale-generic-queue",
+      kind: "health_check",
+      displayStatus: "queued",
+    });
+    const recentRuns = Array.from({ length: 5 }, (_, index) => workflowRun({
+      taskId: `recent-unrelated-${index}`,
+      kind: "update_wiki",
+      displayStatus: "completed",
+    }));
+    useProjectStore.setState({ currentProject: projectSummary });
+    useWorkflowStore.getState().activateProject("project-a\0D:/a");
+    useWorkflowStore.setState({
+      overview: {
+        ...overview,
+        recentRuns,
+        contextSummary: {
+          pendingSourceCount: 4,
+          lastHealth: { taskId: "older-health", completedAt: "2026-08-01T00:00:00Z", errorCount: 1, warningCount: 2, infoCount: 3 },
+          recentArtifact: { taskId: "older-artifact", completedAt: "2026-07-31T00:00:00Z", artifactType: "project_report" },
+          queueCount: 6,
+          queuedRuns,
+        },
+      },
+      runs: [staleGenericRun],
+      surface: "overview",
+    });
+
+    render(<WorkflowsRightPanel />);
+
+    expect(screen.getByText("4", { selector: "dd" })).toBeInTheDocument();
+    expect(screen.getByText("6", { selector: "dd" })).toBeInTheDocument();
+    expect(screen.getByText("workflows.context.healthSummary")).toBeInTheDocument();
+    expect(screen.getByText("workflows.artifact.projectReport")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "workflows.context.openQueuedRun" })).toHaveLength(5);
+    expect(screen.queryByText("stale-generic-queue")).not.toBeInTheDocument();
+  });
+
+  it("does not present a missing context summary as an empty queue", () => {
+    useProjectStore.setState({ currentProject: projectSummary });
+    useWorkflowStore.getState().activateProject("project-a\0D:/a");
+    useWorkflowStore.setState({ overview: { ...overview, contextSummary: undefined }, surface: "overview" });
+
+    render(<WorkflowsRightPanel />);
+
+    expect(screen.getAllByText("workflows.context.summaryUnavailable").length).toBeGreaterThan(0);
+    expect(screen.queryByText("workflows.context.queueEmpty")).not.toBeInTheDocument();
+  });
+
+  it("keeps the authoritative Workflows terminology explicit and locale keys in parity", () => {
+    const enWorkflowKeys = Object.keys(enLocale).filter((key) => key.startsWith("workflows.")).sort();
+    const zhWorkflowKeys = Object.keys(zhLocale).filter((key) => key.startsWith("workflows.")).sort();
+
+    expect(zhWorkflowKeys).toEqual(enWorkflowKeys);
+    expect(enLocale["workflows.result.artifactType"]).toBe("Output type");
+    expect(zhLocale["workflows.result.artifactType"]).toBe("输出类型");
+    expect(enLocale["workflows.artifact.beautifulRead"]).toBe("Comfortable reading page");
+    expect(zhLocale["workflows.artifact.beautifulRead"]).toBe("舒适阅读页");
+    expect(enLocale["workflows.artifact.projectReport"]).toBe("Project report");
+    expect(zhLocale["workflows.context.git"]).toBe("Git 检查点");
+  });
+
+  it("keeps long English context labels semantic and keyboard operable under enlarged text", () => {
     const longTitle = "Workflow context for a knowledge base with unusually descriptive English labels";
     i18nMocks.t = (key: string) => key === "workflows.context.title" ? longTitle : key;
     useProjectStore.setState({ currentProject: {

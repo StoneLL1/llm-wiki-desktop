@@ -1,20 +1,49 @@
-import { type CSSProperties, useEffect } from "react";
+import { type CSSProperties, useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 
 import {
   PANE_WIDTH_LIMITS,
   SIDEBAR_COLLAPSE_THRESHOLD,
 } from "../../hooks/useResizablePane";
+import { useModalDialog } from "../../hooks/useModalDialog";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { BottomStatusBar } from "./BottomStatusBar";
 import { LeftSidebar } from "./LeftSidebar";
 import { ProjectConfirmationController } from "./ProjectConfirmationController";
 import { ResizableSplitter } from "./ResizableSplitter";
 import { RightContextPanel } from "./RightContextPanel";
+import { RightPanelModalContext } from "./RightPanelHeader";
 import { TaskLogDrawer } from "./TaskLogDrawer";
 import { Toaster } from "./Toaster";
 import { TopBar } from "./TopBar";
 import { WorkspaceController } from "./WorkspaceController";
+
+function useNarrowDesktop() {
+  const [narrow, setNarrow] = useState(() =>
+    typeof window.matchMedia === "function"
+      ? window.matchMedia("(max-width: 1180px)").matches
+      : false,
+  );
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const media = window.matchMedia("(max-width: 1180px)");
+    const update = () => setNarrow(media.matches);
+    update();
+    if (typeof media.addEventListener === "function") {
+      media.addEventListener("change", update);
+      return () => media.removeEventListener("change", update);
+    }
+    if (typeof media.addListener === "function") {
+      media.addListener(update);
+      return () => media.removeListener(update);
+    }
+    return undefined;
+  }, []);
+
+  return narrow;
+}
 
 export function AppShell() {
   const { t } = useTranslation();
@@ -32,20 +61,22 @@ export function AppShell() {
   const toggleSettings = useNavigationStore((state) => state.toggleSettings);
   const sidebarCollapsed =
     paneSizes.sidebar <= SIDEBAR_COLLAPSE_THRESHOLD;
+  const narrowDesktop = useNarrowDesktop();
   const showRightPanel = rightPanelOpen && workspaceFocus === null;
+  const showRightPanelDialog = showRightPanel && narrowDesktop;
+  const rightPanelDialogRef = useModalDialog<HTMLDivElement>({
+    open: showRightPanelDialog,
+    onClose: () => setRightPanelOpen(false),
+    returnFocusSelector: '[aria-controls="right-context-panel"][aria-label]',
+  });
   const shellStyle = {
     "--sidebar-w-current": `${paneSizes.sidebar}px`,
     "--rightpanel-w-current": `${paneSizes.rightPanel}px`,
   } as CSSProperties;
 
   useEffect(() => {
-    if (
-      typeof window.matchMedia === "function" &&
-      window.matchMedia("(max-width: 1180px)").matches
-    ) {
-      setRightPanelOpen(false);
-    }
-  }, [setRightPanelOpen]);
+    if (narrowDesktop) setRightPanelOpen(false);
+  }, [narrowDesktop, setRightPanelOpen]);
 
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -104,6 +135,7 @@ export function AppShell() {
         .filter(Boolean)
         .join(" ")}
       style={shellStyle}
+      inert={showRightPanelDialog ? true : undefined}
     >
       <TopBar />
 
@@ -121,7 +153,7 @@ export function AppShell() {
         <main className="app-shell__main">
           <WorkspaceController />
         </main>
-        {showRightPanel ? (
+        {showRightPanel && !narrowDesktop ? (
           <ResizableSplitter
             paneId="rightPanel"
             label={t("shell.splitter.rightPanel")}
@@ -133,22 +165,35 @@ export function AppShell() {
             onReset={() => resetPaneSize("rightPanel")}
           />
         ) : null}
-        {showRightPanel ? <RightContextPanel /> : null}
-        {showRightPanel ? (
-          <button
-            aria-hidden="true"
-            className="right-panel__backdrop"
-            onClick={() => setRightPanelOpen(false)}
-            tabIndex={-1}
-            type="button"
-          />
-        ) : null}
+        {showRightPanel && !narrowDesktop ? <RightContextPanel /> : null}
       </div>
 
       <BottomStatusBar />
       <Toaster />
       <ProjectConfirmationController />
       <TaskLogDrawer />
+      {showRightPanelDialog
+        ? createPortal(
+            <div
+              aria-labelledby="right-context-panel-title"
+              aria-modal="true"
+              className="right-panel-overlay"
+              onClick={(event) => {
+                if (event.target === event.currentTarget) setRightPanelOpen(false);
+              }}
+              ref={rightPanelDialogRef}
+              role="dialog"
+              tabIndex={-1}
+            >
+              <div className="right-panel-overlay__surface">
+                <RightPanelModalContext.Provider value>
+                  <RightContextPanel />
+                </RightPanelModalContext.Provider>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }

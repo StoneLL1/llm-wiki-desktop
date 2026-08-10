@@ -49,7 +49,16 @@ function ProjectWorkspaceController() {
   const clearPendingImportPath = useNavigationStore((state) => state.clearPendingImportPath);
   const closeSettings = useNavigationStore((state) => state.closeSettings);
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
+  const workflowSurface = useWorkflowStore((state) => state.surface);
   const setWorkflowsSurface = useWorkflowStore((state) => state.setSurface);
+  const workflowHistoryTriggerRef = useRef<HTMLButtonElement>(null);
+  const workflowHistoryContextRef = useRef<{ projectKey: string | null; identityKey: string | null } | null>(null);
+  const workflowReturnTargetRef = useRef<{
+    key: string;
+    projectKey: string | null;
+    identityKey: string | null;
+  } | null>(null);
+  const previousWorkflowSurfaceRef = useRef(workflowSurface);
   const [projectAuthorityRequest, setProjectAuthorityRequest] = useState<{
     action: ProjectAuthorityAction;
     project: Pick<ProjectSummary, "projectId" | "rootPath">;
@@ -99,6 +108,72 @@ function ProjectWorkspaceController() {
     { onProjectPrerequisite },
   );
   const settingsWasOpenRef = useRef(settingsOpen);
+
+  useEffect(() => {
+    if (activeView !== "workflows") return;
+    return useWorkflowStore.subscribe((state, previousState) => {
+      if (previousState.surface !== "overview" || state.surface === "overview") return;
+      const trigger = document.activeElement;
+      if (!(trigger instanceof HTMLButtonElement)) return;
+      const key = trigger.dataset.workflowReturnKey;
+      if (!key) return;
+      workflowReturnTargetRef.current = {
+        key,
+        projectKey: previousState.projectKey,
+        identityKey: previousState.identityGuard
+          ? `${previousState.identityGuard.canonicalIdentityKey}\0${previousState.identityGuard.identityRevision}`
+          : null,
+      };
+    });
+  }, [activeView]);
+
+  useEffect(() => {
+    const previousSurface = previousWorkflowSurfaceRef.current;
+    previousWorkflowSurfaceRef.current = workflowSurface;
+    if (activeView !== "workflows" || previousSurface === workflowSurface) return;
+
+    if (workflowSurface === "overview") {
+      if (previousSurface === "history") {
+        const historyContext = workflowHistoryContextRef.current;
+        workflowHistoryContextRef.current = null;
+        const currentState = useWorkflowStore.getState();
+        const currentIdentityKey = currentState.identityGuard
+          ? `${currentState.identityGuard.canonicalIdentityKey}\0${currentState.identityGuard.identityRevision}`
+          : null;
+        if (
+          historyContext
+          && historyContext.projectKey === currentState.projectKey
+          && historyContext.identityKey === currentIdentityKey
+        ) {
+          workflowHistoryTriggerRef.current?.focus();
+        } else {
+          document.querySelector<HTMLElement>("[data-workflow-surface-title]")?.focus();
+        }
+        return;
+      }
+      const target = workflowReturnTargetRef.current;
+      workflowReturnTargetRef.current = null;
+      const currentWorkflowState = useWorkflowStore.getState();
+      const currentIdentityKey = currentWorkflowState.identityGuard
+        ? `${currentWorkflowState.identityGuard.canonicalIdentityKey}\0${currentWorkflowState.identityGuard.identityRevision}`
+        : null;
+      const returnButton = target
+        && target.projectKey === currentWorkflowState.projectKey
+        && target.identityKey === currentIdentityKey
+        ? [...document.querySelectorAll<HTMLButtonElement>("[data-workflow-return-key]")].find(
+            (button) => button.dataset.workflowReturnKey === target.key,
+          )
+        : null;
+      if (returnButton) {
+        returnButton.focus();
+        return;
+      }
+      document.querySelector<HTMLElement>("[data-workflow-surface-title]")?.focus();
+      return;
+    }
+
+    document.querySelector<HTMLElement>("[data-workflow-surface-title]")?.focus();
+  }, [activeView, workflowSurface]);
 
   useEffect(() => {
     if (
@@ -241,19 +316,30 @@ function ProjectWorkspaceController() {
         {activeView === "workflows" ? (
           <button
             className="btn btn--secondary ml-auto"
-            onClick={() => setWorkflowsSurface("history")}
+            onClick={() => {
+              const state = useWorkflowStore.getState();
+              workflowHistoryContextRef.current = {
+                projectKey: state.projectKey,
+                identityKey: state.identityGuard
+                  ? `${state.identityGuard.canonicalIdentityKey}\0${state.identityGuard.identityRevision}`
+                  : null,
+              };
+              setWorkflowsSurface("history");
+            }}
+            ref={workflowHistoryTriggerRef}
             type="button"
           >
             <History aria-hidden="true" size={14} />
             {t("workflows.history.title")}
           </button>
         ) : null}
-        {!rightPanelOpen && workspaceFocus === null ? (
+        {workspaceFocus === null ? (
           <button
             aria-controls="right-context-panel"
-            aria-expanded="false"
+            aria-expanded={rightPanelOpen}
             aria-label={t("shell.contextPanel.open")}
             className={`icon-button ${activeView === "workflows" ? "" : "ml-auto"}`}
+            hidden={rightPanelOpen}
             onClick={() => setRightPanelOpen(true)}
             title={t("shell.contextPanel.open")}
             type="button"
