@@ -7,7 +7,7 @@ import {
   type WorkflowOperationError,
   type WorkflowOverviewStatus,
 } from "../../stores/workflowStore";
-import type { WorkflowKind, WorkflowRun, WorkflowsOverview } from "../../types/workflow";
+import type { WorkflowKind, WorkflowRunSummary, WorkflowsOverview } from "../../types/workflow";
 import { WorkflowRow } from "./WorkflowRow";
 import {
   attentionWorkflowRow,
@@ -57,7 +57,7 @@ export function WorkflowsOverviewView({
         ) : (
           <LoaderCircle className="workflow-empty__icon animate-spin" size={20} aria-hidden="true" />
         )}
-        <h2>{t(failed ? "workflows.loadError.title" : "workflows.loading.title")}</h2>
+        <h2 data-workflow-surface-title tabIndex={-1}>{t(failed ? "workflows.loadError.title" : "workflows.loading.title")}</h2>
         <p>{t(failed ? "workflows.loadError.description" : "workflows.loading.description")}</p>
         {failed && errorSummary ? <code className="workflow-empty__detail">{errorSummary}</code> : null}
         {failed && technicalDetails ? <details><summary>{t("workflows.error.technicalDetails")}</summary><pre>{technicalDetails}</pre></details> : null}
@@ -90,7 +90,7 @@ export function WorkflowsOverviewView({
   return (
     <div className="workflows-overview">
       <div className="workflows-intro">
-        <h2>{t("workflows.overview.title")}</h2>
+        <h2 data-workflow-surface-title tabIndex={-1}>{t("workflows.overview.title")}</h2>
         <p>{t("workflows.overview.description")}</p>
       </div>
       {leadingRow && leadingRow.activeTaskId && leadingStatus ? (
@@ -120,6 +120,7 @@ export function WorkflowsOverviewView({
             <button
               aria-label={`${t(attentionActionKey)}: ${t(workflowKindKey(leadingRow.kind))}`}
               className="btn btn--primary btn--sm"
+              data-workflow-return-key={`attention:${leadingRow.activeTaskId}`}
               disabled={attentionActionPending}
               type="button"
               onClick={() => leadingStatus === "queued" && leadingRow.activeContinuationRequired
@@ -185,7 +186,7 @@ export function WorkflowsOverviewView({
 }
 
 function RecentRunRow({ run, language, pending, onOpen }: {
-  run: WorkflowRun;
+  run: WorkflowRunSummary;
   language: string;
   pending: boolean;
   onOpen: () => void;
@@ -207,6 +208,7 @@ function RecentRunRow({ run, language, pending, onOpen }: {
       <button
         aria-label={`${t("workflows.action.view")}: ${t(workflowKindKey(run.kind))}, ${t(workflowStatusKey(run.displayStatus))}, ${dateTimeLabel}`}
         className="btn btn--ghost btn--sm"
+        data-workflow-return-key={`recent:${run.taskId}`}
         disabled={pending}
         type="button"
         onClick={onOpen}

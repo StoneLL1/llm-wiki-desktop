@@ -75,13 +75,14 @@ export function WorkflowRow({
         <span>{t(workflowStatusKey(state))}</span>
       </div>
       {activeTaskId ? (
-        <button aria-label={`${actionLabel}: ${kindLabel}`} className="btn btn--secondary btn--sm" disabled={pending} onClick={() => onOpenRun(activeTaskId)} type="button">
+        <button aria-label={`${actionLabel}: ${kindLabel}`} className="btn btn--secondary btn--sm" data-workflow-return-key={`row:${row.kind}:${activeTaskId}`} disabled={pending} onClick={() => onOpenRun(activeTaskId)} type="button">
           {actionLabel}
         </button>
       ) : (
         <button
           aria-label={`${actionLabel}: ${kindLabel}`}
           className={`btn ${highlighted ? "btn--primary" : "btn--secondary"} btn--sm`}
+          data-workflow-return-key={`row:${row.kind}:${row.lastCompletedTaskId ?? "prepare"}`}
           disabled={pending || (state === "up_to_date" && !row.lastCompletedTaskId)}
           onClick={() => state === "up_to_date" && row.lastCompletedTaskId
             ? onOpenRun(row.lastCompletedTaskId)

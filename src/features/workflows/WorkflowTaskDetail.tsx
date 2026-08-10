@@ -107,7 +107,7 @@ export function WorkflowTaskDetail({
       </button>
       <div className="workflow-detail__heading">
         <div>
-          <h2>{t(workflowKindKey(run.kind))}</h2>
+          <h2 data-workflow-surface-title tabIndex={-1}>{t(workflowKindKey(run.kind))}</h2>
           <p>
             {t(workflowStatusKey(run.displayStatus))} · <span className="font-mono">{run.taskId.slice(0, 8)}</span>
           </p>

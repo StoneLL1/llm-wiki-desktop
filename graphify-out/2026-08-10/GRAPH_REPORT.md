@@ -1,35 +1,35 @@
 # Graph Report - llm-wiki-desktop  (2026-08-10)
 
 ## Corpus Check
-- 784 files · ~1,058,069 words
+- 786 files · ~1,090,607 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 13001 nodes · 36474 edges · 590 communities (509 shown, 81 thin omitted)
-- Extraction: 98% EXTRACTED · 2% INFERRED · 0% AMBIGUOUS · INFERRED: 633 edges (avg confidence: 0.79)
+- 13065 nodes · 36653 edges · 596 communities (514 shown, 82 thin omitted)
+- Extraction: 98% EXTRACTED · 2% INFERRED · 0% AMBIGUOUS · INFERRED: 634 edges (avg confidence: 0.79)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `ca5fc421`
+- Built from commit: `83367405`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
 ## Community Hubs (Navigation)
-- services/importV2Api.ts
-- wiki.rs
-- task.ts
+- types/importV2.ts
+- wiki_commands.rs
+- ChatView.tsx
 - scan_confirmation.rs
 - WikiView.tsx
 - SettingsView.tsx
 - transaction.rs
 - Option
 - agent_candidate.rs
-- importV2File.ts
+- ImportEngine
 - platform-extract.mjs
-- source_lifecycle.rs
+- BackendError
 - source_commands.rs
 - capability_runtime.rs
-- ProjectContext
+- BackendError
 - graph_service.rs
 - workflow.rs
 - export_service.rs
@@ -47,14 +47,14 @@
 - BackendTask
 - workflow_queue.rs
 - asr-sensevoice-small/runner/core.mjs
-- update_wiki.rs
+- .new
 - generate_content.rs
 - settings.rs
 - project.rs
-- ImportView.tsx
+- TaskLogDrawer.tsx
 - rules.rs
 - AppState
-- ImportInput
+- Option
 - platform_provider.rs
 - assessment.rs
 - lint.rs
@@ -62,16 +62,16 @@
 - media_router.rs
 - export_commands.rs
 - agent_tools.rs
-- GitService
+- fixes.rs
 - import_v2_commands.rs
 - task_service.rs
-- String
+- TaskService
 - reports.rs
 - task_commands.rs
 - WebTargetStore
 - CoreIntegrationFixture
 - query.rs
-- file_store.rs
+- FileStore
 - agent_workspace.rs
 - confirmation.rs
 - lint_commands.rs
@@ -80,38 +80,38 @@
 - import_v2_web_commands.rs
 - asr-whisper/runner/core.mjs
 - capability_release.rs
-- .new
+- ProjectContext
 - index.ts
 - BackendError
 - import_v2_presentation.rs
-- types/importV2.ts
+- trust_store.rs
 - ocr_router.rs
 - asr-whisper/manifest.json
-- notifications.ts
+- graphStore.ts
 - workflow_commands.rs
-- sessions.rs
+- now_rfc3339
 - execution_control.rs
 - deep.rs
 - source_ai_organize.rs
 - wiki_index.rs
 - markdown_utils.rs
 - compile_service.rs
-- useModalDialog
+- workflowPresentation.ts
 - chat_commands.rs
-- projectStore.ts
+- project.ts
 - pages.rs
-- export.ts
+- useModalDialog
 - pdf_router.rs
 - devDependencies
 - file_discovery.rs
 - import_v2_web.rs
 - project_service.rs
 - agent_service.rs
-- PrivateTargetGrant
+- SessionWebTarget
 - chat_convenience_service.rs
 - AgentInvocation
-- .new
-- WorkspaceRouter.tsx
+- FakeAgentRunner
+- GitService
 - WorkflowCoordinator
 - run_generate_content_with_generator
 - SettingsService
@@ -123,16 +123,16 @@
 - workflow_routes.rs
 - task.rs
 - dependencies
-- commit.rs
+- .two_ready_items
 - core.py
-- TaskService
-- importWorkflow.ts
+- Option
+- git_service.rs
 - llm_commands.rs
 - tauri.conf.json
 - parse_final_source
 - import_v2/bilibili.rs
 - file_router.rs
-- SessionWebTarget
+- source.rs
 - compile_commands.rs
 - export.rs
 - String
@@ -141,15 +141,15 @@
 - ocr-cjk-accurate/manifest.json
 - 5. P1：高优先级问题
 - browser-runtime/runner/index.mjs
-- CompileRoutePreference
+- workflowStore.ts
 - bookmark_service.rs
 - settings_commands.rs
-- .execute_local_asr_continuation
+- useWorkflowsController.ts
 - models/import_v2_migration.rs
 - mvp_flow.rs
 - prepare-sensevoice-dev.mjs
 - source_lifecycle_tests.rs
-- ImportHistoryDetailDialog.tsx
+- workflows.test.tsx
 - commands/import_v2_migration.rs
 - markdown_normalizer.rs
 - Cell
@@ -158,11 +158,11 @@
 - file_commands.rs
 - planner.rs
 - ProjectOpenDecisionStore
-- ImportCapabilitiesPanel.tsx
+- wiki.rs
 - wechat_web_engine.rs
-- .enable_compatible_guidance
 - String
-- .retrieve_with_excerpts
+- commit.rs
+- .evaluate
 - BookmarkFile
 - 4. P2：中优先级问题与功能缺口
 - AssessmentId
@@ -177,15 +177,15 @@
 - .scan
 - source_registry.rs
 - validate_existing_project_file
-- version_is_restorable
+- source_lifecycle.rs
 - compilerOptions
 - legacy_history.rs
 - import_v2_file.rs
-- import_v2_file_discovery.rs
+- identify_file
 - preferences.rs
 - ocr-basic/manifest.json
 - SecretService
-- .remember_recent_project
+- .activate
 - .new
 - WikiPageType
 - ProjectService
@@ -202,19 +202,19 @@
 - apply.rs
 - install_import_capability_v2
 - redact_sensitive_text
-- ImportItem
+- importStatusPresentation.ts
 - CommitFixture
 - import_v2_gate_a.rs
 - office-oxide/manifest.json
 - graph.ts
 - graphRenderStyle.ts
 - retrieval.rs
-- importLocator.ts
+- workflowBaselineFixtures.ts
 - LintService
 - settings_service.rs
 - import_v2_agent_orchestration.rs
 - SourceIndex
-- Option
+- update_wiki.rs
 - asr-sensevoice-small/manifest.json
 - media-metadata/runner/core.mjs
 - git_commands.rs
@@ -235,17 +235,17 @@
 - browser-runtime/manifest.json
 - dependencies
 - scripts
-- .add_ignore
+- workflowApi.test.ts
 - graph.rs
 - graphExport.ts
-- .new
+- .build_commit_plan
 - browser-runtime-lite/manifest.json
 - snapshot-policy.mjs
 - commands/import_v2_activation.rs
 - AgentOutputParser
-- String
+- workflowNavigation.ts
 - browser-runtime-lite/package.json
-- search.rs
+- Vec
 - Import V2 Core
 - get_import_frontend_readiness_v2
 - poll_with_progress
@@ -263,14 +263,14 @@
 - import_v2_migration_planner.rs
 - workflows-architecture.test.ts
 - Import V2 migration and cutover checklist
-- Path
-- .commit_one
+- .finalize_exact_duplicate
+- .commit_items_cancellable_with_progress
 - permissions
 - permissions
 - build_remote_media_retention_plan
 - Import, Source Library, and Media Flow Design
 - Implementation Roadmap
-- PlatformSubtitleKind
+- prepare_saved_scan_acceptance
 - AgentConfig
 - .from_plan
 - Q: 能帮我单独修复一下这个知识库项目吗
@@ -282,7 +282,7 @@
 - Workflows 正确性、性能与 UI 修复计划
 - webviews
 - webviews
-- FixtureEngine
+- TaskEntry
 - What You Must Do When Invoked
 - import_v2_migration_scanner.rs
 - execution
@@ -292,14 +292,14 @@
 - CapabilityRemote
 - LLM Wiki Desktop Context
 - i18n.rs
-- useProjectStore
+- projectStore.ts
 - Local-first Knowledge Base
 - acceptedContainers
 - B 站视频转 Markdown：从开源调研到运行时闭环的实现复盘
 - bindGraphCanvasInteractions
 - Controller-owned AppShell workflows
 - LLM Wiki Desktop MVP Implementation Plan
-- BackendError
+- .commit_one
 - Workflows remediation Batch 5C evidence
 - Q: 第一性原理审核当前导入板块：Batch E/F 后 URL 导入显示 Import batch (1) 且导入路径失效
 - optionalByTarget
@@ -314,12 +314,12 @@
 - import_v2_web_fetch.rs
 - Shell Controller Architecture
 - Design Tokens
-- ProcessLifetimeGuard
+- .attach
 - Chat Backend P0+P1 Plan Ledger
 - Capability
 - Capability
 - Project Map
-- NoAgents
+- import_backend_activation.rs
 - Workflows Remediation Batch 5B Evidence
 - Q: 第一性原理审查当前导入板块：Batch E/F 后 URL 导入显示 Import batch (1) 并解析失败的真实原因是什么？
 - import_v2_migration_contract.rs
@@ -350,7 +350,7 @@
 - Q: Re-review Batch 2 fixes for trust freeze confirmation cancellation launch and persistence
 - ImportItem
 - Batch Lint Auto-Fix
-- SuccessfulAgent
+- ProcessGuard
 - local
 - Q: Final Batch 2 review of launch revoke freeze dispatch confirmation races
 - Q: 为什么 D:\Users\Aletta\Desktop\Study\wiki 这个项目会显示无法加载项目工作流，并报 A selected Source version is missing or its content hash no longer matches.
@@ -369,7 +369,7 @@
 - Agent P0+P1 Plan Ledger
 - Settings P0+P1 Implementation Ledger
 - Wiki Feature
-- legendEntries.ts
+- wiki.ts
 - Import Recovery Skill
 - Wiki Ingest Skill
 - app-shell-architecture.test.ts
@@ -482,7 +482,7 @@
 - 9. 建议的目标后端合同
 - 2026-07-25-import-source-media-flow-remediation.md
 - 8. Batch C — Compatible app-state 与 Workflows 最小可用闭环
-- probe_writable_path
+- prepare_legacy_scan_staging
 - 11. 排障清单
 - 8. 如何把方法迁移到小红书视频/图文
 - 12. 分阶段实施顺序
@@ -544,35 +544,41 @@
 - 11. Batch 5 — 必做的 request-scoped overview 去重与有条件的跨请求优化
 - 12. Batch 6 — 大数据 Preparation、History、attempt grouping 与 Diff
 - Q: 根据 Workflows 审查结果，为 Agent 撰写详细修复计划，并单列 UI 优化
-- NativeFileEngine
+- import_v2_web_ingestion.rs
 - graphify reference: add a URL and watch a folder
 - graphify reference: commit hook and native CLAUDE.md integration
 - graphify reference: incremental update and cluster-only
 - 13. Decision Gate H — Health Check Agent 路线
 - 15. Batch 7 — 集成验收、审查与文档收口
+- ImportSession
 - AgentAssistancePolicy
 - Workflows Remediation Batch 5A Evidence
 - graphify reference: GitHub clone and cross-repo merge
 - graphify reference: transcribe video and audio
-- chat_service/test_support.rs
+- git.rs
 - DefaultLegacyScanner
 - import_v2_migration_apply.rs
 - .claude/skills/graphify/references/extraction-spec.md
-- Option
+- build_snapshot_from_evaluation
 - search_wiki
-- DashboardView.tsx
-- 3. 导入对象模型
-- 7. 暂存、目录和提交策略
-- UpdateWikiRunner
+- paginate_workflow_file_diff_source
+- import_v2_media.rs
+- upgrade_trusted_platform_page_to_https
+- import_v2_web_target_store.rs
+- Batch UI-2 non-Health Preparation viewport evidence
+- Batch UI-3 task-detail viewport evidence
+- Metadata
 - NoAgents
 - description
 - source_overlap_candidates
-- now_rfc3339
-- SourceProcessingStaging
-- WorkspaceGuard
+- 6. Capability Pack 设计
+- .new
+- NoAgents
+- NoAgents
+- FileScanPolicy
 
 ## God Nodes (most connected - your core abstractions)
-1. `ProjectContext` - 723 edges
+1. `ProjectContext` - 726 edges
 2. `AppState` - 307 edges
 3. `TaskService` - 253 edges
 4. `FileStore` - 185 edges
@@ -588,12 +594,12 @@
   docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md → SPEC/BACKEND_STRUCTURE.md
 - `bindGraphCanvasInteractions()` --references--> `sigma`  [EXTRACTED]
   src/features/graph/graphCanvasInteractions.ts → package.json
-- `createRenderer()` --references--> `sigma`  [EXTRACTED]
-  src/features/graph/GraphView.tsx → package.json
 - `parses_a_raw_view_api_response_after_wrapping_it_as_json_script()` --calls--> `extract_platform_document()`  [INFERRED]
   src-tauri/src/services/import_v2/bilibili.rs → src-tauri/src/services/import_v2/platform_provider.rs
-- `ocr_asr_and_companion_edge_fixtures_reach_their_batch_three_routes()` --calls--> `identify_file()`  [INFERRED]
-  src-tauri/tests/import_v2_file_discovery.rs → src-tauri/src/services/import_v2/file_discovery.rs
+- `temporary_media_is_removed_on_success_failure_and_restart()` --calls--> `recover_media_temp_root()`  [INFERRED]
+  src-tauri/tests/import_v2_media.rs → src-tauri/src/services/import_v2/media_router.rs
+- `real_collection_selection_runs_children_through_candidate_and_commit_in_source_order()` --calls--> `extract_platform_collection()`  [INFERRED]
+  src-tauri/tests/import_v2_gate_a.rs → src-tauri/src/services/import_v2/platform_provider.rs
 
 ## Import Cycles
 - 1-file cycle: `src-tauri/src/services/workflow_service/launch_registry.rs -> src-tauri/src/services/workflow_service/launch_registry.rs`
@@ -619,75 +625,75 @@
 - **Readable Markdown Feature Consumers** — src_features_graph_readme_graph_feature, src_features_wiki_readme_wiki_feature, src_features_import_readme_import_feature [INFERRED 0.85]
 - **Fixed Product Workflows** — src_features_workflows_readme_update_wiki, src_features_workflows_readme_health_check, src_features_workflows_readme_generate_content [EXTRACTED 1.00]
 
-## Communities (590 total, 81 thin omitted)
+## Communities (596 total, 82 thin omitted)
 
-### Community 0 - "services/importV2Api.ts"
-Cohesion: 0.05
-Nodes (97): activateImportV2(), getImportBackendActivation(), invoke, commandNames, applyImportV2Migration(), getImportV2MigrationStatus(), planImportV2Migration(), resumeImportV2Migration() (+89 more)
-
-### Community 1 - "wiki.rs"
-Cohesion: 0.07
-Nodes (53): ReadWikiPageRequest, SaveWikiPageRequest, create_wiki_page(), read_wiki_asset(), read_wiki_page(), rename_wiki_page(), request_delete_wiki_page(), AppHandle (+45 more)
-
-### Community 2 - "task.ts"
+### Community 0 - "types/importV2.ts"
 Cohesion: 0.02
-Nodes (166): ActivityRow, AgentActivityTimeline(), AgentActivityTimelineProps, EMPTY_CHAT_SAVE_STATUS, EMPTY_GRAPH_TYPE_FILTER, EMPTY_TASKS, PageChatPanel, ProjectRightContextPanel() (+158 more)
+Nodes (274): ImportAsrDialogProps, ImportCandidateDiffDialog(), ImportCandidateDiffDialogProps, ImportCandidateDiffIntent, ImportCandidateDiffIntentKind, view, formatDuration(), ImportCollectionDialog() (+266 more)
+
+### Community 1 - "wiki_commands.rs"
+Cohesion: 0.13
+Nodes (29): ReadWikiPageRequest, SaveWikiPageRequest, create_wiki_page(), read_wiki_asset(), read_wiki_page(), rename_wiki_page(), request_delete_wiki_page(), AppHandle (+21 more)
+
+### Community 2 - "ChatView.tsx"
+Cohesion: 0.04
+Nodes (65): ChatComposer(), ChatComposerProps, PREFERENCE_LABEL, ROUTE_LABEL, ChatConveniencePanel(), ChatConveniencePanelProps, ChatSessionList(), ChatSessionListProps (+57 more)
 
 ### Community 3 - "scan_confirmation.rs"
-Cohesion: 0.13
-Nodes (45): accepted_and_discarded_saved_scans_are_terminal_and_idempotent(), aggregate_and_spreadsheet_risks_require_separate_acknowledgements(), aggregate_confirmation_produces_no_session_inputs_before_acceptance(), aggregate_confirmation_thresholds_are_backend_owned_and_strict(), aggregate_scan_totals(), empty_session(), expected_identity(), finalize_scan_totals() (+37 more)
+Cohesion: 0.21
+Nodes (20): accepted_and_discarded_saved_scans_are_terminal_and_idempotent(), aggregate_and_spreadsheet_risks_require_separate_acknowledgements(), aggregate_confirmation_produces_no_session_inputs_before_acceptance(), aggregate_confirmation_thresholds_are_backend_owned_and_strict(), aggregate_scan_totals(), empty_session(), expected_identity(), finalize_scan_totals() (+12 more)
 
 ### Community 4 - "WikiView.tsx"
 Cohesion: 0.03
-Nodes (110): ConflictDiffDialog(), ConflictDiffDialogProps, HtmlPreviewPane(), HtmlPreviewPaneProps, FrontmatterRow, isLocalWikiAsset(), loadWikiAsset(), LocalWikiImage() (+102 more)
+Nodes (106): PageChatPanelProps, ImportQualitySummary(), ImportQualitySummaryProps, percentage(), qualityFact(), ConflictDiffDialog(), ConflictDiffDialogProps, HtmlPreviewPane() (+98 more)
 
 ### Community 5 - "SettingsView.tsx"
-Cohesion: 0.04
-Nodes (79): AgentSettingsProps, agentMeta, AiSettings(), AiSettingsProps, AiTab, defaultBaseUrls, defaultModels, getPreferredAgent() (+71 more)
+Cohesion: 0.03
+Nodes (95): ViewErrorBoundary, ViewErrorBoundaryProps, ViewErrorBoundaryState, ViewFallback(), NoProjectWorkspaceController(), ProjectWorkspaceController(), ChatView, ExportsView (+87 more)
 
 ### Community 6 - "transaction.rs"
-Cohesion: 0.06
-Nodes (122): digest(), ImportV2ActivationService, io_error(), ActivationConfirmation, ActivationResult, BackendError, Error, ImportBackendActivation (+114 more)
+Cohesion: 0.08
+Nodes (107): assert_no_recovery_residue(), bind_recovery_parent(), bound_file_identity(), bound_hard_link(), bound_quarantine(), bound_remove_file(), bound_rename(), bound_replace_existing() (+99 more)
 
 ### Community 7 - "Option"
-Cohesion: 0.13
-Nodes (19): agent_probe_target_identities(), AgentRouteProbeCacheKey, BlockingRouteProbeRunner, executable_identity(), ExecutableIdentity, find_executable(), find_executable_falls_back_to_npm_global_dir_off_path(), json_value_as_visible_output() (+11 more)
+Cohesion: 0.15
+Nodes (14): BlockingRouteProbeRunner, find_executable(), find_executable_falls_back_to_npm_global_dir_off_path(), finish_stdin_writer(), json_value_as_visible_output(), resolve_active_hermes_home(), RouteCacheProbeRunner, AtomicUsize (+6 more)
 
 ### Community 8 - "agent_candidate.rs"
 Cohesion: 0.15
 Nodes (43): AgentCandidateDiff, AgentCandidateService<'a>, candidate_artifact_prefix(), candidate_error(), candidate_record_path(), candidate_root_path(), collect_output_files(), hash_bytes() (+35 more)
 
-### Community 9 - "importV2File.ts"
-Cohesion: 0.07
-Nodes (24): ImportDiscoveryStatus(), ImportDiscoveryStatusProps, parseDiscoverySummary(), AddImportTextV2Request, GetImportScanResultV2Request, ImportCapabilityStatus, SourceIdentity, DiscoveredFile (+16 more)
+### Community 9 - "ImportEngine"
+Cohesion: 0.10
+Nodes (39): catch_engine_panic(), describe_engine(), DescriptorPanicsAfterRegistration, engine_panicked_error(), engine_panics_become_recoverable_backend_errors(), engine_result_cannot_escape_item_staging(), engine_supports(), EngineRegistry (+31 more)
 
 ### Community 10 - "platform-extract.mjs"
 Cohesion: 0.15
 Nodes (38): balancedJson(), bilibiliMediaUrls(), bilibiliTargetAliases(), collectBilibiliSubtitleCandidates(), collectKeyUrls(), collectXhsImages(), collectXhsSubtitleCandidates(), collectXhsTags() (+30 more)
 
-### Community 11 - "source_lifecycle.rs"
-Cohesion: 0.09
-Nodes (88): SourceAiOrganizeRoute, normalize_project_path(), AppliedSourceProvenance, apply_markdown_version(), apply_source_move(), available_actions(), build_delete_preview(), build_move_preview() (+80 more)
+### Community 11 - "BackendError"
+Cohesion: 0.13
+Nodes (50): SourceAiOrganizeRoute, apply_markdown_version(), apply_source_move(), build_delete_preview(), build_move_preview(), build_reprocess_candidate(), candidate_path(), candidate_summary() (+42 more)
 
 ### Community 12 - "source_commands.rs"
-Cohesion: 0.06
-Nodes (97): agent_unavailable(), apply_source_candidate(), delete_source(), discard_source_candidate(), failed_source_ai_task(), get_source_detail(), is_retryable_source_ai_task(), list_source_versions() (+89 more)
+Cohesion: 0.10
+Nodes (60): agent_unavailable(), apply_source_candidate(), delete_source(), discard_source_candidate(), failed_source_ai_task(), get_source_detail(), is_retryable_source_ai_task(), list_source_versions() (+52 more)
 
 ### Community 13 - "capability_runtime.rs"
 Cohesion: 0.12
 Nodes (30): CapabilityRuntimeStatus, decode_hex(), development_overlay_only_replaces_routes_that_are_ready(), embedded_trusted_keys(), empty_embedded_trust_store_fails_closed_without_disabling_native_imports(), ImportCapabilityRuntime, merge_development_statuses(), PackSpec (+22 more)
 
-### Community 14 - "ProjectContext"
+### Community 14 - "BackendError"
 Cohesion: 0.08
-Nodes (53): AttemptOutcome, ImportItemStatus, ImportMediaAuthorizationKind, ImportStage, ProjectContext, ProjectLayout, ProjectLayoutConfidence, ProjectLayoutWarning (+45 more)
+Nodes (48): AttemptOutcome, ImportItemStatus, ImportMediaAuthorizationKind, ImportStage, a_second_operation_cannot_steal_an_active_item_claim(), cancellation_after_claim_cannot_leave_item_processing(), CompletedAsrShard, ended_session_rejects_text_and_discovery_before_any_side_effect() (+40 more)
 
 ### Community 15 - "graph_service.rs"
-Cohesion: 0.07
-Nodes (62): GraphLayout, GraphNode, CompileInstructionSet, CompilePromptRoute, render_compile_core_instructions(), render_compile_core_instructions_with_policy(), render_compile_prompt_header(), render_compile_prompt_header_with_policy() (+54 more)
+Cohesion: 0.12
+Nodes (39): GraphLayout, GraphNode, add_signal(), build_target_lookup(), builds_one_node_per_page_with_type_and_label(), cache_roundtrip_preserves_data(), content_hash_for(), content_hash_is_stable_and_changes_with_content() (+31 more)
 
 ### Community 16 - "workflow.rs"
-Cohesion: 0.10
-Nodes (57): default_workflow_persistence_mode(), HealthCheckMode, AgentKind, BackendTask, From, LlmProviderKind, Option, PendingActionType (+49 more)
+Cohesion: 0.09
+Nodes (61): default_workflow_persistence_mode(), HealthCheckMode, AgentKind, BackendTask, BTreeMap, From, LlmProviderKind, Option (+53 more)
 
 ### Community 17 - "export_service.rs"
 Cohesion: 0.07
@@ -695,51 +701,51 @@ Nodes (64): build_output_relative_path_ignores_source_for_project_report(), buil
 
 ### Community 18 - "generic_web_engine.rs"
 Cohesion: 0.07
-Nodes (68): attribute_after(), cancelled(), completed_media_download_cache_is_reusable_only_while_payload_is_intact(), CompletedMediaDownload, direct_image_preservation_failure_does_not_block_ocr_continuation(), direct_image_result(), direct_media_preservation_failure_does_not_block_asr_continuation(), direct_media_result() (+60 more)
+Nodes (69): attribute_after(), cancelled(), completed_media_download_cache_is_reusable_only_while_payload_is_intact(), CompletedMediaDownload, direct_image_preservation_failure_does_not_block_ocr_continuation(), direct_image_result(), direct_media_preservation_failure_does_not_block_asr_continuation(), direct_media_result() (+61 more)
 
 ### Community 19 - "orchestrator.rs"
-Cohesion: 0.06
-Nodes (85): ImportIssue, a_panicked_mutation_does_not_disable_later_imports(), a_second_operation_cannot_steal_an_active_item_claim(), accurate_ocr_accepts_the_exact_mean_and_readable_block_boundaries(), accurate_ocr_rejects_nonempty_text_below_the_confidence_floor(), agent_candidate_action_lock_serializes_select_finalize_and_discard(), agent_eligibility_uses_stable_issue_codes_and_excludes_access_failures(), authorized_staging_rejects_a_residual_non_directory() (+77 more)
+Cohesion: 0.05
+Nodes (97): ImportIssue, a_panicked_mutation_does_not_disable_later_imports(), accurate_ocr_accepts_the_exact_mean_and_readable_block_boundaries(), accurate_ocr_rejects_nonempty_text_below_the_confidence_floor(), agent_candidate_action_lock_serializes_select_finalize_and_discard(), agent_eligibility_uses_stable_issue_codes_and_excludes_access_failures(), apply_companion_transcript_fallback(), asr_shard_key() (+89 more)
 
 ### Community 20 - "preparation.rs"
 Cohesion: 0.06
-Nodes (76): LocalKey, Sender, add_elapsed(), AgentRouteCandidate, build_snapshot(), build_snapshot_from_evaluation(), ConcurrentProbeRunner, default_output_path() (+68 more)
+Nodes (79): LocalKey, Ref, RefCell, Sender, add_elapsed(), baseline_files(), build_snapshot(), CachedMarkdownFile (+71 more)
 
 ### Community 21 - "pack_engine.rs"
-Cohesion: 0.06
-Nodes (75): Cursor, accepts_a_valid_response_arriving_in_slow_chunks(), append_platform_transcript(), attach_platform_job(), bilibili_metadata_only_candidate_is_rejected(), cancelled(), CapabilityProgress, CapabilityProgressNotification (+67 more)
+Cohesion: 0.07
+Nodes (68): Cursor, accepts_a_valid_response_arriving_in_slow_chunks(), append_platform_transcript(), attach_platform_job(), bilibili_metadata_only_candidate_is_rejected(), cancelled(), CapabilityProgress, CapabilityProgressNotification (+60 more)
 
 ### Community 22 - "lint.ts"
-Cohesion: 0.04
-Nodes (90): CompileConflictDetail, CompileConflictDialog(), CompileConflictDialogProps, errorMessage(), action, invokeMock, ConfirmationDialog(), ConfirmationDialogProps (+82 more)
+Cohesion: 0.05
+Nodes (69): formatHistoryTime(), LintHistoryList(), LintHistoryListProps, LintIssueDetailsProps, groupLabel(), LintIssueList(), LintIssueListProps, SEVERITY_BADGE (+61 more)
 
 ### Community 23 - "app_state.rs"
-Cohesion: 0.05
-Nodes (107): another_instance_observes_durable_compatible_revocation_before_workflow_access(), app_state_resolves_trusted_native_workflow_access_without_inventing_git(), claimed_snapshot_is_rejected_after_real_trust_revocation(), cleanup_paths(), compatible_access_is_writable_but_memory_only_without_a_state_root(), compatible_authority_revocation_rotates_epoch_and_cannot_self_restore(), compatible_project(), compatible_trust_restores_from_global_settings_for_the_same_identity() (+99 more)
+Cohesion: 0.08
+Nodes (70): another_instance_observes_durable_compatible_revocation_before_workflow_access(), app_state_resolves_trusted_native_workflow_access_without_inventing_git(), claimed_snapshot_is_rejected_after_real_trust_revocation(), cleanup_paths(), compatible_access_is_writable_but_memory_only_without_a_state_root(), compatible_authority_revocation_rotates_epoch_and_cannot_self_restore(), compatible_project(), compatible_trust_restores_from_global_settings_for_the_same_identity() (+62 more)
 
 ### Community 24 - "ConnectorSessionService"
-Cohesion: 0.13
-Nodes (31): authenticated_profile_is_exactly_bound_and_reusable(), ConnectorSessionBinding, ConnectorSessionRef, ConnectorSessionService, e(), harden_private_directory(), is_reparse(), ManagedChild (+23 more)
+Cohesion: 0.16
+Nodes (30): authenticated_profile_is_exactly_bound_and_reusable(), ConnectorSessionBinding, ConnectorSessionRef, ConnectorSessionService, e(), harden_private_directory(), is_reparse(), ManagedChild (+22 more)
 
 ### Community 25 - "quality_gate.rs"
-Cohesion: 0.07
-Nodes (65): ArtifactKind, QualityMetric, agent_candidate_rejects_secret_corpus_and_unclosed_fence(), classify_asset(), contains_event_handler(), contains_unsafe_html_attribute(), decode_html_entities(), destination_token() (+57 more)
+Cohesion: 0.11
+Nodes (26): agent_candidate_rejects_secret_corpus_and_unclosed_fence(), contains_event_handler(), contains_unsafe_html_attribute(), escaped_bang_without_image_syntax_does_not_hide_unsafe_html(), four_space_indentation_does_not_open_a_fence_or_hide_unsafe_html(), quality_fixture(), quality_fixture_with_metrics(), quality_gate_hashes_and_sizes_all_artifacts_and_preserves_cjk() (+18 more)
 
 ### Community 26 - "structured_extract.rs"
 Cohesion: 0.10
 Nodes (68): BytesStart, contained(), execute_libreoffice(), fail(), handle(), kill_process_tree(), main(), profile_uri() (+60 more)
 
 ### Community 27 - "workflow.ts"
-Cohesion: 0.03
-Nodes (178): ProjectWorkspaceController(), hasTauri(), keepLatestPendingEvent(), operationError(), PendingWorkflowEvent, PROJECT_PREREQUISITE_ACTIONS, routeSelectionOf(), settle() (+170 more)
+Cohesion: 0.07
+Nodes (39): WorkflowsController, WorkflowLaunchIntent, WorkflowSettingsReturnIntent, PendingActionType, RiskLevel, ConfirmWorkflowActionRequest, ListWorkflowRunsRequest, PrepareWorkflowRequest (+31 more)
 
 ### Community 28 - "native_file_engine.rs"
-Cohesion: 0.14
-Nodes (30): cells_to_gfm(), detect_delimiter(), escape_link_label(), escape_table_cell(), image_dimensions(), image_extension(), markdown_resources(), MarkdownResource (+22 more)
+Cohesion: 0.09
+Nodes (57): cancelled(), cells_to_gfm(), copy_and_rewrite_local_assets(), detect_delimiter(), escape_link_label(), escape_table_cell(), fetch_remote_image(), image_dimensions() (+49 more)
 
 ### Community 29 - "BackendTask"
-Cohesion: 0.07
-Nodes (38): GREEN_TARGETS, item(), projectKey, SCALE_FIXTURES, session(), ACTIVE_ITEM_STATUSES, activeStatusForTask(), mergeImportItemTask() (+30 more)
+Cohesion: 0.04
+Nodes (75): invokeMock, runningTask, Toaster(), toneStyles, ImportBatchStatus(), ImportBatchStatusProps, ImportDiscoveryStatus(), ImportDiscoveryStatusProps (+67 more)
 
 ### Community 30 - "workflow_queue.rs"
 Cohesion: 0.07
@@ -749,13 +755,13 @@ Nodes (53): dispatch_claimed_next(), observe_workflow_adapter_error(), reject_wo
 Cohesion: 0.07
 Nodes (57): asError(), assertProviderWasUsed(), buildChunkedFfmpegArguments(), buildEmbeddedSubtitleArguments(), buildFfmpegArguments(), buildSenseVoiceArguments(), buildSenseVoiceBatchArguments(), buildVideoOcrFrameArguments() (+49 more)
 
-### Community 32 - "update_wiki.rs"
-Cohesion: 0.15
-Nodes (49): CompileCandidate, applied_paths_from_error(), apply_persisted_update_wiki_candidate(), baseline_manifest_hashes(), confirm_update_wiki_review(), current_manifest_hashes(), discard_update_wiki_candidate(), ensure_checkpoint_head() (+41 more)
+### Community 32 - ".new"
+Cohesion: 0.13
+Nodes (50): CompileCandidate, applied_paths_from_error(), apply_persisted_update_wiki_candidate(), baseline_manifest_hashes(), confirm_update_wiki_review(), current_manifest_hashes(), discard_update_wiki_candidate(), ensure_checkpoint_head() (+42 more)
 
 ### Community 33 - "generate_content.rs"
-Cohesion: 0.11
-Nodes (65): artifact_title(), artifact_type_for_scope(), baseline_changed(), cancel_generate_content_confirmation(), candidate_context(), candidate_path_error(), candidate_permissions_are_private(), candidate_root() (+57 more)
+Cohesion: 0.10
+Nodes (70): artifact_title(), artifact_type_for_scope(), baseline_changed(), cancel_generate_content_confirmation(), candidate_context(), candidate_path_error(), candidate_permissions_are_private(), candidate_root() (+62 more)
 
 ### Community 34 - "settings.rs"
 Cohesion: 0.07
@@ -763,11 +769,11 @@ Nodes (46): AgentOutputLanguage, ChatConvenienceAuthorization, CloseBehavior, co
 
 ### Community 35 - "project.rs"
 Cohesion: 0.06
-Nodes (55): AgentRoute, GraphState, IndexState, OpenProjectKind, ProjectRepairOperation, ProjectRepairOperationType, AgentRoute, AppSummary (+47 more)
+Nodes (54): AgentRoute, GraphState, IndexState, OpenProjectKind, ProjectRepairOperation, ProjectRepairOperationType, AgentRoute, AppSummary (+46 more)
 
-### Community 36 - "ImportView.tsx"
-Cohesion: 0.08
-Nodes (28): ImportBatchStatus(), ImportBatchStatusProps, ImportCommitBar(), ImportCommitBarCounts, ImportCommitBarProps, formatTimestamp(), HISTORY_STATUS_KEYS, historyDomId() (+20 more)
+### Community 36 - "TaskLogDrawer.tsx"
+Cohesion: 0.06
+Nodes (44): ActivityRow, AgentActivityTimeline(), AgentActivityTimelineProps, computeDurationLabel(), EMPTY_ACTIVITIES, EMPTY_LOGS, errorMessage(), formatBytes() (+36 more)
 
 ### Community 37 - "rules.rs"
 Cohesion: 0.09
@@ -777,17 +783,17 @@ Nodes (54): build_inbound_counts(), build_target_lookup(), check_structural_page
 Cohesion: 0.11
 Nodes (67): AppSummary, OpenedProject, ProjectSessionAuthority, AppState, LintService, Mutex, SearchService, AssessedCurrentProjectRequest (+59 more)
 
-### Community 39 - "ImportInput"
-Cohesion: 0.06
-Nodes (32): QualityFloor, BlockingEngine, CountingAsrShardFixtureEngine, detect_input_format(), EmbeddedSubtitleProbeFixtureEngine, explicit_routes(), FailingEngine, is_bilibili_import_input() (+24 more)
+### Community 39 - "Option"
+Cohesion: 0.09
+Nodes (23): BlockingEngine, candidate_meets_floor(), CompletedOcrShard, detect_input_format(), EmbeddedSubtitleProbeFixtureEngine, explicit_routes(), FixtureEngine, is_bilibili_import_input() (+15 more)
 
 ### Community 40 - "platform_provider.rs"
-Cohesion: 0.11
-Nodes (58): anchors_platform_json_to_the_requested_url_id(), balanced_json_value(), collect_json_values(), collect_key_strings(), collect_key_urls(), collect_key_values(), collect_urls(), collect_xiaohongshu_images() (+50 more)
+Cohesion: 0.09
+Nodes (61): anchors_platform_json_to_the_requested_url_id(), balanced_json_value(), collect_json_values(), collect_key_strings(), collect_key_urls(), collect_key_values(), collect_urls(), collect_xiaohongshu_images() (+53 more)
 
 ### Community 41 - "assessment.rs"
 Cohesion: 0.10
-Nodes (49): ProjectAssessmentWarning, ProjectCapability, ProjectFormat, ProjectHealth, ProjectMarker, ProjectTrustState, accepts_the_current_empty_graph_cache_schema(), assess_project_folder() (+41 more)
+Nodes (56): ProjectAssessmentWarning, ProjectCapability, ProjectFormat, ProjectHealth, ProjectMarker, ProjectTrustState, accepts_the_current_empty_graph_cache_schema(), app_state_is_corrupt() (+48 more)
 
 ### Community 42 - "lint.rs"
 Cohesion: 0.07
@@ -795,11 +801,11 @@ Nodes (50): LintBatchConfirmation, LintBatchSkip, LintFixOutcomeKind, AddLintIgn
 
 ### Community 43 - "layout.rs"
 Cohesion: 0.09
-Nodes (75): add_mapped_markdown_root(), app_owned_compatible_guidance_does_not_switch_to_native_scan_rules(), bounded_layout_discovery_stops_before_reading_entries_when_cancelled(), bounded_markdown_signal(), bounded_markdown_signal_at_depth(), canonical_internal_read_path(), canonical_read_target_is_sensitive(), check_discovery_budget() (+67 more)
+Nodes (74): add_mapped_markdown_root(), app_owned_compatible_guidance_does_not_switch_to_native_scan_rules(), bounded_layout_discovery_stops_before_reading_entries_when_cancelled(), bounded_markdown_signal(), bounded_markdown_signal_at_depth(), canonical_internal_read_path(), canonical_read_target_is_sensitive(), check_discovery_budget() (+66 more)
 
 ### Community 44 - "media_router.rs"
-Cohesion: 0.08
-Nodes (38): AsrModel, AsrModelCatalog, existing_temporary_workspace_is_adopted_without_recreating_it(), is_reparse(), link_or_copy(), media_error(), MediaArtifactPlan, MediaInput (+30 more)
+Cohesion: 0.10
+Nodes (37): AsrModel, AsrModelCatalog, existing_temporary_workspace_is_adopted_without_recreating_it(), is_reparse(), link_or_copy(), media_error(), MediaArtifactPlan, MediaInput (+29 more)
 
 ### Community 45 - "export_commands.rs"
 Cohesion: 0.08
@@ -809,21 +815,21 @@ Nodes (53): ExportRestrictedContentStatus, ExportRoutePreference, GetExportRestr
 Cohesion: 0.09
 Nodes (33): ImportAgentToolBroker, ImportAgentToolCall, ImportAgentToolExecutor, ImportAgentToolResult, ImportAgentToolTaskContext, is_safe_component(), is_windows_reparse(), reject_existing_links() (+25 more)
 
-### Community 47 - "GitService"
-Cohesion: 0.05
-Nodes (116): CheckpointPurpose, GitChangedFile, GitChangedFileKind, GitCheckpoint, GitDiff, GitRepositoryStatus, Option, String (+108 more)
+### Community 47 - "fixes.rs"
+Cohesion: 0.14
+Nodes (42): append_fix_log(), attach_post_write_hashes(), batch_fix_collects_high_risk_skips_non_fixable_and_missing_hash(), batch_fix_gives_index_drift_confirmations_distinct_ids(), batch_fix_rejects_out_of_scope_path(), batch_fix_uses_one_shared_checkpoint_for_safe_writes(), batch_skips_stale_high_risk_preview_without_discarding_safe_result(), commit_count() (+34 more)
 
 ### Community 48 - "import_v2_commands.rs"
 Cohesion: 0.10
 Nodes (64): AddImportTextV2Request, add_import_items_v2(), add_import_text_v2(), BatchOperationJob, cancel_import_batch_v2(), cancel_import_item_v2(), cancel_import_operation_for_state(), classify_batch_item_outcome() (+56 more)
 
 ### Community 49 - "task_service.rs"
-Cohesion: 0.10
-Nodes (48): cancellation_and_atomic_completion_never_leave_a_cancelled_result(), cancellation_cannot_be_finalized_without_a_request(), create_directory_alias(), deferred_cancellation_stays_nonterminal_until_worker_finalizes_it(), discard_rejects_replaced_persistence_parent_without_deleting_outside_file(), discard_unstarted_tasks_removes_memory_and_persisted_files(), emit_activity_is_structured_and_recoverable_from_task_state(), emit_stream_delta_emits_without_persisting_to_logs() (+40 more)
+Cohesion: 0.12
+Nodes (46): cancellation_and_atomic_completion_never_leave_a_cancelled_result(), cancellation_cannot_be_finalized_without_a_request(), create_directory_alias(), deferred_cancellation_stays_nonterminal_until_worker_finalizes_it(), discard_rejects_replaced_persistence_parent_without_deleting_outside_file(), discard_unstarted_tasks_removes_memory_and_persisted_files(), emit_activity_is_structured_and_recoverable_from_task_state(), emit_stream_delta_emits_without_persisting_to_logs() (+38 more)
 
-### Community 50 - "String"
-Cohesion: 0.13
-Nodes (19): RecoveredTaskSnapshot, Result, TaskStatus, validate_transition(), parse_persisted_task(), remove_persisted_task_snapshot(), require_current_stage(), require_running_workflow() (+11 more)
+### Community 50 - "TaskService"
+Cohesion: 0.09
+Nodes (27): ImportSessionPatchEvent, WorkflowStageSink, Result, TaskStatus, validate_transition(), require_current_stage(), require_running_workflow(), BackendError (+19 more)
 
 ### Community 51 - "reports.rs"
 Cohesion: 0.16
@@ -834,20 +840,20 @@ Cohesion: 0.12
 Nodes (50): activate_project_with_access(), cancel_task(), continue_after_trust_revocation_claims_with_memory_only_binding(), continue_queued_workflows(), continue_queued_workflows_for_state(), continue_rebinds_queued_workflow_before_returning_reprepare_error(), create_task(), CreateTaskRequest (+42 more)
 
 ### Community 53 - "WebTargetStore"
-Cohesion: 0.10
-Nodes (35): asr_target_sha256(), authenticated_profile_is_bound_to_the_whole_login_group(), BilibiliAsrGrant, collection_error(), collection_page(), collection_pages_continue_past_two_hundred_without_truncation(), collection_preview_is_session_bound_and_selection_keeps_source_order(), CollectionPage (+27 more)
+Cohesion: 0.11
+Nodes (34): asr_target_sha256(), authenticated_profile_is_bound_to_the_whole_login_group(), BilibiliAsrGrant, collection_error(), collection_page(), collection_pages_continue_past_two_hundred_without_truncation(), collection_preview_is_session_bound_and_selection_keeps_source_order(), CollectionPage (+26 more)
 
 ### Community 54 - "CoreIntegrationFixture"
 Cohesion: 0.15
 Nodes (10): CoreIntegrationFixture, FixtureEngine, import_v2_core_honors_cancellation(), import_v2_core_is_resumable_partial_atomic_and_deduplicated(), import_v2_core_rejects_escape_and_redacts_secrets(), import_v2_text_input_is_staged_before_identity_is_recorded(), input(), register_fixture_routes() (+2 more)
 
 ### Community 55 - "query.rs"
-Cohesion: 0.12
-Nodes (34): extract_query_terms(), first_matching_term(), flush_ascii_run(), flush_cjk_run(), is_cjk(), normalize_for_search(), push_unique_term(), BackendError (+26 more)
+Cohesion: 0.06
+Nodes (55): Option, Self, String, Vec, WikiPageType, SearchRequest, SearchResponse, SearchResult (+47 more)
 
-### Community 56 - "file_store.rs"
-Cohesion: 0.13
-Nodes (30): concurrent_create_new_publishes_exactly_one_complete_file(), create_directory_link(), enumerates_markdown_skipping_obsidian_and_app_state(), file_hash_mismatch_surfaces_disk_baseline_for_three_way_diff(), hash_bytes(), hash_file(), io_error(), json_writes_reject_linked_state_directories() (+22 more)
+### Community 56 - "FileStore"
+Cohesion: 0.14
+Nodes (31): concurrent_create_new_publishes_exactly_one_complete_file(), create_directory_link(), enumerates_markdown_skipping_obsidian_and_app_state(), file_hash_mismatch_surfaces_disk_baseline_for_three_way_diff(), FileStore, hash_bytes(), hash_file(), io_error() (+23 more)
 
 ### Community 57 - "agent_workspace.rs"
 Cohesion: 0.14
@@ -881,25 +887,25 @@ Nodes (39): asError(), buildArguments(), buildEmbeddedSubtitleArguments(), build
 Cohesion: 0.05
 Nodes (120): assemble(), assembled_archive_resolves_after_extraction_with_the_release_public_key(), AssembleOptions, AssembleResult, assembles_schema_v2_without_self_referential_archive_measurements(), CatalogFragment, collect_executable_files(), collect_paths() (+112 more)
 
-### Community 65 - ".new"
-Cohesion: 0.18
-Nodes (19): compatible_context_rejects_legacy_content_roots_without_mapping(), compatible_context_routes_legacy_native_prefixes_to_configured_roots(), converts_canonical_existing_paths_to_project_relative_paths(), create_directory_link(), derives_standard_project_directories(), nearest_existing_ancestor(), rejects_project_write_through_a_descendant_link(), remove_directory_link() (+11 more)
+### Community 65 - "ProjectContext"
+Cohesion: 0.15
+Nodes (27): compatible_context_rejects_legacy_content_roots_without_mapping(), compatible_context_routes_legacy_native_prefixes_to_configured_roots(), converts_canonical_existing_paths_to_project_relative_paths(), create_directory_link(), derives_standard_project_directories(), nearest_existing_ancestor(), ProjectContext, rejects_project_write_through_a_descendant_link() (+19 more)
 
 ### Community 66 - "index.ts"
-Cohesion: 0.05
-Nodes (55): errorMessage(), GlobalUiPreferences, hasTauri(), NoProjectSettingsDialog(), AppearanceSettings(), AppearanceSettingsProps, previews, BackgroundTaskSettings() (+47 more)
+Cohesion: 0.04
+Nodes (58): ImportCommitBar(), ImportCommitBarCounts, ImportCommitBarProps, errorMessage(), GlobalUiPreferences, hasTauri(), NoProjectSettingsDialog(), AppearanceSettings() (+50 more)
 
 ### Community 67 - "BackendError"
 Cohesion: 0.14
-Nodes (37): CompiledConsumption, SourceAlias, SourceTimelineEvent, artifact_record_or_fallback(), artifact_records_under(), compile_consumption_preflights_every_reference_before_any_write(), compile_consumption_updates_manifest_and_writes_one_task_record(), compile_source_resolution_rejects_misbound_or_tampered_registry_state() (+29 more)
+Nodes (35): artifact_record_or_fallback(), artifact_records_under(), compile_consumption_preflights_every_reference_before_any_write(), compile_consumption_updates_manifest_and_writes_one_task_record(), compile_source_resolution_rejects_misbound_or_tampered_registry_state(), compile_source_version_changed(), invalid_index(), invalid_pointer() (+27 more)
 
 ### Community 68 - "import_v2_presentation.rs"
 Cohesion: 0.09
 Nodes (44): ImportCapabilityReadiness, MigrationStatus, GetImportAsrEnablementPlanV2Request, GetImportCapabilityRequirementV2Request, GetImportFrontendReadinessV2Request, GetImportPreviewContentV2Request, ImportAsrDependency, ImportAsrDependencyKind (+36 more)
 
-### Community 69 - "types/importV2.ts"
-Cohesion: 0.05
-Nodes (50): completionCountRows(), fileName(), ImportCompletionSummary(), ImportCompletionSummaryProps, completion, ImportMergeResolutionDialog(), mergeContext, ArtifactKind (+42 more)
+### Community 69 - "trust_store.rs"
+Cohesion: 0.14
+Nodes (37): ProjectTrustKind, acquire_project_trust_lock(), compatible_root(), compatible_trust_round_trips_from_global_settings_with_cjk_path(), corrupt_or_future_store_cannot_be_overwritten_by_a_grant(), corrupt_trust_file_is_treated_as_empty_without_panicking(), grant_current(), grant_rejects_an_identity_that_changed_after_backend_validation() (+29 more)
 
 ### Community 70 - "ocr_router.rs"
 Cohesion: 0.09
@@ -909,25 +915,25 @@ Nodes (32): availability_reason(), character_accuracy(), invalid_model(), invali
 Cohesion: 0.04
 Nodes (44): archiveSha256, audioDecoding, acceptedContainers, componentInventory, qualificationFixture, requiredBuildFeature, compressedBytes, distributionNote (+36 more)
 
-### Community 72 - "notifications.ts"
-Cohesion: 0.08
-Nodes (26): TERMINAL_CHANNELS, CapturedHandler, invokeMock, listenMock, projectScope, unlistenMock, waitForTaskTerminal(), WaitForTaskTerminalOptions (+18 more)
+### Community 72 - "graphStore.ts"
+Cohesion: 0.07
+Nodes (20): invokeMock, waitForTaskTerminalMock, TERMINAL_CHANNELS, CapturedHandler, invokeMock, listenMock, projectScope, unlistenMock (+12 more)
 
 ### Community 73 - "workflow_commands.rs"
 Cohesion: 0.11
-Nodes (65): cancel_or_discard_workflow(), cancel_workflow_run(), confirm_workflow_action(), ConfirmWorkflowActionRequest, decode_history_cursor(), diff_pages_always_advance_over_a_multibyte_character(), diff_pages_are_utf8_safe_and_bounded(), diff_pages_bound_the_serialized_payload_with_escape_heavy_content() (+57 more)
+Nodes (64): cancel_or_discard_workflow(), cancel_workflow_run(), confirm_workflow_action(), ConfirmWorkflowActionRequest, decode_history_cursor(), diff_pages_always_advance_over_a_multibyte_character(), diff_pages_are_utf8_safe_and_bounded(), diff_pages_bound_the_serialized_payload_with_escape_heavy_content() (+56 more)
 
-### Community 74 - "sessions.rs"
-Cohesion: 0.14
-Nodes (30): chat_session_persists_and_round_trips(), chat_state_root(), ChatService, concurrent_appends_merge_into_the_latest_session_snapshot(), create_directory_link(), create_session_defaults_title_and_appends_message(), create_session_normalizes_and_validates_context_page_path(), delete_session_rejects_a_linked_chat_state_root() (+22 more)
+### Community 74 - "now_rfc3339"
+Cohesion: 0.10
+Nodes (40): chat_session_persists_and_round_trips(), chat_state_root(), ChatService, concurrent_appends_merge_into_the_latest_session_snapshot(), create_directory_link(), create_session_defaults_title_and_appends_message(), create_session_normalizes_and_validates_context_page_path(), delete_session_rejects_a_linked_chat_state_root() (+32 more)
 
 ### Community 75 - "execution_control.rs"
 Cohesion: 0.10
 Nodes (21): batch_execution_control_observes_the_one_shared_cancellation_token(), batch_progress_is_throttled_with_a_deterministic_clock_and_flushes_terminal(), batch_terminal_status(), BatchExecutionControl, BatchExecutionControl<'a>, BatchOperationState, ImportExecutionControl, ImportItemRunOutcome (+13 more)
 
 ### Community 76 - "deep.rs"
-Cohesion: 0.17
-Nodes (25): agent_issue_normalization_rejects_unknown_paths_and_downgrades_evidence_free_errors(), append_bounded(), BuiltDeepPrompt, deep_lint_prompt_includes_purpose_and_pages(), DeepLintSnapshot, extract_json_block(), health_deep_snapshot_reports_actual_coverage_when_prompt_is_truncated(), LintService (+17 more)
+Cohesion: 0.21
+Nodes (21): agent_issue_normalization_rejects_unknown_paths_and_downgrades_evidence_free_errors(), append_bounded(), BuiltDeepPrompt, deep_lint_prompt_includes_purpose_and_pages(), DeepLintSnapshot, extract_json_block(), health_deep_snapshot_reports_actual_coverage_when_prompt_is_truncated(), LintService (+13 more)
 
 ### Community 77 - "source_ai_organize.rs"
 Cohesion: 0.15
@@ -938,32 +944,32 @@ Cohesion: 0.14
 Nodes (39): SearchService, build_entry(), bump_mtime(), cached_meta_bookmarked_is_false_until_caller_overlays(), cap_drops_oldest_project_snapshot_when_limit_exceeded(), compatible_obsidian_layout_indexes_root_and_discovered_markdown_roots(), evict_drops_a_project_snapshot_without_touching_others(), external_delete_removes_the_page_from_the_index() (+31 more)
 
 ### Community 79 - "markdown_utils.rs"
-Cohesion: 0.11
-Nodes (36): collect_block_list(), extract_title(), extract_title_prefers_h1_then_frontmatter_then_filename(), extract_wikilinks(), extract_wikilinks_handles_alias_anchor_and_duplicates(), extract_wikilinks_ignores_code_spans_partial(), Frontmatter, frontmatter_lookups_are_case_insensitive() (+28 more)
+Cohesion: 0.10
+Nodes (37): rewrite_wikilinks_handles_cjk_target_and_alias_preservation(), collect_block_list(), extract_title(), extract_title_prefers_h1_then_frontmatter_then_filename(), extract_wikilinks(), extract_wikilinks_handles_alias_anchor_and_duplicates(), extract_wikilinks_ignores_code_spans_partial(), Frontmatter (+29 more)
 
 ### Community 80 - "compile_service.rs"
 Cohesion: 0.05
-Nodes (104): CompileAction, CompileChangeSummary, CompileConflictResolution, CompileConsumptionRecord, CompileFile, CompileManifest, CompilePageType, CompilePlan (+96 more)
+Nodes (105): CompileAction, CompileChangeSummary, CompileConflictResolution, CompileConsumptionRecord, CompileFile, CompileManifest, CompilePageType, CompilePlan (+97 more)
 
-### Community 81 - "useModalDialog"
-Cohesion: 0.05
-Nodes (56): ExportRestrictedContentDialog(), ExportRestrictedContentDialogProps, AsrPreference, isProfile(), readAsrPreference(), writeAsrPreference(), canChoose(), formatBytes() (+48 more)
+### Community 81 - "workflowPresentation.ts"
+Cohesion: 0.12
+Nodes (34): formatDuration(), WorkflowPipeline(), attentionWorkflowRow(), isQueueOwningStatus(), presentWorkflowResult(), WORKFLOW_KINDS, workflowActionTypeKey(), workflowArtifactTypeKey() (+26 more)
 
 ### Community 82 - "chat_commands.rs"
 Cohesion: 0.10
 Nodes (57): ResolveChatConvenienceEditRequest, RollbackLastChatConvenienceEditRequest, SaveAnswerToWikiRequest, SendChatMessageRequest, byok(), chat_cancelled_error(), cleanup_convenience_failure(), convenience_cleanup_error() (+49 more)
 
-### Community 83 - "projectStore.ts"
-Cohesion: 0.03
-Nodes (93): errorMessage(), ProjectConfirmationController(), compileAction, mocks, project, projectAction, task, DialogSelection (+85 more)
+### Community 83 - "project.ts"
+Cohesion: 0.04
+Nodes (72): activeGraphTaskLabel(), buildDashboardGraphPreview(), DashboardGraphPreviewModel, ovalPoint(), page(), tree(), topTypes(), DialogSelection (+64 more)
 
 ### Community 84 - "pages.rs"
 Cohesion: 0.11
-Nodes (34): apply_page_delete_invalidates_graph_cache(), apply_page_delete_rejects_hash_drift_and_missing_and_outside_wiki(), apply_page_delete_removes_file_after_git_checkpoint(), apply_page_delete_supports_cjk_filename(), create_directory_link(), create_page_escapes_page_type_and_title_in_frontmatter(), create_page_rejects_paths_outside_wiki_and_supports_cjk(), create_page_seeds_frontmatter_and_h1_and_rejects_existing() (+26 more)
+Nodes (35): file_read_error(), Error, apply_page_delete_invalidates_graph_cache(), apply_page_delete_rejects_hash_drift_and_missing_and_outside_wiki(), apply_page_delete_removes_file_after_git_checkpoint(), apply_page_delete_supports_cjk_filename(), create_directory_link(), create_page_escapes_page_type_and_title_in_frontmatter() (+27 more)
 
-### Community 85 - "export.ts"
-Cohesion: 0.08
-Nodes (33): BrowsePage, ExportDialog(), ExportDialogProps, ExportDialogResult, ROUTE_OPTIONS, TEMPLATE_OPTIONS, GenerateHtmlDialog(), GenerateHtmlDialogProps (+25 more)
+### Community 85 - "useModalDialog"
+Cohesion: 0.03
+Nodes (78): CompileConflictDetail, CompileConflictDialog(), CompileConflictDialogProps, errorMessage(), action, invokeMock, ConfirmationDialog(), ConfirmationDialogProps (+70 more)
 
 ### Community 86 - "pdf_router.rs"
 Cohesion: 0.12
@@ -974,40 +980,40 @@ Cohesion: 0.05
 Nodes (41): esbuild, eslint, @eslint/js, globals, devDependencies, dompurify, esbuild, eslint (+33 more)
 
 ### Community 88 - "file_discovery.rs"
-Cohesion: 0.10
-Nodes (53): B, FileDetectionMethod, FileSkipReason, contains_ascii(), contains_ascii_case_insensitive(), contains_utf16le_ascii(), enforce_file_count_limit(), error() (+45 more)
+Cohesion: 0.11
+Nodes (50): B, FileDetectionMethod, FileSkipReason, contains_ascii(), contains_ascii_case_insensitive(), contains_utf16le_ascii(), enforce_file_count_limit(), error() (+42 more)
 
 ### Community 89 - "import_v2_web.rs"
 Cohesion: 0.09
 Nodes (36): AddImportCollectionItemsV2Request, AddImportUrlV2Request, AuthorizeLocalAsrV2Request, AuthorizeLocalOcrV2Request, ConfirmRemoteMediaRetentionV2Request, DiscoverImportCollectionV2Request, ImportCollectionItemPreview, ImportCollectionPage (+28 more)
 
 ### Community 90 - "project_service.rs"
-Cohesion: 0.11
-Nodes (45): compatible_guidance_adds_only_scoped_state_and_does_not_initialize_git(), compatible_guidance_never_overwrites_existing_app_owned_guidance(), compatible_guidance_retry_accepts_only_the_exact_generated_templates(), compatible_guidance_serializes_same_process_enablement(), compatible_layout_summary_and_inventory_follow_resolved_roles(), create_project_builds_full_skeleton_and_templates(), create_project_rejects_invalid_or_windows_reserved_names_before_writing(), create_project_rejects_non_empty_directory() (+37 more)
+Cohesion: 0.08
+Nodes (56): compatibility_guidance_write_lock(), compatibility_path_unsafe_error(), compatible_guidance_adds_only_scoped_state_and_does_not_initialize_git(), compatible_guidance_never_overwrites_existing_app_owned_guidance(), compatible_guidance_retry_accepts_only_the_exact_generated_templates(), compatible_guidance_serializes_same_process_enablement(), compatible_layout_summary_and_inventory_follow_resolved_roles(), create_project_builds_full_skeleton_and_templates() (+48 more)
 
 ### Community 91 - "agent_service.rs"
-Cohesion: 0.09
-Nodes (42): Command, OsString, build_command(), capture_runner_resumes_child_only_after_job_assignment(), chat_invocation_rejects_agents_without_verified_read_only_profile(), chat_invocation_runs_from_project_root_read_only(), codex_chat_invocation_is_ephemeral_read_only_and_ignores_project_rules(), collect_import_material_paths() (+34 more)
+Cohesion: 0.07
+Nodes (57): Command, OsString, agent_probe_target_identities(), agent_route_probe_cache_key(), AgentRouteProbeCache, AgentRouteProbeCacheKey, build_command(), capture_runner_resumes_child_only_after_job_assignment() (+49 more)
 
-### Community 92 - "PrivateTargetGrant"
-Cohesion: 0.11
-Nodes (28): Ipv6Addr, allows_tunneled_https_fake_ip(), blocked_v4(), blocked_v6(), fake_ip_exception_does_not_relax_other_private_ranges(), fake_ip_exception_rejects_http_literals_and_mixed_dns_sets(), generic_https_fake_ip_requires_explicit_private_authorization(), grant_allows() (+20 more)
+### Community 92 - "SessionWebTarget"
+Cohesion: 0.07
+Nodes (55): Ipv6Addr, Output, S, allows_tunneled_https_fake_ip(), blocked_v4(), blocked_v6(), fake_ip_exception_does_not_relax_other_private_ranges(), fake_ip_exception_rejects_http_literals_and_mixed_dns_sets() (+47 more)
 
 ### Community 93 - "chat_convenience_service.rs"
-Cohesion: 0.12
-Nodes (29): should_use_convenience_flow(), audit_accepts_three_small_wiki_markdown_changes(), audit_changed_paths(), audit_git_changes(), audit_git_changes_reuses_convenience_rules(), audit_hard_violates_delete_raw_config_and_outside_wiki(), audit_hard_violates_dot_segments_case_variants_and_non_markdown(), audit_soft_violates_empty_change_sets() (+21 more)
+Cohesion: 0.06
+Nodes (52): should_use_convenience_flow(), audit_accepts_three_small_wiki_markdown_changes(), audit_changed_paths(), audit_git_changes(), audit_git_changes_reuses_convenience_rules(), audit_hard_violates_delete_raw_config_and_outside_wiki(), audit_hard_violates_dot_segments_case_variants_and_non_markdown(), audit_soft_violates_empty_change_sets() (+44 more)
 
 ### Community 94 - "AgentInvocation"
 Cohesion: 0.14
-Nodes (22): activity_log_text(), AgentInvocation, finish_stdin_writer(), import_workspace_materials(), is_structured_invocation(), process_agent_output_line(), BackendError, Duration (+14 more)
+Nodes (22): activity_log_text(), AgentInvocation, AgentProbeTarget, is_structured_invocation(), process_agent_output_line(), AtomicBool, BackendError, Duration (+14 more)
 
-### Community 95 - ".new"
-Cohesion: 0.07
-Nodes (23): process_path_generation(), ProcessRunner, resume_suspended_child(), Arc, Child, Self, Send, source_ai_execution_always_uses_the_isolated_runner_profile() (+15 more)
+### Community 95 - "FakeAgentRunner"
+Cohesion: 0.11
+Nodes (3): FakeAgentRunner, NoAgents, SuccessfulAgent
 
-### Community 96 - "WorkspaceRouter.tsx"
-Cohesion: 0.07
-Nodes (24): ViewErrorBoundary, ViewErrorBoundaryProps, ViewErrorBoundaryState, ViewFallback(), ChatView, ExportsView, GraphView, ImportView (+16 more)
+### Community 96 - "GitService"
+Cohesion: 0.21
+Nodes (19): CheckpointPurpose, collect_initial_commit_paths(), commit_paths_with_message(), commit_with_message(), completes_an_existing_unborn_repository_with_an_initial_commit(), git_path_unsafe(), GitService, initial_commit_preview_too_large() (+11 more)
 
 ### Community 97 - "WorkflowCoordinator"
 Cohesion: 0.14
@@ -1019,7 +1025,7 @@ Nodes (12): run_generate_content_with_generator(), cancellation_after_generation
 
 ### Community 99 - "SettingsService"
 Cohesion: 0.16
-Nodes (16): CloseBehavior, project_root_fingerprint(), project_state_path(), AgentKind, BackendError, ChatConvenienceAuthorization, Default, GlobalUiPreferences (+8 more)
+Nodes (18): CloseBehavior, project_root_fingerprint(), project_state_path(), AgentKind, BackendError, ChatConvenienceAuthorization, Default, GlobalUiPreferences (+10 more)
 
 ### Community 100 - "commands/import_v2_presentation_commands.rs"
 Cohesion: 0.10
@@ -1039,7 +1045,7 @@ Nodes (23): resolve_workflow_persistence_binding(), WorkflowPersistenceMode, Wor
 
 ### Community 104 - "chat.rs"
 Cohesion: 0.09
-Nodes (29): ChatExpandedPage, ChatAffectedPathHash, ChatCitation, ChatConvenienceEdit, ChatConvenienceEditStatus, ChatExpandedPage, ChatMessage, ChatRetrievalDiagnostics (+21 more)
+Nodes (32): ChatExpandedPage, ChatAffectedPathHash, ChatCitation, ChatConvenienceEdit, ChatConvenienceEditStatus, ChatExpandedPage, ChatMessage, ChatRetrievalDiagnostics (+24 more)
 
 ### Community 105 - "workflow_routes.rs"
 Cohesion: 0.35
@@ -1053,21 +1059,21 @@ Nodes (30): CompileResult, BackendEvent, BackendEventType, BackendTask, AgentKin
 Cohesion: 0.06
 Nodes (35): @fontsource/source-serif-4, graphology, graphology-communities-louvain, graphology-layout-forceatlas2, i18next, @milkdown/plugin-listener, dependencies, @fontsource/source-serif-4 (+27 more)
 
-### Community 108 - "commit.rs"
+### Community 108 - ".two_ready_items"
 Cohesion: 0.11
-Nodes (38): cancellation_before_first_item_returns_typed_error_and_accounts_all_decisions(), cancellation_between_items_commits_first_and_accounts_remaining_decision(), commit_rejects_a_new_source_target_that_changed_after_preview(), commit_rejects_persisted_preview_path_traversal(), commit_rejects_symlinked_staging_source(), commit_rejects_windows_reparse_staging_source_when_supported(), concurrent_history_edit_is_preserved(), concurrent_new_destinations_are_never_clobbered() (+30 more)
+Nodes (31): cancellation_before_first_item_returns_typed_error_and_accounts_all_decisions(), cancellation_between_items_commits_first_and_accounts_remaining_decision(), commit_rejects_a_new_source_target_that_changed_after_preview(), commit_rejects_persisted_preview_path_traversal(), commit_rejects_symlinked_staging_source(), commit_rejects_windows_reparse_staging_source_when_supported(), concurrent_history_edit_is_preserved(), concurrent_new_destinations_are_never_clobbered() (+23 more)
 
 ### Community 109 - "core.py"
 Cohesion: 0.15
 Nodes (23): clean_text(), _fail(), is_contained(), markdown_escape(), mean_confidence(), native_tool_path(), normalize_blocks(), _number() (+15 more)
 
-### Community 110 - "TaskService"
-Cohesion: 0.08
-Nodes (30): ImportSessionPatchEvent, WorkflowStageSink, PersistedTaskEntry, persistence_transition(), persistence_transition_log(), PersistenceWriterGate, Arc, BackendError (+22 more)
+### Community 110 - "Option"
+Cohesion: 0.12
+Nodes (20): RecoveredTaskSnapshot, parse_persisted_task(), PersistedTaskEntry, persistence_transition(), persistence_transition_log(), BackendTask, LogLevel, LogLine (+12 more)
 
-### Community 111 - "importWorkflow.ts"
-Cohesion: 0.05
-Nodes (71): Toaster(), toneStyles, ImportMergeResolutionDialogProps, countLine(), ImportMigrationDialog(), ImportMigrationDialogProps, ImportMigrationUiStatus, STATUS_KEYS (+63 more)
+### Community 111 - "git_service.rs"
+Cohesion: 0.12
+Nodes (37): assessed_initialization_rejects_files_added_after_confirmation(), assessment_disabled_hooks_config(), assessment_git_probe_honors_cancellation_and_deadline_before_spawning(), bounded_optional_git_value(), BoundedGitOutput, changed_files_since_head_counts_long_single_line_bytes(), changed_files_since_head_reports_status_and_changed_chars(), changed_files_since_head_with_ignored_baseline_reports_new_ignored_only() (+29 more)
 
 ### Community 112 - "llm_commands.rs"
 Cohesion: 0.14
@@ -1078,8 +1084,8 @@ Cohesion: 0.06
 Nodes (31): core:event:allow-listen, core:event:allow-unlisten, dialog:allow-open, icons/128x128@2x.png, icons/128x128.png, icons/32x32.png, icons/icon.icns, icons/icon.ico (+23 more)
 
 ### Community 114 - "parse_final_source"
-Cohesion: 0.17
-Nodes (31): SourceFrontmatter, candidate_record(), CandidateInspection, CandidateMetadata, final_source_normalizes_leading_blank_lines_from_html_extractors(), final_source_round_trip_preserves_detected_language_and_original_text(), final_source_round_trip_rejects_engine_owned_stable_ids(), finalization_error() (+23 more)
+Cohesion: 0.16
+Nodes (33): SourceFrontmatter, Result, validate_source_frontmatter(), candidate_record(), CandidateInspection, CandidateMetadata, final_source_normalizes_leading_blank_lines_from_html_extractors(), final_source_round_trip_preserves_detected_language_and_original_text() (+25 more)
 
 ### Community 115 - "import_v2/bilibili.rs"
 Cohesion: 0.14
@@ -1087,11 +1093,11 @@ Nodes (33): api_unavailable(), api_url(), BilibiliApiResult, cancelled(), classi
 
 ### Community 116 - "file_router.rs"
 Cohesion: 0.09
-Nodes (15): AttemptOutcome, AttemptRecord, CapabilitySnapshot, FileRoutePlanner, OfficeOxideQualification, QualityRequirements, RouteAttempt, RouteFailure (+7 more)
+Nodes (16): AttemptOutcome, AttemptRecord, CapabilitySnapshot, FileRoutePlanner, OfficeOxideQualification, QualityFloor, QualityRequirements, RouteAttempt (+8 more)
 
-### Community 117 - "SessionWebTarget"
-Cohesion: 0.15
-Nodes (28): Output, S, SessionWebTarget, await_or_cancel(), err(), next_stream_item_or_cancel(), RedirectLedgerEntry, restricted_fetch_policy_rejects_downgrade_and_untrusted_redirect_targets() (+20 more)
+### Community 117 - "source.rs"
+Cohesion: 0.12
+Nodes (37): ApplySourceCandidateRequest, DeleteSourcePreview, DeleteSourceRequest, DiscardSourceCandidateRequest, GetSourceDetailRequest, GetSourceVersionsRequest, MoveSourcePreview, MoveSourceRequest (+29 more)
 
 ### Community 118 - "compile_commands.rs"
 Cohesion: 0.18
@@ -1102,16 +1108,16 @@ Cohesion: 0.12
 Nodes (24): content_options_default_and_round_trip(), ExportContentOptions, ExportPreviewMetadata, ExportRecord, ExportRestrictedContentStatus, ExportRoute, ExportRoutePreference, ExportStatus (+16 more)
 
 ### Community 120 - "String"
-Cohesion: 0.12
-Nodes (34): ImportCollectionChildRelation, ArtifactKind, CommitImportSessionRequest, CommitItemDecision, DuplicateResult, ImportArtifact, ImportBatchResult, ImportCollectionChildRelation (+26 more)
+Cohesion: 0.14
+Nodes (27): ArtifactKind, CommitImportSessionRequest, CommitItemDecision, DuplicateResult, ImportArtifact, ImportCollectionChildRelation, ImportCompletion, ImportIssueDiagnostics (+19 more)
 
 ### Community 121 - "ConnectorFailure"
 Cohesion: 0.06
 Nodes (44): Debug, Formatter, BilibiliDocument, extract_json(), LocalAsrPolicy, Option, Result, String (+36 more)
 
 ### Community 122 - "saved_answers.rs"
-Cohesion: 0.15
-Nodes (18): append_save_log(), build_answer_markdown_includes_frontmatter_and_sources(), build_answer_markdown_sources_follow_parsed_model_citations_only(), ChatService, first_line(), invalidate_graph_cache(), BackendError, ChatMessage (+10 more)
+Cohesion: 0.11
+Nodes (24): append_save_log(), build_answer_markdown_includes_frontmatter_and_sources(), build_answer_markdown_sources_follow_parsed_model_citations_only(), ChatService, first_line(), invalidate_graph_cache(), BackendError, ChatMessage (+16 more)
 
 ### Community 123 - "ocr-cjk-accurate/manifest.json"
 Cohesion: 0.06
@@ -1125,21 +1131,21 @@ Nodes (48): 10. 验收门槛建议, 1. 审查方法：先定义 Lint 必须成�
 Cohesion: 0.10
 Nodes (21): bundledBrowsers, packRoot, platform, privateTargetAuthority, retainedProfile, rpc, RpcHandled, stagingRoot (+13 more)
 
-### Community 126 - "CompileRoutePreference"
-Cohesion: 0.50
-Nodes (4): default_route(), CompileRoutePreference, default_route(), default_route()
+### Community 126 - "workflowStore.ts"
+Cohesion: 0.08
+Nodes (24): PendingWorkflowEvent, mocks, noProjectOverview, overview, preparation, project, run, initialState (+16 more)
 
 ### Community 127 - "bookmark_service.rs"
-Cohesion: 0.15
-Nodes (31): ExportStatus, bookmark_parse_error(), bookmarks_path(), BookmarkService, corrupt_json_returns_recoverable_parse_error(), export_entry_id(), export_record(), legacy_path_and_title() (+23 more)
+Cohesion: 0.17
+Nodes (27): ExportStatus, bookmark_parse_error(), bookmarks_path(), BookmarkService, corrupt_json_returns_recoverable_parse_error(), export_entry_id(), export_record(), legacy_string_array_converts_to_wiki_entries() (+19 more)
 
 ### Community 128 - "settings_commands.rs"
 Cohesion: 0.25
 Nodes (19): ProviderSecretStatusRequest, SaveSettingsRequest, SettingsProjectRequest, get_chat_convenience_authorization(), get_global_ui_preferences(), get_provider_secret_status(), get_settings(), revoke_all_chat_convenience_authorizations() (+11 more)
 
-### Community 129 - ".execute_local_asr_continuation"
-Cohesion: 0.21
-Nodes (18): apply_companion_transcript_fallback(), asr_shard_key(), asr_unavailable(), completed_ocr_shards_are_reused_only_with_valid_atomic_markers(), engine_progress_on_task_scale(), is_allowed_local_asr_output_workspace(), load_completed_asr_shard(), load_completed_ocr_shard() (+10 more)
+### Community 129 - "useWorkflowsController.ts"
+Cohesion: 0.14
+Nodes (29): hasTauri(), keepLatestPendingEvent(), operationError(), PROJECT_PREREQUISITE_ACTIONS, routeSelectionOf(), settle(), SettledResult, TERMINAL_WORKFLOW_STATUSES (+21 more)
 
 ### Community 130 - "models/import_v2_migration.rs"
 Cohesion: 0.16
@@ -1154,32 +1160,32 @@ Cohesion: 0.09
 Nodes (42): download(), fetchNodeRuntime(), main(), parse(), run(), assertSafeLinks(), buildMacFfmpeg(), download() (+34 more)
 
 ### Community 133 - "source_lifecycle_tests.rs"
-Cohesion: 0.12
-Nodes (32): AsRef, apply_validated_page_binding(), apply_validated_source_bindings(), WikiPageContent, WikiTree, cancelled_source_ai_completion_can_remove_only_its_staged_candidate(), candidate_diff_apply_external_three_way_and_reliable_package_restore_work(), dedicated_package_move_updates_manifest_wikilinks_and_checkpoint_with_cjk_paths() (+24 more)
+Cohesion: 0.14
+Nodes (30): AsRef, apply_validated_source_bindings(), WikiTree, cancelled_source_ai_completion_can_remove_only_its_staged_candidate(), candidate_diff_apply_external_three_way_and_reliable_package_restore_work(), dedicated_package_move_updates_manifest_wikilinks_and_checkpoint_with_cjk_paths(), extend_source_for_ai(), Fixture (+22 more)
 
-### Community 134 - "ImportHistoryDetailDialog.tsx"
-Cohesion: 0.16
-Nodes (14): formatTime(), ImportAttemptTimeline(), ImportAttemptTimelineProps, AttemptRow(), formatAttemptDuration(), historyDomId(), HistoryItem(), ImportHistoryDetailDialog() (+6 more)
+### Community 134 - "workflows.test.tsx"
+Cohesion: 0.13
+Nodes (23): HistoryRow, WorkflowHistoryView(), ARTIFACT_SKILL_IDS, routeDisplay(), scopeValidationKey(), sourceVersionKey(), stringSetEqual(), WorkflowPreparationView() (+15 more)
 
 ### Community 135 - "commands/import_v2_migration.rs"
-Cohesion: 0.12
-Nodes (34): apply_import_v2_migration(), ApplyImportV2MigrationRequest, get_import_v2_migration_status(), GetImportV2MigrationStatusRequest, plan_import_v2_migration(), PlanImportV2MigrationRequest, resume_import_v2_migration(), ResumeImportV2MigrationRequest (+26 more)
+Cohesion: 0.22
+Nodes (23): apply_import_v2_migration(), ApplyImportV2MigrationRequest, get_import_v2_migration_status(), GetImportV2MigrationStatusRequest, plan_import_v2_migration(), PlanImportV2MigrationRequest, resume_import_v2_migration(), ResumeImportV2MigrationRequest (+15 more)
 
 ### Community 136 - "markdown_normalizer.rs"
 Cohesion: 0.13
 Nodes (25): attribute(), collapse_blank_lines(), converts_images_to_markdown_and_prefers_lazy_data_source(), csv_error(), csv_to_gfm(), decode_entities(), decode_text(), drops_unsafe_image_urls() (+17 more)
 
 ### Community 137 - "Cell"
-Cohesion: 0.23
+Cohesion: 0.16
 Nodes (16): Cell, CsvFallback, PresentationOutput, PresentationPlan, Into, Option, Result, Self (+8 more)
 
 ### Community 138 - "BackendError"
-Cohesion: 0.18
-Nodes (23): canonicalize_root(), create_native_repair_directory(), create_project_backup_path(), create_project_staging_root(), install_staged_project(), normal_empty_directory(), prepare_default_project_parent_at(), project_repair_write_lock() (+15 more)
+Cohesion: 0.11
+Nodes (37): native_repair_directory_allowed(), canonicalize_root(), concurrent_recent_remember_and_remove_keep_both_updates(), create_native_repair_directory(), create_project_backup_path(), create_project_staging_root(), install_staged_project(), NativeProjectIdentityFile (+29 more)
 
 ### Community 139 - "catalog.rs"
-Cohesion: 0.14
-Nodes (25): bookmark_toggle_between_scans_flips_bookmarked_without_a_file_change(), compute_file_counts(), file_read_error(), insert_node(), mtime_rfc3339(), read_page_returns_frontmatter_body_and_meta(), BackendError, Error (+17 more)
+Cohesion: 0.15
+Nodes (23): bookmark_toggle_between_scans_flips_bookmarked_without_a_file_change(), compute_file_counts(), insert_node(), mtime_rfc3339(), read_page_returns_frontmatter_body_and_meta(), BackendError, HashSet, Path (+15 more)
 
 ### Community 140 - "file_commands.rs"
 Cohesion: 0.19
@@ -1193,37 +1199,37 @@ Nodes (27): MigrationCandidate, MigrationDecision, MigrationSummary, candidate_i
 Cohesion: 0.19
 Nodes (16): decision_store_locked(), file_error(), ProjectOpenDecisionFile, ProjectOpenDecisionStore, BackendError, Default, Option, Path (+8 more)
 
-### Community 143 - "ImportCapabilitiesPanel.tsx"
-Cohesion: 0.22
-Nodes (10): CapabilityGroup, groupStatus(), ImportCapabilitiesPanel(), ImportCapabilitiesPanelProps, ImportCapabilityDialog(), ImportCapabilityDialogProps, requirement, capabilityDisplayName() (+2 more)
+### Community 143 - "wiki.rs"
+Cohesion: 0.14
+Nodes (24): toggle_bookmark(), CreateWikiPageRequest, ReadWikiAssetRequest, ReadWikiPageRequest, RenameWikiPageResponse, Option, QualityReport, Self (+16 more)
 
 ### Community 144 - "wechat_web_engine.rs"
-Cohesion: 0.11
-Nodes (29): Runtime, is_wechat_target(), page_hosts_exclude_platform_asset_cdns(), reviewed_http_shortlink_is_upgraded_before_fetch(), BackendError, Result, trusted_platform_page_host_suffixes(), upgrade_trusted_platform_page_to_https() (+21 more)
+Cohesion: 0.15
+Nodes (23): Runtime, is_wechat_target(), cancelled(), connector_error(), image_extension(), image_reference_replacement_updates_markdown_and_snapshot_content(), ImageLocalizationSummary, localize_wechat_images() (+15 more)
 
-### Community 145 - ".enable_compatible_guidance"
-Cohesion: 0.21
-Nodes (13): compatibility_guidance_write_lock(), compatibility_path_unsafe_error(), NativeProjectIdentityFile, ProjectSettings, Mutex, ProjectTemplate, String, sha256_hex() (+5 more)
+### Community 145 - "String"
+Cohesion: 0.18
+Nodes (21): QualityMetric, decode_html_entities(), destination_token(), fence_marker(), has_unclosed_fenced_block(), html_attribute(), html_image_destinations(), image_destinations_from_rendered() (+13 more)
 
-### Community 146 - "String"
-Cohesion: 0.13
-Nodes (23): asset_collision_key(), canonical_candidate_locator(), canonical_platform_locator(), classify_commit_target(), CommitPersistenceTarget, content_identity_hash(), expected_item_commit_boundaries(), persistence_target_for() (+15 more)
+### Community 146 - "commit.rs"
+Cohesion: 0.09
+Nodes (35): abort_at_item_boundary(), artifact_record(), assert_no_transaction_orphans(), classify_commit_target(), CommitPersistenceBoundary, CommitPersistenceTarget, completion_warning(), expected_item_commit_boundaries() (+27 more)
 
-### Community 147 - ".retrieve_with_excerpts"
-Cohesion: 0.21
-Nodes (13): first_body_excerpt(), retrieve_with_excerpts_does_not_slice_inside_cjk_prefix(), retrieve_with_excerpts_handles_chinese_question_suffix(), retrieve_with_excerpts_reuses_cached_body_and_does_not_reread(), BackendError, ChatRetrievalHit, Option, Result (+5 more)
+### Community 147 - ".evaluate"
+Cohesion: 0.26
+Nodes (16): ArtifactKind, classify_asset(), is_remote(), normalize_relative(), quality_error(), QualityGate, read_artifact(), BackendError (+8 more)
 
 ### Community 148 - "BookmarkFile"
-Cohesion: 0.18
-Nodes (15): BookmarkEntry, BookmarkFile, BookmarkResourceKind, ExportBookmarkResponse, Default, Option, Self, String (+7 more)
+Cohesion: 0.14
+Nodes (19): BookmarkEntry, BookmarkFile, BookmarkResourceKind, ExportBookmarkResponse, Default, Option, Self, String (+11 more)
 
 ### Community 149 - "4. P2：中优先级问题与功能缺口"
 Cohesion: 0.05
 Nodes (41): 10. 修复跟踪（2026-07-18）, 1. 范围与依据, 2. 总结, 3. P1：高优先级问题, 4. P2：中优先级问题与功能缺口, 5.1 Composer：从“两排散件”改为统一输入卡, 5.2 会话栏：增加时间层级、作用域和持久化心智, 5.3 对话流：减少重复卡片，稳定生成前后形态 (+33 more)
 
 ### Community 150 - "AssessmentId"
-Cohesion: 0.15
-Nodes (29): AssessmentId, AssessmentOperationId, app_state_is_corrupt(), AssessmentEntry, AssessmentRegistry, bounded_path_name_collisions(), cancelling_discards_operation_and_completed_snapshot(), check_cancelled() (+21 more)
+Cohesion: 0.17
+Nodes (23): AssessmentId, AssessmentOperationId, StartProjectOpenAssessmentResult, AssessmentEntry, AssessmentRegistry, OperationEntry, OperationState, ProjectAssessmentService (+15 more)
 
 ### Community 151 - "import_v2_local_agent.rs"
 Cohesion: 0.18
@@ -1250,12 +1256,12 @@ Cohesion: 0.11
 Nodes (32): Box, current_preparation_run(), existing_preparation_run(), NoopHealthRunner, prepared_to_started_race_recovers_existing_deterministically(), recover_preparation_run(), Arc, BackendError (+24 more)
 
 ### Community 157 - ".build_retrieval_context_with_mode"
-Cohesion: 0.20
-Nodes (14): ChatRoute, AgentPromptMode, candidate_from_page(), char_len(), ChatService, first_prompt_line(), retrieval_budgets(), BackendError (+6 more)
+Cohesion: 0.18
+Nodes (23): ChatRoute, ChatSourceRef, AgentPromptMode, append_prompt_common(), append_prompt_history(), append_prompt_source(), candidate_from_page(), canonical_source_key() (+15 more)
 
 ### Community 158 - "GraphView.tsx"
 Cohesion: 0.13
-Nodes (24): sigma, sigma, GraphCanvasControls(), GraphCanvasControlsProps, fitGraphToViewport(), createLatestLayoutSaveQueue(), LatestLayoutSaveQueue, applyColors() (+16 more)
+Nodes (26): sigma, sigma, GraphCanvasControls(), GraphCanvasControlsProps, fitGraphToViewport(), createLatestLayoutSaveQueue(), LatestLayoutSaveQueue, applyColors() (+18 more)
 
 ### Community 159 - ".scan"
 Cohesion: 0.29
@@ -1263,15 +1269,15 @@ Nodes (7): BackendError, Error, LegacyInventory, Result, safe_metadata(), ScanSt
 
 ### Community 160 - "source_registry.rs"
 Cohesion: 0.08
-Nodes (53): SourceProvenance, commit_plan_derives_safe_unicode_paths_through_project_context(), commit_plan_never_reuses_an_existing_raw_version_path(), CompiledConsumption, corrupt_existing_manifest_is_rejected_before_paths_are_returned(), derive_wiki_path(), derive_wiki_path_for_input(), existing_manifest_wiki_filename_must_be_portable() (+45 more)
+Nodes (42): CompiledConsumption, SourceAlias, SourceProvenance, SourceTimelineEvent, CompiledConsumption, current_version_has_legacy_migration_marker(), derive_wiki_path(), derive_wiki_path_for_input() (+34 more)
 
 ### Community 161 - "validate_existing_project_file"
 Cohesion: 0.23
 Nodes (21): probe_writable_project_directory(), accepts_windows_and_posix_separator_styles(), canonical_root_and_relative(), creates_cjk_directory_components_and_revalidates_them(), ensure_project_directory(), ensure_project_directory_with_created(), metadata_is_link_or_reparse(), metadata_is_reparse_point() (+13 more)
 
-### Community 162 - "version_is_restorable"
-Cohesion: 0.22
-Nodes (13): SourceTimelineItem, apply_tree_binding_types(), product_timeline_kind(), BTreeMap, SourceManifest, SourceVersionSummary, WikiPageType, WikiTreeNode (+5 more)
+### Community 162 - "source_lifecycle.rs"
+Cohesion: 0.09
+Nodes (57): SourceTimelineItem, normalize_project_path(), AppliedSourceProvenance, apply_tree_binding_types(), apply_validated_page_binding(), available_actions(), candidate_evidence_path(), current_version() (+49 more)
 
 ### Community 163 - "compilerOptions"
 Cohesion: 0.08
@@ -1282,12 +1288,12 @@ Cohesion: 0.14
 Nodes (20): collect_json_paths(), corrupt_warning(), is_v2_import_task(), LegacyHistoryAdapter, LegacyHistoryLimits, limit_warning(), relative_path(), BackendError (+12 more)
 
 ### Community 165 - "import_v2_file.rs"
-Cohesion: 0.11
-Nodes (24): FileContentKind, CapabilityRequirement, DiscoveredFile, FileContentKind, FileDetectionMethod, FileFormat, FileIdentity, FileScanPolicy (+16 more)
+Cohesion: 0.13
+Nodes (21): FileContentKind, CapabilityRequirement, DiscoveredFile, FileContentKind, FileDetectionMethod, FileFormat, FileIdentity, FileScanResult (+13 more)
 
-### Community 166 - "import_v2_file_discovery.rs"
+### Community 166 - "identify_file"
 Cohesion: 0.11
-Nodes (21): new_import_inputs(), normalize_locator(), DiscoveredFile, ImportInput, ImportSession, IntoIterator, Item, Vec (+13 more)
+Nodes (22): identify_file(), new_import_inputs(), DiscoveredFile, FileIdentity, ImportInput, ImportSession, IntoIterator, Item (+14 more)
 
 ### Community 167 - "preferences.rs"
 Cohesion: 0.17
@@ -1301,21 +1307,21 @@ Nodes (23): archiveSha256, compressedBytes, distributionNote, engine, license, n
 Cohesion: 0.23
 Nodes (15): Entry, keyring_account(), Arc, BackendError, Error, HashMap, LlmProviderKind, Option (+7 more)
 
-### Community 170 - ".remember_recent_project"
-Cohesion: 0.31
-Nodes (8): concurrent_recent_remember_and_remove_keep_both_updates(), list_recent_projects_marks_missing_paths_without_deleting_them(), normalize_root_key(), recent_project_write_lock(), recent_root_normalization_only_folds_case_on_windows(), RecentProjectsFile, RecentProject, Vec
+### Community 170 - ".activate"
+Cohesion: 0.18
+Nodes (14): digest(), ImportV2ActivationService, io_error(), ActivationConfirmation, ActivationResult, BackendError, Error, ImportBackendActivation (+6 more)
 
 ### Community 171 - ".new"
 Cohesion: 0.14
 Nodes (16): AgentAuditRecord, AgentCandidateService, audit(), deterministic_baseline_hash_is_reverified_after_agent_run(), io_error(), manifest(), provenance_fails_closed_for_unknown_routes_and_tampering(), rejects_incomplete_provenance_and_executable_assets() (+8 more)
 
 ### Community 172 - "WikiPageType"
-Cohesion: 0.30
-Nodes (11): GraphLegendProps, buildRenderSnapshot(), computeHiddenNodeIds(), RenderSnapshot, RenderSnapshotInput, visibleTypeFilterFromHidden(), GraphRenderOptions, RenderState (+3 more)
+Cohesion: 0.20
+Nodes (16): GraphControls(), GraphControlsProps, GraphInspectorProps, GraphLegendProps, buildRenderSnapshot(), computeHiddenNodeIds(), RenderSnapshot, RenderSnapshotInput (+8 more)
 
 ### Community 173 - "ProjectService"
 Cohesion: 0.13
-Nodes (24): count_inventory_files(), count_inventory_markdown_roles(), count_inventory_sources(), count_inventory_tasks(), default_config_dir(), graph_cache_has_content(), has_child_named(), inventory_metadata_is_link_or_reparse() (+16 more)
+Nodes (23): count_inventory_files(), count_inventory_markdown_roles(), count_inventory_sources(), count_inventory_tasks(), default_config_dir(), graph_cache_has_content(), has_child_named(), InventoryFileCount (+15 more)
 
 ### Community 174 - "launch_registry.rs"
 Cohesion: 0.16
@@ -1334,24 +1340,24 @@ Cohesion: 0.08
 Nodes (24): For /graphify add and --watch, For /graphify query, For the commit hook and native CLAUDE.md integration, For --update and --cluster-only, /graphify, Honesty Rules, Interpreter guard for subcommands, Part A - Structural extraction for code files (+16 more)
 
 ### Community 178 - "import_v2.rs"
-Cohesion: 0.11
-Nodes (17): asr_failures_preserve_actionable_recovery_codes(), authenticated_account_permission_denial_never_loops_back_to_login(), image_url_ocr_failure_offers_the_ocr_capability_installer(), ImportRecoveryAction, ImportSessionPatchCounts, ImportSessionPatchEvent, ImportUserState, missing_platform_route_offers_capability_and_local_agent_recovery() (+9 more)
+Cohesion: 0.14
+Nodes (11): asr_failures_preserve_actionable_recovery_codes(), authenticated_account_permission_denial_never_loops_back_to_login(), image_url_ocr_failure_offers_the_ocr_capability_installer(), ImportRecoveryAction, ImportSessionPatchCounts, ImportSessionPatchEvent, ImportUserState, missing_platform_route_offers_capability_and_local_agent_recovery() (+3 more)
 
 ### Community 179 - "import_v2_file_commands.rs"
 Cohesion: 0.17
 Nodes (25): accept_import_scan_v2(), AcceptImportScanV2Request, AcceptImportScanV2Result, add_import_paths_v2(), AddImportPathsV2Request, discard_import_scan_v2(), DiscardImportScanV2Request, get_import_capability_statuses() (+17 more)
 
 ### Community 180 - "import_v2_native_file_engine.rs"
-Cohesion: 0.19
-Nodes (17): cancellation_during_remote_resource_fetch_removes_partial_staging(), csv_quotes_newlines_and_pipes_as_gfm_without_silent_loss(), FixtureImageSource, invalid_utf8_and_pre_cancel_leave_no_staging_artifacts(), local_html_archives_meaningful_remote_images_without_third_party_links(), local_html_removes_executable_content_and_emits_typed_warnings(), markdown_accepts_gb18030_and_utf16_sources(), markdown_copies_inline_and_reference_style_attachments() (+9 more)
+Cohesion: 0.21
+Nodes (16): cancellation_during_remote_resource_fetch_removes_partial_staging(), csv_quotes_newlines_and_pipes_as_gfm_without_silent_loss(), invalid_utf8_and_pre_cancel_leave_no_staging_artifacts(), local_html_archives_meaningful_remote_images_without_third_party_links(), local_html_removes_executable_content_and_emits_typed_warnings(), markdown_accepts_gb18030_and_utf16_sources(), markdown_copies_inline_and_reference_style_attachments(), markdown_normalizes_dot_image_paths_and_keeps_escaping_links_non_fatal() (+8 more)
 
 ### Community 181 - "BackendError"
 Cohesion: 0.28
 Nodes (22): ImportPreviewContent, bounded_preview_markdown(), get_import_preview_content_v2(), normalize_relative(), presentation_error(), preview_comparison(), preview_target(), read_history_markdown() (+14 more)
 
 ### Community 182 - "AgentService"
-Cohesion: 0.17
-Nodes (14): agent_route_probe_cache_key(), AgentProbeTarget, AgentRouteProbeCache, AgentService, CachedAgentRouteProbe, help_supports_invocation(), invocation_supported(), normalized_path() (+6 more)
+Cohesion: 0.12
+Nodes (21): AgentService, CachedAgentRouteProbe, first_non_empty_line(), help_supports_invocation(), install_guidance_is_data_not_an_executable_action(), invocation_supported(), ProcessRunner, AgentInfo (+13 more)
 
 ### Community 183 - "scanner.rs"
 Cohesion: 0.28
@@ -1369,57 +1375,57 @@ Nodes (19): GetImportCapabilityRequirementV2Request, ImportCapabilityRequirement
 Cohesion: 0.20
 Nodes (19): Range, redacts_sensitive_query_and_json_values(), attribute_value_range(), html_snapshot_redaction_catches_camel_case_and_meta_credentials(), is_sensitive_json_key(), json_snapshot_redaction_preserves_valid_json_and_catches_camel_case_keys(), redact_json_snapshot(), redact_json_value() (+11 more)
 
-### Community 187 - "ImportItem"
-Cohesion: 0.05
-Nodes (68): ProgressBar(), buildImportActionGroups(), capabilityIdForItem(), ImportActionGroup, ImportActionGroupKind, ImportActionGroups(), ImportActionGroupsProps, items (+60 more)
+### Community 187 - "importStatusPresentation.ts"
+Cohesion: 0.03
+Nodes (103): ProgressBar(), DragDropEnvelope, DragDropSubscription, DragDropUpdate, reduceDragDrop(), subscribeToDragDrop(), position, buildImportActionGroups() (+95 more)
 
 ### Community 188 - "CommitFixture"
-Cohesion: 0.18
-Nodes (18): abort_at_item_boundary(), assert_no_transaction_orphans(), CommitFixture, CommitPersistenceBoundary, concurrent_existing_index_update_blocks_without_manifest_inconsistency(), concurrent_existing_manifest_update_blocks_before_index_commit(), keep_current_source_records_candidate_version_without_advancing_current(), manual_merge_commits_the_staged_three_way_result_with_checkpoint() (+10 more)
+Cohesion: 0.35
+Nodes (8): CommitFixture, concurrent_existing_index_update_blocks_without_manifest_inconsistency(), concurrent_existing_manifest_update_blocks_before_index_commit(), keep_current_source_records_candidate_version_without_advancing_current(), manual_merge_commits_the_staged_three_way_result_with_checkpoint(), Drop, SourceManifest, wiki_hash_drift_blocks_update_before_any_write()
 
 ### Community 189 - "import_v2_gate_a.rs"
-Cohesion: 0.30
-Nodes (10): configure_case_engines(), create_case_input(), FixtureWebArtifactSource, gate_a_success_contract_is_table_driven_for_every_supported_input(), GateACase, LocalFixtureAsset, real_collection_selection_runs_children_through_candidate_and_commit_in_source_order(), run_gate_a_case() (+2 more)
+Cohesion: 0.27
+Nodes (11): configure_case_engines(), create_case_input(), FixtureWebArtifactSource, gate_a_success_contract_is_table_driven_for_every_supported_input(), GateACase, LocalFixtureAsset, real_collection_selection_runs_children_through_candidate_and_commit_in_source_order(), run_gate_a_case() (+3 more)
 
 ### Community 190 - "office-oxide/manifest.json"
 Cohesion: 0.11
 Nodes (18): archiveSha256, compressedBytes, entrypoint, installedBytes, aarch64-apple-darwin, x86_64-apple-darwin, x86_64-pc-windows-msvc, x86_64-unknown-linux-gnu (+10 more)
 
 ### Community 191 - "graph.ts"
-Cohesion: 0.13
-Nodes (21): GraphControls(), GraphControlsProps, GraphInfo(), GraphInfoProps, countCommunities(), GRAPH_STATUS_LABELS, GraphInspector(), GraphInspectorProps (+13 more)
+Cohesion: 0.15
+Nodes (16): GraphInfo(), GraphInfoProps, countCommunities(), GRAPH_STATUS_LABELS, GraphInspector(), data, neighborCount(), NeighborEntry (+8 more)
 
 ### Community 192 - "graphRenderStyle.ts"
-Cohesion: 0.16
-Nodes (18): EdgeVisual, GRAPH_DEFAULT_EDGE_COLOR, GRAPH_SELECTED_COLOR, GraphHiddenReason, graphSearchMatches(), hiddenReasonForNode(), nodeColor(), NodeVisual (+10 more)
+Cohesion: 0.17
+Nodes (17): EdgeVisual, GRAPH_DEFAULT_EDGE_COLOR, GRAPH_SELECTED_COLOR, GraphHiddenReason, graphSearchMatches(), hiddenReasonForNode(), nodeColor(), NodeVisual (+9 more)
 
 ### Community 193 - "retrieval.rs"
 Cohesion: 0.26
 Nodes (16): agent_prompt_is_read_only_index_first_and_can_read_more(), byok_prompt_has_no_filesystem_or_tool_access_and_uses_numbered_sources(), convenience_agent_prompt_allows_scoped_writes_without_read_only_conflict(), retrieval_context_assembles_citations_purpose_and_bounded_history(), retrieval_context_dedupes_pinned_page_from_search_hits(), retrieval_context_errors_when_pinned_page_missing(), retrieval_context_includes_full_pinned_page_body(), retrieval_context_includes_pinned_page_first() (+8 more)
 
-### Community 194 - "importLocator.ts"
-Cohesion: 0.12
-Nodes (21): DragDropEnvelope, DragDropSubscription, DragDropUpdate, reduceDragDrop(), subscribeToDragDrop(), position, importPlatformForHost(), importPlatformForLocator() (+13 more)
+### Community 194 - "workflowBaselineFixtures.ts"
+Cohesion: 0.25
+Nodes (15): baselineAccess, baselineFixtureSignature(), fixedAsciiBytes(), makeBaselineRun(), makeDecisionReview(), makeDrawerEventPayload(), makeDrawerTask(), makeHistoryAttempts() (+7 more)
 
 ### Community 195 - "LintService"
 Cohesion: 0.16
 Nodes (13): LintService, BackendError, HashMap, HashSet, LintIssue, Mutex, MutexGuard, Option (+5 more)
 
 ### Community 196 - "settings_service.rs"
-Cohesion: 0.20
-Nodes (22): agent_config_is_canonical_when_legacy_settings_disagree(), chat_convenience_authorization_can_be_revoked_for_project(), chat_convenience_authorization_is_global_only(), default_config_dir(), global_settings_lock(), provider_secret_status_never_reveals_any_secret_characters(), read_language_defaults_to_english_when_settings_missing(), read_language_returns_global_preference_or_english_default() (+14 more)
+Cohesion: 0.22
+Nodes (20): agent_config_is_canonical_when_legacy_settings_disagree(), chat_convenience_authorization_can_be_revoked_for_project(), chat_convenience_authorization_is_global_only(), default_config_dir(), global_settings_lock(), provider_secret_status_never_reveals_any_secret_characters(), read_language_defaults_to_english_when_settings_missing(), read_language_returns_global_preference_or_english_default() (+12 more)
 
 ### Community 197 - "import_v2_agent_orchestration.rs"
 Cohesion: 0.23
 Nodes (6): preview(), validation_is_explicit_and_failed_optimization_restores_deterministic_preview(), artifact(), terminal_cleanup_preserves_output_hashes_but_removes_workspace(), workspace_contains_only_sanitized_current_item_copies(), workspace_rejects_symlinked_source_snapshot()
 
 ### Community 198 - "SourceIndex"
-Cohesion: 0.31
+Cohesion: 0.27
 Nodes (8): Deserialize, BTreeMap, D, Error, Self, SourceIndex, SourcePointer, UniquePointerMap
 
-### Community 199 - "Option"
-Cohesion: 0.27
-Nodes (19): candidate_file_diff_len(), committed_update_wiki_result(), load_update_wiki_candidate_for_workflow(), load_valid_update_wiki_candidate(), PersistedUpdateWikiCandidate, Option, Path, WorkflowDecisionReview (+11 more)
+### Community 199 - "update_wiki.rs"
+Cohesion: 0.15
+Nodes (32): candidate_file_diff_len(), committed_update_wiki_result(), deleted_worktree_file_is_reported_as_a_user_edit(), load_update_wiki_candidate_for_workflow(), load_valid_update_wiki_candidate(), materialize_workflow_file_diff(), PersistedUpdateWikiCandidate, render_three_way_comparison() (+24 more)
 
 ### Community 200 - "asr-sensevoice-small/manifest.json"
 Cohesion: 0.11
@@ -1470,8 +1476,8 @@ Cohesion: 0.21
 Nodes (16): GraphRequest, build_graph(), get_graph(), AppHandle, BackendError, BackendTask, GraphBuildResult, GraphData (+8 more)
 
 ### Community 212 - "SourcePackageManifest"
-Cohesion: 0.20
-Nodes (14): committed_manifest_binds_entry_and_rejects_duplicate_targets(), member(), Result, Self, String, Vec, safe_relative_path(), SourcePackageManifest (+6 more)
+Cohesion: 0.22
+Nodes (13): committed_manifest_binds_entry_and_rejects_duplicate_targets(), member(), Result, Self, String, Vec, safe_relative_path(), SourcePackageManifest (+5 more)
 
 ### Community 213 - "pack_protocol.rs"
 Cohesion: 0.22
@@ -1482,8 +1488,8 @@ Cohesion: 0.26
 Nodes (9): Option, Result, Self, String, WorkflowErrorSummary, WorkflowPendingAction, WorkflowResult, WorkflowRun (+1 more)
 
 ### Community 215 - "url_utils.rs"
-Cohesion: 0.14
-Nodes (10): extract_url_host(), is_public_ip(), is_public_ipv4(), is_safe_remote_url(), normalize_url(), IpAddr, Ipv4Addr, Option (+2 more)
+Cohesion: 0.15
+Nodes (9): extract_url_host(), is_public_ip(), is_public_ipv4(), is_safe_remote_url(), normalize_url(), IpAddr, Ipv4Addr, Option (+1 more)
 
 ### Community 216 - "start_import_agent_assistance_v2"
 Cohesion: 0.21
@@ -1501,21 +1507,21 @@ Nodes (15): dependencies, dompurify, jsdom, @mozilla/readability, playwright, tu
 Cohesion: 0.12
 Nodes (16): scripts, build, check, check:console, check:import-source-media, check:import-v2-cutover, check:quick, check:rust:core (+8 more)
 
-### Community 220 - ".add_ignore"
-Cohesion: 0.34
-Nodes (9): add_lint_ignore_rejects_traversal_path(), add_then_remove_lint_ignore_round_trips(), LintService, BackendError, LintIgnoreFile, LintIssueType, Result, run_local_lint_excludes_ignored_issues() (+1 more)
+### Community 220 - "workflowApi.test.ts"
+Cohesion: 0.33
+Nodes (15): invoke, isNullableString(), isOneOf(), isRecord(), isStringArray(), parseCandidate(), parsePendingAction(), parseResult() (+7 more)
 
 ### Community 221 - "graph.rs"
 Cohesion: 0.24
 Nodes (13): GraphBuildResult, GraphData, GraphEdge, GraphLayout, GraphNode, GraphRequest, HashMap, Option (+5 more)
 
 ### Community 222 - "graphExport.ts"
-Cohesion: 0.17
-Nodes (20): buildGraphSvg(), computeTransform(), dataUrlToBlob(), decodeImage(), downloadBlob(), emptySvg(), escapeXml(), ExportFilters (+12 more)
+Cohesion: 0.18
+Nodes (19): buildGraphSvg(), computeTransform(), dataUrlToBlob(), decodeImage(), downloadBlob(), emptySvg(), escapeXml(), ExportFilters (+11 more)
 
-### Community 223 - ".new"
-Cohesion: 0.30
-Nodes (19): cancelled(), copy_and_rewrite_local_assets(), fetch_remote_image(), invalid(), is_reparse_point(), NativeStructuredFileEngine, resolve_chained_office_artifact(), resolve_inside() (+11 more)
+### Community 223 - ".build_commit_plan"
+Cohesion: 0.35
+Nodes (13): commit_plan_derives_safe_unicode_paths_through_project_context(), commit_plan_never_reuses_an_existing_raw_version_path(), corrupt_existing_manifest_is_rejected_before_paths_are_returned(), existing_manifest_wiki_filename_must_be_portable(), fixture_input(), fixture_manifest(), locator_update_cannot_steal_content_owned_by_another_source(), normalized_locator_case_is_preserved() (+5 more)
 
 ### Community 224 - "browser-runtime-lite/manifest.json"
 Cohesion: 0.13
@@ -1526,24 +1532,24 @@ Cohesion: 0.40
 Nodes (9): isLoginChallengeState(), isSensitiveKey(), normalizedKey(), PERSISTED_QUERY_KEYS, redactJsonValue(), redactSensitiveText(), redactUnknownUrlQueries(), sanitizePublicUrl() (+1 more)
 
 ### Community 226 - "commands/import_v2_activation.rs"
-Cohesion: 0.12
-Nodes (24): activate_import_v2(), ActivateImportV2Request, get_import_backend_activation(), GetImportBackendActivationRequest, ActivationConfirmation, ActivationResult, BackendError, ImportBackendActivation (+16 more)
+Cohesion: 0.23
+Nodes (14): activate_import_v2(), ActivateImportV2Request, get_import_backend_activation(), GetImportBackendActivationRequest, ActivationConfirmation, ActivationResult, BackendError, ImportBackendActivation (+6 more)
 
 ### Community 227 - "AgentOutputParser"
 Cohesion: 0.55
 Nodes (4): AgentOutputParser, ParsedAgentLine, Value, safe_tool_detail()
 
-### Community 228 - "String"
-Cohesion: 0.44
-Nodes (9): ChatSourceRef, append_prompt_common(), append_prompt_history(), append_prompt_source(), canonical_source_key(), ChatSession, Option, String (+1 more)
+### Community 228 - "workflowNavigation.ts"
+Cohesion: 0.33
+Nodes (12): attentionRun(), WorkflowsRightPanel(), assertActiveProject(), assertNavigationGuard(), captureNavigationGuard(), hydrateAndSelectWorkflowRun(), navigationGuardMatches(), openWorkflowResult() (+4 more)
 
 ### Community 229 - "browser-runtime-lite/package.json"
 Cohesion: 0.14
 Nodes (13): dependencies, dompurify, jsdom, @mozilla/readability, turndown, dompurify, jsdom, @mozilla/readability (+5 more)
 
-### Community 230 - "search.rs"
-Cohesion: 0.36
-Nodes (8): Option, Self, String, Vec, WikiPageType, SearchRequest, SearchResponse, SearchResult
+### Community 230 - "Vec"
+Cohesion: 0.37
+Nodes (12): GitChangedFile, append_ignored_changes(), estimate_changed_bytes(), head_file_bytes(), ignored_paths(), initial_commit_git_candidates(), normalize_git_path(), parse_status_changes() (+4 more)
 
 ### Community 231 - "Import V2 Core"
 Cohesion: 0.20
@@ -1582,8 +1588,8 @@ Cohesion: 0.23
 Nodes (8): BackendError, BackendErrorKind, Into, Option, Self, String, Value, serializes_backend_error_with_camel_case_fields()
 
 ### Community 240 - ".default"
-Cohesion: 0.13
-Nodes (36): concurrent_progress_cannot_leave_a_stale_snapshot_after_a_barrier(), confirmation_and_cancellation_barriers_persist_the_latest_progress_before_events(), created_workflow(), failed_observational_write_is_retried_by_the_next_barrier(), failed_terminal_barrier_rollback_cannot_overwrite_a_concurrent_log(), generic_workflow_barrier_cancels_the_pending_trailing_generation(), history_pages_reuse_the_ordered_index_across_progress_updates(), paused_progress_writer_serializes_before_newer_stage_barrier() (+28 more)
+Cohesion: 0.11
+Nodes (40): concurrent_progress_cannot_leave_a_stale_snapshot_after_a_barrier(), confirmation_and_cancellation_barriers_persist_the_latest_progress_before_events(), created_workflow(), failed_observational_write_is_retried_by_the_next_barrier(), failed_terminal_barrier_rollback_cannot_overwrite_a_concurrent_log(), generic_workflow_barrier_cancels_the_pending_trailing_generation(), history_pages_reuse_the_ordered_index_across_progress_updates(), import_operation_uses_the_resolved_compatible_task_root() (+32 more)
 
 ### Community 241 - "workflow_update_wiki.rs"
 Cohesion: 0.39
@@ -1609,13 +1615,13 @@ Nodes (8): architectureViolations(), currentWorkflowSources(), root, SourceFile,
 Cohesion: 0.40
 Nodes (4): Current release gate, Import V2 migration and cutover checklist, Legacy compatibility boundary, Migration boundary
 
-### Community 248 - "Path"
-Cohesion: 0.22
-Nodes (10): opened_file_matches_path(), read_optional(), File, FnOnce, Path, run_before_artifact_open_hook(), run_before_failed_history_write_hook(), set_before_artifact_open_hook() (+2 more)
+### Community 248 - ".finalize_exact_duplicate"
+Cohesion: 0.19
+Nodes (14): exact_duplicate_batch_setup_failure_is_persisted_as_retryable(), exact_duplicate_cancellation_does_not_relabel_the_item_as_failed(), exact_duplicate_commit_failure_is_returned_and_persisted_as_retryable(), exact_duplicate_records_alias_without_copying_raw_bytes(), exact_duplicate_task_transition_failure_is_persisted_as_retryable(), restricted_exact_duplicate_waits_for_project_acknowledgement(), C, FnOnce (+6 more)
 
-### Community 249 - ".commit_one"
-Cohesion: 0.17
-Nodes (17): CommitItemDecision, artifact_record(), completion_warning(), json_bytes(), persist_history_checked(), refresh_completion(), CommitImportSessionRequest, Fn (+9 more)
+### Community 249 - ".commit_items_cancellable_with_progress"
+Cohesion: 0.31
+Nodes (9): persist_history_checked(), refresh_completion(), CommitImportSessionRequest, Fn, FnMut, ImportBatchResult, update_history_snapshot(), derive_session_status() (+1 more)
 
 ### Community 250 - "permissions"
 Cohesion: 0.17
@@ -1637,12 +1643,12 @@ Nodes (42): Backend-owned project safety, Spec Audit Remediation Implementation 
 Cohesion: 0.18
 Nodes (11): Workflows Roadmap, Chat Roadmap, Cross-cutting Roadmap, Exports Roadmap, Graph Roadmap, Import Roadmap, Lint Roadmap, Implementation Roadmap (+3 more)
 
-### Community 256 - "PlatformSubtitleKind"
-Cohesion: 0.33
-Nodes (3): PlatformSubtitleKind, Default, Self
+### Community 256 - "prepare_saved_scan_acceptance"
+Cohesion: 0.46
+Nodes (13): mark_scan_aggregate_confirmed(), mark_scan_discarded(), prepare_saved_scan_acceptance(), BackendError, FileScanResult, ImportScanIdentity, Option, Result (+5 more)
 
 ### Community 257 - "AgentConfig"
-Cohesion: 0.19
+Cohesion: 0.20
 Nodes (17): AgentProjectRequest, detect_agents(), get_agent_config(), AgentInfo, BackendError, Result, State, String (+9 more)
 
 ### Community 258 - ".from_plan"
@@ -1681,9 +1687,9 @@ Nodes (10): type, webviews, windows, items, description, items, type, descriptio
 Cohesion: 0.20
 Nodes (10): type, webviews, windows, items, description, items, type, description (+2 more)
 
-### Community 268 - "FixtureEngine"
-Cohesion: 0.40
-Nodes (4): FixtureEngine, remove_committed_clipboard_input(), ImportInput, PathBuf
+### Community 268 - "TaskEntry"
+Cohesion: 0.18
+Nodes (11): LogLevel, LogLine, Arc, BackendTask, LogLevel, Option, PathBuf, String (+3 more)
 
 ### Community 269 - "What You Must Do When Invoked"
 Cohesion: 0.08
@@ -1717,9 +1723,9 @@ Nodes (8): Current Architecture Guardrails, First Read, LLM Wiki Desktop Context
 Cohesion: 0.28
 Nodes (4): language_display_name(), language_instruction(), language_instruction_falls_back_for_unknown_locale(), String
 
-### Community 278 - "useProjectStore"
-Cohesion: 0.03
-Nodes (109): App(), invokeMock, openDialogMock, sampleAuthority(), sampleOpenedProject(), sampleProject(), AppShell(), invokeMock (+101 more)
+### Community 278 - "projectStore.ts"
+Cohesion: 0.02
+Nodes (211): App(), invokeMock, openDialogMock, sampleAuthority(), sampleOpenedProject(), sampleProject(), AppShell(), invokeMock (+203 more)
 
 ### Community 279 - "Local-first Knowledge Base"
 Cohesion: 0.50
@@ -1745,9 +1751,9 @@ Nodes (8): Controller-owned AppShell workflows, AppShell Workflow Controllers Im
 Cohesion: 0.09
 Nodes (21): 0. Execution Contract For Agents, 10. Task 8: Execution Routes, Update Wiki, And Workflows Surface, 11. Task 9: Graph Build, Cache, And Sigma View, 12. Task 10: Chat Sessions, Retrieval, Citations, And Save To Wiki, 13. Task 11: Lint Local Rules, Agent Deep Lint, And Fix Flow, 14. Task 12: HTML, Card, Concept Map, And Project Report Exports, 15. Task 13: Settings, Secrets, Language, Theme, And Updates, 16. Task 14: End-To-End MVP Flow (+13 more)
 
-### Community 285 - "BackendError"
-Cohesion: 0.19
-Nodes (26): ImportResolutionContext, backfill_missing_new_source_wiki_targets(), collision_free_package_entry_path(), collision_free_package_entry_path_avoiding(), collision_free_wiki_path(), collision_free_wiki_path_avoiding(), commit_error(), derive_resolution_context() (+18 more)
+### Community 285 - ".commit_one"
+Cohesion: 0.16
+Nodes (38): CommitItemDecision, ImportResolutionContext, asset_collision_key(), backfill_missing_new_source_wiki_targets(), canonical_candidate_locator(), canonical_platform_locator(), collision_free_package_entry_path(), collision_free_package_entry_path_avoiding() (+30 more)
 
 ### Community 286 - "Workflows remediation Batch 5C evidence"
 Cohesion: 0.22
@@ -1797,9 +1803,9 @@ Nodes (4): Shell Controller Architecture, AppShell Workflow Controllers Plan, Ar
 Cohesion: 0.33
 Nodes (6): UI Polish Design, Sidebar Scroll and Theme Stability Design, Design Tokens, Design System, Codex-like Desktop Shell, Frontend Guidelines
 
-### Community 301 - "ProcessLifetimeGuard"
-Cohesion: 0.33
-Nodes (5): pid_t, RawFd, ProcessLifetimeGuard, Drop, HANDLE
+### Community 301 - ".attach"
+Cohesion: 0.22
+Nodes (8): pid_t, RawFd, ProcessLifetimeGuard, resume_suspended_child(), Child, Drop, HANDLE, terminate_agent_tree()
 
 ### Community 302 - "Chat Backend P0+P1 Plan Ledger"
 Cohesion: 0.33
@@ -1816,6 +1822,10 @@ Nodes (6): description, required, type, Capability, identifier, permissions
 ### Community 305 - "Project Map"
 Cohesion: 0.25
 Nodes (7): Before Editing Checklist, Build And Verification, Code Router, Contract And Registration Router, Current Implementation Anchors, Document Router, Project Map
+
+### Community 306 - "import_backend_activation.rs"
+Cohesion: 0.27
+Nodes (10): ActivationConfirmation, ActivationResult, ImportBackend, ImportBackendActivation, Option, String, activation_refuses_incomplete_gate_and_duplicate_activation(), activation_requires_readiness_and_preserves_legacy_state() (+2 more)
 
 ### Community 307 - "Workflows Remediation Batch 5B Evidence"
 Cohesion: 0.25
@@ -1854,8 +1864,8 @@ Cohesion: 0.40
 Nodes (5): Import V2 Agent Assistance QA Evidence, Import V2 release QA, Import V2 File Ingestion Release-Gate Evidence, Import V2 Frontend Release Evidence, Import V2 Web Ingestion release evidence
 
 ### Community 318 - "Import V2：小红书 / 抖音 / B 站图文视频导入实现方案"
-Cohesion: 0.11
-Nodes (18): 10. UI / 交互要求, 14. 最终落地建议, 16. 参考项目, 1.1 建议的开源组件组合, 1.2 不推荐的做法, 1. 结论先行, 2.1 核心职责边界, 2. 与当前项目的边界和复用点 (+10 more)
+Cohesion: 0.10
+Nodes (21): 10. UI / 交互要求, 14. 最终落地建议, 16. 参考项目, 1.1 建议的开源组件组合, 1.2 不推荐的做法, 1. 结论先行, 2.1 核心职责边界, 2. 与当前项目的边界和复用点 (+13 more)
 
 ### Community 319 - "package.json"
 Cohesion: 0.40
@@ -1902,8 +1912,8 @@ Cohesion: 0.50
 Nodes (4): Performance Complexity Audit, Performance and Stability, P0 Performance Stability Fix Progress, P0 Stability Remediation
 
 ### Community 334 - "Option"
-Cohesion: 0.33
-Nodes (9): ImportItemResolution, bound_current_hash(), ExactDuplicateFinalizationFingerprint, resolve_item_resolution(), ResolvedItemCommit, ImportPreviewArtifact, Option, stale_resolution_error() (+1 more)
+Cohesion: 0.27
+Nodes (10): ImportItemResolution, bound_current_hash(), ExactDuplicateFinalizationFingerprint, resolve_item_resolution(), ResolvedItemCommit, ImportPreviewArtifact, MediaSaveMode, Option (+2 more)
 
 ### Community 335 - "Authorized Chat convenience actions"
 Cohesion: 0.50
@@ -1922,12 +1932,16 @@ Cohesion: 0.40
 Nodes (4): Answer, Outcome, Q: Re-review Batch 2 fixes for trust freeze confirmation cancellation launch and persistence, Source Nodes
 
 ### Community 339 - "ImportItem"
-Cohesion: 0.14
-Nodes (16): AgentRecoveryAction, AttemptOutcome, AttemptRecord, import_v2_contract_is_versioned_and_camel_case(), ImportInput, ImportInputKind, ImportIssue, ImportItem (+8 more)
+Cohesion: 0.12
+Nodes (18): AgentRecoveryAction, AttemptOutcome, AttemptRecord, import_v2_contract_is_versioned_and_camel_case(), ImportInput, ImportInputKind, ImportIssue, ImportItem (+10 more)
 
 ### Community 340 - "Batch Lint Auto-Fix"
 Cohesion: 0.50
 Nodes (4): Batch Lint Auto-Fix, Lint Backend P0+P1 Plan Ledger, Lint Results UI, Lint Frontend P0+P1 Plan Ledger
+
+### Community 341 - "ProcessGuard"
+Cohesion: 0.23
+Nodes (9): PlatformJob, process_guard_joins_reader_after_termination(), ProcessGuard, Child, Drop, HANDLE, JoinHandle, Send (+1 more)
 
 ### Community 342 - "local"
 Cohesion: 0.50
@@ -1993,9 +2007,9 @@ Nodes (3): Settings P0+P1 Implementation Ledger, LLM Provider Configuration, Set
 Cohesion: 0.67
 Nodes (3): Graph Feature, Import Feature, Wiki Feature
 
-### Community 362 - "legendEntries.ts"
-Cohesion: 0.24
-Nodes (11): GraphLegend(), resolveLabels(), communityLegendEntries(), legendEntries(), LegendEntry, pageTypeSwatch(), labels, typeLegendEntries() (+3 more)
+### Community 362 - "wiki.ts"
+Cohesion: 0.13
+Nodes (20): GraphLegend(), resolveLabels(), communityLegendEntries(), legendEntries(), LegendEntry, pageTypeSwatch(), labels, typeLegendEntries() (+12 more)
 
 ### Community 363 - "Import Recovery Skill"
 Cohesion: 0.67
@@ -2158,8 +2172,8 @@ Cohesion: 0.20
 Nodes (10): 9.1 目标, 9.2 最小 adapter 层, 9.3 显式 compatible root mapping, 9.4 服务迁移顺序, 9.5 固定路径处理规则, 9.6 兼容发现改善, 9.7 预计生产文件, 9.8 必测场景 (+2 more)
 
 ### Community 485 - "ImportMediaAuthorization"
-Cohesion: 0.22
-Nodes (6): ImportAsrProfile, ImportMediaAuthorization, ImportMediaAuthorizationKind, MediaSaveMode, remote_media_defaults_to_extract_only_without_retaining_the_original_payload(), Default
+Cohesion: 0.29
+Nodes (5): ImportAsrProfile, ImportMediaAuthorization, ImportMediaAuthorizationKind, remote_media_defaults_to_extract_only_without_retaining_the_original_payload(), Default
 
 ### Community 486 - "graphify reference: extra exports and benchmark"
 Cohesion: 0.22
@@ -2209,9 +2223,9 @@ Nodes (7): 0. 如何使用本文, 1.1 九条禁止的"关闭方式", 1. 全局�
 Cohesion: 0.25
 Nodes (8): 8.1 目标, 8.2 Compatible state profile, 8.3 分离 persistence 与 content write, 8.4 Workflows 路径切换, 8.5 预计生产文件, 8.6 必测场景, 8.7 退出门槛, 8. Batch C — Compatible app-state 与 Workflows 最小可用闭环
 
-### Community 498 - "probe_writable_path"
-Cohesion: 0.67
-Nodes (3): probe_writable_path(), ProbeCleanup, Drop
+### Community 498 - "prepare_legacy_scan_staging"
+Cohesion: 0.24
+Nodes (12): large_data_confirmation_detail(), prepare_legacy_scan_staging(), requires_item_confirmation(), DiscoveredFile, ImportInput, LargeDataEstimate, Vec, SavedScanAcceptance (+4 more)
 
 ### Community 499 - "11. 排障清单"
 Cohesion: 0.29
@@ -2239,7 +2253,7 @@ Nodes (7): Batch 0 acceptance, Final verification, Fixed fixtures, Measurement r
 
 ### Community 505 - "CancellationToken"
 Cohesion: 0.03
-Nodes (74): catch_engine_panic(), describe_engine(), DescriptorPanicsAfterRegistration, engine_panicked_error(), engine_panics_become_recoverable_backend_errors(), engine_result_cannot_escape_item_staging(), engine_supports(), EngineContinuation (+66 more)
+Nodes (45): EngineContinuation, EngineDescriptor, EngineOperation, EngineProgress, EngineRequest, EngineResult, ImportAsrProfile, MediaSaveMode (+37 more)
 
 ### Community 506 - "graphify reference: query, path, explain"
 Cohesion: 0.33
@@ -2433,9 +2447,9 @@ Nodes (5): 12.1 Preparation, 12.2 History 的服务端真值, 12.3 Lazy Diff 与
 Cohesion: 0.40
 Nodes (4): Answer, Outcome, Q: 根据 Workflows 审查结果，为 Agent 撰写详细修复计划，并单列 UI 优化, Source Nodes
 
-### Community 562 - "NativeFileEngine"
-Cohesion: 0.17
-Nodes (8): NativeCsvPackageEngine, NativeFileEngine, Arc, Default, Drop, ImportInput, Self, StagingCleanup
+### Community 562 - "import_v2_web_ingestion.rs"
+Cohesion: 0.20
+Nodes (3): assert_platform_authorized_asr(), bilibili_without_subtitles_waits_for_explicit_asr_authorization_and_cleans_temp(), xiaohongshu_and_douyin_without_subtitles_wait_for_explicit_asr_authorization()
 
 ### Community 563 - "graphify reference: add a URL and watch a folder"
 Cohesion: 0.50
@@ -2457,6 +2471,10 @@ Nodes (4): 13.1 路径 A — 产品明确采用近期 BYOK-only, 13.2 路径 B �
 Cohesion: 0.50
 Nodes (4): 15.1 场景矩阵, 15.2 最终审查, 15.3 文档与可观察性收口, 15. Batch 7 — 集成验收、审查与文档收口
 
+### Community 568 - "ImportSession"
+Cohesion: 0.27
+Nodes (10): ImportCollectionChildRelation, ImportBatchResult, ImportCollectionRelation, ImportCommitDisposition, ImportItemCommitResult, ImportResourceMode, ImportSession, ImportSessionStatus (+2 more)
+
 ### Community 569 - "AgentAssistancePolicy"
 Cohesion: 0.60
 Nodes (3): AgentAssistancePolicy, Default, Self
@@ -2465,9 +2483,9 @@ Nodes (3): AgentAssistancePolicy, Default, Self
 Cohesion: 0.25
 Nodes (7): Batch 5B/5C stop-go reference, Batch 5B: GO, Batch 5C: GO, Focused verification, Regression-first evidence, Review closure, Workflows Remediation Batch 5A Evidence
 
-### Community 573 - "chat_service/test_support.rs"
-Cohesion: 0.50
-Nodes (4): PathBuf, source_ref(), tmp_context(), write_file()
+### Community 573 - "git.rs"
+Cohesion: 0.29
+Nodes (7): GitChangedFileKind, GitCheckpoint, GitDiff, GitRepositoryStatus, Option, String, Vec
 
 ### Community 574 - "DefaultLegacyScanner"
 Cohesion: 0.28
@@ -2477,29 +2495,33 @@ Nodes (7): DefaultLegacyScanner, LegacyScanner, Default, Self, Send, Sync, Scann
 Cohesion: 0.67
 Nodes (6): apply_requires_confirmation_and_preserves_legacy_bytes_and_timestamps(), external_markdown_edit_and_cancellation_fail_closed_without_new_metadata(), no_git_requires_an_explicit_release_rollback_acknowledgement(), prepare(), project(), repeat_apply_converges_to_the_existing_applied_report()
 
-### Community 577 - "Option"
-Cohesion: 0.11
-Nodes (36): Ref, RefCell, baseline_files(), CachedMarkdownFile, capture_baseline(), CapturedBaseline, list_markdown_inventory(), preparation_fingerprint() (+28 more)
+### Community 577 - "build_snapshot_from_evaluation"
+Cohesion: 0.13
+Nodes (33): AgentRouteCandidate, build_snapshot_from_evaluation(), capture_baseline(), CapturedBaseline, git_policy(), output_summary(), preparation_fingerprint(), PreparationSnapshot (+25 more)
 
 ### Community 578 - "search_wiki"
 Cohesion: 0.38
 Nodes (6): BackendError, Result, SearchRequest, SearchResponse, State, search_wiki()
 
-### Community 580 - "DashboardView.tsx"
-Cohesion: 0.11
-Nodes (16): activeGraphTaskLabel(), buildDashboardGraphPreview(), DashboardGraphPreviewModel, latestCompileTask(), ovalPoint(), page(), tree(), topTypes() (+8 more)
+### Community 579 - "paginate_workflow_file_diff_source"
+Cohesion: 0.38
+Nodes (6): WorkflowFileDiffKind, paginate_workflow_file_diff_source(), push_three_way_section(), WorkflowFileDiffPage, virtual_diff_pages_copy_only_the_requested_chunk(), VirtualDiffPageBuilder
 
-### Community 583 - "3. 导入对象模型"
-Cohesion: 0.50
-Nodes (4): 3.1 输入模型, 3.2 统一的媒体来源模型, 3.3 字幕和转写模型, 3. 导入对象模型
+### Community 581 - "upgrade_trusted_platform_page_to_https"
+Cohesion: 0.48
+Nodes (6): page_hosts_exclude_platform_asset_cdns(), reviewed_http_shortlink_is_upgraded_before_fetch(), BackendError, Result, trusted_platform_page_host_suffixes(), upgrade_trusted_platform_page_to_https()
 
-### Community 584 - "7. 暂存、目录和提交策略"
-Cohesion: 0.50
-Nodes (4): 7.1 目录结构, 7.2 提交顺序, 7.3 去重和版本, 7. 暂存、目录和提交策略
+### Community 583 - "Batch UI-2 non-Health Preparation viewport evidence"
+Cohesion: 0.33
+Nodes (5): 1440 × 900, 820 × 900 stress reflow, Batch UI-2 non-Health Preparation viewport evidence, Method, Result
 
-### Community 585 - "UpdateWikiRunner"
-Cohesion: 0.40
-Nodes (4): Arc, StartCallback, WorkflowKind, UpdateWikiRunner
+### Community 584 - "Batch UI-3 task-detail viewport evidence"
+Cohesion: 0.33
+Nodes (5): 1440 × 900, 820 × 900 stress reflow, Batch UI-3 task-detail viewport evidence, Method, Result
+
+### Community 585 - "Metadata"
+Cohesion: 0.33
+Nodes (6): is_reparse_point(), Metadata, staging_reparse(), is_reparse_point(), same_file(), inventory_metadata_is_link_or_reparse()
 
 ### Community 587 - "description"
 Cohesion: 0.50
@@ -2509,18 +2531,22 @@ Nodes (4): default, description, type, description
 Cohesion: 0.36
 Nodes (9): graph_expand_candidates(), GraphExpansionCandidate, is_expandable_page(), HashMap, Vec, WikiPageMeta, sorted_expansion_candidates(), source_overlap_candidates() (+1 more)
 
-### Community 590 - "now_rfc3339"
-Cohesion: 0.67
-Nodes (3): now_rfc3339(), returns_rfc3339_timestamp(), String
+### Community 589 - "6. Capability Pack 设计"
+Cohesion: 0.40
+Nodes (5): 6.1 为什么采用外部 capability pack, 6.2 推荐能力 ID 与路线, 6.3 JSON-RPC 协议, 6.4 yt-dlp 的调用约束, 6. Capability Pack 设计
 
-### Community 592 - "SourceProcessingStaging"
+### Community 590 - ".new"
+Cohesion: 0.40
+Nodes (4): Fn, Self, Send, Sync
+
+### Community 593 - "FileScanPolicy"
 Cohesion: 0.50
-Nodes (3): Drop, PathBuf, SourceProcessingStaging
+Nodes (3): FileScanPolicy, Default, Self
 
 ## Knowledge Gaps
-- **2225 isolated node(s):** `schemaVersion`, `packId`, `version`, `protocolVersion`, `targetTriples` (+2220 more)
+- **2236 isolated node(s):** `schemaVersion`, `packId`, `version`, `protocolVersion`, `targetTriples` (+2231 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **81 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **82 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Work-memory lessons
 
@@ -2532,24 +2558,24 @@ Nodes (3): Drop, PathBuf, SourceProcessingStaging
 - `AppState` (3× useful, score=2.962204006)
 - `FileDiscoveryService` (3× useful, score=2.694369038)
 - `ConfirmationRegistry` (2× useful, score=1.97440535)
-- `WorkflowCoordinator` (2× useful, score=1.97440535)
+- `WorkflowCoordinator` (2× useful, score=1.97440535) _(code changed — re-verify)_
 - `import_v2_commands.rs` (2× useful, score=1.832773116)
 - `orchestrator.rs` (2× useful, score=1.832773116)
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `ProjectContext` connect `ProjectContext` to `scan_confirmation.rs`, `transaction.rs`, `agent_candidate.rs`, `source_lifecycle.rs`, `source_commands.rs`, `graph_service.rs`, `export_service.rs`, `orchestrator.rs`, `preparation.rs`, `app_state.rs`, `update_wiki.rs`, `generate_content.rs`, `rules.rs`, `AppState`, `ImportInput`, `export_commands.rs`, `GitService`, `import_v2_commands.rs`, `reports.rs`, `task_commands.rs`, `CoreIntegrationFixture`, `query.rs`, `file_store.rs`, `agent_workspace.rs`, `confirmation.rs`, `lint_commands.rs`, `health_check.rs`, `chat_service/test_support.rs`, `session_store.rs`, `import_v2_migration_apply.rs`, `.new`, `Option`, `BackendError`, `workflow_commands.rs`, `sessions.rs`, `deep.rs`, `wiki_index.rs`, `compile_service.rs`, `chat_commands.rs`, `pages.rs`, `file_discovery.rs`, `project_service.rs`, `agent_service.rs`, `.new`, `run_generate_content_with_generator`, `SettingsService`, `commands/import_v2_presentation_commands.rs`, `workflow_preparation.rs`, `workflow_routes.rs`, `commit.rs`, `compile_commands.rs`, `saved_answers.rs`, `bookmark_service.rs`, `.execute_local_asr_continuation`, `mvp_flow.rs`, `source_lifecycle_tests.rs`, `BackendError`, `catalog.rs`, `file_commands.rs`, `.enable_compatible_guidance`, `.retrieve_with_excerpts`, `WorkflowService`, `.build_retrieval_context_with_mode`, `source_registry.rs`, `validate_existing_project_file`, `version_is_restorable`, `import_v2_file_discovery.rs`, `preferences.rs`, `ProjectService`, `import_v2_file_commands.rs`, `BackendError`, `apply.rs`, `CommitFixture`, `retrieval.rs`, `LintService`, `settings_service.rs`, `git_commands.rs`, `.new`, `build_graph`, `SourcePackageManifest`, `.add_ignore`, `workflow_update_wiki.rs`, `.commit_one`, `build_remote_media_retention_plan`, `AgentConfig`, `FixtureEngine`, `BackendError`, `ChatService`?**
-  _High betweenness centrality (0.194) - this node is a cross-community bridge._
-- **Why does `AppState` connect `AppState` to `settings_commands.rs`, `AgentConfig`, `wiki.rs`, `commands/import_v2_migration.rs`, `file_commands.rs`, `capability_runtime.rs`, `ProjectContext`, `graph_service.rs`, `source_commands.rs`, `export_service.rs`, `AssessmentId`, `app_state.rs`, `ConnectorSessionService`, `WorkflowService`, `workflow_queue.rs`, `SecretService`, `.parse_model_citations`, `ProjectService`, `launch_registry.rs`, `GitService`, `export_commands.rs`, `import_v2_commands.rs`, `import_v2_file_commands.rs`, `task_commands.rs`, `BackendError`, `AgentService`, `install_import_capability_v2`, `confirmation.rs`, `lint_commands.rs`, `health_check.rs`, `import_v2_web_commands.rs`, `search_wiki`, `workflow_commands.rs`, `git_commands.rs`, `Option`, `chat_commands.rs`, `build_graph`, `start_import_agent_assistance_v2`, `chat_convenience_service.rs`, `commands/import_v2_activation.rs`, `SettingsService`, `commands/import_v2_presentation_commands.rs`, `get_import_frontend_readiness_v2`, `TaskService`, `llm_commands.rs`, `compile_commands.rs`, `bookmark_service.rs`?**
-  _High betweenness centrality (0.061) - this node is a cross-community bridge._
-- **Why does `TaskService` connect `TaskService` to `.execute_local_asr_continuation`, `mvp_flow.rs`, `task8_contracts.rs`, `commands/import_v2_migration.rs`, `agent_candidate.rs`, `WorkflowPersistenceClock`, `ProjectContext`, `orchestrator.rs`, `preparation.rs`, `app_state.rs`, `import_v2_local_agent.rs`, `WorkflowService`, `workflow_queue.rs`, `update_wiki.rs`, `generate_content.rs`, `AppState`, `.new`, `import_v2_commands.rs`, `task_service.rs`, `String`, `NoAgents`, `CoreIntegrationFixture`, `CommitFixture`, `health_check.rs`, `NoAgents`, `.new`, `execution_control.rs`, `overview.rs`, `CancellationRegistry`, `compile_service.rs`, `SuccessfulAgent`, `WorkflowStageSink<'a>`, `agent_service.rs`, `AgentInvocation`, `.new`, `WorkflowCoordinator`, `run_generate_content_with_generator`, `poll_with_progress`, `workflow_routes.rs`, `commit.rs`, `.default`, `workflow_update_wiki.rs`?**
-  _High betweenness centrality (0.035) - this node is a cross-community bridge._
+- **Why does `ProjectContext` connect `ProjectContext` to `scan_confirmation.rs`, `agent_candidate.rs`, `BackendError`, `source_commands.rs`, `BackendError`, `graph_service.rs`, `export_service.rs`, `orchestrator.rs`, `preparation.rs`, `app_state.rs`, `.new`, `generate_content.rs`, `rules.rs`, `AppState`, `Option`, `export_commands.rs`, `fixes.rs`, `import_v2_commands.rs`, `reports.rs`, `task_commands.rs`, `CoreIntegrationFixture`, `query.rs`, `FileStore`, `agent_workspace.rs`, `confirmation.rs`, `lint_commands.rs`, `health_check.rs`, `session_store.rs`, `import_v2_migration_apply.rs`, `build_snapshot_from_evaluation`, `BackendError`, `paginate_workflow_file_diff_source`, `workflow_commands.rs`, `now_rfc3339`, `deep.rs`, `wiki_index.rs`, `compile_service.rs`, `chat_commands.rs`, `pages.rs`, `file_discovery.rs`, `project_service.rs`, `agent_service.rs`, `chat_convenience_service.rs`, `AgentInvocation`, `GitService`, `run_generate_content_with_generator`, `SettingsService`, `commands/import_v2_presentation_commands.rs`, `workflow_preparation.rs`, `workflow_routes.rs`, `.two_ready_items`, `git_service.rs`, `compile_commands.rs`, `saved_answers.rs`, `bookmark_service.rs`, `mvp_flow.rs`, `source_lifecycle_tests.rs`, `BackendError`, `catalog.rs`, `file_commands.rs`, `commit.rs`, `WorkflowService`, `.build_retrieval_context_with_mode`, `source_registry.rs`, `validate_existing_project_file`, `source_lifecycle.rs`, `identify_file`, `preferences.rs`, `.activate`, `ProjectService`, `import_v2_file_commands.rs`, `BackendError`, `AgentService`, `apply.rs`, `CommitFixture`, `retrieval.rs`, `LintService`, `settings_service.rs`, `update_wiki.rs`, `git_commands.rs`, `.new`, `build_graph`, `Vec`, `workflow_update_wiki.rs`, `.finalize_exact_duplicate`, `.commit_items_cancellable_with_progress`, `build_remote_media_retention_plan`, `.commit_one`, `ChatService`?**
+  _High betweenness centrality (0.199) - this node is a cross-community bridge._
+- **Why does `AppState` connect `AppState` to `settings_commands.rs`, `AgentConfig`, `wiki_commands.rs`, `commands/import_v2_migration.rs`, `file_commands.rs`, `capability_runtime.rs`, `source_commands.rs`, `graph_service.rs`, `wiki.rs`, `export_service.rs`, `AssessmentId`, `app_state.rs`, `ConnectorSessionService`, `WorkflowService`, `workflow_queue.rs`, `SecretService`, `.parse_model_citations`, `ProjectService`, `launch_registry.rs`, `export_commands.rs`, `import_v2_commands.rs`, `TaskService`, `import_v2_file_commands.rs`, `task_commands.rs`, `BackendError`, `AgentService`, `FileStore`, `install_import_capability_v2`, `confirmation.rs`, `lint_commands.rs`, `health_check.rs`, `import_v2_web_commands.rs`, `search_wiki`, `workflow_commands.rs`, `git_commands.rs`, `Option`, `chat_commands.rs`, `build_graph`, `start_import_agent_assistance_v2`, `chat_convenience_service.rs`, `GitService`, `commands/import_v2_activation.rs`, `SettingsService`, `commands/import_v2_presentation_commands.rs`, `get_import_frontend_readiness_v2`, `llm_commands.rs`, `compile_commands.rs`, `bookmark_service.rs`?**
+  _High betweenness centrality (0.062) - this node is a cross-community bridge._
+- **Why does `TaskService` connect `TaskService` to `mvp_flow.rs`, `task8_contracts.rs`, `agent_candidate.rs`, `WorkflowPersistenceClock`, `TaskEntry`, `BackendError`, `commit.rs`, `orchestrator.rs`, `preparation.rs`, `app_state.rs`, `import_v2_local_agent.rs`, `WorkflowService`, `workflow_queue.rs`, `.new`, `generate_content.rs`, `AppState`, `Option`, `.new`, `import_v2_commands.rs`, `task_service.rs`, `CoreIntegrationFixture`, `CommitFixture`, `health_check.rs`, `update_wiki.rs`, `NoAgents`, `.new`, `execution_control.rs`, `overview.rs`, `CancellationRegistry`, `compile_service.rs`, `NoAgents`, `NoAgents`, `WorkflowStageSink<'a>`, `agent_service.rs`, `AgentInvocation`, `FakeAgentRunner`, `WorkflowCoordinator`, `run_generate_content_with_generator`, `poll_with_progress`, `workflow_routes.rs`, `Option`, `.default`, `workflow_update_wiki.rs`?**
+  _High betweenness centrality (0.031) - this node is a cross-community bridge._
 - **What connects `schemaVersion`, `packId`, `version` to the rest of the system?**
-  _2225 weakly-connected nodes found - possible documentation gaps or missing edges._
-- **Should `services/importV2Api.ts` be split into smaller, more focused modules?**
-  _Cohesion score 0.051666372773761245 - nodes in this community are weakly interconnected._
-- **Should `wiki.rs` be split into smaller, more focused modules?**
-  _Cohesion score 0.07188778492109878 - nodes in this community are weakly interconnected._
-- **Should `task.ts` be split into smaller, more focused modules?**
-  _Cohesion score 0.019469026548672566 - nodes in this community are weakly interconnected._
+  _2236 weakly-connected nodes found - possible documentation gaps or missing edges._
+- **Should `types/importV2.ts` be split into smaller, more focused modules?**
+  _Cohesion score 0.016013203869857603 - nodes in this community are weakly interconnected._
+- **Should `wiki_commands.rs` be split into smaller, more focused modules?**
+  _Cohesion score 0.1310344827586207 - nodes in this community are weakly interconnected._
+- **Should `ChatView.tsx` be split into smaller, more focused modules?**
+  _Cohesion score 0.04369538077403246 - nodes in this community are weakly interconnected._

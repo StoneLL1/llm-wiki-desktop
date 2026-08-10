@@ -13,12 +13,14 @@ interface UseModalDialogOptions {
   open?: boolean;
   onClose: () => void;
   initialFocusRef?: RefObject<HTMLElement | null>;
+  returnFocusSelector?: string;
 }
 
 export function useModalDialog<T extends HTMLElement = HTMLDivElement>({
   open = true,
   onClose,
   initialFocusRef,
+  returnFocusSelector,
 }: UseModalDialogOptions) {
   const dialogRef = useRef<T>(null);
   const onCloseRef = useRef(onClose);
@@ -80,9 +82,12 @@ export function useModalDialog<T extends HTMLElement = HTMLDivElement>({
       document.removeEventListener("keydown", handleKeyDown);
       document.removeEventListener("focusin", keepFocusInside);
       document.body.style.overflow = prevOverflow;
-      trigger?.focus();
+      const returnTarget = returnFocusSelector
+        ? document.querySelector<HTMLElement>(returnFocusSelector)
+        : null;
+      (returnTarget ?? trigger)?.focus();
     };
-  }, [initialFocusRef, open]);
+  }, [initialFocusRef, open, returnFocusSelector]);
 
   return dialogRef;
 }

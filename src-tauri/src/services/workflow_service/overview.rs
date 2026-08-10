@@ -1,8 +1,10 @@
 use crate::errors::BackendError;
 use crate::models::workflow::{
-    WorkflowDisplayStatus, WorkflowKind, WorkflowOverviewRow, WorkflowOverviewState,
+    WorkflowArtifactContextSummary, WorkflowContextSummary, WorkflowDisplayStatus,
+    WorkflowHealthContextSummary, WorkflowKind, WorkflowOverviewRow, WorkflowOverviewState,
     WorkflowPrerequisite, WorkflowPrerequisiteAction, WorkflowProjectAccessSummary,
-    WorkflowsOverview, WORKFLOW_SCHEMA_VERSION,
+    WorkflowQueueContextItem, WorkflowResult, WorkflowRun, WorkflowRunSummary, WorkflowsOverview,
+    WORKFLOW_SCHEMA_VERSION,
 };
 use crate::tasks::TaskService;
 
@@ -18,6 +20,7 @@ impl WorkflowOverviewService {
             schema_version: WORKFLOW_SCHEMA_VERSION,
             project_access: None,
             recent_runs: Vec::new(),
+            context_summary: None,
             rows: fixed_kinds()
                 .into_iter()
                 .map(|kind| WorkflowOverviewRow {
@@ -40,7 +43,7 @@ impl WorkflowOverviewService {
         evaluation: &WorkflowOverviewEvaluationSnapshot,
         tasks: &TaskService,
     ) -> Result<WorkflowsOverview, BackendError> {
-        let owner_runs = tasks
+        let mut owner_runs = tasks
             .list_workflow_runs()
             .into_iter()
             .filter(|run| {
@@ -48,6 +51,7 @@ impl WorkflowOverviewService {
                     && run.identity_revision == access.identity_revision
             })
             .collect::<Vec<_>>();
+        owner_runs.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
         let current_health_baseline = evaluation
             .prerequisites
             .iter()
@@ -85,9 +89,89 @@ impl WorkflowOverviewService {
         Ok(WorkflowsOverview {
             schema_version: WORKFLOW_SCHEMA_VERSION,
             project_access: Some(access),
-            recent_runs: owner_runs.iter().take(5).cloned().collect(),
+            recent_runs: owner_runs
+                .iter()
+                .take(5)
+                .map(WorkflowRunSummary::from)
+                .collect(),
+            context_summary: Some(context_summary(
+                evaluation.changed_source_count,
+                &owner_runs,
+            )),
             rows,
         })
+    }
+}
+
+fn context_summary(pending_source_count: usize, runs: &[WorkflowRun]) -> WorkflowContextSummary {
+    let latest_health = runs
+        .iter()
+        .filter(|run| {
+            run.kind == WorkflowKind::HealthCheck
+                && run.display_status == WorkflowDisplayStatus::Completed
+        })
+        .max_by(|left, right| left.completed_at.cmp(&right.completed_at));
+    let last_health = latest_health.and_then(|run| match (&run.result, &run.completed_at) {
+        (
+            Some(WorkflowResult::HealthCheck {
+                error_count,
+                warning_count,
+                info_count,
+                ..
+            }),
+            Some(completed_at),
+        ) => Some(WorkflowHealthContextSummary {
+            task_id: run.task_id.clone(),
+            completed_at: completed_at.clone(),
+            error_count: *error_count,
+            warning_count: *warning_count,
+            info_count: *info_count,
+        }),
+        _ => None,
+    });
+    let latest_artifact = runs
+        .iter()
+        .filter(|run| {
+            run.kind == WorkflowKind::GenerateContent
+                && run.display_status == WorkflowDisplayStatus::Completed
+        })
+        .max_by(|left, right| left.completed_at.cmp(&right.completed_at));
+    let recent_artifact = latest_artifact.and_then(|run| match (&run.result, &run.completed_at) {
+        (Some(WorkflowResult::GenerateContent { artifact_type, .. }), Some(completed_at)) => {
+            Some(WorkflowArtifactContextSummary {
+                task_id: run.task_id.clone(),
+                completed_at: completed_at.clone(),
+                artifact_type: artifact_type.clone(),
+            })
+        }
+        _ => None,
+    });
+    let mut queued = runs
+        .iter()
+        .filter(|run| run.display_status == WorkflowDisplayStatus::Queued)
+        .collect::<Vec<_>>();
+    queued.sort_by(|left, right| {
+        left.queue_position
+            .unwrap_or(u32::MAX)
+            .cmp(&right.queue_position.unwrap_or(u32::MAX))
+            .then_with(|| left.started_at.cmp(&right.started_at))
+    });
+
+    WorkflowContextSummary {
+        pending_source_count,
+        last_health,
+        recent_artifact,
+        queue_count: queued.len(),
+        queued_runs: queued
+            .into_iter()
+            .take(5)
+            .map(|run| WorkflowQueueContextItem {
+                task_id: run.task_id.clone(),
+                kind: run.kind.clone(),
+                queue_position: run.queue_position,
+                started_at: run.started_at.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -339,5 +423,220 @@ mod tests {
             Some("older-running-update")
         );
         assert!(!running_row.active_continuation_required);
+    }
+
+    #[test]
+    fn context_summary_uses_all_identity_owned_runs_but_bounds_queue_items() {
+        let mut runs = (0..6)
+            .map(|index| {
+                workflow_run(
+                    &format!("queued-{index}"),
+                    "queued",
+                    &format!("2026-08-10T1{index}:00:00Z"),
+                    None,
+                    false,
+                )
+            })
+            .collect::<Vec<_>>();
+        let queue_facts = [
+            (Some(3), "2026-08-01T00:03:00Z"),
+            (None, "2026-08-01T00:00:00Z"),
+            (Some(1), "2026-08-01T00:01:00Z"),
+            (Some(2), "2026-08-01T00:02:00Z"),
+            (Some(2), "2026-08-01T00:04:00Z"),
+            (Some(4), "2026-08-01T00:05:00Z"),
+        ];
+        for (run, (position, started_at)) in runs.iter_mut().zip(queue_facts) {
+            run.queue_position = position;
+            run.started_at = started_at.into();
+        }
+        runs.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+
+        let mut health = workflow_run(
+            "older-health",
+            "completed",
+            "2026-08-01T00:00:00Z",
+            Some("2026-08-01T00:00:00Z"),
+            false,
+        );
+        health.kind = WorkflowKind::HealthCheck;
+        health.result = Some(WorkflowResult::HealthCheck {
+            report_id: None,
+            persistent: true,
+            error_count: 1,
+            warning_count: 2,
+            info_count: 3,
+            coverage: None,
+            findings_by_type: Default::default(),
+        });
+        let mut artifact = workflow_run(
+            "older-artifact",
+            "completed",
+            "2026-07-31T00:00:00Z",
+            Some("2026-07-31T00:00:00Z"),
+            false,
+        );
+        artifact.kind = WorkflowKind::GenerateContent;
+        artifact.result = Some(WorkflowResult::GenerateContent {
+            artifact_type: crate::models::workflow::WorkflowArtifactType::ProjectReport,
+            record_id: None,
+            output_paths: vec!["exports/report.html".into()],
+            artifact_count: Some(1),
+            validation_passed: true,
+        });
+        runs.extend([health, artifact]);
+
+        let summary = context_summary(4, &runs);
+
+        assert_eq!(summary.pending_source_count, 4);
+        assert_eq!(summary.queue_count, 6);
+        assert_eq!(summary.queued_runs.len(), 5);
+        assert_eq!(
+            summary
+                .queued_runs
+                .iter()
+                .map(|run| run.task_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["queued-2", "queued-3", "queued-4", "queued-0", "queued-5"]
+        );
+        assert_eq!(summary.last_health.unwrap().task_id, "older-health");
+        assert_eq!(summary.recent_artifact.unwrap().task_id, "older-artifact");
+    }
+
+    #[test]
+    fn context_summary_does_not_fall_back_past_the_latest_resultless_completion() {
+        let mut older = workflow_run(
+            "older-health-with-result",
+            "completed",
+            "2026-08-01T00:00:00Z",
+            Some("2026-08-01T00:00:00Z"),
+            false,
+        );
+        older.kind = WorkflowKind::HealthCheck;
+        older.result = Some(WorkflowResult::HealthCheck {
+            report_id: None,
+            persistent: true,
+            error_count: 9,
+            warning_count: 0,
+            info_count: 0,
+            coverage: None,
+            findings_by_type: Default::default(),
+        });
+        let mut newer = workflow_run(
+            "newer-health-without-result",
+            "completed",
+            "2026-08-02T00:00:00Z",
+            Some("2026-08-02T00:00:00Z"),
+            false,
+        );
+        newer.kind = WorkflowKind::HealthCheck;
+
+        let summary = context_summary(0, &[newer, older]);
+
+        assert!(summary.last_health.is_none());
+    }
+
+    fn test_workflow_state(
+        identity_key: &str,
+        identity_revision: &str,
+        queue_position: u32,
+    ) -> crate::models::workflow::WorkflowExecutionState {
+        serde_json::from_value(serde_json::json!({
+            "schemaVersion": 1,
+            "canonicalIdentityKey": identity_key,
+            "identityRevision": identity_revision,
+            "kind": "health_check",
+            "scope": { "kind": "health_check", "mode": "local_quick" },
+            "executionOptions": { "preparationRevision": "test-preparation" },
+            "route": { "kind": "local", "routeRevision": "local" },
+            "fingerprint": format!("fingerprint-{identity_key}-{identity_revision}-{queue_position}"),
+            "baselineFingerprint": "health-baseline",
+            "persistence": "memory_only",
+            "stages": [],
+            "currentStageId": null,
+            "queuePosition": queue_position,
+            "continuationRequired": false,
+            "retry": null,
+            "pendingAction": null,
+            "result": null,
+            "error": null,
+            "cancelledFromQueue": false,
+            "undoCancelUntil": null
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn project_overview_context_excludes_foreign_identity_and_old_revision_runs() {
+        let root = tempfile::tempdir().unwrap();
+        let tasks = TaskService::default();
+        let create = |identity_key: &str, identity_revision: &str, queue_position: u32| {
+            tasks
+                .create_workflow_task(
+                    "project-a".into(),
+                    root.path().to_path_buf(),
+                    "Health".into(),
+                    test_workflow_state(identity_key, identity_revision, queue_position),
+                    None,
+                )
+                .unwrap()
+        };
+        let current_completed = create("identity-current", "revision-current", 1);
+        tasks
+            .transition_workflow_status(
+                &current_completed.task_id,
+                crate::models::task::TaskStatus::Running,
+            )
+            .unwrap();
+        tasks
+            .complete_workflow(
+                &current_completed.task_id,
+                WorkflowResult::HealthCheck {
+                    report_id: None,
+                    persistent: true,
+                    error_count: 1,
+                    warning_count: 2,
+                    info_count: 3,
+                    coverage: None,
+                    findings_by_type: Default::default(),
+                },
+            )
+            .unwrap();
+        let current_queue = create("identity-current", "revision-current", 2);
+        let _foreign_queue = create("identity-foreign", "revision-current", 1);
+        let _old_revision_queue = create("identity-current", "revision-old", 1);
+        let access: WorkflowProjectAccessSummary = serde_json::from_value(serde_json::json!({
+            "projectId": "project-a",
+            "canonicalIdentityKey": "identity-current",
+            "identityRevision": "revision-current",
+            "trust": "trusted",
+            "filesystemAccess": "writable",
+            "persistence": "memory_only",
+            "gitState": "clean"
+        }))
+        .unwrap();
+        let evaluation = WorkflowOverviewEvaluationSnapshot {
+            prerequisites: fixed_kinds()
+                .into_iter()
+                .map(|kind| (kind, None, "health-baseline".into()))
+                .collect(),
+            has_sources: true,
+            changed_source_count: 7,
+            has_readable_markdown: true,
+        };
+
+        let overview = WorkflowOverviewService
+            .for_project(access, &evaluation, &tasks)
+            .unwrap();
+        let summary = overview.context_summary.unwrap();
+
+        assert_eq!(summary.pending_source_count, 7);
+        assert_eq!(summary.queue_count, 1);
+        assert_eq!(summary.queued_runs[0].task_id, current_queue.task_id);
+        assert_eq!(summary.last_health.unwrap().error_count, 1);
+        assert!(overview.recent_runs.iter().all(|run| {
+            run.canonical_identity_key == "identity-current"
+                && run.identity_revision == "revision-current"
+        }));
     }
 }

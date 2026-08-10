@@ -7,12 +7,31 @@ import { AppShell } from "./AppShell";
 import type { PendingAction } from "../../types/backend";
 
 const invokeMock = vi.hoisted(() => vi.fn());
+const originalMatchMedia = window.matchMedia;
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
 }));
 
+function mockNarrowDesktop(matches: boolean) {
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    writable: true,
+    value: vi.fn((query: string) => ({
+      matches: query === "(max-width: 1180px)" ? matches : false,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
+}
+
 beforeEach(async () => {
+  mockNarrowDesktop(false);
   await i18next.changeLanguage("en");
   useNavigationStore.getState().setActiveView("dashboard");
   useNavigationStore.getState().setRightPanelOpen(true);
@@ -28,7 +47,14 @@ beforeEach(async () => {
   invokeMock.mockReset();
 });
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    writable: true,
+    value: originalMatchMedia,
+  });
+});
 
 function workspaceHeader() {
   const header = document.querySelector("main section > header");
@@ -82,6 +108,47 @@ describe("AppShell workspace focus", () => {
 
     expect(useNavigationStore.getState().workspaceFocus).toBeNull();
     expect(useNavigationStore.getState().rightPanelOpen).toBe(true);
+  });
+});
+
+describe("AppShell narrow context panel", () => {
+  it("uses a labelled modal overlay, traps focus, closes by Escape or outside click, and restores the trigger", async () => {
+    mockNarrowDesktop(true);
+    render(<AppShell />);
+
+    const trigger = await screen.findByRole("button", { name: "Open context panel" });
+    trigger.focus();
+    fireEvent.click(trigger);
+
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(dialog).toHaveAccessibleName();
+    expect(within(dialog).getByRole("button", { name: "Close context panel" })).toBeVisible();
+    expect(document.querySelector(".app-shell")).toHaveAttribute("inert");
+    expect(dialog).toContainElement(document.activeElement as HTMLElement);
+    expect(document.querySelector(".right-panel__backdrop")).not.toBeInTheDocument();
+
+    const backgroundButton = document.querySelector<HTMLElement>(".app-topbar button");
+    backgroundButton?.focus();
+    expect(dialog).toContainElement(document.activeElement as HTMLElement);
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Open context panel" })).toHaveFocus();
+
+    fireEvent.click(trigger);
+    const reopened = await screen.findByRole("dialog");
+    fireEvent.click(reopened);
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Open context panel" })).toHaveFocus();
+  });
+
+  it("keeps the panel as a complementary docked surface above the narrow breakpoint", () => {
+    render(<AppShell />);
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("complementary")).toHaveAttribute("id", "right-context-panel");
+    expect(document.querySelector(".app-shell")).not.toHaveAttribute("inert");
   });
 });
 
