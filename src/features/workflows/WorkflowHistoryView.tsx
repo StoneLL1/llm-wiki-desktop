@@ -1,45 +1,54 @@
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, RotateCcw } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { WorkflowDisplayStatus, WorkflowKind, WorkflowRunSummary } from "../../types/workflow";
 import { useWorkflowStore, workflowOperationPending } from "../../stores/workflowStore";
-import { groupWorkflowAttempts, WORKFLOW_KINDS, WORKFLOW_STATUSES, workflowKindKey, workflowStatusKey } from "./workflowPresentation";
+import {
+  groupWorkflowAttempts,
+  WORKFLOW_KINDS,
+  WORKFLOW_STATUSES,
+  workflowDateTimeLabel,
+  workflowDurationLabel,
+  workflowDurationMs,
+  workflowHistoryOutcomeLabel,
+  workflowKindKey,
+  workflowStatusKey,
+} from "./workflowPresentation";
 
-const HISTORY_ROW_HEIGHT = 56;
+const HISTORY_ROW_HEIGHT = 76;
 const HISTORY_VIEWPORT_HEIGHT = 448;
 const HISTORY_OVERSCAN = 4;
 
 interface HistoryRow {
   groupKey: string;
-  groupSize: number;
-  firstAttempt: boolean;
   run: WorkflowRunSummary;
 }
 
-export function WorkflowHistoryView({ runs, onBack, onOpen, onLoadMore, onFilter }: {
+export function WorkflowHistoryView({ runs, onBack, onOpen, onRetry, onLoadMore, onFilter }: {
   runs: WorkflowRunSummary[];
   onBack: () => void;
   onOpen: (taskId: string) => void;
+  onRetry: (taskId: string) => void;
   onLoadMore: () => void;
   onFilter?: (kind: WorkflowKind | null, status: WorkflowDisplayStatus | null) => void;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const language = i18n.resolvedLanguage ?? i18n.language;
   const historyKind = useWorkflowStore((state) => state.historyKind);
   const historyStatus = useWorkflowStore((state) => state.historyStatus);
   const setHistoryFilters = useWorkflowStore((state) => state.setHistoryFilters);
   const historyCursor = useWorkflowStore((state) => state.historyCursor);
   const operations = useWorkflowStore((state) => state.operations);
-  const pagePending = workflowOperationPending(operations, "history:");
+  const filterPending = workflowOperationPending(operations, "history:filter");
+  const pagePending = workflowOperationPending(operations, "history:page");
   const listRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const kind: WorkflowKind | "all" = historyKind ?? "all";
   const status: WorkflowDisplayStatus | "all" = historyStatus ?? "all";
   const rows = useMemo<HistoryRow[]>(() => groupWorkflowAttempts(runs).flatMap((group) =>
-    group.runs.map((run, index) => ({
+    group.runs.map((run) => ({
       groupKey: group.key,
-      groupSize: group.runs.length,
-      firstAttempt: index === 0,
       run,
     })),
   ), [runs]);
@@ -69,18 +78,36 @@ export function WorkflowHistoryView({ runs, onBack, onOpen, onLoadMore, onFilter
       ref={listRef}
       role="list"
     >
-      {rows.length === 0 ? <p className="workflow-muted">{t("workflows.history.empty")}</p> : <div style={{ paddingTop: firstVisible * HISTORY_ROW_HEIGHT, paddingBottom: (rows.length - lastVisible) * HISTORY_ROW_HEIGHT }}>
-        {visibleRows.map(({ groupKey, groupSize, firstAttempt, run }) => <div className="workflow-history__row" key={run.taskId} role="listitem">
-          <button className="workflow-history__run" disabled={workflowOperationPending(operations, `task:${run.taskId}:open`)} onClick={() => onOpen(run.taskId)} type="button">
-            <span className="workflow-history__attempt">{firstAttempt ? t("workflows.history.attempts", { count: groupSize }) : t("workflows.history.retryAttempt", { count: run.retry?.attemptNumber ?? 1 })}</span>
-            <span>{t(workflowKindKey(run.kind))}</span>
-            <span>{t(workflowStatusKey(run.displayStatus))}</span>
-            <time dateTime={run.updatedAt}>{new Date(run.updatedAt).toLocaleString()}</time>
-          </button>
-          <span className="sr-only">{groupKey}</span>
-        </div>)}
+      {rows.length === 0 ? (
+        filterPending
+          ? <p className="workflow-history__state workflow-muted" role="status">{t("workflows.history.loading")}</p>
+          : <p className="workflow-history__state workflow-muted">{t(historyKind || historyStatus ? "workflows.history.emptyFiltered" : "workflows.history.emptyFirstRun")}</p>
+      ) : <div style={{ paddingTop: firstVisible * HISTORY_ROW_HEIGHT, paddingBottom: (rows.length - lastVisible) * HISTORY_ROW_HEIGHT }}>
+        {visibleRows.map(({ groupKey, run }) => {
+          const duration = workflowDurationMs(run.startedAt, run.completedAt);
+          const outcome = workflowHistoryOutcomeLabel(run.outcome, language, t);
+          const canRetry = run.displayStatus === "failed" || run.displayStatus === "interrupted";
+          const attemptLabel = t("workflows.history.retryAttempt", { count: run.retry?.attemptNumber ?? 1 });
+          const dateLabel = workflowDateTimeLabel(run.updatedAt, language);
+          const retryLabel = `${t("workflows.action.retry")}: ${t(workflowKindKey(run.kind))} · ${attemptLabel} · ${dateLabel} · #${run.taskId.slice(-8)}`;
+          return <div className="workflow-history__row" data-attempt-group={groupKey} key={run.taskId} role="listitem">
+            <button className="workflow-history__run" disabled={workflowOperationPending(operations, `task:${run.taskId}:open`)} onClick={() => onOpen(run.taskId)} type="button">
+              <span className="workflow-history__attempt">{attemptLabel}</span>
+              <span className="workflow-history__heading">
+                <span>{t(workflowKindKey(run.kind))}</span>
+                <span className={`workflow-history__status is-${run.displayStatus.replaceAll("_", "-")}`}>{t(workflowStatusKey(run.displayStatus))}</span>
+              </span>
+              {outcome ? <span className="workflow-history__outcome">{outcome}</span> : <span className="workflow-history__outcome workflow-muted">{t("workflows.history.outcome.unavailable")}</span>}
+              <span className="workflow-history__meta">
+                <time dateTime={run.updatedAt}>{dateLabel}</time>
+                {duration !== null ? <span>{workflowDurationLabel(duration, language, t)}</span> : null}
+              </span>
+            </button>
+            {canRetry ? <button aria-label={retryLabel} className="icon-button workflow-history__recovery" disabled={workflowOperationPending(operations, `task:${run.taskId}:retry`)} onClick={() => onRetry(run.taskId)} title={retryLabel} type="button"><RotateCcw aria-hidden="true" size={14} /></button> : null}
+          </div>;
+        })}
       </div>}
     </div>
-    {historyCursor ? <div className="workflow-actions"><button className="btn btn--secondary" disabled={pagePending} onClick={onLoadMore} type="button">{t("workflows.history.loadMore")}</button></div> : null}
+    {historyCursor ? <div className="workflow-actions"><button className="btn btn--secondary" disabled={pagePending} onClick={onLoadMore} type="button">{t(pagePending ? "workflows.history.loadingMore" : "workflows.history.loadMore")}</button></div> : null}
   </div>;
 }

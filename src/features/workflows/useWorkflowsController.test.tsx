@@ -1330,8 +1330,66 @@ describe("useWorkflowsController", () => {
     await act(() => result.current.loadHistoryMore());
 
     expect(useWorkflowStore.getState().runs.map((item) => item.taskId)).toEqual([run.taskId]);
-    expect(useWorkflowStore.getState().historyCursor).toBe("cursor-a");
+    expect(useWorkflowStore.getState().historyCursor).toBeNull();
     expect(useWorkflowStore.getState().operations["history:page"]?.error).toBeTruthy();
+
+    await act(() => result.current.loadHistoryMore());
+    expect(mocks.listRuns).toHaveBeenCalledTimes(2);
+  });
+
+  it("invalidates an oversized history page before it can replay the cursor", async () => {
+    mocks.listRuns
+      .mockResolvedValueOnce({ runs: [run], nextCursor: "cursor-a" })
+      .mockRejectedValueOnce({
+        code: "WORKFLOW_HISTORY_PAGE_TOO_LARGE",
+        message: "history page exceeded the bounded response size",
+      });
+    const { result } = renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().historyCursor).toBe("cursor-a"));
+
+    await act(() => result.current.loadHistoryMore());
+
+    expect(useWorkflowStore.getState().historyCursor).toBeNull();
+    await act(() => result.current.loadHistoryMore());
+    expect(mocks.listRuns).toHaveBeenCalledTimes(2);
+  });
+
+  it("invalidates a stale history cursor so recovery reloads from the first page", async () => {
+    mocks.listRuns
+      .mockResolvedValueOnce({ runs: [run], nextCursor: "cursor-a" })
+      .mockRejectedValueOnce({
+        code: "WORKFLOW_CURSOR_SCOPE_MISMATCH",
+        message: "cursor is stale",
+      });
+    const { result } = renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().historyCursor).toBe("cursor-a"));
+
+    await act(() => result.current.loadHistoryMore());
+
+    expect(useWorkflowStore.getState().historyCursor).toBeNull();
+    expect(useWorkflowStore.getState().operations["history:page"]?.error).toMatchObject({
+      summary: "This history page changed while it was open. Reload the current filters from the first page.",
+    });
+  });
+
+  it("clears a superseded page error when a new server filter succeeds", async () => {
+    mocks.listRuns
+      .mockResolvedValueOnce({ runs: [run], nextCursor: "cursor-a" })
+      .mockResolvedValueOnce({ runs: [], nextCursor: null });
+    const { result } = renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().historyCursor).toBe("cursor-a"));
+    useWorkflowStore.setState({
+      operations: {
+        ...useWorkflowStore.getState().operations,
+        "history:page": { requestId: 999, pending: false, error: { summary: "old page error", technicalDetails: null } },
+      },
+    });
+
+    await act(() => result.current.filterHistory("health_check", "completed"));
+
+    expect(useWorkflowStore.getState().operations["history:page"]?.error ?? null).toBeNull();
+    expect(useWorkflowStore.getState().historyKind).toBe("health_check");
+    expect(useWorkflowStore.getState().historyStatus).toBe("completed");
   });
 
   it("does not let a superseded history page overwrite a full refresh with the same cursor", async () => {

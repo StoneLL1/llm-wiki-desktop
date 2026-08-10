@@ -3,7 +3,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("react-i18next", () => ({
   initReactI18next: { type: "3rdParty", init: vi.fn() },
-  useTranslation: () => ({ t: (key: string) => key }),
+  useTranslation: () => ({
+    t: (key: string) => key,
+    i18n: { language: "en", resolvedLanguage: "en" },
+  }),
 }));
 
 import type { WorkflowsController } from "./useWorkflowsController";
@@ -88,6 +91,7 @@ describe("Workflows Batch 0 deterministic scale fixtures", () => {
         onBack={vi.fn()}
         onLoadMore={vi.fn()}
         onOpen={vi.fn()}
+        onRetry={vi.fn()}
       />,
     );
     expect(view.container.querySelectorAll(".workflow-history__run").length).toBeLessThanOrEqual(200);

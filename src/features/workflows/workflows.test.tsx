@@ -18,7 +18,8 @@ vi.mock("../../services/workflowApi", () => ({
   getWorkflowFileDiff: workflowApiMocks.getWorkflowFileDiff,
 }));
 
-import type { WorkflowFileDiffPage, WorkflowPreparation, WorkflowRun, WorkflowsOverview } from "../../types/workflow";
+import type { WorkflowFileDiffPage, WorkflowPreparation, WorkflowRun, WorkflowRunSummary, WorkflowsOverview } from "../../types/workflow";
+import { WorkflowHistoryView } from "./WorkflowHistoryView";
 import { WorkflowPipeline } from "./WorkflowPipeline";
 import { WorkflowPreparationView } from "./WorkflowPreparationView";
 import { WorkflowTaskDetail } from "./WorkflowTaskDetail";
@@ -1469,6 +1470,213 @@ describe("Workflows overview", () => {
     ] as never);
     expect(groups).toHaveLength(1);
     expect(groups[0]?.runs.map((run) => run.taskId)).toEqual(["first", "retry"]);
+  });
+
+  it("renders localized linked attempts with duration, compact outcome, and recovery", () => {
+    i18nMocks.language = "zh-CN";
+    const onRetry = vi.fn();
+    const completed = {
+      schemaVersion: 1,
+      taskId: "first",
+      projectId: "project-a",
+      canonicalIdentityKey: "identity-a",
+      identityRevision: "revision-a",
+      kind: "update_wiki",
+      displayStatus: "completed",
+      retry: null,
+      outcome: { kind: "update_wiki", created: 2, updated: 3, skipped: 1 },
+      startedAt: "2026-08-10T08:00:00Z",
+      updatedAt: "2026-08-10T08:01:30Z",
+      completedAt: "2026-08-10T08:01:30Z",
+    } as WorkflowRunSummary;
+    const failed = {
+      ...completed,
+      taskId: "retry",
+      displayStatus: "failed",
+      retry: { attemptOf: "first", attemptNumber: 2 },
+      outcome: null,
+      updatedAt: "2026-08-10T08:02:00Z",
+      completedAt: null,
+    } as WorkflowRunSummary;
+
+    render(<WorkflowHistoryView runs={[failed, completed]} onBack={vi.fn()} onOpen={vi.fn()} onRetry={onRetry} onLoadMore={vi.fn()} onFilter={vi.fn()} />);
+
+    expect(screen.getByText(new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(completed.updatedAt)))).toBeInTheDocument();
+    expect(screen.getByText("workflows.duration.minutesSeconds")).toBeInTheDocument();
+    expect(screen.getByText("workflows.history.outcome.updateWiki")).toBeInTheDocument();
+    expect(screen.getAllByText("workflows.history.retryAttempt")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: /^workflows\.action\.retry:/ }));
+    expect(onRetry).toHaveBeenCalledWith("retry");
+  });
+
+  it("keeps partial-page retry numbering accurate and recovery names unique", () => {
+    const failed = (taskId: string, updatedAt: string): WorkflowRunSummary => ({
+      schemaVersion: 1,
+      taskId,
+      projectId: "project-a",
+      canonicalIdentityKey: "identity-a",
+      identityRevision: "revision-a",
+      kind: "health_check",
+      displayStatus: "failed",
+      retry: { attemptOf: "original-on-another-page", attemptNumber: 2 },
+      outcome: null,
+      startedAt: updatedAt,
+      updatedAt,
+      completedAt: updatedAt,
+    });
+
+    render(<WorkflowHistoryView runs={[
+      failed("attempt-2", "2026-08-10T08:02:10Z"),
+      failed("attempt-3", "2026-08-10T08:02:40Z"),
+    ]} onBack={vi.fn()} onOpen={vi.fn()} onRetry={vi.fn()} onLoadMore={vi.fn()} onFilter={vi.fn()} />);
+
+    expect(screen.queryByText("workflows.history.attempts")).not.toBeInTheDocument();
+    expect(screen.getAllByText("workflows.history.retryAttempt")).toHaveLength(2);
+    const retries = screen.getAllByRole("button", { name: /^workflows\.action\.retry:/ });
+    expect(retries).toHaveLength(2);
+    expect(retries[0]).not.toHaveAccessibleName(retries[1]?.getAttribute("aria-label") ?? "");
+  });
+
+  it("renders compact key results for every workflow kind", () => {
+    const base = {
+      schemaVersion: 1,
+      projectId: "project-a",
+      canonicalIdentityKey: "identity-a",
+      identityRevision: "revision-a",
+      displayStatus: "completed" as const,
+      retry: null,
+      startedAt: "2026-08-10T08:00:00Z",
+      updatedAt: "2026-08-10T08:01:00Z",
+      completedAt: "2026-08-10T08:01:00Z",
+    };
+    const runs = [
+      { ...base, taskId: "update", kind: "update_wiki", outcome: { kind: "update_wiki", created: 1, updated: 2, skipped: 3 } },
+      { ...base, taskId: "health", kind: "health_check", outcome: { kind: "health_check", errorCount: 1, warningCount: 2, infoCount: 3 } },
+      { ...base, taskId: "generate", kind: "generate_content", outcome: { kind: "generate_content", artifactType: "project_report", artifactCount: 2, validationPassed: true } },
+    ] as WorkflowRunSummary[];
+
+    render(<WorkflowHistoryView runs={runs} onBack={vi.fn()} onOpen={vi.fn()} onRetry={vi.fn()} onLoadMore={vi.fn()} onFilter={vi.fn()} />);
+
+    expect(screen.getByText("workflows.history.outcome.updateWiki")).toBeInTheDocument();
+    expect(screen.getByText("workflows.history.outcome.healthCheck")).toBeInTheDocument();
+    expect(screen.getByText("workflows.history.outcome.generateContent")).toBeInTheDocument();
+  });
+
+  it("distinguishes first-run, filtered-empty, and filter-loading history", () => {
+    const props = { runs: [], onBack: vi.fn(), onOpen: vi.fn(), onRetry: vi.fn(), onLoadMore: vi.fn(), onFilter: vi.fn() };
+    const view = render(<WorkflowHistoryView {...props} />);
+    expect(screen.getByText("workflows.history.emptyFirstRun")).toBeInTheDocument();
+
+    useWorkflowStore.setState({ historyKind: "health_check", historyStatus: "failed" });
+    view.rerender(<WorkflowHistoryView {...props} />);
+    expect(screen.getByText("workflows.history.emptyFiltered")).toBeInTheDocument();
+
+    useWorkflowStore.setState({
+      operations: {
+        "history:filter": { requestId: 1, pending: true, error: null },
+      },
+    });
+    view.rerender(<WorkflowHistoryView {...props} />);
+    expect(screen.getByRole("status")).toHaveTextContent("workflows.history.loading");
+    expect(screen.queryByText("workflows.history.emptyFiltered")).not.toBeInTheDocument();
+    view.unmount();
+  });
+
+  it("retries the current server-filtered history after a history error", () => {
+    const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "filterHistory", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
+    useWorkflowStore.setState({
+      overview,
+      surface: "history",
+      historyKind: "health_check",
+      historyStatus: "failed",
+      operations: {
+        "history:page": { requestId: 1, pending: false, error: { summary: "history failed", technicalDetails: "cursor stale" } },
+      },
+    });
+
+    render(<WorkflowsView controller={controller} onOpenTask={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.retry" }));
+
+    expect(controller.filterHistory).toHaveBeenCalledWith("health_check", "failed");
+  });
+
+  it("continues a transient failed history page without discarding loaded results", () => {
+    const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "filterHistory", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
+    useWorkflowStore.setState({
+      overview,
+      surface: "history",
+      historyCursor: "cursor-a",
+      historyRuns: [{
+        schemaVersion: 1, taskId: "loaded", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a",
+        kind: "update_wiki", displayStatus: "completed", retry: null, outcome: null,
+        startedAt: "2026-08-10T08:00:00Z", updatedAt: "2026-08-10T08:01:00Z", completedAt: "2026-08-10T08:01:00Z",
+      }],
+      operations: {
+        "history:page": { requestId: 1, pending: false, error: { summary: "network failed", technicalDetails: "offline" } },
+      },
+    });
+
+    render(<WorkflowsView controller={controller} onOpenTask={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.retry" }));
+
+    expect(controller.loadHistoryMore).toHaveBeenCalledTimes(1);
+    expect(controller.filterHistory).not.toHaveBeenCalled();
+    expect(useWorkflowStore.getState().historyRuns.map((run) => run.taskId)).toEqual(["loaded"]);
+  });
+
+  it("refreshes instead of replaying a deterministic foreign-identity page", () => {
+    const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "filterHistory", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
+    useWorkflowStore.setState({
+      overview,
+      surface: "history",
+      historyCursor: "cursor-a",
+      operations: {
+        "history:page": { requestId: 1, pending: false, error: { summary: "wrong identity", technicalDetails: "WORKFLOW_HISTORY_IDENTITY_MISMATCH" } },
+      },
+    });
+
+    render(<WorkflowsView controller={controller} onOpenTask={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.refresh" }));
+
+    expect(controller.refresh).toHaveBeenCalledTimes(1);
+    expect(controller.loadHistoryMore).not.toHaveBeenCalled();
+    expect(controller.filterHistory).not.toHaveBeenCalled();
+  });
+
+  it("surfaces and retries a task retry failure from History", () => {
+    const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "filterHistory", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
+    useWorkflowStore.setState({
+      overview,
+      surface: "history",
+      operations: {
+        "task:failed-a:retry": { requestId: 1, pending: false, error: { summary: "retry failed", technicalDetails: "identity changed" } },
+      },
+    });
+
+    render(<WorkflowsView controller={controller} onOpenTask={vi.fn()} />);
+    expect(screen.getByRole("alert")).toHaveTextContent("retry failed");
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.retry" }));
+    expect(controller.retry).toHaveBeenCalledWith("failed-a");
+  });
+
+  it("keeps task retry errors dismiss-only outside History", () => {
+    const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "filterHistory", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
+    const failed = workflowRun({ taskId: "detail-failed", kind: "health_check", displayStatus: "failed" });
+    useWorkflowStore.setState({
+      overview,
+      runs: [failed],
+      selectedTaskId: failed.taskId,
+      surface: "detail",
+      operations: {
+        "task:detail-failed:retry": { requestId: 1, pending: false, error: { summary: "retry failed", technicalDetails: null } },
+      },
+    });
+
+    render(<WorkflowsView controller={controller} onOpenTask={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.dismiss" }));
+
+    expect(controller.retry).not.toHaveBeenCalled();
+    expect(useWorkflowStore.getState().operations["task:detail-failed:retry"]?.error ?? null).toBeNull();
   });
 
   it("loads one guarded diff page only when its disclosure opens", async () => {

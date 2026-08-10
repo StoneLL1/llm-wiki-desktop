@@ -46,6 +46,7 @@ import type {
   WorkflowScope,
   WorkflowStartOutcome,
 } from "../../types/workflow";
+import { historyPageErrorRequiresRefresh } from "./workflowHistoryRecovery";
 
 interface PendingWorkflowEvent {
   eventProjectId: string | null;
@@ -84,6 +85,12 @@ function operationError(summaryKey: string, error: unknown): WorkflowOperationEr
     summary,
     technicalDetails: [code, message, details].filter(Boolean).join("\n") || null,
   };
+}
+
+function backendErrorCode(error: unknown): string | null {
+  if (typeof error !== "object" || error === null) return null;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" ? code : null;
 }
 
 function workflowRequestScopeMatches(guard: WorkflowRequestGuard): boolean {
@@ -775,6 +782,7 @@ export function useWorkflowsController(
           workflowRunMatchesAccess(run, project.projectId, latestAccess),
         )
       ) {
+        latest.setHistoryCursor(null);
         latest.failOperation(operationKey, operationRequest, {
           summary: i18next.t("workflows.error.historyIdentityMismatch"),
           technicalDetails: "WORKFLOW_HISTORY_IDENTITY_MISMATCH",
@@ -783,14 +791,22 @@ export function useWorkflowsController(
       }
       latest.appendHistoryPage(page.runs, page.nextCursor);
     } catch (error) {
+      const latest = useWorkflowStore.getState();
       if (
         workflowRequestGuardMatchesAuthority(guard, project)
         && historyRequestRef.current === historyRequest
+        && latest.historyCursor === cursor
+        && latest.historyKind === state.historyKind
+        && latest.historyStatus === state.historyStatus
       ) {
-        useWorkflowStore.getState().failOperation(
+        const errorCode = backendErrorCode(error);
+        const staleCursor = errorCode === "WORKFLOW_CURSOR_SCOPE_MISMATCH"
+          || errorCode === "WORKFLOW_CURSOR_INVALID";
+        if (historyPageErrorRequiresRefresh(errorCode)) latest.setHistoryCursor(null);
+        latest.failOperation(
           operationKey,
           operationRequest,
-          operationError("workflows.operationError.history", error),
+          operationError(staleCursor ? "workflows.error.historyCursorStale" : "workflows.operationError.history", error),
         );
       }
     } finally {
@@ -807,6 +823,7 @@ export function useWorkflowsController(
     const expectedAccess = state.overview?.projectAccess;
     if (!expectedAccess) return;
     state.setHistoryFilters(kind, status);
+    state.clearOperationError("history:page");
     const historyRequest = ++historyRequestRef.current;
     const guard = captureWorkflowRequestGuard(useWorkflowStore.getState());
     const operationKey = "history:filter";

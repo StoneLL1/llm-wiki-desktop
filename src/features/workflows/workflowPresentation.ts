@@ -7,6 +7,7 @@ import type {
   WorkflowPrerequisiteAction,
   WorkflowRoute,
   WorkflowRun,
+  WorkflowRunOutcomeSummary,
   WorkflowStageStatus,
 } from "../../types/workflow";
 import type { PendingActionType, RiskLevel } from "../../types/backend";
@@ -227,6 +228,53 @@ export function workflowDateTimeLabel(value: string, language: string): string {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(date);
+}
+
+export function workflowDurationLabel(
+  milliseconds: number,
+  language: string,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string {
+  const seconds = Math.max(0, Math.round(milliseconds / 1_000));
+  const formatter = new Intl.NumberFormat(language);
+  if (seconds < 60) return t("workflows.duration.seconds", { count: formatter.format(seconds) });
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return remainingSeconds === 0
+    ? t("workflows.duration.minutes", { count: formatter.format(minutes) })
+    : t("workflows.duration.minutesSeconds", {
+        minutes: formatter.format(minutes),
+        seconds: formatter.format(remainingSeconds),
+      });
+}
+
+export function workflowHistoryOutcomeLabel(
+  outcome: WorkflowRunOutcomeSummary | null | undefined,
+  language: string,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string | null {
+  if (!outcome) return null;
+  const formatter = new Intl.NumberFormat(language);
+  switch (outcome.kind) {
+    case "update_wiki":
+      return t("workflows.history.outcome.updateWiki", {
+        created: formatter.format(outcome.created),
+        updated: formatter.format(outcome.updated),
+        skipped: formatter.format(outcome.skipped),
+      });
+    case "health_check":
+      return t("workflows.history.outcome.healthCheck", {
+        errors: formatter.format(outcome.errorCount),
+        warnings: formatter.format(outcome.warningCount),
+        info: formatter.format(outcome.infoCount),
+      });
+    case "generate_content":
+      return t("workflows.history.outcome.generateContent", {
+        artifact: t(workflowArtifactTypeKey(outcome.artifactType)),
+        count: formatter.format(outcome.artifactCount),
+        validation: t(`workflows.result.${outcome.validationPassed ? "yes" : "no"}`),
+      });
+  }
 }
 
 export function groupWorkflowAttempts<T extends Pick<WorkflowRun, "taskId" | "retry">>(runs: T[]): Array<{

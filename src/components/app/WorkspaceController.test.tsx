@@ -302,6 +302,7 @@ describe("WorkspaceController", () => {
     fireEvent.click(screen.getByRole("button", { name: "Workflow history" }));
 
     expect(useWorkflowStore.getState().surface).toBe("history");
+    expect(screen.queryByRole("button", { name: "Workflow history" })).not.toBeInTheDocument();
   });
 
   it("focuses each new workflow surface title and restores the history trigger on return", async () => {
@@ -315,7 +316,7 @@ describe("WorkspaceController", () => {
     await waitFor(() => expect(screen.getByRole("heading", { name: "surface:history" })).toHaveFocus());
 
     act(() => useWorkflowStore.getState().setSurface("overview"));
-    await waitFor(() => expect(historyTrigger).toHaveFocus());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Workflow history" })).toHaveFocus());
   });
 
   it("restores a workflow row trigger after returning from preparation", async () => {

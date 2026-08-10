@@ -11,6 +11,7 @@ import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
 import type { WorkflowsController } from "./useWorkflowsController";
 import { WorkflowHistoryView } from "./WorkflowHistoryView";
+import { historyPageErrorRequiresRefresh } from "./workflowHistoryRecovery";
 import { WorkflowsOverviewView } from "./WorkflowsOverview";
 import { WorkflowPreparationView } from "./WorkflowPreparationView";
 import { WorkflowTaskDetail } from "./WorkflowTaskDetail";
@@ -23,6 +24,9 @@ export function WorkflowsView({ controller, onOpenTask }: { controller: Workflow
   const overviewStatus = useWorkflowStore((state) => state.overviewStatus);
   const runs = useWorkflowStore((state) => state.runs);
   const historyRuns = useWorkflowStore((state) => state.historyRuns);
+  const historyKind = useWorkflowStore((state) => state.historyKind);
+  const historyStatus = useWorkflowStore((state) => state.historyStatus);
+  const historyCursor = useWorkflowStore((state) => state.historyCursor);
   const preparation = useWorkflowStore((state) => state.preparation);
   const selectedTaskId = useWorkflowStore((state) => state.selectedTaskId);
   const surface = useWorkflowStore((state) => state.surface);
@@ -37,7 +41,7 @@ export function WorkflowsView({ controller, onOpenTask }: { controller: Workflow
       : surface === "detail"
         ? [`task:${selectedTaskId ?? ""}:`]
         : surface === "history"
-          ? ["history:", "task-open:"]
+          ? ["history:", "task-open:", "task-retry:"]
           : ["overview:", "queue:", "prepare:", "task-open:"],
   );
   const surfacePending = surface === "preparation"
@@ -46,13 +50,27 @@ export function WorkflowsView({ controller, onOpenTask }: { controller: Workflow
     : surface === "detail"
       ? workflowOperationPending(operations, `task:${selectedTaskId ?? ""}:`)
       : surface === "history"
-        ? workflowOperationPending(operations, "history:")
+      ? workflowOperationPending(operations, "history:")
         : !overview && workflowOperationPending(operations, "overview:init");
+  const historyPageRequiresRefresh = surface === "history"
+    && surfaceError?.key === "history:page"
+    && historyPageErrorRequiresRefresh(surfaceError.error.technicalDetails);
+  const historyTaskRetryError = surface === "history" && surfaceError?.key.endsWith(":retry");
   const recoverSurfaceError = () => {
     if (!surfaceError) return;
     useWorkflowStore.getState().clearOperationError(surfaceError.key);
     if (surfaceError.key.startsWith("overview:")) {
       void controller.refresh();
+      return;
+    }
+    if (surfaceError.key.startsWith("history:")) {
+      if (historyPageRequiresRefresh) {
+        void controller.refresh();
+      } else if (surfaceError.key === "history:page" && historyCursor) {
+        void controller.loadHistoryMore();
+      } else {
+        void controller.filterHistory(historyKind, historyStatus);
+      }
       return;
     }
     if (
@@ -65,13 +83,23 @@ export function WorkflowsView({ controller, onOpenTask }: { controller: Workflow
     if (surfaceError.key.endsWith(":open")) {
       const taskId = surfaceError.key.slice("task:".length, -":open".length);
       if (taskId) void controller.openRun(taskId);
+      return;
+    }
+    if (historyTaskRetryError) {
+      const taskId = surfaceError.key.slice("task:".length, -":retry".length);
+      if (taskId) void controller.retry(taskId);
     }
   };
-  const surfaceErrorAction = surfaceError?.key.startsWith("overview:")
+  const surfaceErrorAction = surfaceError?.key.startsWith("overview:") || historyPageRequiresRefresh
     ? "workflows.action.refresh"
-    : surfaceError?.key.includes(":hydrate:") || surfaceError?.key.endsWith(":open")
+    : surfaceError?.key.startsWith("history:") || surfaceError?.key.includes(":hydrate:") || surfaceError?.key.endsWith(":open") || historyTaskRetryError
       ? "workflows.action.retry"
       : "workflows.action.dismiss";
+  const surfaceErrorCanRecover = surfaceError?.key.startsWith("overview:")
+    || surfaceError?.key.startsWith("history:")
+    || surfaceError?.key.includes(":hydrate:")
+    || surfaceError?.key.endsWith(":open")
+    || historyTaskRetryError;
   const overviewView = (
     <WorkflowsOverviewView
       overview={overview}
@@ -93,7 +121,7 @@ export function WorkflowsView({ controller, onOpenTask }: { controller: Workflow
   const content = !overview
     ? overviewView
     : surface === "history"
-      ? <WorkflowHistoryView runs={historyRuns} onBack={controller.backToOverview} onFilter={(kind, status) => void controller.filterHistory(kind, status)} onOpen={(taskId) => void controller.openRun(taskId)} onLoadMore={() => void controller.loadHistoryMore()} />
+      ? <WorkflowHistoryView runs={historyRuns} onBack={controller.backToOverview} onFilter={(kind, status) => void controller.filterHistory(kind, status)} onOpen={(taskId) => void controller.openRun(taskId)} onRetry={(taskId) => void controller.retry(taskId)} onLoadMore={() => void controller.loadHistoryMore()} />
       : surface === "preparation" && preparation
         ? <WorkflowPreparationView preparation={preparation} onBack={controller.backToOverview} onPrerequisite={controller.handlePrerequisite} onReprepare={(scope, route) => void controller.prepare(preparation.kind, scope, route)} onStart={(restricted, remote) => void controller.startPrepared(restricted, remote)} />
         : surface === "detail" && selectedRun
@@ -107,7 +135,7 @@ export function WorkflowsView({ controller, onOpenTask }: { controller: Workflow
           <span>{surfaceError.error.summary}</span>
           {surfaceError.error.technicalDetails ? <details><summary>{t("workflows.error.technicalDetails")}</summary><pre>{surfaceError.error.technicalDetails}</pre></details> : null}
           <button className="btn btn--secondary btn--sm" type="button" onClick={recoverSurfaceError}>
-            {surfaceError.key.startsWith("overview:") || surfaceError.key.includes(":hydrate:") || surfaceError.key.endsWith(":open")
+            {surfaceErrorCanRecover
               ? <RefreshCw size={13} aria-hidden="true" />
               : <X size={13} aria-hidden="true" />}
             {t(surfaceErrorAction)}
@@ -127,7 +155,9 @@ function latestOperationError(
     .filter(([key, operation]) => operation.error && prefixes.some((prefix) =>
       prefix === "task-open:"
         ? key.startsWith("task:") && key.endsWith(":open")
-        : key.startsWith(prefix),
+        : prefix === "task-retry:"
+          ? key.startsWith("task:") && key.endsWith(":retry")
+          : key.startsWith(prefix),
     ))
     .sort(([, left], [, right]) => right.requestId - left.requestId)[0];
   return entry?.[1].error ? { key: entry[0], error: entry[1].error } : null;
