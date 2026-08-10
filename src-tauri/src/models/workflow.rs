@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::models::agent::AgentKind;
@@ -229,6 +231,14 @@ pub struct WorkflowDecisionCounts {
     pub deleted: u32,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowFileDiffKind {
+    #[default]
+    TwoWay,
+    ThreeWay,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowFileDiff {
@@ -238,6 +248,19 @@ pub struct WorkflowFileDiff {
     #[serde(default)]
     pub diff_bytes: usize,
     pub diff: Option<String>,
+    #[serde(default)]
+    pub kind: WorkflowFileDiffKind,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowFileDiffPage {
+    pub file_id: String,
+    pub path: String,
+    pub kind: WorkflowFileDiffKind,
+    pub diff: String,
+    pub next_cursor: Option<usize>,
+    pub truncated: bool,
 }
 
 /// Read-only review data hydrated from the backend-owned confirmation
@@ -397,6 +420,15 @@ pub struct WorkflowPreparation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowHealthCoverageSummary {
+    pub mode: HealthCheckMode,
+    pub scanned_pages: u64,
+    pub deep_covered_pages: Option<u64>,
+    pub deep_truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(
     tag = "kind",
     rename_all = "snake_case",
@@ -419,13 +451,29 @@ pub enum WorkflowResult {
         error_count: u64,
         warning_count: u64,
         info_count: u64,
+        #[serde(default)]
+        coverage: Option<WorkflowHealthCoverageSummary>,
+        #[serde(default)]
+        findings_by_type: BTreeMap<String, u64>,
     },
     GenerateContent {
         artifact_type: WorkflowArtifactType,
         record_id: Option<String>,
         output_paths: Vec<String>,
+        #[serde(default)]
+        artifact_count: Option<u64>,
         validation_passed: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowProjectMutationState {
+    NotModified,
+    Modified,
+    RolledBack,
+    #[default]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -436,6 +484,8 @@ pub struct WorkflowErrorSummary {
     pub recoverable: bool,
     pub user_action_required: bool,
     pub suggested_action: Option<WorkflowPrerequisiteAction>,
+    #[serde(default)]
+    pub project_mutation_state: WorkflowProjectMutationState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -652,5 +702,70 @@ impl WorkflowExecutionState {
             cancellable: task.cancellable,
             undo_cancel_until: self.undo_cancel_until.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod ui3_contract_tests {
+    use super::*;
+
+    #[test]
+    fn additive_ui3_result_fields_keep_legacy_payloads_readable() {
+        let health: WorkflowResult = serde_json::from_value(serde_json::json!({
+            "kind": "health_check",
+            "reportId": "report-a",
+            "persistent": true,
+            "errorCount": 1,
+            "warningCount": 2,
+            "infoCount": 3
+        }))
+        .unwrap();
+        assert!(matches!(
+            health,
+            WorkflowResult::HealthCheck {
+                coverage: None,
+                findings_by_type,
+                ..
+            } if findings_by_type.is_empty()
+        ));
+
+        let generated: WorkflowResult = serde_json::from_value(serde_json::json!({
+            "kind": "generate_content",
+            "artifactType": "project_report",
+            "recordId": null,
+            "outputPaths": ["exports/report.html"],
+            "validationPassed": true
+        }))
+        .unwrap();
+        assert!(matches!(
+            generated,
+            WorkflowResult::GenerateContent {
+                artifact_count: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn additive_ui3_review_and_error_fields_default_fail_closed() {
+        let diff: WorkflowFileDiff = serde_json::from_value(serde_json::json!({
+            "path": "wiki/a.md",
+            "diff": "candidate"
+        }))
+        .unwrap();
+        assert_eq!(diff.kind, WorkflowFileDiffKind::TwoWay);
+
+        let error: WorkflowErrorSummary = serde_json::from_value(serde_json::json!({
+            "code": "FAILED",
+            "messageKey": "failed",
+            "recoverable": true,
+            "userActionRequired": false,
+            "suggestedAction": null
+        }))
+        .unwrap();
+        assert_eq!(
+            error.project_mutation_state,
+            WorkflowProjectMutationState::Unknown
+        );
     }
 }

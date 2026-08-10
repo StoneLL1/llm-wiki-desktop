@@ -4,9 +4,9 @@ use std::sync::Mutex;
 use crate::models::task::TaskStatus;
 use crate::models::workflow::{
     WorkflowErrorSummary, WorkflowExecutionOptions, WorkflowExecutionState, WorkflowKind,
-    WorkflowPersistenceMode, WorkflowPersistenceTransition, WorkflowResult, WorkflowRetryLink,
-    WorkflowRoute, WorkflowRun, WorkflowScope, WorkflowStage, WorkflowStartOutcome,
-    WORKFLOW_SCHEMA_VERSION,
+    WorkflowPersistenceMode, WorkflowPersistenceTransition, WorkflowProjectMutationState,
+    WorkflowResult, WorkflowRetryLink, WorkflowRoute, WorkflowRun, WorkflowScope, WorkflowStage,
+    WorkflowStartOutcome, WORKFLOW_SCHEMA_VERSION,
 };
 use crate::tasks::TaskService;
 use chrono::{Duration, Utc};
@@ -855,6 +855,7 @@ fn dispatch_error(
         recoverable,
         user_action_required: true,
         suggested_action: Some(crate::models::workflow::WorkflowPrerequisiteAction::PrepareAgain),
+        project_mutation_state: WorkflowProjectMutationState::Unknown,
     }
 }
 

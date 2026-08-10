@@ -59,7 +59,7 @@ pub use runners::update_wiki::{
 #[cfg(feature = "gui")]
 pub(crate) use runners::update_wiki::{
     update_wiki_decision_review_for_workflow, update_wiki_decision_review_summary_for_workflow,
-    update_wiki_file_diff_for_workflow,
+    update_wiki_file_diff_page_for_workflow, update_wiki_review_can_inline,
 };
 pub use stage_sink::WorkflowStageSink;
 

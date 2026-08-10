@@ -7,8 +7,9 @@ use llm_wiki_desktop_lib::models::task::{BackendEventType, TaskStatus};
 use llm_wiki_desktop_lib::models::workflow::{
     HealthCheckMode, UpdateWikiMode, WorkflowArtifactType, WorkflowDisplayStatus,
     WorkflowExecutionOptions, WorkflowKind, WorkflowPendingAction, WorkflowPersistenceMode,
-    WorkflowPersistenceTransition, WorkflowResult, WorkflowRoute, WorkflowScope,
-    WorkflowSourceVersionRef, WorkflowStage, WorkflowStageStatus, WorkflowStartOutcome,
+    WorkflowPersistenceTransition, WorkflowProjectMutationState, WorkflowResult, WorkflowRoute,
+    WorkflowScope, WorkflowSourceVersionRef, WorkflowStage, WorkflowStageStatus,
+    WorkflowStartOutcome,
 };
 use llm_wiki_desktop_lib::services::{
     project_identity, EnqueueWorkflow, WorkflowCoordinator, WorkflowDispatchFailure,
@@ -434,6 +435,7 @@ fn queued_cancel_and_undo_are_idempotent_and_retry_links_a_new_attempt() {
                 recoverable: true,
                 user_action_required: false,
                 suggested_action: None,
+                project_mutation_state: WorkflowProjectMutationState::Unknown,
             },
         )
         .unwrap();
@@ -493,6 +495,7 @@ fn retry_uses_new_memory_only_authority_without_updating_the_old_task_file() {
                 recoverable: true,
                 user_action_required: false,
                 suggested_action: None,
+                project_mutation_state: WorkflowProjectMutationState::Unknown,
             },
         )
         .unwrap();
@@ -568,6 +571,7 @@ fn retry_uses_new_unicode_persistence_root_without_backfilling_the_old_attempt()
                 recoverable: true,
                 user_action_required: false,
                 suggested_action: None,
+                project_mutation_state: WorkflowProjectMutationState::Unknown,
             },
         )
         .unwrap();
@@ -787,6 +791,7 @@ fn terminal_transitions_claim_next_but_waiting_pauses_the_queue() {
                 recoverable: true,
                 user_action_required: false,
                 suggested_action: None,
+                project_mutation_state: WorkflowProjectMutationState::Unknown,
             },
         )
         .unwrap();
@@ -839,6 +844,7 @@ fn invalid_waiting_confirmation_interrupts_and_claims_next_once() {
                 suggested_action: Some(
                     llm_wiki_desktop_lib::models::workflow::WorkflowPrerequisiteAction::PrepareAgain,
                 ),
+                project_mutation_state: WorkflowProjectMutationState::Unknown,
             },
         )
         .unwrap();
@@ -859,6 +865,7 @@ fn invalid_waiting_confirmation_interrupts_and_claims_next_once() {
                 recoverable: false,
                 user_action_required: true,
                 suggested_action: None,
+                project_mutation_state: WorkflowProjectMutationState::Unknown,
             },
         )
         .unwrap();
@@ -894,6 +901,7 @@ fn cancelled_or_terminal_workflows_reject_stale_stage_updates() {
                 recoverable: true,
                 user_action_required: false,
                 suggested_action: None,
+                project_mutation_state: WorkflowProjectMutationState::Unknown,
             },
         )
         .is_err());
@@ -937,6 +945,7 @@ fn undo_after_the_active_run_finishes_claims_the_restored_queue_item() {
                 recoverable: true,
                 user_action_required: false,
                 suggested_action: None,
+                project_mutation_state: WorkflowProjectMutationState::Unknown,
             },
         )
         .unwrap();

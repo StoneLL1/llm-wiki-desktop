@@ -233,14 +233,24 @@ export type WorkflowResult =
       errorCount: number;
       warningCount: number;
       infoCount: number;
+      coverage?: {
+        mode: HealthCheckMode;
+        scannedPages: number;
+        deepCoveredPages: number | null;
+        deepTruncated: boolean;
+      };
+      findingsByType?: Record<string, number>;
     }
   | {
       kind: "generate_content";
       artifactType: WorkflowArtifactType;
       recordId: string | null;
       outputPaths: string[];
+      artifactCount?: number;
       validationPassed: boolean;
     };
+
+export type WorkflowProjectMutationState = "not_modified" | "modified" | "rolled_back" | "unknown";
 
 export interface WorkflowErrorSummary {
   code: string;
@@ -248,6 +258,7 @@ export interface WorkflowErrorSummary {
   recoverable: boolean;
   userActionRequired: boolean;
   suggestedAction: WorkflowPrerequisiteAction | null;
+  projectMutationState?: WorkflowProjectMutationState;
 }
 
 export interface WorkflowRetryLink {
@@ -269,6 +280,7 @@ export interface WorkflowDecisionReview {
     path: string;
     diffBytes?: number;
     diff: string | null;
+    kind?: "two_way" | "three_way";
   }>;
 }
 
@@ -397,6 +409,7 @@ export interface WorkflowFileDiffRequest extends WorkflowRunRequest {
 export interface WorkflowFileDiffPage {
   fileId: string;
   path: string;
+  kind?: "two_way" | "three_way";
   diff: string;
   nextCursor: number | null;
   truncated: boolean;

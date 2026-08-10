@@ -7,7 +7,7 @@ use chrono::Utc;
 use crate::models::task::{BackendTask, TaskStatus};
 use crate::models::workflow::{
     WorkflowCandidateReference, WorkflowErrorSummary, WorkflowExecutionState, WorkflowKind,
-    WorkflowPrerequisiteAction,
+    WorkflowPrerequisiteAction, WorkflowProjectMutationState,
 };
 
 use super::fingerprint::hex_sha256;
@@ -126,6 +126,7 @@ fn interrupt(task: &mut BackendTask, workflow: &mut WorkflowExecutionState) {
         recoverable: true,
         user_action_required: true,
         suggested_action: Some(WorkflowPrerequisiteAction::PrepareAgain),
+        project_mutation_state: WorkflowProjectMutationState::Unknown,
     });
 }
 

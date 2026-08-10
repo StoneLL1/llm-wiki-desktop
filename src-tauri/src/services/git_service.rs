@@ -253,6 +253,37 @@ impl GitService {
         run_git(&context, &["rev-parse", "--verify", "--quiet", &commit]).is_ok()
     }
 
+    /// Read a UTF-8 project file exactly as it existed at a validated checkpoint.
+    /// Missing files are represented as `None`; this never mutates the repository.
+    pub fn file_at_checkpoint(
+        context: &ProjectContext,
+        checkpoint_hash: &str,
+        relative_path: &str,
+    ) -> Result<Option<String>, BackendError> {
+        if !Self::checkpoint_exists(&context.root, checkpoint_hash) {
+            return Err(BackendError::new(
+                "GIT_CHECKPOINT_INVALID",
+                "The requested workflow checkpoint is unavailable.",
+                true,
+                true,
+            ));
+        }
+        context.resolve_project_path(relative_path)?;
+        let spec = format!("{checkpoint_hash}:{relative_path}");
+        if run_git(context, &["cat-file", "-e", spec.as_str()]).is_err() {
+            return Ok(None);
+        }
+        let bytes = run_git_bytes(context, &["show", spec.as_str()])?;
+        String::from_utf8(bytes).map(Some).map_err(|error| {
+            BackendError::new(
+                "GIT_CHECKPOINT_FILE_INVALID_UTF8",
+                error.to_string(),
+                false,
+                true,
+            )
+        })
+    }
+
     pub fn head_subject(context: &ProjectContext) -> Option<String> {
         if !GitService
             .repository_status(context)
@@ -1346,6 +1377,34 @@ mod tests {
             args,
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn reads_utf8_file_at_checkpoint_without_using_worktree_content() {
+        let root = unique_temp_dir("checkpoint-file");
+        fs::create_dir_all(root.join("wiki")).unwrap();
+        fs::write(root.join("wiki/冲突.md"), "baseline 内容\n").unwrap();
+        run_git_in(&root, &["init"]);
+        run_git_in(&root, &["config", "user.email", "tests@example.com"]);
+        run_git_in(&root, &["config", "user.name", "Tests"]);
+        run_git_in(&root, &["add", "--", "wiki/冲突.md"]);
+        run_git_in(&root, &["commit", "-m", "baseline"]);
+        let context = ProjectContext::new("project-1", root.clone());
+        let checkpoint = run_git(&context, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
+        fs::write(root.join("wiki/冲突.md"), "current 用户编辑\n").unwrap();
+
+        assert_eq!(
+            GitService::file_at_checkpoint(&context, &checkpoint, "wiki/冲突.md").unwrap(),
+            Some("baseline 内容\n".into())
+        );
+        assert_eq!(
+            GitService::file_at_checkpoint(&context, &checkpoint, "wiki/missing.md").unwrap(),
+            None
+        );
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
