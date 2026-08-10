@@ -1235,8 +1235,8 @@
     "semantic_hash": "78bdf9bf98d55b58ccfc130d0807608c"
   },
   "src/components/app/AppShell.tsx": {
-    "mtime": 1786342784.7720292,
-    "ast_hash": "35d42c11359f34eff9fec61a0f58809d",
+    "mtime": 1786349971.5371788,
+    "ast_hash": "b6b4c8d552fa654ae9d62fa6bbc590a1",
     "semantic_hash": ""
   },
   "src/components/app/BottomStatusBar.tsx": {
@@ -1365,8 +1365,8 @@
     "semantic_hash": "c24c243606abcc3e07bb51975e926205"
   },
   "src/components/app/appShellActions.test.tsx": {
-    "mtime": 1786340176.1000261,
-    "ast_hash": "2618248559d4e9e0fcd33d79159ced91",
+    "mtime": 1786350047.0702176,
+    "ast_hash": "6729d683631499864adb5a7cba9ef868",
     "semantic_hash": ""
   },
   "src/components/app/shellNavigation.ts": {
@@ -2205,8 +2205,8 @@
     "semantic_hash": "f282a5b37480d338d825c5d520d54fb0"
   },
   "src/features/workflows/WorkflowHistoryView.tsx": {
-    "mtime": 1786346190.5407016,
-    "ast_hash": "225f91fecbd6ee17d56f1e6ee6ba5848",
+    "mtime": 1786350502.4821677,
+    "ast_hash": "31026f4ba2ac17de5d19d8165dee407f",
     "semantic_hash": ""
   },
   "src/features/workflows/WorkflowPipeline.tsx": {
@@ -2220,18 +2220,18 @@
     "semantic_hash": ""
   },
   "src/features/workflows/WorkflowRow.tsx": {
-    "mtime": 1786341653.5458148,
-    "ast_hash": "81c775cdcb71fcb7c9e7deaa03962c60",
+    "mtime": 1786349528.7909808,
+    "ast_hash": "1b0eaad6fd8d368437e2b25d0972cc84",
     "semantic_hash": ""
   },
   "src/features/workflows/WorkflowTaskDetail.tsx": {
-    "mtime": 1786338845.0713997,
-    "ast_hash": "00d94882220fbb5e2cec53f756458a70",
+    "mtime": 1786349530.5679955,
+    "ast_hash": "a0608e232637c1e0b98b8ef156e6ff47",
     "semantic_hash": ""
   },
   "src/features/workflows/WorkflowsOverview.tsx": {
-    "mtime": 1786341768.7688348,
-    "ast_hash": "b92392e1e75fac983511666147417059",
+    "mtime": 1786350074.7362626,
+    "ast_hash": "4b2c667d11878ab26f83bc6784bcb732",
     "semantic_hash": ""
   },
   "src/features/workflows/WorkflowsRightPanel.tsx": {
@@ -2260,8 +2260,8 @@
     "semantic_hash": ""
   },
   "src/features/workflows/workflows.test.tsx": {
-    "mtime": 1786347349.5733142,
-    "ast_hash": "47c3362f4ff77ea0b114dea551381b0a",
+    "mtime": 1786351413.1634018,
+    "ast_hash": "22c7c4ec42aad2dc25dd6d52ff913895",
     "semantic_hash": ""
   },
   "src/hooks/useAiCapabilities.test.tsx": {
@@ -2590,8 +2590,8 @@
     "semantic_hash": "8dbf9e0e253781c64ccc6a40f66c31ca"
   },
   "src/test/ui-css-contracts.test.ts": {
-    "mtime": 1786338584.7134886,
-    "ast_hash": "3aa8639cb85296609365265a1b58bfab",
+    "mtime": 1786351413.8348389,
+    "ast_hash": "2d0d7e515cd69ffef387780069b09b27",
     "semantic_hash": ""
   },
   "src/test/workflows-architecture.test.ts": {
@@ -2825,8 +2825,8 @@
     "semantic_hash": "678701704f553a827612a7eb8143fd07"
   },
   "SPEC/gotchas.txt": {
-    "mtime": 1786347165.3538435,
-    "ast_hash": "39ae0578d5e92395ef3acfaf58727e02",
+    "mtime": 1786352760.680507,
+    "ast_hash": "7fb04927c6f48bf97b210a685f30f8a6",
     "semantic_hash": ""
   },
   "SPEC/plans/agent.md": {
@@ -2905,8 +2905,8 @@
     "semantic_hash": "35ef62685304280209d4cbf4013fbacb"
   },
   "SPEC/progress.txt": {
-    "mtime": 1786347164.7611704,
-    "ast_hash": "4f31586bb63733ea4c829add900ee9a2",
+    "mtime": 1786352760.1242344,
+    "ast_hash": "8c5dcd97c40ebac411cb8e12355dc698",
     "semantic_hash": ""
   },
   "SPEC/roadmap/README.md": {
@@ -4362,6 +4362,36 @@
   "src/features/workflows/workflowHistoryRecovery.ts": {
     "mtime": 1786348030.53476,
     "ast_hash": "ec9ad1d7dcce9fd6c62993e5dee78c8b",
+    "semantic_hash": ""
+  },
+  "src/features/workflows/WorkflowStatus.tsx": {
+    "mtime": 1786349528.2251916,
+    "ast_hash": "5378bd770668fcc7138269465e28680d",
+    "semantic_hash": ""
+  },
+  "docs/superpowers/evidence/2026-08-10-workflows-ui6-viewport-evidence.md": {
+    "mtime": 1786351172.5955281,
+    "ast_hash": "5906b25efad092cf1d5453af65192a5a",
+    "semantic_hash": ""
+  },
+  "docs/superpowers/evidence/2026-08-10-workflows-ui6-1181x900-max-panes-history.png": {
+    "mtime": 1786351018.8789878,
+    "ast_hash": "f46774292964ea235d19e5033db8b3b8",
+    "semantic_hash": ""
+  },
+  "docs/superpowers/evidence/2026-08-10-workflows-ui6-1440x900-zh.png": {
+    "mtime": 1786351147.8511434,
+    "ast_hash": "06a94b06bbee5549faa76338266901d4",
+    "semantic_hash": ""
+  },
+  "docs/superpowers/evidence/2026-08-10-workflows-ui6-1440x900.png": {
+    "mtime": 1786350964.5127199,
+    "ast_hash": "fbf8b6925e4472e0e2d4840af67afd62",
+    "semantic_hash": ""
+  },
+  "docs/superpowers/evidence/2026-08-10-workflows-ui6-820x900.png": {
+    "mtime": 1786350978.6978893,
+    "ast_hash": "e160d15e75744d85e2024477a250fbcb",
     "semantic_hash": ""
   }
 }

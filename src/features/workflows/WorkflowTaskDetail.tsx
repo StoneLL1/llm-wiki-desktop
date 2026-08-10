@@ -14,9 +14,9 @@ import {
   workflowKindKey,
   workflowPrerequisiteActionKey,
   workflowRiskKey,
-  workflowStatusKey,
   type WorkflowResultValue,
 } from "./workflowPresentation";
+import { WorkflowStatus } from "./WorkflowStatus";
 
 export function WorkflowTaskDetail({
   run,
@@ -108,13 +108,9 @@ export function WorkflowTaskDetail({
       <div className="workflow-detail__heading">
         <div>
           <h2 data-workflow-surface-title tabIndex={-1}>{t(workflowKindKey(run.kind))}</h2>
-          <p>
-            {t(workflowStatusKey(run.displayStatus))} · <span className="font-mono">{run.taskId.slice(0, 8)}</span>
-          </p>
+          <p><span className="font-mono">{run.taskId.slice(0, 8)}</span></p>
         </div>
-        <span className={`workflow-badge is-${run.displayStatus.replaceAll("_", "-")}`}>
-          {t(workflowStatusKey(run.displayStatus))}
-        </span>
+        <WorkflowStatus className="workflow-detail__status" status={run.displayStatus} />
       </div>
 
       {run.pendingAction ? (

@@ -112,6 +112,20 @@ describe("AppShell workspace focus", () => {
 });
 
 describe("AppShell narrow context panel", () => {
+  it("scopes the narrow overlay motion hook to Workflows", async () => {
+    mockNarrowDesktop(true);
+    const dashboard = render(<AppShell />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open context panel" }));
+    expect(document.querySelector(".right-panel-overlay__surface")).not.toHaveClass("is-workflows");
+    dashboard.unmount();
+
+    useNavigationStore.getState().setActiveView("workflows");
+    useNavigationStore.getState().setRightPanelOpen(false);
+    render(<AppShell />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open context panel" }));
+    expect(document.querySelector(".right-panel-overlay__surface")).toHaveClass("is-workflows");
+  });
+
   it("uses a labelled modal overlay, traps focus, closes by Escape or outside click, and restores the trigger", async () => {
     mockNarrowDesktop(true);
     render(<AppShell />);

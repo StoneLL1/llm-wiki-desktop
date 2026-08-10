@@ -52,6 +52,7 @@ export function AppShell() {
     (state) => state.setRightPanelOpen,
   );
   const workspaceFocus = useNavigationStore((state) => state.workspaceFocus);
+  const activeView = useNavigationStore((state) => state.activeView);
   const clearWorkspaceFocus = useNavigationStore(
     (state) => state.clearWorkspaceFocus,
   );
@@ -185,7 +186,9 @@ export function AppShell() {
               role="dialog"
               tabIndex={-1}
             >
-              <div className="right-panel-overlay__surface">
+              <div
+                className={`right-panel-overlay__surface${activeView === "workflows" ? " is-workflows" : ""}`}
+              >
                 <RightPanelModalContext.Provider value>
                   <RightContextPanel />
                 </RightPanelModalContext.Provider>

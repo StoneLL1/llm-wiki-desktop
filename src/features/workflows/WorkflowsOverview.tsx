@@ -1,4 +1,4 @@
-import { CircleAlert, Clock3, LoaderCircle, RefreshCw } from "lucide-react";
+import { Activity, CircleAlert, Clock3, FileOutput, RefreshCw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -18,6 +18,13 @@ import {
   workflowKindKey,
   workflowStatusKey,
 } from "./workflowPresentation";
+import { WorkflowStatus } from "./WorkflowStatus";
+
+const workflowIcons = {
+  update_wiki: RefreshCw,
+  health_check: Activity,
+  generate_content: FileOutput,
+} satisfies Record<WorkflowKind, typeof Activity>;
 
 export function WorkflowsOverviewView({
   overview,
@@ -44,6 +51,7 @@ export function WorkflowsOverviewView({
   const technicalDetails = typeof error === "string" ? null : error?.technicalDetails ?? null;
   if (!overview) {
     const failed = overviewStatus === "error";
+    if (!failed) return <WorkflowsOverviewSkeleton />;
     return (
       <div
         className="workflow-empty"
@@ -52,21 +60,15 @@ export function WorkflowsOverviewView({
         aria-atomic="true"
         aria-busy={!failed}
       >
-        {failed ? (
-          <CircleAlert className="workflow-empty__icon is-error" size={20} aria-hidden="true" />
-        ) : (
-          <LoaderCircle className="workflow-empty__icon animate-spin" size={20} aria-hidden="true" />
-        )}
-        <h2 data-workflow-surface-title tabIndex={-1}>{t(failed ? "workflows.loadError.title" : "workflows.loading.title")}</h2>
-        <p>{t(failed ? "workflows.loadError.description" : "workflows.loading.description")}</p>
+        <CircleAlert className="workflow-empty__icon is-error" size={20} aria-hidden="true" />
+        <h2 data-workflow-surface-title tabIndex={-1}>{t("workflows.loadError.title")}</h2>
+        <p>{t("workflows.loadError.description")}</p>
         {failed && errorSummary ? <code className="workflow-empty__detail">{errorSummary}</code> : null}
         {failed && technicalDetails ? <details><summary>{t("workflows.error.technicalDetails")}</summary><pre>{technicalDetails}</pre></details> : null}
-        {failed ? (
-          <button className="btn btn--secondary workflow-empty__retry" type="button" onClick={onRetry}>
-            <RefreshCw size={14} aria-hidden="true" />
-            {t("workflows.action.retry")}
-          </button>
-        ) : null}
+        <button className="btn btn--secondary workflow-empty__retry" type="button" onClick={onRetry}>
+          <RefreshCw size={14} aria-hidden="true" />
+          {t("workflows.action.retry")}
+        </button>
       </div>
     );
   }
@@ -87,6 +89,7 @@ export function WorkflowsOverviewView({
       ? workflowOperationPending(operations, "queue:continue")
       : workflowOperationPending(operations, `task:${leadingRow.activeTaskId}:open`)
     : false;
+  const AttentionIcon = leadingRow ? workflowIcons[leadingRow.kind] : Activity;
   return (
     <div className="workflows-overview">
       <div className="workflows-intro">
@@ -100,20 +103,12 @@ export function WorkflowsOverviewView({
           </h2>
           <div className={`workflow-attention-run is-${leadingStatus.replaceAll("_", "-")}`}>
             <div className="workflow-attention-run__icon">
-              {leadingStatus === "running" ? (
-                <LoaderCircle className="animate-spin" size={16} aria-hidden="true" />
-              ) : leadingStatus === "queued" ? (
-                <Clock3 size={16} aria-hidden="true" />
-              ) : (
-                <CircleAlert size={16} aria-hidden="true" />
-              )}
+              <AttentionIcon size={16} aria-hidden="true" />
             </div>
             <div className="min-w-0">
               <div className="workflow-attention-run__heading">
                 <h3>{t(workflowKindKey(leadingRow.kind))}</h3>
-                <span className={`workflow-badge is-${leadingStatus.replaceAll("_", "-")}`}>
-                  {t(workflowStatusKey(leadingStatus))}
-                </span>
+                <WorkflowStatus status={leadingStatus} />
               </div>
               <p>{t(workflowKindDescriptionKey(leadingRow.kind))}</p>
             </div>
@@ -201,7 +196,7 @@ function RecentRunRow({ run, language, pending, onOpen }: {
       <div className="min-w-0">
         <div className="workflow-recent-row__heading">
           <h3>{t(workflowKindKey(run.kind))}</h3>
-          <span className="workflow-recent-row__status">{t(workflowStatusKey(run.displayStatus))}</span>
+          <WorkflowStatus className="workflow-recent-row__status" status={run.displayStatus} />
         </div>
         <time dateTime={run.updatedAt}>{dateTimeLabel}</time>
       </div>
@@ -215,6 +210,55 @@ function RecentRunRow({ run, language, pending, onOpen }: {
       >
         {t("workflows.action.view")}
       </button>
+    </div>
+  );
+}
+
+function WorkflowsOverviewSkeleton() {
+  const { t } = useTranslation();
+  return (
+    <div
+      aria-atomic="true"
+      aria-busy="true"
+      aria-live="polite"
+      className="workflows-overview is-loading"
+      role="status"
+    >
+      <div className="workflows-intro">
+        <h2 data-workflow-surface-title tabIndex={-1}>{t("workflows.loading.title")}</h2>
+        <p>{t("workflows.loading.description")}</p>
+      </div>
+      <section aria-hidden="true" className="workflow-overview-section">
+        <span className="workflow-skeleton__line is-label" />
+        <div className="workflow-list">
+          {Array.from({ length: 3 }, (_, index) => (
+            <div className="workflow-row" key={index}>
+              <span className="workflow-row__icon workflow-skeleton__block" />
+              <span className="workflow-skeleton__copy">
+                <span className="workflow-skeleton__line is-title" />
+                <span className="workflow-skeleton__line is-copy" />
+              </span>
+              <span className="workflow-skeleton__line is-status" />
+              <span className="workflow-skeleton__block is-action" />
+            </div>
+          ))}
+        </div>
+      </section>
+      <section aria-hidden="true" className="workflow-overview-section">
+        <span className="workflow-skeleton__line is-label" />
+        <div className="workflow-recent-list">
+          {Array.from({ length: 5 }, (_, index) => (
+            <div className="workflow-recent-row" key={index}>
+              <span className="workflow-recent-row__icon workflow-skeleton__block" />
+              <span className="workflow-skeleton__copy">
+                <span className="workflow-skeleton__line is-title" />
+                <span className="workflow-skeleton__line is-meta" />
+              </span>
+              <span className="workflow-skeleton__block is-action" />
+            </div>
+          ))}
+        </div>
+      </section>
     </div>
   );
 }

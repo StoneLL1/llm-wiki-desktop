@@ -2240,18 +2240,18 @@
     "semantic_hash": ""
   },
   "src/features/workflows/WorkflowsView.tsx": {
-    "mtime": 1786346191.1491134,
-    "ast_hash": "9ac065840d9f50f3afc629ca7db73c42",
+    "mtime": 1786348031.200542,
+    "ast_hash": "98321a1189064d1051bd893052dff901",
     "semantic_hash": ""
   },
   "src/features/workflows/useWorkflowsController.test.tsx": {
-    "mtime": 1786346164.9892929,
-    "ast_hash": "48ff353c2df46c2c5fff2558b516b3c3",
+    "mtime": 1786347949.11565,
+    "ast_hash": "3f687fe4bdff958b9fe3fd08c04d34b3",
     "semantic_hash": ""
   },
   "src/features/workflows/useWorkflowsController.ts": {
-    "mtime": 1786346191.7710643,
-    "ast_hash": "9b211fa25087a5c167388c618bc63ce0",
+    "mtime": 1786348040.4788408,
+    "ast_hash": "a9c3075761dd18973e7588237a60407f",
     "semantic_hash": ""
   },
   "src/features/workflows/workflowPresentation.ts": {
@@ -2260,8 +2260,8 @@
     "semantic_hash": ""
   },
   "src/features/workflows/workflows.test.tsx": {
-    "mtime": 1786346164.3652925,
-    "ast_hash": "13152949b5283c06c05ad8fe46046cbd",
+    "mtime": 1786347349.5733142,
+    "ast_hash": "47c3362f4ff77ea0b114dea551381b0a",
     "semantic_hash": ""
   },
   "src/hooks/useAiCapabilities.test.tsx": {
@@ -2825,8 +2825,8 @@
     "semantic_hash": "678701704f553a827612a7eb8143fd07"
   },
   "SPEC/gotchas.txt": {
-    "mtime": 1786337723.2994175,
-    "ast_hash": "b5fa822f015333267dcc568103246e80",
+    "mtime": 1786347165.3538435,
+    "ast_hash": "39ae0578d5e92395ef3acfaf58727e02",
     "semantic_hash": ""
   },
   "SPEC/plans/agent.md": {
@@ -2905,8 +2905,8 @@
     "semantic_hash": "35ef62685304280209d4cbf4013fbacb"
   },
   "SPEC/progress.txt": {
-    "mtime": 1786337722.575363,
-    "ast_hash": "f3c93b80da18875d1c4076f86fd0c620",
+    "mtime": 1786347164.7611704,
+    "ast_hash": "4f31586bb63733ea4c829add900ee9a2",
     "semantic_hash": ""
   },
   "SPEC/roadmap/README.md": {
@@ -4357,6 +4357,11 @@
   "docs/superpowers/evidence/2026-08-10-workflows-ui5-820x900.png": {
     "mtime": 1786346233.233781,
     "ast_hash": "1b94fbb9c61ea33bd41011efa4fb8d1a",
+    "semantic_hash": ""
+  },
+  "src/features/workflows/workflowHistoryRecovery.ts": {
+    "mtime": 1786348030.53476,
+    "ast_hash": "ec9ad1d7dcce9fd6c62993e5dee78c8b",
     "semantic_hash": ""
   }
 }
