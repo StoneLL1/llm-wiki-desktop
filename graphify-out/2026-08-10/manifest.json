@@ -435,8 +435,8 @@
     "semantic_hash": "6dd7f2d0ca84a20dc98ee88313a40521"
   },
   "src-tauri/src/commands/workflow_commands.rs": {
-    "mtime": 1786315675.396106,
-    "ast_hash": "4494eeb7476fdc56a635f82d3e03c885",
+    "mtime": 1786316536.2299237,
+    "ast_hash": "9af930a3d089a161393ba5538eb5b616",
     "semantic_hash": ""
   },
   "src-tauri/src/errors/backend_error.rs": {
@@ -2905,8 +2905,8 @@
     "semantic_hash": "35ef62685304280209d4cbf4013fbacb"
   },
   "SPEC/progress.txt": {
-    "mtime": 1786311464.3495266,
-    "ast_hash": "6b721d0610c7a821d91fde8a5840a884",
+    "mtime": 1786317100.008292,
+    "ast_hash": "5d395e7dd984cc2e93a088ddebd1fca0",
     "semantic_hash": ""
   },
   "SPEC/roadmap/README.md": {

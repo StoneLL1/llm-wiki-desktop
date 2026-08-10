@@ -1,5 +1,7 @@
 # 踩坑清单 (gotchas.txt)
 
+A nominal 820px Tauri screenshot can actually be a cropped 1120px window — Root cause: the shipping window has `minWidth: 1120`, so constraining only the host screen or capture rectangle clips the physical window without exercising component reflow — How to avoid: for sub-minimum stress evidence, use WebView2 device-metrics emulation, verify `innerWidth = clientWidth = scrollWidth`, dismiss overlay panels, and label the result as a content-viewport stress test; do not change the global minimum outside its owning batch.
+
 A workflow Barrier can persist the latest state while an older progress timer is still armed — Root cause: a generic persistence helper may advance the durable snapshot without clearing the lane's pending observational revision or invalidating its trailing generation — How to avoid: every successful workflow Barrier must clear pending progress, cancel the scheduled flag, advance the generation, and keep a deterministic old-callback regression proving no duplicate write or revision regression.
 
 Short Windows task-persistence samples can show extreme timing variance even when deterministic write counts are stable — Root cause: atomic rename and filesystem jitter dominate a single short tempdir fixture, producing a misleading 46% CV — How to avoid: keep write-count/revision/lock assertions as the hard CI gate; for release timing retain five warmups and 50 samples, aggregate multiple identical fixtures per sample, report per-fixture mean/p95/CV, and reject conclusions when CV is 15% or higher.

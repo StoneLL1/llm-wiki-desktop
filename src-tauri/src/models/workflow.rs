@@ -506,7 +506,11 @@ pub struct WorkflowOverviewRow {
     pub state: WorkflowOverviewState,
     pub recommended: bool,
     pub active_task_id: Option<String>,
+    #[serde(default)]
+    pub active_continuation_required: bool,
     pub last_completed_at: Option<String>,
+    #[serde(default)]
+    pub last_completed_task_id: Option<String>,
     pub prerequisite: Option<WorkflowPrerequisite>,
 }
 

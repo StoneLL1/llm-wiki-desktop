@@ -1,14 +1,18 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const i18nMocks = vi.hoisted(() => ({
   t: (key: string) => key,
+  language: "en-US",
 }));
 const workflowApiMocks = vi.hoisted(() => ({ getWorkflowFileDiff: vi.fn() }));
 
 vi.mock("react-i18next", () => ({
   initReactI18next: { type: "3rdParty", init: vi.fn() },
-  useTranslation: () => ({ t: (key: string) => i18nMocks.t(key) }),
+  useTranslation: () => ({
+    t: (key: string) => i18nMocks.t(key),
+    i18n: { language: i18nMocks.language, resolvedLanguage: i18nMocks.language },
+  }),
 }));
 vi.mock("../../services/workflowApi", () => ({
   getWorkflowFileDiff: workflowApiMocks.getWorkflowFileDiff,
@@ -38,14 +42,44 @@ const overview: WorkflowsOverview = {
     gitState: "clean",
   },
   rows: [
-    { kind: "update_wiki", state: "ready", recommended: true, activeTaskId: null, lastCompletedAt: null, prerequisite: null },
-    { kind: "health_check", state: "ready", recommended: false, activeTaskId: null, lastCompletedAt: null, prerequisite: null },
-    { kind: "generate_content", state: "needs_prerequisite", recommended: false, activeTaskId: null, lastCompletedAt: null, prerequisite: null },
+    { kind: "update_wiki", state: "ready", recommended: true, activeTaskId: null, activeContinuationRequired: false, lastCompletedAt: null, lastCompletedTaskId: null, prerequisite: null },
+    { kind: "health_check", state: "ready", recommended: false, activeTaskId: null, activeContinuationRequired: false, lastCompletedAt: null, lastCompletedTaskId: null, prerequisite: null },
+    { kind: "generate_content", state: "needs_prerequisite", recommended: false, activeTaskId: null, activeContinuationRequired: false, lastCompletedAt: null, lastCompletedTaskId: null, prerequisite: null },
   ],
 };
 
+function workflowRun(overrides: Partial<WorkflowRun> & Pick<WorkflowRun, "taskId" | "kind" | "displayStatus">): WorkflowRun {
+  return {
+    schemaVersion: 1,
+    projectId: "project-a",
+    canonicalIdentityKey: "identity-a",
+    identityRevision: "revision-a",
+    scope: overrides.kind === "update_wiki"
+      ? { kind: "update_wiki", mode: "changed_sources", sourceVersions: [] }
+      : overrides.kind === "generate_content"
+        ? { kind: "generate_content", artifactType: "project_report", pagePaths: [], outputPath: "exports/report.html" }
+        : { kind: "health_check", mode: "local_quick" },
+    route: null,
+    fingerprint: `fingerprint-${overrides.taskId}`,
+    baselineFingerprint: `baseline-${overrides.taskId}`,
+    stages: [],
+    currentStageId: null,
+    queuePosition: null,
+    continuationRequired: false,
+    retry: null,
+    pendingAction: null,
+    result: null,
+    error: null,
+    startedAt: "2026-08-10T08:00:00Z",
+    updatedAt: "2026-08-10T08:01:00Z",
+    completedAt: null,
+    ...overrides,
+  };
+}
+
 afterEach(() => {
   i18nMocks.t = (key: string) => key;
+  i18nMocks.language = "en-US";
   useWorkflowStore.getState().reset();
   workflowApiMocks.getWorkflowFileDiff.mockReset();
 });
@@ -53,11 +87,275 @@ afterEach(() => {
 describe("Workflows overview", () => {
   it("renders exactly the three fixed workflows and a single recommendation", () => {
     const prepare = vi.fn();
-    render(<WorkflowsOverviewView overview={overview} overviewStatus="ready" error={null} runs={[]} onRetry={vi.fn()} onPrepare={prepare} onPrerequisite={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
+    render(<WorkflowsOverviewView overview={overview} overviewStatus="ready" error={null} onRetry={vi.fn()} onPrepare={prepare} onPrerequisite={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
     expect(screen.getAllByRole("listitem")).toHaveLength(3);
     expect(screen.getAllByText("workflows.recommended")).toHaveLength(1);
-    fireEvent.click(screen.getAllByRole("button", { name: "workflows.action.prepare" })[1]!);
+    fireEvent.click(screen.getAllByRole("button", { name: /^workflows\.action\.run:/ })[1]!);
     expect(prepare).toHaveBeenCalledWith("health_check");
+  });
+
+  it("orders attention, the three available workflows, and the backend-bounded recent five", () => {
+    const waiting = workflowRun({
+      taskId: "waiting-review",
+      kind: "update_wiki",
+      displayStatus: "waiting_for_confirmation",
+      updatedAt: "2026-08-10T09:00:00Z",
+    });
+    const recentRuns = Array.from({ length: 6 }, (_, index) => workflowRun({
+      taskId: `recent-${index}`,
+      kind: index % 2 === 0 ? "health_check" : "generate_content",
+      displayStatus: "completed",
+      updatedAt: `2026-08-10T08:0${5 - index}:00Z`,
+      completedAt: `2026-08-10T08:0${5 - index}:00Z`,
+    }));
+    const snapshot = {
+      ...overview,
+      rows: overview.rows.map((row) => row.kind === "update_wiki"
+        ? { ...row, state: "waiting_for_confirmation" as const, activeTaskId: waiting.taskId }
+        : row),
+      recentRuns,
+    };
+
+    render(<WorkflowsOverviewView overview={snapshot} overviewStatus="ready" error={null} onRetry={vi.fn()} onPrepare={vi.fn()} onPrerequisite={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
+
+    const attention = screen.getByRole("region", { name: "workflows.overview.attention" });
+    const available = screen.getByRole("region", { name: "workflows.overview.available" });
+    const recent = screen.getByRole("region", { name: "workflows.overview.recent" });
+    expect(attention.compareDocumentPosition(available) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(available.compareDocumentPosition(recent) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(attention).getByText("workflows.status.waiting_for_confirmation")).toBeInTheDocument();
+    expect(within(available).getAllByRole("listitem")).toHaveLength(3);
+    const visibleRecentRuns = within(recent).getAllByRole("listitem");
+    expect(visibleRecentRuns).toHaveLength(5);
+    expect(visibleRecentRuns.map((row) => row.querySelector("time")?.dateTime)).toEqual(
+      recentRuns.slice(0, 5).map((run) => run.updatedAt),
+    );
+  });
+
+  it("maps row state to one clear action while an attention task owns the only primary action", () => {
+    const active = workflowRun({ taskId: "running-update", kind: "update_wiki", displayStatus: "running" });
+    const completed = workflowRun({ taskId: "completed-export", kind: "generate_content", displayStatus: "completed", completedAt: "2026-08-10T08:01:00Z" });
+    const handleOpenRun = vi.fn();
+    const handlePrepare = vi.fn();
+    const statefulOverview: WorkflowsOverview = {
+      ...overview,
+      rows: [
+        { ...overview.rows[0]!, state: "running", activeTaskId: active.taskId },
+        { ...overview.rows[1]!, state: "ready", recommended: true },
+        { ...overview.rows[2]!, state: "up_to_date", lastCompletedAt: completed.completedAt, lastCompletedTaskId: completed.taskId, prerequisite: null },
+      ],
+      recentRuns: [],
+    };
+
+    const { container } = render(<WorkflowsOverviewView overview={statefulOverview} overviewStatus="ready" error={null} onRetry={vi.fn()} onPrepare={handlePrepare} onPrerequisite={vi.fn()} onOpenRun={handleOpenRun} onContinueQueue={vi.fn()} />);
+
+    const attention = screen.getByRole("region", { name: "workflows.overview.attention" });
+    const available = screen.getByRole("region", { name: "workflows.overview.available" });
+    expect(within(attention).getByRole("button", { name: /^workflows\.action\.viewProgress:/ })).toBeInTheDocument();
+    expect(within(available).getByRole("button", { name: /^workflows\.action\.viewProgress:/ })).toBeInTheDocument();
+    expect(within(available).getByRole("button", { name: /^workflows\.action\.queue:/ })).toBeInTheDocument();
+    expect(within(available).getByRole("button", { name: /^workflows\.action\.view:/ })).toBeInTheDocument();
+    expect(screen.queryByText("workflows.recommended")).not.toBeInTheDocument();
+    expect(container.querySelectorAll(".btn--primary")).toHaveLength(1);
+    fireEvent.click(within(available).getByRole("button", { name: /^workflows\.action\.view:/ }));
+    expect(handleOpenRun).toHaveBeenCalledWith(completed.taskId);
+    expect(handlePrepare).not.toHaveBeenCalledWith("generate_content");
+  });
+
+  it("continues a recovered queue from row truth when the active run is outside the bounded snapshot", () => {
+    const handleContinueQueue = vi.fn();
+    const snapshot: WorkflowsOverview = {
+      ...overview,
+      rows: overview.rows.map((row) => row.kind === "health_check"
+        ? {
+            ...row,
+            state: "queued" as const,
+            activeTaskId: "recovered-queue-outside-recent",
+            activeContinuationRequired: true,
+          }
+        : row),
+      recentRuns: [],
+    };
+
+    render(<WorkflowsOverviewView overview={snapshot} overviewStatus="ready" error={null} onRetry={vi.fn()} onPrepare={vi.fn()} onPrerequisite={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={handleContinueQueue} />);
+
+    const attention = screen.getByRole("region", { name: "workflows.overview.attention" });
+    fireEvent.click(within(attention).getByRole("button", { name: /^workflows\.action\.continueQueue:/ }));
+    expect(handleContinueQueue).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an up-to-date action stable when its completion is outside recent runs", () => {
+    const handleOpenRun = vi.fn();
+    const currentWithoutTarget: WorkflowsOverview = {
+      ...overview,
+      rows: overview.rows.map((row) => row.kind === "update_wiki"
+        ? {
+            ...row,
+            state: "up_to_date" as const,
+            lastCompletedAt: "2026-07-01T08:00:00Z",
+            lastCompletedTaskId: null,
+          }
+        : row),
+      recentRuns: [],
+    };
+    const props = { overviewStatus: "ready" as const, error: null, onRetry: vi.fn(), onPrepare: vi.fn(), onPrerequisite: vi.fn(), onOpenRun: handleOpenRun, onContinueQueue: vi.fn() };
+    const view = render(<WorkflowsOverviewView overview={currentWithoutTarget} {...props} />);
+    const available = screen.getByRole("region", { name: "workflows.overview.available" });
+    const updateRow = within(available).getByText("workflows.kind.update_wiki").closest<HTMLElement>('[role="listitem"]')!;
+    expect(within(updateRow).getByRole("button", { name: /^workflows\.status\.up_to_date:/ })).toBeDisabled();
+    expect(within(updateRow).queryByRole("button", { name: /^workflows\.action\.run:/ })).not.toBeInTheDocument();
+
+    view.rerender(<WorkflowsOverviewView overview={{
+      ...currentWithoutTarget,
+      rows: currentWithoutTarget.rows.map((row) => row.kind === "update_wiki"
+        ? { ...row, lastCompletedTaskId: "older-completed-update" }
+        : row),
+    }} {...props} />);
+    fireEvent.click(within(updateRow).getByRole("button", { name: /^workflows\.action\.view:/ }));
+    expect(handleOpenRun).toHaveBeenCalledWith("older-completed-update");
+  });
+
+  it("disables an up-to-date View action while its bounded task target is opening", () => {
+    const taskId = "older-completed-update";
+    useWorkflowStore.setState({
+      operations: {
+        [`task:${taskId}:open`]: { requestId: 1, pending: true, error: null },
+      },
+    });
+    const snapshot: WorkflowsOverview = {
+      ...overview,
+      rows: overview.rows.map((row) => row.kind === "update_wiki"
+        ? {
+            ...row,
+            state: "up_to_date" as const,
+            lastCompletedAt: "2026-07-01T08:00:00Z",
+            lastCompletedTaskId: taskId,
+          }
+        : row),
+      recentRuns: [],
+    };
+
+    render(<WorkflowsOverviewView overview={snapshot} overviewStatus="ready" error={null} onRetry={vi.fn()} onPrepare={vi.fn()} onPrerequisite={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
+
+    const available = screen.getByRole("region", { name: "workflows.overview.available" });
+    const updateRow = within(available).getByText("workflows.kind.update_wiki").closest<HTMLElement>('[role="listitem"]')!;
+    expect(within(updateRow).getByRole("button", { name: /^workflows\.action\.view:/ })).toBeDisabled();
+  });
+
+  it("renders only the first backend recommendation", () => {
+    const duplicateRecommendations: WorkflowsOverview = {
+      ...overview,
+      rows: overview.rows.map((row) => ({ ...row, recommended: true })),
+      recentRuns: [],
+    };
+
+    const { container } = render(<WorkflowsOverviewView overview={duplicateRecommendations} overviewStatus="ready" error={null} onRetry={vi.fn()} onPrepare={vi.fn()} onPrerequisite={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
+
+    expect(screen.getAllByText("workflows.recommended")).toHaveLength(1);
+    expect(container.querySelectorAll(".workflow-row .btn--primary")).toHaveLength(1);
+  });
+
+  it("formats recent run time with the selected application language", () => {
+    const recent = workflowRun({ taskId: "recent-locale", kind: "health_check", displayStatus: "completed", updatedAt: "2026-08-10T08:05:00Z", completedAt: "2026-08-10T08:05:00Z" });
+    const snapshot = { ...overview, recentRuns: [recent] };
+    const props = { overview: snapshot, overviewStatus: "ready" as const, error: null, onRetry: vi.fn(), onPrepare: vi.fn(), onPrerequisite: vi.fn(), onOpenRun: vi.fn(), onContinueQueue: vi.fn() };
+    const view = render(<WorkflowsOverviewView {...props} />);
+    const time = screen.getByRole("region", { name: "workflows.overview.recent" }).querySelector("time")!;
+    const enLabel = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" }).format(new Date(recent.updatedAt));
+    expect(time).toHaveTextContent(enLabel);
+
+    i18nMocks.language = "zh-CN";
+    view.rerender(<WorkflowsOverviewView {...props} />);
+    const zhLabel = new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(recent.updatedAt));
+    expect(time).toHaveTextContent(zhLabel);
+    expect(zhLabel).not.toBe(enLabel);
+  });
+
+  it("uses overview activeTaskId when the attention run is outside the recent snapshot", () => {
+    const handleOpenRun = vi.fn();
+    const snapshot: WorkflowsOverview = {
+      ...overview,
+      rows: overview.rows.map((row) => row.kind === "health_check"
+        ? { ...row, state: "running" as const, activeTaskId: "older-running-health" }
+        : row.kind === "update_wiki"
+          ? { ...row, state: "failed" as const, activeTaskId: "newer-failed-update" }
+          : row),
+      recentRuns: [],
+    };
+
+    render(<WorkflowsOverviewView overview={snapshot} overviewStatus="ready" error={null} onRetry={vi.fn()} onPrepare={vi.fn()} onPrerequisite={vi.fn()} onOpenRun={handleOpenRun} onContinueQueue={vi.fn()} />);
+
+    const attention = screen.getByRole("region", { name: "workflows.overview.attention" });
+    expect(within(attention).getByText("workflows.status.running")).toBeInTheDocument();
+    fireEvent.click(within(attention).getByRole("button", { name: /^workflows\.action\.viewProgress:/ }));
+    expect(handleOpenRun).toHaveBeenCalledWith("older-running-health");
+  });
+
+  it("keeps prerequisite guidance ahead of queueing when another workflow is active", () => {
+    const active = workflowRun({ taskId: "running-update", kind: "update_wiki", displayStatus: "running" });
+    const prerequisite = { code: "WORKFLOW_ROUTE_REQUIRED", messageKey: "workflows.prerequisite.routeRequired", blocking: true, action: "configure_execution_route" as const };
+    const handlePrerequisite = vi.fn();
+    const snapshot: WorkflowsOverview = {
+      ...overview,
+      rows: overview.rows.map((row) => row.kind === "update_wiki"
+        ? { ...row, state: "running" as const, activeTaskId: active.taskId }
+        : row.kind === "generate_content"
+          ? { ...row, prerequisite }
+          : row),
+      recentRuns: [],
+    };
+
+    render(<WorkflowsOverviewView overview={snapshot} overviewStatus="ready" error={null} onRetry={vi.fn()} onPrepare={vi.fn()} onPrerequisite={handlePrerequisite} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
+
+    const available = screen.getByRole("region", { name: "workflows.overview.available" });
+    const generateRow = within(available).getByText("workflows.kind.generate_content").closest<HTMLElement>('[role="listitem"]')!;
+    expect(within(generateRow).getByRole("button", { name: /^workflows\.action\.run:/ })).toBeInTheDocument();
+    expect(within(generateRow).queryByRole("button", { name: /^workflows\.action\.queue:/ })).not.toBeInTheDocument();
+  });
+
+  it("gives repeated overview actions workflow-specific accessible names", () => {
+    render(<WorkflowsOverviewView overview={{ ...overview, recentRuns: [] }} overviewStatus="ready" error={null} onRetry={vi.fn()} onPrepare={vi.fn()} onPrerequisite={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
+
+    expect(screen.getByRole("button", { name: "workflows.action.run: workflows.kind.update_wiki" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "workflows.action.run: workflows.kind.health_check" })).toBeInTheDocument();
+  });
+
+  it("keeps failed recovery in attention without treating it as an active queue owner", () => {
+    const failed = workflowRun({ taskId: "failed-update", kind: "update_wiki", displayStatus: "failed" });
+    const failedOverview: WorkflowsOverview = {
+      ...overview,
+      rows: overview.rows.map((row) => row.kind === "update_wiki"
+        ? { ...row, state: "failed" as const, activeTaskId: failed.taskId }
+        : row),
+      recentRuns: [],
+    };
+
+    render(<WorkflowsOverviewView overview={failedOverview} overviewStatus="ready" error={null} onRetry={vi.fn()} onPrepare={vi.fn()} onPrerequisite={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
+
+    const attention = screen.getByRole("region", { name: "workflows.overview.attention" });
+    const available = screen.getByRole("region", { name: "workflows.overview.available" });
+    expect(within(attention).getByText("workflows.status.failed")).toBeInTheDocument();
+    expect(within(available).queryByRole("button", { name: /^workflows\.action\.queue:/ })).not.toBeInTheDocument();
+    expect(within(available).getAllByRole("button", { name: /^workflows\.action\.run:/ })).toHaveLength(2);
+  });
+
+  it("keeps all three workflows discoverable without a project and expands the project prerequisite from Run", () => {
+    const handlePrerequisite = vi.fn();
+    const prerequisite = { code: "WORKFLOW_PROJECT_REQUIRED", messageKey: "workflows.prerequisite.openOrCreateProject", blocking: true, action: "open_or_create_project" as const };
+    const noProjectOverview: WorkflowsOverview = {
+      schemaVersion: 1,
+      projectAccess: null,
+      rows: overview.rows.map((row) => ({ ...row, state: "needs_prerequisite", recommended: false, prerequisite })),
+      recentRuns: [],
+    };
+
+    render(<WorkflowsOverviewView overview={noProjectOverview} overviewStatus="ready" error={null} onRetry={vi.fn()} onPrepare={vi.fn()} onPrerequisite={handlePrerequisite} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
+
+    const available = screen.getByRole("region", { name: "workflows.overview.available" });
+    expect(within(available).getAllByRole("listitem")).toHaveLength(3);
+    expect(screen.getByText("workflows.overview.noRecentRuns")).toBeInTheDocument();
+    fireEvent.click(within(available).getAllByRole("button", { name: /^workflows\.action\.run:/ })[0]!);
+    expect(handlePrerequisite).toHaveBeenCalledWith("open_or_create_project");
   });
 
   it("re-prepares each workflow from structured scope controls", () => {
@@ -98,11 +396,12 @@ describe("Workflows overview", () => {
     expect(WORKFLOW_STATUSES).toEqual(["queued", "running", "waiting_for_confirmation", "completed", "failed", "cancelled", "interrupted"]);
   });
 
-  it("prioritizes waiting, failed, and running runs for attention", () => {
+  it("prioritizes queue-owning work before terminal recovery", () => {
     const base = { taskId: "running", displayStatus: "running" } as WorkflowRun;
     expect(attentionRun([{ ...base }, { ...base, taskId: "failed", displayStatus: "failed" }, { ...base, taskId: "waiting", displayStatus: "waiting_for_confirmation" }])?.taskId).toBe("waiting");
-    expect(attentionRun([{ ...base }, { ...base, taskId: "failed", displayStatus: "failed" }])?.taskId).toBe("failed");
+    expect(attentionRun([{ ...base }, { ...base, taskId: "failed", displayStatus: "failed" }])?.taskId).toBe("running");
     expect(attentionRun([base])?.taskId).toBe("running");
+    expect(attentionRun([{ ...base, taskId: "queued", displayStatus: "queued" }])?.taskId).toBe("queued");
   });
 
   it("keeps an explicitly selected completed run ahead of another attention run", () => {
@@ -190,7 +489,7 @@ describe("Workflows overview", () => {
   });
 
   it("does not mislabel a pending overview as no project", () => {
-    render(<WorkflowsOverviewView overview={null} overviewStatus="loading" error={null} runs={[]} onRetry={vi.fn()} onPrepare={vi.fn()} onPrerequisite={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
+    render(<WorkflowsOverviewView overview={null} overviewStatus="loading" error={null} onRetry={vi.fn()} onPrepare={vi.fn()} onPrerequisite={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
     expect(screen.getByRole("status")).toHaveAttribute("aria-busy", "true");
     expect(screen.getByRole("heading", { name: "workflows.loading.title" })).toBeInTheDocument();
     expect(screen.queryByText("workflows.noProject.title")).not.toBeInTheDocument();
@@ -198,7 +497,7 @@ describe("Workflows overview", () => {
 
   it("shows an actionable error when the overview request fails", () => {
     const retry = vi.fn();
-    render(<WorkflowsOverviewView overview={null} overviewStatus="error" error={{ summary: "overview unavailable", technicalDetails: "OVERVIEW_FAILED" }} runs={[]} onRetry={retry} onPrepare={vi.fn()} onPrerequisite={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
+    render(<WorkflowsOverviewView overview={null} overviewStatus="error" error={{ summary: "overview unavailable", technicalDetails: "OVERVIEW_FAILED" }} onRetry={retry} onPrepare={vi.fn()} onPrerequisite={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
     expect(screen.getByRole("alert")).toHaveTextContent("overview unavailable");
     expect(screen.getByText("OVERVIEW_FAILED")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "workflows.action.retry" }));
@@ -213,10 +512,10 @@ describe("Workflows overview", () => {
       projectAccess: null,
       rows: overview.rows.map((row) => ({ ...row, state: "needs_prerequisite", recommended: false, prerequisite })),
     };
-    render(<WorkflowsOverviewView overview={noProjectOverview} overviewStatus="ready" error={null} runs={[]} onRetry={vi.fn()} onPrepare={vi.fn()} onPrerequisite={handlePrerequisite} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
+    render(<WorkflowsOverviewView overview={noProjectOverview} overviewStatus="ready" error={null} onRetry={vi.fn()} onPrepare={vi.fn()} onPrerequisite={handlePrerequisite} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
     expect(screen.getAllByRole("listitem")).toHaveLength(3);
     expect(screen.queryByText("workflows.prerequisite.openOrCreateProject")).not.toBeInTheDocument();
-    fireEvent.click(screen.getAllByRole("button", { name: "workflows.action.openOrCreateProject" })[0]!);
+    fireEvent.click(screen.getAllByRole("button", { name: /^workflows\.action\.run:/ })[0]!);
     expect(handlePrerequisite).toHaveBeenCalledWith("open_or_create_project");
   });
 
@@ -239,8 +538,8 @@ describe("Workflows overview", () => {
           prerequisite: { code: action, messageKey: `workflows.prerequisite.${action}`, blocking: true, action },
         } : row),
       };
-      view.rerender(<WorkflowsOverviewView overview={blockedOverview} overviewStatus="ready" error={null} runs={[]} onRetry={vi.fn()} onPrepare={prepare} onPrerequisite={handlePrerequisite} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
-      fireEvent.click(screen.getAllByRole("button", { name: "workflows.action.prepare" })[0]!);
+      view.rerender(<WorkflowsOverviewView overview={blockedOverview} overviewStatus="ready" error={null} onRetry={vi.fn()} onPrepare={prepare} onPrerequisite={handlePrerequisite} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
+      fireEvent.click(screen.getAllByRole("button", { name: /^workflows\.action\.run:/ })[0]!);
     }
 
     expect(prepare).toHaveBeenCalledTimes(actions.length);

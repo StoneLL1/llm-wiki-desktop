@@ -1,6 +1,7 @@
 import type {
   WorkflowDisplayStatus,
   WorkflowKind,
+  WorkflowOverviewRow,
   WorkflowOverviewState,
   WorkflowRun,
   WorkflowStageStatus,
@@ -46,10 +47,44 @@ export function workflowStageStatusClass(status: WorkflowStageStatus): string {
 export function attentionRun(runs: WorkflowRun[]): WorkflowRun | null {
   return (
     runs.find((run) => run.displayStatus === "waiting_for_confirmation") ??
-    runs.find((run) => run.displayStatus === "failed" || run.displayStatus === "interrupted") ??
     runs.find((run) => run.displayStatus === "running") ??
+    runs.find((run) => run.displayStatus === "queued") ??
+    runs.find((run) => run.displayStatus === "failed" || run.displayStatus === "interrupted") ??
     null
   );
+}
+
+export function attentionWorkflowRow(rows: WorkflowOverviewRow[]): WorkflowOverviewRow | null {
+  return (
+    rows.find((row) => row.activeTaskId && row.state === "waiting_for_confirmation") ??
+    rows.find((row) => row.activeTaskId && row.state === "running") ??
+    rows.find((row) => row.activeTaskId && row.state === "queued") ??
+    rows.find((row) => row.activeTaskId && (row.state === "failed" || row.state === "interrupted")) ??
+    null
+  );
+}
+
+export function isAttentionRun(run: Pick<WorkflowRun, "displayStatus">): boolean {
+  return run.displayStatus === "queued"
+    || run.displayStatus === "running"
+    || run.displayStatus === "waiting_for_confirmation"
+    || run.displayStatus === "failed"
+    || run.displayStatus === "interrupted";
+}
+
+export function isQueueOwningStatus(status: WorkflowDisplayStatus | WorkflowOverviewState): boolean {
+  return status === "queued"
+    || status === "running"
+    || status === "waiting_for_confirmation";
+}
+
+export function workflowDateTimeLabel(value: string, language: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(language, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
 }
 
 export function groupWorkflowAttempts<T extends Pick<WorkflowRun, "taskId" | "retry">>(runs: T[]): Array<{

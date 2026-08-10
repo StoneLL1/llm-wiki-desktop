@@ -77,7 +77,6 @@ export function WorkflowsView({ controller, onOpenTask }: { controller: Workflow
       overview={overview}
       overviewStatus={overviewStatus}
       error={overviewError?.error ?? null}
-      runs={runs}
       onRetry={() => void controller.refresh()}
       onPrepare={(kind) => requestWorkflowLaunch({
         projectId: project.projectId,

@@ -671,6 +671,7 @@ dialogue
 did
 diff
 different
+diffs
 digest
 digits
 dimensions
@@ -1339,6 +1340,7 @@ legacy
 legend
 len
 length
+lengths
 level
 levenshtein
 lexically
@@ -1446,6 +1448,7 @@ matches
 matching
 material
 materialize
+materialized
 materials
 math
 matrix
@@ -1526,6 +1529,7 @@ mozilla
 msvc
 mtime
 multi
+multibyte
 multiframe
 multiline
 multiple
@@ -1689,6 +1693,7 @@ packaging
 packs
 page
 pages
+paginate
 pairs
 palette
 pane
@@ -2708,6 +2713,7 @@ updating
 upgrade
 upgraded
 upgrades
+upsert
 uri
 url
 urls
