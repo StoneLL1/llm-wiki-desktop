@@ -193,6 +193,7 @@ describe("WorkspaceController", () => {
           pagePaths: ["wiki/中文.md"],
           outputPath: null,
         },
+        routeSelection: { kind: "byok", provider: "open_ai" },
       },
     });
 
@@ -201,6 +202,7 @@ describe("WorkspaceController", () => {
     expect(workflowsController.prepare).toHaveBeenCalledWith(
       "generate_content",
       expect.objectContaining({ pagePaths: ["wiki/中文.md"] }),
+      { kind: "byok", provider: "open_ai" },
     );
     expect(useNavigationStore.getState().workflowLaunchIntent).toBeNull();
   });
@@ -214,6 +216,36 @@ describe("WorkspaceController", () => {
         kind: "health_check",
         origin: "lint",
         scopePreset: { kind: "health_check", mode: "complete" },
+      },
+    });
+
+    render(<WorkspaceController />);
+
+    expect(workflowsController.prepare).not.toHaveBeenCalled();
+    expect(useNavigationStore.getState().workflowLaunchIntent).toBeNull();
+  });
+
+  it("clears a deferred launch draft after a same-root identity replacement", () => {
+    useProjectStore.setState({
+      currentProject: project,
+      authority: {
+        projectId: project.projectId,
+        canonicalRootPath: project.rootPath,
+        canonicalIdentityKey: "replacement-identity",
+        identityRevision: "replacement-revision",
+      } as never,
+    });
+    useNavigationStore.setState({
+      activeView: "workflows",
+      workflowLaunchIntent: {
+        projectId: project.projectId,
+        projectRootPath: project.rootPath,
+        kind: "update_wiki",
+        origin: "workflows",
+        scopePreset: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [] },
+        routeSelection: null,
+        expectedCanonicalIdentityKey: "original-identity",
+        expectedIdentityRevision: "original-revision",
       },
     });
 

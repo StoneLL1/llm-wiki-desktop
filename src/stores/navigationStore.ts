@@ -52,6 +52,9 @@ export interface WorkflowLaunchIntent {
   kind: WorkflowKind;
   origin: WorkflowLaunchOrigin;
   scopePreset: WorkflowScopePreset | null;
+  routeSelection?: WorkflowRouteSelection | null;
+  expectedCanonicalIdentityKey?: string;
+  expectedIdentityRevision?: string;
 }
 
 export interface WorkflowSettingsReturnIntent {
