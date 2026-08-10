@@ -253,6 +253,7 @@ brand
 breadth
 break
 breaking
+breakpoint
 bridge
 brief
 broad
@@ -532,6 +533,7 @@ coordinates
 coordinator
 copies
 copy
+copyable
 copying
 core
 coreml
@@ -720,6 +722,7 @@ dive
 diverges
 dlp
 dns
+docked
 docling
 document
 documentation
@@ -738,6 +741,7 @@ downgrades
 downgrading
 download
 downloads
+draft
 drag
 drained
 drains
@@ -911,6 +915,7 @@ failures
 fake
 falkor
 falkordb
+fall
 fallback
 fallbacks
 falls
@@ -1686,6 +1691,7 @@ overwritten
 owned
 owner
 ownership
+owning
 oxide
 pack
 package
@@ -2137,6 +2143,7 @@ restoring
 restrict
 restricted
 result
+resultless
 results
 resumable
 resume
@@ -2192,6 +2199,7 @@ roadmap
 role
 roles
 rollback
+rolled
 rolls
 root
 rooted
@@ -2450,6 +2458,7 @@ str
 stream
 streaming
 streams
+stress
 strict
 string
 strings
@@ -2655,6 +2664,7 @@ type
 typed
 types
 typescript
+unaffected
 unapproved
 unavailable
 unbind
@@ -2725,6 +2735,7 @@ used
 user
 users
 uses
+using
 usize
 utc
 utf
@@ -2761,6 +2772,7 @@ views
 violates
 violation
 violations
+virtual
 visible
 visual
 visualization

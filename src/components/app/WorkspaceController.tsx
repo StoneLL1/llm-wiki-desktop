@@ -313,7 +313,7 @@ function ProjectWorkspaceController() {
           <h1 className="m-0 text-[16px] font-semibold tracking-[-0.01em]">{t(`nav.${activeView}`)}</h1>
           {activeView === "workflows" ? <p className="m-0 text-[11px] text-[var(--text-muted)]">{t("workflows.header.subtitle")}</p> : null}
         </div>
-        {activeView === "workflows" ? (
+        {activeView === "workflows" && workflowSurface !== "history" ? (
           <button
             className="btn btn--secondary ml-auto"
             onClick={() => {

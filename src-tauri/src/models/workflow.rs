@@ -636,6 +636,68 @@ pub struct WorkflowRunHistoryPage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum WorkflowRunOutcomeSummary {
+    UpdateWiki {
+        created: u64,
+        updated: u64,
+        skipped: u64,
+    },
+    HealthCheck {
+        error_count: u64,
+        warning_count: u64,
+        info_count: u64,
+    },
+    GenerateContent {
+        artifact_type: WorkflowArtifactType,
+        artifact_count: u64,
+        validation_passed: bool,
+    },
+}
+
+impl From<&WorkflowResult> for WorkflowRunOutcomeSummary {
+    fn from(result: &WorkflowResult) -> Self {
+        match result {
+            WorkflowResult::UpdateWiki {
+                created,
+                updated,
+                skipped,
+                ..
+            } => Self::UpdateWiki {
+                created: *created,
+                updated: *updated,
+                skipped: *skipped,
+            },
+            WorkflowResult::HealthCheck {
+                error_count,
+                warning_count,
+                info_count,
+                ..
+            } => Self::HealthCheck {
+                error_count: *error_count,
+                warning_count: *warning_count,
+                info_count: *info_count,
+            },
+            WorkflowResult::GenerateContent {
+                artifact_type,
+                artifact_count,
+                output_paths,
+                validation_passed,
+                ..
+            } => Self::GenerateContent {
+                artifact_type: artifact_type.clone(),
+                artifact_count: artifact_count.unwrap_or(output_paths.len() as u64),
+                validation_passed: *validation_passed,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowRunSummary {
     #[serde(default = "workflow_schema_version")]
@@ -647,6 +709,8 @@ pub struct WorkflowRunSummary {
     pub kind: WorkflowKind,
     pub display_status: WorkflowDisplayStatus,
     pub retry: Option<WorkflowRetryLink>,
+    #[serde(default)]
+    pub outcome: Option<WorkflowRunOutcomeSummary>,
     pub started_at: String,
     pub updated_at: String,
     pub completed_at: Option<String>,
@@ -663,6 +727,7 @@ impl From<&WorkflowRun> for WorkflowRunSummary {
             kind: run.kind.clone(),
             display_status: run.display_status.clone(),
             retry: run.retry.clone(),
+            outcome: run.result.as_ref().map(WorkflowRunOutcomeSummary::from),
             started_at: run.started_at.clone(),
             updated_at: run.updated_at.clone(),
             completed_at: run.completed_at.clone(),
@@ -806,5 +871,54 @@ mod ui3_contract_tests {
             error.project_mutation_state,
             WorkflowProjectMutationState::Unknown
         );
+    }
+
+    #[test]
+    fn workflow_history_summary_exposes_only_a_bounded_typed_outcome() {
+        let run: WorkflowRun = serde_json::from_value(serde_json::json!({
+            "schemaVersion": 1,
+            "taskId": "task-a",
+            "projectId": "project-a",
+            "canonicalIdentityKey": "identity-a",
+            "identityRevision": "revision-a",
+            "kind": "update_wiki",
+            "displayStatus": "completed",
+            "scope": { "kind": "update_wiki", "mode": "changed_sources", "sourceVersions": [] },
+            "route": null,
+            "fingerprint": "fingerprint-a",
+            "baselineFingerprint": "baseline-a",
+            "stages": [],
+            "currentStageId": null,
+            "queuePosition": null,
+            "retry": null,
+            "pendingAction": null,
+            "result": {
+                "kind": "update_wiki",
+                "created": 2,
+                "updated": 3,
+                "skipped": 1,
+                "deleted": 0,
+                "conflicted": 0,
+                "affectedPaths": ["wiki/private-and-long-path.md"],
+                "checkpointHash": "abc123",
+                "finalCommit": "def456"
+            },
+            "error": null,
+            "startedAt": "2026-08-10T08:00:00Z",
+            "updatedAt": "2026-08-10T08:01:30Z",
+            "completedAt": "2026-08-10T08:01:30Z",
+            "cancellable": false,
+            "undoCancelUntil": null
+        }))
+        .unwrap();
+
+        let payload = serde_json::to_value(WorkflowRunSummary::from(&run)).unwrap();
+        assert_eq!(payload["outcome"]["kind"], "update_wiki");
+        assert_eq!(payload["outcome"]["created"], 2);
+        assert_eq!(payload["outcome"]["updated"], 3);
+        assert_eq!(payload["outcome"]["skipped"], 1);
+        assert!(payload.to_string().len() < 1_024);
+        assert!(!payload.to_string().contains("private-and-long-path"));
+        assert!(!payload.to_string().contains("checkpointHash"));
     }
 }

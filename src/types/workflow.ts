@@ -376,6 +376,26 @@ export type WorkflowStartOutcome =
   | { kind: "created"; run: WorkflowRun }
   | { kind: "existing"; run: WorkflowRun };
 
+export type WorkflowRunOutcomeSummary =
+  | {
+      kind: "update_wiki";
+      created: number;
+      updated: number;
+      skipped: number;
+    }
+  | {
+      kind: "health_check";
+      errorCount: number;
+      warningCount: number;
+      infoCount: number;
+    }
+  | {
+      kind: "generate_content";
+      artifactType: WorkflowArtifactType;
+      artifactCount: number;
+      validationPassed: boolean;
+    };
+
 export interface WorkflowRunSummary {
   schemaVersion: number;
   taskId: string;
@@ -385,6 +405,7 @@ export interface WorkflowRunSummary {
   kind: WorkflowKind;
   displayStatus: WorkflowDisplayStatus;
   retry: WorkflowRetryLink | null;
+  outcome?: WorkflowRunOutcomeSummary | null;
   startedAt: string;
   updatedAt: string;
   completedAt: string | null;
