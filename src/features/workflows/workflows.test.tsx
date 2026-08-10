@@ -169,6 +169,8 @@ describe("Workflows overview", () => {
 
     const attention = screen.getByRole("region", { name: "workflows.overview.attention" });
     const available = screen.getByRole("region", { name: "workflows.overview.available" });
+    expect(attention.querySelectorAll(".workflow-status svg")).toHaveLength(1);
+    expect(attention.querySelector(".workflow-attention-run__icon .animate-spin")).not.toBeInTheDocument();
     expect(within(attention).getByRole("button", { name: /^workflows\.action\.viewProgress:/ })).toBeInTheDocument();
     expect(within(available).getByRole("button", { name: /^workflows\.action\.viewProgress:/ })).toBeInTheDocument();
     expect(within(available).getByRole("button", { name: /^workflows\.action\.queue:/ })).toBeInTheDocument();
@@ -178,6 +180,31 @@ describe("Workflows overview", () => {
     fireEvent.click(within(available).getByRole("button", { name: /^workflows\.action\.view:/ }));
     expect(handleOpenRun).toHaveBeenCalledWith(completed.taskId);
     expect(handlePrepare).not.toHaveBeenCalledWith("generate_content");
+  });
+
+  it("keeps prerequisite guidance and last-completed context together without forcing a fixed row height", () => {
+    const snapshot: WorkflowsOverview = {
+      ...overview,
+      rows: overview.rows.map((row) => row.kind === "update_wiki"
+        ? {
+            ...row,
+            state: "needs_prerequisite" as const,
+            lastCompletedAt: "2026-08-10T08:01:00Z",
+            lastCompletedTaskId: "completed-before-route-change",
+            prerequisite: {
+              code: "WORKFLOW_ROUTE_REQUIRED",
+              messageKey: "workflows.prerequisite.routeRequired",
+              blocking: true,
+              action: "configure_execution_route" as const,
+            },
+          }
+        : row),
+    };
+
+    const { container } = render(<WorkflowsOverviewView overview={snapshot} overviewStatus="ready" error={null} onRetry={vi.fn()} onPrepare={vi.fn()} onPrerequisite={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
+    const row = container.querySelector<HTMLElement>(".workflow-row")!;
+    expect(within(row).getByText("workflows.prerequisite.routeRequired")).toBeInTheDocument();
+    expect(within(row).getByText("workflows.overview.lastCompleted")).toBeInTheDocument();
   });
 
   it("continues a recovered queue from row truth when the active run is outside the bounded snapshot", () => {
@@ -1002,10 +1029,36 @@ describe("Workflows overview", () => {
   });
 
   it("does not mislabel a pending overview as no project", () => {
-    render(<WorkflowsOverviewView overview={null} overviewStatus="loading" error={null} onRetry={vi.fn()} onPrepare={vi.fn()} onPrerequisite={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
+    const { container } = render(<WorkflowsOverviewView overview={null} overviewStatus="loading" error={null} onRetry={vi.fn()} onPrepare={vi.fn()} onPrerequisite={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
     expect(screen.getByRole("status")).toHaveAttribute("aria-busy", "true");
     expect(screen.getByRole("heading", { name: "workflows.loading.title" })).toBeInTheDocument();
     expect(screen.queryByText("workflows.noProject.title")).not.toBeInTheDocument();
+    expect(container.querySelector(".workflows-overview.is-loading")).toBeInTheDocument();
+    expect(container.querySelectorAll(".workflow-row")).toHaveLength(3);
+    expect(container.querySelectorAll(".workflow-recent-row")).toHaveLength(5);
+  });
+
+  it("uses the same icon-and-label status treatment across overview, history, and task detail without repeating detail status", () => {
+    const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
+    const completed = workflowRun({
+      taskId: "status-completed",
+      kind: "health_check",
+      displayStatus: "completed",
+      completedAt: "2026-08-10T08:05:00Z",
+    });
+
+    const overviewView = render(<WorkflowsOverviewView overview={overview} overviewStatus="ready" error={null} onRetry={vi.fn()} onPrepare={vi.fn()} onPrerequisite={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
+    expect(overviewView.container.querySelectorAll(".workflow-row .workflow-status svg")).toHaveLength(3);
+    overviewView.unmount();
+
+    const historyView = render(<WorkflowHistoryView runs={[completed]} onBack={vi.fn()} onOpen={vi.fn()} onRetry={vi.fn()} onLoadMore={vi.fn()} onFilter={vi.fn()} />);
+    expect(historyView.container.querySelector(".workflow-history__status.workflow-status svg")).toBeInTheDocument();
+    historyView.unmount();
+
+    const detailView = render(<WorkflowTaskDetail run={completed} controller={controller} queuedRuns={[]} onOpenLogs={vi.fn()} />);
+    const heading = detailView.container.querySelector<HTMLElement>(".workflow-detail__heading")!;
+    expect(heading.querySelector(".workflow-status svg")).toBeInTheDocument();
+    expect(within(heading).getAllByText("workflows.status.completed")).toHaveLength(1);
   });
 
   it("shows an actionable error when the overview request fails", () => {

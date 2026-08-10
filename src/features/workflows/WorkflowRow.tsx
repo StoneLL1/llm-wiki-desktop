@@ -6,8 +6,8 @@ import {
   workflowDateTimeLabel,
   workflowKindDescriptionKey,
   workflowKindKey,
-  workflowStatusKey,
 } from "./workflowPresentation";
+import { WorkflowStatus } from "./WorkflowStatus";
 
 const icons = {
   update_wiki: RefreshCw,
@@ -71,8 +71,7 @@ export function WorkflowRow({
         {!activeTaskId && row.lastCompletedAt ? <time className="workflow-row__last" dateTime={row.lastCompletedAt}>{t("workflows.overview.lastCompleted", { time: workflowDateTimeLabel(row.lastCompletedAt, i18n.resolvedLanguage ?? i18n.language) })}</time> : null}
       </div>
       <div className="workflow-row__state">
-        <span className={`workflow-status-dot is-${String(state).replaceAll("_", "-")}`} aria-hidden="true" />
-        <span>{t(workflowStatusKey(state))}</span>
+        <WorkflowStatus status={state} />
       </div>
       {activeTaskId ? (
         <button aria-label={`${actionLabel}: ${kindLabel}`} className="btn btn--secondary btn--sm" data-workflow-return-key={`row:${row.kind}:${activeTaskId}`} disabled={pending} onClick={() => onOpenRun(activeTaskId)} type="button">

@@ -15,8 +15,9 @@ import {
   workflowKindKey,
   workflowStatusKey,
 } from "./workflowPresentation";
+import { WorkflowStatus } from "./WorkflowStatus";
 
-const HISTORY_ROW_HEIGHT = 76;
+const HISTORY_ROW_HEIGHT = 88;
 const HISTORY_VIEWPORT_HEIGHT = 448;
 const HISTORY_OVERSCAN = 4;
 
@@ -95,7 +96,7 @@ export function WorkflowHistoryView({ runs, onBack, onOpen, onRetry, onLoadMore,
               <span className="workflow-history__attempt">{attemptLabel}</span>
               <span className="workflow-history__heading">
                 <span>{t(workflowKindKey(run.kind))}</span>
-                <span className={`workflow-history__status is-${run.displayStatus.replaceAll("_", "-")}`}>{t(workflowStatusKey(run.displayStatus))}</span>
+                <WorkflowStatus className="workflow-history__status" status={run.displayStatus} />
               </span>
               {outcome ? <span className="workflow-history__outcome">{outcome}</span> : <span className="workflow-history__outcome workflow-muted">{t("workflows.history.outcome.unavailable")}</span>}
               <span className="workflow-history__meta">
