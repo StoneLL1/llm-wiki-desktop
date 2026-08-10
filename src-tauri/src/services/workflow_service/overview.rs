@@ -25,7 +25,9 @@ impl WorkflowOverviewService {
                     state: WorkflowOverviewState::NeedsPrerequisite,
                     recommended: false,
                     active_task_id: None,
+                    active_continuation_required: false,
                     last_completed_at: None,
+                    last_completed_task_id: None,
                     prerequisite: Some(prerequisite.clone()),
                 })
                 .collect(),
@@ -102,22 +104,27 @@ fn row_for_kind(
         .filter(|run| run.kind == kind)
         .collect::<Vec<_>>();
     matching.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
-    let attention = matching.iter().copied().find(|run| {
-        matches!(
-            run.display_status,
-            WorkflowDisplayStatus::Running
-                | WorkflowDisplayStatus::WaitingForConfirmation
-                | WorkflowDisplayStatus::Queued
-                | WorkflowDisplayStatus::Failed
-                | WorkflowDisplayStatus::Interrupted
-        )
+    let attention = [
+        WorkflowDisplayStatus::WaitingForConfirmation,
+        WorkflowDisplayStatus::Running,
+        WorkflowDisplayStatus::Queued,
+        WorkflowDisplayStatus::Failed,
+        WorkflowDisplayStatus::Interrupted,
+    ]
+    .into_iter()
+    .find_map(|status| {
+        matching
+            .iter()
+            .copied()
+            .find(|run| run.display_status == status)
     });
-    let last_completed_at = matching
+    let last_completed = matching
         .iter()
         .copied()
         .filter(|run| run.display_status == WorkflowDisplayStatus::Completed)
-        .filter_map(|run| run.completed_at.clone())
-        .max();
+        .filter(|run| run.completed_at.is_some())
+        .max_by(|left, right| left.completed_at.cmp(&right.completed_at));
+    let last_completed_at = last_completed.and_then(|run| run.completed_at.clone());
     let update_is_current =
         kind == WorkflowKind::UpdateWiki && has_sources && changed_source_count == 0;
     if update_is_current {
@@ -149,7 +156,9 @@ fn row_for_kind(
     WorkflowOverviewRow {
         recommended: recommendation.is_some_and(|recommended| *recommended == kind),
         active_task_id: attention.map(|run| run.task_id.clone()),
+        active_continuation_required: attention.is_some_and(|run| run.continuation_required),
         last_completed_at,
+        last_completed_task_id: last_completed.map(|run| run.task_id.clone()),
         prerequisite,
         kind,
         state,
@@ -177,6 +186,43 @@ fn open_project_prerequisite() -> WorkflowPrerequisite {
 mod tests {
     use super::*;
 
+    fn workflow_run(
+        task_id: &str,
+        status: &str,
+        updated_at: &str,
+        completed_at: Option<&str>,
+        continuation_required: bool,
+    ) -> crate::models::workflow::WorkflowRun {
+        serde_json::from_value(serde_json::json!({
+            "schemaVersion": 1,
+            "taskId": task_id,
+            "projectId": "project-a",
+            "canonicalIdentityKey": "identity-a",
+            "identityRevision": "revision-a",
+            "kind": "update_wiki",
+            "displayStatus": status,
+            "scope": { "kind": "update_wiki", "mode": "changed_sources", "sourceVersions": [] },
+            "route": null,
+            "fingerprint": format!("fingerprint-{task_id}"),
+            "baselineFingerprint": "baseline-a",
+            "stages": [],
+            "currentStageId": null,
+            "queuePosition": if status == "queued" { Some(1) } else { None },
+            "continuationRequired": continuation_required,
+            "retry": null,
+            "pendingAction": null,
+            "decisionReview": null,
+            "result": null,
+            "error": null,
+            "startedAt": "2026-08-01T00:00:00Z",
+            "updatedAt": updated_at,
+            "completedAt": completed_at,
+            "cancellable": status == "queued",
+            "undoCancelUntil": null
+        }))
+        .expect("workflow test run must deserialize")
+    }
+
     #[test]
     fn consumed_sources_are_up_to_date_even_when_execution_is_currently_blocked() {
         let row = row_for_kind(
@@ -194,5 +240,104 @@ mod tests {
         );
         assert_eq!(row.state, WorkflowOverviewState::UpToDate);
         assert!(row.prerequisite.is_none());
+    }
+
+    #[test]
+    fn overview_row_carries_bounded_action_targets_outside_recent_runs() {
+        let completed = workflow_run(
+            "older-completed-update",
+            "completed",
+            "2026-08-01T00:00:00Z",
+            Some("2026-08-01T00:00:00Z"),
+            false,
+        );
+        let recovered_queue = workflow_run(
+            "recovered-queued-update",
+            "queued",
+            "2026-08-10T00:00:00Z",
+            None,
+            true,
+        );
+
+        let row = row_for_kind(
+            WorkflowKind::UpdateWiki,
+            &[completed, recovered_queue],
+            None,
+            true,
+            1,
+            None,
+        );
+
+        assert_eq!(
+            row.active_task_id.as_deref(),
+            Some("recovered-queued-update")
+        );
+        assert!(row.active_continuation_required);
+        assert_eq!(
+            row.last_completed_task_id.as_deref(),
+            Some("older-completed-update")
+        );
+        assert_eq!(
+            row.last_completed_at.as_deref(),
+            Some("2026-08-01T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn same_kind_attention_prefers_waiting_and_running_over_a_newer_queue() {
+        let queued = workflow_run(
+            "newer-queued-update",
+            "queued",
+            "2026-08-10T10:00:00Z",
+            None,
+            true,
+        );
+        let waiting = workflow_run(
+            "older-waiting-update",
+            "waiting_for_confirmation",
+            "2026-08-10T08:00:00Z",
+            None,
+            false,
+        );
+        let running = workflow_run(
+            "older-running-update",
+            "running",
+            "2026-08-10T09:00:00Z",
+            None,
+            false,
+        );
+
+        let waiting_row = row_for_kind(
+            WorkflowKind::UpdateWiki,
+            &[queued.clone(), waiting],
+            None,
+            true,
+            1,
+            None,
+        );
+        assert_eq!(
+            waiting_row.state,
+            WorkflowOverviewState::WaitingForConfirmation
+        );
+        assert_eq!(
+            waiting_row.active_task_id.as_deref(),
+            Some("older-waiting-update")
+        );
+        assert!(!waiting_row.active_continuation_required);
+
+        let running_row = row_for_kind(
+            WorkflowKind::UpdateWiki,
+            &[queued, running],
+            None,
+            true,
+            1,
+            None,
+        );
+        assert_eq!(running_row.state, WorkflowOverviewState::Running);
+        assert_eq!(
+            running_row.active_task_id.as_deref(),
+            Some("older-running-update")
+        );
+        assert!(!running_row.active_continuation_required);
     }
 }

@@ -546,6 +546,7 @@ pub struct BackendTask {
 - 用户可见状态统一为 `queued`、`running`、`waiting_for_confirmation`、`succeeded`、`failed`、`cancelled`、`interrupted`；`cancelling` 可以保留为内部过渡状态。
 - 任务进度包含工作流阶段 id、阶段顺序、当前处理项、已完成数、总数和结构化活动记录。原始 stdout/stderr 继续写日志，但不能承担主状态合同。
 - 每个项目维护独立串行工作流队列。不同项目可以并行执行，任何列表、确认、取消和历史 command 都必须验证项目归属；前端切换项目后才可操作该项目任务。
+- Workflows overview 行必须携带渲染该行动作所需的有界目标事实：活动任务是否要求显式续队，以及最近完成任务的稳定 task id。前端不得通过偶然命中最近五条运行历史来推断“继续队列”或“查看已完成任务”。
 - `canonical_identity_key + identity_revision + workflow_kind + scope + execution options + route + baseline` 生成持久稳定输入指纹；`project_id` 只作为当前进程句柄，不参与跨重开 dedupe。相同指纹的非终态或可复用任务应返回既有任务，不重复入队。
 - 重试必须创建新任务并通过 `attempt_of` 指向原任务；不得覆盖原任务、日志或错误。
 - 当布局提供可写 task state root 时，等待确认和排队任务持久化；排队任务重开后需要显式 continuation。进程异常退出时，原先持久化的运行中工作流映射为 `interrupted`，并记录已完成阶段和可复用产物；不得伪造进程级续跑。restricted/read-only 的 ephemeral 本地任务不承诺跨重启恢复。

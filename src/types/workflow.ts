@@ -312,7 +312,9 @@ export interface WorkflowOverviewRow {
   state: WorkflowOverviewState;
   recommended: boolean;
   activeTaskId: string | null;
+  activeContinuationRequired: boolean;
   lastCompletedAt: string | null;
+  lastCompletedTaskId: string | null;
   prerequisite: WorkflowPrerequisite | null;
 }
 
