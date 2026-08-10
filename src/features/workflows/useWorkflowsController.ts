@@ -40,6 +40,7 @@ import type {
   WorkflowPrerequisiteAction,
   WorkflowRouteSelection,
   WorkflowPreparation,
+  WorkflowPreparationDraft,
   WorkflowRun,
   WorkflowRunSummary,
   WorkflowScope,
@@ -186,7 +187,7 @@ export interface WorkflowsController {
   continueQueue: () => Promise<void>;
   filterHistory: (kind: WorkflowKind | null, status: WorkflowDisplayStatus | null) => Promise<void>;
   loadHistoryMore: () => Promise<void>;
-  handlePrerequisite: (action: WorkflowPrerequisiteAction) => void;
+  handlePrerequisite: (action: WorkflowPrerequisiteAction, draft?: WorkflowPreparationDraft) => void;
   backToOverview: () => void;
 }
 
@@ -863,13 +864,15 @@ export function useWorkflowsController(
         const state = useWorkflowStore.getState();
         const preparation = state.preparation;
         if (!preparation) return;
+        const operationKey = `start:${preparation.preparationId}`;
+        if (workflowOperationPending(state.operations, operationKey)) return;
         const guard = captureWorkflowRequestGuard(state);
         if (
           preparation.projectAccess.canonicalIdentityKey !== guard.canonicalIdentityKey
           || preparation.projectAccess.identityRevision !== guard.identityRevision
         ) return;
         await perform(
-          `start:${preparation.preparationId}`,
+          operationKey,
           "workflows.operationError.start",
           () =>
           startWorkflow({
@@ -985,8 +988,23 @@ export function useWorkflowsController(
       ),
       filterHistory,
       loadHistoryMore,
-      handlePrerequisite: (action) => {
+      handlePrerequisite: (action, draft) => {
         if (action === "import_sources") {
+          const preparation = useWorkflowStore.getState().preparation;
+          if (preparation) {
+            useNavigationStore.setState({
+              workflowLaunchIntent: {
+                projectId: project.projectId,
+                projectRootPath: project.rootPath,
+                kind: preparation.kind,
+                origin: "workflows",
+                scopePreset: draft?.scope ?? preparation.scope,
+                routeSelection: draft ? draft.routeSelection : routeSelectionOf(preparation.route),
+                expectedCanonicalIdentityKey: preparation.projectAccess.canonicalIdentityKey,
+                expectedIdentityRevision: preparation.projectAccess.identityRevision,
+              },
+            });
+          }
           setActiveView("import");
           return;
         }
@@ -994,7 +1012,8 @@ export function useWorkflowsController(
           void prepareKind("update_wiki");
           return;
         }
-        if (action === "configure_execution_route" || action === "choose_execution_route") {
+        if (action === "choose_execution_route") return;
+        if (action === "configure_execution_route") {
           const preparation = useWorkflowStore.getState().preparation;
           if (!preparation) {
             void refresh();
@@ -1004,8 +1023,8 @@ export function useWorkflowsController(
             projectId: project.projectId,
             projectRootPath: project.rootPath,
             kind: preparation.kind,
-            scope: preparation.scope,
-            routeSelection: routeSelectionOf(preparation.route),
+            scope: draft?.scope ?? preparation.scope,
+            routeSelection: draft ? draft.routeSelection : routeSelectionOf(preparation.route),
             source: "prerequisite",
             expectedSurface: "preparation",
             expectedCanonicalIdentityKey:

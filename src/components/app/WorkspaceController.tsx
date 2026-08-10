@@ -135,7 +135,11 @@ function ProjectWorkspaceController() {
     if (!workflowLaunchIntent) return;
     if (
       workflowLaunchIntent.projectId !== currentProject.projectId ||
-      workflowLaunchIntent.projectRootPath !== currentProject.rootPath
+      workflowLaunchIntent.projectRootPath !== currentProject.rootPath ||
+      (workflowLaunchIntent.expectedCanonicalIdentityKey !== undefined
+        && (authority?.projectId !== currentProject.projectId
+          || authority.canonicalIdentityKey !== workflowLaunchIntent.expectedCanonicalIdentityKey
+          || authority.identityRevision !== workflowLaunchIntent.expectedIdentityRevision))
     ) {
       clearWorkflowLaunchIntent();
       return;
@@ -145,9 +149,11 @@ function ProjectWorkspaceController() {
     void workflowsController.prepare(
       workflowLaunchIntent.kind,
       workflowLaunchIntent.scopePreset,
+      workflowLaunchIntent.routeSelection ?? null,
     );
   }, [
     activeView,
+    authority,
     clearWorkflowLaunchIntent,
     currentProject.projectId,
     currentProject.rootPath,

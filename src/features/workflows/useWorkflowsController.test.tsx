@@ -116,6 +116,7 @@ describe("useWorkflowsController", () => {
       settingsOpen: false,
       settingsSection: "general",
       workflowSettingsReturnIntent: null,
+      workflowLaunchIntent: null,
     });
     mocks.listener = null;
     mocks.getOverview.mockReset().mockResolvedValue(overview);
@@ -552,6 +553,29 @@ describe("useWorkflowsController", () => {
     await act(async () => {
       postStartOverview.resolve(replacementOverview);
       await request;
+    });
+  });
+
+  it("coalesces rapid duplicate starts for the same prepared revision", async () => {
+    const pendingStart = deferred<{ kind: "created"; run: WorkflowRun }>();
+    mocks.start.mockReset().mockReturnValue(pendingStart.promise);
+    const { result } = renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
+    useWorkflowStore.setState({ preparation });
+
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    act(() => {
+      first = result.current.startPrepared(false, false);
+      second = result.current.startPrepared(false, false);
+    });
+
+    expect(mocks.start).toHaveBeenCalledTimes(1);
+    expect(useWorkflowStore.getState().operations[`start:${preparation.preparationId}`]?.pending).toBe(true);
+
+    await act(async () => {
+      pendingStart.resolve({ kind: "created", run });
+      await Promise.all([first, second]);
     });
   });
 
@@ -1388,6 +1412,86 @@ describe("useWorkflowsController", () => {
       scope: preparation.scope,
       routeSelection: { kind: "byok", provider: "ollama" },
     }));
+  });
+
+  it("carries an edited preparation draft through Settings without starting", async () => {
+    const { result } = renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
+    const draft = {
+      scope: {
+        kind: "generate_content" as const,
+        artifactType: "knowledge_card" as const,
+        pagePaths: ["wiki/a.md", "wiki/b.md"],
+        outputPath: "exports/draft.html",
+      },
+      routeSelection: { kind: "byok" as const, provider: "open_ai" as const },
+    };
+    useWorkflowStore.setState({
+      preparation: { ...preparation, kind: "generate_content", scope: draft.scope },
+      surface: "preparation",
+    });
+
+    act(() => result.current.handlePrerequisite("configure_execution_route", draft));
+
+    expect(useNavigationStore.getState()).toMatchObject({
+      settingsOpen: true,
+      settingsSection: "ai",
+      workflowSettingsReturnIntent: {
+        scope: draft.scope,
+        routeSelection: draft.routeSelection,
+        source: "prerequisite",
+        expectedPreparationId: preparation.preparationId,
+      },
+    });
+    expect(mocks.start).not.toHaveBeenCalled();
+  });
+
+  it("preserves an explicit automatic route draft across Settings and Import", async () => {
+    const { result } = renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
+    const draft = { scope: preparation.scope, routeSelection: null };
+    useWorkflowStore.setState({ preparation, surface: "preparation" });
+
+    act(() => result.current.handlePrerequisite("configure_execution_route", draft));
+    expect(useNavigationStore.getState().workflowSettingsReturnIntent?.routeSelection).toBeNull();
+
+    act(() => result.current.handlePrerequisite("import_sources", draft));
+    expect(useNavigationStore.getState().workflowLaunchIntent).toMatchObject({
+      routeSelection: null,
+      expectedCanonicalIdentityKey: preparation.projectAccess.canonicalIdentityKey,
+      expectedIdentityRevision: preparation.projectAccess.identityRevision,
+    });
+  });
+
+  it("defers an edited import prerequisite draft for identity-guarded return", async () => {
+    const { result } = renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
+    const draft = {
+      scope: { kind: "update_wiki" as const, mode: "changed_sources" as const, sourceVersions: [] },
+      routeSelection: { kind: "byok" as const, provider: "open_ai" as const },
+    };
+    useWorkflowStore.setState({
+      preparation: { ...preparation, kind: "update_wiki", scope: draft.scope },
+      surface: "preparation",
+    });
+
+    act(() => result.current.handlePrerequisite("import_sources", draft));
+
+    expect(useNavigationStore.getState()).toMatchObject({
+      activeView: "import",
+      workflowLaunchIntent: {
+        projectId: project.projectId,
+        projectRootPath: project.rootPath,
+        kind: "update_wiki",
+        origin: "workflows",
+        scopePreset: draft.scope,
+        routeSelection: draft.routeSelection,
+        expectedCanonicalIdentityKey: preparation.projectAccess.canonicalIdentityKey,
+        expectedIdentityRevision: preparation.projectAccess.identityRevision,
+      },
+    });
+    expect(mocks.prepare).not.toHaveBeenCalled();
+    expect(mocks.start).not.toHaveBeenCalled();
   });
 
   it("delegates project authority prerequisites without pretending to grant access", async () => {

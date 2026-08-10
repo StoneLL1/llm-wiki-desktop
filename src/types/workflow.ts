@@ -87,6 +87,11 @@ export type WorkflowScope =
       outputPath: string | null;
     };
 
+export interface WorkflowPreparationDraft {
+  scope: WorkflowScope;
+  routeSelection: WorkflowRouteSelection | null;
+}
+
 /**
  * A launch entry may prefill a complete structured scope, but it never owns
  * preparation validity or task creation. The backend normalizes and validates
