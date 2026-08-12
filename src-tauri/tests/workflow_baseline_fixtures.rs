@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use llm_wiki_desktop_lib::models::paths::ProjectContext;
 use llm_wiki_desktop_lib::models::workflow::{
-    HealthCheckMode, WorkflowKind, WorkflowPersistenceMode, WorkflowScope,
+    HealthCheckMode, WorkflowKind, WorkflowPersistenceMode, WorkflowScope, WORKFLOW_SCHEMA_VERSION,
 };
 use llm_wiki_desktop_lib::services::{WorkflowPreference, WorkflowPreferences};
 
@@ -25,6 +25,16 @@ fn deterministic_scale_fixtures_repeat_identically_ten_times() {
     let diffs = fixed_diffs();
     assert_eq!(diffs.len(), DIFF_FILE_COUNT);
     assert!(diffs.iter().all(|(_, diff)| diff.len() == DIFF_BYTES));
+}
+
+#[test]
+fn workflow_v2_frontend_fixture_keeps_built_in_as_the_baseline_operation() {
+    assert_eq!(WORKFLOW_SCHEMA_VERSION, 2);
+    let typescript = include_str!("../../src/types/workflow.ts");
+    let fixtures = include_str!("../../src/features/workflows/workflowBaselineFixtures.ts");
+    assert!(typescript.contains("WORKFLOW_SCHEMA_VERSION = 2 as const"));
+    assert!(typescript.contains("agent_lint_repair"));
+    assert!(fixtures.contains("operation: { kind: \"built_in\" }"));
 }
 
 #[test]

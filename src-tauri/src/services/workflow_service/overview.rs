@@ -1,10 +1,10 @@
 use crate::errors::BackendError;
 use crate::models::workflow::{
     WorkflowArtifactContextSummary, WorkflowContextSummary, WorkflowDisplayStatus,
-    WorkflowHealthContextSummary, WorkflowKind, WorkflowOverviewRow, WorkflowOverviewState,
-    WorkflowPrerequisite, WorkflowPrerequisiteAction, WorkflowProjectAccessSummary,
-    WorkflowQueueContextItem, WorkflowResult, WorkflowRun, WorkflowRunSummary, WorkflowsOverview,
-    WORKFLOW_SCHEMA_VERSION,
+    WorkflowHealthContextSummary, WorkflowKind, WorkflowOperation, WorkflowOverviewRow,
+    WorkflowOverviewState, WorkflowPrerequisite, WorkflowPrerequisiteAction,
+    WorkflowProjectAccessSummary, WorkflowQueueContextItem, WorkflowResult, WorkflowRun,
+    WorkflowRunSummary, WorkflowsOverview, WORKFLOW_SCHEMA_VERSION,
 };
 use crate::tasks::TaskService;
 
@@ -57,10 +57,10 @@ impl WorkflowOverviewService {
             .iter()
             .find(|(kind, _, _)| *kind == WorkflowKind::HealthCheck)
             .map(|(_, _, baseline)| baseline.as_str());
-        let has_current_health = owner_runs.iter().any(|run| {
-            run.kind == WorkflowKind::HealthCheck
-                && run.display_status == WorkflowDisplayStatus::Completed
-                && current_health_baseline == Some(run.baseline_fingerprint.as_str())
+        let has_current_health = current_health_baseline.is_some_and(|baseline| {
+            owner_runs
+                .iter()
+                .any(|run| is_current_built_in_health(run, baseline))
         });
         let recommendation = if !evaluation.has_sources || evaluation.changed_source_count > 0 {
             Some(WorkflowKind::UpdateWiki)
@@ -106,10 +106,7 @@ impl WorkflowOverviewService {
 fn context_summary(pending_source_count: usize, runs: &[WorkflowRun]) -> WorkflowContextSummary {
     let latest_health = runs
         .iter()
-        .filter(|run| {
-            run.kind == WorkflowKind::HealthCheck
-                && run.display_status == WorkflowDisplayStatus::Completed
-        })
+        .filter(|run| is_completed_built_in_health(run))
         .max_by(|left, right| left.completed_at.cmp(&right.completed_at));
     let last_health = latest_health.and_then(|run| match (&run.result, &run.completed_at) {
         (
@@ -168,11 +165,23 @@ fn context_summary(pending_source_count: usize, runs: &[WorkflowRun]) -> Workflo
             .map(|run| WorkflowQueueContextItem {
                 task_id: run.task_id.clone(),
                 kind: run.kind.clone(),
+                operation: run.operation.clone(),
                 queue_position: run.queue_position,
                 started_at: run.started_at.clone(),
             })
             .collect(),
     }
+}
+
+fn is_completed_built_in_health(run: &WorkflowRun) -> bool {
+    run.kind == WorkflowKind::HealthCheck
+        && run.operation == WorkflowOperation::BuiltIn
+        && run.display_status == WorkflowDisplayStatus::Completed
+        && matches!(run.result, Some(WorkflowResult::HealthCheck { .. }))
+}
+
+fn is_current_built_in_health(run: &WorkflowRun, baseline: &str) -> bool {
+    is_completed_built_in_health(run) && run.baseline_fingerprint == baseline
 }
 
 fn row_for_kind(
@@ -504,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn context_summary_does_not_fall_back_past_the_latest_resultless_completion() {
+    fn context_summary_ignores_resultless_health_completion() {
         let mut older = workflow_run(
             "older-health-with-result",
             "completed",
@@ -533,7 +542,74 @@ mod tests {
 
         let summary = context_summary(0, &[newer, older]);
 
-        assert!(summary.last_health.is_none());
+        assert_eq!(
+            summary.last_health.unwrap().task_id,
+            "older-health-with-result"
+        );
+    }
+
+    #[test]
+    fn newer_agent_repair_does_not_hide_or_satisfy_built_in_health() {
+        let mut health = workflow_run(
+            "older-health",
+            "completed",
+            "2026-08-01T00:00:00Z",
+            Some("2026-08-01T00:00:00Z"),
+            false,
+        );
+        health.kind = WorkflowKind::HealthCheck;
+        health.result = Some(WorkflowResult::HealthCheck {
+            report_id: Some("older-health".into()),
+            persistent: false,
+            error_count: 1,
+            warning_count: 2,
+            info_count: 3,
+            coverage: None,
+            findings_by_type: Default::default(),
+        });
+        let mut repair = workflow_run(
+            "newer-repair",
+            "completed",
+            "2026-08-02T00:00:00Z",
+            Some("2026-08-02T00:00:00Z"),
+            false,
+        );
+        repair.kind = WorkflowKind::HealthCheck;
+        repair.operation = crate::models::workflow::WorkflowOperation::AgentLintRepair {
+            preparation_id: "prepare-1".into(),
+            preparation_revision: "prepare-revision-1".into(),
+            report_id: "older-health".into(),
+            selection_revision: "selection-revision-1".into(),
+            selected_finding_ids: vec!["contradiction:wiki/a.md".into()],
+            skill: crate::models::lint::WikiLintSkillRef::builtin(),
+            authorized_path_hashes: [("wiki/a.md".into(), Some("a".repeat(64)))]
+                .into_iter()
+                .collect(),
+            expected_git_head: "b".repeat(40),
+        };
+        repair.result = Some(WorkflowResult::AgentLintRepair {
+            outcome: crate::models::lint::AgentLintRepairOutcome::Succeeded,
+            resolved_finding_ids: vec!["contradiction:wiki/a.md".into()],
+            unresolved_finding_ids: Vec::new(),
+            introduced_finding_ids: Vec::new(),
+            skipped_finding_ids: Vec::new(),
+            rounds: Vec::new(),
+            affected_paths: vec!["wiki/a.md".into()],
+            checkpoint_hash: Some("c".repeat(40)),
+            final_commit: Some("d".repeat(40)),
+            diff_available: true,
+            rollback_available: true,
+        });
+
+        assert!(is_current_built_in_health(&health, "baseline-a"));
+        assert!(!is_current_built_in_health(&repair, "baseline-a"));
+        assert_eq!(
+            context_summary(0, &[repair, health])
+                .last_health
+                .unwrap()
+                .task_id,
+            "older-health"
+        );
     }
 
     fn test_workflow_state(

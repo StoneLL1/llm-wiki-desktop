@@ -32,7 +32,7 @@ export function makeBaselineOverview(
   identityRevision = baselineAccess.identityRevision,
 ): WorkflowsOverview {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     projectAccess: { ...baselineAccess, identityRevision },
     rows: [],
   };
@@ -42,12 +42,13 @@ export function makeBaselineRun(index = 0, overrides: Partial<WorkflowRun> = {})
   const second = String(index % 60).padStart(2, "0");
   const timestamp = `2026-08-09T00:00:${second}Z`;
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     taskId: `workflow-${String(index).padStart(5, "0")}`,
     projectId: baselineAccess.projectId,
     canonicalIdentityKey: baselineAccess.canonicalIdentityKey,
     identityRevision: baselineAccess.identityRevision,
     kind: "health_check",
+    operation: { kind: "built_in" },
     displayStatus: "running",
     scope: { kind: "health_check", mode: "local_quick" },
     route: { kind: "local", routeRevision: "local-v1" },
@@ -118,7 +119,7 @@ export function makeScopeOptions(count = WORKFLOW_BASELINE_SIZES.scopeOptions) {
 export function makePreparationWithOptions(count = WORKFLOW_BASELINE_SIZES.scopeOptions): WorkflowPreparation {
   const options = makeScopeOptions(count);
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     preparationId: "preparation-scale",
     preparationRevision: "revision-scale",
     projectAccess: { ...baselineAccess },

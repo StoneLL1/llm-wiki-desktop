@@ -37,6 +37,7 @@ const rustRunFixture = {
   canonicalIdentityKey: "identity-1",
   identityRevision: "revision-1",
   kind: "update_wiki",
+  operation: { kind: "built_in" },
   displayStatus: "waiting_for_confirmation",
   scope: {
     kind: "update_wiki",

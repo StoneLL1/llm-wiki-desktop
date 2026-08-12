@@ -6,10 +6,10 @@ use llm_wiki_desktop_lib::models::confirmation::{PendingActionType, RiskLevel};
 use llm_wiki_desktop_lib::models::task::{BackendEventType, TaskStatus};
 use llm_wiki_desktop_lib::models::workflow::{
     HealthCheckMode, UpdateWikiMode, WorkflowArtifactType, WorkflowDisplayStatus,
-    WorkflowExecutionOptions, WorkflowKind, WorkflowPendingAction, WorkflowPersistenceMode,
-    WorkflowPersistenceTransition, WorkflowProjectMutationState, WorkflowResult, WorkflowRoute,
-    WorkflowScope, WorkflowSourceVersionRef, WorkflowStage, WorkflowStageStatus,
-    WorkflowStartOutcome,
+    WorkflowExecutionOptions, WorkflowKind, WorkflowOperation, WorkflowOperationKind,
+    WorkflowPendingAction, WorkflowPersistenceMode, WorkflowPersistenceTransition,
+    WorkflowProjectMutationState, WorkflowResult, WorkflowRoute, WorkflowRunnerKey, WorkflowScope,
+    WorkflowSourceVersionRef, WorkflowStage, WorkflowStageStatus, WorkflowStartOutcome,
 };
 use llm_wiki_desktop_lib::services::{
     project_identity, EnqueueWorkflow, WorkflowCoordinator, WorkflowDispatchFailure,
@@ -95,6 +95,33 @@ fn unavailable_runner_finalizes_claim_and_does_not_strand_the_owner_queue() {
     }
 }
 
+#[test]
+fn unavailable_runner_iteratively_drains_a_queue_larger_than_receipt_capacity() {
+    let temp = tempfile::tempdir().unwrap();
+    let tasks = TaskService::default();
+    let workflows = WorkflowService::default();
+    let mut runs = Vec::new();
+    for index in 0..300 {
+        let mut queued = request(
+            temp.path(),
+            "p",
+            &format!("v-{index}"),
+            &format!("missing-runner-{index}"),
+        );
+        queued.task_state_root = None;
+        runs.push(created(
+            workflows.coordinator.enqueue(&tasks, queued).unwrap(),
+        ));
+    }
+
+    assert!(!workflows.dispatch_claimed_run(&tasks, &runs[0]).unwrap());
+    assert!(runs.iter().all(|run| {
+        tasks
+            .get_workflow_run(&run.task_id)
+            .is_some_and(|current| current.display_status == WorkflowDisplayStatus::Failed)
+    }));
+}
+
 fn request(root: &Path, project_id: &str, version: &str, baseline: &str) -> EnqueueWorkflow {
     EnqueueWorkflow {
         project_id: project_id.into(),
@@ -168,6 +195,258 @@ fn empty_update_wiki_result() -> WorkflowResult {
         checkpoint_hash: None,
         final_commit: None,
     }
+}
+
+fn repair_operation(selection: &str) -> WorkflowOperation {
+    WorkflowOperation::AgentLintRepair {
+        preparation_id: format!("prepare-{selection}"),
+        preparation_revision: format!("prepare-revision-{selection}"),
+        report_id: "health-report-1".into(),
+        selection_revision: format!("selection-revision-{selection}"),
+        selected_finding_ids: vec![format!("duplicate_topic:wiki/{selection}.md")],
+        skill: llm_wiki_desktop_lib::models::lint::WikiLintSkillRef::builtin(),
+        authorized_path_hashes: [(format!("wiki/{selection}.md"), Some("a".repeat(64)))]
+            .into_iter()
+            .collect(),
+        expected_git_head: "b".repeat(40),
+    }
+}
+
+#[test]
+fn enqueue_rejects_agent_repair_outside_complete_agent_health_contract() {
+    let temp = tempfile::tempdir().unwrap();
+    let tasks = TaskService::default();
+    let coordinator = WorkflowCoordinator::default();
+
+    let mut wrong_kind = request(temp.path(), "project-a", "v1", "wrong-kind");
+    wrong_kind.execution_options.operation = repair_operation("wrong-kind");
+    assert!(coordinator.enqueue(&tasks, wrong_kind).is_err());
+
+    let mut wrong_scope = request(temp.path(), "project-a", "v1", "wrong-scope");
+    wrong_scope.kind = WorkflowKind::HealthCheck;
+    wrong_scope.scope = WorkflowScope::HealthCheck {
+        mode: HealthCheckMode::LocalQuick,
+    };
+    wrong_scope.execution_options.operation = repair_operation("wrong-scope");
+    assert!(coordinator.enqueue(&tasks, wrong_scope).is_err());
+
+    let mut wrong_route = request(temp.path(), "project-a", "v1", "wrong-route");
+    wrong_route.kind = WorkflowKind::HealthCheck;
+    wrong_route.scope = WorkflowScope::HealthCheck {
+        mode: HealthCheckMode::Complete,
+    };
+    wrong_route.route = None;
+    wrong_route.execution_options.operation = repair_operation("wrong-route");
+    assert!(coordinator.enqueue(&tasks, wrong_route).is_err());
+
+    assert!(tasks.list_workflow_runs().is_empty());
+}
+
+#[test]
+fn operation_subtypes_have_distinct_runner_and_dedup_keys_but_share_one_project_queue() {
+    let temp = tempfile::tempdir().unwrap();
+    let tasks = TaskService::default();
+    let coordinator = WorkflowCoordinator::default();
+    let health_request = |operation: WorkflowOperation| {
+        let mut request = request(temp.path(), "project-a", "v1", "same-baseline");
+        request.kind = WorkflowKind::HealthCheck;
+        request.scope = WorkflowScope::HealthCheck {
+            mode: HealthCheckMode::Complete,
+        };
+        request.execution_options.operation = operation;
+        request
+    };
+
+    let built_in = created(
+        coordinator
+            .enqueue(&tasks, health_request(WorkflowOperation::BuiltIn))
+            .unwrap(),
+    );
+    let repair = created(
+        coordinator
+            .enqueue(&tasks, health_request(repair_operation("a")))
+            .unwrap(),
+    );
+
+    assert_ne!(built_in.fingerprint, repair.fingerprint);
+    assert_eq!(built_in.display_status, WorkflowDisplayStatus::Running);
+    assert_eq!(repair.display_status, WorkflowDisplayStatus::Queued);
+    assert_eq!(repair.queue_position, Some(1));
+    assert_ne!(
+        WorkflowRunnerKey::new(WorkflowKind::HealthCheck, WorkflowOperationKind::BuiltIn),
+        WorkflowRunnerKey::new(
+            WorkflowKind::HealthCheck,
+            WorkflowOperationKind::AgentLintRepair,
+        )
+    );
+}
+
+#[test]
+fn pending_initial_approval_cannot_be_claimed_until_confirmation_is_released() {
+    let temp = tempfile::tempdir().unwrap();
+    let tasks = TaskService::default();
+    let coordinator = WorkflowCoordinator::default();
+    let identity = project_identity(temp.path()).unwrap();
+    let active = created(
+        coordinator
+            .enqueue(&tasks, request(temp.path(), "project-a", "v1", "active"))
+            .unwrap(),
+    );
+    let mut repair_request = request(temp.path(), "project-a", "v2", "repair");
+    repair_request.kind = WorkflowKind::HealthCheck;
+    repair_request.scope = WorkflowScope::HealthCheck {
+        mode: HealthCheckMode::Complete,
+    };
+    repair_request.execution_options.operation = repair_operation("held");
+    let held = created(
+        coordinator
+            .enqueue_for_owner_pending_approval(
+                &tasks,
+                repair_request,
+                &identity.canonical_identity_key,
+                &identity.identity_revision,
+            )
+            .unwrap(),
+    );
+    assert_eq!(held.display_status, WorkflowDisplayStatus::Queued);
+    assert!(held.continuation_required);
+
+    tasks
+        .start_workflow_stage(&active.task_id, "prepare")
+        .unwrap();
+    tasks
+        .complete_workflow_stage(&active.task_id, "prepare")
+        .unwrap();
+    let (_, next) = coordinator
+        .complete_and_claim_next(&tasks, &active.task_id, empty_update_wiki_result())
+        .unwrap();
+    assert!(next.is_none(), "approval-pending repair must remain held");
+    assert_eq!(
+        tasks
+            .get_workflow_run(&held.task_id)
+            .unwrap()
+            .display_status,
+        WorkflowDisplayStatus::Queued
+    );
+
+    let (released, claimed) = coordinator
+        .release_initial_approval_hold_and_claim_next(&tasks, &held.task_id)
+        .unwrap();
+    assert!(!released.continuation_required);
+    assert_eq!(released.display_status, WorkflowDisplayStatus::Running);
+    assert_eq!(claimed.unwrap().task_id, held.task_id);
+}
+
+#[test]
+fn retry_preserves_the_exact_agent_repair_operation() {
+    let temp = tempfile::tempdir().unwrap();
+    let tasks = TaskService::default();
+    let workflows = WorkflowService::default();
+    let mut request = request(temp.path(), "project-a", "v1", "repair-baseline");
+    request.kind = WorkflowKind::HealthCheck;
+    request.scope = WorkflowScope::HealthCheck {
+        mode: HealthCheckMode::Complete,
+    };
+    request.execution_options.operation = repair_operation("retry");
+    let original = created(workflows.coordinator.enqueue(&tasks, request).unwrap());
+    workflows
+        .coordinator
+        .reject_claimed_dispatch(
+            &tasks,
+            &original.task_id,
+            WorkflowDispatchFailure::stale_not_modified("TEST", "test"),
+        )
+        .unwrap();
+    let failed = tasks.get_workflow_run(&original.task_id).unwrap();
+    assert_eq!(
+        failed.error.as_ref().unwrap().project_mutation_state,
+        WorkflowProjectMutationState::NotModified,
+    );
+
+    let retry = created(
+        workflows
+            .coordinator
+            .retry(
+                &tasks,
+                &original.task_id,
+                "project-a".into(),
+                temp.path().to_path_buf(),
+                Some(temp.path().join(".app/tasks")),
+            )
+            .unwrap(),
+    );
+    assert_eq!(retry.operation, original.operation);
+    assert_eq!(retry.kind, WorkflowKind::HealthCheck);
+}
+
+#[test]
+fn agent_repair_retry_is_held_until_its_new_attestation_can_be_written() {
+    let temp = tempfile::tempdir().unwrap();
+    let tasks = TaskService::default();
+    let workflows = WorkflowService::default();
+    let mut original_request = request(temp.path(), "project-a", "v1", "repair-original");
+    original_request.kind = WorkflowKind::HealthCheck;
+    original_request.scope = WorkflowScope::HealthCheck {
+        mode: HealthCheckMode::Complete,
+    };
+    original_request.execution_options.operation = repair_operation("held-retry");
+    let original = created(
+        workflows
+            .coordinator
+            .enqueue(&tasks, original_request)
+            .unwrap(),
+    );
+    workflows
+        .coordinator
+        .reject_claimed_dispatch(
+            &tasks,
+            &original.task_id,
+            WorkflowDispatchFailure::stale_not_modified("TEST", "test"),
+        )
+        .unwrap();
+    let active = created(
+        workflows
+            .coordinator
+            .enqueue(
+                &tasks,
+                request(temp.path(), "project-a", "v2", "active-before-retry"),
+            )
+            .unwrap(),
+    );
+
+    let retry = created(
+        workflows
+            .coordinator
+            .retry_pending_approval(
+                &tasks,
+                &original.task_id,
+                "project-a".into(),
+                temp.path().to_path_buf(),
+                Some(temp.path().join(".app/tasks")),
+            )
+            .unwrap(),
+    );
+    assert_eq!(retry.display_status, WorkflowDisplayStatus::Queued);
+    assert!(retry.continuation_required);
+
+    tasks
+        .start_workflow_stage(&active.task_id, "prepare")
+        .unwrap();
+    tasks
+        .complete_workflow_stage(&active.task_id, "prepare")
+        .unwrap();
+    let (_, next) = workflows
+        .coordinator
+        .complete_and_claim_next(&tasks, &active.task_id, empty_update_wiki_result())
+        .unwrap();
+    assert!(next.is_none(), "retry must remain held before attestation");
+
+    let (released, claimed) = workflows
+        .coordinator
+        .release_initial_approval_hold_and_claim_next(&tasks, &retry.task_id)
+        .unwrap();
+    assert_eq!(released.display_status, WorkflowDisplayStatus::Running);
+    assert_eq!(claimed.unwrap().task_id, retry.task_id);
 }
 
 #[test]
@@ -973,6 +1252,66 @@ fn undo_after_the_active_run_finishes_claims_the_restored_queue_item() {
     );
     assert_eq!(later.display_status, WorkflowDisplayStatus::Queued);
     assert_eq!(later.queue_position, Some(1));
+}
+
+#[test]
+fn repair_undo_hold_prevents_claim_until_authority_is_restored() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = TaskService::default();
+    let coordinator = WorkflowCoordinator::default();
+    let active = created(
+        coordinator
+            .enqueue(&service, request(temp.path(), "p", "v1", "active"))
+            .unwrap(),
+    );
+    let queued = created(
+        coordinator
+            .enqueue(&service, request(temp.path(), "p", "v2", "repair"))
+            .unwrap(),
+    );
+    coordinator.cancel(&service, &queued.task_id).unwrap();
+    service
+        .start_workflow_stage(&active.task_id, "prepare")
+        .unwrap();
+    let (_, next) = coordinator
+        .fail_stage_and_claim_next(
+            &service,
+            &active.task_id,
+            "prepare",
+            llm_wiki_desktop_lib::models::workflow::WorkflowErrorSummary {
+                code: "TEST".into(),
+                message_key: "test".into(),
+                recoverable: true,
+                user_action_required: false,
+                suggested_action: None,
+                project_mutation_state: WorkflowProjectMutationState::Unknown,
+            },
+        )
+        .unwrap();
+    assert!(next.is_none());
+
+    let (held, claimed) = coordinator
+        .undo_cancel_pending_approval(&service, &queued.task_id)
+        .unwrap();
+    assert_eq!(held.display_status, WorkflowDisplayStatus::Queued);
+    assert!(held.continuation_required);
+    assert!(claimed.is_none());
+    assert_eq!(
+        service
+            .get_workflow_run(&queued.task_id)
+            .unwrap()
+            .display_status,
+        WorkflowDisplayStatus::Queued
+    );
+
+    let (released, claimed) = coordinator
+        .release_initial_approval_hold_and_claim_next(&service, &queued.task_id)
+        .unwrap();
+    assert_eq!(released.display_status, WorkflowDisplayStatus::Running);
+    assert_eq!(
+        claimed.as_ref().map(|run| run.task_id.as_str()),
+        Some(queued.task_id.as_str())
+    );
 }
 
 #[test]

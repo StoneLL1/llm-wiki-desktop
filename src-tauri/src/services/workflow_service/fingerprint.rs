@@ -3,8 +3,11 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::models::workflow::{
-    WorkflowExecutionOptions, WorkflowKind, WorkflowRoute, WorkflowScope, WORKFLOW_SCHEMA_VERSION,
+    WorkflowExecutionOptions, WorkflowKind, WorkflowRoute, WorkflowRun, WorkflowScope,
+    WORKFLOW_SCHEMA_VERSION,
 };
+
+const AGENT_LINT_REPAIR_ATTESTATION_VERSION: &str = "agent-lint-repair-attestation-v1";
 
 pub fn canonical_json<T: Serialize>(value: &T) -> Result<String, String> {
     let value = serde_json::to_value(value).map_err(|error| error.to_string())?;
@@ -41,6 +44,7 @@ pub fn workflow_fingerprint(
         canonical_identity_key.to_string(),
         identity_revision.to_string(),
         canonical_json(kind)?,
+        canonical_json(&execution_options.operation)?,
         canonical_json(scope)?,
         canonical_json(&(
             &execution_options.existing_target_hash,
@@ -51,6 +55,35 @@ pub fn workflow_fingerprint(
         baseline_fingerprint.to_string(),
     ];
     Ok(hex_sha256(parts.join("\n").as_bytes()))
+}
+
+pub fn agent_lint_repair_attestation_digest(
+    run: &WorkflowRun,
+    execution_options: &WorkflowExecutionOptions,
+) -> Result<String, String> {
+    let stage_contract = run
+        .stages
+        .iter()
+        .map(|stage| (&stage.id, stage.ordinal, &stage.label_key))
+        .collect::<Vec<_>>();
+    let canonical = canonical_json(&(
+        AGENT_LINT_REPAIR_ATTESTATION_VERSION,
+        run.schema_version,
+        &run.task_id,
+        &run.canonical_identity_key,
+        &run.identity_revision,
+        &run.kind,
+        &run.operation,
+        execution_options,
+        &run.scope,
+        &run.route,
+        &run.fingerprint,
+        &run.baseline_fingerprint,
+        &run.persistence,
+        &run.retry,
+        stage_contract,
+    ))?;
+    Ok(hex_sha256(canonical.as_bytes()))
 }
 
 pub(crate) fn hex_sha256(bytes: &[u8]) -> String {

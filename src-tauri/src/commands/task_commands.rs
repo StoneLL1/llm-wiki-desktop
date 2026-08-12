@@ -115,63 +115,20 @@ pub fn cancel_task(
         let context =
             state.resolve_project_context(&request.project_id, &request.project_root_path)?;
         let next = state.with_workflow_access(&context, |_| {
-            state
-                .workflow_service
-                .coordinator
-                .cancel(&state.task_service, &request.task_id)
-                .map_err(|msg| BackendError::new("TASK_CANCEL_FAILED", &msg, true, false))?;
-            let cancelling = state
-                .task_service
-                .get_workflow_run(&request.task_id)
-                .ok_or_else(|| {
-                    BackendError::new("TASK_NOT_FOUND", "Task not found.", false, false)
-                })?;
-            let Some(action) = cancelling.pending_action.as_ref() else {
-                return Ok(None);
-            };
-            if let Err(error) = state.confirmation_registry.cancel_workflow_binding(
+            crate::commands::workflow_commands::cancel_or_discard_workflow(
+                &state,
                 &context,
-                &cancelling,
-                action,
-            ) {
-                if error.code == "CONFIRMATION_IN_USE" {
-                    return Ok(None);
-                }
-                return Err(error);
-            }
-            if let Err(error) = crate::services::discard_update_wiki_candidate(&request.task_id) {
-                let _ = state.task_service.append_log(
-                    &request.task_id,
-                    crate::tasks::task_model::LogLevel::Warn,
-                    format!(
-                        "Workflow was cancelled, but candidate cleanup needs attention: {}",
-                        error.message
-                    ),
-                );
-            }
-            if let Err(error) =
-                crate::services::discard_generate_content_candidate(&request.task_id)
-            {
-                let _ = state.task_service.append_log(
-                    &request.task_id,
-                    crate::tasks::task_model::LogLevel::Warn,
-                    format!(
-                        "Workflow was cancelled, but generated artifact cleanup needs attention: {}",
-                        error.message
-                    ),
-                );
-            }
-            let (_, next) = state
-                .workflow_service
-                .coordinator
-                .finish_cancelled_and_claim_next(&state.task_service, &request.task_id)
-                .map_err(|msg| BackendError::new("TASK_CANCEL_FAILED", &msg, true, false))?;
-            Ok(next)
+                &request.task_id,
+                false,
+            )
+            .map(|(_, next)| next)
         })?;
         if let Some(next) = next {
-            state
-                .workflow_service
-                .dispatch_claimed_run(&state.task_service, &next)?;
+            state.workflow_service.dispatch_claimed_run_with_settings(
+                &state.task_service,
+                &state.settings_service,
+                &next,
+            )?;
         }
         return state
             .task_service
@@ -287,9 +244,11 @@ fn set_active_project_for_state(
                 activate_project_with_access(state, &context, access)
             })?;
             for next in next_runs {
-                state
-                    .workflow_service
-                    .dispatch_claimed_run(&state.task_service, &next)?;
+                state.workflow_service.dispatch_claimed_run_with_settings(
+                    &state.task_service,
+                    &state.settings_service,
+                    &next,
+                )?;
             }
             Ok(result)
         }
@@ -471,6 +430,7 @@ fn continue_queued_workflows_for_state(
                 &context,
                 queued_run,
                 access.clone(),
+                super::lint_commands::AgentLintRepairReplayIntent::Continue,
             )?;
             if let Err(error) = replay.eligibility {
                 if eligibility_error.is_none() {
@@ -501,9 +461,11 @@ fn continue_queued_workflows_for_state(
         Ok((runs, claimed))
     })?;
     if let Some(run) = claimed {
-        state
-            .workflow_service
-            .dispatch_claimed_run(&state.task_service, &run)?;
+        state.workflow_service.dispatch_claimed_run_with_settings(
+            &state.task_service,
+            &state.settings_service,
+            &run,
+        )?;
     }
     Ok(WorkflowRunPage {
         runs,

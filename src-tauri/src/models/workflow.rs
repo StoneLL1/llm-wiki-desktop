@@ -4,13 +4,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::agent::AgentKind;
 use crate::models::confirmation::{PendingActionType, RiskLevel};
+use crate::models::lint::{AgentLintRepairOutcome, AgentLintRepairRoundSummary, WikiLintSkillRef};
 use crate::models::llm::LlmProviderKind;
 use crate::models::task::TaskStatus;
 
-pub const WORKFLOW_SCHEMA_VERSION: u32 = 1;
+pub const WORKFLOW_SCHEMA_VERSION: u32 = 2;
 
 fn workflow_schema_version() -> u32 {
     WORKFLOW_SCHEMA_VERSION
+}
+
+fn legacy_workflow_schema_version() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -19,6 +24,121 @@ pub enum WorkflowKind {
     UpdateWiki,
     HealthCheck,
     GenerateContent,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowOperationKind {
+    #[default]
+    BuiltIn,
+    AgentLintRepair,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum WorkflowOperation {
+    #[default]
+    BuiltIn,
+    AgentLintRepair {
+        preparation_id: String,
+        preparation_revision: String,
+        report_id: String,
+        selection_revision: String,
+        selected_finding_ids: Vec<String>,
+        skill: WikiLintSkillRef,
+        authorized_path_hashes: BTreeMap<String, Option<String>>,
+        expected_git_head: String,
+    },
+}
+
+impl WorkflowOperation {
+    pub fn kind(&self) -> WorkflowOperationKind {
+        match self {
+            Self::BuiltIn => WorkflowOperationKind::BuiltIn,
+            Self::AgentLintRepair { .. } => WorkflowOperationKind::AgentLintRepair,
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        let Self::AgentLintRepair {
+            preparation_id,
+            preparation_revision,
+            report_id,
+            selection_revision,
+            selected_finding_ids,
+            skill,
+            authorized_path_hashes,
+            expected_git_head,
+        } = self
+        else {
+            return Ok(());
+        };
+        for (label, value) in [
+            ("preparationId", preparation_id),
+            ("preparationRevision", preparation_revision),
+            ("reportId", report_id),
+            ("selectionRevision", selection_revision),
+        ] {
+            if value.trim().is_empty() || value.len() > 256 {
+                return Err(format!("{label} is not a bounded operation fact"));
+            }
+        }
+        if selected_finding_ids.is_empty()
+            || selected_finding_ids.len() > 100
+            || selected_finding_ids
+                .iter()
+                .any(|value| value.trim().is_empty())
+        {
+            return Err("Agent lint repair requires 1..=100 selected finding ids".into());
+        }
+        let mut sorted_findings = selected_finding_ids.clone();
+        sorted_findings.sort();
+        if sorted_findings != *selected_finding_ids
+            || sorted_findings.windows(2).any(|pair| pair[0] == pair[1])
+        {
+            return Err("Agent lint repair finding ids must be sorted and unique".into());
+        }
+        if !skill.is_builtin() {
+            return Err("Agent lint repair must use the pinned built-in Skill".into());
+        }
+        if authorized_path_hashes.is_empty()
+            || authorized_path_hashes.len() > 256
+            || authorized_path_hashes.iter().any(|(path, hash)| {
+                path.trim().is_empty()
+                    || path.len() > 1_024
+                    || hash.as_ref().is_some_and(|value| {
+                        value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+            })
+        {
+            return Err("Agent lint repair authorized path hashes are invalid".into());
+        }
+        if !(7..=64).contains(&expected_git_head.len())
+            || !expected_git_head
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("Agent lint repair expected Git HEAD is invalid".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WorkflowRunnerKey {
+    pub kind: WorkflowKind,
+    pub operation: WorkflowOperationKind,
+}
+
+impl WorkflowRunnerKey {
+    pub fn new(kind: WorkflowKind, operation: WorkflowOperationKind) -> Self {
+        Self { kind, operation }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -138,6 +258,8 @@ pub enum WorkflowScope {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkflowExecutionOptions {
     pub preparation_revision: String,
+    #[serde(default)]
+    pub operation: WorkflowOperation,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preparation_fingerprint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -151,6 +273,7 @@ pub struct WorkflowExecutionOptions {
 impl WorkflowExecutionOptions {
     pub fn validate(&self) -> Result<(), String> {
         validate_revision("preparationRevision", &self.preparation_revision)?;
+        self.operation.validate()?;
         if let Some(fingerprint) = self.preparation_fingerprint.as_deref() {
             validate_revision("preparationFingerprint", fingerprint)?;
         }
@@ -167,6 +290,36 @@ impl WorkflowExecutionOptions {
         }
         Ok(())
     }
+}
+
+pub(crate) fn validate_workflow_execution_contract(
+    kind: &WorkflowKind,
+    scope: &WorkflowScope,
+    route: Option<&WorkflowRoute>,
+    execution_options: &WorkflowExecutionOptions,
+) -> Result<(), String> {
+    execution_options.validate()?;
+    if !matches!(
+        execution_options.operation,
+        WorkflowOperation::AgentLintRepair { .. }
+    ) {
+        return Ok(());
+    }
+    if kind != &WorkflowKind::HealthCheck {
+        return Err("Agent lint repair must remain a Health Check operation".into());
+    }
+    if !matches!(
+        scope,
+        WorkflowScope::HealthCheck {
+            mode: HealthCheckMode::Complete
+        }
+    ) {
+        return Err("Agent lint repair requires Complete Health scope".into());
+    }
+    if !matches!(route, Some(WorkflowRoute::Agent { .. })) {
+        return Err("Agent lint repair requires an Agent route".into());
+    }
+    Ok(())
 }
 
 fn validate_revision(label: &str, value: &str) -> Result<(), String> {
@@ -464,6 +617,19 @@ pub enum WorkflowResult {
         artifact_count: Option<u64>,
         validation_passed: bool,
     },
+    AgentLintRepair {
+        outcome: AgentLintRepairOutcome,
+        resolved_finding_ids: Vec<String>,
+        unresolved_finding_ids: Vec<String>,
+        introduced_finding_ids: Vec<String>,
+        skipped_finding_ids: Vec<String>,
+        rounds: Vec<AgentLintRepairRoundSummary>,
+        affected_paths: Vec<String>,
+        checkpoint_hash: Option<String>,
+        final_commit: Option<String>,
+        diff_available: bool,
+        rollback_available: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -505,6 +671,8 @@ pub struct WorkflowRun {
     pub canonical_identity_key: String,
     pub identity_revision: String,
     pub kind: WorkflowKind,
+    #[serde(default)]
+    pub operation: WorkflowOperation,
     pub display_status: WorkflowDisplayStatus,
     pub scope: WorkflowScope,
     pub route: Option<WorkflowRoute>,
@@ -587,6 +755,7 @@ pub struct WorkflowArtifactContextSummary {
 pub struct WorkflowQueueContextItem {
     pub task_id: String,
     pub kind: WorkflowKind,
+    pub operation: WorkflowOperation,
     pub queue_position: Option<u32>,
     pub started_at: String,
 }
@@ -657,6 +826,12 @@ pub enum WorkflowRunOutcomeSummary {
         artifact_count: u64,
         validation_passed: bool,
     },
+    AgentLintRepair {
+        outcome: AgentLintRepairOutcome,
+        resolved_count: u64,
+        unresolved_count: u64,
+        introduced_count: u64,
+    },
 }
 
 impl From<&WorkflowResult> for WorkflowRunOutcomeSummary {
@@ -693,6 +868,18 @@ impl From<&WorkflowResult> for WorkflowRunOutcomeSummary {
                 artifact_count: artifact_count.unwrap_or(output_paths.len() as u64),
                 validation_passed: *validation_passed,
             },
+            WorkflowResult::AgentLintRepair {
+                outcome,
+                resolved_finding_ids,
+                unresolved_finding_ids,
+                introduced_finding_ids,
+                ..
+            } => Self::AgentLintRepair {
+                outcome: *outcome,
+                resolved_count: resolved_finding_ids.len() as u64,
+                unresolved_count: unresolved_finding_ids.len() as u64,
+                introduced_count: introduced_finding_ids.len() as u64,
+            },
         }
     }
 }
@@ -707,6 +894,7 @@ pub struct WorkflowRunSummary {
     pub canonical_identity_key: String,
     pub identity_revision: String,
     pub kind: WorkflowKind,
+    pub operation: WorkflowOperation,
     pub display_status: WorkflowDisplayStatus,
     pub retry: Option<WorkflowRetryLink>,
     #[serde(default)]
@@ -725,6 +913,7 @@ impl From<&WorkflowRun> for WorkflowRunSummary {
             canonical_identity_key: run.canonical_identity_key.clone(),
             identity_revision: run.identity_revision.clone(),
             kind: run.kind.clone(),
+            operation: run.operation.clone(),
             display_status: run.display_status.clone(),
             retry: run.retry.clone(),
             outcome: run.result.as_ref().map(WorkflowRunOutcomeSummary::from),
@@ -741,7 +930,7 @@ impl From<&WorkflowRun> for WorkflowRunSummary {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowExecutionState {
-    #[serde(default = "workflow_schema_version")]
+    #[serde(default = "legacy_workflow_schema_version")]
     pub schema_version: u32,
     pub canonical_identity_key: String,
     pub identity_revision: String,
@@ -784,6 +973,7 @@ impl WorkflowExecutionState {
             canonical_identity_key: self.canonical_identity_key.clone(),
             identity_revision: self.identity_revision.clone(),
             kind: self.kind.clone(),
+            operation: self.execution_options.operation.clone(),
             display_status: WorkflowDisplayStatus::from(&task.status),
             scope: self.scope.clone(),
             route: self.route.clone(),

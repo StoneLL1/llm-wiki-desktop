@@ -214,6 +214,7 @@ impl Fixture {
                     baseline_fingerprint: baseline.fingerprint,
                     execution_options: WorkflowExecutionOptions {
                         preparation_revision: "generate-test-v1".into(),
+                        operation: Default::default(),
                         preparation_fingerprint: None,
                         existing_target_hash,
                         restricted_content_acknowledgement_revision: restricted_ack,

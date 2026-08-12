@@ -11,6 +11,7 @@ function run(taskId: string, updatedAt: string): WorkflowRun {
     canonicalIdentityKey: "identity-a",
     identityRevision: "revision-a",
     kind: "health_check",
+    operation: { kind: "built_in" },
     displayStatus: "completed",
     scope: { kind: "health_check", mode: "local_quick" },
     route: { kind: "local", routeRevision: "local-1" },

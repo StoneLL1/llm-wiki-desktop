@@ -40,8 +40,12 @@ fn reject_workflow_dispatch(
     };
     match state
         .workflow_service
-        .reject_claimed_dispatch(&state.task_service, task_id, failure)
-    {
+        .reject_claimed_dispatch_with_settings(
+            &state.task_service,
+            &state.settings_service,
+            task_id,
+            failure,
+        ) {
         Ok(_) => {
             if let Err(log_error) =
                 state
@@ -57,10 +61,11 @@ fn reject_workflow_dispatch(
 
 #[cfg(feature = "gui")]
 fn dispatch_claimed_next(state: &app_state::AppState, next: &models::workflow::WorkflowRun) {
-    if let Err(error) = state
-        .workflow_service
-        .dispatch_claimed_run(&state.task_service, next)
-    {
+    if let Err(error) = state.workflow_service.dispatch_claimed_run_with_settings(
+        &state.task_service,
+        &state.settings_service,
+        next,
+    ) {
         observe_workflow_adapter_error(&next.task_id, "next-dispatch", &error.message);
         if let Err(log_error) = state.task_service.append_log(
             &next.task_id,
@@ -669,6 +674,9 @@ pub fn run() {
             commands::chat_commands::rollback_last_chat_convenience_edit,
             commands::lint_commands::run_local_lint,
             commands::lint_commands::start_deep_lint,
+            commands::lint_commands::prepare_agent_lint_repair,
+            commands::lint_commands::confirm_agent_lint_repair_start,
+            commands::lint_commands::cancel_agent_lint_repair_preparation,
             commands::lint_commands::get_deep_lint_report,
             commands::lint_commands::list_lint_history,
             commands::lint_commands::read_lint_history_report,

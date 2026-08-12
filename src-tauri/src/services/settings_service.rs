@@ -7,14 +7,17 @@ use crate::models::import_v2_agent::AgentAssistancePolicy;
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::paths::ProjectContext;
 use crate::models::settings::{
-    ChatConvenienceAuthorization, CloseBehavior, GlobalSettingsFile, GlobalUiPreferences,
-    ProjectSettingsFile, Settings,
+    AgentLintRepairAttestation, AgentLintRepairAttestationLifecycle, ChatConvenienceAuthorization,
+    CloseBehavior, GlobalSettingsFile, GlobalUiPreferences, ProjectSettingsFile, Settings,
 };
 use crate::services::{FileStore, SecretService};
 
 pub struct SettingsService {
     config_dir: PathBuf,
 }
+
+const MAX_AGENT_LINT_REPAIR_ATTESTATIONS: usize = 256;
+const AGENT_LINT_REPAIR_CANCEL_TOMBSTONE_MINUTES: i64 = 15;
 
 impl Default for SettingsService {
     fn default() -> Self {
@@ -63,6 +66,7 @@ impl SettingsService {
         let mut global = settings.to_global_file();
         let existing_global = self.read_global_settings()?;
         global.chat_convenience_authorizations = existing_global.chat_convenience_authorizations;
+        global.agent_lint_repair_attestations = existing_global.agent_lint_repair_attestations;
         global.remote_provider_disclosure_revision =
             existing_global.remote_provider_disclosure_revision;
         store.write_json_atomic_absolute(&self.global_settings_path(), &global)?;
@@ -324,6 +328,188 @@ impl SettingsService {
         store.write_json_atomic_absolute(&self.global_settings_path(), &settings)
     }
 
+    pub fn record_agent_lint_repair_attestation(
+        &self,
+        canonical_identity_key: &str,
+        identity_revision: &str,
+        task_id: &str,
+        operation_digest: &str,
+    ) -> Result<AgentLintRepairAttestation, BackendError> {
+        let _guard = self.lock_global_settings()?;
+        let mut settings = self.read_global_settings()?;
+        if let Some(existing) = settings
+            .agent_lint_repair_attestations
+            .iter()
+            .find(|item| item.task_id == task_id)
+        {
+            if existing.canonical_identity_key == canonical_identity_key
+                && existing.identity_revision == identity_revision
+                && existing.operation_digest == operation_digest
+                && existing.lifecycle == AgentLintRepairAttestationLifecycle::QueuedAuthorized
+            {
+                return Ok(existing.clone());
+            }
+            return Err(BackendError::new(
+                "LINT_REPAIR_ATTESTATION_STATE_INVALID",
+                "The Agent lint repair approval was cancelled or changed before it could be authorized.",
+                true,
+                true,
+            ));
+        }
+        let attestation = AgentLintRepairAttestation {
+            canonical_identity_key: canonical_identity_key.to_string(),
+            identity_revision: identity_revision.to_string(),
+            task_id: task_id.to_string(),
+            operation_digest: operation_digest.to_string(),
+            confirmed_at: chrono::Utc::now().to_rfc3339(),
+            lifecycle: AgentLintRepairAttestationLifecycle::QueuedAuthorized,
+        };
+        settings
+            .agent_lint_repair_attestations
+            .push(attestation.clone());
+        prune_agent_lint_repair_attestations(
+            &mut settings.agent_lint_repair_attestations,
+            task_id,
+        )?;
+        let store = FileStore;
+        store.ensure_absolute_dir(&self.config_dir)?;
+        store.write_json_atomic_absolute(&self.global_settings_path(), &settings)?;
+        Ok(attestation)
+    }
+
+    /// Persist a fail-closed cancellation receipt for an exact repair run.
+    ///
+    /// This also creates a tombstone when initial confirmation has created the
+    /// held task but has not written its authorization receipt yet. A later
+    /// authorization attempt therefore cannot resurrect a cancellation that
+    /// won the race.
+    pub fn cancel_agent_lint_repair_attestation(
+        &self,
+        canonical_identity_key: &str,
+        identity_revision: &str,
+        task_id: &str,
+        operation_digest: &str,
+    ) -> Result<(), BackendError> {
+        let _guard = self.lock_global_settings()?;
+        let mut settings = self.read_global_settings()?;
+        if let Some(existing) = settings
+            .agent_lint_repair_attestations
+            .iter_mut()
+            .find(|item| item.task_id == task_id)
+        {
+            if existing.canonical_identity_key != canonical_identity_key
+                || existing.identity_revision != identity_revision
+                || existing.operation_digest != operation_digest
+            {
+                return Err(BackendError::new(
+                    "LINT_REPAIR_ATTESTATION_REQUIRED",
+                    "The Agent lint repair cancellation does not match its app-owned approval attestation.",
+                    true,
+                    true,
+                ));
+            }
+            if existing.lifecycle == AgentLintRepairAttestationLifecycle::Completed {
+                return Err(BackendError::new(
+                    "LINT_REPAIR_ATTESTATION_STATE_INVALID",
+                    "A completed Agent lint repair cannot be cancelled.",
+                    true,
+                    true,
+                ));
+            }
+            existing.lifecycle = AgentLintRepairAttestationLifecycle::Cancelled;
+            existing.confirmed_at = chrono::Utc::now().to_rfc3339();
+        } else {
+            settings
+                .agent_lint_repair_attestations
+                .push(AgentLintRepairAttestation {
+                    canonical_identity_key: canonical_identity_key.to_string(),
+                    identity_revision: identity_revision.to_string(),
+                    task_id: task_id.to_string(),
+                    operation_digest: operation_digest.to_string(),
+                    confirmed_at: chrono::Utc::now().to_rfc3339(),
+                    lifecycle: AgentLintRepairAttestationLifecycle::Cancelled,
+                });
+            prune_agent_lint_repair_attestations(
+                &mut settings.agent_lint_repair_attestations,
+                task_id,
+            )?;
+        }
+        let store = FileStore;
+        store.ensure_absolute_dir(&self.config_dir)?;
+        store.write_json_atomic_absolute(&self.global_settings_path(), &settings)
+    }
+
+    pub fn has_agent_lint_repair_attestation(
+        &self,
+        canonical_identity_key: &str,
+        identity_revision: &str,
+        task_id: &str,
+        operation_digest: &str,
+        allowed_lifecycles: &[AgentLintRepairAttestationLifecycle],
+    ) -> Result<bool, BackendError> {
+        Ok(self
+            .read_global_settings()?
+            .agent_lint_repair_attestations
+            .iter()
+            .any(|item| {
+                item.canonical_identity_key == canonical_identity_key
+                    && item.identity_revision == identity_revision
+                    && item.task_id == task_id
+                    && item.operation_digest == operation_digest
+                    && allowed_lifecycles.contains(&item.lifecycle)
+            }))
+    }
+
+    pub fn transition_agent_lint_repair_attestation(
+        &self,
+        task_id: &str,
+        operation_digest: &str,
+        from: &[AgentLintRepairAttestationLifecycle],
+        to: AgentLintRepairAttestationLifecycle,
+    ) -> Result<(), BackendError> {
+        let _guard = self.lock_global_settings()?;
+        let mut settings = self.read_global_settings()?;
+        let item = settings
+            .agent_lint_repair_attestations
+            .iter_mut()
+            .find(|item| item.task_id == task_id && item.operation_digest == operation_digest)
+            .ok_or_else(|| {
+                BackendError::new(
+                    "LINT_REPAIR_ATTESTATION_REQUIRED",
+                    "The Agent lint repair has no exact app-owned approval attestation.",
+                    true,
+                    true,
+                )
+            })?;
+        if !from.contains(&item.lifecycle) {
+            return Err(BackendError::new(
+                "LINT_REPAIR_ATTESTATION_STATE_INVALID",
+                "The Agent lint repair approval is no longer dispatchable.",
+                true,
+                true,
+            ));
+        }
+        item.lifecycle = to;
+        let store = FileStore;
+        store.ensure_absolute_dir(&self.config_dir)?;
+        store.write_json_atomic_absolute(&self.global_settings_path(), &settings)
+    }
+
+    pub fn revoke_agent_lint_repair_attestation(&self, task_id: &str) -> Result<(), BackendError> {
+        let _guard = self.lock_global_settings()?;
+        let mut settings = self.read_global_settings()?;
+        let old_len = settings.agent_lint_repair_attestations.len();
+        settings
+            .agent_lint_repair_attestations
+            .retain(|item| item.task_id != task_id);
+        if old_len == settings.agent_lint_repair_attestations.len() {
+            return Ok(());
+        }
+        let store = FileStore;
+        store.ensure_absolute_dir(&self.config_dir)?;
+        store.write_json_atomic_absolute(&self.global_settings_path(), &settings)
+    }
+
     fn global_settings_path(&self) -> PathBuf {
         self.config_dir.join("settings.json")
     }
@@ -338,6 +524,40 @@ impl SettingsService {
             )
         })
     }
+}
+
+fn prune_agent_lint_repair_attestations(
+    attestations: &mut Vec<AgentLintRepairAttestation>,
+    protected_task_id: &str,
+) -> Result<(), BackendError> {
+    let retirement_cutoff =
+        chrono::Utc::now() - chrono::Duration::minutes(AGENT_LINT_REPAIR_CANCEL_TOMBSTONE_MINUTES);
+    attestations.retain(|item| {
+        if item.task_id == protected_task_id
+            || item.lifecycle != AgentLintRepairAttestationLifecycle::Cancelled
+        {
+            return true;
+        }
+        item.confirmed_at
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .map(|cancelled_at| cancelled_at > retirement_cutoff)
+            .unwrap_or(true)
+    });
+    while attestations.len() > MAX_AGENT_LINT_REPAIR_ATTESTATIONS {
+        let Some(index) = attestations.iter().position(|item| {
+            item.task_id != protected_task_id
+                && item.lifecycle != AgentLintRepairAttestationLifecycle::Cancelled
+        }) else {
+            return Err(BackendError::new(
+                "LINT_REPAIR_ATTESTATION_CAPACITY_REACHED",
+                "Cancelled Agent lint repair approvals fill the bounded app-owned receipt store.",
+                true,
+                true,
+            ));
+        };
+        attestations.remove(index);
+    }
+    Ok(())
 }
 
 fn project_state_path<'a>(
@@ -396,6 +616,7 @@ mod tests {
     use crate::models::agent::{AgentConfig, AgentKind};
     use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
     use crate::models::paths::ProjectContext;
+    use crate::models::settings::AgentLintRepairAttestationLifecycle;
     use crate::models::settings::{
         CloseBehavior, GlobalSettingsFile, GlobalUiPreferences, Settings, ThemePreference,
     };
@@ -670,6 +891,270 @@ mod tests {
                 .unwrap()
                 .enabled
         );
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn repair_attestation_is_global_exact_and_survives_settings_save() {
+        let (context, root, config_dir) = tmp_paths("repair-attestation");
+        let service = SettingsService::with_config_dir(config_dir.clone());
+
+        service
+            .record_agent_lint_repair_attestation(
+                "identity-key",
+                "identity-revision",
+                "task-1",
+                "operation-digest",
+            )
+            .unwrap();
+        assert!(service
+            .has_agent_lint_repair_attestation(
+                "identity-key",
+                "identity-revision",
+                "task-1",
+                "operation-digest",
+                &[AgentLintRepairAttestationLifecycle::QueuedAuthorized],
+            )
+            .unwrap());
+        assert!(!service
+            .has_agent_lint_repair_attestation(
+                "identity-key",
+                "identity-revision",
+                "task-1",
+                "forged-digest",
+                &[AgentLintRepairAttestationLifecycle::QueuedAuthorized],
+            )
+            .unwrap());
+        service
+            .transition_agent_lint_repair_attestation(
+                "task-1",
+                "operation-digest",
+                &[AgentLintRepairAttestationLifecycle::QueuedAuthorized],
+                AgentLintRepairAttestationLifecycle::Dispatched,
+            )
+            .unwrap();
+        assert!(!service
+            .has_agent_lint_repair_attestation(
+                "identity-key",
+                "identity-revision",
+                "task-1",
+                "operation-digest",
+                &[AgentLintRepairAttestationLifecycle::QueuedAuthorized],
+            )
+            .unwrap());
+        assert!(service
+            .has_agent_lint_repair_attestation(
+                "identity-key",
+                "identity-revision",
+                "task-1",
+                "operation-digest",
+                &[AgentLintRepairAttestationLifecycle::Dispatched],
+            )
+            .unwrap());
+
+        service
+            .save_settings(&context, &service.read_settings(&context).unwrap())
+            .unwrap();
+        assert!(service
+            .has_agent_lint_repair_attestation(
+                "identity-key",
+                "identity-revision",
+                "task-1",
+                "operation-digest",
+                &[AgentLintRepairAttestationLifecycle::Dispatched],
+            )
+            .unwrap());
+        let project: serde_json::Value =
+            FileStore.read_json(&context, ".app/settings.json").unwrap();
+        assert!(project.get("agentLintRepairAttestations").is_none());
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn repair_cancellation_tombstone_blocks_late_authorization_and_supports_exact_undo() {
+        let (_context, root, config_dir) = tmp_paths("repair-cancel-tombstone");
+        let service = SettingsService::with_config_dir(config_dir.clone());
+
+        service
+            .cancel_agent_lint_repair_attestation(
+                "identity-key",
+                "identity-revision",
+                "task-1",
+                "operation-digest",
+            )
+            .unwrap();
+        assert_eq!(
+            service
+                .record_agent_lint_repair_attestation(
+                    "identity-key",
+                    "identity-revision",
+                    "task-1",
+                    "operation-digest",
+                )
+                .unwrap_err()
+                .code,
+            "LINT_REPAIR_ATTESTATION_STATE_INVALID"
+        );
+        assert!(service
+            .has_agent_lint_repair_attestation(
+                "identity-key",
+                "identity-revision",
+                "task-1",
+                "operation-digest",
+                &[AgentLintRepairAttestationLifecycle::Cancelled],
+            )
+            .unwrap());
+
+        service
+            .transition_agent_lint_repair_attestation(
+                "task-1",
+                "operation-digest",
+                &[AgentLintRepairAttestationLifecycle::Cancelled],
+                AgentLintRepairAttestationLifecycle::QueuedAuthorized,
+            )
+            .unwrap();
+        assert!(service
+            .has_agent_lint_repair_attestation(
+                "identity-key",
+                "identity-revision",
+                "task-1",
+                "operation-digest",
+                &[AgentLintRepairAttestationLifecycle::QueuedAuthorized],
+            )
+            .unwrap());
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn repair_cancellation_tombstone_survives_bounded_receipt_churn() {
+        let (_context, root, config_dir) = tmp_paths("repair-cancel-capacity");
+        let service = SettingsService::with_config_dir(config_dir.clone());
+
+        service
+            .cancel_agent_lint_repair_attestation(
+                "identity-key",
+                "identity-revision",
+                "cancelled-task",
+                "cancelled-digest",
+            )
+            .unwrap();
+        for index in 0..super::MAX_AGENT_LINT_REPAIR_ATTESTATIONS {
+            service
+                .record_agent_lint_repair_attestation(
+                    "identity-key",
+                    "identity-revision",
+                    &format!("task-{index}"),
+                    &format!("digest-{index}"),
+                )
+                .unwrap();
+        }
+
+        assert!(service
+            .has_agent_lint_repair_attestation(
+                "identity-key",
+                "identity-revision",
+                "cancelled-task",
+                "cancelled-digest",
+                &[AgentLintRepairAttestationLifecycle::Cancelled],
+            )
+            .unwrap());
+        assert_eq!(
+            service
+                .record_agent_lint_repair_attestation(
+                    "identity-key",
+                    "identity-revision",
+                    "cancelled-task",
+                    "cancelled-digest",
+                )
+                .unwrap_err()
+                .code,
+            "LINT_REPAIR_ATTESTATION_STATE_INVALID"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn fresh_cancelled_receipt_capacity_fails_closed_then_expired_receipts_retire() {
+        let (_context, root, config_dir) = tmp_paths("repair-cancel-retirement");
+        let service = SettingsService::with_config_dir(config_dir.clone());
+        let mut settings = GlobalSettingsFile::default();
+        let fresh = chrono::Utc::now().to_rfc3339();
+        for index in 0..super::MAX_AGENT_LINT_REPAIR_ATTESTATIONS {
+            settings.agent_lint_repair_attestations.push(
+                crate::models::settings::AgentLintRepairAttestation {
+                    canonical_identity_key: "identity-key".into(),
+                    identity_revision: "identity-revision".into(),
+                    task_id: format!("cancelled-{index}"),
+                    operation_digest: format!("cancelled-digest-{index}"),
+                    confirmed_at: fresh.clone(),
+                    lifecycle: AgentLintRepairAttestationLifecycle::Cancelled,
+                },
+            );
+        }
+        FileStore
+            .write_json_atomic_absolute(&service.global_settings_path(), &settings)
+            .unwrap();
+
+        assert_eq!(
+            service
+                .record_agent_lint_repair_attestation(
+                    "identity-key",
+                    "identity-revision",
+                    "new-task",
+                    "new-digest",
+                )
+                .unwrap_err()
+                .code,
+            "LINT_REPAIR_ATTESTATION_CAPACITY_REACHED"
+        );
+        assert!(!service
+            .has_agent_lint_repair_attestation(
+                "identity-key",
+                "identity-revision",
+                "new-task",
+                "new-digest",
+                &[AgentLintRepairAttestationLifecycle::QueuedAuthorized],
+            )
+            .unwrap());
+
+        settings
+            .agent_lint_repair_attestations
+            .iter_mut()
+            .for_each(|item| {
+                item.confirmed_at = (chrono::Utc::now()
+                    - chrono::Duration::minutes(
+                        super::AGENT_LINT_REPAIR_CANCEL_TOMBSTONE_MINUTES + 1,
+                    ))
+                .to_rfc3339();
+            });
+        FileStore
+            .write_json_atomic_absolute(&service.global_settings_path(), &settings)
+            .unwrap();
+        service
+            .record_agent_lint_repair_attestation(
+                "identity-key",
+                "identity-revision",
+                "new-task",
+                "new-digest",
+            )
+            .unwrap();
+        assert!(service
+            .has_agent_lint_repair_attestation(
+                "identity-key",
+                "identity-revision",
+                "new-task",
+                "new-digest",
+                &[AgentLintRepairAttestationLifecycle::QueuedAuthorized],
+            )
+            .unwrap());
 
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(config_dir).unwrap();

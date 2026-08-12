@@ -2,20 +2,22 @@ use llm_wiki_desktop_lib::models::agent::AgentKind;
 use llm_wiki_desktop_lib::models::confirmation::{PendingActionType, RiskLevel};
 use llm_wiki_desktop_lib::models::lint::{
     AgentLintRepairDeclaredChangeOperation, AgentLintRepairFindingStatus, AgentLintRepairOperation,
-    AgentLintRepairRoundOutput, WikiLintSkillRef, WIKI_LINT_SCHEMA_VERSION, WIKI_LINT_SKILL_ID,
-    WIKI_LINT_SKILL_SHA256, WIKI_LINT_SKILL_VERSION,
+    AgentLintRepairOutcome, AgentLintRepairRoundOutput, AgentLintRepairRoundSummary,
+    WikiLintSkillRef, WIKI_LINT_SCHEMA_VERSION, WIKI_LINT_SKILL_ID, WIKI_LINT_SKILL_SHA256,
+    WIKI_LINT_SKILL_VERSION,
 };
 use llm_wiki_desktop_lib::models::llm::LlmProviderKind;
 use llm_wiki_desktop_lib::models::task::{BackendTask, TaskStatus};
 use llm_wiki_desktop_lib::models::workflow::{
     HealthCheckMode, UpdateWikiMode, WorkflowArtifactType, WorkflowBaselineSummary,
     WorkflowCandidateReference, WorkflowCountProgress, WorkflowDisplayStatus, WorkflowErrorSummary,
-    WorkflowFilesystemAccess, WorkflowGitPolicy, WorkflowGitState, WorkflowKind,
-    WorkflowOutputSummary, WorkflowPendingAction, WorkflowPersistenceMode, WorkflowPreparation,
-    WorkflowPrerequisite, WorkflowPrerequisiteAction, WorkflowProjectAccessSummary,
-    WorkflowProjectMutationState, WorkflowProjectTrust, WorkflowRetryLink, WorkflowRoute,
-    WorkflowRouteSelection, WorkflowRun, WorkflowScope, WorkflowSourceVersionRef, WorkflowStage,
-    WorkflowStageStatus, WorkflowStartOutcome, WORKFLOW_SCHEMA_VERSION,
+    WorkflowFilesystemAccess, WorkflowGitPolicy, WorkflowGitState, WorkflowKind, WorkflowOperation,
+    WorkflowOperationKind, WorkflowOutputSummary, WorkflowPendingAction, WorkflowPersistenceMode,
+    WorkflowPreparation, WorkflowPrerequisite, WorkflowPrerequisiteAction,
+    WorkflowProjectAccessSummary, WorkflowProjectMutationState, WorkflowProjectTrust,
+    WorkflowRetryLink, WorkflowRoute, WorkflowRouteSelection, WorkflowRun, WorkflowScope,
+    WorkflowSourceVersionRef, WorkflowStage, WorkflowStageStatus, WorkflowStartOutcome,
+    WORKFLOW_SCHEMA_VERSION,
 };
 use llm_wiki_desktop_lib::tasks::TaskService;
 use serde_json::{json, Value};
@@ -137,6 +139,7 @@ fn sample_run() -> WorkflowRun {
         canonical_identity_key: "identity-1".into(),
         identity_revision: "revision-1".into(),
         kind: WorkflowKind::UpdateWiki,
+        operation: WorkflowOperation::BuiltIn,
         display_status: WorkflowDisplayStatus::WaitingForConfirmation,
         scope: update_scope(),
         route: Some(WorkflowRoute::Byok {
@@ -182,8 +185,8 @@ fn sample_run() -> WorkflowRun {
 }
 
 #[test]
-fn workflow_contract_uses_schema_v1_and_stable_wire_casing() {
-    assert_eq!(WORKFLOW_SCHEMA_VERSION, 1);
+fn workflow_contract_uses_schema_v2_and_stable_wire_casing() {
+    assert_eq!(WORKFLOW_SCHEMA_VERSION, 2);
     assert_eq!(
         serde_json::to_string(&WorkflowKind::GenerateContent).unwrap(),
         "\"generate_content\""
@@ -194,7 +197,8 @@ fn workflow_contract_uses_schema_v1_and_stable_wire_casing() {
     );
 
     let value = serde_json::to_value(sample_run()).unwrap();
-    assert_eq!(value["schemaVersion"], 1);
+    assert_eq!(value["schemaVersion"], 2);
+    assert_eq!(value["operation"]["kind"], "built_in");
     assert_eq!(value["displayStatus"], "waiting_for_confirmation");
     assert_eq!(value["cancellable"], true);
     assert!(value["undoCancelUntil"].is_null());
@@ -216,13 +220,64 @@ fn workflow_contract_uses_schema_v1_and_stable_wire_casing() {
 }
 
 #[test]
-fn agent_lint_repair_operation_and_commands_remain_unreachable_before_h4a() {
-    let workflow_model = include_str!("../src/models/workflow.rs");
-    let command_registry = include_str!("../src/lib.rs");
+fn agent_lint_repair_operation_is_a_health_subtype_not_a_fourth_kind() {
+    let operation = WorkflowOperation::AgentLintRepair {
+        preparation_id: "prepare-1".into(),
+        preparation_revision: "prepare-revision-1".into(),
+        report_id: "health-report-1".into(),
+        selection_revision: "selection-revision-1".into(),
+        selected_finding_ids: vec!["duplicate_topic:wiki/主题.md".into()],
+        skill: WikiLintSkillRef::builtin(),
+        authorized_path_hashes: [("wiki/主题.md".into(), Some("a".repeat(64)))]
+            .into_iter()
+            .collect(),
+        expected_git_head: "b".repeat(40),
+    };
+    assert_eq!(operation.kind(), WorkflowOperationKind::AgentLintRepair);
+    let wire = serde_json::to_value(&operation).unwrap();
+    assert_eq!(wire["kind"], "agent_lint_repair");
+    assert_eq!(wire["selectionRevision"], "selection-revision-1");
+    assert_eq!(wire["authorizedPathHashes"]["wiki/主题.md"], "a".repeat(64));
+    assert_eq!(
+        [
+            WorkflowKind::UpdateWiki,
+            WorkflowKind::HealthCheck,
+            WorkflowKind::GenerateContent,
+        ]
+        .len(),
+        3,
+    );
+}
 
-    assert!(!workflow_model.contains("AgentLintRepair"));
-    assert!(!command_registry.contains("prepare_agent_lint_repair"));
-    assert!(!command_registry.contains("confirm_agent_lint_repair_start"));
+#[test]
+fn agent_lint_repair_result_has_a_bounded_history_outcome() {
+    let result = llm_wiki_desktop_lib::models::workflow::WorkflowResult::AgentLintRepair {
+        outcome: AgentLintRepairOutcome::ManualReviewRequired,
+        resolved_finding_ids: vec!["resolved-a".into()],
+        unresolved_finding_ids: vec!["unresolved-a".into()],
+        introduced_finding_ids: vec!["introduced-a".into()],
+        skipped_finding_ids: Vec::new(),
+        rounds: vec![AgentLintRepairRoundSummary {
+            round: 1,
+            affected_paths: vec!["wiki/主题.md".into()],
+            unresolved_finding_ids: vec!["unresolved-a".into()],
+            summary: "bounded".into(),
+        }],
+        affected_paths: vec!["wiki/主题.md".into()],
+        checkpoint_hash: Some("b".repeat(40)),
+        final_commit: None,
+        diff_available: true,
+        rollback_available: true,
+    };
+    let summary = llm_wiki_desktop_lib::models::workflow::WorkflowRunOutcomeSummary::from(&result);
+    let wire = serde_json::to_value(summary).unwrap();
+    assert_eq!(wire["kind"], "agent_lint_repair");
+    assert_eq!(wire["outcome"], "manual_review_required");
+    assert_eq!(wire["resolvedCount"], 1);
+    assert_eq!(wire["unresolvedCount"], 1);
+    assert_eq!(wire["introducedCount"], 1);
+    assert!(wire.get("affectedPaths").is_none());
+    assert!(wire.get("checkpointHash").is_none());
 }
 
 #[test]

@@ -157,6 +157,8 @@ export async function openWorkflowResult(
     return;
   }
 
+  if (result.kind === "agent_lint_repair") return;
+
   const commitGuard = () => navigationGuardMatches(project, guard);
   await useExportStore.getState().loadExports(project.projectId, project.rootPath, commitGuard);
   assertNavigationGuard(project, guard);

@@ -1903,7 +1903,11 @@ mod project_registry_tests {
             dispatch_rx.recv().unwrap();
             worker_state
                 .workflow_service
-                .dispatch_claimed_run(&worker_state.task_service, &stale_claimed)
+                .dispatch_claimed_run_with_settings(
+                    &worker_state.task_service,
+                    &worker_state.settings_service,
+                    &stale_claimed,
+                )
                 .unwrap()
         });
         let stale_claimed = claimed_rx
