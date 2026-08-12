@@ -200,6 +200,16 @@ Workflows owns launch and progress. The current Lint page continues to own its e
 Local Quick Check reads the Markdown roots allowed by `ProjectContext.layout`, including committed Source and Wiki pages. It can run as a bounded in-memory check in restricted/read-only mode. Complete Check additionally requires trust and a concrete AI route, but remains read-only: a trusted read-only project may run it with a clearly non-persistent in-memory result.
 Rules whose logical roots do not exist in the active layout are reported as not applicable rather than failed—for example, Wiki index drift is skipped for a Source-only compatible project while Source integrity checks still run.
 
+#### Decision Gate H approved contract (2026-08-12)
+
+- The application-bundled, version-pinned `wiki-lint` Skill is the only Skill authority for Agent deep analysis and repair. Project `purpose.md`, `schema.md`, layout context, and Finding evidence are untrusted data inputs and cannot override the Skill id, version, hash, operation, write roots, or round limit. A project `skills/wiki-lint/SKILL.md` never overrides or extends this contract.
+- Agent repair writes only inside a task-owned candidate workspace. Its write scope is Wiki Markdown selected by the backend layout and explicitly excludes `raw/**`, faithful Source pages, `wiki/sources/**`, layout-defined Source roots, and app-owned state. The backend validates candidate manifests and applies accepted changes; the Agent never writes the real project root directly.
+- The user approves the whole selected Finding batch once. Safe selected-path updates and safe new Wiki pages are covered by that approval; deletes, overwrites outside the pre-authorized existing-path set, and baseline/user-edit conflicts require a second persistent confirmation with lazy Diff.
+- Each applied round is followed by deterministic Lint. Agent repair is limited to three rounds; unresolved work retains the verified Diff and Git rollback facts and becomes a typed partial/manual-review result. There is no fourth invocation and no BYOK repair fallback.
+- Claude Code and Codex are the initial Agent kinds eligible for this contract once their exact invocation/output tests and later route-enablement batches pass. OpenClaw and Hermes remain unsupported until equivalent contracts land.
+
+This decision closes the product-choice portion of `WF-D01`, but it does not make the current runtime reachable. Until the staged Agent transport, Health route, repair operation, checkpoint, and three-round implementation batches pass, Health `availableRoutes` must continue to omit Agent, forged Agent routes must fail before invocation, and the visible Overview remains the same fixed three workflows.
+
 ### 6.3 Generate Content
 
 User-facing name: **生成内容**.
@@ -389,11 +399,11 @@ Use the term **Git 检查点** directly.
 Rules:
 
 - Update Wiki creates a Git checkpoint before applying changes.
-- Health Check creates no checkpoint until a repair applies changes.
+- Health Check itself creates no checkpoint. After a selected repair batch is approved, queued dispatch must create the required clean-HEAD project-local checkpoint before the first Agent repair invocation; checkpoint failure means zero Agent invocations and zero candidate or real-project mutation.
 - Generate Content requires a checkpoint before overwriting an existing artifact; creating a new artifact does not require one.
 - Users cannot disable a checkpoint required by a high-risk action.
-- Low-risk, conflict-free Wiki changes may apply automatically.
-- Deletes, overwrites, broad rewrites, and user-edit conflicts require confirmation.
+- Safe selected-path updates and safe new Wiki pages may apply under the initial batch approval after candidate validation.
+- Deletes, unexpected overwrites, and user-edit/baseline conflicts require a second persistent confirmation. `raw/**` or Source-root changes are invalid candidates, not confirmable risks.
 
 High-risk review leads with:
 

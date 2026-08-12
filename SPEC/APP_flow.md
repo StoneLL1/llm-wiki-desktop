@@ -411,7 +411,7 @@ Markdown 渲染必须支持：
 
 ### 12.2 Agent 深度 Lint
 
-项目已信任时，需要判断的问题可交给 `wiki-lint` Skill：
+项目已信任且存在真实可执行的 concrete route 时，需要判断的问题可交给应用内置、版本固定的 `wiki-lint` Skill。项目同名 Skill 不读取；purpose/schema/layout context 仅作为显式不可信输入，不能覆盖 Skill id/version/hash、operation、write roots、schema 或三轮上限：
 
 - 重复主题。
 - 弱交叉引用。
@@ -426,22 +426,23 @@ Markdown 渲染必须支持：
 2. 应用对当前可读 Markdown 执行本地快速 Lint；当项目 app state 不可写时（包括未信任受限与 trusted read-only），只在内存运行、不写报告或缓存，并明确标注“本次运行有效 / 不会持久化”。
 3. 项目已信任且有适用 AI 路径时，首次默认完整检查，否则默认本地快速检查；后续记住该项目最近模式。完整检查在本地规则后执行深度 Lint 并合并重复发现。
 4. 健康检查只读，问题列表与修复建议由现有 Lint 页面承接。
-5. trusted writable 项目中的用户明确选择单项或批量修复；restricted/read-only 只显示问题与权限说明。
-6. 危险/批量修复前创建 Git 检查点；失败时零写入。
-7. 自动应用低风险、无冲突的可处理问题。
-8. 高风险修改进入持久等待确认。
-9. 修复成功后提交结果并刷新 UI。
+5. trusted writable + clean Git 项目中的用户选择一批 eligible Finding，并一次批准整个 Agent 修复批次；restricted/read-only/dirty/no-Git 只显示 backend prerequisite，修复不回退 BYOK。
+6. 批批准成功后，queued dispatch 在第一次 Agent repair invocation 前创建 clean-HEAD Git 检查点；失败时 Agent invocation 与候选/真实项目 mutation 都为 0。
+7. Agent 在 task-owned candidate workspace 中只修改 backend 授权的 Wiki Markdown；不复制项目 Skill 或 raw originals，`raw/**`、忠实 Source、`wiki/sources/**` 与 layout-defined Source roots 始终只读。后端复用既有 manifest/hash/checked apply 验证并应用候选。
+8. safe selected-path 更新和安全新建由初次批准覆盖；删除、未授权既有路径覆盖、baseline/外部编辑冲突进入持久二次确认并提供 lazy Diff。Source/raw/越界/link 逃逸候选直接失败，不提供确认继续。
+9. 每轮应用后执行 deterministic Lint 并按稳定 Finding identity 关联结果；未解决且 round < 3 才进入下一轮。三轮后仍未解决返回 partial/manual-review，保留 Diff、checkpoint/final commit 与 Git rollback；第四轮 invocation 为 0。
+10. 修复作为 Lint 发起的隐藏 workflow operation 复用现有项目串行队列、TaskService、history/cancel/recovery；Overview 仍固定三行。成功或人工处理终态后提交验证结果并刷新 UI。
 
 ### 12.4 高风险操作
 
 以下操作必须确认：
 
-- 删除页面。
-- 覆盖页面。
+- 删除页面（Agent repair 为二次确认）。
+- 覆盖页面（Agent repair 仅未授权既有路径覆盖为二次确认）。
 - 永久删除整个来源包。
 - 以新版本替换或合并当前来源。
-- 批量重写。
-- 冲突合并。
+- 批量重写（Agent repair 已由初次 selected-batch 批批准覆盖；其他产品操作按各自合同确认）。
+- 冲突合并（Agent repair 为二次确认）。
 
 ## 13. HTML / 卡片 / 报告导出流程
 
@@ -493,9 +494,9 @@ HTML 模板只影响输出样式，不影响 Wiki schema、Lint 规则或 Agent 
 
 ### 14.3 结果、安全与恢复
 
-- 健康检查只读；结果和后续批量修复继续由现有 Lint 页面管理。
+- 健康检查只读；结果和后续选中批修复继续由现有 Lint 页面管理。修复 operation 可出现在 task/history/detail 中，但不成为第四个 Overview workflow。
 - 生成内容的制品继续由现有 Exports 页面管理。
-- Update Wiki 与修复中的低风险、无冲突变更在所需 Git 检查点后自动应用；Generate Content 新建制品不要求检查点，覆盖既有制品需先建检查点并等待确认。其他高风险或冲突变更异步等待确认，不用阻塞式弹窗打断用户。
+- Update Wiki 与修复中的安全 selected-path、无冲突变更在所需 Git 检查点后按初次批批准应用；Generate Content 新建制品不要求检查点，覆盖既有制品需先建检查点并等待确认。修复删除、未授权既有路径覆盖或冲突异步等待二次确认；raw/Source 越界永不进入可确认状态。
 - 取消保留审计记录，不把未确认的部分结果写入正式 Wiki 或 Exports 路径。
 - 重试创建关联的新任务，不覆盖失败记录。
 - 应用异常退出后，运行中任务标记为“已中断”，并解释哪些步骤可复用；不得伪装从进程中间继续。只有布局提供可写 task state root 时，等待确认与排队记录才持久化，排队任务重开后需用户明确继续；restricted/read-only 的 ephemeral 只读任务不承诺跨重启恢复。

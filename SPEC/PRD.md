@@ -132,7 +132,7 @@ MVP 必须让用户完成以下闭环：
 
 ### 6.5 维护知识库健康
 
-用户从工作流运行“健康检查”。第一次运行时，有可用 AI 路径则默认完整检查，否则默认本地快速检查；后续记住该项目最近模式。完整检查先执行本地规则，再执行深度检查并合并重复发现，把死链、孤立页面、重复主题或来源缺失交给现有 Lint 页面展示。健康检查本身只读；用户随后在 Lint 明确启动修复时，应用才创建 Git 检查点并自动应用低风险修复，高风险修改等待确认。
+用户从工作流运行“健康检查”。第一次运行时，有可用 AI 路径则默认完整检查，否则默认本地快速检查；后续记住该项目最近模式。完整检查先执行本地规则，再执行深度检查并合并重复发现，把死链、孤立页面、重复主题或来源缺失交给现有 Lint 页面展示。健康检查本身只读；用户随后在 Lint 选择并一次批准整个修复批次后，应用才创建 Git 检查点并验证、应用候选；只有删除、未授权既有路径覆盖或冲突需要二次确认。
 
 ## 7. 范围定义
 
@@ -249,13 +249,14 @@ PRD 仅列出当前不纳入 MVP 的内容，后续可重新评估：
 
 1. 用户从工作流运行“健康检查”或在 Lint 页面点击检查。
 2. 应用执行本地快速 Lint。
-3. 项目已信任且已配置适用 AI 路径时可执行深度 Lint；否则仍可完成本地快速检查。
+3. 项目已信任且存在真实可执行的适用 AI 路径时可执行深度 Lint；Agent 路线使用应用内置、版本固定的 `wiki-lint` Skill，项目 purpose/schema/layout context 只作为不可信输入，项目同名 Skill 不得覆盖；否则仍可完成本地快速检查。
 4. 健康检查只读，把问题列表与修复建议交给现有 Lint 页面。
-5. 用户在 Lint 明确选择单项或批量修复。
-6. 应用创建 Git 检查点。
-7. 自动应用低风险、无冲突的可处理修复。
-8. 删除、覆盖、广泛重写和冲突操作进入等待确认。
-9. 成功后提交结果。
+5. 用户在 Lint 选择一批 eligible Finding，并一次批准整个 Agent 修复批次；Agent 修复没有 BYOK fallback。
+6. 批批准成功后，queued dispatch 在第一次 Agent repair invocation 前创建 clean-HEAD Git 检查点；失败时 Agent invocation 与候选/真实项目 mutation 都为 0。dirty/no-Git/read-only/untrusted 状态直接返回 prerequisite，不 stash、不吸收现有改动。
+7. Agent 只在 task-owned candidate 中修改 backend 授权的 Wiki Markdown；`raw/**`、忠实 Source 页面、`wiki/sources/**` 与 layout-defined Source roots 永远只读。后端用既有 manifest/hash/checked apply 验证并应用候选。
+8. 普通 selected-path 更新与安全新建由初次批准覆盖；删除、未授权既有路径覆盖和基线/用户编辑冲突进入持久二次确认并提供按需 Diff。Source/raw 越界候选直接失败，不可确认继续。
+9. 每轮应用后运行 deterministic Lint，最多三轮 Agent 修复；仍未解决时保留 Diff、checkpoint/final commit 与 Git 回滚事实，返回 partial/manual-review typed result，第四次 Agent invocation 必须为 0。
+10. 成功或人工处理终态后提交验证过的结果并刷新现有索引、报告和 UI。
 
 ## 9. 功能需求
 
@@ -343,7 +344,7 @@ PRD 仅列出当前不纳入 MVP 的内容，后续可重新评估：
 | PRD-AGENT-003 | Agent 执行输出实时展示 | P0 | 任务详情以结构化阶段为主，并可展开 stdout/stderr |
 | PRD-AGENT-004 | 支持取消任务 | P0 | 正在运行任务可取消 |
 | PRD-AGENT-005 | 支持后台运行 | P0 | 关闭主窗口后任务可继续运行 |
-| PRD-AGENT-006 | HTML 和 Lint 通过 Skill 驱动 | P0 | 对应操作能调用 `skills/html-*` 和 `wiki-lint` |
+| PRD-AGENT-006 | HTML 和 Lint 通过 Skill 驱动 | P0 | HTML 使用相应 `skills/html-*`；Lint 的唯一权威是应用内置、版本固定且可审计 id/version/hash 的 `wiki-lint`，项目同名 Skill 不得覆盖 |
 | PRD-AGENT-007 | Agent 与 BYOK 配置留在设置 | P0 | 工作流主界面不展示 CLI/BYOK 配置仪表盘，仅显示次级路线摘要和设置入口 |
 
 ### 9.8 Lint 健康检查
@@ -351,9 +352,9 @@ PRD 仅列出当前不纳入 MVP 的内容，后续可重新评估：
 | ID | 需求 | 优先级 | 验收标准 |
 |---|---|---|---|
 | PRD-LINT-001 | 本地快速 Lint | P0 | 对可读 Markdown 检查适用的死链、孤立页面、缺失 frontmatter、索引漂移、空页面、重复文件名；没有 Wiki 索引根时索引规则为 N/A；project app state 不可写时在内存运行并标注“本次运行有效 / 不会持久化” |
-| PRD-LINT-002 | Agent 深度 Lint | P0 | 项目已信任时识别重复主题、弱关联、来源缺失、schema 不一致、内容过期 |
-| PRD-LINT-003 | 自动修复可处理问题 | P0 | 仅 trusted writable 项目可修复；危险/批量修复前创建 Git 检查点，失败时零写入 |
-| PRD-LINT-004 | 高风险修改需要确认 | P0 | 删除、覆盖、广泛重写或冲突操作进入持久等待确认，并提供影响摘要与按需 Diff |
+| PRD-LINT-002 | Agent 深度 Lint | P0 | 项目已信任且 concrete route 可执行时，由内置固定 `wiki-lint` 识别六类语义 Finding；首期只允许通过同等 invocation/output 合同的 Claude/Codex，未支持或 forged/stale route 不广告且 invocation 为 0 |
+| PRD-LINT-003 | 自动修复可处理问题 | P0 | 仅 trusted writable + clean Git 项目可批准 selected Finding batch；批准后先 checkpoint，Agent 只写 task-owned candidate 的授权 Wiki，backend checked apply；最多三轮 deterministic recheck，无 BYOK fallback |
+| PRD-LINT-004 | 高风险修改需要确认 | P0 | 初次批准覆盖整个选中批次的安全 selected-path 更新/新建；删除、未授权既有路径覆盖或冲突进入持久二次确认并提供按需 Diff；raw/Source 越界不可确认 |
 
 ### 9.9 Git 版本与恢复
 

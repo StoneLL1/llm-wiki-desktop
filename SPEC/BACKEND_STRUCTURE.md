@@ -557,7 +557,7 @@ pub struct BackendTask {
 - 工作流准备请求只传结构化类型、范围、选项和显式执行路径覆盖，不接受任意 prompt 或任意 shell 参数。
 - 启动时后端重新解析 `ProjectContext` access policy：外部 AI / Agent / Skill 要求 trusted，任何项目写入还要求 writable，checkpoint-required mutation 还要求可用 Git checkpoint。无项目、restricted 或 read-only 状态不得创建一个随后必然失败的写入工作流任务。
 - 路径默认值由 `SettingsService` 解析；不可用时返回结构化 prerequisite，不自动换用另一 Agent、Provider 或模型。
-- Update Wiki 与修复中的低风险、无冲突写入在所需 Git 检查点成功后自动应用；Generate Content 新建制品不要求检查点，覆盖既有制品则必须先建检查点并进入确认。删除、覆盖、广泛重写和冲突修改创建持久 `PendingAction`。
+- Update Wiki 的低风险、无冲突写入在所需 Git 检查点成功后自动应用；Generate Content 新建制品不要求检查点，覆盖既有制品则必须先建检查点并进入确认。Agent repair 由初次 selected-batch 批批准覆盖安全 selected-path 更新/新建以及批量/广泛重写本身；只有 delete、unexpected existing-path overwrite 和 baseline/user-edit conflict 创建二次持久 `PendingAction`。其他产品操作继续按各自合同对删除、覆盖、广泛重写和冲突创建确认。
 - 确认是异步任务状态。用户可以离开页面继续工作；确认 command 必须再次校验项目、基线、计划和检查点。
 - 取消后不得把未确认的部分结果提升到正式 Wiki 或 Exports 路径。
 - 系统通知只在 `waiting_for_confirmation`、`succeeded` 和 `failed` 时触发。
@@ -824,6 +824,13 @@ pub trait Extractor {
 
 - Agent 路线支持 Claude Code、Codex、OpenClaw 和 Hermes；四者与 BYOK 路线消费同一份内置 `source-rewrite` 合同，并复用所选 CLI 可用于执行的本地登录态。
 - 每次 Source Agent 都在临时候选 workspace 中运行，应用不会把项目目录作为可写工作区，也不会让候选绕过 Diff、显式确认和 Git checkpoint 直接落盘。Claude Code 与 Codex 使用无会话、跳过项目规则/扩展的隔离执行配置，其中 Codex 保留认证目录但不加载用户 `config.toml`；OpenClaw 使用 `agent exec` 临时状态的一次性执行；Hermes 使用 `-z` 一次性执行并跳过项目规则。
+
+`wiki-lint` Agent 合同（2026-08-12 产品决定）：
+
+- 复用现有 `AgentService` runtime、structured transport、超时、取消、进程树终止和环境清理；不建设新的 Agent runtime、credential broker、逐工具审批或专门 no-tools/no-network 子系统。
+- 只有通过精确 invocation/output contract 的 Claude Code 与 Codex 可进入首期 lint capability；OpenClaw/Hermes 在同等测试落地前保持 unsupported。所选 route 不可用时 fail closed，不切换 BYOK。
+- Agent 只把 task-owned candidate workspace 作为可写 cwd；真实项目根不作为可写 workspace。candidate 中的内置 Skill、typed request、purpose/schema context 与 Source snapshot 都受 hash 保护。
+- H0–H2 只落地合同和不可达 bridge；在后续 Health route/repair runner 批次完成前，`supports_lint_agent` 仍为 false，外部 command 和 Health `availableRoutes` 不可到达该 transport。
 - 环境清理后只恢复所选 Agent 必需的认证/配置路径：OpenClaw 保留活动 state/config/profile、auth secret dir 与 include roots；Hermes 优先使用显式 `HERMES_HOME`，否则解析 sticky `active_profile`（Windows 默认根为 `%LOCALAPPDATA%\hermes`），并保留 OAuth/model 路径覆盖。
 - 为复用本机登录与默认模型，Agent 进程仍可使用所选 CLI 的本地配置；该宽松边界不等价于操作系统级只读沙箱。应用只主动提供当前 Source 的有界输入，不承诺所选第三方 CLI 的工具无法读取其他本地路径。
 - 普通可恢复失败必须由用户按保存的 Source 基线、路线和设置显式重试。BYOK 重试锁定 provider 与 model；Agent 重试锁定 Agent 种类，使用重试时该 CLI 当前的 Source 执行 profile（其本地 profile、认证或默认模型若已变化，不伪装成原设置）。运行时禁止静默 fallback、自动第二模型或双调用。
@@ -986,13 +993,21 @@ Agent 深度 Lint：
 - 内容过期。
 - 跨页面矛盾。
 
+内置 Skill 与 Agent repair 合同：
+
+- 应用编译期内置、版本固定的 `wiki-lint` 是唯一 authority；项目同名 Skill 不读取。purpose/schema/layout context 只是不可信输入，不能覆盖 Skill ref、operation、write allowlist、round limit 或 schema。
+- Lint 拥有 Finding selection、batch preparation 和结果关联；用户一次批准选中批次。WorkflowService 只在批准后承载隐藏的 repair operation，复用同一项目队列、TaskService、history/cancel/recovery，不新增 WorkflowKind/Overview 行。
+- 批准后的 queued dispatch 必须在第一次 Agent repair invocation 前调用 GitService 创建 clean-HEAD checkpoint；失败时 invocation 与 candidate/project mutation 均为 0。Agent 只修改 bounded candidate 中的授权 Wiki Markdown；`raw/**`、忠实 Source、`wiki/sources/**`、layout-defined Source roots、`.app/**`、Skill/request/context 均不可由 Agent 修改。
+- CompileService/Update Wiki 已有 candidate manifest、baseline、checked apply、journal 与 two/three-way lazy Diff 是唯一 apply/review 实现。安全 selected-path 更新/新建由初次批准覆盖；delete、unexpected overwrite、baseline conflict 进入二次 PendingAction；越界候选直接失败。
+- 每轮 apply 后 LintService 运行 deterministic recheck 并以稳定 Finding identity 关联结果，最多三轮；未解决保留 verified Diff、commit/checkpoint 与 rollback facts，返回 typed partial/manual-review 终态。Agent 输出不能自行宣布最终 resolved，repair 不回退 BYOK。
+
 硬边界：
 
 - 本地只读 Lint 可在 restricted 模式对有限深度 Markdown 运行，不写报告或缓存。
 - Agent 深度 Lint 要求项目已信任。
-- 任何修复要求 trusted writable；危险/批量修复前创建 Git 检查点。
-- 删除、覆盖、冲突修复必须确认。
-- Agent 深度 Lint 通过 `wiki-lint` Skill 驱动。
+- 任何修复要求 trusted writable + clean Git；一次批批准成功后、queued dispatch 在第一次 Agent repair invocation 前创建 Git 检查点。
+- 删除、未授权既有路径覆盖、冲突修复必须二次确认；raw/Source 越界不可确认。
+- Agent 深度 Lint 与 repair 只由应用内置固定 `wiki-lint` Skill 驱动。
 
 ## 21. ExportService
 

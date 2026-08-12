@@ -593,7 +593,11 @@ waiting、terminal 与 confirmation 先 flush 同 task 的 buffered progress 并
 
 若新增或扩展 IPC，本批执行两次 review 和完整 `npm run check`；仅做局部前端 Set/lazy mount 时至少 `npm run check:quick`，但与完整 Batch 6 合并前仍需 full gate。
 
-## 13. Decision Gate H — Health Check Agent 路线
+## 13. Decision Gate H — Health Check Agent 路线（产品决定已批准，分批实施中）
+
+> 2026-08-12 superseding status：产品所有者已批准 Agent 路线，并以 [Agent Deep Lint / Agent 修复实施计划](2026-08-12-decision-gate-h-agent-deep-lint-repair-implementation.md) 的 1A/2A/3A/4A 取代下列旧 Path A/B 选择：内置固定 `wiki-lint`；Agent 只写 task-owned candidate 的授权 Wiki，raw/Source 只读；一次批批准且仅 delete/overwrite/conflict 二次确认；最多三轮 deterministic recheck 并保留 Diff/rollback。旧 `credential broker`、专门 no-tools/no-network 项目和逐工具审批不再是 Gate H 前置条件；trust、writable、Git checkpoint、path/link、no-secret、route revision、cancel/timeout、checked apply、no fallback 等 Hard Rules 保持不变。
+>
+> 这关闭 `WF-D01` 的产品未决状态，不表示 runtime 已启用。H0–H2 期间 `supports_lint_agent` 仍为 false、Health 不广告 Agent、repair command/operation 不可达；只有新计划 H3–H6 全部通过后，Batch 7 才可解除阻断。以下 13.1–13.3 保留为决策前历史证据，不再作为当前实施前置条件。
 
 这是安全/产品决策，不是可以顺手修掉的普通 bug。
 
@@ -872,7 +876,7 @@ A11y 与 i18n：
 功能：
 
 - Update Wiki changed/full、无 Source、conflict、高风险 confirmation；
-- Health Local Quick restricted/read-only、Source-only malformed Markdown、Complete BYOK，以及 Decision Gate H 所选路径的完整 contract；H 未决则 Batch 7 blocked；
+- Health Local Quick restricted/read-only、Source-only malformed Markdown、Complete BYOK，以及已批准 Decision Gate H 路径的完整 contract；新实施计划 H0–H6 未全部验收前 Batch 7 仍 blocked；
 - Generate Content 四种 artifact、新建/覆盖、restricted content/remote acknowledgement；
 - Dashboard、Wiki、Lint、Exports、Workflows 的统一 launch intent。
 
@@ -928,7 +932,7 @@ Windows 若遇到 Cargo PDB/LNK 文件锁，使用新的任务专用 `CARGO_TARG
 - 需要把 project registry、project ID 或磁盘可写当作 trust；
 - 需要放宽 canonical path、symlink/reparse、identity revision 或 Git guard；
 - 需要在 trust 恢复后自动运行 queued task；
-- 需要启用 Deep Lint Agent，但 credential/no-tools broker 尚未获批并验证；
+- 需要在新实施计划对应 H3/H4B 之前提前启用 Deep Lint Agent 或 repair mutation，或需要绕开既有 Agent/candidate/Git/confirmation/queue 合同；
 - 需要引入数据库、替换现有 Markdown/JSON source of truth；
 - 需要用静默 fallback、虚假 progress 或丢 terminal persistence 达到性能目标；
 - 需要改写 Settings、Lint、Exports 或 Workflows 权威信息架构；
@@ -950,7 +954,7 @@ Windows 若遇到 Cargo PDB/LNK 文件锁，使用新的任务专用 `CARGO_TARG
 - Overview 具有 attention、固定三行和 recent five；右栏与主 surface 始终一致。
 - Pipeline、confirmation、failure、completion result 不依赖 raw logs 或 raw enum 才能理解。
 - 中英文、键盘、200% zoom、窄桌面、reduced motion 和默认主题 WCAG AA 验收通过。
-- WF-D01 已由产品所有者明确选择路径 A 或 B：路径 A 完成权威 BYOK-only 对齐，或路径 B 完成独立 Agent 安全项目；未决时本计划不得标记 complete。
+- WF-D01 的产品决定已于 2026-08-12 关闭；必须按新 Agent Deep Lint / repair 实施计划完成 H0–H6 的合同、bridge、route、repair、UI 与最终矩阵后，本计划才可标记 complete 并解除 Batch 7 阻断。
 - 无论选择哪条路径，未经验证的 Health Agent route 始终 fail closed，且不存在 forged route 绕过或静默 fallback。
 - 两轮高风险审查关闭所有有效 finding。
 - 最终 `npm run check` 从头通过，`graphify update .` 完成，进度与必要 gotcha 已记录。

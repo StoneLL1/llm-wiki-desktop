@@ -140,6 +140,16 @@ fn workflow_contract_uses_schema_v1_and_stable_wire_casing() {
 }
 
 #[test]
+fn agent_lint_repair_operation_and_commands_remain_unreachable_before_h4a() {
+    let workflow_model = include_str!("../src/models/workflow.rs");
+    let command_registry = include_str!("../src/lib.rs");
+
+    assert!(!workflow_model.contains("AgentLintRepair"));
+    assert!(!command_registry.contains("prepare_agent_lint_repair"));
+    assert!(!command_registry.contains("confirm_agent_lint_repair_start"));
+}
+
+#[test]
 fn every_scope_and_route_is_a_tagged_union() {
     let cases = [
         serde_json::to_value(WorkflowRoute::Local {

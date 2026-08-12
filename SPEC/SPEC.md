@@ -436,8 +436,8 @@ Wiki 页面是普通 Markdown，用户可能在应用内、Obsidian 或外部编
 ### 8.4 工作流修改确认
 
 - 用户显式启动后，无冲突的普通编译可自动完成；导入不得自动启动编译。
-- Update Wiki 与 checkpoint-required 修复中的低风险、无冲突修改可在对应检查点成功后自动应用；Health Check 不修改文件或创建检查点；Generate Content 新建制品不要求检查点，覆盖既有制品才要求检查点与确认。
-- 删除、覆盖、广泛重写和冲突操作必须异步等待确认；确认入口展示影响摘要，并允许按需查看 Diff。
+- Update Wiki 的低风险、无冲突修改可在对应检查点成功后自动应用；Health Check 不修改文件或创建检查点；Generate Content 新建制品不要求检查点，覆盖既有制品才要求检查点与确认。Agent repair 则先由用户一次批准整个 selected Finding batch，检查点成功后应用经验证的安全 selected-path 更新/新建。
+- 对 Agent repair，只有删除、未授权既有路径覆盖和 baseline/用户编辑冲突必须异步二次确认；批量或广泛重写本身已由初次批批准覆盖。其他产品操作仍按其各自合同对删除、覆盖、广泛重写和冲突进行确认。确认入口展示影响摘要，并允许按需查看 Diff。
 - 用户可继续编辑 Markdown；写入前必须复核基线并执行三方合并或转入冲突确认。
 - 所有自动修复依靠 Git 检查点提供回滚。
 
@@ -460,7 +460,7 @@ Lint 采用双层健康检查。
 
 ### 9.2 Agent 深度 Lint
 
-需要判断的问题交给 `wiki-lint` Skill：
+需要判断的问题交给应用内置、版本固定且以 id/version/content hash 审计的 `wiki-lint` Skill。项目 `skills/wiki-lint/SKILL.md` 不读取、不哈希、不能覆盖内置合同；purpose、schema、layout context 与 Finding evidence 只放在显式不可信数据边界中：
 
 - 重复主题。
 - 弱交叉引用。
@@ -473,9 +473,11 @@ Lint 采用双层健康检查。
 
 - 健康检查工作流本身只读；结果进入现有 Lint 页面，修复由用户从发现项另行启动。
 - 确定性问题可由应用一键修复。
-- 用户启动修复后，Agent 可处理适用问题，但不得绕过风险分级与确认。
-- 修复前创建 Git 检查点，修复后提交结果。
-- 高风险删除或冲突修改仍需用户确认。
+- trusted writable 用户选择一批 eligible Finding，并一次批准整个 Agent 修复批次；批准前不创建 task/checkpoint、不运行 Agent，Agent 修复不回退 BYOK。
+- 批准后的 queued dispatch 在第一次 Agent repair invocation 前创建 clean-HEAD Git 检查点；失败时 invocation 与候选/真实项目 mutation 均为 0。Agent 只在 task-owned candidate 内修改 backend 授权的 Wiki Markdown，真实项目仅经既有 manifest/hash/checked apply 写入；`raw/**`、忠实 Source、`wiki/sources/**` 和 layout-defined Source roots 永远只读。
+- 初次批准覆盖安全的 selected-path 更新与安全新建。删除、未授权既有路径覆盖、baseline 或外部编辑冲突进入持久二次确认；Source/raw 越界直接使候选失败，不提供继续确认。
+- 每轮候选应用后复用 deterministic Lint，以稳定 Finding identity 关联 resolved/unresolved/introduced；最多三轮。仍未解决时形成 partial/manual-review typed result，保留 Diff 与 Git rollback 信息，不调用第四轮。
+- Agent repair 作为 Lint 发起的隐藏 workflow operation 复用现有项目串行队列、TaskService、历史、取消与恢复，不新增第四个 WorkflowKind 或 Overview 行。
 
 ## 10. 后台任务与通知
 
@@ -598,12 +600,13 @@ Lint 采用双层健康检查。
 ```text
 用户运行 Lint
   -> 对可读 Markdown 执行本地快速 Lint（restricted 可内存运行）
-  -> 已信任时可选 Agent 深度 Lint
+  -> 已信任且 concrete route 可执行时可选内置固定 Skill 的 Agent 深度 Lint
   -> 展示问题列表
-  -> 用户在 trusted writable 项目选择修复
-  -> 危险 / 批量修复先创建 Git 检查点
-  -> 自动修复可处理问题；高风险修改请求确认
-  -> 成功后提交并刷新 UI
+  -> 用户在 trusted writable + clean Git 项目选择一批 Finding 并一次批准
+  -> 批准后创建 Git 检查点；Agent 只写 task-owned candidate 的授权 Wiki
+  -> backend checked apply；删除 / 未授权覆盖 / 冲突二次确认，raw/Source 越界失败
+  -> 每轮 deterministic Lint 复检，最多三轮
+  -> 成功或 partial/manual-review 后提交验证结果、保留 Diff/rollback 并刷新 UI
 ```
 
 ## 13. 国际化
