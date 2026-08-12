@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use llm_wiki_desktop_lib::errors::BackendError;
+use llm_wiki_desktop_lib::models::agent::AgentKind;
 use llm_wiki_desktop_lib::models::llm::{LlmProviderConfig, LlmProviderKind};
 use llm_wiki_desktop_lib::models::paths::ProjectContext;
 use llm_wiki_desktop_lib::models::project::ProjectTrustKind;
@@ -481,4 +482,30 @@ async fn stale_complete_route_fails_in_deep_stage_without_downgrading() {
         .iter()
         .skip(4)
         .any(|stage| stage.status == WorkflowStageStatus::Completed));
+}
+
+#[tokio::test]
+async fn forged_agent_complete_route_fails_before_agent_invocation() {
+    let fixture = Fixture::native("forged-agent-route");
+    let run = fixture.enqueue(
+        HealthCheckMode::Complete,
+        WorkflowRoute::Agent {
+            agent: AgentKind::Codex,
+            model: None,
+            route_revision: "forged-agent-route".into(),
+        },
+        true,
+    );
+    let task_id = run.task_id.clone();
+
+    run_health_check_with_deep(&fixture.context, run, &fixture.services(), |_, _| async {
+        panic!("a disabled Agent route must fail before deep execution")
+    })
+    .await;
+
+    let failed = fixture.tasks.get_workflow_run(&task_id).unwrap();
+    assert_eq!(
+        failed.error.as_ref().map(|error| error.code.as_str()),
+        Some("WORKFLOW_ROUTE_UNAVAILABLE")
+    );
 }

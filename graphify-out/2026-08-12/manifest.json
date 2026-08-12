@@ -2905,8 +2905,8 @@
     "semantic_hash": "35ef62685304280209d4cbf4013fbacb"
   },
   "SPEC/progress.txt": {
-    "mtime": 1786352760.1242344,
-    "ast_hash": "8c5dcd97c40ebac411cb8e12355dc698",
+    "mtime": 1786512173.9611607,
+    "ast_hash": "82d2e0753236542981f681a19eca2cf7",
     "semantic_hash": ""
   },
   "SPEC/roadmap/README.md": {
@@ -3445,8 +3445,8 @@
     "semantic_hash": "8a5a3953ec9eb051bebb7c1add12f71a"
   },
   "progress.txt": {
-    "mtime": 1786343967.2266445,
-    "ast_hash": "6053d72f62551093fa3fe3096ff8b819",
+    "mtime": 1786512173.4622035,
+    "ast_hash": "ae868c00b3301766b0ff20e7d50f9fb5",
     "semantic_hash": ""
   },
   "src-tauri/templates/projects/business/purpose.md": {
@@ -4392,6 +4392,11 @@
   "docs/superpowers/evidence/2026-08-10-workflows-ui6-820x900.png": {
     "mtime": 1786350978.6978893,
     "ast_hash": "e160d15e75744d85e2024477a250fbcb",
+    "semantic_hash": ""
+  },
+  "docs/superpowers/plans/2026-08-12-decision-gate-h-agent-deep-lint-repair-implementation.md": {
+    "mtime": 1786512045.821527,
+    "ast_hash": "37e7114869a895a1ececb4db9ec6e825",
     "semantic_hash": ""
   }
 }

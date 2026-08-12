@@ -46,7 +46,7 @@ impl ProcessRunner for NoAgents {
     }
 
     fn run_capture(&self, _invocation: &AgentInvocation) -> Result<(String, String), BackendError> {
-        Ok((String::new(), String::new()))
+        unreachable!("a disabled Health Agent route must fail before capture")
     }
 
     fn run_task_streaming(
@@ -55,7 +55,7 @@ impl ProcessRunner for NoAgents {
         _tasks: &TaskService,
         _task_id: &str,
     ) -> Result<String, BackendError> {
-        Ok(String::new())
+        unreachable!("a disabled Health Agent route must fail before streaming")
     }
 }
 
@@ -204,8 +204,9 @@ fn configured_default_agent_never_falls_back_to_byok() {
         Some(AgentKind::Codex),
         vec![provider(LlmProviderKind::Ollama, "qwen")],
     );
+    let service = WorkflowService::default();
     let preparation = prepare(
-        &WorkflowService::default(),
+        &service,
         &context,
         &settings,
         &secrets,
@@ -214,7 +215,9 @@ fn configured_default_agent_never_falls_back_to_byok() {
         Some(WorkflowScope::HealthCheck {
             mode: HealthCheckMode::Complete,
         }),
-        None,
+        Some(WorkflowRouteSelection::Agent {
+            agent: AgentKind::Codex,
+        }),
     )
     .unwrap();
     assert!(preparation.route.is_none());
@@ -222,6 +225,28 @@ fn configured_default_agent_never_falls_back_to_byok() {
         .prerequisites
         .iter()
         .any(|item| { item.action == WorkflowPrerequisiteAction::ConfigureExecutionRoute }));
+    assert!(!preparation
+        .available_routes
+        .iter()
+        .any(|route| matches!(route, WorkflowRouteSelection::Agent { .. })));
+    assert!(!AgentService::supports_lint_agent(AgentKind::Claude));
+    assert!(!AgentService::supports_lint_agent(AgentKind::Codex));
+
+    let tasks = TaskService::default();
+    let error = service
+        .start(
+            &context,
+            trusted(),
+            &settings,
+            &secrets,
+            &agents,
+            &tasks,
+            &preparation.preparation_id,
+            &preparation.preparation_revision,
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "WORKFLOW_PREREQUISITES_BLOCKING");
+    assert!(tasks.list_workflow_runs().is_empty());
 }
 
 #[test]
