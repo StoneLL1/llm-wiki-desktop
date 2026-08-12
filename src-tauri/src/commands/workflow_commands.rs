@@ -838,7 +838,6 @@ pub(crate) fn revalidate_workflow_replay_with_access(
 ) -> Result<WorkflowReplayValidation, BackendError> {
     ensure_workflow_identity(context, run)?;
     state.require_workflow_content_write_root(context, &run.kind)?;
-    let persistence = resolve_workflow_persistence_binding(context, access.persistence.clone())?;
     let route_selection = run.route.as_ref().and_then(|route| match route {
         crate::models::workflow::WorkflowRoute::Agent { agent, .. } => {
             Some(WorkflowRouteSelection::Agent {
@@ -852,21 +851,34 @@ pub(crate) fn revalidate_workflow_replay_with_access(
         }
         crate::models::workflow::WorkflowRoute::Local { .. } => None,
     });
+    if matches!(
+        run.route,
+        Some(crate::models::workflow::WorkflowRoute::Agent { .. })
+    ) {
+        // Retry and project-open continuation share this replay validator.
+        // Neither boundary may accept the short-lived route-presentation cache
+        // when deciding whether an Agent attempt can be created or claimed.
+        state.agent_service.invalidate_workflow_route_cache();
+    }
+    let preparation = state.workflow_service.prepare(
+        &WorkflowPreparationEnvironment {
+            context,
+            access,
+            settings_service: &state.settings_service,
+            secret_service: &state.secret_service,
+            agent_service: &state.agent_service,
+        },
+        PrepareWorkflowInput {
+            kind: run.kind.clone(),
+            scope: Some(run.scope.clone()),
+            route_selection,
+        },
+    )?;
+    let persistence = resolve_workflow_persistence_binding(
+        context,
+        preparation.project_access.persistence.clone(),
+    )?;
     let eligibility = (|| {
-        let preparation = state.workflow_service.prepare(
-            &WorkflowPreparationEnvironment {
-                context,
-                access,
-                settings_service: &state.settings_service,
-                secret_service: &state.secret_service,
-                agent_service: &state.agent_service,
-            },
-            PrepareWorkflowInput {
-                kind: run.kind.clone(),
-                scope: Some(run.scope.clone()),
-                route_selection,
-            },
-        )?;
         let blocking = preparation.prerequisites.iter().find(|item| {
             item.blocking
                 && !matches!(
@@ -1327,5 +1339,167 @@ mod batch6_tests {
         let first = paginate_workflow_diff(file, 0, 1).unwrap();
         assert_eq!(first.diff, "中");
         assert_eq!(first.next_cursor, Some("中".len()));
+    }
+
+    #[test]
+    fn retry_and_continue_shared_replay_gate_reprobe_agent_route_before_claim() {
+        use std::path::PathBuf;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use crate::models::agent::AgentKind;
+        use crate::models::project::ProjectTrustKind;
+        use crate::models::settings::Settings;
+        use crate::models::workflow::{
+            HealthCheckMode, WorkflowExecutionOptions, WorkflowFilesystemAccess, WorkflowGitState,
+            WorkflowPersistenceMode, WorkflowProjectTrust, WorkflowScope, WorkflowStartOutcome,
+        };
+        use crate::services::{
+            AgentInvocation, AgentProbeTarget, AgentService, EnqueueWorkflow, ProcessRunner,
+            SettingsService, WorkflowAccessSnapshot,
+        };
+        use crate::tasks::TaskService;
+
+        struct MutableCodex {
+            version: AtomicUsize,
+            invocations: AtomicUsize,
+        }
+
+        impl ProcessRunner for MutableCodex {
+            fn find_executable(&self, command: &str) -> Option<PathBuf> {
+                (command == "codex").then(|| PathBuf::from("codex"))
+            }
+
+            fn resolve_probe_target(&self, command: &str) -> AgentProbeTarget {
+                AgentProbeTarget {
+                    logical_command: command.into(),
+                    executable_path: self.find_executable(command),
+                    program: command.into(),
+                    leading_args: Vec::new(),
+                }
+            }
+
+            fn run_with_timeout(
+                &self,
+                _: &str,
+                args: &[&str],
+                _: Duration,
+            ) -> Result<String, BackendError> {
+                if args == ["--version"] {
+                    return Ok(format!("codex {}.0.0", self.version.load(Ordering::SeqCst)));
+                }
+                Ok("--json --ephemeral --sandbox --ignore-user-config --ignore-rules --output-schema --output-last-message --skip-git-repo-check -C --cd".into())
+            }
+
+            fn run_capture(&self, _: &AgentInvocation) -> Result<(String, String), BackendError> {
+                unreachable!()
+            }
+
+            fn run_task_streaming(
+                &self,
+                _: &AgentInvocation,
+                _: &TaskService,
+                _: &str,
+            ) -> Result<String, BackendError> {
+                self.invocations.fetch_add(1, Ordering::SeqCst);
+                Ok("[]".into())
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".app/tasks")).unwrap();
+        std::fs::create_dir_all(root.path().join("wiki")).unwrap();
+        std::fs::write(root.path().join("wiki/index.md"), "# Index\n").unwrap();
+        let context =
+            crate::models::paths::ProjectContext::new("replay-route", root.path().to_path_buf());
+        let config = tempfile::tempdir().unwrap();
+        let runner = Arc::new(MutableCodex {
+            version: AtomicUsize::new(1),
+            invocations: AtomicUsize::new(0),
+        });
+        let state = AppState {
+            agent_service: AgentService::with_runner(runner.clone()),
+            settings_service: SettingsService::with_config_dir(config.path().to_path_buf()),
+            ..AppState::default()
+        };
+        state
+            .settings_service
+            .save_settings(
+                &context,
+                &Settings {
+                    agent_default: Some(AgentKind::Codex),
+                    ..Settings::default()
+                },
+            )
+            .unwrap();
+        let access = WorkflowAccessSnapshot {
+            trust: WorkflowProjectTrust::Trusted,
+            trust_kind: Some(ProjectTrustKind::Native),
+            filesystem_access: WorkflowFilesystemAccess::Writable,
+            persistence: WorkflowPersistenceMode::Persistent,
+            git_state: WorkflowGitState::Clean,
+            authority_revision: "authority-v1".into(),
+        };
+        let preparation = state
+            .workflow_service
+            .prepare(
+                &WorkflowPreparationEnvironment {
+                    context: &context,
+                    access: access.clone(),
+                    settings_service: &state.settings_service,
+                    secret_service: &state.secret_service,
+                    agent_service: &state.agent_service,
+                },
+                PrepareWorkflowInput {
+                    kind: WorkflowKind::HealthCheck,
+                    scope: Some(WorkflowScope::HealthCheck {
+                        mode: HealthCheckMode::Complete,
+                    }),
+                    route_selection: Some(WorkflowRouteSelection::Agent {
+                        agent: AgentKind::Codex,
+                    }),
+                },
+            )
+            .unwrap();
+        let outcome = state
+            .workflow_service
+            .coordinator
+            .enqueue(
+                &state.task_service,
+                EnqueueWorkflow {
+                    project_id: context.project_id.clone(),
+                    project_root: context.root.clone(),
+                    task_state_root: None,
+                    title: "Health Check".into(),
+                    kind: WorkflowKind::HealthCheck,
+                    scope: WorkflowScope::HealthCheck {
+                        mode: HealthCheckMode::Complete,
+                    },
+                    route: preparation.route,
+                    baseline_fingerprint: preparation.baseline.fingerprint,
+                    execution_options: WorkflowExecutionOptions {
+                        preparation_revision: preparation.preparation_revision,
+                        ..WorkflowExecutionOptions::default()
+                    },
+                    stages: crate::services::workflow_stages(&WorkflowKind::HealthCheck),
+                    retry: None,
+                },
+            )
+            .unwrap();
+        let run = match outcome {
+            WorkflowStartOutcome::Created { run } => run,
+            _ => panic!("fixture must create a workflow run"),
+        };
+
+        runner.version.store(2, Ordering::SeqCst);
+        let replay =
+            revalidate_workflow_replay_with_access(&state, &context, &run, access).unwrap();
+        assert!(replay.persistence.task_state_root.is_none());
+        assert_eq!(
+            replay.eligibility.unwrap_err().code,
+            "WORKFLOW_REPREPARATION_REQUIRED"
+        );
+        assert_eq!(runner.invocations.load(Ordering::SeqCst), 0);
     }
 }

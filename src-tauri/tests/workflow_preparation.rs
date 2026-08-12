@@ -1,4 +1,5 @@
 use llm_wiki_desktop_lib::errors::BackendError;
+use llm_wiki_desktop_lib::models::agent::AgentKind;
 use llm_wiki_desktop_lib::models::llm::{LlmProviderConfig, LlmProviderKind};
 use llm_wiki_desktop_lib::models::paths::ProjectContext;
 use llm_wiki_desktop_lib::models::project::ProjectTrustKind;
@@ -6,7 +7,7 @@ use llm_wiki_desktop_lib::models::settings::Settings;
 use llm_wiki_desktop_lib::models::workflow::{
     HealthCheckMode, WorkflowArtifactType, WorkflowFilesystemAccess, WorkflowGitState,
     WorkflowKind, WorkflowPersistenceMode, WorkflowPrerequisiteAction, WorkflowProjectTrust,
-    WorkflowRun, WorkflowScope, WorkflowStartOutcome,
+    WorkflowRouteSelection, WorkflowRun, WorkflowScope, WorkflowStartOutcome,
 };
 use llm_wiki_desktop_lib::services::{
     project_identity, resolve_workflow_persistence_binding, AgentInvocation, AgentService,
@@ -21,6 +22,11 @@ use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
 struct NoAgents;
+
+struct MutableCodex {
+    generation: AtomicUsize,
+    invocations: AtomicUsize,
+}
 
 impl ProcessRunner for NoAgents {
     fn find_executable(&self, _command: &str) -> Option<PathBuf> {
@@ -47,6 +53,42 @@ impl ProcessRunner for NoAgents {
         _task_id: &str,
     ) -> Result<String, BackendError> {
         Ok(String::new())
+    }
+}
+
+impl ProcessRunner for MutableCodex {
+    fn find_executable(&self, command: &str) -> Option<PathBuf> {
+        (command == "codex").then(|| PathBuf::from("codex"))
+    }
+
+    fn run_with_timeout(
+        &self,
+        _command: &str,
+        args: &[&str],
+        _timeout: Duration,
+    ) -> Result<String, BackendError> {
+        if args == ["--version"] {
+            return Ok(format!(
+                "codex {}.0.0",
+                self.generation.load(Ordering::SeqCst)
+            ));
+        }
+        Ok("--json --ephemeral --sandbox --ignore-user-config --ignore-rules --output-schema --output-last-message --skip-git-repo-check -C --cd".into())
+    }
+
+    fn run_capture(&self, _invocation: &AgentInvocation) -> Result<(String, String), BackendError> {
+        self.invocations.fetch_add(1, Ordering::SeqCst);
+        Ok((String::new(), String::new()))
+    }
+
+    fn run_task_streaming(
+        &self,
+        _invocation: &AgentInvocation,
+        _tasks: &TaskService,
+        _task_id: &str,
+    ) -> Result<String, BackendError> {
+        self.invocations.fetch_add(1, Ordering::SeqCst);
+        Ok("[]".into())
     }
 }
 
@@ -131,6 +173,151 @@ fn trusted_read_only_authority_stays_memory_only_without_creating_task_state() {
     assert_eq!(binding.mode, WorkflowPersistenceMode::MemoryOnly);
     assert_eq!(binding.task_state_root, None);
     assert!(!root.path().join(".app").exists());
+}
+
+#[test]
+fn agent_version_change_after_prepare_fails_start_before_dispatch_or_invocation() {
+    let (_root, context) = project();
+    let config = tempfile::tempdir().unwrap();
+    let settings = SettingsService::with_config_dir(config.path().to_path_buf());
+    settings
+        .save_settings(
+            &context,
+            &Settings {
+                agent_default: Some(AgentKind::Codex),
+                ..Settings::default()
+            },
+        )
+        .unwrap();
+    let secrets = SecretService::memory();
+    let runner = Arc::new(MutableCodex {
+        generation: AtomicUsize::new(1),
+        invocations: AtomicUsize::new(0),
+    });
+    let agents = AgentService::with_runner(runner.clone());
+    let service = WorkflowService::default();
+    let dispatches = Arc::new(CountingRunner::default());
+    service.register_runner(dispatches.clone()).unwrap();
+    let tasks = TaskService::default();
+    let project_access = access(
+        WorkflowProjectTrust::Trusted,
+        WorkflowFilesystemAccess::ReadOnly,
+        WorkflowPersistenceMode::MemoryOnly,
+    );
+    let preparation = service
+        .prepare(
+            &WorkflowPreparationEnvironment {
+                context: &context,
+                access: project_access.clone(),
+                settings_service: &settings,
+                secret_service: &secrets,
+                agent_service: &agents,
+            },
+            PrepareWorkflowInput {
+                kind: WorkflowKind::HealthCheck,
+                scope: Some(WorkflowScope::HealthCheck {
+                    mode: HealthCheckMode::Complete,
+                }),
+                route_selection: Some(WorkflowRouteSelection::Agent {
+                    agent: AgentKind::Codex,
+                }),
+            },
+        )
+        .unwrap();
+    runner.generation.store(2, Ordering::SeqCst);
+
+    let error = service
+        .start(
+            &context,
+            project_access,
+            &settings,
+            &secrets,
+            &agents,
+            &tasks,
+            &preparation.preparation_id,
+            &preparation.preparation_revision,
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code, "WORKFLOW_PREPARATION_STALE");
+    assert_eq!(dispatches.0.load(Ordering::SeqCst), 0);
+    assert_eq!(runner.invocations.load(Ordering::SeqCst), 0);
+    assert!(tasks.list_workflow_runs().is_empty());
+}
+
+#[test]
+fn complete_health_forces_memory_only_even_when_project_access_is_persistent() {
+    let (_root, context) = project();
+    let config = tempfile::tempdir().unwrap();
+    let settings = SettingsService::with_config_dir(config.path().to_path_buf());
+    settings
+        .save_settings(
+            &context,
+            &Settings {
+                agent_default: Some(AgentKind::Codex),
+                ..Settings::default()
+            },
+        )
+        .unwrap();
+    let secrets = SecretService::memory();
+    let runner = Arc::new(MutableCodex {
+        generation: AtomicUsize::new(1),
+        invocations: AtomicUsize::new(0),
+    });
+    let agents = AgentService::with_runner(runner);
+    let service = WorkflowService::default();
+    service
+        .register_runner(Arc::new(CountingRunner::default()))
+        .unwrap();
+    let tasks = TaskService::default();
+    let project_access = access(
+        WorkflowProjectTrust::Trusted,
+        WorkflowFilesystemAccess::Writable,
+        WorkflowPersistenceMode::Persistent,
+    );
+    let preparation = service
+        .prepare(
+            &WorkflowPreparationEnvironment {
+                context: &context,
+                access: project_access.clone(),
+                settings_service: &settings,
+                secret_service: &secrets,
+                agent_service: &agents,
+            },
+            PrepareWorkflowInput {
+                kind: WorkflowKind::HealthCheck,
+                scope: Some(WorkflowScope::HealthCheck {
+                    mode: HealthCheckMode::Complete,
+                }),
+                route_selection: Some(WorkflowRouteSelection::Agent {
+                    agent: AgentKind::Codex,
+                }),
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        preparation.project_access.persistence,
+        WorkflowPersistenceMode::MemoryOnly
+    );
+    let outcome = service
+        .start(
+            &context,
+            project_access,
+            &settings,
+            &secrets,
+            &agents,
+            &tasks,
+            &preparation.preparation_id,
+            &preparation.preparation_revision,
+        )
+        .unwrap();
+    let run = match outcome {
+        WorkflowStartOutcome::Created { run } => run,
+        WorkflowStartOutcome::Existing { .. } => panic!("first start must create"),
+    };
+    assert_eq!(run.persistence, WorkflowPersistenceMode::MemoryOnly);
+    assert!(!context.root.join(".app/tasks").exists());
 }
 
 fn prepare(

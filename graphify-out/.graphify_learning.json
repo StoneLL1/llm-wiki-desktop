@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-12T05:31:08.722415+00:00",
+  "generated_at": "2026-08-12T08:10:20.640265+00:00",
   "nodes": {
     "src_services_importv2api_importv2api": {
       "code_fingerprint": "03b4a0c77425f1d54519eb7aa57147562c00a539d470ea231de729e9725bcbc5",
@@ -12,7 +12,7 @@
           "q": "第一性原理审查当前导入板块：Batch E/F 后 URL 导入显示 Import batch (1)，并核对大批量导入的正确性、可观察性与测试覆盖"
         }
       ],
-      "score": 0.878029303,
+      "score": 0.875789367,
       "source_file": "src/services/importV2Api.ts",
       "status": "tentative",
       "uses": 1
@@ -38,7 +38,7 @@
           "q": "Review Batch 2 workflow cancellation trust dispatch confirmation state machine"
         }
       ],
-      "score": 2.807184506,
+      "score": 2.800023114,
       "source_file": "src-tauri/src/app_state.rs",
       "status": "preferred",
       "uses": 3
@@ -59,7 +59,7 @@
           "q": "019fd1d8-7c68-7131-ac0a-934f17ca6332 这个batch E的阻断原因是什么，有什么办法稳定解决并继续完成batch F吗"
         }
       ],
-      "score": 1.736859542,
+      "score": 1.73242865,
       "source_file": "src-tauri/src/commands/import_v2_commands.rs",
       "status": "preferred",
       "uses": 2
@@ -75,7 +75,7 @@
           "q": "第一性原理审查当前导入板块：Batch E/F 后 URL 导入显示 Import batch (1)，并核对大批量导入的正确性、可观察性与测试覆盖"
         }
       ],
-      "score": 0.878029303,
+      "score": 0.875789367,
       "source_file": "src-tauri/src/commands/import_v2_web_commands.rs",
       "status": "tentative",
       "uses": 1
@@ -96,7 +96,7 @@
           "q": "Review Batch 2 workflow cancellation trust dispatch confirmation state machine"
         }
       ],
-      "score": 1.871079809,
+      "score": 1.866306509,
       "source_file": "src-tauri/src/models/confirmation.rs",
       "status": "preferred",
       "uses": 2
@@ -112,13 +112,13 @@
           "q": "为什么 D:\\Users\\Aletta\\Desktop\\Study\\wiki 这个项目会显示无法加载项目工作流，并报 A selected Source version is missing or its content hash no longer matches."
         }
       ],
-      "score": 0.856568989,
+      "score": 0.854383801,
       "source_file": "src-tauri/src/models/paths.rs",
       "status": "tentative",
       "uses": 1
     },
     "src_tauri_src_services_agent_service_agentservice": {
-      "code_fingerprint": "413d2af7aaee9212aa270f58e451a3e327e326235c75dbc452c6bcc401f8758c",
+      "code_fingerprint": "93300ba95291dbe18ea6ffc57c98a63ffdce648881bed2272d37171d8a426da0",
       "label": "AgentService",
       "last": "2026-08-09T03:56:03.536117+00:00",
       "provenance": [
@@ -128,7 +128,7 @@
           "q": "根据 Workflows 审查结果，为 Agent 撰写详细修复计划，并单列 UI 优化"
         }
       ],
-      "score": 0.931610577,
+      "score": 0.929233951,
       "source_file": "src-tauri/src/services/agent_service.rs",
       "status": "tentative",
       "uses": 1
@@ -144,7 +144,7 @@
           "q": "为什么 D:\\Users\\Aletta\\Desktop\\Study\\wiki 这个项目会显示无法加载项目工作流，并报 A selected Source version is missing or its content hash no longer matches."
         }
       ],
-      "score": 0.856568989,
+      "score": 0.854383801,
       "source_file": "src-tauri/src/services/file_store.rs",
       "status": "tentative",
       "uses": 1
@@ -160,7 +160,7 @@
           "q": "019fd1d8-7c68-7131-ac0a-934f17ca6332 这个batch E的阻断原因是什么，有什么办法稳定解决并继续完成batch F吗"
         }
       ],
-      "score": 0.858830239,
+      "score": 0.856639283,
       "source_file": "src-tauri/src/services/import_v2/commit.rs",
       "status": "tentative",
       "uses": 1
@@ -186,7 +186,7 @@
           "q": "请你调用llm wiki desktop context skill来了解项目上下文，以及用Graphify来溯源。从第一性原理出发。帮我溯源定位几个问题：1、有些旧项目打开，工作流页面没法用。2、一次性导入量过多了之后应用会卡死 3、打开现有知识库兼容性还不够好，导致很多功能无法使用。"
         }
       ],
-      "score": 2.553366008,
+      "score": 2.546852131,
       "source_file": "src-tauri/src/services/import_v2/file_discovery.rs",
       "status": "preferred",
       "uses": 3
@@ -207,7 +207,7 @@
           "q": "019fd1d8-7c68-7131-ac0a-934f17ca6332 这个batch E的阻断原因是什么，有什么办法稳定解决并继续完成batch F吗"
         }
       ],
-      "score": 1.736859542,
+      "score": 1.73242865,
       "source_file": "src-tauri/src/services/import_v2/orchestrator.rs",
       "status": "preferred",
       "uses": 2
@@ -243,7 +243,7 @@
           "q": "请你调用llm wiki desktop context skill来了解项目上下文，以及用Graphify来溯源。从第一性原理出发。帮我溯源定位几个问题：1、有些旧项目打开，工作流页面没法用。2、一次性导入量过多了之后应用会卡死 3、打开现有知识库兼容性还不够好，导致很多功能无法使用。"
         }
       ],
-      "score": 4.29022555,
+      "score": 4.27928078,
       "source_file": "src-tauri/src/services/import_v2/session_store.rs",
       "status": "preferred",
       "uses": 5
@@ -259,7 +259,7 @@
           "q": "能帮我单独修复一下这个知识库项目吗"
         }
       ],
-      "score": 0.867035342,
+      "score": 0.864823453,
       "source_file": "src-tauri/src/services/import_v2/source_lifecycle_tests.rs",
       "status": "tentative",
       "uses": 1
@@ -280,7 +280,7 @@
           "q": "Review Batch 2 workflow cancellation trust dispatch confirmation state machine"
         }
       ],
-      "score": 1.871079809,
+      "score": 1.866306509,
       "source_file": "src-tauri/src/services/workflow_service/coordinator.rs",
       "status": "preferred",
       "uses": 2
@@ -316,7 +316,7 @@
           "q": "能帮我单独修复一下这个知识库项目吗"
         }
       ],
-      "score": 5.462399414,
+      "score": 5.448464319,
       "source_file": "src-tauri/src/services/workflow_service/mod.rs",
       "status": "preferred",
       "uses": 6
@@ -352,7 +352,7 @@
           "q": "请你调用llm wiki desktop context skill来了解项目上下文，以及用Graphify来溯源。从第一性原理出发。帮我溯源定位几个问题：1、有些旧项目打开，工作流页面没法用。2、一次性导入量过多了之后应用会卡死 3、打开现有知识库兼容性还不够好，导致很多功能无法使用。"
         }
       ],
-      "score": 4.341545575,
+      "score": 4.330469883,
       "source_file": "src-tauri/src/services/workflow_service/preparation.rs",
       "status": "preferred",
       "uses": 5
@@ -388,7 +388,7 @@
           "q": "第一性原理审查当前导入板块：Batch E/F 后 URL 导入显示 Import batch (1)，并核对大批量导入的正确性、可观察性与测试覆盖"
         }
       ],
-      "score": 6.326944131,
+      "score": 6.3108035,
       "source_file": "src-tauri/src/tasks/task_service.rs",
       "status": "preferred",
       "uses": 7

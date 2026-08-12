@@ -605,8 +605,8 @@
     "semantic_hash": ""
   },
   "src-tauri/src/services/agent_service.rs": {
-    "mtime": 1786306310.4017043,
-    "ast_hash": "f14df0eac8237abd8f6f8fde570a8765",
+    "mtime": 1786520717.4842687,
+    "ast_hash": "aca3dda12ad06f0098c0d0260cff84a3",
     "semantic_hash": ""
   },
   "src-tauri/src/services/bookmark_service.rs": {
@@ -660,9 +660,9 @@
     "semantic_hash": "051e22347f1fd0bb9ea83619c549044a"
   },
   "src-tauri/src/services/compile_service.rs": {
-    "mtime": 1785759496.8952816,
-    "ast_hash": "cd1c783e0a4b49f3894788fe66b1c981",
-    "semantic_hash": "cd1c783e0a4b49f3894788fe66b1c981"
+    "mtime": 1786520059.499298,
+    "ast_hash": "879a067d08b9ac890dbd6bb4f8b904d1",
+    "semantic_hash": ""
   },
   "src-tauri/src/services/export_service.rs": {
     "mtime": 1786299610.3916788,
@@ -990,8 +990,8 @@
     "semantic_hash": "a4116cd13140f9427f9cd681fe91435d"
   },
   "src-tauri/src/services/lint_service/mod.rs": {
-    "mtime": 1786514187.6235967,
-    "ast_hash": "b7459496cfb8491df8346fe54cacc89d",
+    "mtime": 1786517234.8130238,
+    "ast_hash": "a6ce17c04030ecb833fff8bce209f9f1",
     "semantic_hash": ""
   },
   "src-tauri/src/services/lint_service/reports.rs": {
@@ -1015,8 +1015,8 @@
     "semantic_hash": "b2c0381a474da0a015eaf47b5a1046b7"
   },
   "src-tauri/src/services/mod.rs": {
-    "mtime": 1786336126.6793675,
-    "ast_hash": "30c4b7bf3dd74e280e9dd0af7e72f4bc",
+    "mtime": 1786516887.9083042,
+    "ast_hash": "69832c4dcef0afa3d4272ed8f0233b40",
     "semantic_hash": ""
   },
   "src-tauri/src/services/project_service.rs": {
@@ -1135,8 +1135,8 @@
     "semantic_hash": "4a7207e939bf8fcf12cbf03597d9dcc6"
   },
   "src-tauri/src/services/workflow_service/runners/update_wiki.rs": {
-    "mtime": 1786336893.7317152,
-    "ast_hash": "f9e410a144534fbf8228f6c0bfb59b3b",
+    "mtime": 1786519048.9414978,
+    "ast_hash": "f2bc43fb7670587cf1e79714cc25403e",
     "semantic_hash": ""
   },
   "src-tauri/src/services/workflow_service/stage_sink.rs": {
@@ -2825,8 +2825,8 @@
     "semantic_hash": "678701704f553a827612a7eb8143fd07"
   },
   "SPEC/gotchas.txt": {
-    "mtime": 1786515864.4766126,
-    "ast_hash": "b2cff063658c96d53ec3c3d30a9b46db",
+    "mtime": 1786520568.470199,
+    "ast_hash": "85123c4abb40bd4f199c9d2317347b91",
     "semantic_hash": ""
   },
   "SPEC/plans/agent.md": {
@@ -2905,8 +2905,8 @@
     "semantic_hash": "35ef62685304280209d4cbf4013fbacb"
   },
   "SPEC/progress.txt": {
-    "mtime": 1786515863.274764,
-    "ast_hash": "bbc695fb5d1db147167a7587da5146b5",
+    "mtime": 1786520567.0901453,
+    "ast_hash": "8dfef2cbc0b1ff5adf67ccd61d64b29f",
     "semantic_hash": ""
   },
   "SPEC/roadmap/README.md": {
@@ -3435,8 +3435,8 @@
     "semantic_hash": ""
   },
   "gotchas.txt": {
-    "mtime": 1786515865.1443782,
-    "ast_hash": "1350822270e50b712dafcdaf44fc972f",
+    "mtime": 1786520567.7542808,
+    "ast_hash": "4aedb4d66334eb103770d26e2e3ad089",
     "semantic_hash": ""
   },
   "index.html": {
@@ -3445,8 +3445,8 @@
     "semantic_hash": "8a5a3953ec9eb051bebb7c1add12f71a"
   },
   "progress.txt": {
-    "mtime": 1786515863.8561316,
-    "ast_hash": "e5d137aca0d0edbaec397bb5ca514263",
+    "mtime": 1786520566.472936,
+    "ast_hash": "f6f6b17b8f01b584224eee6bbac06246",
     "semantic_hash": ""
   },
   "src-tauri/templates/projects/business/purpose.md": {
@@ -4405,8 +4405,8 @@
     "semantic_hash": ""
   },
   "src-tauri/src/services/lint_service/repair.rs": {
-    "mtime": 1786515114.9521708,
-    "ast_hash": "978e33e391e1bfd5a7a67ae7c1aca16b",
+    "mtime": 1786520214.1853786,
+    "ast_hash": "49dacf08f09b8d7479ab963d71a6341e",
     "semantic_hash": ""
   }
 }

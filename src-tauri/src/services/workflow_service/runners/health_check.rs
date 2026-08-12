@@ -10,6 +10,7 @@ use crate::models::lint::{
     Fixability, HealthCheckCoverage, HealthCheckReport, LintIssue, LintIssueSource, LintIssueType,
     LintSeverity,
 };
+use crate::models::llm::LlmProviderConfig;
 use crate::models::paths::ProjectContext;
 use crate::models::task::TaskStatus;
 use crate::models::workflow::{
@@ -18,8 +19,8 @@ use crate::models::workflow::{
     WorkflowRun, WorkflowScope,
 };
 use crate::services::{
-    health_source_paths, AgentService, LintService, LlmService, LocalLintPhase, SearchService,
-    SecretService, SettingsService,
+    health_source_paths, AgentService, DeepLintSnapshot, LintService, LlmService, LocalLintPhase,
+    SearchService, SecretService, SettingsService,
 };
 use crate::tasks::task_model::LogLevel;
 use crate::tasks::TaskService;
@@ -109,14 +110,24 @@ where
     P: FnMut() -> Result<Option<WorkflowExternalLaunchPermit>, BackendError>,
 {
     let task_id = run.task_id.clone();
+    let launch_run = run.clone();
     run_health_check_with_deep_and_report_authority(
         context,
         run,
         services,
-        move |prompt, route| async move {
+        move |snapshot, route| async move {
             let publication = authorize_external_launch()?.begin()?;
-            execute_prepared_deep_route(context, services, &task_id, &route, prompt, publication)
-                .await
+            execute_prepared_deep_route(
+                context,
+                services,
+                &task_id,
+                &route,
+                &snapshot,
+                &launch_run.scope,
+                &launch_run.baseline_fingerprint,
+                publication,
+            )
+            .await
         },
         authorize_report_write,
     )
@@ -133,7 +144,7 @@ pub async fn run_health_check_with_deep<F, Fut>(
     deep_check: F,
 ) -> Option<WorkflowRun>
 where
-    F: FnOnce(String, WorkflowRoute) -> Fut,
+    F: FnOnce(DeepLintSnapshot, WorkflowRoute) -> Fut,
     Fut: Future<Output = Result<String, BackendError>>,
 {
     let report_run = run.clone();
@@ -155,7 +166,7 @@ pub async fn run_health_check_with_deep_and_report_authority<F, Fut, P>(
     report_authority: P,
 ) -> Option<WorkflowRun>
 where
-    F: FnOnce(String, WorkflowRoute) -> Fut,
+    F: FnOnce(DeepLintSnapshot, WorkflowRoute) -> Fut,
     Fut: Future<Output = Result<String, BackendError>>,
     P: FnMut() -> Result<Option<WorkflowExternalLaunchPermit>, BackendError>,
 {
@@ -173,7 +184,7 @@ async fn execute_health_check<F, Fut, P>(
     mut report_authority: P,
 ) -> Result<Option<WorkflowRun>, BackendError>
 where
-    F: FnOnce(String, WorkflowRoute) -> Fut,
+    F: FnOnce(DeepLintSnapshot, WorkflowRoute) -> Fut,
     Fut: Future<Output = Result<String, BackendError>>,
     P: FnMut() -> Result<Option<WorkflowExternalLaunchPermit>, BackendError>,
 {
@@ -292,7 +303,7 @@ where
             {
                 return Err(baseline_changed());
             }
-            let raw = deep_check(snapshot.prompt.clone(), route).await?;
+            let raw = deep_check(snapshot.clone(), route).await?;
             ensure_not_cancelled(services.task_service, task_id)?;
             deep_issues = services
                 .lint_service
@@ -453,54 +464,65 @@ async fn execute_prepared_deep_route(
     services: &HealthCheckExecutionServices<'_>,
     task_id: &str,
     route: &WorkflowRoute,
-    prompt: String,
+    snapshot: &DeepLintSnapshot,
+    scope: &WorkflowScope,
+    baseline_fingerprint: &str,
     publication: super::super::WorkflowLaunchPublication,
 ) -> Result<String, BackendError> {
+    // Revalidate at the actual launch boundary as well as before snapshot
+    // construction. Agent/provider version, executable, profile, model, URL,
+    // or secret drift during the local pass must yield invocation zero.
     match route {
         WorkflowRoute::Local { .. } => Err(route_unavailable()),
-        WorkflowRoute::Agent { agent, .. } => {
-            if !AgentService::supports_lint_agent(*agent) {
-                return Err(route_unavailable());
-            }
-            let settings = services.settings_service.read_settings(context)?;
-            let info = services
-                .agent_service
-                .detect_agent(*agent, settings.agent_default == Some(*agent));
-            if info.state != AgentDetectionState::Installed {
-                return Err(route_unavailable());
-            }
+        WorkflowRoute::Agent {
+            agent,
+            route_revision,
+            ..
+        } => {
             let workspace = create_lint_workspace(task_id)?;
             let _guard = WorkspaceGuard(workspace.clone());
-            let invocation = AgentService::lint_invocation(*agent, &workspace, &prompt)?;
-            let result = services.agent_service.run_lint_streaming(
-                &invocation,
+            let settings = services.settings_service.read_settings(context)?;
+            let prepared = services
+                .agent_service
+                .prepare_lint_analysis(
+                    *agent,
+                    settings.agent_default == Some(*agent),
+                    &workspace,
+                    &snapshot.prompt,
+                )
+                .map_err(|_| route_unavailable())?;
+            validate_agent_route_revision(
+                *agent,
+                prepared.info(),
+                prepared.target_revision(),
+                route_revision,
+            )?;
+            validate_launch_snapshot(context, services, snapshot, scope, baseline_fingerprint)?;
+            let result = services.agent_service.run_prepared_lint_streaming(
+                &prepared,
                 services.task_service,
                 task_id,
             );
             publication.started();
             result
         }
-        WorkflowRoute::Byok {
-            provider, model, ..
-        } => {
-            let config = services
-                .settings_service
-                .read_settings(context)?
-                .llm_providers
-                .into_iter()
-                .find(|candidate| {
-                    candidate.enabled
-                        && candidate.provider == *provider
-                        && candidate.model == *model
-                })
-                .ok_or_else(route_unavailable)?;
-            let secret = services.secret_service.get(*provider)?;
-            if provider.requires_secret() && secret.is_none() {
+        WorkflowRoute::Byok { .. } => {
+            let PreparedDeepRoute::Byok { config, secret } =
+                validate_prepared_route(context, services, route)?
+            else {
                 return Err(route_unavailable());
+            };
+            if services.task_service.is_cancelled(task_id) {
+                return Err(crate::tasks::byok_progress::cancelled_error(
+                    "WORKFLOW_CANCELLED",
+                    "Health Check was cancelled.",
+                ));
             }
-            let completion = services
-                .llm_service
-                .complete(&config, secret.as_deref(), &prompt);
+            validate_launch_snapshot(context, services, snapshot, scope, baseline_fingerprint)?;
+            let completion =
+                services
+                    .llm_service
+                    .complete(&config, secret.as_deref(), &snapshot.prompt);
             let result = crate::tasks::byok_progress::poll_with_progress(
                 services.task_service,
                 task_id,
@@ -520,14 +542,40 @@ async fn execute_prepared_deep_route(
     }
 }
 
+fn validate_launch_snapshot(
+    context: &ProjectContext,
+    services: &HealthCheckExecutionServices<'_>,
+    snapshot: &DeepLintSnapshot,
+    scope: &WorkflowScope,
+    baseline_fingerprint: &str,
+) -> Result<(), BackendError> {
+    services
+        .lint_service
+        .verify_deep_lint_snapshot(context, services.search_service, snapshot)
+        .map_err(map_deep_snapshot_error)?;
+    if workflow_baseline_for_scope(context, scope)?.fingerprint != baseline_fingerprint {
+        return Err(baseline_changed());
+    }
+    Ok(())
+}
+
+enum PreparedDeepRoute {
+    Local,
+    Agent,
+    Byok {
+        config: LlmProviderConfig,
+        secret: Option<String>,
+    },
+}
+
 fn validate_prepared_route(
     context: &ProjectContext,
     services: &HealthCheckExecutionServices<'_>,
     route: &WorkflowRoute,
-) -> Result<(), BackendError> {
+) -> Result<PreparedDeepRoute, BackendError> {
     match route {
         WorkflowRoute::Local { route_revision } => (route_revision == "local-v1")
-            .then_some(())
+            .then_some(PreparedDeepRoute::Local)
             .ok_or_else(route_unavailable),
         WorkflowRoute::Agent {
             agent,
@@ -538,16 +586,11 @@ fn validate_prepared_route(
                 return Err(route_unavailable());
             }
             let settings = services.settings_service.read_settings(context)?;
-            let info = services
+            let (info, target_revision) = services
                 .agent_service
-                .detect_agent(*agent, settings.agent_default == Some(*agent));
-            let revision =
-                canonical_json(&(agent, &info.state, &info.version, &info.executable_path))
-                    .map(|value| hex_sha256(value.as_bytes()))
-                    .map_err(|_| route_unavailable())?;
-            (info.state == AgentDetectionState::Installed && revision == *route_revision)
-                .then_some(())
-                .ok_or_else(route_unavailable)
+                .lint_analysis_route_facts(*agent, settings.agent_default == Some(*agent))?;
+            validate_agent_route_revision(*agent, &info, &target_revision, route_revision)?;
+            Ok(PreparedDeepRoute::Agent)
         }
         WorkflowRoute::Byok {
             provider,
@@ -560,8 +603,8 @@ fn validate_prepared_route(
                 .into_iter()
                 .find(|candidate| candidate.provider == *provider && candidate.model == *model)
                 .ok_or_else(route_unavailable)?;
-            let configured_secret =
-                !provider.requires_secret() || services.secret_service.get(*provider)?.is_some();
+            let secret = services.secret_service.get(*provider)?;
+            let configured_secret = !provider.requires_secret() || secret.is_some();
             let available = config.enabled
                 && !config.model.trim().is_empty()
                 && {
@@ -580,10 +623,33 @@ fn validate_prepared_route(
             .map(|value| hex_sha256(value.as_bytes()))
             .map_err(|_| route_unavailable())?;
             (available && revision == *route_revision)
-                .then_some(())
+                .then_some(PreparedDeepRoute::Byok { config, secret })
                 .ok_or_else(route_unavailable)
         }
     }
+}
+
+fn validate_agent_route_revision(
+    agent: crate::models::agent::AgentKind,
+    info: &crate::models::agent::AgentInfo,
+    target_revision: &str,
+    route_revision: &str,
+) -> Result<(), BackendError> {
+    let profile_revision =
+        AgentService::lint_route_profile_revision(agent).ok_or_else(route_unavailable)?;
+    let revision = canonical_json(&(
+        agent,
+        &info.state,
+        &info.version,
+        &info.executable_path,
+        profile_revision,
+        target_revision,
+    ))
+    .map(|value| hex_sha256(value.as_bytes()))
+    .map_err(|_| route_unavailable())?;
+    (info.state == AgentDetectionState::Installed && revision == route_revision)
+        .then_some(())
+        .ok_or_else(route_unavailable)
 }
 
 fn health_mode(run: &WorkflowRun) -> Result<HealthCheckMode, BackendError> {

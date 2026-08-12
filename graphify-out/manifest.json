@@ -310,7 +310,7 @@
     "semantic_hash": "63b790e19a03b1fd01b6921ebe537ef1"
   },
   "src-tauri/src/app_state.rs": {
-    "mtime": 1786266628.4194853,
+    "mtime": 1786525951.843656,
     "ast_hash": "b71a2638a45b6617f04e90ddbde58040",
     "semantic_hash": ""
   },
@@ -390,9 +390,9 @@
     "semantic_hash": ""
   },
   "src-tauri/src/commands/lint_commands.rs": {
-    "mtime": 1785748571.0837946,
-    "ast_hash": "172206a4c0345186abeeebc6d4dc573b",
-    "semantic_hash": "172206a4c0345186abeeebc6d4dc573b"
+    "mtime": 1786524808.9420788,
+    "ast_hash": "1da748e3ca528d7e474f68294c2d0295",
+    "semantic_hash": ""
   },
   "src-tauri/src/commands/llm_commands.rs": {
     "mtime": 1782298722.9230845,
@@ -435,8 +435,8 @@
     "semantic_hash": "6dd7f2d0ca84a20dc98ee88313a40521"
   },
   "src-tauri/src/commands/workflow_commands.rs": {
-    "mtime": 1786336147.9876347,
-    "ast_hash": "cebd71a9253183e277387562ce8ca554",
+    "mtime": 1786527456.5617197,
+    "ast_hash": "38be87bfe15bf39bd08b0af771d00810",
     "semantic_hash": ""
   },
   "src-tauri/src/errors/backend_error.rs": {
@@ -605,8 +605,8 @@
     "semantic_hash": ""
   },
   "src-tauri/src/services/agent_service.rs": {
-    "mtime": 1786520717.4842687,
-    "ast_hash": "aca3dda12ad06f0098c0d0260cff84a3",
+    "mtime": 1786529111.1565595,
+    "ast_hash": "6bd9fcaf4440bb4ecfbc54fea8f3c4e1",
     "semantic_hash": ""
   },
   "src-tauri/src/services/bookmark_service.rs": {
@@ -675,7 +675,7 @@
     "semantic_hash": ""
   },
   "src-tauri/src/services/git_service.rs": {
-    "mtime": 1786333883.5940385,
+    "mtime": 1786525952.4256876,
     "ast_hash": "7c7522afc8b7a1ab3a63f82e5d0968e0",
     "semantic_hash": ""
   },
@@ -1115,8 +1115,8 @@
     "semantic_hash": ""
   },
   "src-tauri/src/services/workflow_service/preparation.rs": {
-    "mtime": 1786305420.640485,
-    "ast_hash": "596ab4fb2bf88710cd340f62f71f59ea",
+    "mtime": 1786527249.3538818,
+    "ast_hash": "4888cfa181625ad00181136f69e29116",
     "semantic_hash": ""
   },
   "src-tauri/src/services/workflow_service/runners/generate_content.rs": {
@@ -1125,8 +1125,8 @@
     "semantic_hash": ""
   },
   "src-tauri/src/services/workflow_service/runners/health_check.rs": {
-    "mtime": 1786333199.872338,
-    "ast_hash": "12cca29f82a9c0ffb990530e0bd15ee3",
+    "mtime": 1786528699.640216,
+    "ast_hash": "95ea0a6ff7966b8939560ed78ab7b3b2",
     "semantic_hash": ""
   },
   "src-tauri/src/services/workflow_service/runners/mod.rs": {
@@ -2825,8 +2825,8 @@
     "semantic_hash": "678701704f553a827612a7eb8143fd07"
   },
   "SPEC/gotchas.txt": {
-    "mtime": 1786520568.470199,
-    "ast_hash": "85123c4abb40bd4f199c9d2317347b91",
+    "mtime": 1786530155.055052,
+    "ast_hash": "6ace37f583531360c6a93cb206207910",
     "semantic_hash": ""
   },
   "SPEC/plans/agent.md": {
@@ -2905,8 +2905,8 @@
     "semantic_hash": "35ef62685304280209d4cbf4013fbacb"
   },
   "SPEC/progress.txt": {
-    "mtime": 1786520567.0901453,
-    "ast_hash": "8dfef2cbc0b1ff5adf67ccd61d64b29f",
+    "mtime": 1786530153.718851,
+    "ast_hash": "9f9b4ff10fddb3e9135d7d6af4c88bca",
     "semantic_hash": ""
   },
   "SPEC/roadmap/README.md": {
@@ -3435,8 +3435,8 @@
     "semantic_hash": ""
   },
   "gotchas.txt": {
-    "mtime": 1786520567.7542808,
-    "ast_hash": "4aedb4d66334eb103770d26e2e3ad089",
+    "mtime": 1786530154.3560894,
+    "ast_hash": "6d4e69762ef4a0bdb2999ed9a2147382",
     "semantic_hash": ""
   },
   "index.html": {
@@ -3445,8 +3445,8 @@
     "semantic_hash": "8a5a3953ec9eb051bebb7c1add12f71a"
   },
   "progress.txt": {
-    "mtime": 1786520566.472936,
-    "ast_hash": "f6f6b17b8f01b584224eee6bbac06246",
+    "mtime": 1786530153.1488993,
+    "ast_hash": "dd6f1f1a0294b168dc2a0c253d5d0356",
     "semantic_hash": ""
   },
   "src-tauri/templates/projects/business/purpose.md": {
