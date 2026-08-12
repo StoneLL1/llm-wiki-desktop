@@ -2790,13 +2790,13 @@
     "semantic_hash": "01dd6f7c59261000a38458717e43f788"
   },
   "SPEC/APP_flow.md": {
-    "mtime": 1786088254.7700765,
-    "ast_hash": "26f6965d8fa50f2b5661b30a1bf3d2b9",
+    "mtime": 1786513392.3246942,
+    "ast_hash": "2552445eea4ed72ea14d100233f03b7b",
     "semantic_hash": ""
   },
   "SPEC/BACKEND_STRUCTURE.md": {
-    "mtime": 1786323158.3604002,
-    "ast_hash": "6dbab35a23192cb14347ae1c097a2c89",
+    "mtime": 1786513391.7450583,
+    "ast_hash": "42c22ea027b2709e16eda6f57f03c358",
     "semantic_hash": ""
   },
   "SPEC/DESIGN.md": {
@@ -2810,13 +2810,13 @@
     "semantic_hash": "3f0db869b5538aa6f4adf44576663e50"
   },
   "SPEC/PRD.md": {
-    "mtime": 1785514627.4021828,
-    "ast_hash": "a0ab0059f7461a34a001cd5d81455dbb",
-    "semantic_hash": "a0ab0059f7461a34a001cd5d81455dbb"
+    "mtime": 1786513390.505799,
+    "ast_hash": "ee18212f148c4fa25ae7c6654aa7f79e",
+    "semantic_hash": ""
   },
   "SPEC/SPEC.md": {
-    "mtime": 1786088254.7700765,
-    "ast_hash": "90cfb1304d6aecbd2e6390ab81b92773",
+    "mtime": 1786513391.100446,
+    "ast_hash": "3a45a2914cc9112a9fa4b996f3447024",
     "semantic_hash": ""
   },
   "SPEC/TECH_STACK.md": {
@@ -2825,8 +2825,8 @@
     "semantic_hash": "678701704f553a827612a7eb8143fd07"
   },
   "SPEC/gotchas.txt": {
-    "mtime": 1786352760.680507,
-    "ast_hash": "7fb04927c6f48bf97b210a685f30f8a6",
+    "mtime": 1786513005.3511376,
+    "ast_hash": "fb7dc532a985c020334a1b0c05fc1816",
     "semantic_hash": ""
   },
   "SPEC/plans/agent.md": {
@@ -2905,8 +2905,8 @@
     "semantic_hash": "35ef62685304280209d4cbf4013fbacb"
   },
   "SPEC/progress.txt": {
-    "mtime": 1786512173.9611607,
-    "ast_hash": "82d2e0753236542981f681a19eca2cf7",
+    "mtime": 1786513005.9646914,
+    "ast_hash": "a1ea782b1f4c1708c32effd90579b9e7",
     "semantic_hash": ""
   },
   "SPEC/roadmap/README.md": {
@@ -3430,9 +3430,9 @@
     "semantic_hash": "43e9cc8e4ea5646053708228991a6dae"
   },
   "docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md": {
-    "mtime": 1786088254.7740762,
-    "ast_hash": "db1d7f068218609c6040e1469d944c8a",
-    "semantic_hash": "db1d7f068218609c6040e1469d944c8a"
+    "mtime": 1786513389.8991506,
+    "ast_hash": "6c8d7a77e2726a61d22296b2d80c6b9a",
+    "semantic_hash": ""
   },
   "gotchas.txt": {
     "mtime": 1786343967.805031,
@@ -3445,8 +3445,8 @@
     "semantic_hash": "8a5a3953ec9eb051bebb7c1add12f71a"
   },
   "progress.txt": {
-    "mtime": 1786512173.4622035,
-    "ast_hash": "ae868c00b3301766b0ff20e7d50f9fb5",
+    "mtime": 1786513006.5805254,
+    "ast_hash": "3f11c48bf25604a74ac5303affd80004",
     "semantic_hash": ""
   },
   "src-tauri/templates/projects/business/purpose.md": {
@@ -4100,8 +4100,8 @@
     "semantic_hash": ""
   },
   "src/features/workflows/workflowBaselineFixtures.test.tsx": {
-    "mtime": 1786346318.433317,
-    "ast_hash": "e5e4a76d3a298bb3bb5c4fb456fc1057",
+    "mtime": 1786512808.4679282,
+    "ast_hash": "1b103a996bbecd768f6df887fec62692",
     "semantic_hash": ""
   },
   "src/features/workflows/workflowBaselineFixtures.ts": {
@@ -4180,8 +4180,8 @@
     "semantic_hash": ""
   },
   "docs/superpowers/plans/2026-08-09-workflows-correctness-performance-ui-remediation.md": {
-    "mtime": 1786248547.4003298,
-    "ast_hash": "5fd58472b26e470640be8b77478e86e0",
+    "mtime": 1786513004.7106624,
+    "ast_hash": "5d8991c7703df460a6244d2f35481ae6",
     "semantic_hash": ""
   },
   "graphify-out/memory/query_20260809_035603_\u6839\u636e_workflows_\u5ba1\u67e5\u7ed3\u679c_\u4e3a_agent_\u64b0\u5199\u8be6\u7ec6\u4fee\u590d\u8ba1\u5212_\u5e76\u5355\u5217_ui_\u4f18\u5316.md": {
@@ -4395,8 +4395,13 @@
     "semantic_hash": ""
   },
   "docs/superpowers/plans/2026-08-12-decision-gate-h-agent-deep-lint-repair-implementation.md": {
-    "mtime": 1786512045.821527,
-    "ast_hash": "37e7114869a895a1ececb4db9ec6e825",
+    "mtime": 1786512319.123157,
+    "ast_hash": "191d133c2078e9fcd2c060d2f3620ade",
+    "semantic_hash": ""
+  },
+  "docs/superpowers/plans/2026-08-12-wiki-quick-export-and-workflows-dual-entry-implementation.md": {
+    "mtime": 1786512382.6365812,
+    "ast_hash": "bc40f1fa5038842ea2214a2ea171ff5f",
     "semantic_hash": ""
   }
 }

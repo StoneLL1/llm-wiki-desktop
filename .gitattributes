@@ -1,1 +1,2 @@
 *.pdf binary
+src-tauri/templates/skills/wiki-lint/SKILL.md text eol=lf

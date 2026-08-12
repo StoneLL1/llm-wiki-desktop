@@ -6,6 +6,57 @@ use super::compile::CompileRoutePreference;
 use super::llm::LlmProviderKind;
 use super::workflow::{HealthCheckMode, WorkflowRoute};
 
+pub const WIKI_LINT_SCHEMA_VERSION: u32 = 1;
+pub const WIKI_LINT_SKILL_ID: &str = "builtin.wiki-lint";
+pub const WIKI_LINT_SKILL_VERSION: &str = "2026-08-12.1";
+pub const WIKI_LINT_SKILL_SHA256: &str =
+    "29e903710745451da287de9d08297ae6863de944bd7d9abd7f4243b5b9f76eb0";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WikiLintSkillRef {
+    pub id: String,
+    pub version: String,
+    pub sha256: String,
+}
+
+impl WikiLintSkillRef {
+    pub fn builtin() -> Self {
+        Self {
+            id: WIKI_LINT_SKILL_ID.into(),
+            version: WIKI_LINT_SKILL_VERSION.into(),
+            sha256: WIKI_LINT_SKILL_SHA256.into(),
+        }
+    }
+
+    pub fn is_builtin(&self) -> bool {
+        self.id == WIKI_LINT_SKILL_ID
+            && self.version == WIKI_LINT_SKILL_VERSION
+            && self.sha256 == WIKI_LINT_SKILL_SHA256
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLintRepairOperation {
+    Analyze,
+    Repair,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentLintRepairPreparation {
+    pub preparation_id: String,
+    pub preparation_revision: String,
+    pub report_id: String,
+    pub selected_finding_ids: Vec<String>,
+    pub route: WorkflowRoute,
+    pub skill: WikiLintSkillRef,
+    pub authorized_paths: Vec<String>,
+    pub baseline_fingerprint: String,
+    pub pending_action: crate::models::confirmation::PendingAction,
+}
+
 /// Coarse severity for surfacing and grouping lint issues.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -108,7 +159,7 @@ pub struct LintReport {
 
 /// The shape the `wiki-lint` Skill emits inside its fenced JSON block. The
 /// backend maps each of these onto a [`LintIssue`] with `source = Agent`.
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DeepLintIssueType {
     DuplicateTopic,
@@ -132,7 +183,7 @@ impl From<DeepLintIssueType> for LintIssueType {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LintAgentIssue {
     pub issue_type: DeepLintIssueType,
@@ -143,6 +194,156 @@ pub struct LintAgentIssue {
     pub evidence: Option<String>,
     #[serde(default)]
     pub suggestion: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WikiLintAnalysisIssue {
+    pub issue_type: DeepLintIssueType,
+    pub severity: LintSeverity,
+    pub path: String,
+    pub message: String,
+    #[serde(default)]
+    pub evidence: Option<String>,
+    #[serde(default)]
+    pub suggestion: Option<String>,
+}
+
+impl From<WikiLintAnalysisIssue> for LintAgentIssue {
+    fn from(value: WikiLintAnalysisIssue) -> Self {
+        Self {
+            issue_type: value.issue_type,
+            severity: value.severity,
+            path: value.path,
+            message: value.message,
+            evidence: value.evidence,
+            suggestion: value.suggestion,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WikiLintAnalysisOutput {
+    pub schema_version: u32,
+    pub operation: AgentLintRepairOperation,
+    pub skill: WikiLintSkillRef,
+    pub issues: Vec<WikiLintAnalysisIssue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentLintRepairFinding {
+    pub id: String,
+    pub issue_type: DeepLintIssueType,
+    pub severity: LintSeverity,
+    pub path: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_action: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentLintRepairRoundSummary {
+    pub round: u8,
+    #[serde(default)]
+    pub affected_paths: Vec<String>,
+    #[serde(default)]
+    pub unresolved_finding_ids: Vec<String>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentLintRepairRequest {
+    pub schema_version: u32,
+    pub operation: AgentLintRepairOperation,
+    pub skill: WikiLintSkillRef,
+    pub report_id: String,
+    pub selection_revision: String,
+    pub round: u8,
+    pub max_rounds: u8,
+    pub findings: Vec<AgentLintRepairFinding>,
+    #[serde(default)]
+    pub prior_rounds: Vec<AgentLintRepairRoundSummary>,
+    pub writable_paths: Vec<String>,
+    pub creatable_roots: Vec<String>,
+    pub read_only_roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub language: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLintRepairFindingStatus {
+    Attempted,
+    Skipped,
+    NeedsReview,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentLintRepairFindingResult {
+    pub finding_id: String,
+    pub status: AgentLintRepairFindingStatus,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLintRepairDeclaredChangeOperation {
+    Create,
+    Update,
+    Delete,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentLintRepairDeclaredChange {
+    pub path: String,
+    pub operation: AgentLintRepairDeclaredChangeOperation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentLintRepairRoundOutput {
+    pub schema_version: u32,
+    pub operation: AgentLintRepairOperation,
+    pub skill: WikiLintSkillRef,
+    pub report_id: String,
+    pub selection_revision: String,
+    pub round: u8,
+    pub finding_results: Vec<AgentLintRepairFindingResult>,
+    pub declared_changes: Vec<AgentLintRepairDeclaredChange>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLintRepairOutcome {
+    Succeeded,
+    PartiallyCompleted,
+    ManualReviewRequired,
+    Cancelled,
+    Failed,
+    Interrupted,
+    RolledBack,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentLintRepairCorrelation {
+    pub resolved_finding_ids: Vec<String>,
+    pub unresolved_finding_ids: Vec<String>,
+    pub introduced_finding_ids: Vec<String>,
+    pub skipped_finding_ids: Vec<String>,
 }
 
 /// Persisted deep-lint report at `.app/lint-reports/<task_id>.json`.

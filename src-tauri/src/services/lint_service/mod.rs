@@ -1,6 +1,7 @@
 mod deep;
 mod fixes;
 mod ignores;
+mod repair;
 mod reports;
 mod rules;
 
@@ -78,7 +79,9 @@ impl LintService {
     }
 
     /// Hash every input that can affect the deep-lint prompt, including
-    /// optional project guidance files. `None` is retained for missing files
+    /// optional project guidance files. The pinned built-in Skill is represented
+    /// by a synthetic immutable key; project-local Skill files are never inputs.
+    /// `None` is retained for missing files
     /// so creation/deletion is detected as a snapshot change too.
     pub fn capture_prompt_input_hashes(
         &self,
@@ -91,15 +94,23 @@ impl LintService {
             "wiki/index.md".to_string(),
             "purpose.md".to_string(),
             "schema.md".to_string(),
-            "skills/wiki-lint/SKILL.md".to_string(),
         ]);
-        paths
+        let mut hashes = paths
             .into_iter()
             .map(|path| {
                 let hash = self.file_store.file_hash_if_exists(context, &path)?;
                 Ok((path, hash))
             })
-            .collect()
+            .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
+        hashes.insert(
+            format!(
+                "builtin://{}/{}",
+                crate::models::lint::WIKI_LINT_SKILL_ID,
+                crate::models::lint::WIKI_LINT_SKILL_VERSION
+            ),
+            Some(crate::models::lint::WIKI_LINT_SKILL_SHA256.into()),
+        );
+        Ok(hashes)
     }
 
     /// Apply the same persisted ignore rules to deterministic and deep

@@ -3,6 +3,32 @@ import type { PendingAction } from "./backend";
 import type { LlmProviderKind } from "./llm";
 import type { HealthCheckMode, WorkflowRoute } from "./workflow";
 
+export const WIKI_LINT_SCHEMA_VERSION = 1 as const;
+export const WIKI_LINT_SKILL_ID = "builtin.wiki-lint" as const;
+export const WIKI_LINT_SKILL_VERSION = "2026-08-12.1" as const;
+export const WIKI_LINT_SKILL_SHA256 =
+  "29e903710745451da287de9d08297ae6863de944bd7d9abd7f4243b5b9f76eb0" as const;
+
+export interface WikiLintSkillRef {
+  id: typeof WIKI_LINT_SKILL_ID;
+  version: typeof WIKI_LINT_SKILL_VERSION;
+  sha256: typeof WIKI_LINT_SKILL_SHA256;
+}
+
+export type AgentLintRepairOperation = "analyze" | "repair";
+
+export interface AgentLintRepairPreparation {
+  preparationId: string;
+  preparationRevision: string;
+  reportId: string;
+  selectedFindingIds: string[];
+  route: WorkflowRoute;
+  skill: WikiLintSkillRef;
+  authorizedPaths: string[];
+  baselineFingerprint: string;
+  pendingAction: PendingAction;
+}
+
 export type LintSeverity = "error" | "warning" | "info";
 
 export type LintIssueSource = "local" | "agent";
@@ -61,6 +87,99 @@ export interface DeepLintReport {
   issues: LintIssue[];
   rawOutput: string;
   generatedAt: string;
+}
+
+export interface AgentLintRepairFinding {
+  id: string;
+  issueType: Extract<
+    LintIssueType,
+    | "duplicate_topic"
+    | "weak_cross_reference"
+    | "missing_source"
+    | "schema_mismatch"
+    | "outdated_content"
+    | "contradiction"
+  >;
+  severity: LintSeverity;
+  path: string;
+  message: string;
+  evidence?: string | null;
+  suggestedAction?: string | null;
+}
+
+export interface AgentLintRepairRoundSummary {
+  round: number;
+  affectedPaths: string[];
+  unresolvedFindingIds: string[];
+  summary: string;
+}
+
+export interface AgentLintRepairRequest {
+  schemaVersion: typeof WIKI_LINT_SCHEMA_VERSION;
+  operation: "repair";
+  skill: WikiLintSkillRef;
+  reportId: string;
+  selectionRevision: string;
+  round: number;
+  maxRounds: 3;
+  findings: AgentLintRepairFinding[];
+  priorRounds: AgentLintRepairRoundSummary[];
+  writablePaths: string[];
+  creatableRoots: string[];
+  readOnlyRoots: string[];
+  purpose?: string | null;
+  schema?: string | null;
+  language: string;
+}
+
+export type AgentLintRepairFindingStatus =
+  | "attempted"
+  | "skipped"
+  | "needs_review"
+  | "failed";
+
+export interface AgentLintRepairFindingResult {
+  findingId: string;
+  status: AgentLintRepairFindingStatus;
+  message: string;
+}
+
+export type AgentLintRepairDeclaredChangeOperation =
+  | "create"
+  | "update"
+  | "delete";
+
+export interface AgentLintRepairDeclaredChange {
+  path: string;
+  operation: AgentLintRepairDeclaredChangeOperation;
+}
+
+export interface AgentLintRepairRoundOutput {
+  schemaVersion: typeof WIKI_LINT_SCHEMA_VERSION;
+  operation: "repair";
+  skill: WikiLintSkillRef;
+  reportId: string;
+  selectionRevision: string;
+  round: number;
+  findingResults: AgentLintRepairFindingResult[];
+  declaredChanges: AgentLintRepairDeclaredChange[];
+  summary: string;
+}
+
+export type AgentLintRepairOutcome =
+  | "succeeded"
+  | "partially_completed"
+  | "manual_review_required"
+  | "cancelled"
+  | "failed"
+  | "interrupted"
+  | "rolled_back";
+
+export interface AgentLintRepairCorrelation {
+  resolvedFindingIds: string[];
+  unresolvedFindingIds: string[];
+  introducedFindingIds: string[];
+  skippedFindingIds: string[];
 }
 
 export interface HealthCheckCoverage {

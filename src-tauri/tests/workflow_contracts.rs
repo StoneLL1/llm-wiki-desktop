@@ -1,5 +1,10 @@
 use llm_wiki_desktop_lib::models::agent::AgentKind;
 use llm_wiki_desktop_lib::models::confirmation::{PendingActionType, RiskLevel};
+use llm_wiki_desktop_lib::models::lint::{
+    AgentLintRepairDeclaredChangeOperation, AgentLintRepairFindingStatus, AgentLintRepairOperation,
+    AgentLintRepairRoundOutput, WikiLintSkillRef, WIKI_LINT_SCHEMA_VERSION, WIKI_LINT_SKILL_ID,
+    WIKI_LINT_SKILL_SHA256, WIKI_LINT_SKILL_VERSION,
+};
 use llm_wiki_desktop_lib::models::llm::LlmProviderKind;
 use llm_wiki_desktop_lib::models::task::{BackendTask, TaskStatus};
 use llm_wiki_desktop_lib::models::workflow::{
@@ -16,6 +21,77 @@ use llm_wiki_desktop_lib::tasks::TaskService;
 use serde_json::{json, Value};
 use std::path::Path;
 use uuid::Uuid;
+
+#[test]
+fn wiki_lint_skill_identity_and_frontend_fixture_are_pinned() {
+    use sha2::{Digest, Sha256};
+
+    assert_eq!(WIKI_LINT_SCHEMA_VERSION, 1);
+    assert_eq!(WIKI_LINT_SKILL_ID, "builtin.wiki-lint");
+    assert_eq!(WIKI_LINT_SKILL_VERSION, "2026-08-12.1");
+    let skill = include_str!("../templates/skills/wiki-lint/SKILL.md");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(skill.as_bytes())),
+        WIKI_LINT_SKILL_SHA256
+    );
+
+    let frontend = include_str!("../../src/types/lint.ts");
+    for value in [
+        WIKI_LINT_SKILL_ID,
+        WIKI_LINT_SKILL_VERSION,
+        WIKI_LINT_SKILL_SHA256,
+    ] {
+        assert!(
+            frontend.contains(value),
+            "frontend lint fixture missing {value}"
+        );
+    }
+}
+
+#[test]
+fn repair_round_wire_is_strict_and_cannot_claim_resolved() {
+    let skill = WikiLintSkillRef {
+        id: WIKI_LINT_SKILL_ID.into(),
+        version: WIKI_LINT_SKILL_VERSION.into(),
+        sha256: WIKI_LINT_SKILL_SHA256.into(),
+    };
+    let value = json!({
+        "schemaVersion": WIKI_LINT_SCHEMA_VERSION,
+        "operation": "repair",
+        "skill": skill,
+        "reportId": "report-1",
+        "selectionRevision": "selection-1",
+        "round": 1,
+        "findingResults": [{
+            "findingId": "duplicate_topic:wiki/概念.md",
+            "status": "attempted",
+            "message": "updated cross-links"
+        }],
+        "declaredChanges": [{
+            "path": "wiki/概念.md",
+            "operation": "update"
+        }],
+        "summary": "candidate updated"
+    });
+    let parsed: AgentLintRepairRoundOutput = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(parsed.operation, AgentLintRepairOperation::Repair);
+    assert_eq!(
+        parsed.finding_results[0].status,
+        AgentLintRepairFindingStatus::Attempted
+    );
+    assert_eq!(
+        parsed.declared_changes[0].operation,
+        AgentLintRepairDeclaredChangeOperation::Update
+    );
+
+    let mut unknown = value.clone();
+    unknown["unexpected"] = json!(true);
+    assert!(serde_json::from_value::<AgentLintRepairRoundOutput>(unknown).is_err());
+
+    let mut resolved = value;
+    resolved["findingResults"][0]["status"] = json!("resolved");
+    assert!(serde_json::from_value::<AgentLintRepairRoundOutput>(resolved).is_err());
+}
 
 fn project_access() -> WorkflowProjectAccessSummary {
     WorkflowProjectAccessSummary {
