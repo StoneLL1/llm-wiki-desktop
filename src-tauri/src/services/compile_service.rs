@@ -59,11 +59,19 @@ pub struct CompileExecutionServices<'a> {
 pub enum CompileGenerationPolicy {
     LegacyNoDeletes,
     WorkflowReviewableDeletes,
+    /// A narrow candidate-only profile for Agent wiki-lint repair. It reuses
+    /// the Compile manifest and conflict journal, but does not impose ingest's
+    /// scaffold-page or source-frontmatter semantics.
+    LintRepair,
 }
 
 impl CompileGenerationPolicy {
     fn allows_reviewable_deletions(self) -> bool {
-        matches!(self, Self::WorkflowReviewableDeletes)
+        matches!(self, Self::WorkflowReviewableDeletes | Self::LintRepair)
+    }
+
+    fn requires_compile_scaffold(self) -> bool {
+        !matches!(self, Self::LintRepair)
     }
 }
 
@@ -692,7 +700,14 @@ impl CompileService {
         let manifest: CompileManifest = serde_json::from_str(json).map_err(|error| {
             BackendError::new("COMPILE_OUTPUT_INVALID", error.to_string(), true, false)
         })?;
-        Self::validate_manifest_with_policy(&manifest, allow_reviewable_deletions)?;
+        Self::validate_manifest_with_policy(
+            &manifest,
+            if allow_reviewable_deletions {
+                CompileGenerationPolicy::WorkflowReviewableDeletes
+            } else {
+                CompileGenerationPolicy::LegacyNoDeletes
+            },
+        )?;
         Ok(manifest)
     }
 
@@ -824,6 +839,100 @@ impl CompileService {
         )
     }
 
+    /// Convert a prevalidated lint-repair candidate into the existing Compile
+    /// manifest shape. Candidate inventory, authorized-path, and contract-file
+    /// checks are owned by `LintService`; this helper retains the shared Source
+    /// hash guard, Markdown path validation, and deletion journal.
+    pub fn manifest_from_lint_repair_workspace(
+        workspace: &Path,
+        wiki_root: &str,
+        baseline: &HashMap<String, String>,
+        protected_sources: &HashMap<String, String>,
+        deletion_candidates: &HashSet<String>,
+    ) -> Result<CompileManifest, BackendError> {
+        for (path, expected) in protected_sources {
+            let candidate = workspace.join(path);
+            let metadata = std::fs::symlink_metadata(&candidate).map_err(|_| {
+                BackendError::new(
+                    "COMPILE_SOURCE_MUTATION_FORBIDDEN",
+                    "Lint repair deleted an import-owned Source.",
+                    false,
+                    true,
+                )
+                .with_details(serde_json::json!({ "path": path }))
+            })?;
+            if !metadata.is_file()
+                || crate::models::layout::is_link_or_reparse(&metadata)
+                || hash_file(&candidate)? != *expected
+            {
+                return Err(BackendError::new(
+                    "COMPILE_SOURCE_MUTATION_FORBIDDEN",
+                    "Lint repair changed an import-owned Source.",
+                    false,
+                    true,
+                )
+                .with_details(serde_json::json!({ "path": path })));
+            }
+        }
+        let protected_native_sources = protected_sources
+            .iter()
+            .filter(|(path, _)| is_compile_protected_path(path))
+            .map(|(path, hash)| (path.clone(), hash.clone()))
+            .collect::<HashMap<_, _>>();
+        if wiki_root == "wiki"
+            && Self::snapshot_workspace_sources(workspace)? != protected_native_sources
+        {
+            return Err(BackendError::new(
+                "COMPILE_SOURCE_MUTATION_FORBIDDEN",
+                "Lint repair attempted to create, modify, or delete an import-owned Source.",
+                false,
+                true,
+            ));
+        }
+        let wiki = workspace.join(wiki_root);
+        let mut files = Vec::new();
+        for absolute in FileStore.list_markdown_files(&wiki)? {
+            let relative = absolute
+                .strip_prefix(workspace)
+                .map_err(|_| {
+                    BackendError::new(
+                        "COMPILE_PATH_INVALID",
+                        "Lint repair candidate path escaped workspace.",
+                        false,
+                        false,
+                    )
+                })?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if protected_sources.contains_key(&relative) || is_compile_protected_path(&relative) {
+                continue;
+            }
+            let content = std::fs::read_to_string(&absolute)
+                .map_err(|error| io_error("COMPILE_OUTPUT_READ_FAILED", error, &absolute))?;
+            if baseline
+                .get(&relative)
+                .is_some_and(|hash| hash == &hash_bytes(content.as_bytes()))
+            {
+                continue;
+            }
+            files.push(CompileFile::new(relative, content));
+        }
+        let mut deletions = deletion_candidates
+            .iter()
+            .filter(|path| baseline.contains_key(*path) && !workspace.join(path).exists())
+            .cloned()
+            .collect::<Vec<_>>();
+        deletions.sort();
+        deletions.dedup();
+        let manifest = CompileManifest {
+            files,
+            deletions,
+            summary: "Agent wiki-lint repair".into(),
+        };
+        Self::validate_manifest_with_policy(&manifest, CompileGenerationPolicy::LintRepair)?;
+        Ok(manifest)
+    }
+
     fn manifest_from_workspace_protected_with_policy(
         workspace: &Path,
         baseline: &HashMap<String, String>,
@@ -886,7 +995,7 @@ impl CompileService {
             deletions,
             summary: "Agent wiki compile".into(),
         };
-        Self::validate_manifest_with_policy(&manifest, policy.allows_reviewable_deletions())?;
+        Self::validate_manifest_with_policy(&manifest, policy)?;
         Ok(manifest)
     }
 
@@ -959,16 +1068,23 @@ impl CompileService {
     }
 
     pub fn validate_manifest(manifest: &CompileManifest) -> Result<(), BackendError> {
-        Self::validate_manifest_with_policy(manifest, false)
+        Self::validate_manifest_with_policy(manifest, CompileGenerationPolicy::LegacyNoDeletes)
     }
 
     pub fn validate_workflow_manifest(manifest: &CompileManifest) -> Result<(), BackendError> {
-        Self::validate_manifest_with_policy(manifest, true)
+        Self::validate_manifest_with_policy(
+            manifest,
+            CompileGenerationPolicy::WorkflowReviewableDeletes,
+        )
+    }
+
+    pub fn validate_lint_repair_manifest(manifest: &CompileManifest) -> Result<(), BackendError> {
+        Self::validate_manifest_with_policy(manifest, CompileGenerationPolicy::LintRepair)
     }
 
     fn validate_manifest_with_policy(
         manifest: &CompileManifest,
-        allow_reviewable_deletions: bool,
+        policy: CompileGenerationPolicy,
     ) -> Result<(), BackendError> {
         let mut seen = HashSet::new();
         for path in manifest
@@ -986,7 +1102,12 @@ impl CompileService {
                 )
                 .with_details(serde_json::json!({ "path": path })));
             }
-            if !is_safe_wiki_markdown(path) || !seen.insert(path.to_string()) {
+            let safe_path = if policy == CompileGenerationPolicy::LintRepair {
+                is_safe_lint_repair_markdown(path)
+            } else {
+                is_safe_wiki_markdown(path)
+            };
+            if !safe_path || !seen.insert(path.to_string()) {
                 return Err(BackendError::new(
                     "COMPILE_PATH_INVALID",
                     "Compile output contains an unsafe or duplicate path.",
@@ -996,7 +1117,7 @@ impl CompileService {
                 .with_details(serde_json::json!({ "path": path })));
             }
         }
-        if !allow_reviewable_deletions && !manifest.deletions.is_empty() {
+        if !policy.allows_reviewable_deletions() && !manifest.deletions.is_empty() {
             return Err(BackendError::new(
                 "COMPILE_DELETE_FORBIDDEN",
                 "Compile cannot delete pages. Record obsolete pages in wiki/log.md for user review instead.",
@@ -1006,18 +1127,92 @@ impl CompileService {
             .with_details(serde_json::json!({ "deletions": manifest.deletions })));
         }
 
-        for required in ["wiki/index.md", "wiki/overview.md", "wiki/log.md"] {
-            if !manifest.files.iter().any(|file| file.path == required) {
-                return Err(BackendError::new(
-                    "COMPILE_CORE_PAGE_MISSING",
-                    "Compile output must include index, overview, and log pages.",
-                    true,
-                    false,
-                )
-                .with_details(serde_json::json!({ "path": required })));
+        if policy.requires_compile_scaffold() {
+            for required in ["wiki/index.md", "wiki/overview.md", "wiki/log.md"] {
+                if !manifest.files.iter().any(|file| file.path == required) {
+                    return Err(BackendError::new(
+                        "COMPILE_CORE_PAGE_MISSING",
+                        "Compile output must include index, overview, and log pages.",
+                        true,
+                        false,
+                    )
+                    .with_details(serde_json::json!({ "path": required })));
+                }
             }
         }
         Ok(())
+    }
+
+    /// Classify a lint candidate against its captured baseline without writing
+    /// any project file. Only delete, unexpected overwrite, and baseline drift
+    /// are high-risk under the locked repair confirmation contract.
+    pub fn classify_lint_repair_changes(
+        context: &ProjectContext,
+        manifest: &CompileManifest,
+        baseline: &HashMap<String, String>,
+        preauthorized_paths: &HashSet<String>,
+    ) -> Result<CompileChangeSummary, BackendError> {
+        Self::validate_lint_repair_manifest(manifest)?;
+        let store = FileStore;
+        let mut summary = CompileChangeSummary::default();
+        for file in &manifest.files {
+            let target = context.resolve_wiki_write_path(&file.path)?;
+            match baseline.get(&file.path) {
+                Some(expected) => {
+                    if !target.is_file() || store.file_hash(context, &file.path)? != *expected {
+                        summary.conflicted.push(file.path.clone());
+                        summary.high_risk.push(file.path.clone());
+                    } else if std::fs::read_to_string(&target)
+                        .map_err(|error| io_error("COMPILE_INPUT_READ_FAILED", error, &target))?
+                        == file.content
+                    {
+                        summary.skipped.push(file.path.clone());
+                    } else {
+                        summary.updated.push(file.path.clone());
+                        if !preauthorized_paths.contains(&file.path) {
+                            summary.high_risk.push(file.path.clone());
+                        }
+                    }
+                }
+                None if target.exists() => {
+                    summary.conflicted.push(file.path.clone());
+                    summary.high_risk.push(file.path.clone());
+                }
+                None => summary.created.push(file.path.clone()),
+            }
+        }
+        for deletion in &manifest.deletions {
+            let target = context.resolve_wiki_write_path(deletion)?;
+            match baseline.get(deletion) {
+                Some(expected)
+                    if target.is_file() && store.file_hash(context, deletion)? == *expected =>
+                {
+                    summary.deleted.push(deletion.clone());
+                    summary.high_risk.push(deletion.clone());
+                }
+                Some(_) => {
+                    summary.conflicted.push(deletion.clone());
+                    summary.high_risk.push(deletion.clone());
+                }
+                None if target.exists() => {
+                    summary.conflicted.push(deletion.clone());
+                    summary.high_risk.push(deletion.clone());
+                }
+                None => summary.skipped.push(deletion.clone()),
+            }
+        }
+        for paths in [
+            &mut summary.created,
+            &mut summary.updated,
+            &mut summary.skipped,
+            &mut summary.deleted,
+            &mut summary.conflicted,
+            &mut summary.high_risk,
+        ] {
+            paths.sort();
+            paths.dedup();
+        }
+        Ok(summary)
     }
 
     pub fn classify_workflow_changes(
@@ -1205,7 +1400,14 @@ impl CompileService {
         known_sources: &HashSet<String>,
         allow_reviewable_deletions: bool,
     ) -> Result<(), BackendError> {
-        Self::validate_manifest_with_policy(manifest, allow_reviewable_deletions)?;
+        Self::validate_manifest_with_policy(
+            manifest,
+            if allow_reviewable_deletions {
+                CompileGenerationPolicy::WorkflowReviewableDeletes
+            } else {
+                CompileGenerationPolicy::LegacyNoDeletes
+            },
+        )?;
         let planned_items: HashMap<&str, &CompilePlanItem> = accepted_plan
             .map(|plan| {
                 plan.items
@@ -2157,6 +2359,22 @@ pub(crate) fn is_safe_wiki_markdown(raw: &str) -> bool {
     // is_compile_protected_path). Even without the dedicated check, the
     // generic safety predicate must refuse these paths.
     if is_compile_protected_path(raw) {
+        return false;
+    }
+    let path = Path::new(raw);
+    !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
+
+fn is_safe_lint_repair_markdown(raw: &str) -> bool {
+    if raw.is_empty()
+        || raw.contains('\\')
+        || raw.contains(':')
+        || raw.contains('\0')
+        || !raw.ends_with(".md")
+    {
         return false;
     }
     let path = Path::new(raw);
@@ -3139,6 +3357,104 @@ mod tests {
             );
             fs::remove_dir_all(workspace).ok();
         }
+    }
+
+    #[test]
+    fn lint_repair_manifest_allows_targeted_pages_without_compile_scaffold() {
+        let workspace = temp_compile_workspace("lint-repair-manifest");
+        fs::create_dir_all(workspace.join("wiki/concepts")).unwrap();
+        let baseline = HashMap::from([
+            (
+                "wiki/concepts/existing.md".into(),
+                hash_bytes(b"# Existing"),
+            ),
+            ("wiki/obsolete.md".into(), hash_bytes(b"# Obsolete")),
+            ("wiki/index.md".into(), hash_bytes(b"# Index")),
+            ("wiki/overview.md".into(), hash_bytes(b"# Overview")),
+            ("wiki/log.md".into(), hash_bytes(b"# Log")),
+        ]);
+        fs::write(workspace.join("wiki/concepts/existing.md"), "# Updated").unwrap();
+        fs::write(workspace.join("wiki/new.md"), "# New").unwrap();
+        fs::write(workspace.join("wiki/obsolete.md"), "# Obsolete").unwrap();
+        fs::remove_file(workspace.join("wiki/obsolete.md")).unwrap();
+        let protected = CompileService::snapshot_workspace_sources(&workspace).unwrap();
+        let deletions = HashSet::from(["wiki/obsolete.md".to_string()]);
+
+        let manifest = CompileService::manifest_from_lint_repair_workspace(
+            &workspace, "wiki", &baseline, &protected, &deletions,
+        )
+        .unwrap();
+        assert_eq!(
+            manifest
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<HashSet<_>>(),
+            HashSet::from(["wiki/concepts/existing.md", "wiki/new.md"])
+        );
+        assert_eq!(manifest.deletions, ["wiki/obsolete.md"]);
+        assert!(CompileService::validate_lint_repair_manifest(&manifest).is_ok());
+        fs::write(
+            workspace.join("wiki/sources/source-a.md"),
+            "# Mutated Source",
+        )
+        .unwrap();
+        assert_eq!(
+            CompileService::manifest_from_lint_repair_workspace(
+                &workspace, "wiki", &baseline, &protected, &deletions,
+            )
+            .unwrap_err()
+            .code,
+            "COMPILE_SOURCE_MUTATION_FORBIDDEN"
+        );
+        fs::remove_dir_all(workspace).ok();
+    }
+
+    #[test]
+    fn lint_repair_change_classification_never_applies_candidates() {
+        let context = temp_project_context("lint-repair-classify");
+        fs::create_dir_all(context.root.join("wiki/concepts")).unwrap();
+        fs::write(context.root.join("wiki/concepts/existing.md"), "# Existing").unwrap();
+        fs::write(context.root.join("wiki/conflict.md"), "# External edit").unwrap();
+        let baseline = HashMap::from([
+            (
+                "wiki/concepts/existing.md".into(),
+                hash_bytes(b"# Existing"),
+            ),
+            ("wiki/conflict.md".into(), hash_bytes(b"# Baseline")),
+            ("wiki/delete.md".into(), hash_bytes(b"# Delete")),
+        ]);
+        fs::write(context.root.join("wiki/delete.md"), "# Delete").unwrap();
+        let manifest = CompileManifest {
+            files: vec![
+                CompileFile::new("wiki/concepts/existing.md", "# Updated"),
+                CompileFile::new("wiki/new.md", "# New"),
+                CompileFile::new("wiki/conflict.md", "# Candidate"),
+            ],
+            deletions: vec!["wiki/delete.md".into()],
+            summary: "lint repair".into(),
+        };
+
+        let preauthorized = HashSet::from(["wiki/concepts/existing.md".to_string()]);
+        let summary = CompileService::classify_lint_repair_changes(
+            &context,
+            &manifest,
+            &baseline,
+            &preauthorized,
+        )
+        .unwrap();
+        assert_eq!(summary.created, ["wiki/new.md"]);
+        assert_eq!(summary.updated, ["wiki/concepts/existing.md"]);
+        assert_eq!(summary.deleted, ["wiki/delete.md"]);
+        assert_eq!(summary.conflicted, ["wiki/conflict.md"]);
+        assert!(summary.high_risk.contains(&"wiki/delete.md".to_string()));
+        assert!(summary.high_risk.contains(&"wiki/conflict.md".to_string()));
+        assert_eq!(
+            fs::read_to_string(context.root.join("wiki/concepts/existing.md")).unwrap(),
+            "# Existing"
+        );
+        assert!(context.root.join("wiki/delete.md").is_file());
+        fs::remove_dir_all(context.root).ok();
     }
 
     #[test]

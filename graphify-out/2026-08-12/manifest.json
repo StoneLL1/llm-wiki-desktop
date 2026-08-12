@@ -545,9 +545,9 @@
     "semantic_hash": ""
   },
   "src-tauri/src/models/lint.rs": {
-    "mtime": 1785571118.3168466,
-    "ast_hash": "e0cce66075e6b4792ff44b9afb32840d",
-    "semantic_hash": "e0cce66075e6b4792ff44b9afb32840d"
+    "mtime": 1786514684.282053,
+    "ast_hash": "db332411b6830feafed813c9fb4dd847",
+    "semantic_hash": ""
   },
   "src-tauri/src/models/llm.rs": {
     "mtime": 1781925562.9989524,
@@ -975,9 +975,9 @@
     "semantic_hash": ""
   },
   "src-tauri/src/services/lint_service/deep.rs": {
-    "mtime": 1785571675.9508274,
-    "ast_hash": "8e926c8f6cd85246ceff6d98410da515",
-    "semantic_hash": "8e926c8f6cd85246ceff6d98410da515"
+    "mtime": 1786514677.9377651,
+    "ast_hash": "cc688c3987011d3ff69522c8831fccac",
+    "semantic_hash": ""
   },
   "src-tauri/src/services/lint_service/fixes.rs": {
     "mtime": 1785759575.4108014,
@@ -990,9 +990,9 @@
     "semantic_hash": "a4116cd13140f9427f9cd681fe91435d"
   },
   "src-tauri/src/services/lint_service/mod.rs": {
-    "mtime": 1785571667.7951684,
-    "ast_hash": "dc72fcadd72ad478c8fda383b8385f01",
-    "semantic_hash": "dc72fcadd72ad478c8fda383b8385f01"
+    "mtime": 1786514187.6235967,
+    "ast_hash": "b7459496cfb8491df8346fe54cacc89d",
+    "semantic_hash": ""
   },
   "src-tauri/src/services/lint_service/reports.rs": {
     "mtime": 1785761779.5718338,
@@ -2700,9 +2700,9 @@
     "semantic_hash": "13e21e164fe39595df18d05b6a8f2e1b"
   },
   "src/types/lint.ts": {
-    "mtime": 1785642508.968432,
-    "ast_hash": "a64993f134b7da70b5390f9310bf6d1f",
-    "semantic_hash": "a64993f134b7da70b5390f9310bf6d1f"
+    "mtime": 1786514684.8085575,
+    "ast_hash": "a61830a106a868655fb60478fac159d5",
+    "semantic_hash": ""
   },
   "src/types/llm.ts": {
     "mtime": 1781927176.4522326,
@@ -2825,8 +2825,8 @@
     "semantic_hash": "678701704f553a827612a7eb8143fd07"
   },
   "SPEC/gotchas.txt": {
-    "mtime": 1786513005.3511376,
-    "ast_hash": "fb7dc532a985c020334a1b0c05fc1816",
+    "mtime": 1786515864.4766126,
+    "ast_hash": "b2cff063658c96d53ec3c3d30a9b46db",
     "semantic_hash": ""
   },
   "SPEC/plans/agent.md": {
@@ -2905,8 +2905,8 @@
     "semantic_hash": "35ef62685304280209d4cbf4013fbacb"
   },
   "SPEC/progress.txt": {
-    "mtime": 1786513005.9646914,
-    "ast_hash": "a1ea782b1f4c1708c32effd90579b9e7",
+    "mtime": 1786515863.274764,
+    "ast_hash": "bbc695fb5d1db147167a7587da5146b5",
     "semantic_hash": ""
   },
   "SPEC/roadmap/README.md": {
@@ -3435,8 +3435,8 @@
     "semantic_hash": ""
   },
   "gotchas.txt": {
-    "mtime": 1786343967.805031,
-    "ast_hash": "c12c3deed285839ae74583d22ab01cab",
+    "mtime": 1786515865.1443782,
+    "ast_hash": "1350822270e50b712dafcdaf44fc972f",
     "semantic_hash": ""
   },
   "index.html": {
@@ -3445,8 +3445,8 @@
     "semantic_hash": "8a5a3953ec9eb051bebb7c1add12f71a"
   },
   "progress.txt": {
-    "mtime": 1786513006.5805254,
-    "ast_hash": "3f11c48bf25604a74ac5303affd80004",
+    "mtime": 1786515863.8561316,
+    "ast_hash": "e5d137aca0d0edbaec397bb5ca514263",
     "semantic_hash": ""
   },
   "src-tauri/templates/projects/business/purpose.md": {
@@ -3560,9 +3560,9 @@
     "semantic_hash": "9a1812fa4692a13dd264d0d1977d91f9"
   },
   "src-tauri/templates/skills/wiki-lint/SKILL.md": {
-    "mtime": 1783419811.596041,
-    "ast_hash": "6da6cd61429bf2e62eac77cd4641d367",
-    "semantic_hash": "6da6cd61429bf2e62eac77cd4641d367"
+    "mtime": 1786514610.329918,
+    "ast_hash": "00505055b72ea3eeb042f93a48d62750",
+    "semantic_hash": ""
   },
   "src-tauri/templates/skills/wiki-query/SKILL.md": {
     "mtime": 1783419794.2353764,
@@ -4402,6 +4402,11 @@
   "docs/superpowers/plans/2026-08-12-wiki-quick-export-and-workflows-dual-entry-implementation.md": {
     "mtime": 1786512382.6365812,
     "ast_hash": "bc40f1fa5038842ea2214a2ea171ff5f",
+    "semantic_hash": ""
+  },
+  "src-tauri/src/services/lint_service/repair.rs": {
+    "mtime": 1786515114.9521708,
+    "ast_hash": "978e33e391e1bfd5a7a67ae7c1aca16b",
     "semantic_hash": ""
   }
 }

@@ -44,7 +44,10 @@ pub use export_service::{ExportService, ValidatedExportArtifact};
 pub use file_store::{FileStore, WriteMode};
 pub use git_service::GitService;
 pub use graph_service::GraphService;
-pub use lint_service::{health_source_paths, DeepLintSnapshot, LintService, LocalLintPhase};
+pub use lint_service::{
+    health_source_paths, AgentLintRepairCandidate, AgentLintRepairWorkspaceDescriptor,
+    AgentLintRepairWorkspaceLease, DeepLintSnapshot, LintService, LocalLintPhase,
+};
 pub use llm_service::LlmService;
 pub use project_service::{assess_project_folder, ProjectAssessmentService, ProjectService};
 pub use search_service::SearchService;
