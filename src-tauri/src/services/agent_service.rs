@@ -7,6 +7,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use sha2::{Digest, Sha256};
+
 use crate::errors::BackendError;
 use crate::models::agent::AgentConfig;
 use crate::models::agent::{AgentDetectionState, AgentInfo, AgentKind};
@@ -18,6 +20,7 @@ use crate::tasks::TaskService;
 
 const ROUTE_PROBE_CACHE_TTL: Duration = Duration::from_secs(30);
 const ROUTE_PROBE_CACHE_MAX_ENTRIES: usize = 128;
+const ROUTE_PROBE_STABILITY_ATTEMPTS: usize = 3;
 const MAX_AGENT_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_AGENT_RUNTIME: Duration = Duration::from_secs(15 * 60);
 
@@ -27,6 +30,27 @@ pub struct AgentInvocation {
     pub args: Vec<String>,
     pub stdin: Option<String>,
     pub cwd: PathBuf,
+}
+
+/// Opaque launch permit for a lint analysis invocation. The version probe and
+/// the executable/spawn target are captured from one `AgentProbeTarget`, so a
+/// caller cannot authorize one PATH entry and execute another (including npm
+/// `.cmd` shims that must be invoked through their resolved node/script pair).
+pub(crate) struct PreparedLintAgent {
+    kind: AgentKind,
+    info: AgentInfo,
+    target_revision: String,
+    invocation: AgentInvocation,
+}
+
+impl PreparedLintAgent {
+    pub(crate) fn info(&self) -> &AgentInfo {
+        &self.info
+    }
+
+    pub(crate) fn target_revision(&self) -> &str {
+        &self.target_revision
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,6 +208,7 @@ struct ExecutableIdentity {
     length: u64,
     modified_nanos: Option<u128>,
     created_nanos: Option<u128>,
+    sha256: Option<String>,
 }
 
 #[derive(Clone)]
@@ -348,6 +373,28 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
         canonical_identity_key: &str,
         identity_revision: &str,
     ) -> (AgentInfo, bool) {
+        let (info, probed, _) = self.detect_agent_for_workflow_route_at(
+            kind,
+            is_default,
+            settings_revision,
+            canonical_identity_key,
+            identity_revision,
+            Instant::now(),
+        );
+        (info, probed)
+    }
+
+    /// Return route presentation facts together with an attestation for the
+    /// exact spawn target behind the logical command. Resolve before and after
+    /// the cached probe so a shim retarget during the probe is retried.
+    pub(crate) fn detect_agent_for_workflow_lint_route(
+        &self,
+        kind: AgentKind,
+        is_default: bool,
+        settings_revision: &str,
+        canonical_identity_key: &str,
+        identity_revision: &str,
+    ) -> (AgentInfo, bool, String) {
         self.detect_agent_for_workflow_route_at(
             kind,
             is_default,
@@ -366,24 +413,42 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
         canonical_identity_key: &str,
         identity_revision: &str,
         now: Instant,
-    ) -> (AgentInfo, bool) {
-        loop {
+    ) -> (AgentInfo, bool, String) {
+        let mut last_key = None;
+        for _ in 0..ROUTE_PROBE_STABILITY_ATTEMPTS {
             let target = self.runner.resolve_probe_target(kind.command());
-            let mut cache = self
+            let epoch = self
                 .route_probe_cache
                 .lock()
-                .expect("Agent route probe cache lock poisoned");
-            cache.entries.retain(|_, entry| entry.expires_at > now);
+                .expect("Agent route probe cache lock poisoned")
+                .epoch;
+            // Exact executable identities may require hashing a large native
+            // binary. Never hold the global route-cache mutex across disk I/O;
+            // the epoch is rechecked after the attestation is built.
             let key = agent_route_probe_cache_key(
                 kind,
                 &target,
                 settings_revision,
                 canonical_identity_key,
                 identity_revision,
-                cache.epoch,
+                epoch,
             );
+            last_key = Some(key.clone());
+            let mut cache = self
+                .route_probe_cache
+                .lock()
+                .expect("Agent route probe cache lock poisoned");
+            cache.entries.retain(|_, entry| entry.expires_at > now);
+            if cache.epoch != epoch {
+                continue;
+            }
+            let target_revision = lint_target_revision_from_probe_key(&key);
             if let Some(entry) = cache.entries.get(&key) {
-                return (entry.info.clone(), false);
+                return (
+                    route_info_with_readable_identity(entry.info.clone(), &key, kind, is_default),
+                    false,
+                    target_revision,
+                );
             }
             if !cache.in_flight.insert(key.clone()) {
                 drop(
@@ -434,8 +499,18 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
                 cache.entries.remove(&oldest);
             }
             self.route_probe_ready.notify_all();
-            return (info, true);
+            return (
+                route_info_with_readable_identity(info, &refreshed_key, kind, is_default),
+                true,
+                lint_target_revision_from_probe_key(&refreshed_key),
+            );
         }
+        let key = last_key.expect("bounded route verification always records a target");
+        (
+            unstable_agent_route_info(kind, is_default, key.executable_path.clone()),
+            true,
+            lint_target_revision_from_probe_key(&key),
+        )
     }
 
     /// Manual Agent refresh/configuration actions advance the cache epoch. A
@@ -772,10 +847,21 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
         matches!(kind, AgentKind::Claude | AgentKind::Codex)
     }
 
-    /// The tested Agent lint bridge is intentionally unreachable until H3
-    /// adds the read-only route gates; H2 must not advertise the capability.
-    pub fn supports_lint_agent(_kind: AgentKind) -> bool {
-        false
+    /// Only Agents with pinned, tested read-only analysis and structured
+    /// output profiles may be advertised for Complete Health.
+    pub fn supports_lint_agent(kind: AgentKind) -> bool {
+        matches!(kind, AgentKind::Claude | AgentKind::Codex)
+    }
+
+    /// Audit revision for the exact read-only analysis profile. Route
+    /// preparation binds this value so a future CLI-profile change invalidates
+    /// an already prepared Health run instead of silently changing execution.
+    pub fn lint_route_profile_revision(kind: AgentKind) -> Option<&'static str> {
+        match kind {
+            AgentKind::Claude => Some("wiki-lint-analysis-claude-v1"),
+            AgentKind::Codex => Some("wiki-lint-analysis-codex-v1"),
+            AgentKind::Openclaw | AgentKind::Hermes => None,
+        }
     }
 
     /// Every supported Agent has a Source AI candidate-workspace profile and
@@ -844,6 +930,69 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
             AgentKind::Openclaw | AgentKind::Hermes => return Err(unsupported_lint_agent(kind)),
         };
         Ok(invocation)
+    }
+
+    /// Probe and bind one exact lint-analysis launch target. In particular, on
+    /// Windows the bound program may be `node.exe` with the npm shim's script
+    /// path prepended; the shim itself is never re-resolved at execution time.
+    pub(crate) fn prepare_lint_analysis(
+        &self,
+        kind: AgentKind,
+        is_default: bool,
+        workspace: &Path,
+        prompt: &str,
+    ) -> Result<PreparedLintAgent, BackendError> {
+        let mut invocation = Self::lint_invocation(kind, workspace, prompt)?;
+        let (info, target, target_revision) = self.stable_lint_analysis_target(kind, is_default)?;
+        if info.state != AgentDetectionState::Installed {
+            return Err(BackendError::new(
+                "LINT_AGENT_UNAVAILABLE",
+                "The prepared lint Agent is no longer installed with a supported invocation profile.",
+                true,
+                true,
+            ));
+        }
+        let mut args = target.leading_args;
+        args.extend(invocation.args);
+        invocation.program = target.program;
+        invocation.args = args;
+        Ok(PreparedLintAgent {
+            kind,
+            info,
+            target_revision,
+            invocation,
+        })
+    }
+
+    pub(crate) fn lint_analysis_route_facts(
+        &self,
+        kind: AgentKind,
+        is_default: bool,
+    ) -> Result<(AgentInfo, String), BackendError> {
+        let (info, _, target_revision) = self.stable_lint_analysis_target(kind, is_default)?;
+        Ok((info, target_revision))
+    }
+
+    fn stable_lint_analysis_target(
+        &self,
+        kind: AgentKind,
+        is_default: bool,
+    ) -> Result<(AgentInfo, AgentProbeTarget, String), BackendError> {
+        for _ in 0..3 {
+            let target = self.runner.resolve_probe_target(kind.command());
+            let target_revision = lint_target_revision(&target);
+            let info = self.detect_with_target(kind, is_default, &target);
+            let current = self.runner.resolve_probe_target(kind.command());
+            if target_revision == lint_target_revision(&current) {
+                return Ok((info, target, target_revision));
+            }
+        }
+        Err(BackendError::new(
+            "LINT_AGENT_ROUTE_CHANGED",
+            "The lint Agent launch target changed while it was being verified.",
+            true,
+            true,
+        ))
     }
 
     /// Build the workspace-write half of the pinned wiki-lint contract. This
@@ -1114,6 +1263,36 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
         task_id: &str,
     ) -> Result<String, BackendError> {
         let kind = validate_lint_transport_invocation(invocation)?;
+        self.run_bound_lint_streaming(kind, invocation, tasks, task_id)
+    }
+
+    /// Execute only the opaque target returned by `prepare_lint_analysis`.
+    /// Cancellation is checked after probing and immediately before delegating
+    /// to the process runner, closing the probe-to-spawn cancellation window.
+    pub(crate) fn run_prepared_lint_streaming(
+        &self,
+        prepared: &PreparedLintAgent,
+        tasks: &TaskService,
+        task_id: &str,
+    ) -> Result<String, BackendError> {
+        self.run_bound_lint_streaming(prepared.kind, &prepared.invocation, tasks, task_id)
+    }
+
+    fn run_bound_lint_streaming(
+        &self,
+        kind: AgentKind,
+        invocation: &AgentInvocation,
+        tasks: &TaskService,
+        task_id: &str,
+    ) -> Result<String, BackendError> {
+        if tasks.is_cancelled(task_id) {
+            return Err(BackendError::new(
+                "AGENT_CANCELLED",
+                "Agent lint was cancelled before launch.",
+                true,
+                false,
+            ));
+        }
         let on_activity = |activity: TaskActivity| tasks.emit_activity(task_id, activity);
         tasks.emit_activity(
             task_id,
@@ -2579,7 +2758,60 @@ fn executable_identity(path: &Path) -> Option<ExecutableIdentity> {
         length: metadata.len(),
         modified_nanos: to_nanos(metadata.modified()),
         created_nanos: to_nanos(metadata.created()),
+        sha256: file_sha256(path),
     })
+}
+
+fn file_sha256(path: &Path) -> Option<String> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).ok()?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Some(format!("{:x}", digest.finalize()))
+}
+
+fn unstable_agent_route_info(
+    kind: AgentKind,
+    is_default: bool,
+    executable_path: Option<String>,
+) -> AgentInfo {
+    AgentInfo {
+        kind,
+        command: kind.command().into(),
+        state: AgentDetectionState::Failed,
+        version: None,
+        executable_path,
+        is_default,
+        install_guidance: AgentService::install_guidance(kind).into(),
+        error: Some(
+            "Agent launch target did not remain stable during bounded verification.".into(),
+        ),
+    }
+}
+
+fn route_info_with_readable_identity(
+    info: AgentInfo,
+    key: &AgentRouteProbeCacheKey,
+    kind: AgentKind,
+    is_default: bool,
+) -> AgentInfo {
+    if key
+        .executable_identities
+        .iter()
+        .all(|identity| identity.sha256.is_some())
+    {
+        return info;
+    }
+    let mut failed = unstable_agent_route_info(kind, is_default, key.executable_path.clone());
+    failed.error =
+        Some("Agent launch target could not be read for exact identity verification.".into());
+    failed
 }
 
 fn normalized_path(path: Option<&Path>) -> Option<String> {
@@ -2610,6 +2842,60 @@ fn agent_probe_target_identities(target: &AgentProbeTarget) -> Vec<ExecutableIde
         .iter()
         .filter_map(|path| executable_identity(path))
         .collect()
+}
+
+fn lint_target_revision(target: &AgentProbeTarget) -> String {
+    lint_target_revision_parts(
+        normalized_path(target.executable_path.as_deref()),
+        target.program.replace('\\', "/"),
+        target
+            .leading_args
+            .iter()
+            .map(|argument| argument.replace('\\', "/"))
+            .collect(),
+        agent_probe_target_identities(target),
+        process_path_generation(),
+    )
+}
+
+fn lint_target_revision_from_probe_key(key: &AgentRouteProbeCacheKey) -> String {
+    lint_target_revision_parts(
+        key.executable_path.clone(),
+        key.program.clone(),
+        key.leading_args.clone(),
+        key.executable_identities.clone(),
+        key.path_generation,
+    )
+}
+
+fn lint_target_revision_parts(
+    executable_path: Option<String>,
+    program: String,
+    leading_args: Vec<String>,
+    executable_identities: Vec<ExecutableIdentity>,
+    path_generation: u64,
+) -> String {
+    let identities = executable_identities
+        .into_iter()
+        .map(|identity| {
+            serde_json::json!({
+                "path": identity.path,
+                "length": identity.length,
+                "modifiedNanos": identity.modified_nanos.map(|value| value.to_string()),
+                "createdNanos": identity.created_nanos.map(|value| value.to_string()),
+                "sha256": identity.sha256,
+            })
+        })
+        .collect::<Vec<_>>();
+    let value = serde_json::json!({
+        "executablePath": executable_path,
+        "program": program,
+        "leadingArgs": leading_args,
+        "executableIdentities": identities,
+        "pathGeneration": path_generation,
+    });
+    let bytes = serde_json::to_vec(&value).unwrap_or_default();
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn agent_route_probe_cache_key(
@@ -3502,7 +3788,7 @@ fn unsupported_lint_agent(kind: AgentKind) -> BackendError {
     BackendError::new(
         "LINT_AGENT_PROFILE_UNSUPPORTED",
         format!(
-            "{} does not expose a verified read-only, no-tools Lint profile. Use Claude, Codex, or BYOK.",
+            "{} does not expose a verified built-in wiki-lint analysis profile. Use Claude or Codex for Agent analysis, or explicitly choose BYOK.",
             kind.command()
         ),
         true,
@@ -3645,7 +3931,7 @@ mod tests {
         let service = AgentService::with_runner(runner.clone());
         let now = Instant::now();
 
-        let (first, first_probed) = service.detect_agent_for_workflow_route_at(
+        let (first, first_probed, _) = service.detect_agent_for_workflow_route_at(
             AgentKind::Claude,
             false,
             "settings-a",
@@ -3655,7 +3941,7 @@ mod tests {
         );
         assert!(first_probed);
         assert_eq!(first.state, AgentDetectionState::Installed);
-        let (warm, warm_probed) = service.detect_agent_for_workflow_route_at(
+        let (warm, warm_probed, _) = service.detect_agent_for_workflow_route_at(
             AgentKind::Claude,
             false,
             "settings-a",
@@ -3667,7 +3953,7 @@ mod tests {
         assert_eq!(warm, first);
         assert_eq!(runner.version_calls.load(Ordering::SeqCst), 1);
 
-        let (settings_changed, settings_probed) = service.detect_agent_for_workflow_route_at(
+        let (settings_changed, settings_probed, _) = service.detect_agent_for_workflow_route_at(
             AgentKind::Claude,
             true,
             "settings-b",
@@ -3677,7 +3963,7 @@ mod tests {
         );
         assert!(settings_probed);
         assert!(settings_changed.is_default);
-        let (_, identity_probed) = service.detect_agent_for_workflow_route_at(
+        let (_, identity_probed, _) = service.detect_agent_for_workflow_route_at(
             AgentKind::Claude,
             true,
             "settings-b",
@@ -3688,7 +3974,7 @@ mod tests {
         assert!(identity_probed);
 
         std::fs::write(&runner.executable, b"replacement-v2").unwrap();
-        let (_, executable_probed) = service.detect_agent_for_workflow_route_at(
+        let (_, executable_probed, _) = service.detect_agent_for_workflow_route_at(
             AgentKind::Claude,
             true,
             "settings-b",
@@ -3699,7 +3985,7 @@ mod tests {
         assert!(executable_probed);
 
         service.invalidate_workflow_route_cache();
-        let (_, manual_refresh_probed) = service.detect_agent_for_workflow_route_at(
+        let (_, manual_refresh_probed, _) = service.detect_agent_for_workflow_route_at(
             AgentKind::Claude,
             true,
             "settings-b",
@@ -3708,7 +3994,7 @@ mod tests {
             now + Duration::from_secs(5),
         );
         assert!(manual_refresh_probed);
-        let (_, ttl_expired_probed) = service.detect_agent_for_workflow_route_at(
+        let (_, ttl_expired_probed, _) = service.detect_agent_for_workflow_route_at(
             AgentKind::Claude,
             true,
             "settings-b",
@@ -4081,6 +4367,107 @@ mod tests {
             Some(target_b.to_string_lossy().replace('\\', "/").as_str())
         );
         assert_eq!(runner.version_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn workflow_lint_route_fails_closed_after_bounded_target_churn() {
+        struct FlappingTarget {
+            resolves: AtomicUsize,
+            probes: AtomicUsize,
+        }
+
+        impl ProcessRunner for FlappingTarget {
+            fn find_executable(&self, command: &str) -> Option<PathBuf> {
+                Some(PathBuf::from(command))
+            }
+
+            fn resolve_probe_target(&self, command: &str) -> AgentProbeTarget {
+                let generation = self.resolves.fetch_add(1, Ordering::SeqCst) % 2;
+                AgentProbeTarget {
+                    logical_command: command.into(),
+                    executable_path: Some(PathBuf::from(format!("{command}-{generation}"))),
+                    program: format!("{command}-{generation}"),
+                    leading_args: Vec::new(),
+                }
+            }
+
+            fn run_with_timeout(
+                &self,
+                _command: &str,
+                _args: &[&str],
+                _timeout: Duration,
+            ) -> Result<String, BackendError> {
+                unreachable!("exact target probing is required")
+            }
+
+            fn run_probe_with_timeout(
+                &self,
+                _target: &AgentProbeTarget,
+                args: &[&str],
+                _timeout: Duration,
+            ) -> Result<String, BackendError> {
+                if args == ["--version"] {
+                    self.probes.fetch_add(1, Ordering::SeqCst);
+                    return Ok("codex 1.0.0".into());
+                }
+                Ok("--json --ephemeral --sandbox --ignore-user-config --ignore-rules --output-schema --output-last-message --skip-git-repo-check -C --cd".into())
+            }
+
+            fn run_capture(
+                &self,
+                _invocation: &AgentInvocation,
+            ) -> Result<(String, String), BackendError> {
+                unreachable!()
+            }
+
+            fn run_task_streaming(
+                &self,
+                _invocation: &AgentInvocation,
+                _tasks: &TaskService,
+                _task_id: &str,
+            ) -> Result<String, BackendError> {
+                unreachable!()
+            }
+        }
+
+        let runner = Arc::new(FlappingTarget {
+            resolves: AtomicUsize::new(0),
+            probes: AtomicUsize::new(0),
+        });
+        let (info, probed, _) = AgentService::with_runner(runner.clone())
+            .detect_agent_for_workflow_lint_route(
+                AgentKind::Codex,
+                false,
+                "settings",
+                "identity",
+                "revision",
+            );
+
+        assert!(probed);
+        assert_eq!(info.state, AgentDetectionState::Failed);
+        assert_eq!(
+            runner.probes.load(Ordering::SeqCst),
+            ROUTE_PROBE_STABILITY_ATTEMPTS
+        );
+        assert!(runner.resolves.load(Ordering::SeqCst) <= ROUTE_PROBE_STABILITY_ATTEMPTS * 2);
+    }
+
+    #[test]
+    fn lint_target_identity_binds_in_place_equal_length_content() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("codex-script.js");
+        std::fs::write(&executable, b"script-a").unwrap();
+        let target = AgentProbeTarget {
+            logical_command: "codex".into(),
+            executable_path: Some(executable.clone()),
+            program: "node.exe".into(),
+            leading_args: vec![executable.to_string_lossy().into_owned()],
+        };
+        let first = lint_target_revision(&target);
+        std::fs::write(&executable, b"script-b").unwrap();
+        let second = lint_target_revision(&target);
+
+        assert_ne!(first, second);
     }
 
     impl ProcessRunner for SourceAiRunnerProbe {
@@ -4747,7 +5134,7 @@ mod tests {
     }
 
     #[test]
-    fn lint_analysis_and_repair_profiles_are_exact_and_capability_stays_closed() {
+    fn lint_analysis_and_repair_profiles_are_exact_and_capability_matches_verified_agents() {
         let workspace = std::env::temp_dir().join(format!(
             "llm-wiki-desktop/lint-profile-{}",
             uuid::Uuid::new_v4()
@@ -4858,7 +5245,7 @@ mod tests {
             (AgentKind::Claude, claude_repair),
             (AgentKind::Codex, codex_repair),
         ] {
-            assert!(!AgentService::supports_lint_agent(kind));
+            assert!(AgentService::supports_lint_agent(kind));
             let mut forged = repair;
             forged.args.push("--dangerously-bypass-approvals".into());
             assert_eq!(
@@ -4878,6 +5265,132 @@ mod tests {
             );
             assert!(!AgentService::supports_lint_agent(kind));
         }
+        std::fs::remove_dir_all(workspace).ok();
+    }
+
+    #[test]
+    fn prepared_lint_binds_windows_shim_spawn_target_and_honors_prelaunch_cancel() {
+        struct BoundTargetRunner {
+            shim: PathBuf,
+            script: PathBuf,
+            resolves: AtomicUsize,
+            runs: AtomicUsize,
+            invocation: Mutex<Option<AgentInvocation>>,
+        }
+
+        impl ProcessRunner for BoundTargetRunner {
+            fn find_executable(&self, _: &str) -> Option<PathBuf> {
+                Some(self.shim.clone())
+            }
+
+            fn resolve_probe_target(&self, command: &str) -> AgentProbeTarget {
+                self.resolves.fetch_add(1, Ordering::SeqCst);
+                AgentProbeTarget {
+                    logical_command: command.into(),
+                    executable_path: Some(self.shim.clone()),
+                    program: "node.exe".into(),
+                    leading_args: vec![self.script.to_string_lossy().into_owned()],
+                }
+            }
+
+            fn run_probe_with_timeout(
+                &self,
+                _: &AgentProbeTarget,
+                args: &[&str],
+                _: Duration,
+            ) -> Result<String, BackendError> {
+                if args == ["--version"] {
+                    return Ok("codex 1.0.0".into());
+                }
+                Ok("--json --ephemeral --sandbox --ignore-user-config --ignore-rules --output-schema --output-last-message --skip-git-repo-check -C".into())
+            }
+
+            fn run_with_timeout(
+                &self,
+                _: &str,
+                _: &[&str],
+                _: Duration,
+            ) -> Result<String, BackendError> {
+                panic!("prepared lint must use the already-resolved probe target")
+            }
+
+            fn run_capture(&self, _: &AgentInvocation) -> Result<(String, String), BackendError> {
+                unreachable!()
+            }
+
+            fn run_task_streaming(
+                &self,
+                invocation: &AgentInvocation,
+                _: &TaskService,
+                _: &str,
+            ) -> Result<String, BackendError> {
+                self.runs.fetch_add(1, Ordering::SeqCst);
+                *self.invocation.lock().unwrap() = Some(invocation.clone());
+                Ok("bound result".into())
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let workspace = std::env::temp_dir()
+            .join("llm-wiki-desktop")
+            .join(format!("lint-bound-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let runner = Arc::new(BoundTargetRunner {
+            shim: root.path().join("codex.cmd"),
+            script: root.path().join("codex.js"),
+            resolves: AtomicUsize::new(0),
+            runs: AtomicUsize::new(0),
+            invocation: Mutex::new(None),
+        });
+        let service = AgentService::with_runner(runner.clone());
+        let prepared = service
+            .prepare_lint_analysis(AgentKind::Codex, false, &workspace, "lint")
+            .unwrap();
+        let resolves_after_prepare = runner.resolves.load(Ordering::SeqCst);
+        assert_eq!(resolves_after_prepare, 2);
+        let tasks = TaskService::default();
+        let task = tasks.create_task(
+            TaskType::DeepLint,
+            Some("project".into()),
+            "Bound lint".into(),
+            true,
+        );
+        assert_eq!(
+            service
+                .run_prepared_lint_streaming(&prepared, &tasks, &task.id)
+                .unwrap(),
+            "bound result"
+        );
+        let invocation = runner.invocation.lock().unwrap().clone().unwrap();
+        assert_eq!(invocation.program, "node.exe");
+        assert_eq!(
+            invocation.args.first(),
+            Some(&runner.script.to_string_lossy().into_owned())
+        );
+        assert_eq!(
+            runner.resolves.load(Ordering::SeqCst),
+            resolves_after_prepare
+        );
+
+        let cancelled = tasks.create_task(
+            TaskType::DeepLint,
+            Some("project".into()),
+            "Cancelled bound lint".into(),
+            true,
+        );
+        tasks.cancel_task(&cancelled.id).unwrap();
+        assert_eq!(
+            service
+                .run_prepared_lint_streaming(&prepared, &tasks, &cancelled.id)
+                .unwrap_err()
+                .code,
+            "AGENT_CANCELLED"
+        );
+        assert_eq!(runner.runs.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            runner.resolves.load(Ordering::SeqCst),
+            resolves_after_prepare
+        );
         std::fs::remove_dir_all(workspace).ok();
     }
 

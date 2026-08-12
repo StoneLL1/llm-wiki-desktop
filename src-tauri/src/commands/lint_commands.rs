@@ -1,11 +1,7 @@
-use std::path::PathBuf;
-
-use tauri::{AppHandle, Manager, State};
+use tauri::State;
 
 use crate::app_state::AppState;
 use crate::errors::BackendError;
-use crate::models::agent::{AgentDetectionState, AgentKind};
-use crate::models::compile::CompileRoutePreference;
 use crate::models::confirmation::ConfirmationExecution;
 use crate::models::lint::{
     AddLintIgnoreRequest, ApplyLintFixRequest, ApplyLintFixesBatchRequest, DeepLintReport,
@@ -14,11 +10,7 @@ use crate::models::lint::{
     PersistedLintReport, ReadLintHistoryReportRequest, RemoveLintIgnoreRequest,
     RunLocalLintRequest, StartDeepLintRequest,
 };
-use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
-use crate::models::paths::ProjectContext;
-use crate::models::task::{BackendTask, TaskResult, TaskStatus, TaskType};
-use crate::services::{AgentService, LlmService};
-use crate::tasks::task_model::LogLevel;
+use crate::models::task::BackendTask;
 
 /// Run the deterministic local lint pass. Synchronous — it never calls a
 /// model and completes in a single wiki scan.
@@ -35,264 +27,25 @@ pub fn run_local_lint(
     Ok(report)
 }
 
-/// Start a deep-lint run as a cancellable background task (BYOK is the only
-/// verified route; CLI Agent execution is disabled until credential isolation
-/// is available). The parsed issues are persisted to
-/// `.app/lint-reports/<task_id>.json` and surfaced via `get_deep_lint_report`.
+/// The legacy task-owned Deep Lint launch path is intentionally migrated to
+/// Complete Health. Keeping it disabled avoids a second launch-authority,
+/// snapshot, cancellation, and report-persistence contract. Complete Health
+/// retains both explicit Agent and explicit BYOK analysis routes.
 #[tauri::command]
 pub fn start_deep_lint(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    request: StartDeepLintRequest,
+    _state: State<'_, AppState>,
+    _request: StartDeepLintRequest,
 ) -> Result<BackendTask, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state.require_external_ai_access(&context)?;
-    state.require_project_write_access(&context)?;
-    let _deep_start_guard = state.lint_service.lock_deep_start()?;
-    if let Some(existing) = state
-        .task_service
-        .list_tasks(None)
-        .into_iter()
-        .find(|task| {
-            task.task_type == TaskType::DeepLint
-                && task.project_id.as_deref() == Some(request.project_id.as_str())
-                && matches!(
-                    task.status,
-                    TaskStatus::Queued
-                        | TaskStatus::Running
-                        | TaskStatus::WaitingForConfirmation
-                        | TaskStatus::Cancelling
-                )
-        })
-    {
-        return Ok(existing);
-    }
-    let task = state
-        .task_service
-        .create_project_task(
-            TaskType::DeepLint,
-            request.project_id.clone(),
-            context.root.clone(),
-            "Deep wiki lint".to_string(),
-            true,
-        )
-        .map_err(task_error)?;
-    let task_id = task.id.clone();
-    tauri::async_runtime::spawn(async move {
-        let state = app.state::<AppState>();
-        if let Err(error) = run_deep_lint(&state, request, &context, &task_id).await {
-            let _ = state
-                .task_service
-                .append_log(&task_id, LogLevel::Error, error.message.clone());
-            let _ = state.task_service.set_error(&task_id, error);
-            if !matches!(
-                state.task_service.get_task(&task_id).map(|t| t.status),
-                Some(TaskStatus::Cancelled)
-            ) {
-                let _ = state
-                    .task_service
-                    .transition_status(&task_id, TaskStatus::Failed);
-            }
-        }
-    });
-    Ok(task)
+    Err(legacy_deep_lint_migrated_error())
 }
 
-async fn run_deep_lint(
-    state: &AppState,
-    request: StartDeepLintRequest,
-    context: &ProjectContext,
-    task_id: &str,
-) -> Result<(), BackendError> {
-    state.require_external_ai_access(context)?;
-    state.require_project_write_access(context)?;
-    state
-        .task_service
-        .transition_status(task_id, TaskStatus::Running)
-        .map_err(task_error)?;
-    state
-        .task_service
-        .append_log(task_id, LogLevel::Info, "Building deep-lint prompt".into())
-        .map_err(task_error)?;
-    let language = state
-        .settings_service
-        .read_settings(context)
-        .map(|settings| settings.language)
-        .unwrap_or_else(|_| "en".to_string());
-    if state.task_service.is_cancelled(task_id) {
-        return Err(BackendError::new(
-            "LINT_CANCELLED",
-            "Deep lint was cancelled.",
-            true,
-            false,
-        ));
-    }
-    let local_report = state
-        .lint_service
-        .run_local_lint(context, &state.search_service)?;
-    let snapshot = state.lint_service.prepare_deep_lint_snapshot(
-        context,
-        &state.search_service,
-        &language,
-        &local_report,
-    )?;
-    state
-        .lint_service
-        .verify_deep_lint_snapshot(context, &state.search_service, &snapshot)?;
-
-    let raw = match resolve_route(
-        state,
-        context,
-        request.route,
-        request.agent,
-        request.provider,
-    )? {
-        ResolvedRoute::Agent(kind) => {
-            state
-                .task_service
-                .append_log(
-                    task_id,
-                    LogLevel::Info,
-                    format!("Running {} (wiki-lint skill)", kind.command()),
-                )
-                .map_err(task_error)?;
-            let workspace = create_lint_workspace(task_id)?;
-            let _guard = WorkspaceGuard(workspace.clone());
-            state.lint_service.verify_deep_lint_snapshot(
-                context,
-                &state.search_service,
-                &snapshot,
-            )?;
-            let invocation = AgentService::lint_invocation(kind, &workspace, &snapshot.prompt)?;
-            state
-                .agent_service
-                .run_lint_streaming(&invocation, &state.task_service, task_id)?
-            // _guard drops here and removes the temp workspace even on Err / cancel.
-        }
-        ResolvedRoute::Byok(provider) => {
-            state
-                .task_service
-                .append_log(
-                    task_id,
-                    LogLevel::Info,
-                    format!("Calling {:?} (BYOK)", provider.provider),
-                )
-                .map_err(task_error)?;
-            let secret = state.secret_service.get(provider.provider)?;
-            state.lint_service.verify_deep_lint_snapshot(
-                context,
-                &state.search_service,
-                &snapshot,
-            )?;
-            let completion =
-                state
-                    .llm_service
-                    .complete(&provider, secret.as_deref(), &snapshot.prompt);
-            let raw = crate::tasks::byok_progress::poll_with_progress(
-                &state.task_service,
-                task_id,
-                "Linting",
-                completion,
-            )
-            .await
-            .map_err(|_| {
-                crate::tasks::byok_progress::cancelled_error(
-                    "LINT_CANCELLED",
-                    "Deep lint was cancelled.",
-                )
-            })??;
-            // Do not mirror model output into the task log: it may contain
-            // source excerpts or provider-side sensitive material. Keep only
-            // a bounded length diagnostic for the task drawer.
-            let _ = state.task_service.append_log(
-                task_id,
-                LogLevel::Info,
-                format!(
-                    "BYOK lint response received ({} chars).",
-                    raw.chars().count()
-                ),
-            );
-            raw
-        }
-    };
-
-    // A provider may take time to start or complete while the user edits the
-    // wiki. Do not persist findings from a prompt that no longer represents
-    // the project snapshot used for this request.
-    state
-        .lint_service
-        .verify_deep_lint_snapshot(context, &state.search_service, &snapshot)?;
-
-    if state.task_service.is_cancelled(task_id) {
-        return Err(BackendError::new(
-            "LINT_CANCELLED",
-            "Deep lint was cancelled.",
-            true,
-            false,
-        ));
-    }
-
-    let issues = state.lint_service.finish_deep_lint_snapshot(
-        context,
-        &state.search_service,
-        &snapshot,
-        &raw,
+fn legacy_deep_lint_migrated_error() -> BackendError {
+    BackendError::new(
+        "LINT_DEEP_HEALTH_REQUIRED",
+        "Deep lint now runs through Complete Health so explicit Agent or BYOK launches share one current-authority, snapshot, cancellation, and report contract.",
         true,
-    )?;
-    let issue_count = issues.len();
-    if state.task_service.is_cancelled(task_id) {
-        return Err(BackendError::new(
-            "LINT_CANCELLED",
-            "Deep lint was cancelled.",
-            true,
-            false,
-        ));
-    }
-    let report = DeepLintReport {
-        issues,
-        // Raw model output can contain wiki excerpts or unrecognized secrets;
-        // persist only the typed issues and a safe diagnostic marker.
-        raw_output: "raw output omitted for security".into(),
-        generated_at: crate::utils::time_utils::now_rfc3339(),
-    };
-    let entry = state
-        .lint_service
-        .persist_deep_report(context, task_id, request.route, &report)?;
-    if state.task_service.is_cancelled(task_id) {
-        return Err(BackendError::new(
-            "LINT_CANCELLED",
-            "Deep lint was cancelled.",
-            true,
-            false,
-        ));
-    }
-    let report_path = format!(".app/lint-reports/{}.json", entry.id);
-
-    state
-        .task_service
-        .set_result(
-            task_id,
-            TaskResult {
-                summary: format!("Deep lint found {issue_count} issue(s)."),
-                affected_paths: vec![report_path],
-                reference: None,
-                pending_action: None,
-            },
-        )
-        .map_err(task_error)?;
-    if state.task_service.is_cancelled(task_id) {
-        return Err(BackendError::new(
-            "LINT_CANCELLED",
-            "Deep lint was cancelled.",
-            true,
-            false,
-        ));
-    }
-    state
-        .task_service
-        .transition_status(task_id, TaskStatus::Succeeded)
-        .map_err(task_error)?;
-    Ok(())
+        true,
+    )
 }
 
 /// Load the persisted deep-lint report for a completed (or in-flight) task.
@@ -505,155 +258,22 @@ pub fn list_lint_ignores(
     state.lint_service.list_ignores(&context)
 }
 
-enum ResolvedRoute {
-    Agent(AgentKind),
-    Byok(LlmProviderConfig),
-}
-
-/// Resolve the deep-lint provider. Unlike chat, this intentionally refuses
-/// unverified CLI Agent profiles and falls back to BYOK in Auto mode.
-/// Kept local to lint so the feature stays self-contained.
-fn resolve_route(
-    state: &AppState,
-    context: &ProjectContext,
-    preference: CompileRoutePreference,
-    explicit_agent: Option<AgentKind>,
-    explicit_provider: Option<LlmProviderKind>,
-) -> Result<ResolvedRoute, BackendError> {
-    let agent_config = AgentService::load_config(context)?;
-    let providers = LlmService::list_providers(context)?;
-    let selected_agent = explicit_agent.or(agent_config.default_agent);
-    let usable_agent = selected_agent.filter(|kind| {
-        // Check the product safety contract before probing PATH. With the
-        // current false profile this avoids executing any CLI detection code
-        // for a route that is intentionally unavailable.
-        if !AgentService::supports_lint_agent(*kind) {
-            return false;
-        }
-        let info = state
-            .agent_service
-            .detect_agent(*kind, agent_config.default_agent == Some(*kind));
-        info.state == AgentDetectionState::Installed && AgentService::supports_lint_agent(*kind)
-    });
-    let selected_provider = select_provider(explicit_provider, &providers, &state.secret_service)?;
-    let use_agent = match preference {
-        CompileRoutePreference::Agent => true,
-        CompileRoutePreference::Byok => false,
-        CompileRoutePreference::Auto => usable_agent.is_some(),
-    };
-    if use_agent {
-        if let Some(kind) = usable_agent {
-            return Ok(ResolvedRoute::Agent(kind));
-        }
-        return Err(BackendError::new(
-            "AGENT_UNAVAILABLE",
-            "No verified no-tools Agent profile is available for deep lint. Switch to BYOK.",
-            true,
-            true,
-        ));
-    }
-    match selected_provider {
-        Some(provider) => Ok(ResolvedRoute::Byok(provider)),
-        None => Err(BackendError::new(
-            "LLM_PROVIDER_MISSING",
-            "No enabled BYOK provider with a configured secret is available for deep lint.",
-            true,
-            true,
-        )),
-    }
-}
-
-fn select_provider(
-    explicit: Option<LlmProviderKind>,
-    providers: &[LlmProviderConfig],
-    secrets: &crate::services::SecretService,
-) -> Result<Option<LlmProviderConfig>, BackendError> {
-    if let Some(kind) = explicit {
-        let provider = providers
-            .iter()
-            .find(|p| p.enabled && p.provider == kind)
-            .cloned()
-            .ok_or_else(|| {
-                BackendError::new(
-                    "LLM_PROVIDER_MISSING",
-                    "The selected BYOK provider is not enabled.",
-                    true,
-                    true,
-                )
-            })?;
-        if provider.provider.requires_secret() && secrets.get(provider.provider)?.is_none() {
-            return Err(BackendError::new(
-                "LLM_SECRET_MISSING",
-                "The selected provider has no configured secret.",
-                true,
-                true,
-            ));
-        }
-        return Ok(Some(provider));
-    }
-    for provider in providers.iter().filter(|p| p.enabled) {
-        // Auto mode must not trust an arbitrary project-local endpoint with a
-        // global credential. Custom/proxy hosts remain available only when a
-        // user explicitly selects that provider in the request.
-        if !is_safe_auto_provider(provider) {
-            continue;
-        }
-        if !provider.provider.requires_secret() || secrets.get(provider.provider)?.is_some() {
-            return Ok(Some(provider.clone()));
-        }
-    }
-    Ok(None)
-}
-
-fn is_safe_auto_provider(provider: &LlmProviderConfig) -> bool {
-    let Ok(url) = url::Url::parse(provider.base_url.trim()) else {
-        return false;
-    };
-    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
-    match provider.provider {
-        LlmProviderKind::OpenAi => host == "api.openai.com",
-        LlmProviderKind::Anthropic => host == "api.anthropic.com",
-        LlmProviderKind::Google => host == "generativelanguage.googleapis.com",
-        LlmProviderKind::Ollama => matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1"),
-        LlmProviderKind::Custom => false,
-    }
-}
-
-fn create_lint_workspace(task_id: &str) -> Result<PathBuf, BackendError> {
-    let workspace = std::env::temp_dir()
-        .join("llm-wiki-desktop")
-        .join(format!("lint-{task_id}"));
-    if workspace.exists() {
-        std::fs::remove_dir_all(&workspace).map_err(|err| {
-            BackendError::new("LINT_WORKSPACE_FAILED", err.to_string(), true, false)
-        })?;
-    }
-    std::fs::create_dir_all(&workspace)
-        .map_err(|err| BackendError::new("LINT_WORKSPACE_FAILED", err.to_string(), true, false))?;
-    Ok(workspace)
-}
-
-/// Removes the temp workspace on drop, including when the agent run errors or
-/// is cancelled mid-stream (the happy-path cleanup alone leaks on those paths).
-struct WorkspaceGuard(PathBuf);
-
-impl Drop for WorkspaceGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn task_error(message: String) -> BackendError {
-    BackendError::new("TASK_OPERATION_FAILED", message, true, false)
-}
-
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn report_path_is_task_scoped() {
         assert_eq!(
             format!(".app/lint-reports/{}.json", "task-1"),
             ".app/lint-reports/task-1.json"
         );
+    }
+
+    #[test]
+    fn legacy_deep_lint_is_migrated_before_any_task_or_external_launch() {
+        let error = legacy_deep_lint_migrated_error();
+        assert_eq!(error.code, "LINT_DEEP_HEALTH_REQUIRED");
+        assert!(error.message.contains("Complete Health"));
     }
 }

@@ -382,6 +382,23 @@ pub(super) fn overview_evaluation_snapshot(
         &evaluation.project_access.identity_revision,
         &evaluation.project_access.persistence,
     )?;
+    let remembered_health =
+        if evaluation.project_access.persistence == WorkflowPersistenceMode::MemoryOnly {
+            remembered
+                .iter()
+                .find(|entry| entry.kind == WorkflowKind::HealthCheck)
+                .cloned()
+        } else {
+            preferences
+                .load(
+                    environment.context,
+                    &evaluation.project_access.canonical_identity_key,
+                    &evaluation.project_access.identity_revision,
+                    &WorkflowPersistenceMode::MemoryOnly,
+                )?
+                .into_iter()
+                .find(|entry| entry.kind == WorkflowKind::HealthCheck)
+        };
     let prerequisites = [
         WorkflowKind::UpdateWiki,
         WorkflowKind::HealthCheck,
@@ -398,7 +415,12 @@ pub(super) fn overview_evaluation_snapshot(
             },
             &evaluation,
         )?;
-        if let Some(previous) = remembered.iter().find(|entry| entry.kind == kind) {
+        let previous = if kind == WorkflowKind::HealthCheck {
+            remembered_health.as_ref()
+        } else {
+            remembered.iter().find(|entry| entry.kind == kind)
+        };
+        if let Some(previous) = previous {
             let remembered = build_snapshot_from_evaluation(
                 environment,
                 &PrepareWorkflowInput {
@@ -619,6 +641,12 @@ impl WorkflowPreparationService {
         if record.preparation.preparation_revision != preparation_revision {
             return Err(stale_preparation_error());
         }
+        if matches!(record.preparation.route, Some(WorkflowRoute::Agent { .. })) {
+            // Route presentation may reuse the short-lived probe cache, but a
+            // start token must bind the Agent executable/version/profile that
+            // exists now. Force the refreshed snapshot below to probe again.
+            environment.agent_service.invalidate_workflow_route_cache();
+        }
         let refreshed = build_snapshot(
             environment,
             &PrepareWorkflowInput {
@@ -794,7 +822,13 @@ fn build_snapshot_from_evaluation(
     input: &PrepareWorkflowInput,
     evaluation: &RequestEvaluationSnapshot,
 ) -> Result<PreparationSnapshot, BackendError> {
-    let project_access = evaluation.project_access.clone();
+    let mut project_access = evaluation.project_access.clone();
+    if input.kind == WorkflowKind::HealthCheck {
+        // Health is a read-only diagnostic. Keep its queue/run/report state in
+        // the existing memory lane even for writable projects so executing it
+        // cannot change project content or Git metadata/status.
+        project_access.persistence = WorkflowPersistenceMode::MemoryOnly;
+    }
     let available_source_versions = evaluation
         .source_versions
         .iter()
@@ -804,11 +838,22 @@ fn build_snapshot_from_evaluation(
         })
         .collect();
     let available_wiki_pages = evaluation.wiki_pages.clone();
-    let available_routes = evaluation.route_catalog.available_selections();
+    let agent_policy = match input.kind {
+        WorkflowKind::HealthCheck => AgentRoutePolicy::LintOnly,
+        WorkflowKind::UpdateWiki | WorkflowKind::GenerateContent => AgentRoutePolicy::Any,
+    };
+    let available_routes = evaluation
+        .route_catalog
+        .available_selections_for(agent_policy);
     let default_route = resolve_external_route(
         input.route_selection.as_ref(),
         &evaluation.route_catalog,
-        false,
+        if input.kind == WorkflowKind::HealthCheck {
+            AgentRoutePolicy::LintOnly
+        } else {
+            AgentRoutePolicy::Disabled
+        },
+        input.kind == WorkflowKind::HealthCheck,
     );
     let scope = normalize_scope(
         environment.context,
@@ -938,6 +983,15 @@ struct RouteCatalog {
 struct AgentRouteCandidate {
     available: bool,
     revision: String,
+    lint_available: bool,
+    lint_revision: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentRoutePolicy {
+    Disabled,
+    Any,
+    LintOnly,
 }
 
 struct ProviderRouteCandidate {
@@ -947,13 +1001,21 @@ struct ProviderRouteCandidate {
 }
 
 impl RouteCatalog {
+    #[cfg(test)]
     fn available_selections(&self) -> Vec<WorkflowRouteSelection> {
+        self.available_selections_for(AgentRoutePolicy::Any)
+    }
+
+    fn available_selections_for(
+        &self,
+        agent_policy: AgentRoutePolicy,
+    ) -> Vec<WorkflowRouteSelection> {
         let mut selections = AgentKind::ALL
             .into_iter()
             .filter(|kind| {
                 self.agents
                     .get(kind)
-                    .is_some_and(|candidate| candidate.available)
+                    .is_some_and(|candidate| candidate.revision_for(agent_policy).is_some())
             })
             .map(|agent| WorkflowRouteSelection::Agent { agent })
             .collect::<Vec<_>>();
@@ -996,13 +1058,15 @@ impl RouteCatalog {
                         kind,
                         scope.spawn(move || {
                             let started = std::time::Instant::now();
-                            let result = environment.agent_service.detect_agent_for_workflow_route(
-                                kind,
-                                default_agent == Some(kind),
-                                settings_revision,
-                                canonical_identity_key,
-                                identity_revision,
-                            );
+                            let result = environment
+                                .agent_service
+                                .detect_agent_for_workflow_lint_route(
+                                    kind,
+                                    default_agent == Some(kind),
+                                    settings_revision,
+                                    canonical_identity_key,
+                                    identity_revision,
+                                );
                             let elapsed =
                                 u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
                             (result, elapsed)
@@ -1029,7 +1093,7 @@ impl RouteCatalog {
                 count.get()
                     + detected_agents
                         .iter()
-                        .filter(|(_, ((_, probed), _))| *probed)
+                        .filter(|(_, ((_, probed, _), _))| *probed)
                         .count(),
             )
         });
@@ -1038,7 +1102,7 @@ impl RouteCatalog {
             slowest.set(
                 detected_agents
                     .iter()
-                    .filter(|(_, ((_, probed), _))| *probed)
+                    .filter(|(_, ((_, probed, _), _))| *probed)
                     .map(|(_, (_, elapsed))| *elapsed)
                     .max()
                     .unwrap_or(0),
@@ -1046,17 +1110,35 @@ impl RouteCatalog {
         });
         let agents = detected_agents
             .into_iter()
-            .map(|(kind, ((info, _probed), _elapsed))| {
+            .map(|(kind, ((info, _probed, target_revision), _elapsed))| {
                 let revision = hex_sha256(
                     canonical_json(&(kind, &info.state, &info.version, &info.executable_path))
                         .unwrap_or_default()
                         .as_bytes(),
                 );
+                let lint_profile = AgentService::lint_route_profile_revision(kind);
+                let lint_revision = lint_profile.map(|profile| {
+                    hex_sha256(
+                        canonical_json(&(
+                            kind,
+                            &info.state,
+                            &info.version,
+                            &info.executable_path,
+                            profile,
+                            &target_revision,
+                        ))
+                        .unwrap_or_default()
+                        .as_bytes(),
+                    )
+                });
                 (
                     kind,
                     AgentRouteCandidate {
                         available: info.state == AgentDetectionState::Installed,
                         revision,
+                        lint_available: info.state == AgentDetectionState::Installed
+                            && lint_profile.is_some(),
+                        lint_revision,
                     },
                 )
             })
@@ -1096,6 +1178,19 @@ impl RouteCatalog {
             agents,
             providers,
         })
+    }
+}
+
+impl AgentRouteCandidate {
+    fn revision_for(&self, policy: AgentRoutePolicy) -> Option<&str> {
+        match policy {
+            AgentRoutePolicy::Disabled => None,
+            AgentRoutePolicy::Any => self.available.then_some(self.revision.as_str()),
+            AgentRoutePolicy::LintOnly => self
+                .lint_available
+                .then(|| self.lint_revision.as_deref())
+                .flatten(),
+        }
     }
 }
 
@@ -1250,7 +1345,11 @@ fn resolve_route(
     resolve_external_route(
         selection,
         catalog,
-        !matches!(scope, WorkflowScope::HealthCheck { .. }),
+        match scope {
+            WorkflowScope::HealthCheck { .. } => AgentRoutePolicy::LintOnly,
+            _ => AgentRoutePolicy::Any,
+        },
+        matches!(scope, WorkflowScope::HealthCheck { .. }),
     )
 }
 
@@ -1269,18 +1368,19 @@ fn route_selection(route: &Option<WorkflowRoute>) -> Option<WorkflowRouteSelecti
 fn resolve_external_route(
     selection: Option<&WorkflowRouteSelection>,
     catalog: &RouteCatalog,
-    allow_agent: bool,
+    agent_policy: AgentRoutePolicy,
+    require_explicit_provider: bool,
 ) -> RouteResolution {
     match selection {
         Some(WorkflowRouteSelection::Agent { agent }) => {
             let route = catalog
                 .agents
                 .get(agent)
-                .filter(|candidate| allow_agent && candidate.available)
-                .map(|candidate| WorkflowRoute::Agent {
+                .and_then(|candidate| candidate.revision_for(agent_policy))
+                .map(|revision| WorkflowRoute::Agent {
                     agent: *agent,
                     model: None,
-                    route_revision: candidate.revision.clone(),
+                    route_revision: revision.to_string(),
                 });
             RouteResolution {
                 prerequisite_action: route
@@ -1311,11 +1411,11 @@ fn resolve_external_route(
                 let route = catalog
                     .agents
                     .get(&default_agent)
-                    .filter(|candidate| allow_agent && candidate.available)
-                    .map(|candidate| WorkflowRoute::Agent {
+                    .and_then(|candidate| candidate.revision_for(agent_policy))
+                    .map(|revision| WorkflowRoute::Agent {
                         agent: default_agent,
                         model: None,
-                        route_revision: candidate.revision.clone(),
+                        route_revision: revision.to_string(),
                     });
                 return RouteResolution {
                     prerequisite_action: route
@@ -1329,16 +1429,17 @@ fn resolve_external_route(
                 .iter()
                 .filter(|candidate| candidate.available)
                 .collect::<Vec<_>>();
-            let route = (usable.len() == 1).then(|| WorkflowRoute::Byok {
-                provider: usable[0].config.provider,
-                model: usable[0].config.model.clone(),
-                route_revision: usable[0].revision.clone(),
-            });
+            let route =
+                (!require_explicit_provider && usable.len() == 1).then(|| WorkflowRoute::Byok {
+                    provider: usable[0].config.provider,
+                    model: usable[0].config.model.clone(),
+                    route_revision: usable[0].revision.clone(),
+                });
             RouteResolution {
-                prerequisite_action: route.is_none().then_some(if usable.len() > 1 {
-                    WorkflowPrerequisiteAction::ChooseExecutionRoute
-                } else {
+                prerequisite_action: route.is_none().then_some(if usable.is_empty() {
                     WorkflowPrerequisiteAction::ConfigureExecutionRoute
+                } else {
+                    WorkflowPrerequisiteAction::ChooseExecutionRoute
                 }),
                 route,
             }

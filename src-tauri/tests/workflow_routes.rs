@@ -21,6 +21,9 @@ use std::time::Duration;
 
 struct NoAgents;
 
+struct InstalledCodex;
+struct InstalledClaude;
+
 struct HealthRunner;
 
 impl WorkflowRunner for HealthRunner {
@@ -59,6 +62,68 @@ impl ProcessRunner for NoAgents {
     }
 }
 
+impl ProcessRunner for InstalledCodex {
+    fn find_executable(&self, command: &str) -> Option<PathBuf> {
+        (command == "codex").then(|| PathBuf::from("codex"))
+    }
+
+    fn run_with_timeout(
+        &self,
+        _command: &str,
+        args: &[&str],
+        _timeout: Duration,
+    ) -> Result<String, BackendError> {
+        if args == ["--version"] {
+            return Ok("codex 1.0.0".into());
+        }
+        Ok("--json --ephemeral --sandbox --ignore-user-config --ignore-rules --output-schema --output-last-message --skip-git-repo-check -C --cd".into())
+    }
+
+    fn run_capture(&self, _invocation: &AgentInvocation) -> Result<(String, String), BackendError> {
+        unreachable!("route preparation must not invoke the Agent")
+    }
+
+    fn run_task_streaming(
+        &self,
+        _invocation: &AgentInvocation,
+        _tasks: &TaskService,
+        _task_id: &str,
+    ) -> Result<String, BackendError> {
+        unreachable!("route preparation must not invoke the Agent")
+    }
+}
+
+impl ProcessRunner for InstalledClaude {
+    fn find_executable(&self, command: &str) -> Option<PathBuf> {
+        (command == "claude").then(|| PathBuf::from("claude"))
+    }
+
+    fn run_with_timeout(
+        &self,
+        _command: &str,
+        args: &[&str],
+        _timeout: Duration,
+    ) -> Result<String, BackendError> {
+        if args == ["--version"] {
+            return Ok("claude 1.0.0".into());
+        }
+        Ok("--print --output-format --verbose --permission-mode --settings --bare --safe-mode --disable-slash-commands --no-session-persistence --no-chrome --prompt-suggestions --strict-mcp-config --tools --allowedTools --json-schema".into())
+    }
+
+    fn run_capture(&self, _invocation: &AgentInvocation) -> Result<(String, String), BackendError> {
+        unreachable!("route preparation must not invoke the Agent")
+    }
+
+    fn run_task_streaming(
+        &self,
+        _invocation: &AgentInvocation,
+        _tasks: &TaskService,
+        _task_id: &str,
+    ) -> Result<String, BackendError> {
+        unreachable!("route preparation must not invoke the Agent")
+    }
+}
+
 fn fixture() -> (
     tempfile::TempDir,
     ProjectContext,
@@ -93,6 +158,17 @@ fn trusted() -> WorkflowAccessSnapshot {
         persistence: WorkflowPersistenceMode::Persistent,
         git_state: WorkflowGitState::Clean,
         authority_revision: "test-authority".into(),
+    }
+}
+
+fn untrusted_read_only() -> WorkflowAccessSnapshot {
+    WorkflowAccessSnapshot {
+        trust: WorkflowProjectTrust::Untrusted,
+        trust_kind: None,
+        filesystem_access: WorkflowFilesystemAccess::ReadOnly,
+        persistence: WorkflowPersistenceMode::MemoryOnly,
+        git_state: WorkflowGitState::Clean,
+        authority_revision: "test-untrusted-authority".into(),
     }
 }
 
@@ -147,7 +223,7 @@ fn prepare(
 }
 
 #[test]
-fn health_default_is_complete_only_when_trusted_route_is_available() {
+fn health_default_stays_local_until_an_external_route_is_explicitly_selected() {
     let (_root, context, _config, settings, secrets, agents) = fixture();
     save_routes(
         &context,
@@ -156,7 +232,7 @@ fn health_default_is_complete_only_when_trusted_route_is_available() {
         vec![provider(LlmProviderKind::Ollama, "qwen")],
     );
     let service = WorkflowService::default();
-    let complete = prepare(
+    let local = prepare(
         &service,
         &context,
         &settings,
@@ -168,12 +244,29 @@ fn health_default_is_complete_only_when_trusted_route_is_available() {
     )
     .unwrap();
     assert!(matches!(
-        complete.scope,
+        local.scope,
         WorkflowScope::HealthCheck {
-            mode: HealthCheckMode::Complete
+            mode: HealthCheckMode::LocalQuick
         }
     ));
-    assert!(matches!(complete.route, Some(WorkflowRoute::Byok { .. })));
+    assert!(matches!(local.route, Some(WorkflowRoute::Local { .. })));
+
+    let explicit = prepare(
+        &service,
+        &context,
+        &settings,
+        &secrets,
+        &agents,
+        trusted(),
+        Some(WorkflowScope::HealthCheck {
+            mode: HealthCheckMode::Complete,
+        }),
+        Some(WorkflowRouteSelection::Byok {
+            provider: LlmProviderKind::Ollama,
+        }),
+    )
+    .unwrap();
+    assert!(matches!(explicit.route, Some(WorkflowRoute::Byok { .. })));
 
     let untrusted = WorkflowAccessSnapshot {
         trust: WorkflowProjectTrust::Untrusted,
@@ -183,12 +276,12 @@ fn health_default_is_complete_only_when_trusted_route_is_available() {
         git_state: WorkflowGitState::Clean,
         authority_revision: "test-authority".into(),
     };
-    let local = prepare(
+    let untrusted_local = prepare(
         &service, &context, &settings, &secrets, &agents, untrusted, None, None,
     )
     .unwrap();
     assert!(matches!(
-        local.scope,
+        untrusted_local.scope,
         WorkflowScope::HealthCheck {
             mode: HealthCheckMode::LocalQuick
         }
@@ -215,9 +308,7 @@ fn configured_default_agent_never_falls_back_to_byok() {
         Some(WorkflowScope::HealthCheck {
             mode: HealthCheckMode::Complete,
         }),
-        Some(WorkflowRouteSelection::Agent {
-            agent: AgentKind::Codex,
-        }),
+        None,
     )
     .unwrap();
     assert!(preparation.route.is_none());
@@ -229,14 +320,141 @@ fn configured_default_agent_never_falls_back_to_byok() {
         .available_routes
         .iter()
         .any(|route| matches!(route, WorkflowRouteSelection::Agent { .. })));
-    assert!(!AgentService::supports_lint_agent(AgentKind::Claude));
-    assert!(!AgentService::supports_lint_agent(AgentKind::Codex));
+    assert!(AgentService::supports_lint_agent(AgentKind::Claude));
+    assert!(AgentService::supports_lint_agent(AgentKind::Codex));
 
     let tasks = TaskService::default();
     let error = service
         .start(
             &context,
             trusted(),
+            &settings,
+            &secrets,
+            &agents,
+            &tasks,
+            &preparation.preparation_id,
+            &preparation.preparation_revision,
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "WORKFLOW_PREREQUISITES_BLOCKING");
+    assert!(tasks.list_workflow_runs().is_empty());
+}
+
+#[test]
+fn health_complete_advertises_only_an_installed_supported_agent() {
+    let (_root, context, _config, settings, secrets, _agents) = fixture();
+    save_routes(&context, &settings, Some(AgentKind::Codex), Vec::new());
+    let agents = AgentService::with_runner(Arc::new(InstalledCodex));
+    let service = WorkflowService::default();
+    let preparation = prepare(
+        &service,
+        &context,
+        &settings,
+        &secrets,
+        &agents,
+        trusted(),
+        Some(WorkflowScope::HealthCheck {
+            mode: HealthCheckMode::Complete,
+        }),
+        Some(WorkflowRouteSelection::Agent {
+            agent: AgentKind::Codex,
+        }),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        preparation.route,
+        Some(WorkflowRoute::Agent {
+            agent: AgentKind::Codex,
+            ..
+        })
+    ));
+    assert_eq!(
+        preparation.available_routes,
+        vec![WorkflowRouteSelection::Agent {
+            agent: AgentKind::Codex,
+        }]
+    );
+    assert!(!preparation
+        .available_routes
+        .contains(&WorkflowRouteSelection::Agent {
+            agent: AgentKind::Openclaw,
+        }));
+    assert!(!preparation
+        .available_routes
+        .contains(&WorkflowRouteSelection::Agent {
+            agent: AgentKind::Hermes,
+        }));
+}
+
+#[test]
+fn health_complete_advertises_an_installed_claude_profile() {
+    let (_root, context, _config, settings, secrets, _agents) = fixture();
+    save_routes(&context, &settings, Some(AgentKind::Claude), Vec::new());
+    let agents = AgentService::with_runner(Arc::new(InstalledClaude));
+    let preparation = prepare(
+        &WorkflowService::default(),
+        &context,
+        &settings,
+        &secrets,
+        &agents,
+        trusted(),
+        Some(WorkflowScope::HealthCheck {
+            mode: HealthCheckMode::Complete,
+        }),
+        Some(WorkflowRouteSelection::Agent {
+            agent: AgentKind::Claude,
+        }),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        preparation.route,
+        Some(WorkflowRoute::Agent {
+            agent: AgentKind::Claude,
+            ..
+        })
+    ));
+    assert_eq!(
+        preparation.available_routes,
+        vec![WorkflowRouteSelection::Agent {
+            agent: AgentKind::Claude,
+        }]
+    );
+}
+
+#[test]
+fn untrusted_project_rejects_installed_agent_health_before_any_invocation() {
+    let (_root, context, _config, settings, secrets, _agents) = fixture();
+    save_routes(&context, &settings, Some(AgentKind::Codex), Vec::new());
+    let agents = AgentService::with_runner(Arc::new(InstalledCodex));
+    let service = WorkflowService::default();
+    let access = untrusted_read_only();
+    let preparation = prepare(
+        &service,
+        &context,
+        &settings,
+        &secrets,
+        &agents,
+        access.clone(),
+        Some(WorkflowScope::HealthCheck {
+            mode: HealthCheckMode::Complete,
+        }),
+        Some(WorkflowRouteSelection::Agent {
+            agent: AgentKind::Codex,
+        }),
+    )
+    .unwrap();
+    assert!(preparation
+        .prerequisites
+        .iter()
+        .any(|item| item.action == WorkflowPrerequisiteAction::TrustProject));
+
+    let tasks = TaskService::default();
+    let error = service
+        .start(
+            &context,
+            access,
             &settings,
             &secrets,
             &agents,
@@ -453,7 +671,9 @@ fn overview_uses_remembered_health_mode_when_the_route_disappears() {
         Some(WorkflowScope::HealthCheck {
             mode: HealthCheckMode::Complete,
         }),
-        None,
+        Some(WorkflowRouteSelection::Byok {
+            provider: LlmProviderKind::Ollama,
+        }),
     )
     .unwrap();
     service
