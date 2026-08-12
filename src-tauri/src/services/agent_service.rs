@@ -18,6 +18,8 @@ use crate::tasks::TaskService;
 
 const ROUTE_PROBE_CACHE_TTL: Duration = Duration::from_secs(30);
 const ROUTE_PROBE_CACHE_MAX_ENTRIES: usize = 128;
+const MAX_AGENT_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_AGENT_RUNTIME: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentInvocation {
@@ -770,8 +772,8 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
         matches!(kind, AgentKind::Claude | AgentKind::Codex)
     }
 
-    /// Deep Lint is intentionally limited to BYOK until a credential broker
-    /// can guarantee both isolated credentials and a verified no-tools CLI.
+    /// The tested Agent lint bridge is intentionally unreachable until H3
+    /// adds the read-only route gates; H2 must not advertise the capability.
     pub fn supports_lint_agent(_kind: AgentKind) -> bool {
         false
     }
@@ -804,15 +806,19 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
             AgentKind::Claude => AgentInvocation {
                 program: "claude".into(),
                 args: vec![
-                    "--bare".into(),
                     "--print".into(),
                     "--output-format".into(),
                     "stream-json".into(),
                     "--verbose".into(),
                     "--permission-mode".into(),
                     "dontAsk".into(),
-                    "--tools".into(),
-                    "".into(),
+                    "--safe-mode".into(),
+                    "--disable-slash-commands".into(),
+                    "--no-session-persistence".into(),
+                    "--no-chrome".into(),
+                    "--prompt-suggestions=false".into(),
+                    "--strict-mcp-config".into(),
+                    "--tools=".into(),
                 ],
                 stdin: Some(prompt_owned),
                 cwd,
@@ -838,6 +844,65 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
             AgentKind::Openclaw | AgentKind::Hermes => return Err(unsupported_lint_agent(kind)),
         };
         Ok(invocation)
+    }
+
+    /// Build the workspace-write half of the pinned wiki-lint contract. This
+    /// helper is deliberately callable before the product capability is
+    /// advertised so its CLI contract and candidate protections can be tested
+    /// independently. Only Claude and Codex currently have a verified
+    /// structured, non-interactive workspace-write profile.
+    pub fn lint_repair_invocation(
+        kind: AgentKind,
+        workspace: &Path,
+        prompt: &str,
+    ) -> Result<AgentInvocation, BackendError> {
+        validate_candidate_workspace(workspace)?;
+        let cwd = workspace.to_path_buf();
+        let prompt_owned = prompt.to_string();
+        match kind {
+            AgentKind::Claude => Ok(AgentInvocation {
+                program: "claude".into(),
+                args: vec![
+                    "--print".into(),
+                    "--output-format".into(),
+                    "stream-json".into(),
+                    "--verbose".into(),
+                    "--permission-mode".into(),
+                    "dontAsk".into(),
+                    "--safe-mode".into(),
+                    "--disable-slash-commands".into(),
+                    "--no-session-persistence".into(),
+                    "--no-chrome".into(),
+                    "--prompt-suggestions=false".into(),
+                    "--strict-mcp-config".into(),
+                    "--tools=Read,Grep,Glob,Edit,Write,Bash".into(),
+                    "--allowedTools=Read Grep Glob Edit Write Bash".into(),
+                    "--settings".into(),
+                    r#"{"sandbox":{"enabled":true,"autoAllowBashIfSandboxed":true}}"#.into(),
+                ],
+                stdin: Some(prompt_owned),
+                cwd,
+            }),
+            AgentKind::Codex => Ok(AgentInvocation {
+                program: "codex".into(),
+                args: vec![
+                    "exec".into(),
+                    "--json".into(),
+                    "--ephemeral".into(),
+                    "--ignore-rules".into(),
+                    "--ignore-user-config".into(),
+                    "--sandbox".into(),
+                    "workspace-write".into(),
+                    "--skip-git-repo-check".into(),
+                    "-C".into(),
+                    workspace.to_string_lossy().into_owned(),
+                    "-".into(),
+                ],
+                stdin: Some(prompt_owned),
+                cwd,
+            }),
+            AgentKind::Openclaw | AgentKind::Hermes => Err(unsupported_lint_agent(kind)),
+        }
     }
 
     /// Build a structured Agent invocation for the `html-*` export skills. The
@@ -1048,13 +1113,52 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
         tasks: &TaskService,
         task_id: &str,
     ) -> Result<String, BackendError> {
-        let _ = (invocation, tasks, task_id);
-        Err(BackendError::new(
-            "LINT_AGENT_UNAVAILABLE",
-            "CLI Agent deep lint is disabled until a verified credential/no-tools broker is available. Switch to BYOK.",
-            true,
-            true,
-        ))
+        let kind = validate_lint_transport_invocation(invocation)?;
+        let on_activity = |activity: TaskActivity| tasks.emit_activity(task_id, activity);
+        tasks.emit_activity(
+            task_id,
+            TaskActivity::Phase {
+                name: "wiki-lint-agent".into(),
+                status: TaskActivityStatus::Started,
+                label: Some("Running built-in wiki-lint".into()),
+            },
+        );
+        let result = self.runner.run_task_streaming_isolated_with_events(
+            invocation,
+            tasks,
+            task_id,
+            Some(kind),
+            &on_activity,
+        );
+        let result = result.and_then(|output| {
+            if output.trim().is_empty() {
+                Err(BackendError::new(
+                    "LINT_AGENT_OUTPUT_MALFORMED",
+                    "Agent lint completed without a structured final result.",
+                    true,
+                    false,
+                ))
+            } else {
+                Ok(output)
+            }
+        });
+        tasks.emit_activity(
+            task_id,
+            TaskActivity::Phase {
+                name: "wiki-lint-agent".into(),
+                status: if result.is_ok() {
+                    TaskActivityStatus::Completed
+                } else {
+                    TaskActivityStatus::Failed
+                },
+                label: Some(if result.is_ok() {
+                    "wiki-lint result captured".into()
+                } else {
+                    "wiki-lint execution failed".into()
+                }),
+            },
+        );
+        result
     }
 
     pub fn run_import_assistance(
@@ -1335,6 +1439,68 @@ fn run_streaming_process(
     )
 }
 
+enum AgentStreamEvent {
+    Line {
+        level: LogLevel,
+        line: String,
+        raw_bytes: usize,
+    },
+    ReadFailed(BackendError),
+}
+
+fn read_agent_stream<R: Read>(
+    stream: R,
+    level: LogLevel,
+    sender: std::sync::mpsc::SyncSender<AgentStreamEvent>,
+) {
+    let mut reader = BufReader::new(stream).take((MAX_AGENT_CAPTURE_BYTES + 1) as u64);
+    loop {
+        let mut bytes = Vec::new();
+        match reader.read_until(b'\n', &mut bytes) {
+            Ok(0) => break,
+            Ok(raw_bytes) => {
+                if bytes.last() == Some(&b'\n') {
+                    bytes.pop();
+                    if bytes.last() == Some(&b'\r') {
+                        bytes.pop();
+                    }
+                }
+                let line = match String::from_utf8(bytes) {
+                    Ok(line) => line,
+                    Err(_) => {
+                        let _ = sender.send(AgentStreamEvent::ReadFailed(BackendError::new(
+                            "AGENT_OUTPUT_INVALID_ENCODING",
+                            "Agent output was not valid UTF-8.",
+                            true,
+                            true,
+                        )));
+                        break;
+                    }
+                };
+                if sender
+                    .send(AgentStreamEvent::Line {
+                        level: level.clone(),
+                        line,
+                        raw_bytes,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Err(error) => {
+                let _ = sender.send(AgentStreamEvent::ReadFailed(BackendError::new(
+                    "AGENT_OUTPUT_READ_FAILED",
+                    error.to_string(),
+                    true,
+                    true,
+                )));
+                break;
+            }
+        }
+    }
+}
+
 fn run_streaming_process_with_events(
     invocation: &AgentInvocation,
     tasks: &TaskService,
@@ -1344,8 +1510,31 @@ fn run_streaming_process_with_events(
     persist_output_logs: bool,
     credential_agent: Option<AgentKind>,
 ) -> Result<String, BackendError> {
-    const MAX_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
-    const MAX_RUNTIME: Duration = Duration::from_secs(15 * 60);
+    run_streaming_process_with_events_and_limits(
+        invocation,
+        tasks,
+        task_id,
+        on_delta,
+        on_activity,
+        persist_output_logs,
+        credential_agent,
+        MAX_AGENT_CAPTURE_BYTES,
+        MAX_AGENT_RUNTIME,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_streaming_process_with_events_and_limits(
+    invocation: &AgentInvocation,
+    tasks: &TaskService,
+    task_id: &str,
+    on_delta: &(dyn Fn(&str) + Sync),
+    on_activity: &(dyn Fn(TaskActivity) + Sync),
+    persist_output_logs: bool,
+    credential_agent: Option<AgentKind>,
+    max_capture_bytes: usize,
+    max_runtime: Duration,
+) -> Result<String, BackendError> {
     let started = Instant::now();
     let mut command = build_command(
         &invocation.program,
@@ -1368,24 +1557,14 @@ fn run_streaming_process_with_events(
             thread::spawn(move || stdin.write_all(input.as_bytes()))
         })
     });
-    let (sender, receiver) = std::sync::mpsc::sync_channel::<(LogLevel, String)>(256);
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<AgentStreamEvent>(256);
     if let Some(stdout) = child.stdout.take() {
         let sender = sender.clone();
-        thread::spawn(move || {
-            let reader = BufReader::new(stdout).take((MAX_CAPTURE_BYTES + 1) as u64);
-            for line in reader.lines().map_while(Result::ok) {
-                let _ = sender.send((LogLevel::Info, line));
-            }
-        });
+        thread::spawn(move || read_agent_stream(stdout, LogLevel::Info, sender));
     }
     if let Some(stderr) = child.stderr.take() {
         let sender = sender.clone();
-        thread::spawn(move || {
-            let reader = BufReader::new(stderr).take((MAX_CAPTURE_BYTES + 1) as u64);
-            for line in reader.lines().map_while(Result::ok) {
-                let _ = sender.send((LogLevel::Warn, line));
-            }
-        });
+        thread::spawn(move || read_agent_stream(stderr, LogLevel::Warn, sender));
     }
     drop(sender);
     // Plain stdout is captured as the answer payload for chat/lint/export.
@@ -1395,20 +1574,23 @@ fn run_streaming_process_with_events(
     let mut parser = AgentOutputParser::new(is_structured_invocation(invocation));
     let mut captured_bytes = 0usize;
     loop {
-        while let Ok((level, line)) = receiver.try_recv() {
-            process_agent_output_line(
+        while let Ok(event) = receiver.try_recv() {
+            if let Err(error) = process_agent_stream_event(
+                event,
                 &mut parser,
-                level,
-                &line,
                 &mut stdout,
                 &mut captured_bytes,
-                MAX_CAPTURE_BYTES,
+                max_capture_bytes,
                 persist_output_logs,
                 tasks,
                 task_id,
                 on_delta,
                 on_activity,
-            )?;
+            ) {
+                terminate_agent_tree(&mut child);
+                let _ = finish_stdin_writer(stdin_writer.take());
+                return Err(error);
+            }
         }
         if tasks.is_cancelled(task_id) {
             terminate_agent_tree(&mut child);
@@ -1420,7 +1602,7 @@ fn run_streaming_process_with_events(
                 false,
             ));
         }
-        if started.elapsed() > MAX_RUNTIME {
+        if started.elapsed() > max_runtime {
             terminate_agent_tree(&mut child);
             let _ = finish_stdin_writer(stdin_writer.take());
             return Err(BackendError::new(
@@ -1433,23 +1615,62 @@ fn run_streaming_process_with_events(
         match child.try_wait() {
             Ok(Some(status)) => {
                 let stdin_result = finish_stdin_writer(stdin_writer.take());
-                for (level, line) in receiver.try_iter() {
-                    process_agent_output_line(
-                        &mut parser,
-                        level,
-                        &line,
-                        &mut stdout,
-                        &mut captured_bytes,
-                        MAX_CAPTURE_BYTES,
-                        persist_output_logs,
-                        tasks,
-                        task_id,
-                        on_delta,
-                        on_activity,
-                    )?;
+                // A process can exit before its pipe-reader threads publish
+                // trailing bytes. Wait for both senders to close so malformed
+                // or oversized output after a valid final cannot be skipped,
+                // while retaining the same cancellation/deadline bound in
+                // case a descendant inherited the pipe handles.
+                loop {
+                    match receiver.recv_timeout(Duration::from_millis(50)) {
+                        Ok(event) => {
+                            if let Err(error) = process_agent_stream_event(
+                                event,
+                                &mut parser,
+                                &mut stdout,
+                                &mut captured_bytes,
+                                max_capture_bytes,
+                                persist_output_logs,
+                                tasks,
+                                task_id,
+                                on_delta,
+                                on_activity,
+                            ) {
+                                terminate_agent_tree(&mut child);
+                                return Err(error);
+                            }
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                            if tasks.is_cancelled(task_id) =>
+                        {
+                            terminate_agent_tree(&mut child);
+                            return Err(BackendError::new(
+                                "AGENT_CANCELLED",
+                                "Agent task was cancelled.",
+                                true,
+                                false,
+                            ));
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                            if started.elapsed() > max_runtime =>
+                        {
+                            terminate_agent_tree(&mut child);
+                            return Err(BackendError::new(
+                                "IMPORT_AGENT_TIMEOUT",
+                                "Agent assistance exceeded the execution time limit.",
+                                true,
+                                true,
+                            ));
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    }
                 }
                 if status.success() {
                     stdin_result?;
+                    if let Err(error) = parser.validate_terminal() {
+                        terminate_agent_tree(&mut child);
+                        return Err(error);
+                    }
                     if !persist_output_logs {
                         let _ = tasks.append_log(
                             task_id,
@@ -1496,6 +1717,10 @@ struct ParsedAgentLine {
 struct AgentOutputParser {
     structured: bool,
     saw_text: bool,
+    terminal_seen: bool,
+    terminal_success: bool,
+    invalid_terminal_sequence: bool,
+    malformed_structured_line: bool,
     thinking_active: bool,
     thinking_started_at: Option<Instant>,
     seen_tool_calls: HashSet<String>,
@@ -1506,6 +1731,10 @@ impl AgentOutputParser {
         Self {
             structured,
             saw_text: false,
+            terminal_seen: false,
+            terminal_success: false,
+            invalid_terminal_sequence: false,
+            malformed_structured_line: false,
             thinking_active: false,
             thinking_started_at: None,
             seen_tool_calls: HashSet::new(),
@@ -1521,6 +1750,7 @@ impl AgentOutputParser {
         }
 
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            self.malformed_structured_line = true;
             return ParsedAgentLine {
                 text: None,
                 activities: Vec::new(),
@@ -1534,6 +1764,42 @@ impl AgentOutputParser {
             .get("type")
             .and_then(|value| value.as_str())
             .unwrap_or("");
+        if self.terminal_seen {
+            self.invalid_terminal_sequence = true;
+        }
+        match event_type {
+            "result" => {
+                self.terminal_seen = true;
+                self.terminal_success = value.get("is_error").and_then(|value| value.as_bool())
+                    != Some(true)
+                    && value
+                        .get("subtype")
+                        .and_then(|value| value.as_str())
+                        .is_none_or(|subtype| subtype == "success");
+            }
+            "response.completed" => {
+                self.terminal_seen = true;
+                self.terminal_success = value
+                    .pointer("/response/status")
+                    .or_else(|| value.get("status"))
+                    .and_then(|value| value.as_str())
+                    .is_none_or(|status| status == "completed")
+                    && value.get("error").is_none_or(serde_json::Value::is_null);
+            }
+            "turn.completed" => {
+                self.terminal_seen = true;
+                self.terminal_success = value
+                    .get("status")
+                    .and_then(|value| value.as_str())
+                    .is_none_or(|status| status == "completed")
+                    && value.get("error").is_none_or(serde_json::Value::is_null);
+            }
+            "response.failed" | "response.incomplete" | "turn.failed" | "error" => {
+                self.terminal_seen = true;
+                self.terminal_success = false;
+            }
+            _ => {}
+        }
 
         if event_type == "stream_event" {
             if let Some(event) = value.get("event") {
@@ -1586,6 +1852,24 @@ impl AgentOutputParser {
                 .map(str::to_string);
         }
         parsed
+    }
+
+    fn validate_line(&self) -> Result<(), BackendError> {
+        if self.malformed_structured_line || self.invalid_terminal_sequence {
+            return Err(lint_agent_output_malformed_error(
+                "Agent emitted malformed structured output.",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_terminal(&self) -> Result<(), BackendError> {
+        if self.structured && (!self.terminal_seen || !self.terminal_success) {
+            return Err(lint_agent_output_malformed_error(
+                "Agent lint completed without a final successful structured terminal result.",
+            ));
+        }
+        self.validate_line()
     }
 
     fn parse_claude_event(&mut self, event: &serde_json::Value, parsed: &mut ParsedAgentLine) {
@@ -1871,10 +2155,9 @@ fn json_value_as_visible_output(value: &serde_json::Value) -> Option<String> {
     None
 }
 
-fn process_agent_output_line(
+fn process_agent_stream_event(
+    event: AgentStreamEvent,
     parser: &mut AgentOutputParser,
-    level: LogLevel,
-    line: &str,
     stdout: &mut String,
     captured_bytes: &mut usize,
     max_capture_bytes: usize,
@@ -1884,6 +2167,49 @@ fn process_agent_output_line(
     on_delta: &(dyn Fn(&str) + Sync),
     on_activity: &(dyn Fn(TaskActivity) + Sync),
 ) -> Result<(), BackendError> {
+    match event {
+        AgentStreamEvent::Line {
+            level,
+            line,
+            raw_bytes,
+        } => process_agent_output_line(
+            parser,
+            level,
+            &line,
+            raw_bytes,
+            stdout,
+            captured_bytes,
+            max_capture_bytes,
+            persist_output_logs,
+            tasks,
+            task_id,
+            on_delta,
+            on_activity,
+        ),
+        AgentStreamEvent::ReadFailed(error) => Err(error),
+    }
+}
+
+fn process_agent_output_line(
+    parser: &mut AgentOutputParser,
+    level: LogLevel,
+    line: &str,
+    raw_bytes: usize,
+    stdout: &mut String,
+    captured_bytes: &mut usize,
+    max_capture_bytes: usize,
+    persist_output_logs: bool,
+    tasks: &TaskService,
+    task_id: &str,
+    on_delta: &(dyn Fn(&str) + Sync),
+    on_activity: &(dyn Fn(TaskActivity) + Sync),
+) -> Result<(), BackendError> {
+    *captured_bytes = captured_bytes
+        .checked_add(raw_bytes)
+        .ok_or_else(|| agent_output_too_large_error())?;
+    if *captured_bytes > max_capture_bytes {
+        return Err(agent_output_too_large_error());
+    }
     if level != LogLevel::Info {
         if persist_output_logs {
             // Structured Agent stderr is diagnostic transport, not a trusted
@@ -1901,16 +2227,8 @@ fn process_agent_output_line(
     }
 
     let parsed = parser.parse(line);
+    parser.validate_line()?;
     if let Some(text) = parsed.text {
-        *captured_bytes = captured_bytes.saturating_add(text.len() + 1);
-        if *captured_bytes > max_capture_bytes {
-            return Err(BackendError::new(
-                "IMPORT_AGENT_OUTPUT_TOO_LARGE",
-                "Agent output exceeded the candidate capture limit.",
-                true,
-                true,
-            ));
-        }
         stdout.push_str(&text);
         if !parser.structured {
             stdout.push('\n');
@@ -1927,6 +2245,19 @@ fn process_agent_output_line(
         let _ = tasks.append_log(task_id, LogLevel::Info, line.to_string());
     }
     Ok(())
+}
+
+fn agent_output_too_large_error() -> BackendError {
+    BackendError::new(
+        "IMPORT_AGENT_OUTPUT_TOO_LARGE",
+        "Agent output exceeded the candidate capture limit.",
+        true,
+        true,
+    )
+}
+
+fn lint_agent_output_malformed_error(message: &str) -> BackendError {
+    BackendError::new("LINT_AGENT_OUTPUT_MALFORMED", message, true, false)
 }
 
 fn activity_log_text(activity: &TaskActivity) -> String {
@@ -2921,14 +3252,66 @@ fn first_non_empty_line(value: &str) -> String {
 }
 
 fn validate_candidate_workspace(workspace: &Path) -> Result<(), BackendError> {
-    let workspace = workspace.canonicalize().map_err(|error| {
+    let candidate_temp = std::env::temp_dir();
+    let candidate_root = candidate_temp.join("llm-wiki-desktop");
+    if !workspace.starts_with(&candidate_root) {
+        return Err(BackendError::new(
+            "AGENT_WORKSPACE_OUTSIDE_CANDIDATE",
+            "Agent execution is restricted to a candidate workspace.",
+            false,
+            true,
+        ));
+    }
+    for path in [candidate_temp.as_path(), candidate_root.as_path()] {
+        let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+            BackendError::new("AGENT_WORKSPACE_INVALID", error.to_string(), true, false)
+        })?;
+        if !metadata.is_dir() || import_metadata_is_link(&metadata) {
+            return Err(BackendError::new(
+                "AGENT_WORKSPACE_INVALID",
+                "Agent candidate roots cannot be links/reparse points.",
+                false,
+                true,
+            ));
+        }
+    }
+    let mut current = workspace;
+    loop {
+        let metadata = std::fs::symlink_metadata(current).map_err(|error| {
+            BackendError::new("AGENT_WORKSPACE_INVALID", error.to_string(), true, false)
+        })?;
+        if !metadata.is_dir() || import_metadata_is_link(&metadata) {
+            return Err(BackendError::new(
+                "AGENT_WORKSPACE_INVALID",
+                "Agent workspace components cannot be links/reparse points.",
+                false,
+                true,
+            ));
+        }
+        if current == candidate_root {
+            break;
+        }
+        current = current.parent().ok_or_else(|| {
+            BackendError::new(
+                "AGENT_WORKSPACE_OUTSIDE_CANDIDATE",
+                "Agent workspace did not descend from its candidate root.",
+                false,
+                true,
+            )
+        })?;
+    }
+    let canonical_temp = candidate_temp.canonicalize().map_err(|error| {
         BackendError::new("AGENT_WORKSPACE_INVALID", error.to_string(), true, false)
     })?;
-    let candidate_root = std::env::temp_dir().join("llm-wiki-desktop");
     let candidate_root = candidate_root.canonicalize().map_err(|error| {
         BackendError::new("AGENT_WORKSPACE_INVALID", error.to_string(), true, false)
     })?;
-    if !workspace.starts_with(candidate_root) {
+    let workspace = workspace.canonicalize().map_err(|error| {
+        BackendError::new("AGENT_WORKSPACE_INVALID", error.to_string(), true, false)
+    })?;
+    if candidate_root.parent() != Some(canonical_temp.as_path())
+        || !workspace.starts_with(&candidate_root)
+    {
         return Err(BackendError::new(
             "AGENT_WORKSPACE_OUTSIDE_CANDIDATE",
             "Agent execution is restricted to a candidate workspace.",
@@ -3125,6 +3508,52 @@ fn unsupported_lint_agent(kind: AgentKind) -> BackendError {
         true,
         true,
     )
+}
+
+fn lint_invocation_kind(invocation: &AgentInvocation) -> Result<AgentKind, BackendError> {
+    let program = Path::new(&invocation.program)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(invocation.program.as_str())
+        .to_ascii_lowercase();
+    if program == "claude" {
+        Ok(AgentKind::Claude)
+    } else if program == "codex" {
+        Ok(AgentKind::Codex)
+    } else {
+        Err(BackendError::new(
+            "LINT_AGENT_PROFILE_UNSUPPORTED",
+            "Lint execution requires a verified Claude or Codex invocation.",
+            true,
+            true,
+        ))
+    }
+}
+
+fn validate_lint_transport_invocation(
+    invocation: &AgentInvocation,
+) -> Result<AgentKind, BackendError> {
+    validate_candidate_workspace(&invocation.cwd)?;
+    let kind = lint_invocation_kind(invocation)?;
+    let prompt = invocation.stdin.as_deref().ok_or_else(|| {
+        BackendError::new(
+            "LINT_AGENT_INVOCATION_INVALID",
+            "Lint Agent invocation must carry its prompt on stdin.",
+            false,
+            true,
+        )
+    })?;
+    let analysis = AgentService::lint_invocation(kind, &invocation.cwd, prompt)?;
+    let repair = AgentService::lint_repair_invocation(kind, &invocation.cwd, prompt)?;
+    if invocation != &analysis && invocation != &repair {
+        return Err(BackendError::new(
+            "LINT_AGENT_INVOCATION_INVALID",
+            "Lint Agent invocation did not match a pinned analysis or repair CLI profile.",
+            false,
+            true,
+        ));
+    }
+    Ok(kind)
 }
 
 #[cfg(test)]
@@ -4289,7 +4718,6 @@ mod tests {
             AgentService::chat_invocation(AgentKind::Claude, &workspace, "chat").unwrap(),
             AgentService::chat_convenience_invocation(AgentKind::Claude, &workspace, "edit")
                 .unwrap(),
-            AgentService::lint_invocation(AgentKind::Claude, &workspace, "lint").unwrap(),
             AgentService::html_export_invocation(AgentKind::Claude, &workspace, "html").unwrap(),
         ] {
             assert!(
@@ -4300,14 +4728,9 @@ mod tests {
         }
         let lint_claude =
             AgentService::lint_invocation(AgentKind::Claude, &workspace, "lint").unwrap();
-        assert!(
-            lint_claude
-                .args
-                .windows(2)
-                .any(|pair| pair == ["--tools", ""]),
-            "Lint Claude profile must disable file tools: {:?}",
-            lint_claude.args
-        );
+        assert!(!lint_claude.args.contains(&"--bare".to_string()));
+        assert!(lint_claude.args.contains(&"--safe-mode".to_string()));
+        assert!(lint_claude.args.contains(&"--tools=".to_string()));
         let lint_codex =
             AgentService::lint_invocation(AgentKind::Codex, &workspace, "lint").unwrap();
         assert!(lint_codex
@@ -4320,6 +4743,517 @@ mod tests {
                 .any(|pair| pair == ["--config", "tools=[]"]),
             "Lint Codex profile must not claim an unsupported tools=[] setting: {:?}",
             lint_codex.args
+        );
+    }
+
+    #[test]
+    fn lint_analysis_and_repair_profiles_are_exact_and_capability_stays_closed() {
+        let workspace = std::env::temp_dir().join(format!(
+            "llm-wiki-desktop/lint-profile-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(workspace.join("wiki")).unwrap();
+
+        let workspace_arg = workspace.to_string_lossy().into_owned();
+        let claude_analysis =
+            AgentService::lint_invocation(AgentKind::Claude, &workspace, "analyze").unwrap();
+        assert_eq!(
+            claude_analysis,
+            AgentInvocation {
+                program: "claude".into(),
+                args: vec![
+                    "--print",
+                    "--output-format",
+                    "stream-json",
+                    "--verbose",
+                    "--permission-mode",
+                    "dontAsk",
+                    "--safe-mode",
+                    "--disable-slash-commands",
+                    "--no-session-persistence",
+                    "--no-chrome",
+                    "--prompt-suggestions=false",
+                    "--strict-mcp-config",
+                    "--tools=",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+                stdin: Some("analyze".into()),
+                cwd: workspace.clone(),
+            }
+        );
+        let claude_repair =
+            AgentService::lint_repair_invocation(AgentKind::Claude, &workspace, "repair").unwrap();
+        assert_eq!(
+            claude_repair.args,
+            vec![
+                "--print",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--permission-mode",
+                "dontAsk",
+                "--safe-mode",
+                "--disable-slash-commands",
+                "--no-session-persistence",
+                "--no-chrome",
+                "--prompt-suggestions=false",
+                "--strict-mcp-config",
+                "--tools=Read,Grep,Glob,Edit,Write,Bash",
+                "--allowedTools=Read Grep Glob Edit Write Bash",
+                "--settings",
+                r#"{"sandbox":{"enabled":true,"autoAllowBashIfSandboxed":true}}"#,
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+        );
+        assert_eq!(claude_repair.stdin.as_deref(), Some("repair"));
+        assert_eq!(claude_repair.cwd, workspace);
+
+        let codex_analysis =
+            AgentService::lint_invocation(AgentKind::Codex, &workspace, "analyze").unwrap();
+        assert_eq!(
+            codex_analysis.args,
+            vec![
+                "exec",
+                "--json",
+                "--ephemeral",
+                "--ignore-rules",
+                "--ignore-user-config",
+                "--sandbox",
+                "read-only",
+                "--skip-git-repo-check",
+                "-C",
+                workspace_arg.as_str(),
+                "-",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+        );
+        let codex_repair =
+            AgentService::lint_repair_invocation(AgentKind::Codex, &workspace, "repair").unwrap();
+        assert_eq!(
+            codex_repair.args,
+            vec![
+                "exec",
+                "--json",
+                "--ephemeral",
+                "--ignore-rules",
+                "--ignore-user-config",
+                "--sandbox",
+                "workspace-write",
+                "--skip-git-repo-check",
+                "-C",
+                workspace_arg.as_str(),
+                "-",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+        );
+        for (kind, repair) in [
+            (AgentKind::Claude, claude_repair),
+            (AgentKind::Codex, codex_repair),
+        ] {
+            assert!(!AgentService::supports_lint_agent(kind));
+            let mut forged = repair;
+            forged.args.push("--dangerously-bypass-approvals".into());
+            assert_eq!(
+                validate_lint_transport_invocation(&forged)
+                    .unwrap_err()
+                    .code,
+                "LINT_AGENT_INVOCATION_INVALID"
+            );
+        }
+
+        for kind in [AgentKind::Openclaw, AgentKind::Hermes] {
+            assert_eq!(
+                AgentService::lint_repair_invocation(kind, &workspace, "repair")
+                    .unwrap_err()
+                    .code,
+                "LINT_AGENT_PROFILE_UNSUPPORTED"
+            );
+            assert!(!AgentService::supports_lint_agent(kind));
+        }
+        std::fs::remove_dir_all(workspace).ok();
+    }
+
+    #[test]
+    fn lint_transport_uses_existing_isolated_streaming_and_rejects_empty_final() {
+        let probe = Arc::new(SourceAiRunnerProbe::default());
+        let service = AgentService::with_runner(probe.clone());
+        let tasks = TaskService::default();
+        let task = tasks.create_task(
+            TaskType::DeepLint,
+            Some("project".into()),
+            "Lint bridge".into(),
+            true,
+        );
+        let workspace = std::env::temp_dir().join(format!(
+            "llm-wiki-desktop/lint-transport-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let invocation =
+            AgentService::lint_invocation(AgentKind::Claude, &workspace, "lint").unwrap();
+        assert_eq!(
+            service
+                .run_lint_streaming(&invocation, &tasks, &task.id)
+                .unwrap(),
+            "isolated"
+        );
+        assert!(probe.isolated_called.load(Ordering::SeqCst));
+        assert!(probe.event_hook_called.load(Ordering::SeqCst));
+        assert!(!probe.regular_called.load(Ordering::SeqCst));
+        assert_eq!(
+            *probe.credential_agent.lock().unwrap(),
+            Some(AgentKind::Claude)
+        );
+
+        #[derive(Default)]
+        struct EmptyLintRunner;
+        impl ProcessRunner for EmptyLintRunner {
+            fn find_executable(&self, _: &str) -> Option<PathBuf> {
+                None
+            }
+            fn run_with_timeout(
+                &self,
+                _: &str,
+                _: &[&str],
+                _: Duration,
+            ) -> Result<String, BackendError> {
+                Ok(String::new())
+            }
+            fn run_capture(&self, _: &AgentInvocation) -> Result<(String, String), BackendError> {
+                unreachable!()
+            }
+            fn run_task_streaming(
+                &self,
+                _: &AgentInvocation,
+                _: &TaskService,
+                _: &str,
+            ) -> Result<String, BackendError> {
+                Ok(String::new())
+            }
+        }
+        let empty = AgentService::with_runner(Arc::new(EmptyLintRunner));
+        assert_eq!(
+            empty
+                .run_lint_streaming(&invocation, &tasks, &task.id)
+                .unwrap_err()
+                .code,
+            "LINT_AGENT_OUTPUT_MALFORMED"
+        );
+        std::fs::remove_dir_all(workspace).ok();
+    }
+
+    #[test]
+    fn lint_transport_preserves_shared_limits_and_terminal_error_taxonomy() {
+        assert_eq!(MAX_AGENT_CAPTURE_BYTES, 16 * 1024 * 1024);
+        assert_eq!(MAX_AGENT_RUNTIME, Duration::from_secs(15 * 60));
+
+        struct FailingLintRunner(&'static str);
+        impl ProcessRunner for FailingLintRunner {
+            fn find_executable(&self, _: &str) -> Option<PathBuf> {
+                None
+            }
+            fn run_with_timeout(
+                &self,
+                _: &str,
+                _: &[&str],
+                _: Duration,
+            ) -> Result<String, BackendError> {
+                unreachable!()
+            }
+            fn run_capture(&self, _: &AgentInvocation) -> Result<(String, String), BackendError> {
+                unreachable!()
+            }
+            fn run_task_streaming(
+                &self,
+                _: &AgentInvocation,
+                _: &TaskService,
+                _: &str,
+            ) -> Result<String, BackendError> {
+                Err(BackendError::new(self.0, "fixture", true, false))
+            }
+        }
+        let tasks = TaskService::default();
+        let task = tasks.create_task(
+            TaskType::DeepLint,
+            Some("project".into()),
+            "Lint transport failures".into(),
+            true,
+        );
+        let workspace = std::env::temp_dir().join(format!(
+            "llm-wiki-desktop/lint-failures-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let invocation =
+            AgentService::lint_invocation(AgentKind::Codex, &workspace, "lint").unwrap();
+        for code in [
+            "AGENT_CANCELLED",
+            "IMPORT_AGENT_TIMEOUT",
+            "AGENT_EXIT_FAILED",
+        ] {
+            let service = AgentService::with_runner(Arc::new(FailingLintRunner(code)));
+            assert_eq!(
+                service
+                    .run_lint_streaming(&invocation, &tasks, &task.id)
+                    .unwrap_err()
+                    .code,
+                code
+            );
+        }
+
+        let mut parser = AgentOutputParser::new(true);
+        let mut stdout = String::new();
+        let mut captured = 0;
+        assert_eq!(
+            process_agent_output_line(
+                &mut parser,
+                LogLevel::Info,
+                r#"{"type":"result","result":"0123456789"}"#,
+                r#"{"type":"result","result":"0123456789"}"#.len() + 1,
+                &mut stdout,
+                &mut captured,
+                8,
+                false,
+                &tasks,
+                &task.id,
+                &|_| {},
+                &|_| {},
+            )
+            .unwrap_err()
+            .code,
+            "IMPORT_AGENT_OUTPUT_TOO_LARGE"
+        );
+        std::fs::remove_dir_all(workspace).ok();
+    }
+
+    #[test]
+    fn agent_stream_reader_fails_closed_on_invalid_bytes_and_counts_stderr() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+        read_agent_stream(
+            std::io::Cursor::new(vec![0xff, b'\n']),
+            LogLevel::Info,
+            sender,
+        );
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            AgentStreamEvent::ReadFailed(BackendError { code, .. })
+                if code == "AGENT_OUTPUT_INVALID_ENCODING"
+        ));
+
+        let tasks = TaskService::default();
+        let task = tasks.create_task(
+            TaskType::DeepLint,
+            Some("project".into()),
+            "Agent stream bound".into(),
+            true,
+        );
+        let mut parser = AgentOutputParser::new(true);
+        let mut stdout = String::new();
+        let mut captured = 0;
+        assert_eq!(
+            process_agent_stream_event(
+                AgentStreamEvent::Line {
+                    level: LogLevel::Warn,
+                    line: "diagnostic".into(),
+                    raw_bytes: 9,
+                },
+                &mut parser,
+                &mut stdout,
+                &mut captured,
+                8,
+                false,
+                &tasks,
+                &task.id,
+                &|_| {},
+                &|_| {},
+            )
+            .unwrap_err()
+            .code,
+            "IMPORT_AGENT_OUTPUT_TOO_LARGE"
+        );
+    }
+
+    #[test]
+    fn structured_transport_requires_valid_json_and_a_terminal_event() {
+        let mut missing_terminal = AgentOutputParser::new(true);
+        let delta = missing_terminal.parse(
+            r#"{"type":"item.completed","item":{"id":"msg-1","type":"agent_message","text":"visible"}}"#,
+        );
+        assert_eq!(delta.text.as_deref(), Some("visible"));
+        assert_eq!(
+            missing_terminal.validate_terminal().unwrap_err().code,
+            "LINT_AGENT_OUTPUT_MALFORMED"
+        );
+
+        let mut malformed_final = AgentOutputParser::new(true);
+        malformed_final.parse(
+            r#"{"type":"item.completed","item":{"id":"msg-1","type":"agent_message","text":"visible"}}"#,
+        );
+        malformed_final.parse("{malformed-final");
+        assert_eq!(
+            malformed_final.validate_terminal().unwrap_err().code,
+            "LINT_AGENT_OUTPUT_MALFORMED"
+        );
+
+        let mut completed = AgentOutputParser::new(true);
+        completed.parse(r#"{"type":"turn.completed"}"#);
+        assert!(completed.validate_terminal().is_ok());
+
+        let mut claude_failure = AgentOutputParser::new(true);
+        claude_failure.parse(
+            r#"{"type":"result","is_error":true,"subtype":"error_max_turns","result":"partial"}"#,
+        );
+        assert_eq!(
+            claude_failure.validate_terminal().unwrap_err().code,
+            "LINT_AGENT_OUTPUT_MALFORMED"
+        );
+
+        let mut post_terminal = AgentOutputParser::new(true);
+        post_terminal.parse(r#"{"type":"turn.completed"}"#);
+        post_terminal.parse(r#"{"type":"error","message":"late failure"}"#);
+        assert_eq!(
+            post_terminal.validate_terminal().unwrap_err().code,
+            "LINT_AGENT_OUTPUT_MALFORMED"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn streaming_process_enforces_real_cancel_timeout_nonzero_and_kill_on_limit() {
+        fn powershell_invocation(workspace: &Path, script: String) -> AgentInvocation {
+            AgentInvocation {
+                program: r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe".into(),
+                args: vec!["-NoProfile".into(), "-Command".into(), script],
+                stdin: None,
+                cwd: workspace.to_path_buf(),
+            }
+        }
+        fn run_with_limits(
+            invocation: &AgentInvocation,
+            tasks: &TaskService,
+            task_id: &str,
+            max_bytes: usize,
+            max_runtime: Duration,
+        ) -> Result<String, BackendError> {
+            run_streaming_process_with_events_and_limits(
+                invocation,
+                tasks,
+                task_id,
+                &|_| {},
+                &|_| {},
+                true,
+                None,
+                max_bytes,
+                max_runtime,
+            )
+        }
+
+        let workspace = tempfile::tempdir().unwrap();
+        let tasks = TaskService::default();
+
+        let cancelled = tasks.create_task(
+            TaskType::DeepLint,
+            Some("project".into()),
+            "cancel fixture".into(),
+            true,
+        );
+        tasks.request_cancel(&cancelled.id).unwrap();
+        let sleep = powershell_invocation(workspace.path(), "Start-Sleep -Seconds 5".into());
+        assert_eq!(
+            run_with_limits(&sleep, &tasks, &cancelled.id, 1024, Duration::from_secs(5),)
+                .unwrap_err()
+                .code,
+            "AGENT_CANCELLED"
+        );
+
+        let timed = tasks.create_task(
+            TaskType::DeepLint,
+            Some("project".into()),
+            "timeout fixture".into(),
+            true,
+        );
+        assert_eq!(
+            run_with_limits(&sleep, &tasks, &timed.id, 1024, Duration::from_millis(25),)
+                .unwrap_err()
+                .code,
+            "IMPORT_AGENT_TIMEOUT"
+        );
+
+        let nonzero = tasks.create_task(
+            TaskType::DeepLint,
+            Some("project".into()),
+            "nonzero fixture".into(),
+            true,
+        );
+        let exit = powershell_invocation(workspace.path(), "exit 7".into());
+        assert_eq!(
+            run_with_limits(&exit, &tasks, &nonzero.id, 1024, Duration::from_secs(5),)
+                .unwrap_err()
+                .code,
+            "AGENT_EXIT_FAILED"
+        );
+
+        let malformed = tasks.create_task(
+            TaskType::DeepLint,
+            Some("project".into()),
+            "malformed fixture".into(),
+            true,
+        );
+        let valid_then_invalid = powershell_invocation(
+            workspace.path(),
+            "$stream=[Console]::OpenStandardOutput(); $bytes=[Text.Encoding]::UTF8.GetBytes('{\"type\":\"result\",\"result\":\"ok\"}`n'); $stream.Write($bytes,0,$bytes.Length); $stream.WriteByte(255); $stream.Flush()".into(),
+        );
+        assert_eq!(
+            run_with_limits(
+                &valid_then_invalid,
+                &tasks,
+                &malformed.id,
+                1024,
+                Duration::from_secs(5),
+            )
+            .unwrap_err()
+            .code,
+            "AGENT_OUTPUT_INVALID_ENCODING"
+        );
+
+        let limited = tasks.create_task(
+            TaskType::DeepLint,
+            Some("project".into()),
+            "limit fixture".into(),
+            true,
+        );
+        let marker = workspace.path().join("must-not-exist.txt");
+        let marker_arg = marker.to_string_lossy().replace(char::from(39), "''");
+        let output_then_mutate = powershell_invocation(
+            workspace.path(),
+            format!(
+                "$value='x' * 512; [Console]::Out.WriteLine($value); Start-Sleep -Milliseconds 700; Set-Content -LiteralPath '{marker_arg}' -Value 'alive'"
+            ),
+        );
+        assert_eq!(
+            run_with_limits(
+                &output_then_mutate,
+                &tasks,
+                &limited.id,
+                64,
+                Duration::from_secs(5),
+            )
+            .unwrap_err()
+            .code,
+            "IMPORT_AGENT_OUTPUT_TOO_LARGE"
+        );
+        std::thread::sleep(Duration::from_millis(900));
+        assert!(
+            !marker.exists(),
+            "output-limit failure left its child alive"
         );
     }
 

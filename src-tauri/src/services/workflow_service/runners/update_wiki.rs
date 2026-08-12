@@ -1692,6 +1692,17 @@ pub fn update_wiki_decision_review(
     update_wiki_decision_review_from_descriptor(project_root, descriptor, true)
 }
 
+/// Borrowed, owner-neutral view over a task-owned candidate. Update Wiki and
+/// Agent lint repair keep separate persistence/authority loaders, then share
+/// this single two-way/three-way/lazy Diff implementation after exact owner
+/// validation.
+pub(crate) struct TaskOwnedCandidateReviewSource<'a> {
+    pub manifest: &'a CompileManifest,
+    pub baseline_hashes: &'a HashMap<String, String>,
+    pub current_hashes: &'a HashMap<String, String>,
+    pub checkpoint_hash: Option<&'a str>,
+}
+
 pub(crate) fn update_wiki_decision_review_for_workflow(
     task_id: &str,
     project_root: &std::path::Path,
@@ -1753,54 +1764,49 @@ pub(crate) fn update_wiki_file_diff_page_for_workflow(
     let context = ProjectContext::new("workflow-review", project_root.to_path_buf())
         .with_resolved_layout()
         .map_err(|error| BackendError::new("WORKFLOW_DIFF_NOT_FOUND", error.message, true, true))?;
-    let files = &descriptor.candidate.manifest.files;
-    if let Some(file) = files.get(index) {
-        let kind = workflow_file_diff_kind(&descriptor, &file.path);
-        let page = paginate_workflow_file_diff_source(
-            &context,
-            &descriptor,
-            &file.path,
-            Some(&file.content),
-            kind,
-            start,
-            limit,
-        )?;
-        return Ok(Some(WorkflowFileDiffPage {
-            file_id: file_id.to_string(),
-            path: file.path.clone(),
-            kind,
-            ..page
-        }));
-    }
-    let Some(deletion) = descriptor
-        .candidate
+    let source = TaskOwnedCandidateReviewSource {
+        manifest: &descriptor.candidate.manifest,
+        baseline_hashes: &descriptor.baseline_hashes,
+        current_hashes: &descriptor.current_hashes,
+        checkpoint_hash: descriptor.checkpoint_hash.as_deref(),
+    };
+    task_owned_candidate_file_diff_page(&context, &source, file_id, index, start, limit)
+}
+
+pub(crate) fn task_owned_candidate_file_diff_page(
+    context: &ProjectContext,
+    source: &TaskOwnedCandidateReviewSource<'_>,
+    file_id: &str,
+    index: usize,
+    start: usize,
+    limit: usize,
+) -> Result<Option<WorkflowFileDiffPage>, BackendError> {
+    let files = &source.manifest.files;
+    let (path, candidate) = if let Some(file) = files.get(index) {
+        (file.path.as_str(), Some(file.content.as_str()))
+    } else if let Some(deletion) = source
         .manifest
         .deletions
         .get(index.checked_sub(files.len()).unwrap_or(usize::MAX))
-    else {
+    {
+        (deletion.as_str(), None)
+    } else {
         return Ok(None);
     };
-    let kind = workflow_file_diff_kind(&descriptor, deletion);
-    let page = paginate_workflow_file_diff_source(
-        &context,
-        &descriptor,
-        deletion,
-        None,
-        kind,
-        start,
-        limit,
-    )?;
+    let kind = task_owned_file_diff_kind(source, path);
+    let page =
+        paginate_task_owned_file_diff_source(context, source, path, candidate, kind, start, limit)?;
     Ok(Some(WorkflowFileDiffPage {
         file_id: file_id.to_string(),
-        path: deletion.clone(),
+        path: path.to_string(),
         kind,
         ..page
     }))
 }
 
-fn paginate_workflow_file_diff_source(
+fn paginate_task_owned_file_diff_source(
     context: &ProjectContext,
-    descriptor: &PersistedUpdateWikiCandidate,
+    source: &TaskOwnedCandidateReviewSource<'_>,
     path: &str,
     candidate: Option<&str>,
     kind: WorkflowFileDiffKind,
@@ -1809,7 +1815,7 @@ fn paginate_workflow_file_diff_source(
 ) -> Result<WorkflowFileDiffPage, BackendError> {
     let mut page = VirtualDiffPageBuilder::new(start, limit);
     if kind == WorkflowFileDiffKind::ThreeWay {
-        let checkpoint = descriptor.checkpoint_hash.as_deref().ok_or_else(|| {
+        let checkpoint = source.checkpoint_hash.ok_or_else(|| {
             BackendError::new(
                 "WORKFLOW_DIFF_NOT_FOUND",
                 "The three-way workflow baseline is unavailable.",
@@ -1829,7 +1835,7 @@ fn paginate_workflow_file_diff_source(
         let current_hash = current
             .as_deref()
             .map(|content| hex_sha256(content.as_bytes()));
-        if current_hash.as_ref() != descriptor.current_hashes.get(path) {
+        if current_hash.as_ref() != source.current_hashes.get(path) {
             return Err(BackendError::new(
                 "WORKFLOW_OUTPUT_BASELINE_CHANGED",
                 "The reviewed workflow file changed after this candidate was prepared.",
@@ -1844,7 +1850,7 @@ fn paginate_workflow_file_diff_source(
         page.push("\n```");
     } else {
         let current_hash = FileStore.file_hash_if_exists(context, path)?;
-        if current_hash.as_ref() != descriptor.current_hashes.get(path) {
+        if current_hash.as_ref() != source.current_hashes.get(path) {
             return Err(BackendError::new(
                 "WORKFLOW_OUTPUT_BASELINE_CHANGED",
                 "The reviewed workflow file changed after this candidate was prepared.",
@@ -1966,12 +1972,12 @@ impl VirtualDiffPageBuilder {
     }
 }
 
-fn workflow_file_diff_kind(
-    descriptor: &PersistedUpdateWikiCandidate,
+fn task_owned_file_diff_kind(
+    source: &TaskOwnedCandidateReviewSource<'_>,
     path: &str,
 ) -> WorkflowFileDiffKind {
-    if descriptor.current_hashes.get(path) != descriptor.baseline_hashes.get(path)
-        && descriptor.checkpoint_hash.is_some()
+    if source.current_hashes.get(path) != source.baseline_hashes.get(path)
+        && source.checkpoint_hash.is_some()
     {
         WorkflowFileDiffKind::ThreeWay
     } else {
@@ -1979,15 +1985,15 @@ fn workflow_file_diff_kind(
     }
 }
 
-fn materialize_workflow_file_diff(
+fn materialize_task_owned_file_diff(
     context: &ProjectContext,
-    descriptor: &PersistedUpdateWikiCandidate,
+    source: &TaskOwnedCandidateReviewSource<'_>,
     path: &str,
     candidate: Option<&str>,
     kind: WorkflowFileDiffKind,
 ) -> Option<String> {
     if kind == WorkflowFileDiffKind::ThreeWay {
-        let checkpoint = descriptor.checkpoint_hash.as_deref()?;
+        let checkpoint = source.checkpoint_hash?;
         let baseline = GitService::file_at_checkpoint(context, checkpoint, path).ok()?;
         let absolute = context.resolve_project_path(path).ok()?;
         let current = if absolute.try_exists().ok()? {
@@ -2015,7 +2021,7 @@ fn materialize_workflow_file_diff(
             .then(|| path.to_string())
             .into_iter()
             .collect(),
-        summary: descriptor.candidate.manifest.summary.clone(),
+        summary: source.manifest.summary.clone(),
     }))
 }
 
@@ -2054,6 +2060,28 @@ fn update_wiki_decision_review_from_descriptor(
         false,
     )
     .ok()?;
+    let source = TaskOwnedCandidateReviewSource {
+        manifest: &descriptor.candidate.manifest,
+        baseline_hashes: &descriptor.baseline_hashes,
+        current_hashes: &descriptor.current_hashes,
+        checkpoint_hash: descriptor.checkpoint_hash.as_deref(),
+    };
+    task_owned_candidate_decision_review(
+        &context,
+        &source,
+        &summary,
+        &descriptor.candidate.plan.summary,
+        include_diffs,
+    )
+}
+
+pub(crate) fn task_owned_candidate_decision_review(
+    context: &ProjectContext,
+    source: &TaskOwnedCandidateReviewSource<'_>,
+    summary: &crate::models::compile::CompileChangeSummary,
+    reason: &str,
+    include_diffs: bool,
+) -> Option<WorkflowDecisionReview> {
     let counts = WorkflowDecisionCounts {
         created: summary.created.len() as u32,
         modified: summary.updated.len() as u32,
@@ -2061,22 +2089,21 @@ fn update_wiki_decision_review_from_descriptor(
         deleted: summary.deleted.len() as u32,
     };
     let user_edits_detected = workflow_user_edits_detected(
-        &descriptor.candidate.manifest,
-        &descriptor.baseline_hashes,
-        &descriptor.current_hashes,
+        source.manifest,
+        source.baseline_hashes,
+        source.current_hashes,
     );
-    let mut file_diffs = descriptor
-        .candidate
+    let mut file_diffs = source
         .manifest
         .files
         .iter()
         .map(|file| {
-            let kind = workflow_file_diff_kind(&descriptor, &file.path);
+            let kind = task_owned_file_diff_kind(source, &file.path);
             let diff = include_diffs
                 .then(|| {
-                    materialize_workflow_file_diff(
-                        &context,
-                        &descriptor,
+                    materialize_task_owned_file_diff(
+                        context,
+                        source,
                         &file.path,
                         Some(&file.content),
                         kind,
@@ -2095,10 +2122,10 @@ fn update_wiki_decision_review_from_descriptor(
             }
         })
         .collect::<Vec<_>>();
-    file_diffs.extend(descriptor.candidate.manifest.deletions.iter().map(|path| {
-        let kind = workflow_file_diff_kind(&descriptor, path);
+    file_diffs.extend(source.manifest.deletions.iter().map(|path| {
+        let kind = task_owned_file_diff_kind(source, path);
         let diff = include_diffs
-            .then(|| materialize_workflow_file_diff(&context, &descriptor, path, None, kind))
+            .then(|| materialize_task_owned_file_diff(context, source, path, None, kind))
             .flatten();
         WorkflowFileDiff {
             file_id: String::new(),
@@ -2111,7 +2138,7 @@ fn update_wiki_decision_review_from_descriptor(
         }
     }));
     Some(WorkflowDecisionReview {
-        reason: descriptor.candidate.plan.summary,
+        reason: reason.to_string(),
         counts,
         user_edits_detected,
         file_diffs,
@@ -2152,6 +2179,52 @@ fn candidate_file_diff_len(path: &str, content: Option<&str>) -> usize {
 #[cfg(test)]
 mod batch6_diff_summary_tests {
     use super::*;
+
+    #[test]
+    fn task_owned_review_helpers_accept_a_lint_repair_candidate_view() {
+        let root =
+            std::env::temp_dir().join(format!("llm-wiki-review-owner-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("wiki")).unwrap();
+        std::fs::write(root.join("wiki/page.md"), "# Current").unwrap();
+        let context = ProjectContext::new("lint-review", root.clone());
+        let current_hash = hex_sha256(b"# Current");
+        let baseline = HashMap::from([("wiki/page.md".into(), current_hash.clone())]);
+        let current = HashMap::from([("wiki/page.md".into(), current_hash)]);
+        let manifest = CompileManifest {
+            files: vec![CompileFile {
+                path: "wiki/page.md".into(),
+                content: "# Repaired".into(),
+            }],
+            deletions: Vec::new(),
+            summary: "Agent wiki-lint repair".into(),
+        };
+        let summary = crate::models::compile::CompileChangeSummary {
+            updated: vec!["wiki/page.md".into()],
+            ..Default::default()
+        };
+        let source = TaskOwnedCandidateReviewSource {
+            manifest: &manifest,
+            baseline_hashes: &baseline,
+            current_hashes: &current,
+            checkpoint_hash: None,
+        };
+        let review = task_owned_candidate_decision_review(
+            &context,
+            &source,
+            &summary,
+            "Review Agent repair",
+            false,
+        )
+        .unwrap();
+        assert_eq!(review.reason, "Review Agent repair");
+        assert_eq!(review.counts.modified, 1);
+        assert_eq!(review.file_diffs[0].kind, WorkflowFileDiffKind::TwoWay);
+        let page = task_owned_candidate_file_diff_page(&context, &source, "file-0", 0, 0, 256)
+            .unwrap()
+            .unwrap();
+        assert!(page.diff.contains("# Repaired"));
+        std::fs::remove_dir_all(root).ok();
+    }
 
     #[test]
     fn deleted_worktree_file_is_reported_as_a_user_edit() {

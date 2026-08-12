@@ -15,6 +15,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard, RwLock};
 
 pub use deep::DeepLintSnapshot;
+pub use repair::{
+    AgentLintRepairCandidate, AgentLintRepairWorkspaceDescriptor, AgentLintRepairWorkspaceLease,
+};
 pub use rules::{health_source_paths, LocalLintPhase};
 
 pub(crate) const LINT_REPORTS_DIR: &str = ".app/lint-reports";
