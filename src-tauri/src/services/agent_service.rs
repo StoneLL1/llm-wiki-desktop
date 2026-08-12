@@ -864,6 +864,24 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
         }
     }
 
+    /// Audit revision for the exact workspace-write repair invocation. The
+    /// digest is produced from the same argument builder used at launch, with
+    /// only the project-specific workspace replaced by a stable placeholder.
+    /// This makes any argv/config change invalidate an existing approval even
+    /// if a caller forgets to bump a hand-maintained profile label.
+    pub fn lint_repair_route_profile_revision(kind: AgentKind) -> Option<String> {
+        let (program, args) = lint_repair_program_and_args(kind, "<WORKSPACE>").ok()?;
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "kind": kind,
+            "program": program,
+            "args": args,
+            "stdin": "prompt",
+            "cwd": "<WORKSPACE>",
+        }))
+        .ok()?;
+        Some(format!("{:x}", Sha256::digest(bytes)))
+    }
+
     /// Every supported Agent has a Source AI candidate-workspace profile and
     /// receives only its selected local login/config directory at runtime.
     pub fn supports_source_ai_agent(kind: AgentKind) -> bool {
@@ -1008,50 +1026,14 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
         validate_candidate_workspace(workspace)?;
         let cwd = workspace.to_path_buf();
         let prompt_owned = prompt.to_string();
-        match kind {
-            AgentKind::Claude => Ok(AgentInvocation {
-                program: "claude".into(),
-                args: vec![
-                    "--print".into(),
-                    "--output-format".into(),
-                    "stream-json".into(),
-                    "--verbose".into(),
-                    "--permission-mode".into(),
-                    "dontAsk".into(),
-                    "--safe-mode".into(),
-                    "--disable-slash-commands".into(),
-                    "--no-session-persistence".into(),
-                    "--no-chrome".into(),
-                    "--prompt-suggestions=false".into(),
-                    "--strict-mcp-config".into(),
-                    "--tools=Read,Grep,Glob,Edit,Write,Bash".into(),
-                    "--allowedTools=Read Grep Glob Edit Write Bash".into(),
-                    "--settings".into(),
-                    r#"{"sandbox":{"enabled":true,"autoAllowBashIfSandboxed":true}}"#.into(),
-                ],
-                stdin: Some(prompt_owned),
-                cwd,
-            }),
-            AgentKind::Codex => Ok(AgentInvocation {
-                program: "codex".into(),
-                args: vec![
-                    "exec".into(),
-                    "--json".into(),
-                    "--ephemeral".into(),
-                    "--ignore-rules".into(),
-                    "--ignore-user-config".into(),
-                    "--sandbox".into(),
-                    "workspace-write".into(),
-                    "--skip-git-repo-check".into(),
-                    "-C".into(),
-                    workspace.to_string_lossy().into_owned(),
-                    "-".into(),
-                ],
-                stdin: Some(prompt_owned),
-                cwd,
-            }),
-            AgentKind::Openclaw | AgentKind::Hermes => Err(unsupported_lint_agent(kind)),
-        }
+        let workspace_arg = workspace.to_string_lossy();
+        let (program, args) = lint_repair_program_and_args(kind, &workspace_arg)?;
+        Ok(AgentInvocation {
+            program,
+            args,
+            stdin: Some(prompt_owned),
+            cwd,
+        })
     }
 
     /// Build a structured Agent invocation for the `html-*` export skills. The
@@ -3537,6 +3519,52 @@ fn first_non_empty_line(value: &str) -> String {
         .to_string()
 }
 
+fn lint_repair_program_and_args(
+    kind: AgentKind,
+    workspace_arg: &str,
+) -> Result<(String, Vec<String>), BackendError> {
+    match kind {
+        AgentKind::Claude => Ok((
+            "claude".into(),
+            vec![
+                "--print".into(),
+                "--output-format".into(),
+                "stream-json".into(),
+                "--verbose".into(),
+                "--permission-mode".into(),
+                "dontAsk".into(),
+                "--safe-mode".into(),
+                "--disable-slash-commands".into(),
+                "--no-session-persistence".into(),
+                "--no-chrome".into(),
+                "--prompt-suggestions=false".into(),
+                "--strict-mcp-config".into(),
+                "--tools=Read,Grep,Glob,Edit,Write,Bash".into(),
+                "--allowedTools=Read Grep Glob Edit Write Bash".into(),
+                "--settings".into(),
+                r#"{"sandbox":{"enabled":true,"autoAllowBashIfSandboxed":true}}"#.into(),
+            ],
+        )),
+        AgentKind::Codex => Ok((
+            "codex".into(),
+            vec![
+                "exec".into(),
+                "--json".into(),
+                "--ephemeral".into(),
+                "--ignore-rules".into(),
+                "--ignore-user-config".into(),
+                "--sandbox".into(),
+                "workspace-write".into(),
+                "--skip-git-repo-check".into(),
+                "-C".into(),
+                workspace_arg.into(),
+                "-".into(),
+            ],
+        )),
+        AgentKind::Openclaw | AgentKind::Hermes => Err(unsupported_lint_agent(kind)),
+    }
+}
+
 fn validate_candidate_workspace(workspace: &Path) -> Result<(), BackendError> {
     let candidate_temp = std::env::temp_dir();
     let candidate_root = candidate_temp.join("llm-wiki-desktop");
@@ -5246,6 +5274,19 @@ mod tests {
             (AgentKind::Codex, codex_repair),
         ] {
             assert!(AgentService::supports_lint_agent(kind));
+            let (program, args) = lint_repair_program_and_args(kind, "<WORKSPACE>").unwrap();
+            let contract = serde_json::to_vec(&serde_json::json!({
+                "kind": kind,
+                "program": program,
+                "args": args,
+                "stdin": "prompt",
+                "cwd": "<WORKSPACE>",
+            }))
+            .unwrap();
+            assert_eq!(
+                AgentService::lint_repair_route_profile_revision(kind),
+                Some(format!("{:x}", Sha256::digest(contract)))
+            );
             let mut forged = repair;
             forged.args.push("--dangerously-bypass-approvals".into());
             assert_eq!(
@@ -5264,6 +5305,7 @@ mod tests {
                 "LINT_AGENT_PROFILE_UNSUPPORTED"
             );
             assert!(!AgentService::supports_lint_agent(kind));
+            assert!(AgentService::lint_repair_route_profile_revision(kind).is_none());
         }
         std::fs::remove_dir_all(workspace).ok();
     }

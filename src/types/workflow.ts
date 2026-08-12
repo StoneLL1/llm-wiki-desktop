@@ -2,13 +2,32 @@ import type { AgentKind } from "./agent";
 import type { PendingActionType, RiskLevel } from "./backend";
 import type { LlmProviderKind } from "./llm";
 import type { TaskStatus } from "./task";
+import type {
+  AgentLintRepairOutcome,
+  AgentLintRepairRoundSummary,
+  WikiLintSkillRef,
+} from "./lint";
 
-export const WORKFLOW_SCHEMA_VERSION = 1 as const;
+export const WORKFLOW_SCHEMA_VERSION = 2 as const;
 
 export type WorkflowKind =
   | "update_wiki"
   | "health_check"
   | "generate_content";
+
+export type WorkflowOperation =
+  | { kind: "built_in" }
+  | {
+      kind: "agent_lint_repair";
+      preparationId: string;
+      preparationRevision: string;
+      reportId: string;
+      selectionRevision: string;
+      selectedFindingIds: string[];
+      skill: WikiLintSkillRef;
+      authorizedPathHashes: Record<string, string | null>;
+      expectedGitHead: string;
+    };
 
 export type WorkflowDisplayStatus =
   | "queued"
@@ -248,6 +267,20 @@ export type WorkflowResult =
       outputPaths: string[];
       artifactCount?: number;
       validationPassed: boolean;
+    }
+  | {
+      kind: "agent_lint_repair";
+      outcome: AgentLintRepairOutcome;
+      resolvedFindingIds: string[];
+      unresolvedFindingIds: string[];
+      introducedFindingIds: string[];
+      skippedFindingIds: string[];
+      rounds: AgentLintRepairRoundSummary[];
+      affectedPaths: string[];
+      checkpointHash: string | null;
+      finalCommit: string | null;
+      diffAvailable: boolean;
+      rollbackAvailable: boolean;
     };
 
 export type WorkflowProjectMutationState = "not_modified" | "modified" | "rolled_back" | "unknown";
@@ -291,6 +324,7 @@ export interface WorkflowRun {
   canonicalIdentityKey: string;
   identityRevision: string;
   kind: WorkflowKind;
+  operation: WorkflowOperation;
   displayStatus: WorkflowDisplayStatus;
   scope: WorkflowScope;
   route: WorkflowRoute | null;
@@ -352,6 +386,7 @@ export interface WorkflowArtifactContextSummary {
 export interface WorkflowQueueContextItem {
   taskId: string;
   kind: WorkflowKind;
+  operation: WorkflowOperation;
   queuePosition: number | null;
   startedAt: string;
 }
@@ -394,6 +429,13 @@ export type WorkflowRunOutcomeSummary =
       artifactType: WorkflowArtifactType;
       artifactCount: number;
       validationPassed: boolean;
+    }
+  | {
+      kind: "agent_lint_repair";
+      outcome: AgentLintRepairOutcome;
+      resolvedCount: number;
+      unresolvedCount: number;
+      introducedCount: number;
     };
 
 export interface WorkflowRunSummary {
@@ -403,6 +445,7 @@ export interface WorkflowRunSummary {
   canonicalIdentityKey: string;
   identityRevision: string;
   kind: WorkflowKind;
+  operation: WorkflowOperation;
   displayStatus: WorkflowDisplayStatus;
   retry: WorkflowRetryLink | null;
   outcome?: WorkflowRunOutcomeSummary | null;

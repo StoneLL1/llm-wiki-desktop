@@ -1,12 +1,15 @@
 #[path = "support/workflow_baseline.rs"]
 mod workflow_baseline;
 
+use llm_wiki_desktop_lib::models::agent::AgentKind;
 use llm_wiki_desktop_lib::models::confirmation::{PendingActionType, RiskLevel};
+use llm_wiki_desktop_lib::models::lint::WikiLintSkillRef;
 use llm_wiki_desktop_lib::models::task::{BackendEventType, TaskStatus, TaskType};
 use llm_wiki_desktop_lib::models::workflow::{
-    UpdateWikiMode, WorkflowCandidateReference, WorkflowDisplayStatus, WorkflowExecutionOptions,
-    WorkflowKind, WorkflowPendingAction, WorkflowScope, WorkflowStage, WorkflowStageStatus,
-    WorkflowStartOutcome,
+    HealthCheckMode, UpdateWikiMode, WorkflowCandidateReference, WorkflowDisplayStatus,
+    WorkflowExecutionOptions, WorkflowKind, WorkflowOperation, WorkflowPendingAction,
+    WorkflowRoute, WorkflowScope, WorkflowStage, WorkflowStageStatus, WorkflowStartOutcome,
+    WORKFLOW_SCHEMA_VERSION,
 };
 use llm_wiki_desktop_lib::services::{project_identity, EnqueueWorkflow, WorkflowCoordinator};
 use llm_wiki_desktop_lib::tasks::task_events::EventBus;
@@ -54,6 +57,161 @@ fn created(outcome: WorkflowStartOutcome) -> llm_wiki_desktop_lib::models::workf
     match outcome {
         WorkflowStartOutcome::Created { run } => run,
         WorkflowStartOutcome::Existing { .. } => panic!("expected created"),
+    }
+}
+
+fn agent_repair_request(root: &std::path::Path, baseline: &str) -> EnqueueWorkflow {
+    let mut request = request(root, baseline);
+    request.kind = WorkflowKind::HealthCheck;
+    request.scope = WorkflowScope::HealthCheck {
+        mode: HealthCheckMode::Complete,
+    };
+    request.route = Some(WorkflowRoute::Agent {
+        agent: AgentKind::Codex,
+        model: Some("gpt-5".into()),
+        route_revision: "route-1".into(),
+    });
+    request.execution_options.operation = WorkflowOperation::AgentLintRepair {
+        preparation_id: "prepare-repair".into(),
+        preparation_revision: "prepare-revision-repair".into(),
+        report_id: "health-report-1".into(),
+        selection_revision: "selection-revision-repair".into(),
+        selected_finding_ids: vec!["duplicate_topic:wiki/a.md".into()],
+        skill: WikiLintSkillRef::builtin(),
+        authorized_path_hashes: [("wiki/a.md".into(), Some("a".repeat(64)))]
+            .into_iter()
+            .collect(),
+        expected_git_head: "b".repeat(40),
+    };
+    request
+}
+
+#[test]
+fn recovery_migrates_schema_v1_to_built_in_without_trusting_smuggled_operation() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = TaskService::default();
+    let run = created(
+        WorkflowCoordinator::default()
+            .enqueue(&service, request(temp.path(), "migration-v1"))
+            .unwrap(),
+    );
+    let path = temp
+        .path()
+        .join(".app/tasks")
+        .join(format!("{}.json", run.task_id));
+    let mut persisted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    persisted["workflow"]["schemaVersion"] = serde_json::json!(1);
+    persisted["workflow"]["executionOptions"]["operation"] = serde_json::json!({
+        "kind": "agent_lint_repair",
+        "preparationId": "smuggled",
+        "preparationRevision": "smuggled",
+        "reportId": "smuggled",
+        "selectionRevision": "smuggled",
+        "selectedFindingIds": ["duplicate_topic:wiki/a.md"],
+        "skill": {
+            "id": "builtin.wiki-lint",
+            "version": "2026-08-12.1",
+            "sha256": "29e903710745451da287de9d08297ae6863de944bd7d9abd7f4243b5b9f76eb0"
+        },
+        "authorizedPathHashes": { "wiki/a.md": null },
+        "expectedGitHead": "abc"
+    });
+    let preserved_scope = persisted["workflow"]["scope"].clone();
+    let preserved_fingerprint = persisted["workflow"]["fingerprint"].clone();
+    std::fs::write(&path, serde_json::to_vec_pretty(&persisted).unwrap()).unwrap();
+
+    let restarted = TaskService::default();
+    restarted.recover_tasks(temp.path()).unwrap();
+    let recovered = restarted.get_workflow_run(&run.task_id).unwrap();
+    assert_eq!(recovered.schema_version, WORKFLOW_SCHEMA_VERSION);
+    assert_eq!(recovered.operation, WorkflowOperation::BuiltIn);
+    let rewritten: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(rewritten["workflow"]["schemaVersion"], 2);
+    assert_eq!(
+        rewritten["workflow"]["executionOptions"]["operation"]["kind"],
+        "built_in"
+    );
+    assert_eq!(rewritten["workflow"]["scope"], preserved_scope);
+    assert_eq!(rewritten["workflow"]["fingerprint"], preserved_fingerprint);
+}
+
+#[test]
+fn recovery_rejects_unknown_future_workflow_schema() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = TaskService::default();
+    let run = created(
+        WorkflowCoordinator::default()
+            .enqueue(&service, request(temp.path(), "future-schema"))
+            .unwrap(),
+    );
+    let path = temp
+        .path()
+        .join(".app/tasks")
+        .join(format!("{}.json", run.task_id));
+    let mut persisted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    persisted["workflow"]["schemaVersion"] = serde_json::json!(99);
+    std::fs::write(&path, serde_json::to_vec_pretty(&persisted).unwrap()).unwrap();
+
+    let restarted = TaskService::default();
+    assert!(restarted.recover_tasks(temp.path()).unwrap().is_empty());
+    assert!(restarted.get_workflow_run(&run.task_id).is_none());
+    let untouched: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(untouched["workflow"]["schemaVersion"], 99);
+}
+
+#[test]
+fn recovery_rejects_invalid_agent_repair_pairings_and_future_operation_authority() {
+    let temp = tempfile::tempdir().unwrap();
+    for case in [
+        "wrong-kind",
+        "wrong-scope",
+        "wrong-route",
+        "future-authority",
+    ] {
+        let root = temp.path().join(case);
+        std::fs::create_dir_all(&root).unwrap();
+        let service = TaskService::default();
+        let run = created(
+            WorkflowCoordinator::default()
+                .enqueue(&service, agent_repair_request(&root, case))
+                .unwrap(),
+        );
+        let path = root
+            .join(".app/tasks")
+            .join(format!("{}.json", run.task_id));
+        let mut persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        match case {
+            "wrong-kind" => persisted["workflow"]["kind"] = serde_json::json!("update_wiki"),
+            "wrong-scope" => {
+                persisted["workflow"]["scope"] = serde_json::json!({
+                    "kind": "health_check",
+                    "mode": "local_quick"
+                });
+            }
+            "wrong-route" => {
+                persisted["workflow"]["route"] = serde_json::json!({
+                    "kind": "local",
+                    "routeRevision": "route-1"
+                });
+            }
+            "future-authority" => {
+                persisted["workflow"]["executionOptions"]["operation"]["futureAuthorization"] =
+                    serde_json::json!(true);
+            }
+            _ => unreachable!(),
+        }
+        let tampered_bytes = serde_json::to_vec_pretty(&persisted).unwrap();
+        std::fs::write(&path, &tampered_bytes).unwrap();
+
+        let restarted = TaskService::default();
+        assert!(restarted.recover_tasks(&root).unwrap().is_empty(), "{case}");
+        assert!(restarted.get_workflow_run(&run.task_id).is_none(), "{case}");
+        assert_eq!(std::fs::read(&path).unwrap(), tampered_bytes, "{case}");
     }
 }
 
@@ -160,6 +318,42 @@ fn worker_finish_after_cancel_uses_a_deterministic_recovery_window() {
         TaskStatus::Cancelled,
         "worker completion must not leave a cancellation suspended",
     );
+}
+
+#[test]
+fn cancelled_initial_approval_cannot_leave_a_recoverable_queued_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let coordinator = WorkflowCoordinator::default();
+    let service = TaskService::default();
+    let _active = created(
+        coordinator
+            .enqueue(&service, request(temp.path(), "active-before-repair"))
+            .unwrap(),
+    );
+    let queued = created(
+        coordinator
+            .enqueue(&service, request(temp.path(), "cancelled-repair"))
+            .unwrap(),
+    );
+    assert_eq!(queued.display_status, WorkflowDisplayStatus::Queued);
+
+    let (cancelled, next) = coordinator
+        .cancel_created_without_undo_and_claim_next(&service, &queued.task_id)
+        .unwrap();
+    assert_eq!(cancelled.display_status, WorkflowDisplayStatus::Cancelled);
+    assert!(!cancelled.continuation_required);
+    assert!(next.is_none());
+    assert!(coordinator.undo_cancel(&service, &queued.task_id).is_err());
+    drop(service);
+
+    let restarted = TaskService::default();
+    restarted.recover_tasks(temp.path()).unwrap();
+    let recovered = restarted.get_workflow_run(&queued.task_id).unwrap();
+    assert_eq!(recovered.display_status, WorkflowDisplayStatus::Cancelled);
+    assert!(!recovered.continuation_required);
+    assert!(coordinator
+        .undo_cancel(&restarted, &queued.task_id)
+        .is_err());
 }
 
 #[test]
@@ -341,7 +535,11 @@ fn legacy_v1_wrapper_migrates_and_current_wrapper_is_accepted() {
     let mut value: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     assert_eq!(value["schemaVersion"], 2);
-    assert_eq!(value["workflow"]["schemaVersion"], 1);
+    assert_eq!(value["workflow"]["schemaVersion"], 2);
+    assert_eq!(
+        value["workflow"]["executionOptions"]["operation"]["kind"],
+        "built_in"
+    );
     value["schemaVersion"] = 1.into();
     std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
     drop(service);
@@ -352,7 +550,11 @@ fn legacy_v1_wrapper_migrates_and_current_wrapper_is_accepted() {
     let migrated: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     assert_eq!(migrated["schemaVersion"], 2);
-    assert_eq!(migrated["workflow"]["schemaVersion"], 1);
+    assert_eq!(migrated["workflow"]["schemaVersion"], 2);
+    assert_eq!(
+        migrated["workflow"]["executionOptions"]["operation"]["kind"],
+        "built_in"
+    );
 }
 
 #[test]

@@ -72,6 +72,7 @@ function workflowRun(overrides: Partial<WorkflowRun> & Pick<WorkflowRun, "taskId
     projectId: "project-a",
     canonicalIdentityKey: "identity-a",
     identityRevision: "revision-a",
+    operation: { kind: "built_in" },
     scope: overrides.kind === "update_wiki"
       ? { kind: "update_wiki", mode: "changed_sources", sourceVersions: [] }
       : overrides.kind === "generate_content"
@@ -737,7 +738,7 @@ describe("Workflows overview", () => {
 
   it("keeps an explicitly selected completed run ahead of another attention run", () => {
     const completed = {
-      schemaVersion: 1, taskId: "selected-completed", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "health_check", displayStatus: "completed",
+      schemaVersion: 1, taskId: "selected-completed", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "health_check", operation: { kind: "built_in" }, displayStatus: "completed",
       scope: { kind: "health_check", mode: "local_quick" }, route: { kind: "local", routeRevision: "local" }, fingerprint: "f", baselineFingerprint: "b",
       stages: [], currentStageId: null, queuePosition: null, continuationRequired: false, retry: null, pendingAction: null, result: null, error: null,
       startedAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:01:00Z", completedAt: "2026-08-01T00:01:00Z",
@@ -762,7 +763,7 @@ describe("Workflows overview", () => {
 
   it("derives preparation and history context from the active surface instead of stale selection", () => {
     const selected = {
-      schemaVersion: 1, taskId: "stale-selected", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "health_check", displayStatus: "completed",
+      schemaVersion: 1, taskId: "stale-selected", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "health_check", operation: { kind: "built_in" }, displayStatus: "completed",
       scope: { kind: "health_check", mode: "local_quick" }, route: { kind: "local", routeRevision: "local" }, fingerprint: "f", baselineFingerprint: "b",
       stages: [], currentStageId: null, queuePosition: null, continuationRequired: false, retry: null, pendingAction: null, result: null, error: null,
       startedAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:01:00Z", completedAt: "2026-08-01T00:01:00Z",
@@ -918,6 +919,7 @@ describe("Workflows overview", () => {
         canonicalIdentityKey: "identity-a",
         identityRevision: "revision-a",
         kind: "generate_content",
+        operation: { kind: "built_in" },
         displayStatus: "completed",
         retry: null,
         startedAt: "2026-08-09T08:00:00Z",
@@ -937,6 +939,7 @@ describe("Workflows overview", () => {
     const queuedRuns = Array.from({ length: 5 }, (_, index) => ({
       taskId: `summary-queue-${index}`,
       kind: "update_wiki" as const,
+      operation: { kind: "built_in" as const },
       queuePosition: index + 1,
       startedAt: `2026-08-10T0${index}:00:00Z`,
     }));
@@ -1011,7 +1014,7 @@ describe("Workflows overview", () => {
     } });
     useWorkflowStore.getState().activateProject("project-a\0D:/a");
     useWorkflowStore.setState({ runs: [{
-      schemaVersion: 1, taskId: "long-label-run", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "health_check", displayStatus: "running",
+      schemaVersion: 1, taskId: "long-label-run", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "health_check", operation: { kind: "built_in" }, displayStatus: "running",
       scope: { kind: "health_check", mode: "local_quick" }, route: { kind: "local", routeRevision: "local" }, fingerprint: "f", baselineFingerprint: "b",
       stages: [], currentStageId: null, queuePosition: null, continuationRequired: false, retry: null, pendingAction: null, result: null, error: null,
       startedAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:01:00Z", completedAt: null,
@@ -1189,7 +1192,7 @@ describe("Workflows overview", () => {
   it("retries detail hydration with a targeted open and clears only its error", () => {
     const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
     const waiting = {
-      schemaVersion: 1, taskId: "waiting-retry", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "update_wiki", displayStatus: "waiting_for_confirmation",
+      schemaVersion: 1, taskId: "waiting-retry", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "update_wiki", operation: { kind: "built_in" }, displayStatus: "waiting_for_confirmation",
       scope: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [] }, route: null, fingerprint: "f", baselineFingerprint: "b", stages: [], currentStageId: null, queuePosition: null, continuationRequired: false, retry: null,
       pendingAction: { id: "action-a", actionType: "batch_rewrite", riskLevel: "high", affectedPaths: [], candidate: null, expiresAt: null, checkpointHash: null }, result: null, error: null,
       startedAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:01:00Z", completedAt: null,
@@ -1243,7 +1246,7 @@ describe("Workflows overview", () => {
   it("shows complete confirmation evidence and valid queue actions", () => {
     const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
     const waiting: WorkflowRun = {
-      schemaVersion: 1, taskId: "waiting-a", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "update_wiki", displayStatus: "waiting_for_confirmation",
+      schemaVersion: 1, taskId: "waiting-a", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "update_wiki", operation: { kind: "built_in" }, displayStatus: "waiting_for_confirmation",
       scope: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [] }, route: null, fingerprint: "f", baselineFingerprint: "b",
       stages: [], currentStageId: null, queuePosition: null, continuationRequired: false, retry: null,
       pendingAction: { id: "action-a", actionType: "batch_rewrite", riskLevel: "high", affectedPaths: ["wiki/甲.md", "wiki/乙.md"], candidate: null, expiresAt: null, checkpointHash: "abc123" }, result: null, error: null,
@@ -1305,7 +1308,7 @@ describe("Workflows overview", () => {
   it("blocks apply while authoritative decision review hydration is pending", () => {
     const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
     const waiting = {
-      schemaVersion: 1, taskId: "waiting-hydrate", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "update_wiki", displayStatus: "waiting_for_confirmation",
+      schemaVersion: 1, taskId: "waiting-hydrate", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "update_wiki", operation: { kind: "built_in" }, displayStatus: "waiting_for_confirmation",
       scope: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [] }, route: null, fingerprint: "f", baselineFingerprint: "b", stages: [], currentStageId: null, queuePosition: null, continuationRequired: false, retry: null,
       pendingAction: { id: "action-a", actionType: "batch_rewrite", riskLevel: "high", affectedPaths: ["wiki/a.md"], candidate: null, expiresAt: null, checkpointHash: null }, result: null, error: null,
       startedAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:01:00Z", completedAt: null,
@@ -1327,7 +1330,7 @@ describe("Workflows overview", () => {
   it("prepares a recommended next workflow without starting it", () => {
     const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
     const completed = {
-      schemaVersion: 1, taskId: "completed-a", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "update_wiki", displayStatus: "completed",
+      schemaVersion: 1, taskId: "completed-a", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "update_wiki", operation: { kind: "built_in" }, displayStatus: "completed",
       scope: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [] }, route: null, fingerprint: "f", baselineFingerprint: "b",
       stages: [], currentStageId: null, queuePosition: null, continuationRequired: false, retry: null, pendingAction: null,
       result: { kind: "update_wiki", created: 1, updated: 0, skipped: 0, deleted: 0, conflicted: 0, checkpointHash: "abc", finalCommit: "def", affectedPaths: ["wiki/a.md"] }, error: null,
@@ -1474,7 +1477,7 @@ describe("Workflows overview", () => {
   it("disables the recommended preparation action while its own request is pending", () => {
     const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
     const completed = {
-      schemaVersion: 1, taskId: "completed-pending", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "update_wiki", displayStatus: "completed",
+      schemaVersion: 1, taskId: "completed-pending", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "update_wiki", operation: { kind: "built_in" }, displayStatus: "completed",
       scope: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [] }, route: null, fingerprint: "f", baselineFingerprint: "b", stages: [], currentStageId: null, queuePosition: null, continuationRequired: false, retry: null, pendingAction: null,
       result: { kind: "update_wiki", created: 1, updated: 0, skipped: 0, deleted: 0, conflicted: 0, checkpointHash: null, finalCommit: null, affectedPaths: [] }, error: null,
       startedAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:01:00Z", completedAt: "2026-08-01T00:01:00Z",
@@ -1489,7 +1492,7 @@ describe("Workflows overview", () => {
   it("exposes retry choices as a disclosed button group", () => {
     const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
     const failed = {
-      schemaVersion: 1, taskId: "failed-a", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "health_check", displayStatus: "failed",
+      schemaVersion: 1, taskId: "failed-a", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "health_check", operation: { kind: "built_in" }, displayStatus: "failed",
       scope: { kind: "health_check", mode: "complete" }, route: { kind: "local", routeRevision: "local" }, fingerprint: "f", baselineFingerprint: "b",
       stages: [], currentStageId: null, queuePosition: null, continuationRequired: false, retry: null, pendingAction: null, result: null,
       error: { code: "FAILED", messageKey: "failed", recoverable: true, userActionRequired: false, suggestedAction: null },
@@ -1535,6 +1538,7 @@ describe("Workflows overview", () => {
       canonicalIdentityKey: "identity-a",
       identityRevision: "revision-a",
       kind: "update_wiki",
+      operation: { kind: "built_in" },
       displayStatus: "completed",
       retry: null,
       outcome: { kind: "update_wiki", created: 2, updated: 3, skipped: 1 },
@@ -1570,6 +1574,7 @@ describe("Workflows overview", () => {
       canonicalIdentityKey: "identity-a",
       identityRevision: "revision-a",
       kind: "health_check",
+      operation: { kind: "built_in" },
       displayStatus: "failed",
       retry: { attemptOf: "original-on-another-page", attemptNumber: 2 },
       outcome: null,
@@ -1596,6 +1601,7 @@ describe("Workflows overview", () => {
       projectId: "project-a",
       canonicalIdentityKey: "identity-a",
       identityRevision: "revision-a",
+      operation: { kind: "built_in" as const },
       displayStatus: "completed" as const,
       retry: null,
       startedAt: "2026-08-10T08:00:00Z",
@@ -1661,7 +1667,7 @@ describe("Workflows overview", () => {
       historyCursor: "cursor-a",
       historyRuns: [{
         schemaVersion: 1, taskId: "loaded", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a",
-        kind: "update_wiki", displayStatus: "completed", retry: null, outcome: null,
+        kind: "update_wiki", operation: { kind: "built_in" }, displayStatus: "completed", retry: null, outcome: null,
         startedAt: "2026-08-10T08:00:00Z", updatedAt: "2026-08-10T08:01:00Z", completedAt: "2026-08-10T08:01:00Z",
       }],
       operations: {
@@ -1743,7 +1749,7 @@ describe("Workflows overview", () => {
     });
     const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "filterHistory", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
     const waiting = {
-      schemaVersion: 1, taskId: "waiting-diff", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "update_wiki", displayStatus: "waiting_for_confirmation",
+      schemaVersion: 1, taskId: "waiting-diff", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "update_wiki", operation: { kind: "built_in" }, displayStatus: "waiting_for_confirmation",
       scope: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [] }, route: null, fingerprint: "f", baselineFingerprint: "b", stages: [], currentStageId: null, queuePosition: null, continuationRequired: false, retry: null,
       pendingAction: { id: "action-a", actionType: "batch_rewrite", riskLevel: "high", affectedPaths: ["wiki/中文/长路径.md"], candidate: { kind: "task_owned", candidateId: "candidate-a" }, expiresAt: null, checkpointHash: null },
       decisionReview: { reason: "review", counts: { created: 0, modified: 1, overwritten: 0, deleted: 0 }, userEditsDetected: false, fileDiffs: [{ fileId: "file-00000000", path: "wiki/中文/长路径.md", diffBytes: 300_000, diff: null, kind: "two_way" }] },
@@ -1774,7 +1780,7 @@ describe("Workflows overview", () => {
     });
     const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "filterHistory", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
     const waiting = {
-      schemaVersion: 1, taskId: "waiting-stale", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "update_wiki", displayStatus: "waiting_for_confirmation",
+      schemaVersion: 1, taskId: "waiting-stale", projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a", kind: "update_wiki", operation: { kind: "built_in" }, displayStatus: "waiting_for_confirmation",
       scope: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [] }, route: null, fingerprint: "f", baselineFingerprint: "b", stages: [], currentStageId: null, queuePosition: null, continuationRequired: false, retry: null,
       pendingAction: { id: "action-stale", actionType: "batch_rewrite", riskLevel: "high", affectedPaths: ["wiki/stale.md"], candidate: { kind: "task_owned", candidateId: "candidate-stale" }, expiresAt: null, checkpointHash: "checkpoint" },
       decisionReview: { reason: "review", counts: { created: 0, modified: 1, overwritten: 0, deleted: 0 }, userEditsDetected: false, fileDiffs: [{ fileId: "file-00000000", path: "wiki/stale.md", diffBytes: 300_000, diff: null, kind: "three_way" }] },

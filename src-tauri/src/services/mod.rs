@@ -56,8 +56,9 @@ pub use settings_service::SettingsService;
 pub use wiki_index::{IndexEntry, WikiIndex};
 pub(crate) use workflow_service::recover_workflow;
 pub use workflow_service::{
-    cancel_generate_content_confirmation, canonical_json, confirm_generate_content_overwrite,
-    confirm_update_wiki_review, discard_generate_content_candidate, discard_update_wiki_candidate,
+    agent_lint_repair_attestation_digest, cancel_generate_content_confirmation, canonical_json,
+    confirm_generate_content_overwrite, confirm_update_wiki_review,
+    discard_generate_content_candidate, discard_update_wiki_candidate,
     generate_content_candidate_is_valid_for_workflow, persist_update_wiki_review, project_identity,
     resolve_workflow_persistence_binding, restore_generate_content_confirmation,
     restore_update_wiki_confirmation, run_generate_content, run_generate_content_authorized,

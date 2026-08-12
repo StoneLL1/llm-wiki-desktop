@@ -27,6 +27,7 @@ import {
   makeWorkflowEventBurst,
 } from "./workflowBaselineFixtures";
 import { WORKFLOW_KINDS } from "./workflowPresentation";
+import { WORKFLOW_SCHEMA_VERSION } from "../../types/workflow";
 
 const noopController = {
   refresh: vi.fn(), prepare: vi.fn(), startPrepared: vi.fn(), cancel: vi.fn(), undoCancel: vi.fn(),
@@ -43,6 +44,9 @@ afterEach(() => {
 describe("Workflows Batch 0 deterministic scale fixtures", () => {
   it("keeps the visible workflow baseline fixed to three kinds before repair operations land", () => {
     expect(WORKFLOW_KINDS).toEqual(["update_wiki", "health_check", "generate_content"]);
+    expect(WORKFLOW_SCHEMA_VERSION).toBe(2);
+    expect(makeBaselineRun().schemaVersion).toBe(2);
+    expect(makeBaselineRun().operation).toEqual({ kind: "built_in" });
   });
 
   it("rebuilds the complete fixed fixture signature identically ten times", () => {

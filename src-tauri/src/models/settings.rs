@@ -247,6 +247,30 @@ pub struct ChatConvenienceAuthorization {
     pub root_path_fingerprint: String,
 }
 
+/// App-owned durable receipt proving that a project-persisted repair task was
+/// created from the dedicated initial approval flow. Project task JSON remains
+/// observable/recoverable state, but cannot manufacture this authority.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentLintRepairAttestation {
+    pub canonical_identity_key: String,
+    pub identity_revision: String,
+    pub task_id: String,
+    pub operation_digest: String,
+    pub confirmed_at: String,
+    pub lifecycle: AgentLintRepairAttestationLifecycle,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLintRepairAttestationLifecycle {
+    #[default]
+    QueuedAuthorized,
+    Dispatched,
+    Completed,
+    Cancelled,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -416,6 +440,8 @@ pub struct GlobalSettingsFile {
     pub associate_wiki_folders: bool,
     #[serde(default)]
     pub chat_convenience_authorizations: Vec<ChatConvenienceAuthorization>,
+    #[serde(default)]
+    pub agent_lint_repair_attestations: Vec<AgentLintRepairAttestation>,
     /// Version of the last remote-provider data-scope disclosure accepted by
     /// the user. This is global UI consent metadata; it never belongs in a
     /// project file and never contains project content.
@@ -471,6 +497,7 @@ impl Default for GlobalSettingsFile {
             associate_md_files: settings.associate_md_files,
             associate_wiki_folders: settings.associate_wiki_folders,
             chat_convenience_authorizations: Vec::new(),
+            agent_lint_repair_attestations: Vec::new(),
             remote_provider_disclosure_revision: None,
         }
     }
@@ -578,6 +605,7 @@ impl Settings {
             associate_md_files: self.associate_md_files,
             associate_wiki_folders: self.associate_wiki_folders,
             chat_convenience_authorizations: Vec::new(),
+            agent_lint_repair_attestations: Vec::new(),
             remote_provider_disclosure_revision: None,
         }
     }

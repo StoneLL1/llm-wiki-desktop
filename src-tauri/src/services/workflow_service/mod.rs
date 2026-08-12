@@ -16,7 +16,8 @@ use std::sync::Mutex;
 use crate::errors::BackendError;
 use crate::models::paths::ProjectContext;
 use crate::models::workflow::{
-    WorkflowDisplayStatus, WorkflowKind, WorkflowRun, WorkflowStartOutcome, WorkflowsOverview,
+    WorkflowDisplayStatus, WorkflowKind, WorkflowOperationKind, WorkflowRun, WorkflowRunnerKey,
+    WorkflowStartOutcome, WorkflowsOverview,
 };
 use crate::services::{AgentService, SecretService, SettingsService};
 use crate::tasks::task_model::LogLevel;
@@ -25,7 +26,7 @@ use crate::tasks::TaskService;
 pub use coordinator::{
     EnqueueWorkflow, WorkflowCoordinator, WorkflowDispatchFailure, WorkflowTrustTransition,
 };
-pub use fingerprint::{canonical_json, workflow_fingerprint};
+pub use fingerprint::{agent_lint_repair_attestation_digest, canonical_json, workflow_fingerprint};
 pub use launch_registry::{
     WorkflowExternalLaunchPermit, WorkflowLaunchCloseBarrier, WorkflowLaunchPublication,
     WorkflowLaunchRegistry,
@@ -65,6 +66,14 @@ pub use stage_sink::WorkflowStageSink;
 
 pub trait WorkflowRunner: Send + Sync {
     fn kind(&self) -> WorkflowKind;
+
+    fn operation_kind(&self) -> WorkflowOperationKind {
+        WorkflowOperationKind::BuiltIn
+    }
+
+    fn key(&self) -> WorkflowRunnerKey {
+        WorkflowRunnerKey::new(self.kind(), self.operation_kind())
+    }
 
     /// Dispatch one already-created run. Implementations own their worker
     /// lifetime and report every stage through `WorkflowStageSink`; they must
@@ -118,9 +127,9 @@ impl WorkflowService {
     }
 
     pub fn register_runner(&self, runner: Arc<dyn WorkflowRunner>) -> Result<(), BackendError> {
-        let kind = runner.kind();
+        let key = runner.key();
         let mut runners = self.runners.write().map_err(|_| runner_lock_error())?;
-        runners.retain(|existing| existing.kind() != kind);
+        runners.retain(|existing| existing.key() != key);
         runners.push(runner);
         Ok(())
     }
@@ -367,7 +376,13 @@ impl WorkflowService {
             .read()
             .map_err(|_| runner_lock_error())?
             .iter()
-            .find(|runner| runner.kind() == validated.preparation.kind)
+            .find(|runner| {
+                runner.key()
+                    == WorkflowRunnerKey::new(
+                        validated.preparation.kind.clone(),
+                        validated.execution_options.operation.kind(),
+                    )
+            })
             .cloned()
             .ok_or_else(|| {
                 BackendError::new(
@@ -423,7 +438,7 @@ impl WorkflowService {
             && matches!(&outcome, WorkflowStartOutcome::Created { .. })
             && run.display_status == WorkflowDisplayStatus::Running
         {
-            self.dispatch_claimed_run(tasks, run)?;
+            self.dispatch_claimed_run_with_settings(tasks, settings_service, run)?;
         }
         Ok(outcome)
     }
@@ -433,81 +448,174 @@ impl WorkflowService {
         tasks: &TaskService,
         run: &WorkflowRun,
     ) -> Result<bool, BackendError> {
-        let current = tasks.get_workflow_run(&run.task_id).ok_or_else(|| {
-            BackendError::new(
-                "WORKFLOW_DISPATCH_INVARIANT",
-                "The claimed workflow no longer exists.",
-                false,
-                true,
-            )
-        })?;
-        if tasks.is_cancelled(&run.task_id) {
-            let (_, next) = self
-                .coordinator
-                .reject_claimed_dispatch(
-                    tasks,
-                    &run.task_id,
-                    WorkflowDispatchFailure::stale(
-                        "WORKFLOW_DISPATCH_CANCELLED",
-                        "workflows.error.prepareAgain",
-                    ),
+        self.dispatch_claimed_run_inner(tasks, None, run)
+    }
+
+    pub fn dispatch_claimed_run_with_settings(
+        &self,
+        tasks: &TaskService,
+        settings_service: &SettingsService,
+        run: &WorkflowRun,
+    ) -> Result<bool, BackendError> {
+        self.dispatch_claimed_run_inner(tasks, Some(settings_service), run)
+    }
+
+    fn dispatch_claimed_run_inner(
+        &self,
+        tasks: &TaskService,
+        settings_service: Option<&SettingsService>,
+        run: &WorkflowRun,
+    ) -> Result<bool, BackendError> {
+        let original_task_id = run.task_id.clone();
+        let mut candidate = run.clone();
+        loop {
+            let current = tasks.get_workflow_run(&candidate.task_id).ok_or_else(|| {
+                BackendError::new(
+                    "WORKFLOW_DISPATCH_INVARIANT",
+                    "The claimed workflow no longer exists.",
+                    false,
+                    true,
                 )
-                .map_err(|message| runner_dispatch_error(&message))?;
-            if let Some(next) = next {
-                self.dispatch_claimed_run(tasks, &next)?;
-            }
-            return Ok(false);
-        }
-        if current.display_status != WorkflowDisplayStatus::Running
-            || current.canonical_identity_key != run.canonical_identity_key
-            || current.identity_revision != run.identity_revision
-            || current.kind != run.kind
-            || current.fingerprint != run.fingerprint
-        {
-            if current.display_status == WorkflowDisplayStatus::Running {
-                let (_, next) = self
-                    .coordinator
+            })?;
+            let next_after_rejection = if tasks.is_cancelled(&candidate.task_id) {
+                self.coordinator
                     .reject_claimed_dispatch(
                         tasks,
-                        &run.task_id,
+                        &candidate.task_id,
+                        WorkflowDispatchFailure::stale(
+                            "WORKFLOW_DISPATCH_CANCELLED",
+                            "workflows.error.prepareAgain",
+                        ),
+                    )
+                    .map_err(|message| runner_dispatch_error(&message))?
+                    .1
+            } else if current.display_status != WorkflowDisplayStatus::Running
+                || current.canonical_identity_key != candidate.canonical_identity_key
+                || current.identity_revision != candidate.identity_revision
+                || current.kind != candidate.kind
+                || current.operation != candidate.operation
+                || current.fingerprint != candidate.fingerprint
+            {
+                if current.display_status != WorkflowDisplayStatus::Running {
+                    return Ok(false);
+                }
+                self.coordinator
+                    .reject_claimed_dispatch(
+                        tasks,
+                        &candidate.task_id,
                         WorkflowDispatchFailure::invariant(
                             "WORKFLOW_DISPATCH_INVARIANT",
                             "workflows.error.prepareAgain",
                         ),
                     )
-                    .map_err(|message| runner_dispatch_error(&message))?;
-                if let Some(next) = next {
-                    self.dispatch_claimed_run(tasks, &next)?;
+                    .map_err(|message| runner_dispatch_error(&message))?
+                    .1
+            } else {
+                if current.operation.kind() == WorkflowOperationKind::AgentLintRepair {
+                    let settings_service = settings_service.ok_or_else(|| {
+                        BackendError::new(
+                            "LINT_REPAIR_ATTESTATION_REQUIRED",
+                            "Agent lint repair dispatch requires app-owned approval authority.",
+                            true,
+                            true,
+                        )
+                    })?;
+                    let execution_options = tasks
+                        .workflow_execution_options(&current.task_id)
+                        .ok_or_else(|| {
+                            BackendError::new(
+                                "LINT_REPAIR_ATTESTATION_REQUIRED",
+                                "Agent lint repair dispatch has no exact execution options.",
+                                true,
+                                true,
+                            )
+                        })?;
+                    let digest = agent_lint_repair_attestation_digest(&current, &execution_options)
+                        .map_err(|error| {
+                            BackendError::new("LINT_REPAIR_BINDING_FAILED", error, false, true)
+                        })?;
+                    if settings_service
+                        .transition_agent_lint_repair_attestation(
+                            &current.task_id,
+                            &digest,
+                            &[crate::models::settings::AgentLintRepairAttestationLifecycle::QueuedAuthorized],
+                            crate::models::settings::AgentLintRepairAttestationLifecycle::Dispatched,
+                        )
+                        .is_err()
+                    {
+                        self.coordinator
+                            .reject_claimed_dispatch(
+                                tasks,
+                                &current.task_id,
+                                WorkflowDispatchFailure::stale_not_modified(
+                                    "LINT_REPAIR_ATTESTATION_REQUIRED",
+                                    "workflows.error.prepareAgain",
+                                ),
+                            )
+                            .map_err(|message| runner_dispatch_error(&message))?
+                            .1
+                    } else {
+                        match self.runner_for(&candidate)? {
+                            Some(runner) => {
+                                runner.start(current);
+                                return Ok(candidate.task_id == original_task_id);
+                            }
+                            None => self
+                                .coordinator
+                                .reject_claimed_dispatch(
+                                    tasks,
+                                    &candidate.task_id,
+                                    WorkflowDispatchFailure::stale_not_modified(
+                                        "WORKFLOW_RUNNER_UNAVAILABLE",
+                                        "workflows.error.configureExecutionRoute",
+                                    ),
+                                )
+                                .map_err(|message| runner_dispatch_error(&message))?
+                                .1,
+                        }
+                    }
+                } else {
+                    match self.runner_for(&candidate)? {
+                        Some(runner) => {
+                            runner.start(current);
+                            return Ok(candidate.task_id == original_task_id);
+                        }
+                        None => {
+                            self.coordinator
+                                .reject_claimed_dispatch(
+                                    tasks,
+                                    &candidate.task_id,
+                                    WorkflowDispatchFailure::stale_not_modified(
+                                        "WORKFLOW_RUNNER_UNAVAILABLE",
+                                        "workflows.error.configureExecutionRoute",
+                                    ),
+                                )
+                                .map_err(|message| runner_dispatch_error(&message))?
+                                .1
+                        }
+                    }
                 }
-            }
-            return Ok(false);
+            };
+            let Some(next) = next_after_rejection else {
+                return Ok(false);
+            };
+            candidate = next;
         }
-        let runner = self
+    }
+
+    fn runner_for(
+        &self,
+        run: &WorkflowRun,
+    ) -> Result<Option<Arc<dyn WorkflowRunner>>, BackendError> {
+        Ok(self
             .runners
             .read()
             .map_err(|_| runner_lock_error())?
             .iter()
-            .find(|runner| runner.kind() == run.kind)
-            .cloned();
-        let Some(runner) = runner else {
-            let (_, next) = self
-                .coordinator
-                .reject_claimed_dispatch(
-                    tasks,
-                    &run.task_id,
-                    WorkflowDispatchFailure::stale(
-                        "WORKFLOW_RUNNER_UNAVAILABLE",
-                        "workflows.error.configureExecutionRoute",
-                    ),
-                )
-                .map_err(|message| runner_dispatch_error(&message))?;
-            if let Some(next) = next {
-                self.dispatch_claimed_run(tasks, &next)?;
-            }
-            return Ok(false);
-        };
-        runner.start(current);
-        Ok(true)
+            .find(|runner| {
+                runner.key() == WorkflowRunnerKey::new(run.kind.clone(), run.operation.kind())
+            })
+            .cloned())
     }
 
     pub fn reject_claimed_dispatch(
@@ -516,12 +624,32 @@ impl WorkflowService {
         task_id: &str,
         failure: WorkflowDispatchFailure,
     ) -> Result<WorkflowRun, BackendError> {
+        self.reject_claimed_dispatch_inner(tasks, None, task_id, failure)
+    }
+
+    pub fn reject_claimed_dispatch_with_settings(
+        &self,
+        tasks: &TaskService,
+        settings_service: &SettingsService,
+        task_id: &str,
+        failure: WorkflowDispatchFailure,
+    ) -> Result<WorkflowRun, BackendError> {
+        self.reject_claimed_dispatch_inner(tasks, Some(settings_service), task_id, failure)
+    }
+
+    fn reject_claimed_dispatch_inner(
+        &self,
+        tasks: &TaskService,
+        settings_service: Option<&SettingsService>,
+        task_id: &str,
+        failure: WorkflowDispatchFailure,
+    ) -> Result<WorkflowRun, BackendError> {
         let (run, next) = self
             .coordinator
             .reject_claimed_dispatch(tasks, task_id, failure)
             .map_err(|message| runner_dispatch_error(&message))?;
         if let Some(next) = next {
-            self.dispatch_claimed_run(tasks, &next)?;
+            self.dispatch_claimed_run_inner(tasks, settings_service, &next)?;
         }
         Ok(run)
     }

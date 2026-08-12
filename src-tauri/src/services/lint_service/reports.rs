@@ -5,6 +5,10 @@ use crate::models::lint::{
     LintReportKind, LintSeverity, PersistedLintReport,
 };
 use crate::models::paths::ProjectContext;
+use crate::models::workflow::{
+    WorkflowDisplayStatus, WorkflowKind, WorkflowOperation, WorkflowResult, WorkflowRoute,
+    WorkflowRun,
+};
 
 use super::{LintService, LINT_REPORTS_DIR};
 
@@ -128,6 +132,87 @@ impl LintService {
                     .map_err(|_| wrapper_error)
             }
         }
+    }
+
+    /// Return a Health report only when it is still owned by this process's
+    /// identity-scoped memory store. Agent repair authorization must never
+    /// revive a copied or stale report body from `.app/lint-reports`.
+    pub fn read_current_memory_health_report(
+        &self,
+        context: &ProjectContext,
+        id: &str,
+    ) -> Result<HealthCheckReport, BackendError> {
+        reject_report_id(id)?;
+        let project_key = memory_project_key(context)?;
+        let memory = self.memory_reports.read().map_err(|_| {
+            BackendError::new(
+                "LINT_MEMORY_REPORTS_LOCKED",
+                "In-memory Lint reports are temporarily unavailable.",
+                true,
+                false,
+            )
+        })?;
+        memory
+            .get(&project_key)
+            .and_then(|reports| reports.get(id))
+            .and_then(|persisted| persisted.health_check_report.as_ref())
+            .filter(|report| !report.persistent && !report.report_id.is_empty())
+            .cloned()
+            .ok_or_else(|| {
+                BackendError::new(
+                    "LINT_MEMORY_HEALTH_REPORT_REQUIRED",
+                    "Agent lint repair requires a current-process Health report.",
+                    true,
+                    true,
+                )
+            })
+    }
+
+    pub fn validate_current_memory_health_report_owner(
+        report: &HealthCheckReport,
+        owner: &WorkflowRun,
+        project_id: &str,
+        canonical_identity_key: &str,
+        identity_revision: &str,
+        current_health_route: &WorkflowRoute,
+        current_baseline_fingerprint: &str,
+    ) -> Result<(), BackendError> {
+        let exact_health_result = matches!(
+            owner.result.as_ref(),
+            Some(WorkflowResult::HealthCheck {
+                report_id: Some(result_report_id),
+                persistent,
+                ..
+            }) if result_report_id == &report.report_id && *persistent == report.persistent
+        );
+        if report.task_id != owner.task_id
+            || owner.project_id != project_id
+            || owner.kind != WorkflowKind::HealthCheck
+            || owner.operation != WorkflowOperation::BuiltIn
+            || owner.display_status != WorkflowDisplayStatus::Completed
+            || owner.route.as_ref() != Some(&report.route)
+            || !exact_health_result
+        {
+            return Err(BackendError::new(
+                "LINT_REPAIR_HEALTH_REPORT_REQUIRED",
+                "The report is not owned by a completed built-in Health Workflow.",
+                true,
+                true,
+            ));
+        }
+        if owner.canonical_identity_key != canonical_identity_key
+            || owner.identity_revision != identity_revision
+            || &report.route != current_health_route
+            || owner.baseline_fingerprint != current_baseline_fingerprint
+        {
+            return Err(BackendError::new(
+                "LINT_REPAIR_REPORT_STALE",
+                "The Health report no longer matches the current project, route, or baseline.",
+                true,
+                true,
+            ));
+        }
+        Ok(())
     }
 
     /// Save one composed Health Check report. Persistent runs use the existing
@@ -441,8 +526,11 @@ mod tests {
     use super::super::test_support::{tmp_context, write_file};
     use super::super::LintService;
     use crate::errors::BackendError;
+    use crate::models::agent::AgentKind;
     use crate::models::lint::{HealthCheckCoverage, HealthCheckReport, LintReport};
-    use crate::models::workflow::{HealthCheckMode, WorkflowRoute};
+    use crate::models::workflow::{
+        HealthCheckMode, WorkflowOperation, WorkflowResult, WorkflowRoute,
+    };
 
     fn health_report(id: &str, persistent: bool, generated_at: String) -> HealthCheckReport {
         HealthCheckReport {
@@ -470,6 +558,48 @@ mod tests {
             duration_ms: 1,
             generated_at,
         }
+    }
+
+    fn agent_health_owner(report: &HealthCheckReport) -> crate::models::workflow::WorkflowRun {
+        serde_json::from_value(serde_json::json!({
+            "schemaVersion": 2,
+            "taskId": report.task_id,
+            "projectId": "project-a",
+            "canonicalIdentityKey": "identity-a",
+            "identityRevision": "revision-a",
+            "kind": "health_check",
+            "operation": { "kind": "built_in" },
+            "displayStatus": "completed",
+            "scope": { "kind": "health_check", "mode": "complete" },
+            "route": report.route,
+            "fingerprint": "run-fingerprint",
+            "baselineFingerprint": "baseline-a",
+            "persistence": "memory_only",
+            "stages": [],
+            "currentStageId": null,
+            "queuePosition": null,
+            "continuationRequired": false,
+            "retry": null,
+            "pendingAction": null,
+            "decisionReview": null,
+            "result": {
+                "kind": "health_check",
+                "reportId": report.report_id,
+                "persistent": false,
+                "errorCount": 0,
+                "warningCount": 0,
+                "infoCount": 0,
+                "coverage": null,
+                "findingsByType": {}
+            },
+            "error": null,
+            "startedAt": "2026-08-12T00:00:00Z",
+            "updatedAt": "2026-08-12T00:01:00Z",
+            "completedAt": "2026-08-12T00:01:00Z",
+            "cancellable": false,
+            "undoCancelUntil": null
+        }))
+        .unwrap()
     }
 
     #[test]
@@ -563,6 +693,131 @@ mod tests {
         assert_eq!(history.entries[0].id, "health-54");
         assert_eq!(history.entries[49].id, "health-05");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn repair_report_reader_accepts_only_current_process_memory_health_reports() {
+        let (context, root) = tmp_context("health-repair-memory-only");
+        let service = LintService::default();
+        let memory = health_report("health-memory", false, "2026-07-04T00:00:00Z".into());
+        service
+            .store_health_check_report(&context, &memory)
+            .unwrap();
+
+        let selected = service
+            .read_current_memory_health_report(&context, "health-memory")
+            .unwrap();
+        assert_eq!(selected, memory);
+
+        let disk = health_report("health-disk", true, "2026-07-04T00:01:00Z".into());
+        service.store_health_check_report(&context, &disk).unwrap();
+        let error = service
+            .read_current_memory_health_report(&context, "health-disk")
+            .expect_err("repair selection must never fall back to a disk report");
+        assert_eq!(error.code, "LINT_MEMORY_HEALTH_REPORT_REQUIRED");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn repair_report_owner_must_be_current_completed_built_in_health() {
+        let route = WorkflowRoute::Agent {
+            agent: AgentKind::Codex,
+            model: None,
+            route_revision: "analysis-route-v1".into(),
+        };
+        let mut report = health_report("health-task-1", false, "2026-08-12T00:00:00Z".into());
+        report.mode = HealthCheckMode::Complete;
+        report.route = route.clone();
+        let run = agent_health_owner(&report);
+
+        LintService::validate_current_memory_health_report_owner(
+            &report,
+            &run,
+            "project-a",
+            "identity-a",
+            "revision-a",
+            &route,
+            "baseline-a",
+        )
+        .unwrap();
+
+        let mut old_baseline = run.clone();
+        old_baseline.baseline_fingerprint = "baseline-old".into();
+        assert_eq!(
+            LintService::validate_current_memory_health_report_owner(
+                &report,
+                &old_baseline,
+                "project-a",
+                "identity-a",
+                "revision-a",
+                &route,
+                "baseline-a",
+            )
+            .unwrap_err()
+            .code,
+            "LINT_REPAIR_REPORT_STALE"
+        );
+
+        let retargeted = WorkflowRoute::Agent {
+            agent: AgentKind::Codex,
+            model: None,
+            route_revision: "analysis-route-v2".into(),
+        };
+        assert_eq!(
+            LintService::validate_current_memory_health_report_owner(
+                &report,
+                &run,
+                "project-a",
+                "identity-a",
+                "revision-a",
+                &retargeted,
+                "baseline-a",
+            )
+            .unwrap_err()
+            .code,
+            "LINT_REPAIR_REPORT_STALE"
+        );
+
+        let mut repair_owner = run;
+        repair_owner.operation = WorkflowOperation::AgentLintRepair {
+            preparation_id: "prepare-1".into(),
+            preparation_revision: "prepare-revision-1".into(),
+            report_id: report.report_id.clone(),
+            selection_revision: "selection-revision-1".into(),
+            selected_finding_ids: vec!["contradiction:wiki/a.md".into()],
+            skill: crate::models::lint::WikiLintSkillRef::builtin(),
+            authorized_path_hashes: [("wiki/a.md".into(), Some("a".repeat(64)))]
+                .into_iter()
+                .collect(),
+            expected_git_head: "b".repeat(40),
+        };
+        repair_owner.result = Some(WorkflowResult::AgentLintRepair {
+            outcome: crate::models::lint::AgentLintRepairOutcome::Succeeded,
+            resolved_finding_ids: Vec::new(),
+            unresolved_finding_ids: Vec::new(),
+            introduced_finding_ids: Vec::new(),
+            skipped_finding_ids: Vec::new(),
+            rounds: Vec::new(),
+            affected_paths: Vec::new(),
+            checkpoint_hash: None,
+            final_commit: None,
+            diff_available: false,
+            rollback_available: false,
+        });
+        assert_eq!(
+            LintService::validate_current_memory_health_report_owner(
+                &report,
+                &repair_owner,
+                "project-a",
+                "identity-a",
+                "revision-a",
+                &route,
+                "baseline-a",
+            )
+            .unwrap_err()
+            .code,
+            "LINT_REPAIR_HEALTH_REPORT_REQUIRED"
+        );
     }
 
     #[test]

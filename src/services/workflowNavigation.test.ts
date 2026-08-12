@@ -21,6 +21,7 @@ function completedUpdate(): WorkflowRun {
     canonicalIdentityKey: "identity-a",
     identityRevision: "revision-a",
     kind: "update_wiki",
+    operation: { kind: "built_in" },
     displayStatus: "completed",
     scope: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [] },
     route: null,

@@ -93,6 +93,24 @@ pub struct StoredPendingAction {
     pub execution: Option<ConfirmationExecution>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmationRegistration {
+    Registered,
+    Existing,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExpiringConfirmationRegistration {
+    pub registration: ConfirmationRegistration,
+    pub stored: StoredPendingAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmationClaimDisposition {
+    Completed,
+    CancelRequested,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConfirmationExecution {
     RepairProject {
@@ -149,6 +167,22 @@ pub enum ConfirmationExecution {
         project_id: String,
         root_path: String,
         issue: crate::models::lint::LintIssue,
+    },
+    AgentLintRepairStart {
+        project_id: String,
+        root_path: String,
+        canonical_identity_key: String,
+        identity_revision: String,
+        preparation_id: String,
+        preparation_revision: String,
+        report_id: String,
+        selection_revision: String,
+        selected_finding_ids: Vec<String>,
+        route: crate::models::workflow::WorkflowRoute,
+        skill: crate::models::lint::WikiLintSkillRef,
+        authorized_path_hashes: std::collections::BTreeMap<String, Option<String>>,
+        baseline_fingerprint: String,
+        expected_git_head: String,
     },
     ChatOverwrite {
         project_id: String,
@@ -213,6 +247,77 @@ impl ConfirmationRegistry {
         }
         actions.insert(action.id.clone(), StoredPendingAction { action, execution });
         Ok(())
+    }
+
+    /// Register a preparation that may be safely retried by the same caller.
+    /// Reuse is accepted only when both the user-visible action and every
+    /// backend-only execution field are byte-for-byte identical.
+    pub fn register_idempotent_with_execution(
+        &self,
+        action: PendingAction,
+        execution: ConfirmationExecution,
+    ) -> Result<ConfirmationRegistration, BackendError> {
+        let mut actions = self.actions.lock().map_err(|_| registry_locked())?;
+        let stored = StoredPendingAction {
+            action: action.clone(),
+            execution: Some(execution),
+        };
+        if let Some(existing) = actions.get(&action.id) {
+            return if existing == &stored {
+                Ok(ConfirmationRegistration::Existing)
+            } else {
+                Err(confirmation_id_conflict(&action.id))
+            };
+        }
+        actions.insert(action.id.clone(), stored);
+        Ok(ConfirmationRegistration::Registered)
+    }
+
+    /// Register a bounded preparation while preserving the first expiration
+    /// across exact retries. Once that stored action expires, the same exact
+    /// preparation may be registered again with a fresh caller-supplied
+    /// expiration.
+    pub fn register_idempotent_expiring_with_execution(
+        &self,
+        mut action: PendingAction,
+        execution: ConfirmationExecution,
+        expires_at: String,
+    ) -> Result<ExpiringConfirmationRegistration, BackendError> {
+        action.expires_at = Some(expires_at);
+        reject_if_expired(&action)?;
+        let mut stored = StoredPendingAction {
+            action: action.clone(),
+            execution: Some(execution),
+        };
+        let mut actions = self.actions.lock().map_err(|_| registry_locked())?;
+        if let Some(existing) = actions.get(&action.id).cloned() {
+            match reject_if_expired(&existing.action) {
+                Ok(()) => {
+                    stored.action.expires_at = existing.action.expires_at.clone();
+                    return if existing == stored {
+                        Ok(ExpiringConfirmationRegistration {
+                            registration: ConfirmationRegistration::Existing,
+                            stored: existing,
+                        })
+                    } else {
+                        Err(confirmation_id_conflict(&action.id))
+                    };
+                }
+                Err(error) if error.code == "CONFIRMATION_EXPIRED" => {
+                    let executing = self.executing.lock().map_err(|_| registry_locked())?;
+                    if executing.contains(&action.id) {
+                        return Err(confirmation_in_use(&action.id));
+                    }
+                    actions.remove(&action.id);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        actions.insert(action.id.clone(), stored.clone());
+        Ok(ExpiringConfirmationRegistration {
+            registration: ConfirmationRegistration::Registered,
+            stored,
+        })
     }
 
     /// Restore a persisted confirmation, replacing only a matching pending
@@ -359,6 +464,20 @@ impl ConfirmationRegistry {
     /// Release a claimed action after execution. Keep it for retryable fix
     /// failures; remove it only after the mutation commits successfully.
     pub fn finish_claim(&self, action_id: &str, consume: bool) -> Result<(), BackendError> {
+        self.finish_claim_with_disposition(action_id, consume)
+            .map(|_| ())
+    }
+
+    /// Release a claimed action and report whether a concurrent cancellation
+    /// arrived while the caller held the claim. Existing callers retain the
+    /// legacy unit-returning `finish_claim` API; flows that enqueue work before
+    /// releasing their claim can use this disposition to keep cancellation
+    /// from being silently swallowed.
+    pub fn finish_claim_with_disposition(
+        &self,
+        action_id: &str,
+        consume: bool,
+    ) -> Result<ConfirmationClaimDisposition, BackendError> {
         let mut actions = self.actions.lock().map_err(|_| registry_locked())?;
         let mut executing = self.executing.lock().map_err(|_| registry_locked())?;
         let mut cancel_requested = self
@@ -378,7 +497,11 @@ impl ConfirmationRegistry {
                 .with_details(serde_json::json!({ "actionId": action_id }))
             })?;
         }
-        Ok(())
+        Ok(if was_cancel_requested {
+            ConfirmationClaimDisposition::CancelRequested
+        } else {
+            ConfirmationClaimDisposition::Completed
+        })
     }
 
     /// Consume an action only after its side effect has completed. Keeping
@@ -693,8 +816,9 @@ fn reject_if_expired(action: &PendingAction) -> Result<(), BackendError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionPreview, ConfirmationExecution, ConfirmationRegistry, ConfirmationStatus,
-        PendingAction, PendingActionType, RiskLevel,
+        ActionPreview, ConfirmationClaimDisposition, ConfirmationExecution,
+        ConfirmationRegistration, ConfirmationRegistry, ConfirmationStatus, PendingAction,
+        PendingActionType, RiskLevel,
     };
     use crate::models::paths::ProjectContext;
     use crate::models::workflow::{
@@ -880,6 +1004,195 @@ mod tests {
 
         assert_eq!(
             registry.claim("retryable-claim").unwrap_err().code,
+            "CONFIRMATION_NOT_FOUND"
+        );
+    }
+
+    fn agent_lint_action() -> PendingAction {
+        PendingAction {
+            id: "agent-lint-prepare-1".into(),
+            action_type: PendingActionType::AgentAutoFix,
+            title: "Repair selected lint findings".into(),
+            message: "Start the approved Agent lint repair".into(),
+            risk_level: RiskLevel::High,
+            affected_paths: vec!["wiki/page.md".into()],
+            preview: None,
+            expires_at: None,
+            checkpoint_hash: None,
+        }
+    }
+
+    fn agent_lint_binding() -> ConfirmationExecution {
+        ConfirmationExecution::AgentLintRepairStart {
+            project_id: "project-a".into(),
+            root_path: "C:/wiki".into(),
+            canonical_identity_key: "identity-a".into(),
+            identity_revision: "identity-revision-a".into(),
+            preparation_id: "prepare-1".into(),
+            preparation_revision: "prepare-revision-1".into(),
+            report_id: "health-report-1".into(),
+            selection_revision: "selection-revision-1".into(),
+            selected_finding_ids: vec!["finding-a".into()],
+            route: crate::models::workflow::WorkflowRoute::Agent {
+                agent: crate::models::agent::AgentKind::Codex,
+                model: None,
+                route_revision: "route-revision-1".into(),
+            },
+            skill: crate::models::lint::WikiLintSkillRef::builtin(),
+            authorized_path_hashes: [("wiki/page.md".into(), Some("a".repeat(64)))]
+                .into_iter()
+                .collect(),
+            baseline_fingerprint: "baseline-1".into(),
+            expected_git_head: "b".repeat(40),
+        }
+    }
+
+    #[test]
+    fn agent_lint_registration_is_idempotent_only_for_the_exact_action_and_binding() {
+        let registry = ConfirmationRegistry::default();
+        let action = agent_lint_action();
+        let binding = agent_lint_binding();
+
+        assert_eq!(
+            registry
+                .register_idempotent_with_execution(action.clone(), binding.clone())
+                .unwrap(),
+            super::ConfirmationRegistration::Registered
+        );
+        assert_eq!(
+            registry
+                .register_idempotent_with_execution(action.clone(), binding.clone())
+                .unwrap(),
+            super::ConfirmationRegistration::Existing
+        );
+
+        let mut changed_action = action.clone();
+        changed_action.affected_paths.push("wiki/forged.md".into());
+        assert_eq!(
+            registry
+                .register_idempotent_with_execution(changed_action, binding.clone())
+                .unwrap_err()
+                .code,
+            "CONFIRMATION_ID_CONFLICT"
+        );
+
+        let mut changed_binding = binding;
+        let ConfirmationExecution::AgentLintRepairStart {
+            selection_revision, ..
+        } = &mut changed_binding
+        else {
+            unreachable!()
+        };
+        *selection_revision = "forged-selection".into();
+        assert_eq!(
+            registry
+                .register_idempotent_with_execution(action, changed_binding)
+                .unwrap_err()
+                .code,
+            "CONFIRMATION_ID_CONFLICT"
+        );
+    }
+
+    #[test]
+    fn agent_lint_exact_binding_can_be_claimed_only_once_and_is_consumed_once() {
+        let registry = ConfirmationRegistry::default();
+        let action = agent_lint_action();
+        let binding = agent_lint_binding();
+        registry
+            .register_idempotent_with_execution(action, binding.clone())
+            .unwrap();
+
+        let claimed = registry.claim("agent-lint-prepare-1").unwrap();
+        assert_eq!(claimed.execution, Some(binding));
+        assert_eq!(
+            registry.claim("agent-lint-prepare-1").unwrap_err().code,
+            "CONFIRMATION_IN_USE"
+        );
+        registry.finish_claim("agent-lint-prepare-1", true).unwrap();
+        assert_eq!(
+            registry.claim("agent-lint-prepare-1").unwrap_err().code,
+            "CONFIRMATION_NOT_FOUND"
+        );
+    }
+
+    #[test]
+    fn expiring_idempotent_registration_reuses_the_original_expiry() {
+        let registry = ConfirmationRegistry::default();
+        let action = agent_lint_action();
+        let binding = agent_lint_binding();
+
+        let first = registry
+            .register_idempotent_expiring_with_execution(
+                action.clone(),
+                binding.clone(),
+                "2099-01-01T00:15:00Z".into(),
+            )
+            .unwrap();
+        let repeated = registry
+            .register_idempotent_expiring_with_execution(
+                action,
+                binding,
+                "2099-01-01T00:30:00Z".into(),
+            )
+            .unwrap();
+
+        assert_eq!(first.registration, ConfirmationRegistration::Registered);
+        assert_eq!(repeated.registration, ConfirmationRegistration::Existing);
+        assert_eq!(first.stored, repeated.stored);
+        assert_eq!(
+            repeated.stored.action.expires_at.as_deref(),
+            Some("2099-01-01T00:15:00Z")
+        );
+    }
+
+    #[test]
+    fn expired_idempotent_registration_is_replaced_with_a_fresh_expiry() {
+        let registry = ConfirmationRegistry::default();
+        let mut expired = agent_lint_action();
+        expired.expires_at = Some("2000-01-01T00:00:00Z".into());
+        let binding = agent_lint_binding();
+        registry
+            .register_with_execution(expired, Some(binding.clone()))
+            .unwrap();
+
+        let refreshed = registry
+            .register_idempotent_expiring_with_execution(
+                agent_lint_action(),
+                binding,
+                "2099-01-01T00:15:00Z".into(),
+            )
+            .unwrap();
+
+        assert_eq!(refreshed.registration, ConfirmationRegistration::Registered);
+        assert_eq!(
+            refreshed.stored.action.expires_at.as_deref(),
+            Some("2099-01-01T00:15:00Z")
+        );
+    }
+
+    #[test]
+    fn finish_claim_reports_when_concurrent_cancellation_won() {
+        let registry = ConfirmationRegistry::default();
+        registry
+            .register_idempotent_with_execution(agent_lint_action(), agent_lint_binding())
+            .unwrap();
+        registry.claim("agent-lint-prepare-1").unwrap();
+        assert_eq!(
+            registry
+                .confirm("agent-lint-prepare-1", ConfirmationStatus::Cancelled)
+                .unwrap_err()
+                .code,
+            "CONFIRMATION_IN_USE"
+        );
+
+        assert_eq!(
+            registry
+                .finish_claim_with_disposition("agent-lint-prepare-1", true)
+                .unwrap(),
+            ConfirmationClaimDisposition::CancelRequested
+        );
+        assert_eq!(
+            registry.peek("agent-lint-prepare-1").unwrap_err().code,
             "CONFIRMATION_NOT_FOUND"
         );
     }
@@ -1259,6 +1572,7 @@ mod tests {
             canonical_identity_key: "identity".into(),
             identity_revision: "revision".into(),
             kind: WorkflowKind::UpdateWiki,
+            operation: crate::models::workflow::WorkflowOperation::BuiltIn,
             display_status: WorkflowDisplayStatus::WaitingForConfirmation,
             scope: WorkflowScope::UpdateWiki {
                 mode: UpdateWikiMode::ChangedSources,

@@ -176,6 +176,8 @@ export function presentWorkflowResult(run: WorkflowRun): WorkflowResultPresentat
           ...commonRows,
         ],
       };
+    case "agent_lint_repair":
+      return null;
   }
 }
 
@@ -274,6 +276,8 @@ export function workflowHistoryOutcomeLabel(
         count: formatter.format(outcome.artifactCount),
         validation: t(`workflows.result.${outcome.validationPassed ? "yes" : "no"}`),
       });
+    case "agent_lint_repair":
+      return null;
   }
 }
 

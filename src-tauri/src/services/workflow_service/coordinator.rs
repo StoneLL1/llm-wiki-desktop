@@ -3,10 +3,10 @@ use std::sync::Mutex;
 
 use crate::models::task::TaskStatus;
 use crate::models::workflow::{
-    WorkflowErrorSummary, WorkflowExecutionOptions, WorkflowExecutionState, WorkflowKind,
-    WorkflowPersistenceMode, WorkflowPersistenceTransition, WorkflowProjectMutationState,
-    WorkflowResult, WorkflowRetryLink, WorkflowRoute, WorkflowRun, WorkflowScope, WorkflowStage,
-    WorkflowStartOutcome, WORKFLOW_SCHEMA_VERSION,
+    validate_workflow_execution_contract, WorkflowErrorSummary, WorkflowExecutionOptions,
+    WorkflowExecutionState, WorkflowKind, WorkflowPersistenceMode, WorkflowPersistenceTransition,
+    WorkflowProjectMutationState, WorkflowResult, WorkflowRetryLink, WorkflowRoute, WorkflowRun,
+    WorkflowScope, WorkflowStage, WorkflowStartOutcome, WORKFLOW_SCHEMA_VERSION,
 };
 use crate::tasks::TaskService;
 use chrono::{Duration, Utc};
@@ -30,6 +30,12 @@ impl WorkflowDispatchFailure {
 
     pub fn stale(code: impl Into<String>, message_key: impl Into<String>) -> Self {
         Self::Stale(dispatch_error(code, message_key, true))
+    }
+
+    pub fn stale_not_modified(code: impl Into<String>, message_key: impl Into<String>) -> Self {
+        let mut error = dispatch_error(code, message_key, true);
+        error.project_mutation_state = WorkflowProjectMutationState::NotModified;
+        Self::Stale(error)
     }
 
     pub fn invariant(code: impl Into<String>, message_key: impl Into<String>) -> Self {
@@ -76,7 +82,7 @@ impl WorkflowCoordinator {
             .operation_lock
             .lock()
             .map_err(|_| "Workflow coordinator lock is unavailable")?;
-        self.enqueue_locked(tasks, request, true, None)
+        self.enqueue_locked(tasks, request, true, None, false)
     }
 
     pub fn enqueue_for_owner(
@@ -95,6 +101,30 @@ impl WorkflowCoordinator {
             request,
             true,
             Some((expected_identity_key, expected_identity_revision)),
+            false,
+        )
+    }
+
+    /// Create an approval-owned workflow in the project queue without making
+    /// it eligible for claim. The confirmation owner must explicitly release
+    /// this hold after the atomic claim disposition is known.
+    pub fn enqueue_for_owner_pending_approval(
+        &self,
+        tasks: &TaskService,
+        request: EnqueueWorkflow,
+        expected_identity_key: &str,
+        expected_identity_revision: &str,
+    ) -> Result<WorkflowStartOutcome, String> {
+        let _operation = self
+            .operation_lock
+            .lock()
+            .map_err(|_| "Workflow coordinator lock is unavailable")?;
+        self.enqueue_locked(
+            tasks,
+            request,
+            true,
+            Some((expected_identity_key, expected_identity_revision)),
+            true,
         )
     }
 
@@ -104,6 +134,7 @@ impl WorkflowCoordinator {
         request: EnqueueWorkflow,
         deduplicate: bool,
         expected_owner: Option<(&str, &str)>,
+        pending_initial_approval: bool,
     ) -> Result<WorkflowStartOutcome, String> {
         let identity = project_identity(&request.project_root)?;
         if expected_owner.is_some_and(|(key, revision)| {
@@ -111,7 +142,12 @@ impl WorkflowCoordinator {
         }) {
             return Err("Workflow project identity changed before task creation".into());
         }
-        request.execution_options.validate()?;
+        validate_workflow_execution_contract(
+            &request.kind,
+            &request.scope,
+            request.route.as_ref(),
+            &request.execution_options,
+        )?;
         let task_state_root = request
             .task_state_root
             .as_deref()
@@ -181,7 +217,7 @@ impl WorkflowCoordinator {
             stages: request.stages,
             current_stage_id: None,
             queue_position: Some(queued_count + 1),
-            continuation_required: false,
+            continuation_required: pending_initial_approval,
             retry: request.retry,
             pending_action: None,
             result: None,
@@ -196,7 +232,7 @@ impl WorkflowCoordinator {
             state,
             task_state_root,
         )?;
-        if !has_active && queued_count == 0 {
+        if !pending_initial_approval && !has_active && queued_count == 0 {
             run = tasks.transition_workflow_status(&run.task_id, TaskStatus::Running)?;
         }
         Ok(WorkflowStartOutcome::Created { run })
@@ -388,6 +424,106 @@ impl WorkflowCoordinator {
         self.cancel_and_claim_next_locked(tasks, &owner)
     }
 
+    /// Permanently cancel a run created by an initial approval that lost a
+    /// concurrent cancellation race. Unlike the user-facing queued cancel,
+    /// this path deliberately has no undo window: replaying it would bypass
+    /// the approval that was just consumed. It also handles the pre-dispatch
+    /// Running state so the caller can use one coordinator-owned transition.
+    pub fn cancel_created_without_undo_and_claim_next(
+        &self,
+        tasks: &TaskService,
+        task_id: &str,
+    ) -> Result<(WorkflowRun, Option<WorkflowRun>), String> {
+        let _operation = self
+            .operation_lock
+            .lock()
+            .map_err(|_| "Workflow coordinator lock is unavailable")?;
+        let owner = tasks
+            .get_workflow_run(task_id)
+            .ok_or_else(|| format!("Workflow not found: {task_id}"))?;
+        if is_terminal(&owner) {
+            return Ok((owner, None));
+        }
+        let cancelled = match owner.display_status {
+            crate::models::workflow::WorkflowDisplayStatus::Queued => {
+                tasks.mutate_workflow(task_id, |task, workflow| {
+                    if task.status != TaskStatus::Queued {
+                        return Err(format!(
+                            "Workflow is no longer queued for approval cancellation: {task_id}"
+                        ));
+                    }
+                    task.status = TaskStatus::Cancelled;
+                    task.cancellable = false;
+                    workflow.pending_action = None;
+                    workflow.queue_position = None;
+                    workflow.continuation_required = false;
+                    workflow.cancelled_from_queue = false;
+                    workflow.undo_cancel_until = None;
+                    workflow.error = None;
+                    for stage in &mut workflow.stages {
+                        stage.decision = None;
+                    }
+                    Ok(())
+                })?
+            }
+            crate::models::workflow::WorkflowDisplayStatus::Running
+            | crate::models::workflow::WorkflowDisplayStatus::WaitingForConfirmation => {
+                tasks.request_workflow_cancel(task_id)?;
+                tasks.finalize_workflow_cancellation(task_id)?
+            }
+            _ => {
+                return Err(format!(
+                    "Workflow cannot be cancelled from its approval state: {task_id}"
+                ))
+            }
+        };
+        self.renumber(
+            tasks,
+            &owner.canonical_identity_key,
+            &owner.identity_revision,
+        )?;
+        let next = self.claim_next_locked(
+            tasks,
+            &owner.canonical_identity_key,
+            &owner.identity_revision,
+        )?;
+        Ok((cancelled, next))
+    }
+
+    /// Release the queue hold created by `enqueue_for_owner_pending_approval`
+    /// and claim it only if the owner queue is otherwise idle. Both changes
+    /// occur under the coordinator lock so predecessor completion cannot race
+    /// the confirmation disposition.
+    pub fn release_initial_approval_hold_and_claim_next(
+        &self,
+        tasks: &TaskService,
+        task_id: &str,
+    ) -> Result<(WorkflowRun, Option<WorkflowRun>), String> {
+        let _operation = self
+            .operation_lock
+            .lock()
+            .map_err(|_| "Workflow coordinator lock is unavailable")?;
+        let held = tasks
+            .get_workflow_run(task_id)
+            .ok_or_else(|| format!("Workflow not found: {task_id}"))?;
+        if held.display_status != crate::models::workflow::WorkflowDisplayStatus::Queued
+            || !held.continuation_required
+        {
+            return Err(format!(
+                "Workflow is not waiting for initial approval release: {task_id}"
+            ));
+        }
+        let released = tasks.set_workflow_queue_state(task_id, held.queue_position, false)?;
+        let claimed =
+            self.claim_next_locked(tasks, &held.canonical_identity_key, &held.identity_revision)?;
+        let current = claimed
+            .as_ref()
+            .filter(|run| run.task_id == task_id)
+            .cloned()
+            .unwrap_or(released);
+        Ok((current, claimed))
+    }
+
     pub fn reject_claimed_dispatch(
         &self,
         tasks: &TaskService,
@@ -471,6 +607,7 @@ impl WorkflowCoordinator {
                         mode: crate::models::workflow::HealthCheckMode::LocalQuick
                     }
                 )
+                && run.operation == crate::models::workflow::WorkflowOperation::BuiltIn
                 && run.display_status == crate::models::workflow::WorkflowDisplayStatus::Running;
             if local_quick {
                 transition.continued_local_quick_runs.push(run);
@@ -567,6 +704,26 @@ impl WorkflowCoordinator {
         tasks: &TaskService,
         task_id: &str,
     ) -> Result<(WorkflowRun, Option<WorkflowRun>), String> {
+        self.undo_cancel_inner(tasks, task_id, false)
+    }
+
+    /// Restore an approved repair behind a queue hold. The caller must first
+    /// restore its app-owned authorization receipt and then release the hold;
+    /// no predecessor completion can claim the task in between.
+    pub fn undo_cancel_pending_approval(
+        &self,
+        tasks: &TaskService,
+        task_id: &str,
+    ) -> Result<(WorkflowRun, Option<WorkflowRun>), String> {
+        self.undo_cancel_inner(tasks, task_id, true)
+    }
+
+    fn undo_cancel_inner(
+        &self,
+        tasks: &TaskService,
+        task_id: &str,
+        pending_approval: bool,
+    ) -> Result<(WorkflowRun, Option<WorkflowRun>), String> {
         let _operation = self
             .operation_lock
             .lock()
@@ -595,10 +752,14 @@ impl WorkflowCoordinator {
             task.completed_at = None;
             workflow.cancelled_from_queue = false;
             workflow.undo_cancel_until = None;
+            workflow.continuation_required = pending_approval;
             Ok(())
         })?;
         tasks.reset_workflow_cancellation(task_id)?;
         self.renumber(tasks, &run.canonical_identity_key, &run.identity_revision)?;
+        if pending_approval {
+            return Ok((restored, None));
+        }
         let claimed =
             self.claim_next_locked(tasks, &run.canonical_identity_key, &run.identity_revision)?;
         let current = if claimed.as_ref().is_some_and(|next| next.task_id == task_id) {
@@ -672,6 +833,43 @@ impl WorkflowCoordinator {
         project_id: String,
         project_root: PathBuf,
         task_state_root: Option<PathBuf>,
+    ) -> Result<WorkflowStartOutcome, String> {
+        self.retry_with_hold(
+            tasks,
+            task_id,
+            project_id,
+            project_root,
+            task_state_root,
+            false,
+        )
+    }
+
+    pub fn retry_pending_approval(
+        &self,
+        tasks: &TaskService,
+        task_id: &str,
+        project_id: String,
+        project_root: PathBuf,
+        task_state_root: Option<PathBuf>,
+    ) -> Result<WorkflowStartOutcome, String> {
+        self.retry_with_hold(
+            tasks,
+            task_id,
+            project_id,
+            project_root,
+            task_state_root,
+            true,
+        )
+    }
+
+    fn retry_with_hold(
+        &self,
+        tasks: &TaskService,
+        task_id: &str,
+        project_id: String,
+        project_root: PathBuf,
+        task_state_root: Option<PathBuf>,
+        pending_approval: bool,
     ) -> Result<WorkflowStartOutcome, String> {
         let original = tasks
             .get_workflow_run(task_id)
@@ -758,6 +956,7 @@ impl WorkflowCoordinator {
                 &original.canonical_identity_key,
                 &original.identity_revision,
             )),
+            pending_approval,
         )?;
         match outcome {
             WorkflowStartOutcome::Created { run } => {

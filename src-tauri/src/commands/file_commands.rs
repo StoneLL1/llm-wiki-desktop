@@ -189,9 +189,11 @@ pub fn confirm_pending_action(
                 },
             )?;
             if let Some(next) = next {
-                state
-                    .workflow_service
-                    .dispatch_claimed_run(&state.task_service, &next)?;
+                state.workflow_service.dispatch_claimed_run_with_settings(
+                    &state.task_service,
+                    &state.settings_service,
+                    &next,
+                )?;
             }
         }
         return Ok(ConfirmedAction {
@@ -228,6 +230,12 @@ pub fn confirm_pending_action(
             true,
             true,
         )),
+        Some(ConfirmationExecution::AgentLintRepairStart { .. }) => Err(BackendError::new(
+            "CONFIRMATION_COMMAND_INVALID",
+            "Agent lint repair must be handled by confirm_agent_lint_repair_start.",
+            true,
+            true,
+        )),
         Some(ConfirmationExecution::ChatOverwrite { .. }) => Err(BackendError::new(
             "CONFIRMATION_COMMAND_INVALID",
             "Chat overwrites must be handled by save_answer_to_wiki.",
@@ -259,16 +267,20 @@ pub fn confirm_pending_action(
             ) {
                 Ok((_, next)) => {
                     if let Some(next) = next {
-                        state
-                            .workflow_service
-                            .dispatch_claimed_run(&state.task_service, &next)?;
+                        state.workflow_service.dispatch_claimed_run_with_settings(
+                            &state.task_service,
+                            &state.settings_service,
+                            &next,
+                        )?;
                     }
                 }
                 Err(failure) => {
                     if let Some(next) = failure.next {
-                        state
-                            .workflow_service
-                            .dispatch_claimed_run(&state.task_service, &next)?;
+                        state.workflow_service.dispatch_claimed_run_with_settings(
+                            &state.task_service,
+                            &state.settings_service,
+                            &next,
+                        )?;
                     }
                     return Err(failure.error);
                 }
@@ -318,6 +330,9 @@ fn reject_workflow_owned_generic_confirmation(
         ),
         Some(ConfirmationExecution::UpdateWikiReview { .. }) => Some(
             "Update Wiki review must be handled by confirm_workflow_action or discard_workflow_result.",
+        ),
+        Some(ConfirmationExecution::AgentLintRepairStart { .. }) => Some(
+            "Agent lint repair must be handled by confirm_agent_lint_repair_start or cancel_agent_lint_repair_preparation.",
         ),
         _ => None,
     };
@@ -965,5 +980,61 @@ mod tests {
 
         assert_eq!(error.code, "CONFIRMATION_COMMAND_INVALID");
         assert!(error.message.contains("confirm_workflow_action"));
+    }
+
+    #[test]
+    fn generic_confirmation_rejects_agent_lint_start_before_consuming_it() {
+        let pending = StoredPendingAction {
+            action: PendingAction {
+                id: "agent-lint-start".into(),
+                action_type: PendingActionType::AgentAutoFix,
+                title: "Repair".into(),
+                message: "Repair selected findings".into(),
+                risk_level: RiskLevel::High,
+                affected_paths: vec!["wiki/page.md".into()],
+                preview: None,
+                expires_at: Some("2099-01-01T00:15:00Z".into()),
+                checkpoint_hash: None,
+            },
+            execution: Some(ConfirmationExecution::AgentLintRepairStart {
+                project_id: "project-a".into(),
+                root_path: "D:/project-a".into(),
+                canonical_identity_key: "identity-a".into(),
+                identity_revision: "revision-a".into(),
+                preparation_id: "preparation-a".into(),
+                preparation_revision: "preparation-revision-a".into(),
+                report_id: "report-a".into(),
+                selection_revision: "selection-a".into(),
+                selected_finding_ids: vec!["finding-a".into()],
+                route: crate::models::workflow::WorkflowRoute::Agent {
+                    agent: crate::models::agent::AgentKind::Codex,
+                    model: None,
+                    route_revision: "route-a".into(),
+                },
+                skill: crate::models::lint::WikiLintSkillRef::builtin(),
+                authorized_path_hashes: [("wiki/page.md".into(), Some("a".repeat(64)))]
+                    .into_iter()
+                    .collect(),
+                baseline_fingerprint: "baseline-a".into(),
+                expected_git_head: "b".repeat(40),
+            }),
+        };
+
+        for status in [ConfirmationStatus::Confirmed, ConfirmationStatus::Cancelled] {
+            let registry = crate::models::confirmation::ConfirmationRegistry::default();
+            registry
+                .register_with_execution(pending.action.clone(), pending.execution.clone())
+                .unwrap();
+            let stored = registry.peek(&pending.action.id).unwrap();
+            let error = reject_workflow_owned_generic_confirmation(&stored).unwrap_err();
+
+            assert_eq!(error.code, "CONFIRMATION_COMMAND_INVALID");
+            assert!(error.message.contains("confirm_agent_lint_repair_start"));
+            assert_eq!(registry.peek(&pending.action.id).unwrap(), pending);
+            assert_eq!(
+                registry.confirm(&pending.action.id, status).unwrap().action,
+                pending.action.clone()
+            );
+        }
     }
 }

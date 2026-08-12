@@ -79,6 +79,7 @@ describe("task notification routing", () => {
       canonicalIdentityKey: "identity",
       identityRevision: "revision",
       kind: "health_check",
+      operation: { kind: "built_in" },
       displayStatus: "running",
       scope: { kind: "health_check", mode: "complete" },
       route: null,

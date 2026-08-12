@@ -196,9 +196,11 @@ pub fn start_workflow(
     })?;
     if let WorkflowStartOutcome::Created { run } = &outcome {
         if run.display_status == WorkflowDisplayStatus::Running {
-            state
-                .workflow_service
-                .dispatch_claimed_run(&state.task_service, run)?;
+            state.workflow_service.dispatch_claimed_run_with_settings(
+                &state.task_service,
+                &state.settings_service,
+                run,
+            )?;
         }
     }
     Ok(outcome)
@@ -345,9 +347,11 @@ pub fn get_workflow_run(
         None
     };
     if let Some(next) = next {
-        state
-            .workflow_service
-            .dispatch_claimed_run(&state.task_service, &next)?;
+        state.workflow_service.dispatch_claimed_run_with_settings(
+            &state.task_service,
+            &state.settings_service,
+            &next,
+        )?;
     }
     Ok(run)
 }
@@ -726,12 +730,62 @@ pub fn undo_cancel_queued_workflow(
     state: State<'_, AppState>,
     request: WorkflowRunRequest,
 ) -> Result<WorkflowRun, BackendError> {
-    require_workflow_project(&state, &request)?;
-    let (run, claimed) = state
-        .workflow_service
-        .coordinator
-        .undo_cancel(&state.task_service, &request.task_id)
-        .map_err(|message| workflow_error("WORKFLOW_UNDO_CANCEL_FAILED", message))?;
+    let context = require_workflow_project(&state, &request)?;
+    let before = workflow_run(&state, &request.task_id)?;
+    let is_repair = matches!(
+        before.operation,
+        crate::models::workflow::WorkflowOperation::AgentLintRepair { .. }
+    );
+    let (run, claimed) = state.with_workflow_access(&context, |access| {
+        if !is_repair {
+            return state
+                .workflow_service
+                .coordinator
+                .undo_cancel(&state.task_service, &request.task_id)
+                .map_err(|message| workflow_error("WORKFLOW_UNDO_CANCEL_FAILED", message));
+        }
+        crate::commands::lint_commands::validate_agent_lint_repair_replay_facts(
+            &state,
+            &context,
+            &before,
+            &access,
+            crate::commands::lint_commands::AgentLintRepairReplayIntent::Undo,
+        )?;
+        let (held, _) = state
+            .workflow_service
+            .coordinator
+            .undo_cancel_pending_approval(&state.task_service, &request.task_id)
+            .map_err(|message| workflow_error("WORKFLOW_UNDO_CANCEL_FAILED", message))?;
+        if let Err(error) =
+            crate::commands::lint_commands::restore_agent_lint_repair_attestation_for_run(
+                &state, &held,
+            )
+        {
+            let _ = state
+                .workflow_service
+                .coordinator
+                .cancel_created_without_undo_and_claim_next(&state.task_service, &held.task_id);
+            return Err(error);
+        }
+        match state
+            .workflow_service
+            .coordinator
+            .release_initial_approval_hold_and_claim_next(&state.task_service, &held.task_id)
+        {
+            Ok(result) => Ok(result),
+            Err(message) => {
+                let _ =
+                    crate::commands::lint_commands::cancel_agent_lint_repair_attestation_for_run(
+                        &state, &held,
+                    );
+                let _ = state
+                    .workflow_service
+                    .coordinator
+                    .cancel_created_without_undo_and_claim_next(&state.task_service, &held.task_id);
+                Err(workflow_error("WORKFLOW_UNDO_CANCEL_FAILED", message))
+            }
+        }
+    })?;
     dispatch_next(&state, claimed)?;
     Ok(run)
 }
@@ -786,8 +840,18 @@ pub(crate) fn retry_workflow_for_state(
 ) -> Result<WorkflowStartOutcome, BackendError> {
     let context = require_workflow_project(state, &request)?;
     let original = workflow_run(state, &request.task_id)?;
-    let outcome = state.with_workflow_access(&context, |access| {
-        let replay = revalidate_workflow_replay_with_access(state, &context, &original, access)?;
+    let repair_retry = matches!(
+        original.operation,
+        crate::models::workflow::WorkflowOperation::AgentLintRepair { .. }
+    );
+    let (outcome, released_claim) = state.with_workflow_access(&context, |access| {
+        let replay = revalidate_workflow_replay_with_access(
+            state,
+            &context,
+            &original,
+            access,
+            super::lint_commands::AgentLintRepairReplayIntent::Retry,
+        )?;
         if let Err(error) = replay.eligibility {
             state
                 .workflow_service
@@ -802,25 +866,67 @@ pub(crate) fn retry_workflow_for_state(
                 .map_err(|message| workflow_error("WORKFLOW_RETRY_FAILED", message))?;
             return Err(error);
         }
-        state
-            .workflow_service
-            .coordinator
-            .retry(
+        let outcome = if repair_retry {
+            state.workflow_service.coordinator.retry_pending_approval(
                 &state.task_service,
                 &request.task_id,
                 context.project_id.clone(),
                 context.root.clone(),
                 replay.persistence.task_state_root,
             )
-            .map_err(|message| workflow_error("WORKFLOW_RETRY_FAILED", message))
+        } else {
+            state.workflow_service.coordinator.retry(
+                &state.task_service,
+                &request.task_id,
+                context.project_id.clone(),
+                context.root.clone(),
+                replay.persistence.task_state_root,
+            )
+        }
+        .map_err(|message| workflow_error("WORKFLOW_RETRY_FAILED", message))?;
+        if repair_retry {
+            let WorkflowStartOutcome::Created { run } = outcome else {
+                return Ok((outcome, None));
+            };
+            if let Err(error) = super::lint_commands::attest_agent_lint_repair_run(state, &run) {
+                let (_, next) = state
+                    .workflow_service
+                    .coordinator
+                    .cancel_created_without_undo_and_claim_next(&state.task_service, &run.task_id)
+                    .map_err(|message| workflow_error("WORKFLOW_RETRY_FAILED", message))?;
+                if let Some(next) = next {
+                    state.workflow_service.dispatch_claimed_run_with_settings(
+                        &state.task_service,
+                        &state.settings_service,
+                        &next,
+                    )?;
+                }
+                return Err(error);
+            }
+            let (released, claimed) = state
+                .workflow_service
+                .coordinator
+                .release_initial_approval_hold_and_claim_next(&state.task_service, &run.task_id)
+                .map_err(|message| workflow_error("WORKFLOW_RETRY_FAILED", message))?;
+            return Ok((WorkflowStartOutcome::Created { run: released }, claimed));
+        }
+        Ok((outcome, None))
     })?;
     let run = match &outcome {
         WorkflowStartOutcome::Created { run } | WorkflowStartOutcome::Existing { run } => run,
     };
-    if matches!(outcome, WorkflowStartOutcome::Created { .. }) {
-        state
-            .workflow_service
-            .dispatch_claimed_run(&state.task_service, run)?;
+    if let Some(claimed) = released_claim {
+        state.workflow_service.dispatch_claimed_run_with_settings(
+            &state.task_service,
+            &state.settings_service,
+            &claimed,
+        )?;
+    } else if !repair_retry && matches!(outcome, WorkflowStartOutcome::Created { .. }) {
+        state.workflow_service.dispatch_claimed_run_with_settings(
+            &state.task_service,
+            &state.settings_service,
+            run,
+        )?;
     }
     Ok(outcome)
 }
@@ -835,8 +941,39 @@ pub(crate) fn revalidate_workflow_replay_with_access(
     context: &crate::models::paths::ProjectContext,
     run: &WorkflowRun,
     access: crate::services::WorkflowAccessSnapshot,
+    repair_intent: super::lint_commands::AgentLintRepairReplayIntent,
 ) -> Result<WorkflowReplayValidation, BackendError> {
     ensure_workflow_identity(context, run)?;
+    if matches!(
+        run.operation,
+        crate::models::workflow::WorkflowOperation::AgentLintRepair { .. }
+    ) {
+        let persistence =
+            resolve_workflow_persistence_binding(context, access.persistence.clone())?;
+        let eligibility = super::lint_commands::validate_agent_lint_repair_replay_facts(
+            state,
+            context,
+            run,
+            &access,
+            repair_intent,
+        )
+        .map_err(|error| {
+            BackendError::new(
+                "WORKFLOW_REPREPARATION_REQUIRED",
+                "Agent lint repair access, route, Git state, or authorized Wiki paths changed. Prepare and approve the repair again.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({
+                "action": crate::models::workflow::WorkflowPrerequisiteAction::PrepareAgain,
+                "reasonCode": error.code,
+            }))
+        });
+        return Ok(WorkflowReplayValidation {
+            persistence,
+            eligibility,
+        });
+    }
     state.require_workflow_content_write_root(context, &run.kind)?;
     let route_selection = run.route.as_ref().and_then(|route| match route {
         crate::models::workflow::WorkflowRoute::Agent { agent, .. } => {
@@ -1144,7 +1281,7 @@ fn workflow_run(state: &AppState, task_id: &str) -> Result<WorkflowRun, BackendE
         .ok_or_else(|| workflow_error("WORKFLOW_NOT_FOUND", "The workflow run was not found."))
 }
 
-fn cancel_or_discard_workflow(
+pub(crate) fn cancel_or_discard_workflow(
     state: &AppState,
     context: &crate::models::paths::ProjectContext,
     task_id: &str,
@@ -1156,6 +1293,16 @@ fn cancel_or_discard_workflow(
             "WORKFLOW_RESULT_NOT_DISCARDABLE",
             "Only a workflow result waiting for confirmation can be discarded.",
         ));
+    }
+    if matches!(
+        before.display_status,
+        WorkflowDisplayStatus::Queued
+            | WorkflowDisplayStatus::Running
+            | WorkflowDisplayStatus::WaitingForConfirmation
+    ) {
+        crate::commands::lint_commands::cancel_agent_lint_repair_attestation_for_run(
+            state, &before,
+        )?;
     }
     state
         .workflow_service
@@ -1203,9 +1350,11 @@ fn generate_content_services(state: &AppState) -> GenerateContentExecutionServic
 
 fn dispatch_next(state: &AppState, next: Option<WorkflowRun>) -> Result<(), BackendError> {
     if let Some(next) = next {
-        state
-            .workflow_service
-            .dispatch_claimed_run(&state.task_service, &next)?;
+        state.workflow_service.dispatch_claimed_run_with_settings(
+            &state.task_service,
+            &state.settings_service,
+            &next,
+        )?;
     }
     Ok(())
 }
@@ -1493,8 +1642,14 @@ mod batch6_tests {
         };
 
         runner.version.store(2, Ordering::SeqCst);
-        let replay =
-            revalidate_workflow_replay_with_access(&state, &context, &run, access).unwrap();
+        let replay = revalidate_workflow_replay_with_access(
+            &state,
+            &context,
+            &run,
+            access,
+            crate::commands::lint_commands::AgentLintRepairReplayIntent::Continue,
+        )
+        .unwrap();
         assert!(replay.persistence.task_state_root.is_none());
         assert_eq!(
             replay.eligibility.unwrap_err().code,

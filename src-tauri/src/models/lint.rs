@@ -49,12 +49,45 @@ pub struct AgentLintRepairPreparation {
     pub preparation_id: String,
     pub preparation_revision: String,
     pub report_id: String,
+    pub selection_revision: String,
     pub selected_finding_ids: Vec<String>,
     pub route: WorkflowRoute,
     pub skill: WikiLintSkillRef,
     pub authorized_paths: Vec<String>,
+    pub authorized_path_hashes: BTreeMap<String, Option<String>>,
     pub baseline_fingerprint: String,
+    pub expected_git_head: String,
     pub pending_action: crate::models::confirmation::PendingAction,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PrepareAgentLintRepairRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub report_id: String,
+    pub selected_finding_ids: Vec<String>,
+    pub agent: crate::models::agent::AgentKind,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConfirmAgentLintRepairStartRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub action_id: String,
+    pub preparation_id: String,
+    pub preparation_revision: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CancelAgentLintRepairPreparationRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub action_id: String,
+    pub preparation_id: String,
+    pub preparation_revision: String,
 }
 
 /// Coarse severity for surfacing and grouping lint issues.
@@ -784,5 +817,79 @@ mod tests {
         assert!(value.get("localReport").is_none());
         assert!(value.get("deepReport").is_none());
         assert!(value.get("healthCheckReport").is_none());
+    }
+
+    #[test]
+    fn agent_lint_prepare_confirm_and_cancel_requests_use_exact_backend_bindings() {
+        let prepare: PrepareAgentLintRepairRequest = serde_json::from_value(json!({
+            "projectId": "project-a",
+            "projectRootPath": "C:/wiki",
+            "reportId": "health-report-1",
+            "selectedFindingIds": ["finding-a"],
+            "agent": "codex"
+        }))
+        .unwrap();
+        assert_eq!(prepare.report_id, "health-report-1");
+        assert_eq!(prepare.selected_finding_ids, vec!["finding-a"]);
+        assert_eq!(prepare.agent, crate::models::agent::AgentKind::Codex);
+
+        let confirm: ConfirmAgentLintRepairStartRequest = serde_json::from_value(json!({
+            "projectId": "project-a",
+            "projectRootPath": "C:/wiki",
+            "actionId": "agent-lint-prepare-1",
+            "preparationId": "prepare-1",
+            "preparationRevision": "prepare-revision-1"
+        }))
+        .unwrap();
+        assert_eq!(confirm.preparation_id, "prepare-1");
+        assert_eq!(confirm.preparation_revision, "prepare-revision-1");
+
+        let cancel: CancelAgentLintRepairPreparationRequest = serde_json::from_value(json!({
+            "projectId": "project-a",
+            "projectRootPath": "C:/wiki",
+            "actionId": "agent-lint-prepare-1",
+            "preparationId": "prepare-1",
+            "preparationRevision": "prepare-revision-1"
+        }))
+        .unwrap();
+        assert_eq!(cancel.action_id, confirm.action_id);
+        assert_eq!(cancel.preparation_id, confirm.preparation_id);
+        assert_eq!(cancel.preparation_revision, confirm.preparation_revision);
+    }
+
+    #[test]
+    fn agent_lint_preparation_exposes_the_stable_selection_revision() {
+        let preparation = AgentLintRepairPreparation {
+            preparation_id: "prepare-1".into(),
+            preparation_revision: "prepare-revision-1".into(),
+            report_id: "health-report-1".into(),
+            selection_revision: "selection-revision-1".into(),
+            selected_finding_ids: vec!["finding-a".into()],
+            route: crate::models::workflow::WorkflowRoute::Agent {
+                agent: crate::models::agent::AgentKind::Codex,
+                model: None,
+                route_revision: "route-revision-1".into(),
+            },
+            skill: WikiLintSkillRef::builtin(),
+            authorized_paths: vec!["wiki/a.md".into()],
+            authorized_path_hashes: [("wiki/a.md".into(), Some("a".repeat(64)))]
+                .into_iter()
+                .collect(),
+            baseline_fingerprint: "baseline-1".into(),
+            expected_git_head: "abcdef0".into(),
+            pending_action: PendingAction {
+                id: "action-1".into(),
+                action_type: PendingActionType::AgentAutoFix,
+                title: "Repair".into(),
+                message: "Repair".into(),
+                risk_level: RiskLevel::High,
+                affected_paths: vec!["wiki/a.md".into()],
+                preview: None,
+                expires_at: None,
+                checkpoint_hash: None,
+            },
+        };
+        let value = serde_json::to_value(preparation).unwrap();
+        assert_eq!(value["selectionRevision"], "selection-revision-1");
     }
 }

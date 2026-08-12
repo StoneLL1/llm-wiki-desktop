@@ -942,6 +942,7 @@ fn build_snapshot_from_evaluation(
     };
     let execution_options = WorkflowExecutionOptions {
         preparation_revision: "pending".into(),
+        operation: crate::models::workflow::WorkflowOperation::BuiltIn,
         preparation_fingerprint: None,
         existing_target_hash,
         restricted_content_acknowledgement_revision: None,

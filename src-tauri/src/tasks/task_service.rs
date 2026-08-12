@@ -17,9 +17,10 @@ use crate::models::task::{
     TaskType,
 };
 use crate::models::workflow::{
-    WorkflowDisplayStatus, WorkflowErrorSummary, WorkflowExecutionState, WorkflowKind,
-    WorkflowPendingAction, WorkflowPersistenceMode, WorkflowPersistenceTransition, WorkflowResult,
-    WorkflowRun, WorkflowRunSummary, WorkflowStageStatus, WORKFLOW_SCHEMA_VERSION,
+    validate_workflow_execution_contract, WorkflowDisplayStatus, WorkflowErrorSummary,
+    WorkflowExecutionState, WorkflowKind, WorkflowOperation, WorkflowPendingAction,
+    WorkflowPersistenceMode, WorkflowPersistenceTransition, WorkflowResult, WorkflowRun,
+    WorkflowRunSummary, WorkflowStageStatus, WORKFLOW_SCHEMA_VERSION,
 };
 use crate::services::FileStore;
 use crate::tasks::cancellation::CancellationRegistry;
@@ -221,7 +222,7 @@ fn parse_persisted_task(json: &str, persisted_id: &str) -> Result<RecoveredTaskS
     // Once a document identifies itself as a wrapper it must never fall back
     // to the raw legacy shape. Otherwise malformed or future wrapper fields
     // could be silently ignored by BackendTask's permissive deserializer.
-    let entry = serde_json::from_value::<PersistedTaskEntry>(value)
+    let mut entry = serde_json::from_value::<PersistedTaskEntry>(value)
         .map_err(|error| format!("Invalid persisted task wrapper: {error}"))?;
     if !matches!(entry.schema_version, 1 | PERSISTED_TASK_SCHEMA_VERSION) {
         return Err(format!(
@@ -229,13 +230,28 @@ fn parse_persisted_task(json: &str, persisted_id: &str) -> Result<RecoveredTaskS
             entry.schema_version
         ));
     }
-    if let Some(workflow) = entry.workflow.as_ref() {
-        if workflow.schema_version != WORKFLOW_SCHEMA_VERSION {
-            return Err(format!(
-                "Unsupported workflow execution schema version: {}",
-                workflow.schema_version
-            ));
+    if let Some(workflow) = entry.workflow.as_mut() {
+        match workflow.schema_version {
+            1 => {
+                // Schema v1 had no operation subtype. Never trust a field
+                // injected into a v1 document as new repair authority.
+                workflow.execution_options.operation = WorkflowOperation::BuiltIn;
+                workflow.schema_version = WORKFLOW_SCHEMA_VERSION;
+            }
+            WORKFLOW_SCHEMA_VERSION => {}
+            version => {
+                return Err(format!(
+                    "Unsupported workflow execution schema version: {version}"
+                ));
+            }
         }
+        validate_workflow_execution_contract(
+            &workflow.kind,
+            &workflow.scope,
+            workflow.route.as_ref(),
+            &workflow.execution_options,
+        )
+        .map_err(|error| format!("Invalid persisted workflow execution contract: {error}"))?;
     }
     let snapshot = (
         entry.task,

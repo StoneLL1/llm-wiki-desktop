@@ -21,11 +21,14 @@ export interface AgentLintRepairPreparation {
   preparationId: string;
   preparationRevision: string;
   reportId: string;
+  selectionRevision: string;
   selectedFindingIds: string[];
   route: WorkflowRoute;
   skill: WikiLintSkillRef;
   authorizedPaths: string[];
+  authorizedPathHashes: Record<string, string | null>;
   baselineFingerprint: string;
+  expectedGitHead: string;
   pendingAction: PendingAction;
 }
 
