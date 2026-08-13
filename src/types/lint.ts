@@ -32,6 +32,13 @@ export interface AgentLintRepairPreparation {
   pendingAction: PendingAction;
 }
 
+export interface AgentLintRepairRollbackResult {
+  taskId: string;
+  rolledBackCommit: string;
+  rollbackCommit: string;
+  affectedPaths: string[];
+}
+
 export type LintSeverity = "error" | "warning" | "info";
 
 export type LintIssueSource = "local" | "agent";
@@ -209,6 +216,34 @@ export interface HealthCheckReport {
   findingsByType: Partial<Record<LintIssueType, number>>;
   durationMs: number;
   generatedAt: string;
+}
+
+export const AGENT_LINT_REPAIR_ISSUE_TYPES = [
+  "duplicate_topic",
+  "weak_cross_reference",
+  "missing_source",
+  "schema_mismatch",
+  "outdated_content",
+  "contradiction",
+] as const;
+
+export type AgentLintRepairIssueType = typeof AGENT_LINT_REPAIR_ISSUE_TYPES[number];
+
+export function isAgentLintRepairEligible(
+  issue: LintIssue,
+  report: HealthCheckReport | null,
+): boolean {
+  if (
+    !report
+    || report.mode !== "complete"
+    || !report.persistent
+    || report.route.kind !== "agent"
+    || issue.source !== "agent"
+    || !(report.findingOrigins[issue.id] ?? []).includes("agent")
+  ) {
+    return false;
+  }
+  return (AGENT_LINT_REPAIR_ISSUE_TYPES as readonly string[]).includes(issue.issueType);
 }
 
 export type LintRoutePreference = "auto" | "agent" | "byok";

@@ -17,6 +17,7 @@ import type {
   WorkflowStartOutcome,
   WorkflowsOverview,
 } from "../types/workflow";
+import type { AgentLintRepairRollbackResult } from "../types/lint";
 
 export function getWorkflowsOverview(
   request: WorkflowProjectRequest,
@@ -94,4 +95,15 @@ export function discardWorkflowResult(
   request: WorkflowRunRequest,
 ): Promise<WorkflowRun> {
   return invoke<WorkflowRun>("discard_workflow_result", { request });
+}
+
+export function rollbackAgentLintRepair(
+  request: {
+    projectId: string;
+    projectRootPath: string;
+    taskId: string;
+    expectedFinalCommit: string;
+  },
+): Promise<AgentLintRepairRollbackResult> {
+  return invoke<AgentLintRepairRollbackResult>("rollback_agent_lint_repair", { request });
 }

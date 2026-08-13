@@ -9,6 +9,8 @@ import type {
   LintReport,
   PersistedLintReport,
 } from "../types/lint";
+import { useProjectStore } from "./projectStore";
+import { useWorkflowStore } from "./workflowStore";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 
@@ -43,6 +45,8 @@ const PROJECT = { projectId: "p", rootPath: "/x" };
 beforeEach(() => {
   invokeMock.mockReset();
   useLintStore.getState().reset();
+  useProjectStore.setState({ currentProject: PROJECT, authority: null } as never);
+  useWorkflowStore.getState().reset();
   Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
 });
 
@@ -218,6 +222,153 @@ describe("lintStore", () => {
     expect(useLintStore.getState().deepTaskId).toBe("task-1");
     expect(useLintStore.getState().runningDeep).toBe(true);
     expect(invokeMock.mock.calls[0][1].request.route).toBe("auto");
+  });
+
+  it("filters Agent repair selection to the current persisted Health findings", () => {
+    const eligible = localIssue({
+      id: "duplicate_topic:wiki/重复.md",
+      source: "agent",
+      issueType: "duplicate_topic",
+      path: "wiki/重复.md",
+      fixability: "none",
+    });
+    const unsupported = localIssue({
+      id: "dead_link:wiki/a.md:ghost",
+      source: "agent",
+      issueType: "dead_link",
+    });
+    const healthReport = {
+      reportId: "health-agent",
+      taskId: "health-agent",
+      mode: "complete" as const,
+      route: { kind: "agent" as const, agent: "codex" as const, model: "gpt-5", routeRevision: "route-a" },
+      persistent: true,
+      issues: [eligible, unsupported],
+      findingOrigins: { [eligible.id]: ["agent" as const], [unsupported.id]: ["agent" as const] },
+      coverage: { scannedPages: 2, sourcePages: 0, wikiPages: 2, notApplicableRules: [] },
+      errorCount: 1,
+      warningCount: 1,
+      infoCount: 0,
+      findingsByType: { duplicate_topic: 1, dead_link: 1 },
+      durationMs: 20,
+      generatedAt: "2026-08-10T00:00:00Z",
+    };
+    useLintStore.setState({ healthReport });
+
+    useLintStore.getState().setAgentRepairSelection(healthReport.reportId, [unsupported.id, eligible.id]);
+
+    expect(useLintStore.getState().agentRepairSelection).toEqual([eligible.id]);
+    expect(useLintStore.getState().agentRepairSelectionReportId).toBe(healthReport.reportId);
+
+    const many = Array.from({ length: 101 }, (_, index) => localIssue({
+      id: `duplicate_topic:wiki/page-${index}.md`,
+      source: "agent",
+      issueType: "duplicate_topic",
+      path: `wiki/page-${index}.md`,
+      fixability: "none",
+    }));
+    useLintStore.setState({
+      healthReport: {
+        ...healthReport,
+        issues: many,
+        findingOrigins: Object.fromEntries(many.map((candidate) => [candidate.id, ["agent"]])),
+      },
+    });
+    useLintStore.getState().setAgentRepairSelection(healthReport.reportId, many.map((candidate) => candidate.id));
+    expect(useLintStore.getState().agentRepairSelection).toHaveLength(101);
+    expect(useLintStore.getState().agentRepairErrorCode).toBe("LINT_REPAIR_SELECTION_LIMIT");
+  });
+
+  it("prepares and confirms one Agent repair batch with project scope guards", async () => {
+    const issue = localIssue({
+      id: "contradiction:wiki/事实.md",
+      source: "agent",
+      issueType: "contradiction",
+      path: "wiki/事实.md",
+      fixability: "none",
+    });
+    const healthReport = {
+      reportId: "health-agent-confirm",
+      taskId: "health-agent-confirm",
+      mode: "complete" as const,
+      route: { kind: "agent" as const, agent: "codex" as const, model: "gpt-5", routeRevision: "route-a" },
+      persistent: true,
+      issues: [issue],
+      findingOrigins: { [issue.id]: ["agent" as const] },
+      coverage: { scannedPages: 1, sourcePages: 0, wikiPages: 1, notApplicableRules: [] },
+      errorCount: 1,
+      warningCount: 0,
+      infoCount: 0,
+      findingsByType: { contradiction: 1 },
+      durationMs: 20,
+      generatedAt: "2026-08-10T00:00:00Z",
+    };
+    useLintStore.setState({ healthReport });
+    useLintStore.getState().setAgentRepairSelection(healthReport.reportId, [issue.id]);
+    const preparation = {
+      preparationId: "prep-agent",
+      preparationRevision: "prep-revision",
+      reportId: healthReport.reportId,
+      selectionRevision: "selection-revision",
+      selectedFindingIds: [issue.id],
+      route: healthReport.route,
+      skill: { id: "builtin.wiki-lint" as const, version: "2026-08-12.1" as const, sha256: "skill" as const },
+      authorizedPaths: [issue.path],
+      authorizedPathHashes: { [issue.path]: "hash-a" },
+      baselineFingerprint: "baseline-a",
+      expectedGitHead: "head-a",
+      pendingAction: {
+        id: "action-agent",
+        actionType: "agent_auto_fix" as const,
+        title: "Repair",
+        message: "Repair",
+        riskLevel: "high" as const,
+        affectedPaths: [issue.path],
+        preview: null,
+        expiresAt: null,
+      },
+    };
+    const run = { taskId: "run-agent", updatedAt: "2026-08-10T00:01:00Z" } as never;
+    invokeMock.mockResolvedValueOnce(preparation).mockResolvedValueOnce({ kind: "created", run });
+
+    await expect(useLintStore.getState().prepareAgentLintRepair(PROJECT.projectId, PROJECT.rootPath, healthReport.reportId)).resolves.toEqual(preparation);
+    expect(invokeMock.mock.calls[0][0]).toBe("prepare_agent_lint_repair");
+    await expect(useLintStore.getState().confirmAgentLintRepairStart()).resolves.toBe(run);
+    expect(invokeMock.mock.calls[1][0]).toBe("confirm_agent_lint_repair_start");
+    expect(useWorkflowStore.getState().selectedTaskId).toBe("run-agent");
+  });
+
+  it("does not publish a confirmed run after the project identity changes", async () => {
+    const originalAuthority = {
+      projectId: PROJECT.projectId,
+      canonicalRootPath: PROJECT.rootPath,
+      canonicalIdentityKey: "identity-a",
+      identityRevision: "revision-a",
+    };
+    useProjectStore.setState({ authority: originalAuthority } as never);
+    useLintStore.setState({
+      agentRepairPreparation: {
+        preparationId: "prep-identity",
+        preparationRevision: "revision-prep",
+        pendingAction: { id: "action-identity" },
+      } as never,
+      agentRepairProjectId: PROJECT.projectId,
+      agentRepairRootPath: PROJECT.rootPath,
+      agentRepairCanonicalIdentityKey: "identity-a",
+      agentRepairIdentityRevision: "revision-a",
+    });
+    let resolveOutcome!: (value: unknown) => void;
+    invokeMock.mockReturnValueOnce(new Promise((resolve) => { resolveOutcome = resolve; }));
+
+    const confirming = useLintStore.getState().confirmAgentLintRepairStart();
+    useProjectStore.setState({
+      authority: { ...originalAuthority, canonicalIdentityKey: "identity-b", identityRevision: "revision-b" },
+    } as never);
+    resolveOutcome({ kind: "created", run: { taskId: "stale-run", updatedAt: "2026-08-10T00:02:00Z" } });
+
+    await expect(confirming).resolves.toBeNull();
+    expect(useWorkflowStore.getState().runs).toEqual([]);
+    expect(useLintStore.getState().agentRepairErrorCode).toBe("LINT_REPAIR_IDENTITY_CHANGED");
   });
 
   it("selectAllIssues merges local and deep findings", () => {

@@ -177,7 +177,34 @@ export function presentWorkflowResult(run: WorkflowRun): WorkflowResultPresentat
         ],
       };
     case "agent_lint_repair":
-      return null;
+      {
+        const roundRows = result.rounds.flatMap((round) => [
+          { labelKey: "workflows.result.agent_lint_repair.roundEvidence", value: { kind: "text", value: `#${round.round}: ${round.summary}` } as WorkflowResultValue },
+          { labelKey: "workflows.result.agent_lint_repair.roundAffectedPaths", value: { kind: "count", value: round.affectedPaths.length } as WorkflowResultValue },
+          { labelKey: "workflows.result.agent_lint_repair.roundUnresolved", value: { kind: "count", value: round.unresolvedFindingIds.length } as WorkflowResultValue },
+        ]);
+      return {
+        titleKey: "workflows.result.agent_lint_repair.title",
+        summaryKey: "workflows.result.agent_lint_repair.summary",
+        primaryActionKey: "workflows.action.openLintResults",
+        paths: result.affectedPaths,
+        rows: [
+          { labelKey: "workflows.result.agent_lint_repair.outcome", value: { kind: "translation", key: `workflows.result.agent_lint_repair.outcome.${result.outcome}` } },
+          { labelKey: "workflows.result.agent_lint_repair.resolved", value: { kind: "count", value: result.resolvedFindingIds.length } },
+          { labelKey: "workflows.result.agent_lint_repair.unresolved", value: { kind: "count", value: result.unresolvedFindingIds.length } },
+          { labelKey: "workflows.result.agent_lint_repair.introduced", value: { kind: "count", value: result.introducedFindingIds.length } },
+          { labelKey: "workflows.result.agent_lint_repair.skipped", value: { kind: "count", value: result.skippedFindingIds.length } },
+          { labelKey: "workflows.result.agent_lint_repair.rounds", value: { kind: "count", value: result.rounds.length } },
+          { labelKey: "workflows.result.agent_lint_repair.diff", value: { kind: "boolean", value: result.diffAvailable } },
+          { labelKey: "workflows.result.agent_lint_repair.rollback", value: { kind: "boolean", value: result.rollbackAvailable } },
+          ...roundRows,
+          { labelKey: "workflows.result.checkpointHash", value: { kind: "text", value: result.checkpointHash, mono: true } },
+          { labelKey: "workflows.result.finalCommit", value: { kind: "text", value: result.finalCommit, mono: true } },
+          { labelKey: "workflows.result.indexRefreshWarnings", value: { kind: "count", value: result.indexRefreshWarnings.length } },
+          ...commonRows,
+        ],
+      };
+      }
   }
 }
 
@@ -277,7 +304,12 @@ export function workflowHistoryOutcomeLabel(
         validation: t(`workflows.result.${outcome.validationPassed ? "yes" : "no"}`),
       });
     case "agent_lint_repair":
-      return null;
+      return t("workflows.history.outcome.agentLintRepair", {
+        resolved: formatter.format(outcome.resolvedCount),
+        unresolved: formatter.format(outcome.unresolvedCount),
+        introduced: formatter.format(outcome.introducedCount),
+        outcome: t(`workflows.result.agent_lint_repair.outcome.${outcome.outcome}`),
+      });
   }
 }
 
