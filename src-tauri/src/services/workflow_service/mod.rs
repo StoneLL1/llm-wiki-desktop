@@ -36,9 +36,24 @@ pub(crate) use persistence::recover_workflow;
 pub use persistence::{project_identity, ProjectWorkflowIdentity};
 pub use preferences::{WorkflowPreference, WorkflowPreferences};
 pub use preparation::{
-    resolve_workflow_persistence_binding, workflow_baseline_for_scope, workflow_stages,
-    PrepareWorkflowInput, ValidatedWorkflowStart, WorkflowAccessSnapshot,
+    agent_lint_repair_stages, resolve_workflow_persistence_binding, workflow_baseline_for_scope,
+    workflow_stages, PrepareWorkflowInput, ValidatedWorkflowStart, WorkflowAccessSnapshot,
     WorkflowPersistenceBinding, WorkflowPreparationEnvironment, WorkflowPreparationService,
+};
+#[cfg(feature = "gui")]
+pub(crate) use runners::agent_lint_repair::{
+    agent_lint_repair_decision_review, agent_lint_repair_file_diff_page,
+};
+pub use runners::agent_lint_repair::{
+    agent_lint_repair_interrupted_result, agent_lint_repair_result_digest,
+    agent_lint_repair_terminal_file_diff_page, cancel_agent_lint_repair_review,
+    confirm_agent_lint_repair_review_authorized,
+    confirm_agent_lint_repair_review_with_round_executor, execute_agent_lint_repair_round_with,
+    reconcile_agent_lint_repair_after_recovery, record_agent_lint_repair_recovery_failure,
+    restore_agent_lint_repair_confirmation, rollback_and_discard_agent_lint_repair_candidate,
+    run_agent_lint_repair_authorized, run_agent_lint_repair_with_round_executor,
+    AgentLintRepairConfirmationFailure, AgentLintRepairExecutionServices,
+    AgentLintRepairRoundExecution, AgentLintRepairRunner,
 };
 pub use runners::generate_content::{
     cancel_generate_content_confirmation, confirm_generate_content_overwrite,

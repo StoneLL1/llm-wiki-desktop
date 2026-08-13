@@ -36,10 +36,12 @@ pub struct AgentInvocation {
 /// the executable/spawn target are captured from one `AgentProbeTarget`, so a
 /// caller cannot authorize one PATH entry and execute another (including npm
 /// `.cmd` shims that must be invoked through their resolved node/script pair).
+#[derive(Debug)]
 pub(crate) struct PreparedLintAgent {
     kind: AgentKind,
     info: AgentInfo,
     target_revision: String,
+    route_revision: String,
     invocation: AgentInvocation,
 }
 
@@ -50,6 +52,13 @@ impl PreparedLintAgent {
 
     pub(crate) fn target_revision(&self) -> &str {
         &self.target_revision
+    }
+
+    /// Full route authority shared with Workflow route preparation. This
+    /// includes Agent kind/version/executable identity, the exact argv profile,
+    /// and the pinned spawn-target revision.
+    pub(crate) fn route_revision(&self) -> &str {
+        &self.route_revision
     }
 }
 
@@ -970,6 +979,10 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
                 true,
             ));
         }
+        let profile_revision =
+            Self::lint_route_profile_revision(kind).ok_or_else(|| unsupported_lint_agent(kind))?;
+        let route_revision =
+            lint_agent_route_revision(kind, &info, profile_revision, &target_revision)?;
         let mut args = target.leading_args;
         args.extend(invocation.args);
         invocation.program = target.program;
@@ -978,6 +991,7 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
             kind,
             info,
             target_revision,
+            route_revision,
             invocation,
         })
     }
@@ -989,6 +1003,61 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
     ) -> Result<(AgentInfo, String), BackendError> {
         let (info, _, target_revision) = self.stable_lint_analysis_target(kind, is_default)?;
         Ok((info, target_revision))
+    }
+
+    /// Return the exact repair route revision advertised by H4A. The digest
+    /// is derived from the same stable target and repair argv builder later
+    /// captured by `prepare_lint_repair`; unsupported Agents never probe and
+    /// unavailable selected Agents are returned as unavailable facts rather
+    /// than being replaced by another route.
+    pub(crate) fn lint_repair_route_facts(
+        &self,
+        kind: AgentKind,
+        is_default: bool,
+    ) -> Result<(AgentInfo, String), BackendError> {
+        let profile_revision = Self::lint_repair_route_profile_revision(kind)
+            .ok_or_else(|| unsupported_lint_agent(kind))?;
+        let (info, _, target_revision) = self.stable_lint_analysis_target(kind, is_default)?;
+        let route_revision =
+            lint_agent_route_revision(kind, &info, &profile_revision, &target_revision)?;
+        Ok((info, route_revision))
+    }
+
+    /// Probe and bind one exact workspace-write lint repair launch target.
+    /// The returned permit carries the same full route revision as
+    /// `lint_repair_route_facts`, and execution never resolves PATH again.
+    pub(crate) fn prepare_lint_repair(
+        &self,
+        kind: AgentKind,
+        is_default: bool,
+        workspace: &Path,
+        prompt: &str,
+    ) -> Result<PreparedLintAgent, BackendError> {
+        let mut invocation = Self::lint_repair_invocation(kind, workspace, prompt)?;
+        let profile_revision = Self::lint_repair_route_profile_revision(kind)
+            .ok_or_else(|| unsupported_lint_agent(kind))?;
+        let (info, target, target_revision) = self.stable_lint_analysis_target(kind, is_default)?;
+        if info.state != AgentDetectionState::Installed {
+            return Err(BackendError::new(
+                "LINT_AGENT_UNAVAILABLE",
+                "The prepared lint repair Agent is no longer installed with a supported invocation profile.",
+                true,
+                true,
+            ));
+        }
+        let route_revision =
+            lint_agent_route_revision(kind, &info, &profile_revision, &target_revision)?;
+        let mut args = target.leading_args;
+        args.extend(invocation.args);
+        invocation.program = target.program;
+        invocation.args = args;
+        Ok(PreparedLintAgent {
+            kind,
+            info,
+            target_revision,
+            route_revision,
+            invocation,
+        })
     }
 
     fn stable_lint_analysis_target(
@@ -3565,6 +3634,33 @@ fn lint_repair_program_and_args(
     }
 }
 
+fn lint_agent_route_revision(
+    kind: AgentKind,
+    info: &AgentInfo,
+    profile_revision: &str,
+    target_revision: &str,
+) -> Result<String, BackendError> {
+    // This tuple intentionally mirrors the H4A Workflow route digest. It has
+    // no object/map members, so serde's compact JSON is already canonical.
+    let canonical = serde_json::to_string(&(
+        kind,
+        &info.state,
+        &info.version,
+        &info.executable_path,
+        profile_revision,
+        target_revision,
+    ))
+    .map_err(|error| {
+        BackendError::new(
+            "LINT_AGENT_ROUTE_BINDING_FAILED",
+            error.to_string(),
+            false,
+            true,
+        )
+    })?;
+    Ok(format!("{:x}", Sha256::digest(canonical.as_bytes())))
+}
+
 fn validate_candidate_workspace(workspace: &Path) -> Result<(), BackendError> {
     let candidate_temp = std::env::temp_dir();
     let candidate_root = candidate_temp.join("llm-wiki-desktop");
@@ -5307,6 +5403,233 @@ mod tests {
             assert!(!AgentService::supports_lint_agent(kind));
             assert!(AgentService::lint_repair_route_profile_revision(kind).is_none());
         }
+        std::fs::remove_dir_all(workspace).ok();
+    }
+
+    #[test]
+    fn prepared_lint_repair_matches_catalog_route_and_launches_only_the_pinned_target() {
+        struct PreparedRepairRunner {
+            executable_root: PathBuf,
+            resolves: AtomicUsize,
+            runs: AtomicUsize,
+            invocations: Mutex<Vec<AgentInvocation>>,
+        }
+
+        impl ProcessRunner for PreparedRepairRunner {
+            fn find_executable(&self, command: &str) -> Option<PathBuf> {
+                Some(self.executable_root.join(format!("{command}.cmd")))
+            }
+
+            fn resolve_probe_target(&self, command: &str) -> AgentProbeTarget {
+                self.resolves.fetch_add(1, Ordering::SeqCst);
+                AgentProbeTarget {
+                    logical_command: command.into(),
+                    executable_path: self.find_executable(command),
+                    program: format!("bound-{command}"),
+                    leading_args: vec![self
+                        .executable_root
+                        .join(format!("{command}.js"))
+                        .to_string_lossy()
+                        .into_owned()],
+                }
+            }
+
+            fn run_probe_with_timeout(
+                &self,
+                target: &AgentProbeTarget,
+                args: &[&str],
+                _: Duration,
+            ) -> Result<String, BackendError> {
+                if args == ["--version"] {
+                    return Ok(format!("{} 1.0.0", target.logical_command));
+                }
+                Ok(if target.logical_command == "claude" {
+                    supported_claude_help()
+                } else {
+                    "--json --ephemeral --sandbox --ignore-user-config --ignore-rules --output-schema --output-last-message --skip-git-repo-check -C".into()
+                })
+            }
+
+            fn run_with_timeout(
+                &self,
+                _: &str,
+                _: &[&str],
+                _: Duration,
+            ) -> Result<String, BackendError> {
+                panic!("prepared repair must use the pinned probe target")
+            }
+
+            fn run_capture(&self, _: &AgentInvocation) -> Result<(String, String), BackendError> {
+                unreachable!()
+            }
+
+            fn run_task_streaming(
+                &self,
+                invocation: &AgentInvocation,
+                _: &TaskService,
+                _: &str,
+            ) -> Result<String, BackendError> {
+                self.runs.fetch_add(1, Ordering::SeqCst);
+                self.invocations.lock().unwrap().push(invocation.clone());
+                Ok("structured repair result".into())
+            }
+        }
+
+        let executable_root = tempfile::tempdir().unwrap();
+        for command in ["claude", "codex"] {
+            std::fs::write(
+                executable_root.path().join(format!("{command}.cmd")),
+                format!("{command} shim"),
+            )
+            .unwrap();
+            std::fs::write(
+                executable_root.path().join(format!("{command}.js")),
+                format!("{command} script"),
+            )
+            .unwrap();
+        }
+        let workspace = std::env::temp_dir()
+            .join("llm-wiki-desktop")
+            .join(format!("lint-repair-bound-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let runner = Arc::new(PreparedRepairRunner {
+            executable_root: executable_root.path().to_path_buf(),
+            resolves: AtomicUsize::new(0),
+            runs: AtomicUsize::new(0),
+            invocations: Mutex::new(Vec::new()),
+        });
+        let service = AgentService::with_runner(runner.clone());
+        let tasks = TaskService::default();
+
+        for kind in [AgentKind::Codex, AgentKind::Claude] {
+            let (catalog_info, catalog_revision) =
+                service.lint_repair_route_facts(kind, false).unwrap();
+            let prepared = service
+                .prepare_lint_repair(kind, false, &workspace, "repair request")
+                .unwrap();
+            assert_eq!(prepared.info(), &catalog_info);
+            assert_eq!(prepared.route_revision(), catalog_revision);
+            let profile_revision = AgentService::lint_repair_route_profile_revision(kind).unwrap();
+            let canonical = serde_json::to_string(&(
+                kind,
+                &catalog_info.state,
+                &catalog_info.version,
+                &catalog_info.executable_path,
+                &profile_revision,
+                prepared.target_revision(),
+            ))
+            .unwrap();
+            assert_eq!(
+                prepared.route_revision(),
+                format!("{:x}", Sha256::digest(canonical.as_bytes()))
+            );
+            let resolves_after_prepare = runner.resolves.load(Ordering::SeqCst);
+            let task = tasks.create_task(
+                TaskType::DeepLint,
+                Some("project".into()),
+                format!("{kind:?} repair"),
+                true,
+            );
+            assert_eq!(
+                service
+                    .run_prepared_lint_streaming(&prepared, &tasks, &task.id)
+                    .unwrap(),
+                "structured repair result"
+            );
+            assert_eq!(
+                runner.resolves.load(Ordering::SeqCst),
+                resolves_after_prepare
+            );
+            let invocation = runner.invocations.lock().unwrap().last().cloned().unwrap();
+            assert_eq!(invocation.program, format!("bound-{}", kind.command()));
+            assert_eq!(
+                invocation.args.first(),
+                Some(
+                    &executable_root
+                        .path()
+                        .join(format!("{}.js", kind.command()))
+                        .to_string_lossy()
+                        .into_owned()
+                )
+            );
+            assert_eq!(invocation.cwd, workspace);
+        }
+        assert_eq!(runner.runs.load(Ordering::SeqCst), 2);
+        std::fs::remove_dir_all(workspace).ok();
+    }
+
+    #[test]
+    fn prepared_lint_repair_never_falls_back_and_unsupported_agents_fail_before_probe() {
+        struct NoFallbackRunner {
+            commands: Mutex<Vec<String>>,
+        }
+
+        impl ProcessRunner for NoFallbackRunner {
+            fn find_executable(&self, _: &str) -> Option<PathBuf> {
+                None
+            }
+
+            fn resolve_probe_target(&self, command: &str) -> AgentProbeTarget {
+                self.commands.lock().unwrap().push(command.into());
+                AgentProbeTarget {
+                    logical_command: command.into(),
+                    executable_path: None,
+                    program: command.into(),
+                    leading_args: Vec::new(),
+                }
+            }
+
+            fn run_with_timeout(
+                &self,
+                _: &str,
+                _: &[&str],
+                _: Duration,
+            ) -> Result<String, BackendError> {
+                unreachable!()
+            }
+
+            fn run_capture(&self, _: &AgentInvocation) -> Result<(String, String), BackendError> {
+                unreachable!()
+            }
+
+            fn run_task_streaming(
+                &self,
+                _: &AgentInvocation,
+                _: &TaskService,
+                _: &str,
+            ) -> Result<String, BackendError> {
+                panic!("an unavailable route must never launch")
+            }
+        }
+
+        let workspace = std::env::temp_dir()
+            .join("llm-wiki-desktop")
+            .join(format!("lint-repair-no-fallback-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let runner = Arc::new(NoFallbackRunner {
+            commands: Mutex::new(Vec::new()),
+        });
+        let service = AgentService::with_runner(runner.clone());
+
+        assert_eq!(
+            service
+                .prepare_lint_repair(AgentKind::Codex, false, &workspace, "repair")
+                .unwrap_err()
+                .code,
+            "LINT_AGENT_UNAVAILABLE"
+        );
+        assert_eq!(*runner.commands.lock().unwrap(), vec!["codex", "codex"]);
+
+        for kind in [AgentKind::Openclaw, AgentKind::Hermes] {
+            assert_eq!(
+                service
+                    .prepare_lint_repair(kind, false, &workspace, "repair")
+                    .unwrap_err()
+                    .code,
+                "LINT_AGENT_PROFILE_UNSUPPORTED"
+            );
+        }
+        assert_eq!(*runner.commands.lock().unwrap(), vec!["codex", "codex"]);
         std::fs::remove_dir_all(workspace).ok();
     }
 

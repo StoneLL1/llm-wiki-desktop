@@ -13,8 +13,9 @@ use crate::models::workflow::{
     WorkflowStartOutcome, WorkflowsOverview,
 };
 use crate::services::{
-    resolve_workflow_persistence_binding, restore_generate_content_confirmation,
-    restore_update_wiki_confirmation, CompileExecutionServices, GenerateContentExecutionServices,
+    resolve_workflow_persistence_binding, restore_agent_lint_repair_confirmation,
+    restore_generate_content_confirmation, restore_update_wiki_confirmation,
+    AgentLintRepairExecutionServices, CompileExecutionServices, GenerateContentExecutionServices,
     PrepareWorkflowInput, UpdateWikiExecutionServices, WorkflowPersistenceBinding,
     WorkflowPreparationEnvironment,
 };
@@ -368,6 +369,52 @@ pub fn get_workflow_file_diff(
     };
     let context = require_workflow_project(&state, &run_request)?;
     let run = workflow_run(&state, &run_request.task_id)?;
+    let start = request.cursor.unwrap_or(0);
+    let limit = if request.limit_bytes == 0 {
+        DEFAULT_DIFF_CHUNK_BYTES
+    } else {
+        request.limit_bytes.clamp(1, MAX_DIFF_CHUNK_BYTES)
+    };
+    let terminal_repair_diff = matches!(
+        &run.result,
+        Some(crate::models::workflow::WorkflowResult::AgentLintRepair {
+            diff_available: true,
+            ..
+        })
+    ) && run.pending_action.is_none();
+    if terminal_repair_diff {
+        let mut bounded_limit = limit;
+        loop {
+            let page = state.with_workflow_access(&context, |_| {
+                crate::services::agent_lint_repair_terminal_file_diff_page(
+                    &context,
+                    &run,
+                    &agent_lint_repair_services(&state),
+                    &request.file_id,
+                    start,
+                    bounded_limit,
+                )?
+                .ok_or_else(|| {
+                    workflow_error(
+                        "WORKFLOW_DIFF_NOT_FOUND",
+                        "The requested terminal repair diff does not exist.",
+                    )
+                })
+            })?;
+            if serde_json::to_vec(&page)
+                .is_ok_and(|payload| payload.len() <= MAX_DIFF_RESPONSE_BYTES)
+            {
+                return Ok(page);
+            }
+            if bounded_limit == 1 {
+                return Err(workflow_error(
+                    "WORKFLOW_DIFF_RESPONSE_TOO_LARGE",
+                    "The workflow diff metadata exceeds the response size limit.",
+                ));
+            }
+            bounded_limit = (bounded_limit / 2).max(1);
+        }
+    }
     let pending = run.pending_action.as_ref().ok_or_else(|| {
         workflow_error(
             "WORKFLOW_CONFIRMATION_STALE",
@@ -382,12 +429,6 @@ pub fn get_workflow_file_diff(
             "The pending workflow action changed before this diff was read.",
         ));
     }
-    let start = request.cursor.unwrap_or(0);
-    let limit = if request.limit_bytes == 0 {
-        DEFAULT_DIFF_CHUNK_BYTES
-    } else {
-        request.limit_bytes.clamp(1, MAX_DIFF_CHUNK_BYTES)
-    };
     if run.kind == WorkflowKind::UpdateWiki {
         let mut bounded_limit = limit;
         loop {
@@ -414,6 +455,43 @@ pub fn get_workflow_file_diff(
                     workflow_error(
                         "WORKFLOW_DIFF_NOT_FOUND",
                         "The requested workflow diff does not exist.",
+                    )
+                })
+            })?;
+            if serde_json::to_vec(&page)
+                .is_ok_and(|payload| payload.len() <= MAX_DIFF_RESPONSE_BYTES)
+            {
+                return Ok(page);
+            }
+            if bounded_limit == 1 {
+                return Err(workflow_error(
+                    "WORKFLOW_DIFF_RESPONSE_TOO_LARGE",
+                    "The workflow diff metadata exceeds the response size limit.",
+                ));
+            }
+            bounded_limit = (bounded_limit / 2).max(1);
+        }
+    }
+    if matches!(
+        run.operation,
+        crate::models::workflow::WorkflowOperation::AgentLintRepair { .. }
+    ) {
+        let mut bounded_limit = limit;
+        loop {
+            let page = state.with_workflow_access(&context, |_| {
+                validate_workflow_confirmation(&state, &context, &run, pending)?;
+                crate::services::agent_lint_repair_file_diff_page(
+                    &context,
+                    &run,
+                    &agent_lint_repair_services(&state),
+                    &request.file_id,
+                    start,
+                    bounded_limit,
+                )?
+                .ok_or_else(|| {
+                    workflow_error(
+                        "WORKFLOW_DIFF_NOT_FOUND",
+                        "The requested repair diff does not exist.",
                     )
                 })
             })?;
@@ -547,6 +625,8 @@ pub(crate) fn interrupt_unconfirmable_workflow(
     let _ = state
         .confirmation_registry
         .cancel_workflow_binding(context, run, pending);
+    let mut repair_result = None;
+    let mut project_mutation_state = WorkflowProjectMutationState::Unknown;
     match &run.kind {
         WorkflowKind::UpdateWiki => {
             let _ = crate::services::discard_update_wiki_candidate(&run.task_id);
@@ -554,12 +634,43 @@ pub(crate) fn interrupt_unconfirmable_workflow(
         WorkflowKind::GenerateContent => {
             let _ = crate::services::discard_generate_content_candidate(&run.task_id);
         }
-        WorkflowKind::HealthCheck => {}
+        WorkflowKind::HealthCheck => {
+            if matches!(
+                &run.operation,
+                crate::models::workflow::WorkflowOperation::AgentLintRepair { .. }
+            ) {
+                match crate::services::rollback_and_discard_agent_lint_repair_candidate(
+                    context,
+                    run,
+                    &agent_lint_repair_services(state),
+                ) {
+                    Ok(result) => {
+                        project_mutation_state = if matches!(
+                            result,
+                            crate::models::workflow::WorkflowResult::AgentLintRepair {
+                                outcome: crate::models::lint::AgentLintRepairOutcome::RolledBack,
+                                ..
+                            }
+                        ) {
+                            WorkflowProjectMutationState::RolledBack
+                        } else {
+                            WorkflowProjectMutationState::NotModified
+                        };
+                        repair_result = Some(result);
+                    }
+                    Err(_) => {
+                        project_mutation_state = WorkflowProjectMutationState::Modified;
+                        repair_result =
+                            Some(crate::services::agent_lint_repair_interrupted_result(run));
+                    }
+                }
+            }
+        }
     }
     state
         .workflow_service
         .coordinator
-        .interrupt_invalid_confirmation(
+        .interrupt_invalid_confirmation_with_result(
             &state.task_service,
             &run.task_id,
             WorkflowErrorSummary {
@@ -568,8 +679,9 @@ pub(crate) fn interrupt_unconfirmable_workflow(
                 recoverable: false,
                 user_action_required: true,
                 suggested_action: Some(WorkflowPrerequisiteAction::PrepareAgain),
-                project_mutation_state: WorkflowProjectMutationState::Unknown,
+                project_mutation_state,
             },
+            repair_result,
         )
         .map_err(|message| workflow_error("WORKFLOW_CONFIRMATION_RECOVERY_FAILED", message))
 }
@@ -617,7 +729,23 @@ fn hydrate_workflow_confirmation(
             }]
         })
         .unwrap_or_default();
-    if run.kind == WorkflowKind::UpdateWiki {
+    if matches!(
+        run.operation,
+        crate::models::workflow::WorkflowOperation::AgentLintRepair { .. }
+    ) {
+        crate::services::agent_lint_repair_decision_review(
+            context,
+            run,
+            &agent_lint_repair_services(state),
+            include_update_wiki_diffs,
+        )
+        .ok_or_else(|| {
+            workflow_error(
+                "WORKFLOW_CANDIDATE_STALE",
+                "The persisted Agent lint repair candidate is no longer valid.",
+            )
+        })
+    } else if run.kind == WorkflowKind::UpdateWiki {
         let workflow = state
             .task_service
             .workflow_execution_state(&run.task_id)
@@ -694,7 +822,20 @@ fn validate_workflow_confirmation(
             &state.task_service,
             &state.confirmation_registry,
         )?,
-        WorkflowKind::HealthCheck => {}
+        WorkflowKind::HealthCheck => {
+            if matches!(
+                run.operation,
+                crate::models::workflow::WorkflowOperation::AgentLintRepair { .. }
+            ) {
+                restore_agent_lint_repair_confirmation(
+                    context,
+                    run,
+                    &state.confirmation_registry,
+                    &state.settings_service,
+                    &state.task_service,
+                )?;
+            }
+        }
     }
     let stored = state.confirmation_registry.peek(&pending.id)?;
     if !crate::models::confirmation::workflow_execution_matches(
@@ -1071,6 +1212,41 @@ pub fn confirm_workflow_action(
             "The confirmation does not belong to this workflow run.",
         ));
     }
+    if matches!(
+        run.operation,
+        crate::models::workflow::WorkflowOperation::AgentLintRepair { .. }
+    ) {
+        let settings = state.settings_service.read_settings(&context)?;
+        let selected_agent = match run.route.as_ref() {
+            Some(crate::models::workflow::WorkflowRoute::Agent { agent, .. }) => *agent,
+            _ => {
+                return Err(workflow_error(
+                    "LINT_AGENT_ROUTE_REQUIRED",
+                    "Agent lint repair has no exact Agent route.",
+                ))
+            }
+        };
+        let services = agent_lint_repair_services(&state);
+        let authority_run = run.clone();
+        let result = crate::services::confirm_agent_lint_repair_review_authorized(
+            &context,
+            &run.task_id,
+            &services,
+            &settings.language,
+            settings.agent_default == Some(selected_agent),
+            || state.publish_workflow_external_launch(&context, &authority_run),
+        );
+        return match result {
+            Ok((current, next)) => {
+                dispatch_next(&state, next)?;
+                Ok(current)
+            }
+            Err(failure) => {
+                dispatch_next(&state, failure.next)?;
+                Err(failure.error)
+            }
+        };
+    }
     let execution_result = state.with_workflow_access(&context, |access| {
         if access.trust != crate::models::workflow::WorkflowProjectTrust::Trusted {
             return Err(workflow_error(
@@ -1294,35 +1470,60 @@ pub(crate) fn cancel_or_discard_workflow(
             "Only a workflow result waiting for confirmation can be discarded.",
         ));
     }
+    state
+        .workflow_service
+        .coordinator
+        .cancel(&state.task_service, task_id)
+        .map_err(|message| workflow_error("WORKFLOW_CANCEL_FAILED", message))?;
     if matches!(
         before.display_status,
         WorkflowDisplayStatus::Queued
             | WorkflowDisplayStatus::Running
             | WorkflowDisplayStatus::WaitingForConfirmation
     ) {
+        // The task owner decides whether cancellation can win (notably, a
+        // checked apply is temporarily non-cancellable) before the app-owned
+        // receipt is tombstoned. A late success publication only accepts a
+        // still-Dispatched receipt, so a winning cancellation cannot be
+        // overwritten by the final commit path.
         crate::commands::lint_commands::cancel_agent_lint_repair_attestation_for_run(
             state, &before,
         )?;
     }
-    state
-        .workflow_service
-        .coordinator
-        .cancel(&state.task_service, task_id)
-        .map_err(|message| workflow_error("WORKFLOW_CANCEL_FAILED", message))?;
     let cancelling = workflow_run(state, task_id)?;
-    if let Some(action) = cancelling.pending_action.as_ref() {
-        if let Err(error) =
-            state
-                .confirmation_registry
-                .cancel_workflow_binding(context, &cancelling, action)
+    if let Some(action) = before.pending_action.as_ref() {
+        if let Err(error) = state
+            .confirmation_registry
+            .cancel_workflow_binding(context, &before, action)
         {
             if error.code == "CONFIRMATION_IN_USE" {
                 return Ok((cancelling, None));
             }
             return Err(error);
         }
-        let _ = crate::services::discard_update_wiki_candidate(task_id);
-        let _ = crate::services::discard_generate_content_candidate(task_id);
+        if matches!(
+            &before.operation,
+            crate::models::workflow::WorkflowOperation::AgentLintRepair { .. }
+        ) {
+            let result = crate::services::rollback_and_discard_agent_lint_repair_candidate(
+                context,
+                &before,
+                &agent_lint_repair_services(state),
+            )?;
+            let (cancelled, next) = state
+                .workflow_service
+                .coordinator
+                .finish_cancelled_and_claim_next_with_result(
+                    &state.task_service,
+                    task_id,
+                    Some(result),
+                )
+                .map_err(|message| workflow_error("WORKFLOW_CANCEL_FAILED", message))?;
+            return Ok((cancelled, next));
+        } else {
+            let _ = crate::services::discard_update_wiki_candidate(task_id);
+            let _ = crate::services::discard_generate_content_candidate(task_id);
+        }
         let (cancelled, next) = state
             .workflow_service
             .coordinator
@@ -1343,6 +1544,21 @@ fn generate_content_services(state: &AppState) -> GenerateContentExecutionServic
         llm_service: &state.llm_service,
         git_service: &state.git_service,
         confirmation_registry: &state.confirmation_registry,
+        task_service: &state.task_service,
+        coordinator: &state.workflow_service.coordinator,
+    }
+}
+
+pub(super) fn agent_lint_repair_services(state: &AppState) -> AgentLintRepairExecutionServices<'_> {
+    AgentLintRepairExecutionServices {
+        agent_service: &state.agent_service,
+        lint_service: &state.lint_service,
+        git_service: &state.git_service,
+        file_store: &state.file_store,
+        bookmark_service: &state.bookmark_service,
+        search_service: &state.search_service,
+        confirmation_registry: &state.confirmation_registry,
+        settings_service: &state.settings_service,
         task_service: &state.task_service,
         coordinator: &state.workflow_service.coordinator,
     }

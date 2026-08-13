@@ -1222,10 +1222,74 @@ fn refresh_indexes(
     task_id: &str,
     services: &UpdateWikiExecutionServices<'_>,
 ) -> Result<(), BackendError> {
-    let graph_path = context.app_dir.join("graph-cache.json");
+    refresh_workflow_wiki_indexes(
+        context,
+        task_id,
+        services.file_store,
+        services.bookmark_service,
+        services.search_service,
+        services.compile.task_service,
+    )
+    .map(|_| ())
+}
+
+pub(crate) fn refresh_workflow_wiki_indexes(
+    context: &ProjectContext,
+    task_id: &str,
+    file_store: &FileStore,
+    bookmark_service: &BookmarkService,
+    search_service: &SearchService,
+    task_service: &TaskService,
+) -> Result<Vec<String>, BackendError> {
+    let graph_relative_path = workflow_graph_cache_relative_path(context);
+    let graph_cache = workflow_stale_graph_cache_value(context, file_store);
+    let mut warnings = Vec::new();
+    if let Err(error) = file_store.write_json_atomic(context, &graph_relative_path, &graph_cache) {
+        warnings.push(format!("graph_cache: {}", error.message));
+        let _ = task_service.append_log(
+            task_id,
+            LogLevel::Warn,
+            format!(
+                "Wiki updated, but graph cache refresh failed: {}",
+                error.message
+            ),
+        );
+    }
+    match bookmark_service.wiki_page_paths(context) {
+        Ok(bookmarks) => {
+            if let Err(error) = search_service.scan_wiki(context, &bookmarks) {
+                warnings.push(format!("search: {}", error.message));
+                let _ = task_service.append_log(
+                    task_id,
+                    LogLevel::Warn,
+                    format!("Wiki updated, but search refresh failed: {}", error.message),
+                );
+            }
+        }
+        Err(error) => {
+            warnings.push(format!("bookmarks: {}", error.message));
+            let _ = task_service.append_log(
+                task_id,
+                LogLevel::Warn,
+                format!(
+                    "Wiki updated, but bookmarks could not be read: {}",
+                    error.message
+                ),
+            );
+        }
+    }
+    Ok(warnings)
+}
+
+pub(crate) fn workflow_stale_graph_cache_value(
+    context: &ProjectContext,
+    file_store: &FileStore,
+) -> serde_json::Value {
+    let graph_path = context
+        .root
+        .join(workflow_graph_cache_relative_path(context));
     let mut graph_cache = if graph_path.exists() {
-        services
-            .file_store
+        file_store
             .read_json_file::<serde_json::Value>(&graph_path)
             .unwrap_or_else(|_| serde_json::json!({}))
     } else {
@@ -1238,42 +1302,12 @@ fn refresh_indexes(
         .as_object_mut()
         .expect("graph cache was normalized")
         .insert("status".into(), serde_json::Value::String("stale".into()));
-    if let Err(error) =
-        services
-            .file_store
-            .write_json_atomic(context, ".app/graph-cache.json", &graph_cache)
-    {
-        let _ = services.compile.task_service.append_log(
-            task_id,
-            LogLevel::Warn,
-            format!(
-                "Wiki updated, but graph cache refresh failed: {}",
-                error.message
-            ),
-        );
-    }
-    match services.bookmark_service.wiki_page_paths(context) {
-        Ok(bookmarks) => {
-            if let Err(error) = services.search_service.scan_wiki(context, &bookmarks) {
-                let _ = services.compile.task_service.append_log(
-                    task_id,
-                    LogLevel::Warn,
-                    format!("Wiki updated, but search refresh failed: {}", error.message),
-                );
-            }
-        }
-        Err(error) => {
-            let _ = services.compile.task_service.append_log(
-                task_id,
-                LogLevel::Warn,
-                format!(
-                    "Wiki updated, but bookmarks could not be read: {}",
-                    error.message
-                ),
-            );
-        }
-    }
-    Ok(())
+    graph_cache
+}
+
+pub(crate) fn workflow_graph_cache_relative_path(context: &ProjectContext) -> String {
+    let app_root = context.layout.app_state_root.as_deref().unwrap_or(".app");
+    format!("{}/graph-cache.json", app_root.trim_end_matches('/'))
 }
 
 fn record_compile_result(

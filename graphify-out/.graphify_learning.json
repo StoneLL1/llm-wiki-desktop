@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-12T08:10:20.640265+00:00",
+  "generated_at": "2026-08-13T01:12:30.146163+00:00",
   "nodes": {
     "src_services_importv2api_importv2api": {
       "code_fingerprint": "03b4a0c77425f1d54519eb7aa57147562c00a539d470ea231de729e9725bcbc5",
@@ -12,13 +12,13 @@
           "q": "第一性原理审查当前导入板块：Batch E/F 后 URL 导入显示 Import batch (1)，并核对大批量导入的正确性、可观察性与测试覆盖"
         }
       ],
-      "score": 0.875789367,
+      "score": 0.861543033,
       "source_file": "src/services/importV2Api.ts",
       "status": "tentative",
       "uses": 1
     },
     "src_tauri_src_app_state_appstate": {
-      "code_fingerprint": "6ad7e4efa9b98fc2391b50a961b5aeb83ff9f76b7b5beb49bc3d771cc3048df9",
+      "code_fingerprint": "525cd0c03eca27314a440d4e9a75db116022dc89cf70ca19d24f69cefc634656",
       "label": "AppState",
       "last": "2026-08-09T08:55:59.464285+00:00",
       "provenance": [
@@ -38,7 +38,7 @@
           "q": "Review Batch 2 workflow cancellation trust dispatch confirmation state machine"
         }
       ],
-      "score": 2.800023114,
+      "score": 2.754475559,
       "source_file": "src-tauri/src/app_state.rs",
       "status": "preferred",
       "uses": 3
@@ -59,7 +59,7 @@
           "q": "019fd1d8-7c68-7131-ac0a-934f17ca6332 这个batch E的阻断原因是什么，有什么办法稳定解决并继续完成batch F吗"
         }
       ],
-      "score": 1.73242865,
+      "score": 1.704247494,
       "source_file": "src-tauri/src/commands/import_v2_commands.rs",
       "status": "preferred",
       "uses": 2
@@ -75,13 +75,13 @@
           "q": "第一性原理审查当前导入板块：Batch E/F 后 URL 导入显示 Import batch (1)，并核对大批量导入的正确性、可观察性与测试覆盖"
         }
       ],
-      "score": 0.875789367,
+      "score": 0.861543033,
       "source_file": "src-tauri/src/commands/import_v2_web_commands.rs",
       "status": "tentative",
       "uses": 1
     },
     "src_tauri_src_models_confirmation_confirmationregistry": {
-      "code_fingerprint": "921779bc8f822e3cc88a19c369e83f8f010d53f7381f219f4e05733e22f0df53",
+      "code_fingerprint": "3c8101f04de87d0e5225d03c239d20146657be1216ea04050eaef689760dc945",
       "label": "ConfirmationRegistry",
       "last": "2026-08-09T08:29:45.959089+00:00",
       "provenance": [
@@ -96,7 +96,7 @@
           "q": "Review Batch 2 workflow cancellation trust dispatch confirmation state machine"
         }
       ],
-      "score": 1.866306509,
+      "score": 1.835947581,
       "source_file": "src-tauri/src/models/confirmation.rs",
       "status": "preferred",
       "uses": 2
@@ -112,13 +112,13 @@
           "q": "为什么 D:\\Users\\Aletta\\Desktop\\Study\\wiki 这个项目会显示无法加载项目工作流，并报 A selected Source version is missing or its content hash no longer matches."
         }
       ],
-      "score": 0.854383801,
+      "score": 0.840485668,
       "source_file": "src-tauri/src/models/paths.rs",
       "status": "tentative",
       "uses": 1
     },
     "src_tauri_src_services_agent_service_agentservice": {
-      "code_fingerprint": "93300ba95291dbe18ea6ffc57c98a63ffdce648881bed2272d37171d8a426da0",
+      "code_fingerprint": "f649f24f6c160bdb07c947c684f727fccaae71d26083cab7a77595ccd277dd3a",
       "label": "AgentService",
       "last": "2026-08-09T03:56:03.536117+00:00",
       "provenance": [
@@ -128,7 +128,7 @@
           "q": "根据 Workflows 审查结果，为 Agent 撰写详细修复计划，并单列 UI 优化"
         }
       ],
-      "score": 0.929233951,
+      "score": 0.914118242,
       "source_file": "src-tauri/src/services/agent_service.rs",
       "status": "tentative",
       "uses": 1
@@ -144,7 +144,7 @@
           "q": "为什么 D:\\Users\\Aletta\\Desktop\\Study\\wiki 这个项目会显示无法加载项目工作流，并报 A selected Source version is missing or its content hash no longer matches."
         }
       ],
-      "score": 0.854383801,
+      "score": 0.840485668,
       "source_file": "src-tauri/src/services/file_store.rs",
       "status": "tentative",
       "uses": 1
@@ -160,7 +160,7 @@
           "q": "019fd1d8-7c68-7131-ac0a-934f17ca6332 这个batch E的阻断原因是什么，有什么办法稳定解决并继续完成batch F吗"
         }
       ],
-      "score": 0.856639283,
+      "score": 0.84270446,
       "source_file": "src-tauri/src/services/import_v2/commit.rs",
       "status": "tentative",
       "uses": 1
@@ -186,7 +186,7 @@
           "q": "请你调用llm wiki desktop context skill来了解项目上下文，以及用Graphify来溯源。从第一性原理出发。帮我溯源定位几个问题：1、有些旧项目打开，工作流页面没法用。2、一次性导入量过多了之后应用会卡死 3、打开现有知识库兼容性还不够好，导致很多功能无法使用。"
         }
       ],
-      "score": 2.546852131,
+      "score": 2.50542287,
       "source_file": "src-tauri/src/services/import_v2/file_discovery.rs",
       "status": "preferred",
       "uses": 3
@@ -207,7 +207,7 @@
           "q": "019fd1d8-7c68-7131-ac0a-934f17ca6332 这个batch E的阻断原因是什么，有什么办法稳定解决并继续完成batch F吗"
         }
       ],
-      "score": 1.73242865,
+      "score": 1.704247494,
       "source_file": "src-tauri/src/services/import_v2/orchestrator.rs",
       "status": "preferred",
       "uses": 2
@@ -243,7 +243,7 @@
           "q": "请你调用llm wiki desktop context skill来了解项目上下文，以及用Graphify来溯源。从第一性原理出发。帮我溯源定位几个问题：1、有些旧项目打开，工作流页面没法用。2、一次性导入量过多了之后应用会卡死 3、打开现有知识库兼容性还不够好，导致很多功能无法使用。"
         }
       ],
-      "score": 4.27928078,
+      "score": 4.209670364,
       "source_file": "src-tauri/src/services/import_v2/session_store.rs",
       "status": "preferred",
       "uses": 5
@@ -259,13 +259,13 @@
           "q": "能帮我单独修复一下这个知识库项目吗"
         }
       ],
-      "score": 0.864823453,
+      "score": 0.8507555,
       "source_file": "src-tauri/src/services/import_v2/source_lifecycle_tests.rs",
       "status": "tentative",
       "uses": 1
     },
     "src_tauri_src_services_workflow_service_coordinator_workflowcoordinator": {
-      "code_fingerprint": "0a7e79be90b7c2bca2e1cf639439a287a951a0724a9687d3600653253282333a",
+      "code_fingerprint": "a727ec63892de2e5361223d65ab34cc886c5b9ee83d9dd0f398dd28232b50c86",
       "label": "WorkflowCoordinator",
       "last": "2026-08-09T08:29:45.959089+00:00",
       "provenance": [
@@ -280,13 +280,13 @@
           "q": "Review Batch 2 workflow cancellation trust dispatch confirmation state machine"
         }
       ],
-      "score": 1.866306509,
+      "score": 1.835947581,
       "source_file": "src-tauri/src/services/workflow_service/coordinator.rs",
       "status": "preferred",
       "uses": 2
     },
     "src_tauri_src_services_workflow_service_mod_workflowservice": {
-      "code_fingerprint": "ba14d94108a192d5c656173dff9a4b77230963e076da93cc653512966305a957",
+      "code_fingerprint": "193c4fb79c6552c0e78ddf4edbd9728df59f50b718a106f4a1cc2177815ddaa6",
       "label": "WorkflowService",
       "last": "2026-08-09T08:55:59.464285+00:00",
       "provenance": [
@@ -316,13 +316,13 @@
           "q": "能帮我单独修复一下这个知识库项目吗"
         }
       ],
-      "score": 5.448464319,
+      "score": 5.359834969,
       "source_file": "src-tauri/src/services/workflow_service/mod.rs",
       "status": "preferred",
       "uses": 6
     },
     "src_tauri_src_services_workflow_service_preparation_workflowaccesssnapshot": {
-      "code_fingerprint": "50aee02a9c41ff886b92856a1bd8987da89186757171529db746316543ad01bf",
+      "code_fingerprint": "11d255e93bf3f07eb77f294893637bf68aff71afd5a5ec2d93be0f7be1f01cbd",
       "label": "WorkflowAccessSnapshot",
       "last": "2026-08-09T03:56:03.536117+00:00",
       "provenance": [
@@ -352,13 +352,13 @@
           "q": "请你调用llm wiki desktop context skill来了解项目上下文，以及用Graphify来溯源。从第一性原理出发。帮我溯源定位几个问题：1、有些旧项目打开，工作流页面没法用。2、一次性导入量过多了之后应用会卡死 3、打开现有知识库兼容性还不够好，导致很多功能无法使用。"
         }
       ],
-      "score": 4.330469883,
+      "score": 4.260026781,
       "source_file": "src-tauri/src/services/workflow_service/preparation.rs",
       "status": "preferred",
       "uses": 5
     },
     "src_tauri_src_tasks_task_service_taskservice": {
-      "code_fingerprint": "1eb38f65f3fc101616574a0f47c2456cf0cad17fa5d5ae31f0025e3ffb397df1",
+      "code_fingerprint": "6c4cfc3b14f5f5622be171d3b25792f8e058ce07ab673ce2cbf656a392a43a35",
       "label": "TaskService",
       "last": "2026-08-09T08:55:59.464285+00:00",
       "provenance": [
@@ -388,7 +388,7 @@
           "q": "第一性原理审查当前导入板块：Batch E/F 后 URL 导入显示 Import batch (1)，并核对大批量导入的正确性、可观察性与测试覆盖"
         }
       ],
-      "score": 6.3108035,
+      "score": 6.208146609,
       "source_file": "src-tauri/src/tasks/task_service.rs",
       "status": "preferred",
       "uses": 7

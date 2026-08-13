@@ -19,8 +19,8 @@ use crate::models::task::{
 use crate::models::workflow::{
     validate_workflow_execution_contract, WorkflowDisplayStatus, WorkflowErrorSummary,
     WorkflowExecutionState, WorkflowKind, WorkflowOperation, WorkflowPendingAction,
-    WorkflowPersistenceMode, WorkflowPersistenceTransition, WorkflowResult, WorkflowRun,
-    WorkflowRunSummary, WorkflowStageStatus, WORKFLOW_SCHEMA_VERSION,
+    WorkflowPersistenceMode, WorkflowPersistenceTransition, WorkflowProjectMutationState,
+    WorkflowResult, WorkflowRun, WorkflowRunSummary, WorkflowStageStatus, WORKFLOW_SCHEMA_VERSION,
 };
 use crate::services::FileStore;
 use crate::tasks::cancellation::CancellationRegistry;
@@ -206,7 +206,7 @@ type RecoveredTaskSnapshot = (
 );
 
 fn parse_persisted_task(json: &str, persisted_id: &str) -> Result<RecoveredTaskSnapshot, String> {
-    let value = serde_json::from_str::<serde_json::Value>(json)
+    let mut value = serde_json::from_str::<serde_json::Value>(json)
         .map_err(|error| format!("Invalid task JSON: {error}"))?;
     let is_wrapper = value
         .as_object()
@@ -217,6 +217,29 @@ fn parse_persisted_task(json: &str, persisted_id: &str) -> Result<RecoveredTaskS
             .map_err(|error| format!("Invalid legacy task snapshot: {error}"))?;
         validate_recovered_task_id(&snapshot.0.id, persisted_id)?;
         return Ok(snapshot);
+    }
+
+    // Workflow schema v1 predates operation subtypes. Normalize any injected
+    // operation before strict v2-shaped deserialization so a legacy document
+    // can neither acquire repair authority nor be made unrecoverable by a
+    // partial/future operation payload. Schema v2 remains strict.
+    if let Some(workflow) = value
+        .get_mut("workflow")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        let is_legacy = workflow.get("schemaVersion").is_none()
+            || workflow.get("schemaVersion") == Some(&serde_json::Value::from(1));
+        if is_legacy {
+            if let Some(execution_options) = workflow
+                .get_mut("executionOptions")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                execution_options.insert(
+                    "operation".into(),
+                    serde_json::json!({ "kind": "built_in" }),
+                );
+            }
+        }
     }
 
     // Once a document identifies itself as a wrapper it must never fall back
@@ -1423,8 +1446,6 @@ impl TaskService {
         {
             entry.task.completed_at = Some(entry.task.updated_at.clone());
         }
-        let history_changed = previous_task.status != entry.task.status;
-
         let persisted = PersistedTaskEntry {
             schema_version: PERSISTED_TASK_SCHEMA_VERSION,
             task: entry.task.clone(),
@@ -1441,6 +1462,14 @@ impl TaskService {
             .and_then(|workflow| workflow.to_run(&task))
             .ok_or_else(|| format!("Workflow task has no project: {id}"))?;
         drop(tasks);
+        let history_changed = previous_task.status != task.status
+            || previous_workflow
+                .as_ref()
+                .map(|workflow| (&workflow.result, &workflow.error))
+                != persisted
+                    .workflow
+                    .as_ref()
+                    .map(|workflow| (&workflow.result, &workflow.error));
 
         let now_ms = self.workflow_persistence_clock.now_ms();
         let should_persist = match durability {
@@ -1847,6 +1876,16 @@ impl TaskService {
         stage_id: &str,
         error: WorkflowErrorSummary,
     ) -> Result<WorkflowRun, String> {
+        self.fail_workflow_stage_with_result(id, stage_id, error, None)
+    }
+
+    pub(crate) fn fail_workflow_stage_with_result(
+        &self,
+        id: &str,
+        stage_id: &str,
+        error: WorkflowErrorSummary,
+        result: Option<WorkflowResult>,
+    ) -> Result<WorkflowRun, String> {
         let cancellation = self.cancellation.get(id);
         self.mutate_workflow(id, |task, workflow| {
             require_running_workflow(task, cancellation.as_ref(), id)?;
@@ -1864,6 +1903,7 @@ impl TaskService {
             stage.completed_at = Some(Utc::now().to_rfc3339());
             workflow.current_stage_id = Some(stage_id.to_string());
             workflow.error = Some(error);
+            workflow.result = result;
             task.status = TaskStatus::Failed;
             Ok(())
         })
@@ -1984,6 +2024,152 @@ impl TaskService {
         })
     }
 
+    pub(crate) fn reconcile_committed_agent_lint_repair(
+        &self,
+        id: &str,
+        result: WorkflowResult,
+    ) -> Result<WorkflowRun, String> {
+        if !matches!(result, WorkflowResult::AgentLintRepair { .. }) {
+            return Err("Only an Agent lint repair result can be reconciled".into());
+        }
+        self.mutate_workflow(id, |task, workflow| {
+            if !matches!(
+                workflow.execution_options.operation,
+                crate::models::workflow::WorkflowOperation::AgentLintRepair { .. }
+            ) || !matches!(
+                task.status,
+                TaskStatus::Running
+                    | TaskStatus::Cancelling
+                    | TaskStatus::Cancelled
+                    | TaskStatus::Interrupted
+                    | TaskStatus::Failed
+            ) {
+                return Err(format!(
+                    "Workflow is not a reconcilable Agent lint repair: {id}"
+                ));
+            }
+            let now = Utc::now().to_rfc3339();
+            for stage in &mut workflow.stages {
+                if !matches!(
+                    stage.status,
+                    WorkflowStageStatus::Completed | WorkflowStageStatus::Skipped
+                ) {
+                    stage.status = WorkflowStageStatus::Completed;
+                    stage.started_at.get_or_insert_with(|| now.clone());
+                    stage.completed_at = Some(now.clone());
+                    stage.decision = None;
+                }
+            }
+            workflow.result = Some(result);
+            workflow.error = None;
+            workflow.pending_action = None;
+            workflow.current_stage_id = None;
+            workflow.queue_position = None;
+            workflow.continuation_required = false;
+            task.error = None;
+            task.status = TaskStatus::Succeeded;
+            task.cancellable = false;
+            Ok(())
+        })?;
+        // A Completed success receipt wins a concurrent cancellation that
+        // arrived after terminal publication. Remove the now-stale token so
+        // later task reads cannot report a cancelled successful run.
+        self.cancellation.remove(id);
+        self.get_workflow_run(id)
+            .ok_or_else(|| format!("Workflow not found after reconciliation: {id}"))
+    }
+
+    pub(crate) fn reconcile_terminal_agent_lint_repair(
+        &self,
+        id: &str,
+        result: WorkflowResult,
+        terminal_status: &str,
+    ) -> Result<WorkflowRun, String> {
+        if terminal_status == "succeeded" {
+            return self.reconcile_committed_agent_lint_repair(id, result);
+        }
+        if !matches!(result, WorkflowResult::AgentLintRepair { .. })
+            || !matches!(terminal_status, "failed" | "cancelled" | "interrupted")
+        {
+            return Err("Invalid terminal Agent lint repair receipt".into());
+        }
+        self.mutate_workflow(id, |task, workflow| {
+            if !matches!(
+                workflow.execution_options.operation,
+                crate::models::workflow::WorkflowOperation::AgentLintRepair { .. }
+            ) || !matches!(
+                task.status,
+                TaskStatus::Running
+                    | TaskStatus::Cancelling
+                    | TaskStatus::Interrupted
+                    | TaskStatus::Failed
+                    | TaskStatus::Cancelled
+            ) {
+                return Err(format!(
+                    "Workflow is not a reconcilable Agent lint repair: {id}"
+                ));
+            }
+            workflow.result = Some(result);
+            workflow.pending_action = None;
+            workflow.current_stage_id = None;
+            workflow.queue_position = None;
+            workflow.continuation_required = false;
+            task.cancellable = false;
+            match terminal_status {
+                "failed" => {
+                    let now = Utc::now().to_rfc3339();
+                    for stage in &mut workflow.stages {
+                        if stage.status == WorkflowStageStatus::Running {
+                            stage.status = WorkflowStageStatus::Failed;
+                            stage.completed_at = Some(now.clone());
+                        }
+                        stage.decision = None;
+                    }
+                    task.status = TaskStatus::Failed;
+                }
+                "cancelled" => {
+                    task.status = TaskStatus::Cancelled;
+                    task.error = None;
+                    workflow.error = None;
+                    for stage in &mut workflow.stages {
+                        stage.decision = None;
+                    }
+                }
+                "interrupted" => task.status = TaskStatus::Interrupted,
+                _ => unreachable!(),
+            }
+            Ok(())
+        })
+    }
+
+    pub(crate) fn attach_interrupted_agent_lint_repair_result(
+        &self,
+        id: &str,
+        result: WorkflowResult,
+        mutation_state: WorkflowProjectMutationState,
+    ) -> Result<WorkflowRun, String> {
+        if !matches!(result, WorkflowResult::AgentLintRepair { .. }) {
+            return Err("Only an Agent lint repair result can be reconciled".into());
+        }
+        self.mutate_workflow(id, |task, workflow| {
+            if task.status != TaskStatus::Interrupted
+                || !matches!(
+                    workflow.execution_options.operation,
+                    crate::models::workflow::WorkflowOperation::AgentLintRepair { .. }
+                )
+            {
+                return Err(format!(
+                    "Workflow is not an interrupted Agent lint repair: {id}"
+                ));
+            }
+            workflow.result = Some(result);
+            if let Some(error) = workflow.error.as_mut() {
+                error.project_mutation_state = mutation_state;
+            }
+            Ok(())
+        })
+    }
+
     pub fn request_workflow_cancel(&self, id: &str) -> Result<WorkflowRun, String> {
         let run = self
             .get_workflow_run(id)
@@ -2014,6 +2200,14 @@ impl TaskService {
     }
 
     pub(crate) fn finalize_workflow_cancellation(&self, id: &str) -> Result<WorkflowRun, String> {
+        self.finalize_workflow_cancellation_with_result(id, None)
+    }
+
+    pub(crate) fn finalize_workflow_cancellation_with_result(
+        &self,
+        id: &str,
+        result: Option<WorkflowResult>,
+    ) -> Result<WorkflowRun, String> {
         self.mutate_workflow(id, |task, workflow| {
             if matches!(
                 task.status,
@@ -2035,6 +2229,7 @@ impl TaskService {
             workflow.queue_position = None;
             workflow.continuation_required = false;
             workflow.error = None;
+            workflow.result = result;
             for stage in &mut workflow.stages {
                 stage.decision = None;
             }
@@ -2048,7 +2243,7 @@ impl TaskService {
         status: TaskStatus,
         error: WorkflowErrorSummary,
     ) -> Result<WorkflowRun, String> {
-        self.reject_workflow_execution(id, status, error, false)
+        self.reject_workflow_execution(id, status, error, false, None)
     }
 
     pub(crate) fn interrupt_workflow_confirmation(
@@ -2056,7 +2251,16 @@ impl TaskService {
         id: &str,
         error: WorkflowErrorSummary,
     ) -> Result<WorkflowRun, String> {
-        self.reject_workflow_execution(id, TaskStatus::Interrupted, error, true)
+        self.interrupt_workflow_confirmation_with_result(id, error, None)
+    }
+
+    pub(crate) fn interrupt_workflow_confirmation_with_result(
+        &self,
+        id: &str,
+        error: WorkflowErrorSummary,
+        result: Option<WorkflowResult>,
+    ) -> Result<WorkflowRun, String> {
+        self.reject_workflow_execution(id, TaskStatus::Interrupted, error, true, result)
     }
 
     fn reject_workflow_execution(
@@ -2065,6 +2269,7 @@ impl TaskService {
         status: TaskStatus,
         error: WorkflowErrorSummary,
         allow_waiting_confirmation: bool,
+        result: Option<WorkflowResult>,
     ) -> Result<WorkflowRun, String> {
         if !matches!(status, TaskStatus::Failed | TaskStatus::Interrupted) {
             return Err("Dispatch rejection must use Failed or Interrupted".into());
@@ -2108,6 +2313,7 @@ impl TaskService {
             workflow.queue_position = None;
             workflow.continuation_required = false;
             workflow.error = Some(error.clone());
+            workflow.result = result;
             task.error = Some(crate::errors::BackendError::new(
                 error.code.clone(),
                 error.message_key.clone(),

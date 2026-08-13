@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::agent::AgentKind;
 use crate::models::confirmation::{PendingActionType, RiskLevel};
-use crate::models::lint::{AgentLintRepairOutcome, AgentLintRepairRoundSummary, WikiLintSkillRef};
+use crate::models::lint::{
+    AgentLintRepairFinding, AgentLintRepairOutcome, AgentLintRepairRoundSummary, WikiLintSkillRef,
+};
 use crate::models::llm::LlmProviderKind;
 use crate::models::task::TaskStatus;
 
@@ -50,6 +52,7 @@ pub enum WorkflowOperation {
         report_id: String,
         selection_revision: String,
         selected_finding_ids: Vec<String>,
+        selected_findings: Vec<AgentLintRepairFinding>,
         skill: WikiLintSkillRef,
         authorized_path_hashes: BTreeMap<String, Option<String>>,
         expected_git_head: String,
@@ -71,6 +74,7 @@ impl WorkflowOperation {
             report_id,
             selection_revision,
             selected_finding_ids,
+            selected_findings,
             skill,
             authorized_path_hashes,
             expected_git_head,
@@ -102,6 +106,36 @@ impl WorkflowOperation {
             || sorted_findings.windows(2).any(|pair| pair[0] == pair[1])
         {
             return Err("Agent lint repair finding ids must be sorted and unique".into());
+        }
+        if selected_findings.is_empty()
+            || selected_findings.len() != selected_finding_ids.len()
+            || selected_findings.len() > 100
+            || selected_findings
+                .iter()
+                .map(|finding| finding.id.as_str())
+                .ne(selected_finding_ids.iter().map(String::as_str))
+        {
+            return Err(
+                "Agent lint repair finding snapshots must exactly match selected finding ids"
+                    .into(),
+            );
+        }
+        if selected_findings.iter().any(|finding| {
+            finding.id.len() > 1_024
+                || finding.path.trim().is_empty()
+                || finding.path.len() > 1_024
+                || finding.message.trim().is_empty()
+                || finding.message.chars().count() > 8_192
+                || finding
+                    .evidence
+                    .as_ref()
+                    .is_some_and(|value| value.chars().count() > 8_192)
+                || finding
+                    .suggested_action
+                    .as_ref()
+                    .is_some_and(|value| value.chars().count() > 8_192)
+        }) {
+            return Err("Agent lint repair finding snapshots are not bounded".into());
         }
         if !skill.is_builtin() {
             return Err("Agent lint repair must use the pinned built-in Skill".into());
@@ -625,10 +659,13 @@ pub enum WorkflowResult {
         skipped_finding_ids: Vec<String>,
         rounds: Vec<AgentLintRepairRoundSummary>,
         affected_paths: Vec<String>,
+        affected_path_hashes: BTreeMap<String, Option<String>>,
         checkpoint_hash: Option<String>,
         final_commit: Option<String>,
         diff_available: bool,
         rollback_available: bool,
+        #[serde(default)]
+        index_refresh_warnings: Vec<String>,
     },
 }
 
@@ -831,6 +868,7 @@ pub enum WorkflowRunOutcomeSummary {
         resolved_count: u64,
         unresolved_count: u64,
         introduced_count: u64,
+        index_refresh_stale: bool,
     },
 }
 
@@ -873,12 +911,14 @@ impl From<&WorkflowResult> for WorkflowRunOutcomeSummary {
                 resolved_finding_ids,
                 unresolved_finding_ids,
                 introduced_finding_ids,
+                index_refresh_warnings,
                 ..
             } => Self::AgentLintRepair {
                 outcome: *outcome,
                 resolved_count: resolved_finding_ids.len() as u64,
                 unresolved_count: unresolved_finding_ids.len() as u64,
                 introduced_count: introduced_finding_ids.len() as u64,
+                index_refresh_stale: !index_refresh_warnings.is_empty(),
             },
         }
     }

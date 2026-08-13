@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::models::agent::AgentKind;
@@ -259,6 +261,48 @@ pub struct AgentLintRepairAttestation {
     pub operation_digest: String,
     pub confirmed_at: String,
     pub lifecycle: AgentLintRepairAttestationLifecycle,
+    /// Digest of the exact project-owned execution descriptor accepted by the
+    /// app-owned receipt. Legacy H4A receipts deliberately start unbound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub descriptor_digest: Option<String>,
+    /// Write-ahead journal covering the narrow interval where a repair may
+    /// have changed project files but has not yet reached a durable terminal
+    /// receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation_journal: Option<AgentLintRepairMutationJournal>,
+    /// Digest of the exact terminal workflow result. Only the dedicated
+    /// completion transition may set this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_result_digest: Option<String>,
+    /// Canonical typed terminal payload retained outside the project so a
+    /// crash between receipt publication and task persistence can be
+    /// reconciled without trusting the project-owned task JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_result_json: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_task_status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentLintRepairMutationJournal {
+    pub phase: AgentLintRepairMutationPhase,
+    pub checkpoint_hash: String,
+    /// Exact hashes observed immediately before the current checked apply.
+    /// During a process kill, each path may truthfully be either this value or
+    /// its intended post value below; any third value is an external edit.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pre_mutation_path_hashes: BTreeMap<String, Option<String>>,
+    pub affected_path_hashes: BTreeMap<String, Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_commit: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLintRepairMutationPhase {
+    Applying,
+    Finalizing,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -664,7 +708,10 @@ pub struct ProviderSecretStatusRequest {
 mod tests {
     use serde_json::json;
 
-    use super::{CloseBehavior, ColorThemePresetId, Settings, ThemePreference};
+    use super::{
+        AgentLintRepairAttestation, AgentLintRepairAttestationLifecycle, CloseBehavior,
+        ColorThemePresetId, Settings, ThemePreference,
+    };
     use crate::models::agent::AgentKind;
 
     #[test]
@@ -716,6 +763,29 @@ mod tests {
             serde_json::to_value(settings).unwrap()["agentDefault"],
             raw["agentDefault"]
         );
+    }
+
+    #[test]
+    fn legacy_agent_lint_repair_attestation_migrates_h4b_fields_to_none() {
+        let legacy = json!({
+            "canonicalIdentityKey": "identity-key",
+            "identityRevision": "identity-revision",
+            "taskId": "task-1",
+            "operationDigest": "operation-digest",
+            "confirmedAt": "2026-08-12T00:00:00Z",
+            "lifecycle": "dispatched"
+        });
+
+        let attestation: AgentLintRepairAttestation =
+            serde_json::from_value(legacy).expect("H4A receipts must remain readable");
+
+        assert_eq!(
+            attestation.lifecycle,
+            AgentLintRepairAttestationLifecycle::Dispatched
+        );
+        assert_eq!(attestation.descriptor_digest, None);
+        assert_eq!(attestation.mutation_journal, None);
+        assert_eq!(attestation.terminal_result_digest, None);
     }
 
     #[test]

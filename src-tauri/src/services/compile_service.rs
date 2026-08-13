@@ -1607,7 +1607,7 @@ impl CompileService {
             manifest,
             accepted_plan,
             expected_current_hashes,
-            false,
+            CompileGenerationPolicy::LegacyNoDeletes,
         )
     }
 
@@ -1622,7 +1622,21 @@ impl CompileService {
             manifest,
             accepted_plan,
             expected_current_hashes,
-            true,
+            CompileGenerationPolicy::WorkflowReviewableDeletes,
+        )
+    }
+
+    pub fn apply_confirmed_lint_repair_manifest(
+        context: &ProjectContext,
+        manifest: &CompileManifest,
+        expected_current_hashes: &HashMap<String, String>,
+    ) -> Result<Vec<String>, BackendError> {
+        Self::apply_confirmed_manifest_with_policy(
+            context,
+            manifest,
+            None,
+            expected_current_hashes,
+            CompileGenerationPolicy::LintRepair,
         )
     }
 
@@ -1631,18 +1645,22 @@ impl CompileService {
         manifest: &CompileManifest,
         accepted_plan: Option<&CompilePlan>,
         expected_current_hashes: &HashMap<String, String>,
-        allow_reviewable_deletions: bool,
+        policy: CompileGenerationPolicy,
     ) -> Result<Vec<String>, BackendError> {
         // Defense in depth: even on the confirmed-apply path, refuse any
         // write or deletion under the compile-protected wiki/sources/ subtree.
-        let known_sources = Self::known_source_refs(context)?;
-        Self::validate_manifest_semantics_with_policy(
-            context,
-            manifest,
-            accepted_plan,
-            &known_sources,
-            allow_reviewable_deletions,
-        )?;
+        if policy == CompileGenerationPolicy::LintRepair {
+            Self::validate_lint_repair_manifest(manifest)?;
+        } else {
+            let known_sources = Self::known_source_refs(context)?;
+            Self::validate_manifest_semantics_with_policy(
+                context,
+                manifest,
+                accepted_plan,
+                &known_sources,
+                policy.allows_reviewable_deletions(),
+            )?;
+        }
         let store = FileStore;
         let mut affected = Vec::new();
         for file in &manifest.files {
@@ -1694,7 +1712,12 @@ impl CompileService {
             }
         }
         for file in &manifest.files {
-            if !is_safe_wiki_markdown(&file.path) {
+            let safe = if policy == CompileGenerationPolicy::LintRepair {
+                is_safe_lint_repair_markdown(&file.path)
+            } else {
+                is_safe_wiki_markdown(&file.path)
+            };
+            if !safe {
                 return Err(BackendError::new(
                     "COMPILE_PATH_INVALID",
                     "Compile output contains an unsafe path.",
@@ -1716,7 +1739,12 @@ impl CompileService {
             affected.push(file.path.clone());
         }
         for deletion in &manifest.deletions {
-            if !is_safe_wiki_markdown(deletion) {
+            let safe = if policy == CompileGenerationPolicy::LintRepair {
+                is_safe_lint_repair_markdown(deletion)
+            } else {
+                is_safe_wiki_markdown(deletion)
+            };
+            if !safe {
                 return Err(BackendError::new(
                     "COMPILE_PATH_INVALID",
                     "Compile deletion contains an unsafe path.",
@@ -3454,6 +3482,69 @@ mod tests {
             "# Existing"
         );
         assert!(context.root.join("wiki/delete.md").is_file());
+        fs::remove_dir_all(context.root).ok();
+    }
+
+    #[test]
+    fn confirmed_lint_repair_apply_reuses_checked_journal_for_update_create_and_delete() {
+        let context = temp_project_context("lint-repair-confirmed-apply");
+        fs::create_dir_all(context.root.join("wiki/concepts")).unwrap();
+        fs::write(context.root.join("wiki/concepts/existing.md"), "# Existing").unwrap();
+        fs::write(context.root.join("wiki/obsolete.md"), "# Obsolete").unwrap();
+        let existing_hash = hash_bytes(b"# Existing");
+        let obsolete_hash = hash_bytes(b"# Obsolete");
+        let manifest = CompileManifest {
+            files: vec![
+                CompileFile::new("wiki/concepts/existing.md", "# Updated"),
+                CompileFile::new("wiki/new.md", "# New"),
+            ],
+            deletions: vec!["wiki/obsolete.md".into()],
+            summary: "repair".into(),
+        };
+        let affected = CompileService::apply_confirmed_lint_repair_manifest(
+            &context,
+            &manifest,
+            &HashMap::from([
+                ("wiki/concepts/existing.md".into(), existing_hash),
+                ("wiki/obsolete.md".into(), obsolete_hash),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            affected,
+            [
+                "wiki/concepts/existing.md",
+                "wiki/new.md",
+                "wiki/obsolete.md"
+            ]
+        );
+        assert_eq!(
+            fs::read_to_string(context.root.join("wiki/concepts/existing.md")).unwrap(),
+            "# Updated"
+        );
+        assert!(context.root.join("wiki/new.md").is_file());
+        assert!(!context.root.join("wiki/obsolete.md").exists());
+        fs::remove_dir_all(context.root).ok();
+    }
+
+    #[test]
+    fn confirmed_lint_repair_apply_keeps_source_paths_forbidden() {
+        let context = temp_project_context("lint-repair-source-apply");
+        let manifest = CompileManifest {
+            files: vec![CompileFile::new("wiki/sources/source.md", "mutated")],
+            deletions: Vec::new(),
+            summary: "forged".into(),
+        };
+        assert_eq!(
+            CompileService::apply_confirmed_lint_repair_manifest(
+                &context,
+                &manifest,
+                &HashMap::new(),
+            )
+            .unwrap_err()
+            .code,
+            "COMPILE_PROTECTED_PATH"
+        );
         fs::remove_dir_all(context.root).ok();
     }
 

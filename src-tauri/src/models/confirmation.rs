@@ -111,7 +111,13 @@ pub enum ConfirmationClaimDisposition {
     CancelRequested,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum ConfirmationExecution {
     RepairProject {
         assessment_id: crate::models::project::AssessmentId,
@@ -184,6 +190,10 @@ pub enum ConfirmationExecution {
         baseline_fingerprint: String,
         expected_git_head: String,
     },
+    /// Backend-only authority for applying one dangerous repair candidate.
+    /// Every mutable descriptor revision is copied into this binding so a
+    /// restored or retried confirmation cannot authorize a different round.
+    AgentLintRepairReview(AgentLintRepairReviewBinding),
     ChatOverwrite {
         project_id: String,
         root_path: String,
@@ -218,6 +228,26 @@ pub enum ConfirmationExecution {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentLintRepairReviewBinding {
+    pub project_id: String,
+    pub root_path: String,
+    pub canonical_identity_key: String,
+    pub identity_revision: String,
+    pub task_id: String,
+    pub round: u8,
+    /// Identifier of the task-owned candidate. Project-relative candidates
+    /// have no representation in this dangerous-review authority.
+    pub candidate_id: String,
+    pub candidate_revision: String,
+    pub manifest_revision: String,
+    pub baseline_fingerprint: String,
+    pub checkpoint_hash: String,
+    pub action_id: String,
+    pub action_revision: String,
+}
+
 impl ConfirmationRegistry {
     pub fn register(&self, action: PendingAction) -> Result<(), BackendError> {
         self.register_with_execution(action, None)
@@ -228,6 +258,7 @@ impl ConfirmationRegistry {
         action: PendingAction,
         execution: Option<ConfirmationExecution>,
     ) -> Result<(), BackendError> {
+        validate_execution_action_binding(&action, execution.as_ref())?;
         let mut actions = self.actions.lock().map_err(|_| {
             BackendError::new(
                 "CONFIRMATION_REGISTRY_LOCKED",
@@ -257,6 +288,7 @@ impl ConfirmationRegistry {
         action: PendingAction,
         execution: ConfirmationExecution,
     ) -> Result<ConfirmationRegistration, BackendError> {
+        validate_execution_action_binding(&action, Some(&execution))?;
         let mut actions = self.actions.lock().map_err(|_| registry_locked())?;
         let stored = StoredPendingAction {
             action: action.clone(),
@@ -285,6 +317,7 @@ impl ConfirmationRegistry {
     ) -> Result<ExpiringConfirmationRegistration, BackendError> {
         action.expires_at = Some(expires_at);
         reject_if_expired(&action)?;
+        validate_execution_action_binding(&action, Some(&execution))?;
         let mut stored = StoredPendingAction {
             action: action.clone(),
             execution: Some(execution),
@@ -328,6 +361,7 @@ impl ConfirmationRegistry {
         action: PendingAction,
         execution: ConfirmationExecution,
     ) -> Result<(), BackendError> {
+        validate_execution_action_binding(&action, Some(&execution))?;
         let mut actions = self.actions.lock().map_err(|_| registry_locked())?;
         let executing = self.executing.lock().map_err(|_| registry_locked())?;
         if let Some(existing) = actions.get_mut(&action.id) {
@@ -379,6 +413,14 @@ impl ConfirmationRegistry {
                 false,
             )
         })?;
+        if actions.get(action_id).is_some_and(|stored| {
+            matches!(
+                stored.execution.as_ref(),
+                Some(ConfirmationExecution::AgentLintRepairReview(_))
+            )
+        }) {
+            return Err(confirmation_exact_execution_required(action_id));
+        }
         let executing = self.executing.lock().map_err(|_| registry_locked())?;
         if executing.contains(action_id) {
             if status == ConfirmationStatus::Cancelled {
@@ -438,6 +480,25 @@ impl ConfirmationRegistry {
     /// concurrent cancellation then fails closed instead of removing the
     /// approval halfway through a destructive write.
     pub fn claim(&self, action_id: &str) -> Result<StoredPendingAction, BackendError> {
+        self.claim_inner(action_id, None)
+    }
+
+    /// Atomically claim only the exact backend execution facts asserted by the
+    /// caller. Dangerous Agent repair reviews deliberately require this API;
+    /// the generic id-only `claim` path rejects them.
+    pub fn claim_exact_execution(
+        &self,
+        action_id: &str,
+        expected: &ConfirmationExecution,
+    ) -> Result<StoredPendingAction, BackendError> {
+        self.claim_inner(action_id, Some(expected))
+    }
+
+    fn claim_inner(
+        &self,
+        action_id: &str,
+        expected: Option<&ConfirmationExecution>,
+    ) -> Result<StoredPendingAction, BackendError> {
         let mut actions = self.actions.lock().map_err(|_| registry_locked())?;
         let stored = actions.get(action_id).cloned().ok_or_else(|| {
             BackendError::new(
@@ -454,10 +515,61 @@ impl ConfirmationRegistry {
             }
             return Err(error);
         }
+        validate_execution_action_binding(&stored.action, stored.execution.as_ref())?;
+        if matches!(
+            stored.execution.as_ref(),
+            Some(ConfirmationExecution::AgentLintRepairReview(_))
+        ) && expected.is_none()
+        {
+            return Err(confirmation_exact_execution_required(action_id));
+        }
+        if expected.is_some_and(|expected| stored.execution.as_ref() != Some(expected)) {
+            return Err(confirmation_execution_mismatch(action_id));
+        }
         let mut executing = self.executing.lock().map_err(|_| registry_locked())?;
         if !executing.insert(action_id.to_string()) {
             return Err(confirmation_in_use(action_id));
         }
+        Ok(stored)
+    }
+
+    /// Cancel one exact execution binding without allowing a colliding action
+    /// id to consume or interrupt another review. If execution already holds
+    /// the claim, cancellation is remembered and reported by `finish_claim`.
+    pub fn cancel_exact_execution(
+        &self,
+        action_id: &str,
+        expected: &ConfirmationExecution,
+    ) -> Result<StoredPendingAction, BackendError> {
+        let mut actions = self.actions.lock().map_err(|_| registry_locked())?;
+        let stored = actions.get(action_id).cloned().ok_or_else(|| {
+            BackendError::new(
+                "CONFIRMATION_NOT_FOUND",
+                "The pending action was not found or has already been handled.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "actionId": action_id }))
+        })?;
+        if let Err(error) = reject_if_expired(&stored.action) {
+            if error.code.starts_with("CONFIRMATION_EXPIRY") {
+                actions.remove(action_id);
+            }
+            return Err(error);
+        }
+        validate_execution_action_binding(&stored.action, stored.execution.as_ref())?;
+        if stored.execution.as_ref() != Some(expected) {
+            return Err(confirmation_execution_mismatch(action_id));
+        }
+        let executing = self.executing.lock().map_err(|_| registry_locked())?;
+        if executing.contains(action_id) {
+            self.cancel_requested
+                .lock()
+                .map_err(|_| registry_locked())?
+                .insert(action_id.to_string());
+            return Err(confirmation_in_use(action_id));
+        }
+        actions.remove(action_id);
         Ok(stored)
     }
 
@@ -616,6 +728,29 @@ pub fn workflow_execution_matches(
         };
     match (kind, execution) {
         (
+            crate::models::workflow::WorkflowKind::HealthCheck,
+            Some(ConfirmationExecution::AgentLintRepairReview(binding)),
+        ) => {
+            matches!(
+                run.operation,
+                crate::models::workflow::WorkflowOperation::AgentLintRepair { .. }
+            ) && binding.project_id == context.project_id
+                && canonical_roots_match(&binding.root_path, &context.root.to_string_lossy())
+                && binding.canonical_identity_key == run.canonical_identity_key
+                && binding.identity_revision == run.identity_revision
+                && binding.task_id == run.task_id
+                && binding.action_id == pending.id
+                && pending.checkpoint_hash.as_deref() == Some(binding.checkpoint_hash.as_str())
+                && pending.candidate.as_ref().is_some_and(|candidate| {
+                    matches!(
+                        candidate,
+                        crate::models::workflow::WorkflowCandidateReference::TaskOwned {
+                            candidate_id
+                        } if candidate_id == &binding.candidate_id
+                    )
+                })
+        }
+        (
             crate::models::workflow::WorkflowKind::GenerateContent,
             Some(ConfirmationExecution::GenerateContentOverwrite {
                 project_id,
@@ -678,6 +813,40 @@ fn confirmation_in_use(action_id: &str) -> BackendError {
     .with_details(serde_json::json!({ "actionId": action_id }))
 }
 
+fn confirmation_exact_execution_required(action_id: &str) -> BackendError {
+    BackendError::new(
+        "CONFIRMATION_EXACT_EXECUTION_REQUIRED",
+        "This confirmation requires its exact backend execution binding.",
+        true,
+        true,
+    )
+    .with_details(serde_json::json!({ "actionId": action_id }))
+}
+
+fn confirmation_execution_mismatch(action_id: &str) -> BackendError {
+    BackendError::new(
+        "CONFIRMATION_EXECUTION_MISMATCH",
+        "The pending action no longer matches the asserted backend execution binding.",
+        true,
+        true,
+    )
+    .with_details(serde_json::json!({ "actionId": action_id }))
+}
+
+fn validate_execution_action_binding(
+    action: &PendingAction,
+    execution: Option<&ConfirmationExecution>,
+) -> Result<(), BackendError> {
+    if let Some(ConfirmationExecution::AgentLintRepairReview(binding)) = execution {
+        let checkpoint_matches =
+            action.checkpoint_hash.as_deref() == Some(binding.checkpoint_hash.as_str());
+        if binding.action_id != action.id || !checkpoint_matches {
+            return Err(confirmation_execution_mismatch(&action.id));
+        }
+    }
+    Ok(())
+}
+
 fn confirmation_id_conflict(action_id: &str) -> BackendError {
     BackendError::new(
         "CONFIRMATION_ID_CONFLICT",
@@ -713,6 +882,23 @@ fn restoration_binding_matches(
                 && canonical_roots_match(existing_root, root)
         };
     match (existing, replacement) {
+        (
+            Some(ConfirmationExecution::AgentLintRepairReview(existing)),
+            ConfirmationExecution::AgentLintRepairReview(replacement),
+        ) => {
+            existing.canonical_identity_key == replacement.canonical_identity_key
+                && existing.identity_revision == replacement.identity_revision
+                && existing.task_id == replacement.task_id
+                && existing.round == replacement.round
+                && existing.candidate_id == replacement.candidate_id
+                && existing.candidate_revision == replacement.candidate_revision
+                && existing.manifest_revision == replacement.manifest_revision
+                && existing.baseline_fingerprint == replacement.baseline_fingerprint
+                && existing.checkpoint_hash == replacement.checkpoint_hash
+                && existing.action_id == replacement.action_id
+                && existing.action_revision == replacement.action_revision
+                && canonical_roots_match(&existing.root_path, &replacement.root_path)
+        }
         (
             Some(ConfirmationExecution::GenerateContentOverwrite {
                 root_path: existing_root,
@@ -816,9 +1002,9 @@ fn reject_if_expired(action: &PendingAction) -> Result<(), BackendError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionPreview, ConfirmationClaimDisposition, ConfirmationExecution,
-        ConfirmationRegistration, ConfirmationRegistry, ConfirmationStatus, PendingAction,
-        PendingActionType, RiskLevel,
+        ActionPreview, AgentLintRepairReviewBinding, ConfirmationClaimDisposition,
+        ConfirmationExecution, ConfirmationRegistration, ConfirmationRegistry, ConfirmationStatus,
+        PendingAction, PendingActionType, RiskLevel,
     };
     use crate::models::paths::ProjectContext;
     use crate::models::workflow::{
@@ -1193,6 +1379,348 @@ mod tests {
         );
         assert_eq!(
             registry.peek("agent-lint-prepare-1").unwrap_err().code,
+            "CONFIRMATION_NOT_FOUND"
+        );
+    }
+
+    fn agent_lint_review_action() -> PendingAction {
+        PendingAction {
+            id: "agent-lint-review-action-1".into(),
+            action_type: PendingActionType::MergeConflict,
+            title: "Review dangerous Agent lint repair changes".into(),
+            message: "Review the exact task-owned repair candidate".into(),
+            risk_level: RiskLevel::Destructive,
+            affected_paths: vec!["wiki/page.md".into()],
+            preview: None,
+            expires_at: Some("2099-01-01T00:15:00Z".into()),
+            checkpoint_hash: Some("c".repeat(40)),
+        }
+    }
+
+    fn agent_lint_review_binding(root_path: String) -> AgentLintRepairReviewBinding {
+        AgentLintRepairReviewBinding {
+            project_id: "runtime-project-a".into(),
+            root_path,
+            canonical_identity_key: "identity-key-a".into(),
+            identity_revision: "identity-revision-a".into(),
+            task_id: "repair-task-a".into(),
+            round: 2,
+            candidate_id: "candidate-a".into(),
+            candidate_revision: "candidate-revision-a".into(),
+            manifest_revision: "manifest-revision-a".into(),
+            baseline_fingerprint: "baseline-fingerprint-a".into(),
+            checkpoint_hash: "c".repeat(40),
+            action_id: "agent-lint-review-action-1".into(),
+            action_revision: "action-revision-a".into(),
+        }
+    }
+
+    fn agent_lint_review_execution(root_path: String) -> ConfirmationExecution {
+        ConfirmationExecution::AgentLintRepairReview(agent_lint_review_binding(root_path))
+    }
+
+    fn agent_lint_review_stale_executions(
+        execution: &ConfirmationExecution,
+    ) -> Vec<ConfirmationExecution> {
+        let mutations: [fn(&mut AgentLintRepairReviewBinding); 11] = [
+            |binding| binding.canonical_identity_key = "other-identity".into(),
+            |binding| binding.identity_revision = "other-identity-revision".into(),
+            |binding| binding.task_id = "other-task".into(),
+            |binding| binding.round = 3,
+            |binding| binding.candidate_id = "other-candidate".into(),
+            |binding| binding.candidate_revision = "other-candidate-revision".into(),
+            |binding| binding.manifest_revision = "other-manifest-revision".into(),
+            |binding| binding.baseline_fingerprint = "other-baseline".into(),
+            |binding| binding.checkpoint_hash = "d".repeat(40),
+            |binding| binding.action_id = "other-action".into(),
+            |binding| binding.action_revision = "other-action-revision".into(),
+        ];
+        mutations
+            .into_iter()
+            .map(|mutate| {
+                let mut mismatch = execution.clone();
+                let ConfirmationExecution::AgentLintRepairReview(binding) = &mut mismatch else {
+                    unreachable!()
+                };
+                mutate(binding);
+                mismatch
+            })
+            .collect()
+    }
+
+    #[test]
+    fn agent_lint_review_binding_round_trips_strict_camel_case_and_rejects_unknown_fields() {
+        let root = tempfile::tempdir().unwrap();
+        let execution = agent_lint_review_execution(root.path().to_string_lossy().into_owned());
+        let mut value = serde_json::to_value(&execution).unwrap();
+
+        assert_eq!(value["kind"], json!("agent_lint_repair_review"));
+        assert_eq!(value["taskId"], json!("repair-task-a"));
+        assert_eq!(value["candidateRevision"], json!("candidate-revision-a"));
+        assert_eq!(value["manifestRevision"], json!("manifest-revision-a"));
+        assert_eq!(
+            value["baselineFingerprint"],
+            json!("baseline-fingerprint-a")
+        );
+        assert_eq!(value["actionRevision"], json!("action-revision-a"));
+        assert_eq!(
+            serde_json::from_value::<ConfirmationExecution>(value.clone()).unwrap(),
+            execution
+        );
+
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("futureAuthority".into(), json!(true));
+        assert!(serde_json::from_value::<ConfirmationExecution>(value).is_err());
+    }
+
+    #[test]
+    fn agent_lint_review_registration_is_idempotent_only_for_every_exact_revision() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().to_string_lossy().into_owned();
+        let registry = ConfirmationRegistry::default();
+        let action = agent_lint_review_action();
+        let execution = agent_lint_review_execution(root_path);
+
+        assert_eq!(
+            registry
+                .register_idempotent_with_execution(action.clone(), execution.clone())
+                .unwrap(),
+            ConfirmationRegistration::Registered
+        );
+        assert_eq!(
+            registry
+                .register_idempotent_with_execution(action.clone(), execution.clone())
+                .unwrap(),
+            ConfirmationRegistration::Existing
+        );
+
+        for mismatch in agent_lint_review_stale_executions(&execution) {
+            let ConfirmationExecution::AgentLintRepairReview(binding) = &mismatch else {
+                unreachable!()
+            };
+            let expected_code = if binding.action_id != action.id
+                || action.checkpoint_hash.as_deref() != Some(binding.checkpoint_hash.as_str())
+            {
+                "CONFIRMATION_EXECUTION_MISMATCH"
+            } else {
+                "CONFIRMATION_ID_CONFLICT"
+            };
+            assert_eq!(
+                registry
+                    .register_idempotent_with_execution(action.clone(), mismatch)
+                    .unwrap_err()
+                    .code,
+                expected_code
+            );
+            assert_eq!(
+                registry.peek(&action.id).unwrap().execution,
+                Some(execution.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn agent_lint_review_registration_rejects_cross_bound_action_and_checkpoint() {
+        let root = tempfile::tempdir().unwrap();
+        let execution = agent_lint_review_execution(root.path().to_string_lossy().into_owned());
+
+        let mut wrong_action = agent_lint_review_action();
+        wrong_action.id = "different-visible-action".into();
+        let registry = ConfirmationRegistry::default();
+        assert_eq!(
+            registry
+                .register_idempotent_with_execution(wrong_action.clone(), execution.clone())
+                .unwrap_err()
+                .code,
+            "CONFIRMATION_EXECUTION_MISMATCH"
+        );
+        assert_eq!(
+            registry.peek(&wrong_action.id).unwrap_err().code,
+            "CONFIRMATION_NOT_FOUND"
+        );
+
+        let mut wrong_checkpoint = agent_lint_review_action();
+        wrong_checkpoint.checkpoint_hash = Some("d".repeat(40));
+        let registry = ConfirmationRegistry::default();
+        assert_eq!(
+            registry
+                .register_idempotent_with_execution(wrong_checkpoint.clone(), execution)
+                .unwrap_err()
+                .code,
+            "CONFIRMATION_EXECUTION_MISMATCH"
+        );
+        assert_eq!(
+            registry.peek(&wrong_checkpoint.id).unwrap_err().code,
+            "CONFIRMATION_NOT_FOUND"
+        );
+    }
+
+    #[test]
+    fn agent_lint_review_restore_rebinds_only_runtime_project_id() {
+        let root = tempfile::tempdir().unwrap();
+        let other_root = tempfile::tempdir().unwrap();
+        let action = agent_lint_review_action();
+        let original = agent_lint_review_execution(root.path().to_string_lossy().into_owned());
+
+        let registry = ConfirmationRegistry::default();
+        registry
+            .register_with_execution(action.clone(), Some(original.clone()))
+            .unwrap();
+        let mut rebound = original.clone();
+        let ConfirmationExecution::AgentLintRepairReview(binding) = &mut rebound else {
+            unreachable!()
+        };
+        binding.project_id = "runtime-project-b".into();
+        let mut reconstructed = action.clone();
+        reconstructed.title = "Reconstructed title must not replace persisted review facts".into();
+        registry
+            .restore_with_execution(reconstructed, rebound.clone())
+            .unwrap();
+        assert_eq!(registry.peek(&action.id).unwrap().action, action);
+        assert_eq!(registry.peek(&action.id).unwrap().execution, Some(rebound));
+
+        let mut mismatches = agent_lint_review_stale_executions(&original);
+        let mut other_root_execution = original.clone();
+        let ConfirmationExecution::AgentLintRepairReview(binding) = &mut other_root_execution
+        else {
+            unreachable!()
+        };
+        binding.root_path = other_root.path().to_string_lossy().into_owned();
+        mismatches.push(other_root_execution);
+
+        for mismatch in mismatches {
+            let registry = ConfirmationRegistry::default();
+            registry
+                .register_with_execution(action.clone(), Some(original.clone()))
+                .unwrap();
+            let error = registry
+                .restore_with_execution(action.clone(), mismatch)
+                .unwrap_err();
+            assert!(matches!(
+                error.code.as_str(),
+                "CONFIRMATION_ID_CONFLICT" | "CONFIRMATION_EXECUTION_MISMATCH"
+            ));
+            assert_eq!(registry.peek(&action.id).unwrap().action, action);
+            assert_eq!(
+                registry.peek(&action.id).unwrap().execution,
+                Some(original.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn agent_lint_review_requires_exact_claim_and_cannot_replay_after_consumption() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = ConfirmationRegistry::default();
+        let action = agent_lint_review_action();
+        let execution = agent_lint_review_execution(root.path().to_string_lossy().into_owned());
+        registry
+            .register_idempotent_with_execution(action.clone(), execution.clone())
+            .unwrap();
+
+        assert_eq!(
+            registry.claim(&action.id).unwrap_err().code,
+            "CONFIRMATION_EXACT_EXECUTION_REQUIRED"
+        );
+        assert_eq!(
+            registry
+                .confirm(&action.id, ConfirmationStatus::Confirmed)
+                .unwrap_err()
+                .code,
+            "CONFIRMATION_EXACT_EXECUTION_REQUIRED"
+        );
+        assert_eq!(
+            registry
+                .confirm(&action.id, ConfirmationStatus::Cancelled)
+                .unwrap_err()
+                .code,
+            "CONFIRMATION_EXACT_EXECUTION_REQUIRED"
+        );
+
+        let mut mismatch = execution.clone();
+        let ConfirmationExecution::AgentLintRepairReview(binding) = &mut mismatch else {
+            unreachable!()
+        };
+        binding.manifest_revision = "forged-manifest".into();
+        assert_eq!(
+            registry
+                .claim_exact_execution(&action.id, &mismatch)
+                .unwrap_err()
+                .code,
+            "CONFIRMATION_EXECUTION_MISMATCH"
+        );
+
+        let claimed = registry
+            .claim_exact_execution(&action.id, &execution)
+            .unwrap();
+        assert_eq!(claimed.execution, Some(execution.clone()));
+        assert_eq!(
+            registry
+                .claim_exact_execution(&action.id, &execution)
+                .unwrap_err()
+                .code,
+            "CONFIRMATION_IN_USE"
+        );
+        registry.finish_claim(&action.id, true).unwrap();
+        assert_eq!(
+            registry
+                .claim_exact_execution(&action.id, &execution)
+                .unwrap_err()
+                .code,
+            "CONFIRMATION_NOT_FOUND"
+        );
+    }
+
+    #[test]
+    fn agent_lint_review_exact_cancel_wins_a_claim_and_mismatch_never_consumes() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = ConfirmationRegistry::default();
+        let action = agent_lint_review_action();
+        let execution = agent_lint_review_execution(root.path().to_string_lossy().into_owned());
+        registry
+            .register_idempotent_with_execution(action.clone(), execution.clone())
+            .unwrap();
+
+        let mut mismatch = execution.clone();
+        let ConfirmationExecution::AgentLintRepairReview(binding) = &mut mismatch else {
+            unreachable!()
+        };
+        binding.checkpoint_hash = "d".repeat(40);
+        assert_eq!(
+            registry
+                .cancel_exact_execution(&action.id, &mismatch)
+                .unwrap_err()
+                .code,
+            "CONFIRMATION_EXECUTION_MISMATCH"
+        );
+        assert_eq!(
+            registry.peek(&action.id).unwrap().execution,
+            Some(execution.clone())
+        );
+
+        registry
+            .claim_exact_execution(&action.id, &execution)
+            .unwrap();
+        assert_eq!(
+            registry
+                .cancel_exact_execution(&action.id, &execution)
+                .unwrap_err()
+                .code,
+            "CONFIRMATION_IN_USE"
+        );
+        assert_eq!(
+            registry
+                .finish_claim_with_disposition(&action.id, false)
+                .unwrap(),
+            ConfirmationClaimDisposition::CancelRequested
+        );
+        assert_eq!(
+            registry
+                .claim_exact_execution(&action.id, &execution)
+                .unwrap_err()
+                .code,
             "CONFIRMATION_NOT_FOUND"
         );
     }

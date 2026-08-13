@@ -13,24 +13,26 @@ use crate::models::confirmation::{
     PendingActionType, RiskLevel,
 };
 use crate::models::lint::{
-    AddLintIgnoreRequest, AgentLintRepairPreparation, ApplyLintFixRequest,
-    ApplyLintFixesBatchRequest, CancelAgentLintRepairPreparationRequest,
-    ConfirmAgentLintRepairStartRequest, DeepLintReport, GetDeepLintReportRequest, LintBatchOutcome,
-    LintBatchSkip, LintFixOutcome, LintHistoryFile, LintIgnoreFile, LintIssueSource, LintIssueType,
-    LintReport, ListLintHistoryRequest, ListLintIgnoresRequest, PersistedLintReport,
+    AddLintIgnoreRequest, AgentLintRepairFinding, AgentLintRepairPreparation,
+    AgentLintRepairRollbackResult, ApplyLintFixRequest, ApplyLintFixesBatchRequest,
+    CancelAgentLintRepairPreparationRequest, ConfirmAgentLintRepairStartRequest, DeepLintIssueType,
+    DeepLintReport, GetDeepLintReportRequest, LintBatchOutcome, LintBatchSkip, LintFixOutcome,
+    LintHistoryFile, LintIgnoreFile, LintIssueSource, LintIssueType, LintReport,
+    ListLintHistoryRequest, ListLintIgnoresRequest, PersistedLintReport,
     PrepareAgentLintRepairRequest, ReadLintHistoryReportRequest, RemoveLintIgnoreRequest,
-    RunLocalLintRequest, StartDeepLintRequest, WikiLintSkillRef,
+    RollbackAgentLintRepairRequest, RunLocalLintRequest, StartDeepLintRequest, WikiLintSkillRef,
 };
 use crate::models::settings::AgentLintRepairAttestationLifecycle;
 use crate::models::task::BackendTask;
 use crate::models::workflow::{
-    HealthCheckMode, WorkflowExecutionOptions, WorkflowKind, WorkflowOperation,
-    WorkflowPersistenceMode, WorkflowRoute, WorkflowScope, WorkflowStartOutcome,
+    HealthCheckMode, WorkflowDisplayStatus, WorkflowExecutionOptions, WorkflowKind,
+    WorkflowOperation, WorkflowPersistenceMode, WorkflowResult, WorkflowRoute, WorkflowScope,
+    WorkflowStartOutcome,
 };
 use crate::services::{
     agent_lint_repair_attestation_digest, canonical_json, project_identity,
-    resolve_workflow_persistence_binding, workflow_baseline_for_scope, workflow_stages,
-    AgentService, EnqueueWorkflow,
+    resolve_workflow_persistence_binding, workflow_baseline_for_scope, AgentService,
+    EnqueueWorkflow,
 };
 
 const AGENT_LINT_REPAIR_CONFIRMATION_TTL_MINUTES: i64 = 15;
@@ -320,17 +322,18 @@ fn prepare_agent_lint_repair_current(
         mode: HealthCheckMode::Complete,
     };
     let baseline_fingerprint = workflow_baseline_for_scope(context, &scope)?.fingerprint;
-    let (selected_finding_ids, authorized_path_hashes) = selected_agent_findings(
-        state,
-        context,
-        &request.report_id,
-        &request.selected_finding_ids,
-        request.agent,
-        &identity.canonical_identity_key,
-        &identity.identity_revision,
-        &routes.analysis,
-        &baseline_fingerprint,
-    )?;
+    let (selected_finding_ids, selected_findings, authorized_path_hashes) =
+        selected_agent_findings(
+            state,
+            context,
+            &request.report_id,
+            &request.selected_finding_ids,
+            request.agent,
+            &identity.canonical_identity_key,
+            &identity.identity_revision,
+            &routes.analysis,
+            &baseline_fingerprint,
+        )?;
     let selection_hashes = authorized_path_hashes
         .clone()
         .into_iter()
@@ -356,6 +359,7 @@ fn prepare_agent_lint_repair_current(
         &request.report_id,
         &selection_revision,
         &selected_finding_ids,
+        &selected_findings,
         &route,
         &skill,
         &authorized_path_hashes,
@@ -457,7 +461,7 @@ fn revalidate_and_enqueue_agent_lint_repair(
             "Project Markdown changed after preparation.",
         ));
     }
-    let (_, current_hashes) = selected_agent_findings(
+    let (_, selected_findings, current_hashes) = selected_agent_findings(
         state,
         context,
         &binding.report_id,
@@ -503,6 +507,7 @@ fn revalidate_and_enqueue_agent_lint_repair(
         report_id: binding.report_id.clone(),
         selection_revision: binding.selection_revision.clone(),
         selected_finding_ids: binding.selected_finding_ids.clone(),
+        selected_findings,
         skill: binding.skill.clone(),
         authorized_path_hashes: binding.authorized_path_hashes.clone(),
         expected_git_head: binding.expected_git_head.clone(),
@@ -529,7 +534,7 @@ fn revalidate_and_enqueue_agent_lint_repair(
                     restricted_content_acknowledgement_revision: None,
                     remote_provider_acknowledgement_revision: None,
                 },
-                stages: workflow_stages(&WorkflowKind::HealthCheck),
+                stages: crate::services::agent_lint_repair_stages(),
                 retry: None,
             },
             &identity.canonical_identity_key,
@@ -649,6 +654,11 @@ fn verify_agent_lint_repair_attestation(
         AgentLintRepairReplayIntent::Retry => vec![
             AgentLintRepairAttestationLifecycle::QueuedAuthorized,
             AgentLintRepairAttestationLifecycle::Dispatched,
+            // The old attempt is immutable and terminal. Its app-owned receipt
+            // proves the original batch approval; current route/trust/Git/path
+            // facts are still fully revalidated before a linked new attempt is
+            // created with its own fresh receipt.
+            AgentLintRepairAttestationLifecycle::Completed,
         ],
         AgentLintRepairReplayIntent::Undo => {
             vec![AgentLintRepairAttestationLifecycle::Cancelled]
@@ -687,6 +697,7 @@ pub(crate) fn validate_agent_lint_repair_replay_facts(
         report_id,
         selection_revision,
         selected_finding_ids,
+        selected_findings,
         skill,
         authorized_path_hashes,
         expected_git_head,
@@ -779,6 +790,7 @@ pub(crate) fn validate_agent_lint_repair_replay_facts(
         report_id,
         selection_revision,
         selected_finding_ids,
+        selected_findings,
         &current_route,
         skill,
         &current_hashes,
@@ -833,7 +845,14 @@ fn selected_agent_findings(
     identity_revision: &str,
     current_health_route: &WorkflowRoute,
     current_baseline_fingerprint: &str,
-) -> Result<(Vec<String>, BTreeMap<String, Option<String>>), BackendError> {
+) -> Result<
+    (
+        Vec<String>,
+        Vec<AgentLintRepairFinding>,
+        BTreeMap<String, Option<String>>,
+    ),
+    BackendError,
+> {
     if requested_ids.is_empty() || requested_ids.len() > 100 {
         return Err(lint_repair_error(
             "LINT_REPAIR_SELECTION_INVALID",
@@ -893,6 +912,7 @@ fn selected_agent_findings(
     })?;
     let wiki_prefix = format!("{}/", wiki_root.trim_matches('/').replace('\\', "/"));
     let mut hashes = BTreeMap::new();
+    let mut findings = Vec::with_capacity(selected.len());
     for id in &selected {
         let issue = issue_by_id.get(id.as_str()).ok_or_else(|| {
             lint_repair_error(
@@ -932,8 +952,32 @@ fn selected_agent_findings(
                 ));
             }
         }
+        findings.push(AgentLintRepairFinding {
+            id: issue.id.clone(),
+            issue_type: deep_lint_issue_type(issue.issue_type)?,
+            severity: issue.severity,
+            path: issue.path.replace('\\', "/"),
+            message: issue.message.clone(),
+            evidence: issue.evidence.clone(),
+            suggested_action: issue.suggested_action.clone(),
+        });
     }
-    Ok((selected, hashes))
+    Ok((selected, findings, hashes))
+}
+
+fn deep_lint_issue_type(issue_type: LintIssueType) -> Result<DeepLintIssueType, BackendError> {
+    match issue_type {
+        LintIssueType::DuplicateTopic => Ok(DeepLintIssueType::DuplicateTopic),
+        LintIssueType::WeakCrossReference => Ok(DeepLintIssueType::WeakCrossReference),
+        LintIssueType::MissingSource => Ok(DeepLintIssueType::MissingSource),
+        LintIssueType::SchemaMismatch => Ok(DeepLintIssueType::SchemaMismatch),
+        LintIssueType::OutdatedContent => Ok(DeepLintIssueType::OutdatedContent),
+        LintIssueType::Contradiction => Ok(DeepLintIssueType::Contradiction),
+        _ => Err(lint_repair_error(
+            "LINT_REPAIR_FINDING_NOT_AUTHORIZED",
+            "Only pinned Agent lint finding types may be repaired.",
+        )),
+    }
 }
 
 fn report_route_matches_repair_agent(route: &WorkflowRoute, expected_agent: AgentKind) -> bool {
@@ -980,10 +1024,19 @@ fn current_agent_lint_routes(
     let (info, target_revision) = state
         .agent_service
         .lint_analysis_route_facts(agent, settings.agent_default == Some(agent))?;
+    let (repair_info, repair_route_revision) = state
+        .agent_service
+        .lint_repair_route_facts(agent, settings.agent_default == Some(agent))?;
     if info.state != AgentDetectionState::Installed {
         return Err(lint_repair_error(
             "LINT_AGENT_ROUTE_UNAVAILABLE",
             "The selected Agent route is unavailable.",
+        ));
+    }
+    if repair_info.state != AgentDetectionState::Installed {
+        return Err(lint_repair_error(
+            "LINT_AGENT_ROUTE_UNAVAILABLE",
+            "The selected Agent repair route is unavailable.",
         ));
     }
     let analysis_profile = AgentService::lint_route_profile_revision(agent).ok_or_else(|| {
@@ -992,13 +1045,6 @@ fn current_agent_lint_routes(
             "This Agent has no pinned lint analysis profile.",
         )
     })?;
-    let repair_profile =
-        AgentService::lint_repair_route_profile_revision(agent).ok_or_else(|| {
-            lint_repair_error(
-                "LINT_AGENT_PROFILE_UNSUPPORTED",
-                "This Agent has no pinned lint repair profile.",
-            )
-        })?;
     let revision = |profile| {
         sha256_canonical(&(
             agent,
@@ -1018,7 +1064,7 @@ fn current_agent_lint_routes(
         repair: WorkflowRoute::Agent {
             agent,
             model: None,
-            route_revision: revision(&repair_profile)?,
+            route_revision: repair_route_revision,
         },
     })
 }
@@ -1165,6 +1211,172 @@ fn lint_repair_stale(message: &str) -> BackendError {
 
 fn lint_repair_error(code: &'static str, message: &'static str) -> BackendError {
     BackendError::new(code, message, true, true)
+}
+
+/// Roll back only the final commit produced by one completed Agent lint repair.
+/// The backend task result, project identity, current HEAD, and every affected
+/// path hash are revalidated before the scoped rollback commit is created.
+#[tauri::command]
+pub fn rollback_agent_lint_repair(
+    state: State<'_, AppState>,
+    request: RollbackAgentLintRepairRequest,
+) -> Result<AgentLintRepairRollbackResult, BackendError> {
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |context| {
+            state.require_project_content_write_root(context, ProjectWriteRootKind::Wiki)?;
+            let identity = project_identity(&context.root).map_err(|message| {
+                BackendError::new("PROJECT_IDENTITY_FAILED", message, true, true)
+            })?;
+            let run = state
+                .task_service
+                .get_workflow_run(&request.task_id)
+                .ok_or_else(|| {
+                    lint_repair_error(
+                        "LINT_REPAIR_TASK_MISSING",
+                        "The Agent lint repair task is unavailable.",
+                    )
+                })?;
+            if run.kind != WorkflowKind::HealthCheck
+                || !matches!(run.operation, WorkflowOperation::AgentLintRepair { .. })
+                || run.display_status != WorkflowDisplayStatus::Completed
+                || run.canonical_identity_key != identity.canonical_identity_key
+                || run.identity_revision != identity.identity_revision
+            {
+                return Err(lint_repair_error(
+                    "LINT_REPAIR_ROLLBACK_NOT_AVAILABLE",
+                    "This task is not a completed Agent lint repair for the current project identity.",
+                ));
+            }
+            let execution_options = state
+                .task_service
+                .workflow_execution_options(&run.task_id)
+                .ok_or_else(|| {
+                    lint_repair_error(
+                        "LINT_REPAIR_ATTESTATION_REQUIRED",
+                        "The completed repair has no exact execution binding.",
+                    )
+                })?;
+            let operation_digest = agent_lint_repair_attestation_digest(
+                &run,
+                &execution_options,
+            )
+            .map_err(|error| {
+                BackendError::new("LINT_REPAIR_BINDING_FAILED", error, false, true)
+            })?;
+            let receipt = state.settings_service.get_agent_lint_repair_attestation(
+                &run.canonical_identity_key,
+                &run.identity_revision,
+                &run.task_id,
+                &operation_digest,
+            )?;
+            let result = run.result.as_ref().ok_or_else(|| {
+                lint_repair_error(
+                    "LINT_REPAIR_ROLLBACK_NOT_AVAILABLE",
+                    "This repair task has no terminal result.",
+                )
+            })?;
+            let terminal_digest = crate::services::agent_lint_repair_result_digest(result)?;
+            if receipt.lifecycle
+                != crate::models::settings::AgentLintRepairAttestationLifecycle::Completed
+                || receipt.terminal_result_digest.as_deref() != Some(terminal_digest.as_str())
+            {
+                return Err(lint_repair_error(
+                    "LINT_REPAIR_ATTESTATION_REQUIRED",
+                    "The repair result is not bound to its app-owned completed receipt.",
+                ));
+            }
+            let Some(WorkflowResult::AgentLintRepair {
+                affected_paths,
+                affected_path_hashes,
+                checkpoint_hash: Some(checkpoint_hash),
+                final_commit: Some(final_commit),
+                rollback_available: true,
+                ..
+            }) = run.result
+            else {
+                return Err(lint_repair_error(
+                    "LINT_REPAIR_ROLLBACK_NOT_AVAILABLE",
+                    "This repair result has no complete rollback binding.",
+                ));
+            };
+            if request.expected_final_commit != final_commit {
+                return Err(lint_repair_stale(
+                    "The requested repair final commit no longer matches the task result.",
+                ));
+            }
+            let mut canonical_paths = affected_paths.clone();
+            canonical_paths.sort();
+            canonical_paths.dedup();
+            if canonical_paths.is_empty() || canonical_paths != affected_paths {
+                return Err(lint_repair_error(
+                    "LINT_REPAIR_ROLLBACK_BINDING_INVALID",
+                    "The repair result has an invalid affected-path binding.",
+                ));
+            }
+            for path in &affected_paths {
+                context.resolve_wiki_write_path(path)?;
+            }
+            let app_root = context.layout.app_state_root.as_deref().unwrap_or(".app");
+            let graph_cache_path =
+                format!("{}/graph-cache.json", app_root.trim_end_matches('/'));
+            let mut rollback_paths = affected_paths.clone();
+            rollback_paths.push(graph_cache_path);
+            rollback_paths.sort();
+            rollback_paths.dedup();
+            if affected_path_hashes.len() != rollback_paths.len() {
+                return Err(lint_repair_error(
+                    "LINT_REPAIR_ROLLBACK_BINDING_INVALID",
+                    "The repair result has an incomplete affected-path hash binding.",
+                ));
+            }
+            for path in &rollback_paths {
+                let expected = affected_path_hashes.get(path).ok_or_else(|| {
+                    lint_repair_error(
+                        "LINT_REPAIR_ROLLBACK_BINDING_INVALID",
+                        "The repair result is missing an affected-path hash.",
+                    )
+                })?;
+                let current = state.file_store.file_hash_if_exists(context, path)?;
+                if &current != expected {
+                    return Err(BackendError::new(
+                        "LINT_REPAIR_ROLLBACK_NOT_CURRENT",
+                        "A repair-owned file changed after the Agent finished; rollback was not applied.",
+                        true,
+                        true,
+                    )
+                    .with_details(serde_json::json!({
+                        "path": path,
+                        "expectedHash": expected,
+                        "currentHash": current,
+                    })));
+                }
+            }
+            let rollback = state.git_service.rollback_paths_to_checkpoint(
+                context,
+                &final_commit,
+                &checkpoint_hash,
+                &format!("Rollback Agent lint repair {}", run.task_id),
+                &rollback_paths,
+            )?;
+            if let Ok(bookmarks) = state.bookmark_service.wiki_page_paths(context) {
+                let _ = state.search_service.scan_wiki(context, &bookmarks);
+            }
+            let rollback_commit = rollback.commit_hash.ok_or_else(|| {
+                lint_repair_error(
+                    "LINT_REPAIR_ROLLBACK_COMMIT_MISSING",
+                    "The repair rollback commit has no commit hash.",
+                )
+            })?;
+            Ok(AgentLintRepairRollbackResult {
+                task_id: run.task_id,
+                rolled_back_commit: final_commit,
+                rollback_commit,
+                affected_paths,
+            })
+        },
+    )
 }
 
 /// Load the persisted deep-lint report for a completed (or in-flight) task.
@@ -1388,7 +1600,9 @@ mod tests {
     use crate::models::workflow::{
         WorkflowFilesystemAccess, WorkflowGitState, WorkflowProjectTrust, WorkflowRoute,
     };
-    use crate::services::{AgentInvocation, AgentProbeTarget, ProcessRunner, SettingsService};
+    use crate::services::{
+        workflow_stages, AgentInvocation, AgentProbeTarget, ProcessRunner, SettingsService,
+    };
     use crate::tasks::TaskService;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -1545,6 +1759,15 @@ mod tests {
         };
         let baseline = workflow_baseline_for_scope(&context, &scope).unwrap();
         let selected_finding_ids = vec!["contradiction:wiki/a.md".to_string()];
+        let selected_findings = vec![AgentLintRepairFinding {
+            id: selected_finding_ids[0].clone(),
+            issue_type: DeepLintIssueType::Contradiction,
+            severity: crate::models::lint::LintSeverity::Warning,
+            path: "wiki/a.md".into(),
+            message: "Contradiction".into(),
+            evidence: None,
+            suggested_action: None,
+        }];
         let authorized_path_hashes = [(
             "wiki/a.md".to_string(),
             hash_optional_project_file(&context, "wiki/a.md").unwrap(),
@@ -1567,6 +1790,7 @@ mod tests {
             "health-report-1",
             &selection_revision,
             &selected_finding_ids,
+            &selected_findings,
             &route,
             &skill,
             &authorized_path_hashes,
@@ -1580,6 +1804,7 @@ mod tests {
             report_id: "health-report-1".into(),
             selection_revision,
             selected_finding_ids,
+            selected_findings,
             skill,
             authorized_path_hashes,
             expected_git_head,
@@ -1686,6 +1911,33 @@ mod tests {
             AgentLintRepairReplayIntent::Retry,
         )
         .unwrap();
+        state
+            .settings_service
+            .complete_agent_lint_repair_attestation(
+                &run.task_id,
+                &digest,
+                None,
+                "terminal-old-attempt",
+            )
+            .unwrap();
+        validate_agent_lint_repair_replay_facts(
+            &state,
+            &context,
+            &run,
+            &access,
+            AgentLintRepairReplayIntent::Retry,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_agent_lint_repair_attestation(
+                &state,
+                &run,
+                AgentLintRepairReplayIntent::Continue,
+            )
+            .unwrap_err()
+            .code,
+            "LINT_REPAIR_ATTESTATION_REQUIRED"
+        );
         fs::write(root.path().join("wiki/a.md"), "# externally changed\n").unwrap();
         assert_eq!(
             validate_agent_lint_repair_replay_facts(

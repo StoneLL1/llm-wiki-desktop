@@ -98,6 +98,7 @@ application
 applied
 applies
 apply
+applying
 approval
 apps
 arbitrary
@@ -147,7 +148,9 @@ attachments
 attempt
 attempts
 attention
+attest
 attestation
+attestations
 attribute
 attributes
 attrs
@@ -315,6 +318,7 @@ canvas
 cap
 capabilities
 capability
+capacity
 caps
 captcha
 capture
@@ -368,6 +372,7 @@ chromium
 chunk
 chunked
 chunks
+churn
 cid
 citation
 citations
@@ -384,6 +389,7 @@ classifies
 classify
 claude
 clean
+cleaned
 cleans
 cleanup
 clear
@@ -488,6 +494,7 @@ conflating
 conflict
 conflicting
 conflicts
+confusion
 connection
 connections
 connectivity
@@ -504,6 +511,7 @@ consume
 consumed
 consumers
 consumes
+consuming
 consumption
 contain
 contained
@@ -542,6 +550,8 @@ coreml
 corpus
 correct
 correctness
+correlate
+correlation
 corrupt
 corrupted
 cost
@@ -611,6 +621,7 @@ default
 defaults
 deferred
 define
+defined
 defines
 definition
 definitions
@@ -726,6 +737,7 @@ dlp
 dns
 docked
 docling
+docs
 document
 documentation
 documents
@@ -880,6 +892,7 @@ expect
 expected
 experience
 expired
+expires
 expiring
 expiry
 explain
@@ -907,6 +920,7 @@ facade
 facades
 facing
 fact
+facts
 factual
 fail
 failed
@@ -917,7 +931,6 @@ failures
 fake
 falkor
 falkordb
-fall
 fallback
 fallbacks
 falls
@@ -1080,6 +1093,7 @@ green
 group
 grouping
 groups
+grows
 growth
 guard
 guarded
@@ -1117,6 +1131,7 @@ healthy
 heavy
 help
 helper
+helpers
 hermes
 hex
 hidden
@@ -1129,6 +1144,7 @@ historical
 history
 hit
 hits
+hold
 holds
 home
 honest
@@ -1489,6 +1505,7 @@ mib
 microtasks
 mid
 migrate
+migrated
 migrates
 migration
 milestone
@@ -1587,6 +1604,7 @@ nonexistent
 nonfree
 nonrecoverable
 nonterminal
+nonzero
 noop
 nord
 normal
@@ -1774,6 +1792,7 @@ pipeline
 pipes
 pixel
 pixels
+place
 placeholder
 plain
 plan
@@ -1809,6 +1828,7 @@ post
 postprocess
 posts
 pptx
+prd
 pre
 prebind
 prebound
@@ -1828,6 +1848,7 @@ prefixes
 preflight
 preflights
 prefs
+prelaunch
 preparation
 prepare
 prepared
@@ -1868,6 +1889,7 @@ product
 production
 profile
 profiles
+program
 progress
 progressive
 project
@@ -1876,6 +1898,7 @@ projects
 promise
 promotes
 prompt
+prompted
 promptly
 prompts
 propagated
@@ -1954,10 +1977,13 @@ rebinds
 rebound
 rebuild
 rebuilds
+receipt
+receipts
 receive
 receiver
 receives
 recent
+recheck
 rechecks
 recipe
 reclassifies
@@ -2102,6 +2128,7 @@ repos
 repository
 reprepare
 reprepares
+reprobe
 reprocess
 request
 requested
@@ -2156,6 +2183,7 @@ retain
 retained
 retaining
 retention
+retire
 retired
 retried
 retries
@@ -2237,9 +2265,11 @@ samples
 sanitize
 sanitized
 satisfies
+satisfy
 save
 saved
 saves
+scaffold
 scalar
 scale
 scan
@@ -2404,6 +2434,7 @@ spec
 specialized
 specific
 specification
+specs
 speech
 split
 splits
@@ -2495,6 +2526,7 @@ sum
 summaries
 summarize
 summary
+superpowers
 supplement
 supplemental
 supplies
@@ -2536,10 +2568,12 @@ take
 tampered
 tampering
 target
+targeted
 targets
 task
 tasks
 tauri
+taxonomy
 tech
 technical
 technology
@@ -2604,6 +2638,7 @@ toggles
 token
 tokens
 tokio
+tombstone
 tone
 too
 tool
@@ -2711,6 +2746,7 @@ unrelated
 unresolved
 unsafe
 unsigned
+unstable
 unstage
 unstarted
 unsupported
@@ -2826,6 +2862,7 @@ wire
 with
 within
 without
+won
 words
 work
 workbench
@@ -2871,6 +2908,7 @@ zustand
 下载和识别必须可取消
 不一定阻塞功能
 不会进入
+不修改
 不发送秘密
 不可破坏的不变量
 不可键盘操作
@@ -2913,6 +2951,7 @@ zustand
 两排散件
 两种运行模式必须明确隔离
 两级预览不完整并泄露内部标识
+两轮代码复查
 两轮独立盲审发现的关键问题
 中优先级问题与功能缺口
 中出现两次
@@ -2938,6 +2977,7 @@ zustand
 二次确认
 交互要求
 交互语义
+产品决定已批准
 产品基准逐节对照
 产品批准启用
 产品明确采用近期
@@ -2969,6 +3009,7 @@ zustand
 任务与项目安全
 任务中执行阻塞进程循环
 任务创建与条目绑定的重启竞态
+任务启动与任务展示
 任务失败或取消后仍尝试读取不存在的
 任务完成检查清单
 任务成功
@@ -3058,6 +3099,8 @@ zustand
 几批需要额外加一句
 凭证和浏览器登录
 分层关系
+分批实施
+分批实施中
 分阶段实施路线
 分阶段实施顺序
 分页仍然先全量读
@@ -3079,6 +3122,7 @@ zustand
 前端切换
 前端完全不展示可信度告警
 前端批量状态
+前端状态与异步边界
 前端的
 前端视觉与交互改进
 前端视觉与交互美化建议
@@ -3091,8 +3135,10 @@ zustand
 加载时继续显示旧消息
 化实现
 升级为回答
+协作记录
 单一原生布局检查
 单条死链确认会替换全文所有同目标链接
+单篇快速导出与
 占位信息和无效动作
 却不回写磁盘
 历史可信度
@@ -3135,6 +3181,7 @@ zustand
 可提交展示与
 可永久留下
 可直接修改
+可直接复用的旧实现仍然存在
 可能删除
 可能吞掉新项目刷新
 可能完全不在视口中
@@ -3164,11 +3211,13 @@ zustand
 合并闭环与结果可解释性
 合法后台
 合法后台任务不会被写入全局
+同步产品
 同步长任务运行在
 名会被并发
 后写样式不一定生效
 后台模式与
 后台计划
+后的提交规则
 后端与视觉体验
 后端已有检索诊断
 后端直接物理删除
@@ -3193,6 +3242,7 @@ zustand
 回滚规则
 回跳或永久
 固化右栏与精简页头的行为测试
+固定双入口回归契约
 固定确认栏展示错误信息
 固定路径处理规则
 图文帖要求
@@ -3235,9 +3285,12 @@ zustand
 安全阻断项
 完全未消费
 完成后又永久不失效
+完成定义
 完成所有视图与弹窗的响应式布局
+完成标准
 完整场景矩阵
 完整测试矩阵
+完整验证
 定时发现
 定量退出门槛
 实施顺序和代码审查点
@@ -3284,6 +3337,7 @@ zustand
 工作台
 工作流页面没法用
 工作纪律
+工作项
 已使用的项目上下文
 已修复
 已存在但未渲染
@@ -3343,9 +3397,11 @@ zustand
 当前代码质量
 当前实现中应保留的基础
 当前实现值得保留的基础
+当前实现审计
 当前工作树事实
 当前布局与权威
 当前未通过或不能作为
+当前被
 当前问题在
 当前项目的代码落点
 形成不必要的隐私暴露面
@@ -3354,9 +3410,11 @@ zustand
 必测竞态
 必补验证矩阵
 必读硬边界
+必须保持的行为
 必须保留的现有能力
 必须成立的事实
 必须新增的合同测试
+必须更新
 必须覆盖的测试矩阵
 必须证明的修复前现象
 必须通过的通用检查
@@ -3364,6 +3422,7 @@ zustand
 快速切页仍可能把旧页会话写回当前
 快速切页是
 快速历史切换和项目切换时仍会残留
+快速导出的输出类型
 怎样保持事件
 性能上限与计数硬门
 性能与
@@ -3373,9 +3432,12 @@ zustand
 总量确认与切换
 总量预览与确认
 恢复动作与任务连续性
+恢复直接
 恢复窗口与低打扰反馈
 恢复语义
+恢复轻量弹窗请求状态
 截图锚点和长文本分块的源码参考
+手动桌面验收
 手动运行与现实中的调度延迟
 打开现有知识库兼容性还不够好
 执行历史与
@@ -3414,6 +3476,7 @@ zustand
 排障清单
 推荐修复顺序
 推荐实施批次与依赖
+推荐实施顺序摘要
 推荐整改顺序
 推荐能力
 掩盖真正原因
@@ -3465,12 +3528,14 @@ zustand
 是有条件的
 普通会话选择
 暂停与
+替换的前端连接
 最值钱的性能修复
 最后才落盘
 最多三轮修复
 最小侵入决策
 最小可用闭环
 最新回答
+最终产品边界
 最终优先级汇总
 最终判断
 最终原则
@@ -3491,6 +3556,7 @@ zustand
 未绑定到当前
 本地图片
 本地报告与
+本地状态
 本地输入
 本批冻结的合同
 本次审阅验证记录
@@ -3516,6 +3582,7 @@ zustand
 检查阻塞了首次可见反馈
 检索预算可能被
 模块代码审查
+模态弹窗
 正文文件
 正确性
 每个实施
@@ -3537,6 +3604,7 @@ zustand
 没有选择语义
 没有项目
 流式阶段还会生成不可用的
+流程和开发文档
 测试基础设施
 测试审计与迁移要求
 测试数量很多
@@ -3562,6 +3630,7 @@ zustand
 甚至没有确认入口
 生命周期
 生命周期与确认状态
+生成内容双入口实施计划
 生成卡片
 生成新回答时
 用户可见迁移工程
@@ -3574,6 +3643,7 @@ zustand
 登录和远程原件策略
 的关联
 的决策顺序与大范围操作
+的区别
 的取消动作与后端状态不一致
 的可实施契约
 的可选
@@ -3594,6 +3664,7 @@ zustand
 的真实边界
 的第一次发送绕过了已实现的
 的结果路径被丢弃
+的职责不回退
 的调用约束
 的迟到错误会清空用户已成功打开的项目
 的追加语义没有明确保护
@@ -3606,6 +3677,7 @@ zustand
 目标与关闭项
 目标执行与刷新模型
 目标架构
+目标调用链
 相对路径交接
 真实批次身份
 确定性导入失败后会自动启动本地
@@ -3656,6 +3728,7 @@ zustand
 算放大
 粒度与
 粘贴输入
+精确关联结果并自动预览
 精确目标文件
 系列依赖图与提交边界
 紧随其后的
@@ -3679,6 +3752,7 @@ zustand
 缺少文本入口与清晰发现反馈
 缺少终态清理
 网络和资源限制
+聚焦测试
 能力包没有得到真正的文件系统沙箱
 能力包路径
 能力恢复不是批量的
@@ -3690,6 +3764,7 @@ zustand
 自动化与视觉矩阵
 自动化模板
 自动开始的产品语义不够明确
+自动预览仍有可复用骨架
 自己判无效的
 范围与依据
 草稿没有
@@ -3717,6 +3792,7 @@ zustand
 设计相反
 证据的结果
 评审方法
+详细测试矩阵
 语言需要分层
 调度语义
 调用示意
@@ -3739,6 +3815,7 @@ zustand
 边界不完整
 运行时证据比静态阅读更重要
 运行详情
+返回值
 返回前时
 返回后会先写旧项目
 还重复加载和线性查找
@@ -3765,6 +3842,7 @@ zustand
 重复执行或无法继续
 重复添加很容易发生
 重复递归扫描子树
+重新生成
 重构为一个完整输入容器
 重渲染
 错误信息先显示
@@ -3785,6 +3863,7 @@ zustand
 集成验收
 静态引用列表
 非关键
+非目标
 面向当前项目的目标架构
 音视频可以通过
 页问题带到
@@ -3799,12 +3878,18 @@ zustand
 项目切换时单一
 项目能力链
 预览不是最终结果的可靠代理
+预览内的直接重新生成
+预计修改
+预计只复用
+预计文件改动
 预计生产文件
 风险与已知张力
+风险与控制
 验收标准
 验收步骤
 验收清单
 验收门槛建议
+验证和
 验证结果
 验证补充
 高优先级问题

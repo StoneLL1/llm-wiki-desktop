@@ -236,6 +236,12 @@ pub fn confirm_pending_action(
             true,
             true,
         )),
+        Some(ConfirmationExecution::AgentLintRepairReview(_)) => Err(BackendError::new(
+            "CONFIRMATION_COMMAND_INVALID",
+            "Agent lint repair review must be handled by confirm_workflow_action.",
+            true,
+            true,
+        )),
         Some(ConfirmationExecution::ChatOverwrite { .. }) => Err(BackendError::new(
             "CONFIRMATION_COMMAND_INVALID",
             "Chat overwrites must be handled by save_answer_to_wiki.",
@@ -333,6 +339,9 @@ fn reject_workflow_owned_generic_confirmation(
         ),
         Some(ConfirmationExecution::AgentLintRepairStart { .. }) => Some(
             "Agent lint repair must be handled by confirm_agent_lint_repair_start or cancel_agent_lint_repair_preparation.",
+        ),
+        Some(ConfirmationExecution::AgentLintRepairReview(_)) => Some(
+            "Agent lint repair review must be handled by confirm_workflow_action or discard_workflow_result.",
         ),
         _ => None,
     };

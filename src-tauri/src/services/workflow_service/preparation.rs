@@ -2125,6 +2125,50 @@ pub fn workflow_stages(kind: &WorkflowKind) -> Vec<WorkflowStage> {
         .collect()
 }
 
+/// Persisted stage contract for the Health-owned Agent lint repair subtype.
+/// It is intentionally separate from built-in Health so recovery cannot
+/// replay a repair attempt through the read-only Health runner.
+pub fn agent_lint_repair_stages() -> Vec<WorkflowStage> {
+    let mut definitions = vec![(
+        "create_checkpoint".to_string(),
+        "workflows.stage.agentLintRepair.createCheckpoint".to_string(),
+    )];
+    for round in 1..=3 {
+        for (id, label) in [
+            ("prepare_round", "prepareRound"),
+            ("run_agent", "runAgent"),
+            ("validate_candidate", "validateCandidate"),
+            ("review_risk", "reviewRisk"),
+            ("apply_changes", "applyChanges"),
+            ("recheck_lint", "recheckLint"),
+        ] {
+            definitions.push((
+                format!("{id}_{round}"),
+                format!("workflows.stage.agentLintRepair.{label}"),
+            ));
+        }
+    }
+    definitions.push((
+        "finalize_repair".to_string(),
+        "workflows.stage.agentLintRepair.finalizeRepair".to_string(),
+    ));
+    definitions
+        .into_iter()
+        .enumerate()
+        .map(|(index, (id, label_key))| WorkflowStage {
+            id,
+            ordinal: (index + 1) as u32,
+            status: WorkflowStageStatus::Pending,
+            label_key,
+            started_at: None,
+            completed_at: None,
+            current_item: None,
+            progress: None,
+            decision: None,
+        })
+        .collect()
+}
+
 fn workflow_title(kind: &WorkflowKind) -> &'static str {
     match kind {
         WorkflowKind::UpdateWiki => "Update Wiki",
