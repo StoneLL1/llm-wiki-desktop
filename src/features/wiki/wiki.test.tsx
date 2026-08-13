@@ -24,6 +24,8 @@ import { updateTreeNodeBookmark, useWikiStore } from "./wikiStore";
 import { invalidateProjectScope } from "../../stores/projectScope";
 import { defaultProject, useProjectStore } from "../../stores/projectStore";
 import { useNavigationStore } from "../../stores/navigationStore";
+import { useExportStore } from "../../stores/exportStore";
+import { useTaskStore } from "../../stores/taskStore";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 const emptyAiCapabilities = { agents: [], providers: [] };
@@ -76,6 +78,21 @@ function deferred<T>() {
 beforeEach(() => {
   invokeMock.mockReset();
   useWikiStore.getState().reset();
+  useExportStore.getState().reset();
+  useTaskStore.setState({
+    activeProjectId: null,
+    activeProjectRootPath: null,
+    tasks: [],
+    logs: {},
+    activities: {},
+    taskOutputs: {},
+    drawerOpen: false,
+    selectedTaskId: null,
+    runningCount: 0,
+    tasksHydrated: false,
+    projectPersistence: null,
+    projectPersistenceReason: null,
+  });
   useNavigationStore.setState({
     activeView: "dashboard",
     rightPanelOpen: true,
@@ -1154,6 +1171,250 @@ describe("Wiki HTML preview", () => {
     } finally {
       requestWorkflowLaunch.mockRestore();
     }
+  });
+
+  it("starts a direct single-page export with default options and opens its task", async () => {
+    const tree: WikiTree = {
+      root: { name: "wiki", kind: "folder", path: "wiki", starred: false, bookmarked: false, fileCount: 1, children: [] },
+      pages: [pageMeta()],
+      totalPages: 1,
+    };
+    const task = {
+      id: "task-export",
+      taskType: "export" as const,
+      projectId: "proj-1",
+      title: "Export Transformer",
+      status: "running" as const,
+      progress: 0.1,
+      startedAt: "2026-08-13T10:00:00Z",
+      updatedAt: "2026-08-13T10:00:00Z",
+      completedAt: null,
+      cancellable: true,
+      logPath: null,
+      result: null,
+      error: null,
+    };
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "scan_wiki") return Promise.resolve(tree);
+      if (command === "read_wiki_page") return Promise.resolve(pageContent());
+      if (command === "list_exports") return Promise.resolve([]);
+      if (command === "get_export_restricted_content_status") {
+        return Promise.resolve({ containsRestrictedContent: false, restrictedSourceCount: 0 });
+      }
+      if (command === "start_export") return Promise.resolve({ id: task.id });
+      if (command === "get_task") return Promise.resolve(task);
+      return Promise.resolve(null);
+    });
+    useProjectStore.setState({
+      currentProject: {
+        ...defaultProject,
+        projectId: "proj-1",
+        rootPath: "D:/wiki",
+        name: "Wiki",
+      },
+    });
+    useTaskStore.setState({
+      activeProjectId: "proj-1",
+      activeProjectRootPath: "D:/wiki",
+    });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      value: {},
+      configurable: true,
+    });
+
+    render(<WikiView capabilities={emptyAiCapabilities} />);
+    await waitFor(() => expect(useWikiStore.getState().page).not.toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Generate HTML" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Generate and preview" }));
+
+    await waitFor(() =>
+      expect(invokeMock.mock.calls.filter(([command]) => command === "start_export")).toHaveLength(1),
+    );
+    const startCall = invokeMock.mock.calls.find(([command]) => command === "start_export");
+    expect(startCall?.[1]).toEqual({
+      request: expect.objectContaining({
+        projectId: "proj-1",
+        projectRootPath: "D:/wiki",
+        exportType: "beautiful_read",
+        sourcePath: "wiki/concepts/transformer.md",
+        route: "auto",
+        options: {
+          includeFrontmatter: true,
+          embedCss: true,
+          embedImages: false,
+        },
+        acknowledgeRestrictedContent: false,
+      }),
+    });
+    expect(useTaskStore.getState()).toMatchObject({
+      drawerOpen: true,
+      selectedTaskId: task.id,
+    });
+    expect(useWikiStore.getState().mode).toBe("preview");
+  });
+
+  it("uses the direct regenerate task for an existing single-page preview", async () => {
+    const tree: WikiTree = {
+      root: { name: "wiki", kind: "folder", path: "wiki", starred: false, bookmarked: false, fileCount: 1, children: [] },
+      pages: [pageMeta()],
+      totalPages: 1,
+    };
+    const record: ExportRecord = {
+      id: "export-existing",
+      exportType: "knowledge_card",
+      title: "Transformer card",
+      sourcePath: pageMeta().path,
+      outputPath: "exports/html/transformer-card.html",
+      createdAt: "2026-08-13T09:00:00Z",
+      route: "agent",
+      status: "succeeded",
+      bookmarked: false,
+    };
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "scan_wiki") return Promise.resolve(tree);
+      if (command === "read_wiki_page") return Promise.resolve(pageContent());
+      if (command === "list_exports") return Promise.resolve([record]);
+      if (command === "get_export_restricted_content_status") {
+        return Promise.resolve({ containsRestrictedContent: false, restrictedSourceCount: 0 });
+      }
+      if (command === "regenerate_export") return Promise.resolve({ id: "task-regenerate" });
+      if (command === "get_task") return Promise.resolve(null);
+      return Promise.resolve(null);
+    });
+    useProjectStore.setState({
+      currentProject: {
+        ...defaultProject,
+        projectId: "proj-1",
+        rootPath: "D:/wiki",
+        name: "Wiki",
+      },
+    });
+    useTaskStore.setState({
+      activeProjectId: "proj-1",
+      activeProjectRootPath: "D:/wiki",
+    });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      value: {},
+      configurable: true,
+    });
+
+    render(<WikiView capabilities={emptyAiCapabilities} />);
+    await waitFor(() => expect(useWikiStore.getState().page).not.toBeNull());
+    await waitFor(() => expect(useExportStore.getState().records).toEqual([record]));
+    act(() => useWikiStore.setState({ mode: "preview" }));
+    fireEvent.click(screen.getByRole("button", { name: "Regenerate" }));
+
+    await waitFor(() =>
+      expect(
+        invokeMock.mock.calls.filter(([command]) => command === "regenerate_export"),
+      ).toHaveLength(1),
+    );
+    const regenerateCall = invokeMock.mock.calls.find(
+      ([command]) => command === "regenerate_export",
+    );
+    expect(regenerateCall?.[1]).toEqual({
+      request: expect.objectContaining({
+        projectId: "proj-1",
+        projectRootPath: "D:/wiki",
+        exportType: "knowledge_card",
+        sourcePath: pageMeta().path,
+        route: "auto",
+        options: {
+          includeFrontmatter: true,
+          embedCss: true,
+          embedImages: false,
+        },
+        acknowledgeRestrictedContent: false,
+      }),
+    });
+  });
+
+  it("pauses for restricted-content confirmation before starting the direct export", async () => {
+    const tree: WikiTree = {
+      root: { name: "wiki", kind: "folder", path: "wiki", starred: false, bookmarked: false, fileCount: 1, children: [] },
+      pages: [pageMeta()],
+      totalPages: 1,
+    };
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "scan_wiki") return Promise.resolve(tree);
+      if (command === "read_wiki_page") return Promise.resolve(pageContent());
+      if (command === "list_exports") return Promise.resolve([]);
+      if (command === "get_export_restricted_content_status") {
+        return Promise.resolve({ containsRestrictedContent: true, restrictedSourceCount: 2 });
+      }
+      if (command === "start_export") return Promise.resolve({ id: "task-restricted" });
+      if (command === "get_task") return Promise.resolve(null);
+      return Promise.resolve(null);
+    });
+    useProjectStore.setState({
+      currentProject: {
+        ...defaultProject,
+        projectId: "proj-1",
+        rootPath: "D:/wiki",
+        name: "Wiki",
+      },
+    });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      value: {},
+      configurable: true,
+    });
+
+    render(<WikiView capabilities={emptyAiCapabilities} />);
+    await waitFor(() => expect(useWikiStore.getState().page).not.toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Generate HTML" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Generate and preview" }));
+
+    expect(await screen.findByText(/This export contains 2 restricted source/)).toBeInTheDocument();
+    expect(invokeMock.mock.calls.filter(([command]) => command === "start_export")).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Export anyway" }));
+
+    await waitFor(() =>
+      expect(invokeMock.mock.calls.filter(([command]) => command === "start_export")).toHaveLength(1),
+    );
+    const startCall = invokeMock.mock.calls.find(([command]) => command === "start_export");
+    expect(startCall?.[1]).toEqual({
+      request: expect.objectContaining({ acknowledgeRestrictedContent: true }),
+    });
+  });
+
+  it("keeps the quick-export dialog open and shows the backend error when start fails", async () => {
+    const tree: WikiTree = {
+      root: { name: "wiki", kind: "folder", path: "wiki", starred: false, bookmarked: false, fileCount: 1, children: [] },
+      pages: [pageMeta()],
+      totalPages: 1,
+    };
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "scan_wiki") return Promise.resolve(tree);
+      if (command === "read_wiki_page") return Promise.resolve(pageContent());
+      if (command === "list_exports") return Promise.resolve([]);
+      if (command === "get_export_restricted_content_status") {
+        return Promise.resolve({ containsRestrictedContent: false, restrictedSourceCount: 0 });
+      }
+      if (command === "start_export") return Promise.reject(new Error("permission denied"));
+      return Promise.resolve(null);
+    });
+    useProjectStore.setState({
+      currentProject: {
+        ...defaultProject,
+        projectId: "proj-1",
+        rootPath: "D:/wiki",
+        name: "Wiki",
+      },
+    });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      value: {},
+      configurable: true,
+    });
+
+    render(<WikiView capabilities={emptyAiCapabilities} />);
+    await waitFor(() => expect(useWikiStore.getState().page).not.toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Generate HTML" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Generate and preview" }));
+
+    expect(await screen.findByText("permission denied")).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(useWikiStore.getState().mode).toBe("read");
+    expect(useTaskStore.getState().drawerOpen).toBe(false);
   });
 
   it("keeps Wiki quick export types limited to single-page artifacts", () => {

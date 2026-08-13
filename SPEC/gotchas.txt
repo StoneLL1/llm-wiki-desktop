@@ -1,5 +1,7 @@
 # 踩坑清单 (gotchas.txt)
 
+Wiki 快速导出在页面或项目切换后可能回写旧任务状态 — 根因：受限内容查询、任务启动和任务事实刷新均为异步 continuation，若只依赖当前组件状态会让旧请求解锁新请求或污染新页面 — 避免方式：为每次请求携带 epoch，并同时校验 mounted、project/root/page scope 与全局 runningTaskId 后再提交 UI 状态。
+
 Graphify refresh can update tracked cache metadata before failing on Windows access control — Root cause: `graphify update .` performs AST extraction and cache writes in the managed sandbox, then may stop with `WinError 5` before completing the rebuild — How to avoid: treat the refresh as blocked, do not claim the graph is current, restore only the tracked cache metadata if it changed, and do not repeat the unchanged failing command; ignored graph artifacts may remain dirty for the next approved refresh.
 
 The full repository gate can be incomplete without a product failure — Root cause: `npm run check` runs frontend Vitest and a 1,089-test no-default-features Rust suite concurrently, so the managed 120-second command window can expire after compilation while tests are still executing; Vitest may also fail earlier on the known Tailwind native binding/`spawn EPERM` environment path — How to avoid: record the exact phase and exit condition, use passing focused compile/lint/contract checks as scoped evidence, and rerun the full gate only after a scoped fix or reclassification rather than repeating an unchanged timeout.
