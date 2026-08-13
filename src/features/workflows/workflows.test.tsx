@@ -5,7 +5,7 @@ const i18nMocks = vi.hoisted(() => ({
   t: (key: string) => key,
   language: "en-US",
 }));
-const workflowApiMocks = vi.hoisted(() => ({ getWorkflowFileDiff: vi.fn() }));
+const workflowApiMocks = vi.hoisted(() => ({ getWorkflowFileDiff: vi.fn(), rollbackAgentLintRepair: vi.fn() }));
 
 vi.mock("react-i18next", () => ({
   initReactI18next: { type: "3rdParty", init: vi.fn() },
@@ -16,6 +16,7 @@ vi.mock("react-i18next", () => ({
 }));
 vi.mock("../../services/workflowApi", () => ({
   getWorkflowFileDiff: workflowApiMocks.getWorkflowFileDiff,
+  rollbackAgentLintRepair: workflowApiMocks.rollbackAgentLintRepair,
 }));
 
 import type { WorkflowFileDiffPage, WorkflowPreparation, WorkflowRun, WorkflowRunSummary, WorkflowsOverview } from "../../types/workflow";
@@ -101,6 +102,7 @@ afterEach(() => {
   i18nMocks.language = "en-US";
   useWorkflowStore.getState().reset();
   workflowApiMocks.getWorkflowFileDiff.mockReset();
+  workflowApiMocks.rollbackAgentLintRepair.mockReset();
 });
 
 describe("Workflows overview", () => {
@@ -571,7 +573,7 @@ describe("Workflows overview", () => {
     expect(screen.getByRole("button", { name: "workflows.action.starting" })).toBeDisabled();
   });
 
-  it("keeps Health route presentation fail-closed while Decision Gate H is unresolved", () => {
+  it("shows the backend-provided Agent route for Health preparation", () => {
     const preparation = {
       schemaVersion: 1,
       preparationId: "prep-health-gate",
@@ -596,9 +598,11 @@ describe("Workflows overview", () => {
 
     expect(view.container.querySelector("[data-decision-step='2']")).toHaveTextContent("workflows.preparation.fixedScopeCount");
     expect(view.container.querySelector("[data-decision-step='6']")).toHaveTextContent("workflows.route.agent");
-    expect(view.container.querySelector("[data-decision-step='6']")).not.toHaveTextContent("codex");
+    expect(view.container.querySelector("[data-decision-step='6']")).toHaveTextContent("codex");
+    expect(screen.getByText("workflows.preparation.agent")).toBeInTheDocument();
+    expect(screen.getByText("workflows.preparation.model")).toBeInTheDocument();
     const routeOverride = screen.getByLabelText("workflows.preparation.routeOverride");
-    expect(within(routeOverride).queryByRole("option", { name: /codex/ })).not.toBeInTheDocument();
+    expect(within(routeOverride).getByRole("option", { name: /codex/ })).toBeInTheDocument();
     expect(within(routeOverride).getByRole("option", { name: /ollama/ })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "workflows.action.chooseRoute" }));
     expect(view.container.querySelector(".workflow-execution-details")).toHaveAttribute("open");
@@ -1771,6 +1775,66 @@ describe("Workflows overview", () => {
       limitBytes: 64 * 1024,
     }));
     expect(await screen.findByText("@@ first chunk @@")).toBeInTheDocument();
+  });
+
+  it("keeps completed Agent repair Diff lazy and bounds the initial disclosures", async () => {
+    workflowApiMocks.getWorkflowFileDiff.mockResolvedValue({
+      fileId: "file-0",
+      path: "wiki/中文/页面.md",
+      kind: "two_way",
+      diff: "@@ repair chunk @@",
+      nextCursor: null,
+      truncated: false,
+    });
+    const repairRun = workflowRun({
+      taskId: "repair-terminal",
+      kind: "health_check",
+      displayStatus: "completed",
+      route: { kind: "agent", agent: "codex", model: "gpt-5", routeRevision: "route-a" },
+      operation: {
+        kind: "agent_lint_repair",
+        preparationId: "prep-a",
+        preparationRevision: "prep-rev-a",
+        reportId: "report-a",
+        selectionRevision: "selection-a",
+        selectedFindingIds: ["duplicate_topic:wiki/中文/页面.md"],
+        skill: { id: "builtin.wiki-lint", version: "2026-08-12.1", sha256: "skill-a" },
+        authorizedPathHashes: { "wiki/中文/页面.md": "hash-a" },
+        expectedGitHead: "head-a",
+      },
+      result: {
+        kind: "agent_lint_repair",
+        outcome: "manual_review_required",
+        resolvedFindingIds: [],
+        unresolvedFindingIds: ["duplicate_topic:wiki/中文/页面.md"],
+        introducedFindingIds: [],
+        skippedFindingIds: [],
+        rounds: [],
+        affectedPaths: Array.from({ length: 101 }, (_, index) => `wiki/page-${index}.md`),
+        affectedPathHashes: {},
+        checkpointHash: "checkpoint-a",
+        finalCommit: "commit-a",
+        diffAvailable: true,
+        rollbackAvailable: false,
+        indexRefreshWarnings: [],
+      },
+      completedAt: "2026-08-10T08:02:00Z",
+    });
+    const view = render(<WorkflowTaskDetail run={repairRun} controller={{} as WorkflowsController} queuedRuns={[]} onOpenLogs={vi.fn()} />);
+
+    expect(view.container.querySelectorAll(".workflow-file-diff")).toHaveLength(100);
+    expect(workflowApiMocks.getWorkflowFileDiff).not.toHaveBeenCalled();
+    fireEvent.click(view.container.querySelector(".workflow-file-diff summary")!);
+    await waitFor(() => expect(workflowApiMocks.getWorkflowFileDiff).toHaveBeenCalledWith(expect.objectContaining({
+      taskId: "repair-terminal",
+      pendingActionId: "",
+      fileId: "file-0",
+      cursor: null,
+      limitBytes: 64 * 1024,
+    })));
+    expect(await screen.findByText("@@ repair chunk @@")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "workflows.diff.nextPage" }));
+    expect(view.container.querySelectorAll(".workflow-file-diff")).toHaveLength(1);
   });
 
   it("blocks Apply and offers prepare-again when a lazy diff snapshot is stale", async () => {

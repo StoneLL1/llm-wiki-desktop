@@ -4,7 +4,8 @@ import { useTranslation } from "react-i18next";
 
 import { useWorkflowStore, workflowOperationPending } from "../../stores/workflowStore";
 import { useProjectStore } from "../../stores/projectStore";
-import { getWorkflowFileDiff } from "../../services/workflowApi";
+import { captureProjectScope, isProjectScopeCurrent } from "../../stores/projectScope";
+import { getWorkflowFileDiff, rollbackAgentLintRepair } from "../../services/workflowApi";
 import type { WorkflowRun } from "../../types/workflow";
 import type { WorkflowsController } from "./useWorkflowsController";
 import { WorkflowPipeline } from "./WorkflowPipeline";
@@ -55,6 +56,9 @@ export function WorkflowTaskDetail({
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [retryMenuOpen, setRetryMenuOpen] = useState(false);
   const [decisionReviewStale, setDecisionReviewStale] = useState(false);
+  const [repairDiffStale, setRepairDiffStale] = useState(false);
+  const [rollbackPending, setRollbackPending] = useState(false);
+  const [rollbackErrorKey, setRollbackErrorKey] = useState<string | null>(null);
   const retryOptionsId = useId();
   const [undoClock, setUndoClock] = useState(() => Date.now());
   const queueIndex = queuedRuns.findIndex((candidate) => candidate.taskId === run.taskId);
@@ -72,6 +76,7 @@ export function WorkflowTaskDetail({
         ? "generate_content"
         : null;
   const resultPresentation = presentWorkflowResult(run);
+  const repairResult = run.result?.kind === "agent_lint_repair" ? run.result : null;
   const currentStage = run.stages.find((stage) => stage.id === run.currentStageId);
   const currentStageLabel = currentStage ? t(currentStage.labelKey) : t("workflows.recovery.noStage");
 
@@ -89,6 +94,7 @@ export function WorkflowTaskDetail({
 
   useEffect(() => {
     setDecisionReviewStale(false);
+    setRepairDiffStale(false);
   }, [run.canonicalIdentityKey, run.identityRevision, run.pendingAction?.id, run.taskId]);
 
   const requestCancel = () => {
@@ -97,6 +103,63 @@ export function WorkflowTaskDetail({
       return;
     }
     void controller.cancel(run.taskId);
+  };
+
+  const rollbackRepair = async () => {
+    if (!repairResult?.rollbackAvailable || !repairResult.finalCommit || rollbackPending) return;
+    const projectState = useProjectStore.getState();
+    const project = projectState.currentProject;
+    const authority = projectState.authority;
+    const scope = captureProjectScope();
+    const guardMatches = () => {
+      const currentState = useProjectStore.getState();
+      const current = currentState.currentProject;
+      if (
+        current.projectId !== run.projectId
+        || current.rootPath !== project.rootPath
+        || !isProjectScopeCurrent(scope)
+      ) return false;
+      const currentAuthority = currentState.authority;
+      return !currentAuthority
+        || (currentAuthority.projectId === run.projectId
+          && currentAuthority.canonicalIdentityKey === run.canonicalIdentityKey
+          && currentAuthority.identityRevision === run.identityRevision);
+    };
+    if (
+      project.projectId !== run.projectId
+      || (authority && (
+        authority.projectId !== run.projectId
+        || authority.canonicalIdentityKey !== run.canonicalIdentityKey
+        || authority.identityRevision !== run.identityRevision
+      ))
+    ) {
+      setRollbackErrorKey("workflows.result.agent_lint_repair.rollbackStale");
+      return;
+    }
+    setRollbackPending(true);
+    setRollbackErrorKey(null);
+    try {
+      await rollbackAgentLintRepair({
+        projectId: run.projectId,
+        projectRootPath: project.rootPath,
+        taskId: run.taskId,
+        expectedFinalCommit: repairResult.finalCommit,
+      });
+      if (!guardMatches()) {
+        setRollbackErrorKey("workflows.result.agent_lint_repair.rollbackStale");
+        return;
+      }
+      await controller.openRun(run.taskId);
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error && typeof error.code === "string"
+        ? error.code
+        : null;
+      setRollbackErrorKey(code === "LINT_REPAIR_ROLLBACK_NOT_CURRENT"
+        ? "workflows.result.agent_lint_repair.rollbackStale"
+        : "workflows.result.agent_lint_repair.rollbackFailed");
+    } finally {
+      setRollbackPending(false);
+    }
   };
 
   return (
@@ -242,11 +305,31 @@ export function WorkflowTaskDetail({
               <ul>{resultPresentation.paths.map((path) => <li key={path}><code title={path}>{path}</code></li>)}</ul>
             </div>
           ) : null}
+          {repairResult?.diffAvailable ? (
+            <RepairDiffList run={run} onStale={() => setRepairDiffStale(true)} paths={repairResult.affectedPaths} />
+          ) : null}
+          {repairDiffStale ? (
+            <p className="workflow-conflict-notice" role="alert">
+              <AlertTriangle aria-hidden="true" size={14} />
+              {t("workflows.diff.stale")}
+            </p>
+          ) : null}
           <div className="workflow-actions mt-3">
             <button className="btn btn--primary" disabled={openResultPending} type="button" onClick={() => void controller.openResult(run)}>{t(resultPresentation.primaryActionKey)}</button>
+            {repairResult?.rollbackAvailable ? (
+              <button
+                className="btn btn--secondary"
+                disabled={rollbackPending || taskMutationPending || !repairResult.finalCommit}
+                type="button"
+                onClick={() => void rollbackRepair()}
+              >
+                {rollbackPending ? "…" : t("workflows.result.agent_lint_repair.rollbackAction")}
+              </button>
+            ) : null}
             <button className="btn btn--secondary" disabled={taskMutationPending || prepareCurrentPending} type="button" onClick={() => void controller.adjustAndPrepare(run)}>{t("workflows.action.runAgain")}</button>
             {recommendedNext ? <button className="btn btn--secondary" disabled={taskMutationPending || prepareNextPending} type="button" onClick={() => void controller.prepare(recommendedNext)}>{t("workflows.action.prepareNext", { workflow: t(workflowKindKey(recommendedNext)) })}</button> : null}
           </div>
+          {rollbackErrorKey ? <p className="workflow-conflict-notice" role="alert">{t(rollbackErrorKey)}</p> : null}
         </section>
       ) : null}
 
@@ -298,6 +381,53 @@ export function WorkflowTaskDetail({
         <p>{t("workflows.logs.description")}</p>
         <button className="btn btn--ghost btn--sm" onClick={() => onOpenLogs(run.taskId)} type="button">{t("workflows.action.viewLogs")}</button>
       </details>
+    </div>
+  );
+}
+
+const MAX_REPAIR_DIFF_HEADERS = 100;
+
+function RepairDiffList({ run, paths, onStale }: {
+  run: WorkflowRun;
+  paths: string[];
+  onStale: () => void;
+}) {
+  const { t } = useTranslation();
+  const [pageStart, setPageStart] = useState(0);
+  useEffect(() => {
+    setPageStart(0);
+  }, [run.taskId, run.updatedAt]);
+  const visiblePaths = paths.slice(pageStart, pageStart + MAX_REPAIR_DIFF_HEADERS);
+  const nextPageStart = pageStart + MAX_REPAIR_DIFF_HEADERS;
+  const previousPageStart = Math.max(0, pageStart - MAX_REPAIR_DIFF_HEADERS);
+
+  return (
+    <div aria-label={t("workflows.result.diff")} className="workflow-result-paths" role="region">
+      <h4>{t("workflows.result.diff")}</h4>
+      {visiblePaths.map((path, index) => (
+        <LazyWorkflowFileDiff
+          diff={null}
+          diffKind="two_way"
+          fileId={`file-${(pageStart + index).toString(16)}`}
+          key={`${run.taskId}:${pageStart + index}:${path}`}
+          path={path}
+          pendingActionId=""
+          run={run}
+          onStale={onStale}
+        />
+      ))}
+      <div className="mt-2 flex gap-2">
+        {pageStart > 0 ? (
+          <button className="btn btn--ghost btn--sm" onClick={() => setPageStart(previousPageStart)} type="button">
+            {t("workflows.diff.previousPage")}
+          </button>
+        ) : null}
+        {nextPageStart < paths.length ? (
+          <button className="btn btn--ghost btn--sm" onClick={() => setPageStart(nextPageStart)} type="button">
+            {t("workflows.diff.nextPage")}
+          </button>
+        ) : null}
+      </div>
     </div>
   );
 }

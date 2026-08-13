@@ -3,6 +3,7 @@ import { create } from "zustand";
 
 import type {
   AddLintIgnoreRequest,
+  AgentLintRepairPreparation,
   ApplyLintFixRequest,
   ApplyLintFixesBatchRequest,
   DeepLintReport,
@@ -26,10 +27,15 @@ import type {
   ListLintIgnoresRequest,
   RemoveLintIgnoreRequest,
   StartDeepLintRequest,
+  isAgentLintRepairEligible,
 } from "../types/lint";
 import type { AgentKind } from "../types/agent";
 import type { LlmProviderKind } from "../types/llm";
+import type { WorkflowRun, WorkflowStartOutcome } from "../types/workflow";
 import { captureProjectScope, isProjectScopeCurrent } from "./projectScope";
+import { useNavigationStore } from "./navigationStore";
+import { useProjectStore } from "./projectStore";
+import { useWorkflowStore } from "./workflowStore";
 
 const hasTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -77,6 +83,51 @@ async function cancelBackendActionBestEffort(actionId: string): Promise<void> {
     // The action may already be expired/cancelled; stale UI must never surface
     // a late confirmation as if it belonged to the current report.
   }
+}
+
+async function cancelAgentRepairPreparationBestEffort(
+  projectId: string,
+  rootPath: string,
+  preparation: AgentLintRepairPreparation,
+): Promise<void> {
+  await invoke("cancel_agent_lint_repair_preparation", {
+    request: {
+      projectId,
+      projectRootPath: rootPath,
+      actionId: preparation.pendingAction.id,
+      preparationId: preparation.preparationId,
+      preparationRevision: preparation.preparationRevision,
+    },
+  });
+}
+
+interface LintProjectGuard {
+  projectKey: string;
+  canonicalIdentityKey: string | null;
+  identityRevision: string | null;
+}
+
+function captureLintProjectGuard(projectId: string, rootPath: string): LintProjectGuard {
+  const projectState = useProjectStore.getState();
+  const authority = projectState.authority;
+  return {
+    projectKey: `${projectId}\0${rootPath}`,
+    canonicalIdentityKey:
+      authority?.projectId === projectId ? authority.canonicalIdentityKey : null,
+    identityRevision: authority?.projectId === projectId ? authority.identityRevision : null,
+  };
+}
+
+function isLintProjectGuardCurrent(guard: LintProjectGuard): boolean {
+  const projectState = useProjectStore.getState();
+  const current = projectState.currentProject;
+  if (`${current.projectId}\0${current.rootPath}` !== guard.projectKey) return false;
+  const authority = projectState.authority;
+  if (!authority || authority.projectId !== current.projectId) {
+    return guard.canonicalIdentityKey === null && guard.identityRevision === null;
+  }
+  return authority.canonicalIdentityKey === guard.canonicalIdentityKey
+    && authority.identityRevision === guard.identityRevision;
 }
 
 const SAFETY_PREFS_KEY = "llm-wiki-desktop.lintSafetyPrefs";
@@ -140,6 +191,15 @@ export interface LintState {
   historyLoading: boolean;
   historyError: string | null;
   activeHistoryId: string | null;
+  agentRepairSelection: string[];
+  agentRepairSelectionReportId: string | null;
+  agentRepairPreparation: AgentLintRepairPreparation | null;
+  agentRepairPending: boolean;
+  agentRepairErrorCode: string | null;
+  agentRepairProjectId: string | null;
+  agentRepairRootPath: string | null;
+  agentRepairCanonicalIdentityKey: string | null;
+  agentRepairIdentityRevision: string | null;
 
   runLocalLint: (
     projectId: string,
@@ -186,6 +246,16 @@ export interface LintState {
   cancelHighRisk: () => Promise<void>;
   /** Best-effort cancellation used before project-scoped state is discarded. */
   cancelPendingActions: () => Promise<void>;
+  setAgentRepairSelection: (reportId: string, findingIds: string[]) => void;
+  clearAgentRepairSelection: () => void;
+  invalidateAgentLintRepairIdentity: () => void;
+  prepareAgentLintRepair: (
+    projectId: string,
+    rootPath: string,
+    reportId: string,
+  ) => Promise<AgentLintRepairPreparation | null>;
+  cancelAgentLintRepairPreparation: () => Promise<void>;
+  confirmAgentLintRepairStart: () => Promise<WorkflowRun | null>;
   reset: () => void;
 }
 
@@ -209,6 +279,15 @@ const initial = {
   historyLoading: false,
   historyError: null as string | null,
   activeHistoryId: null as string | null,
+  agentRepairSelection: [] as string[],
+  agentRepairSelectionReportId: null as string | null,
+  agentRepairPreparation: null as AgentLintRepairPreparation | null,
+  agentRepairPending: false,
+  agentRepairErrorCode: null as string | null,
+  agentRepairProjectId: null as string | null,
+  agentRepairRootPath: null as string | null,
+  agentRepairCanonicalIdentityKey: null as string | null,
+  agentRepairIdentityRevision: null as string | null,
 };
 
 export const useLintStore = create<LintState>((set, get) => ({
@@ -221,6 +300,8 @@ export const useLintStore = create<LintState>((set, get) => ({
     if (
       current.batchRunning ||
       current.fixConfirm ||
+      current.agentRepairPending ||
+      current.agentRepairPreparation ||
       (!preserveBatchConfirmations && current.batchConfirmations.length > 0) ||
       Object.values(current.fixStatus).some((status) => status === "applying")
     ) {
@@ -231,11 +312,14 @@ export const useLintStore = create<LintState>((set, get) => ({
     set({
       loadingLocal: true,
       error: null,
+      agentRepairErrorCode: null,
       localReport: null,
       healthReport: null,
       selectedIssueId: null,
       activeHistoryId: null,
       fixStatus: {},
+      agentRepairSelection: [],
+      agentRepairSelectionReportId: null,
       // Never discard an in-flight batch or confirmations explicitly preserved
       // by the batch completion rescan. Ordinary new scans invalidate old
       // confirmations so their scan hashes cannot outlive the report.
@@ -263,10 +347,18 @@ export const useLintStore = create<LintState>((set, get) => ({
   startDeepLint: async (projectId, rootPath, route, agent, provider) => {
     if (!hasTauri()) return null;
     if (get().runningDeep) return null;
+    if (get().agentRepairPending || get().agentRepairPreparation) return null;
     const scope = captureProjectScope();
     // Claim the running slot before the IPC round-trip so a double click
     // cannot enqueue two deep scans.
-    set({ error: null, runningDeep: true, healthReport: null });
+    set({
+      error: null,
+      agentRepairErrorCode: null,
+      runningDeep: true,
+      healthReport: null,
+      agentRepairSelection: [],
+      agentRepairSelectionReportId: null,
+    });
     try {
       const request: StartDeepLintRequest = {
         projectId,
@@ -297,6 +389,8 @@ export const useLintStore = create<LintState>((set, get) => ({
       set({
         deepReport: report,
         healthReport: null,
+        agentRepairSelection: [],
+        agentRepairSelectionReportId: null,
         activeHistoryId: request.taskId,
         runningDeep: false,
       });
@@ -358,6 +452,8 @@ export const useLintStore = create<LintState>((set, get) => ({
     if (
       current.loadingLocal ||
       current.batchRunning ||
+      current.agentRepairPending ||
+      current.agentRepairPreparation ||
       Object.values(current.fixStatus).some((status) => status === "applying")
     ) {
       set({ historyError: "lint.history.waitForFix" });
@@ -419,6 +515,15 @@ export const useLintStore = create<LintState>((set, get) => ({
         fixConfirm: null,
         batchConfirmations: [],
         batchRunning: false,
+        agentRepairSelection: [],
+        agentRepairSelectionReportId: null,
+        agentRepairPreparation: null,
+        agentRepairPending: false,
+        agentRepairErrorCode: null,
+        agentRepairProjectId: null,
+        agentRepairRootPath: null,
+        agentRepairCanonicalIdentityKey: null,
+        agentRepairIdentityRevision: null,
         activeHistoryId: persisted.entry.id,
         mode:
           persisted.entry.kind === "local"
@@ -735,6 +840,232 @@ export const useLintStore = create<LintState>((set, get) => ({
         // cancellation failure must not leak an old project's error into the
         // newly selected project after the synchronous store reset.
       }
+    }
+    if (state.agentRepairPreparation && state.agentRepairProjectId && state.agentRepairRootPath) {
+      try {
+        await cancelAgentRepairPreparationBestEffort(
+          state.agentRepairProjectId,
+          state.agentRepairRootPath,
+          state.agentRepairPreparation,
+        );
+      } catch {
+        // Project teardown and expiry are terminal from the UI's point of
+        // view; cancellation remains best-effort during global reset.
+      }
+    }
+  },
+
+  setAgentRepairSelection: (reportId, findingIds) => {
+    const report = get().healthReport;
+    if (!report || report.reportId !== reportId || get().agentRepairPreparation) return;
+    const eligibleIds = new Set(
+      report.issues
+        .filter((issue) => isAgentLintRepairEligible(issue, report))
+        .map((issue) => issue.id),
+    );
+    const next = [...new Set(findingIds)].filter((id) => eligibleIds.has(id));
+    set({
+      agentRepairSelection: next,
+      agentRepairSelectionReportId: reportId,
+      agentRepairErrorCode: next.length > 100 ? "LINT_REPAIR_SELECTION_LIMIT" : null,
+    });
+  },
+
+  clearAgentRepairSelection: () => set({
+    agentRepairSelection: [],
+    agentRepairSelectionReportId: null,
+    agentRepairErrorCode: null,
+  }),
+
+  invalidateAgentLintRepairIdentity: () => {
+    const state = get();
+    const preparation = state.agentRepairPreparation;
+    const projectId = state.agentRepairProjectId;
+    const rootPath = state.agentRepairRootPath;
+    lintOperationEpoch += 1;
+    set({
+      agentRepairSelection: [],
+      agentRepairSelectionReportId: null,
+      agentRepairPreparation: null,
+      agentRepairPending: false,
+      agentRepairErrorCode: "LINT_REPAIR_IDENTITY_CHANGED",
+      agentRepairProjectId: null,
+      agentRepairRootPath: null,
+      agentRepairCanonicalIdentityKey: null,
+      agentRepairIdentityRevision: null,
+    });
+    if (preparation && projectId && rootPath) {
+      void cancelAgentRepairPreparationBestEffort(projectId, rootPath, preparation).catch(() => undefined);
+    }
+  },
+
+  prepareAgentLintRepair: async (projectId, rootPath, reportId) => {
+    if (!hasTauri()) return null;
+    const current = get();
+    const report = current.healthReport;
+    const selectedFindingIds = current.agentRepairSelection;
+    const agent = report?.route.kind === "agent" ? report.route.agent : null;
+    if (selectedFindingIds.length > 100) {
+      set({ agentRepairErrorCode: "LINT_REPAIR_SELECTION_LIMIT" });
+      return null;
+    }
+    if (
+      current.agentRepairPending
+      || current.agentRepairPreparation
+      || !report
+      || report.reportId !== reportId
+      || !agent
+      || selectedFindingIds.length === 0
+      || current.agentRepairSelectionReportId !== reportId
+      || selectedFindingIds.some((id) => {
+        const issue = report.issues.find((candidate) => candidate.id === id);
+        return !issue || !isAgentLintRepairEligible(issue, report);
+      })
+    ) {
+      set({ agentRepairErrorCode: "LINT_REPAIR_SELECTION_INVALID" });
+      return null;
+    }
+    const operationEpoch = ++lintOperationEpoch;
+    const scope = captureProjectScope();
+    const projectGuard = captureLintProjectGuard(projectId, rootPath);
+    if (!isLintProjectGuardCurrent(projectGuard)) {
+      set({ agentRepairErrorCode: "LINT_REPAIR_IDENTITY_CHANGED" });
+      return null;
+    }
+    set({
+      agentRepairPending: true,
+      agentRepairErrorCode: null,
+      agentRepairProjectId: projectId,
+      agentRepairRootPath: rootPath,
+      agentRepairCanonicalIdentityKey: projectGuard.canonicalIdentityKey,
+      agentRepairIdentityRevision: projectGuard.identityRevision,
+    });
+    try {
+      const preparation = await invoke<AgentLintRepairPreparation>(
+        "prepare_agent_lint_repair",
+        {
+          request: {
+            projectId,
+            projectRootPath: rootPath,
+            reportId,
+            selectedFindingIds,
+            agent,
+          },
+        },
+      );
+      if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch || !isLintProjectGuardCurrent(projectGuard)) {
+        void cancelAgentRepairPreparationBestEffort(projectId, rootPath, preparation).catch(() => undefined);
+        if (isProjectScopeCurrent(scope) && operationEpoch === lintOperationEpoch) {
+          set({ agentRepairPending: false, agentRepairErrorCode: "LINT_REPAIR_IDENTITY_CHANGED" });
+        }
+        return null;
+      }
+      set({ agentRepairPreparation: preparation, agentRepairPending: false });
+      return preparation;
+    } catch (error) {
+      if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch || !isLintProjectGuardCurrent(projectGuard)) {
+        if (isProjectScopeCurrent(scope) && operationEpoch === lintOperationEpoch) {
+          set({ agentRepairPending: false, agentRepairErrorCode: "LINT_REPAIR_IDENTITY_CHANGED" });
+        }
+        return null;
+      }
+      set({ agentRepairPending: false, agentRepairErrorCode: errorCode(error) ?? "UNKNOWN" });
+      return null;
+    }
+  },
+
+  cancelAgentLintRepairPreparation: async () => {
+    const state = get();
+    const preparation = state.agentRepairPreparation;
+    if (state.agentRepairPending && !preparation) {
+      lintOperationEpoch += 1;
+      set({
+        agentRepairPending: false,
+        agentRepairErrorCode: null,
+        agentRepairProjectId: null,
+        agentRepairRootPath: null,
+        agentRepairCanonicalIdentityKey: null,
+        agentRepairIdentityRevision: null,
+      });
+      return;
+    }
+    if (!preparation || !state.agentRepairProjectId || !state.agentRepairRootPath) return;
+    if (state.agentRepairPending) return;
+    set({ agentRepairPending: true, agentRepairErrorCode: null });
+    try {
+      await cancelAgentRepairPreparationBestEffort(
+        state.agentRepairProjectId,
+        state.agentRepairRootPath,
+        preparation,
+      );
+      set({
+        agentRepairPreparation: null,
+        agentRepairPending: false,
+        agentRepairSelection: [],
+        agentRepairSelectionReportId: null,
+        agentRepairProjectId: null,
+        agentRepairRootPath: null,
+        agentRepairCanonicalIdentityKey: null,
+        agentRepairIdentityRevision: null,
+      });
+    } catch (error) {
+      set({ agentRepairPending: false, agentRepairErrorCode: errorCode(error) ?? "UNKNOWN" });
+    }
+  },
+
+  confirmAgentLintRepairStart: async () => {
+    if (!hasTauri()) return null;
+    const state = get();
+    const preparation = state.agentRepairPreparation;
+    if (!preparation || !state.agentRepairProjectId || !state.agentRepairRootPath || state.agentRepairPending) return null;
+    const operationEpoch = ++lintOperationEpoch;
+    const scope = captureProjectScope();
+    const projectId = state.agentRepairProjectId;
+    const rootPath = state.agentRepairRootPath;
+    const projectGuard: LintProjectGuard = {
+      projectKey: `${projectId}\0${rootPath}`,
+      canonicalIdentityKey: state.agentRepairCanonicalIdentityKey,
+      identityRevision: state.agentRepairIdentityRevision,
+    };
+    if (!isLintProjectGuardCurrent(projectGuard)) {
+      set({ agentRepairErrorCode: "LINT_REPAIR_IDENTITY_CHANGED" });
+      return null;
+    }
+    set({ agentRepairPending: true, agentRepairErrorCode: null });
+    try {
+      const outcome = await invoke<WorkflowStartOutcome>("confirm_agent_lint_repair_start", {
+        request: {
+          projectId,
+          projectRootPath: rootPath,
+          actionId: preparation.pendingAction.id,
+          preparationId: preparation.preparationId,
+          preparationRevision: preparation.preparationRevision,
+        },
+      });
+      if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch || !isLintProjectGuardCurrent(projectGuard)) {
+        if (isProjectScopeCurrent(scope) && operationEpoch === lintOperationEpoch) {
+          set({ agentRepairPending: false, agentRepairErrorCode: "LINT_REPAIR_IDENTITY_CHANGED" });
+        }
+        return null;
+      }
+      useWorkflowStore.getState().upsertRun(outcome.run);
+      useWorkflowStore.getState().selectRun(outcome.run.taskId);
+      useNavigationStore.getState().setActiveView("workflows");
+      set({
+        agentRepairPreparation: null,
+        agentRepairPending: false,
+        agentRepairSelection: [],
+        agentRepairSelectionReportId: null,
+        agentRepairProjectId: null,
+        agentRepairRootPath: null,
+        agentRepairCanonicalIdentityKey: null,
+        agentRepairIdentityRevision: null,
+      });
+      return outcome.run;
+    } catch (error) {
+      if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch) return null;
+      set({ agentRepairPending: false, agentRepairErrorCode: errorCode(error) ?? "UNKNOWN" });
+      return null;
     }
   },
 

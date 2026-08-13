@@ -245,6 +245,78 @@ describe("LintView", () => {
     expect(screen.getAllByText("Agent").length).toBeGreaterThanOrEqual(2);
   });
 
+  it("selects eligible Agent findings and queues one bounded repair batch", async () => {
+    const issue = {
+      id: "duplicate_topic:wiki/重复.md",
+      source: "agent" as const,
+      severity: "warning" as const,
+      issueType: "duplicate_topic" as const,
+      path: "wiki/重复.md",
+      message: "Duplicate topic",
+      evidence: "semantic evidence",
+      fixability: "none" as const,
+    };
+    const healthReport = {
+      reportId: "health-repair-ui",
+      taskId: "health-repair-ui",
+      mode: "complete" as const,
+      route: { kind: "agent" as const, agent: "codex" as const, model: "gpt-5", routeRevision: "route-ui" },
+      persistent: true,
+      issues: [issue],
+      findingOrigins: { [issue.id]: ["agent" as const] },
+      coverage: { scannedPages: 1, sourcePages: 0, wikiPages: 1, notApplicableRules: [] },
+      errorCount: 0,
+      warningCount: 1,
+      infoCount: 0,
+      findingsByType: { duplicate_topic: 1 },
+      durationMs: 10,
+      generatedAt: "2026-08-10T00:00:00Z",
+    };
+    const preparation = {
+      preparationId: "prep-ui",
+      preparationRevision: "prep-ui-revision",
+      reportId: healthReport.reportId,
+      selectionRevision: "selection-ui",
+      selectedFindingIds: [issue.id],
+      route: healthReport.route,
+      skill: { id: "builtin.wiki-lint", version: "2026-08-12.1", sha256: "skill" },
+      authorizedPaths: [issue.path],
+      authorizedPathHashes: { [issue.path]: "hash-ui" },
+      baselineFingerprint: "baseline-ui",
+      expectedGitHead: "head-ui",
+      pendingAction: {
+        id: "action-ui",
+        actionType: "agent_auto_fix",
+        title: "Repair",
+        message: "Repair",
+        riskLevel: "high",
+        affectedPaths: [issue.path],
+        preview: null,
+        expiresAt: null,
+      },
+    };
+    const run = { taskId: "run-ui", updatedAt: "2026-08-10T00:01:00Z" };
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "list_lint_ignores") return Promise.resolve({ ignored: [] });
+      if (command === "list_lint_history") return Promise.resolve({ version: 1, entries: [] });
+      if (command === "prepare_agent_lint_repair") return Promise.resolve(preparation);
+      if (command === "confirm_agent_lint_repair_start") return Promise.resolve({ kind: "created", run });
+      return Promise.resolve({ ignored: [] });
+    });
+    useLintStore.setState({ healthReport });
+    useProjectStore.setState({ currentProject: PROJECT, authority: null } as never);
+
+    render(<LintView />);
+    const checkbox = screen.getByRole("checkbox", { name: "Select finding in wiki/重复.md for Agent repair" });
+    fireEvent.click(checkbox);
+    expect(checkbox).toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "Prepare repair (1)" }));
+    expect(await screen.findByText("Confirm one Agent repair batch")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Approve and queue" }));
+    await waitFor(() => expect(useNavigationStore.getState().activeView).toBe("workflows"));
+    expect(invokeMock).toHaveBeenCalledWith("confirm_agent_lint_repair_start", expect.anything());
+  });
+
   it("labels a memory-only Health Check history entry as not saved", () => {
     useLintStore.setState({
       history: [

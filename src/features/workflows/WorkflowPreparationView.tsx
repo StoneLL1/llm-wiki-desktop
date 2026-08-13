@@ -77,11 +77,9 @@ function scopeValidationKey(scope: WorkflowScope, updateAutoDetect: boolean): st
 function routeDisplay(
   route: WorkflowRoute | null,
   t: (key: string) => string,
-  healthFailClosed = false,
 ): string {
   if (!route) return t("workflows.route.none");
   if (route.kind === "local") return t("workflows.route.local");
-  if (healthFailClosed && route.kind === "agent") return t("workflows.route.agent");
   if (route.kind === "agent") return `${t("workflows.route.agent")} · ${route.agent}`;
   return `${t("workflows.route.byok")} · ${route.provider}`;
 }
@@ -125,12 +123,7 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
     setScopePage(0);
   }, [preparation.preparationRevision, preparation.scope]);
 
-  const visibleRoutes = useMemo(
-    () => preparation.kind === "health_check"
-      ? (preparation.availableRoutes ?? []).filter((route) => route.kind !== "agent")
-      : (preparation.availableRoutes ?? []),
-    [preparation.availableRoutes, preparation.kind],
-  );
+  const visibleRoutes = useMemo(() => preparation.availableRoutes ?? [], [preparation.availableRoutes]);
   const routeSelection = useMemo<WorkflowRouteSelection | null>(() => {
     if (routeChoice === "auto") return null;
     return visibleRoutes.find((route) => workflowRouteSelectionKey(route) === routeChoice) ?? null;
@@ -539,15 +532,15 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
           <dt>{t("workflows.preparation.baselineCaptured")}</dt>
           <dd>{preparation.baseline.capturedAt}</dd>
           <dt>{t("workflows.preparation.route")}</dt>
-          <dd>{routeDisplay(preparation.route, t, preparation.kind === "health_check")}</dd>
-          {preparation.kind !== "health_check" && preparation.route?.kind === "agent" ? (
+          <dd>{routeDisplay(preparation.route, t)}</dd>
+          {preparation.route?.kind === "agent" ? (
             <>
               <dt>{t("workflows.preparation.agent")}</dt>
               <dd>{preparation.route.agent}</dd>
               {preparation.route.model ? <><dt>{t("workflows.preparation.model")}</dt><dd>{preparation.route.model}</dd></> : null}
             </>
           ) : null}
-          {preparation.kind !== "health_check" && preparation.route?.kind === "byok" ? (
+          {preparation.route?.kind === "byok" ? (
             <>
               <dt>{t("workflows.preparation.provider")}</dt>
               <dd>{preparation.route.provider}</dd>

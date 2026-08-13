@@ -11,6 +11,9 @@ interface LintIssueListProps {
   actionsDisabled?: boolean;
   onSelect: (issueId: string) => void;
   onApplyFix: (issue: LintIssue) => void;
+  repairSelection?: ReadonlySet<string>;
+  repairEligibleIds?: ReadonlySet<string>;
+  onToggleRepairSelection?: (issueId: string, selected: boolean) => void;
 }
 
 const SEVERITY_ICON: Record<LintSeverity, typeof Info> = {
@@ -51,6 +54,9 @@ export function LintIssueList({
   actionsDisabled = false,
   onSelect,
   onApplyFix,
+  repairSelection = new Set<string>(),
+  repairEligibleIds = new Set<string>(),
+  onToggleRepairSelection,
 }: LintIssueListProps) {
   const { t } = useTranslation();
 
@@ -99,13 +105,27 @@ export function LintIssueList({
               return (
                 <div
                   key={issue.id}
-                  className={`issue-card-shell ${active ? "is-selected" : ""}`}
+                  className={`issue-card-shell relative ${active ? "is-selected" : ""}`}
                 >
+                  {repairEligibleIds.has(issue.id) ? (
+                    <span
+                      className="absolute left-2 top-3 z-[1] flex items-start"
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      <input
+                        aria-label={t("lint.repair.selectFinding", { path: issue.path })}
+                        checked={repairSelection.has(issue.id)}
+                        disabled={actionsDisabled}
+                        onChange={(event) => onToggleRepairSelection?.(issue.id, event.target.checked)}
+                        type="checkbox"
+                      />
+                    </span>
+                  ) : null}
                   <button
                     type="button"
                     aria-pressed={active}
                     onClick={() => onSelect(issue.id)}
-                    className="issue-card"
+                    className={`issue-card ${repairEligibleIds.has(issue.id) ? "pl-10" : ""}`}
                   >
                     <span className={`issue-card__icon ${SEVERITY_ICON_COLOR[issue.severity]}`}>
                       <Icon size={16} aria-hidden="true" />
