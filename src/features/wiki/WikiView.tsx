@@ -22,11 +22,13 @@ import { useTaskStore } from "../../stores/taskStore";
 import { ConfirmationDialog } from "../../components/app/ConfirmationDialog";
 import type { PendingAction } from "../../types/backend";
 import type { ExportRecord, ExportType } from "../../types/export";
+import { SINGLE_PAGE_EXPORT_TYPES } from "../../types/export";
 import type { SourceAiOrganizeBinding } from "../../types/source";
 import { isTerminalStatus, type BackendTask } from "../../types/task";
 import type { CreateWikiPageInput, WikiPageContent, WikiPageMeta } from "../../types/wiki";
 import { MarkdownReader } from "./MarkdownReader";
 import { ConflictDiffDialog } from "./ConflictDiffDialog";
+import { GenerateHtmlDialog } from "./GenerateHtmlDialog";
 import { HtmlPreviewPane } from "./HtmlPreviewPane";
 import { WikiPageFormDialog } from "./WikiPageFormDialog";
 import { WikiTree } from "./WikiTree";
@@ -90,6 +92,8 @@ export function WikiView({ capabilities }: WikiViewProps) {
     | { kind: "delete"; action: PendingAction }
     | null
   >(null);
+  const [htmlDialogOpen, setHtmlDialogOpen] = useState(false);
+  const [htmlTemplate, setHtmlTemplate] = useState<ExportType>("beautiful_read");
   const [conflictDialogOpen, setConflictDialogOpen] = useState(true);
   const [sourceMovePath, setSourceMovePath] = useState<string | null>(null);
   const [sourceAiWorkbench, setSourceAiWorkbench] =
@@ -120,6 +124,8 @@ export function WikiView({ capabilities }: WikiViewProps) {
   const requestDeletePage = useWikiStore((state) => state.requestDeletePage);
   const confirmDeletePage = useWikiStore((state) => state.confirmDeletePage);
   const cancelPendingAction = useWikiStore((state) => state.cancelPendingAction);
+  const requestedExportType = useWikiStore((state) => state.requestedExportType);
+  const consumeExportRequest = useWikiStore((state) => state.consumeExportRequest);
   const loadSourceDetail = useSourceStore((state) => state.loadDetail);
   const previewSourceMove = useSourceStore((state) => state.previewMove);
   const previewSourceDelete = useSourceStore((state) => state.previewDelete);
@@ -166,6 +172,16 @@ export function WikiView({ capabilities }: WikiViewProps) {
   useEffect(() => {
     void loadExports(projectId, rootPath);
   }, [projectId, rootPath, loadExports]);
+
+  useEffect(() => {
+    if (!requestedExportType || !page) return;
+    const nextType = SINGLE_PAGE_EXPORT_TYPES.includes(requestedExportType)
+      ? requestedExportType
+      : "beautiful_read";
+    setHtmlTemplate(nextType);
+    setHtmlDialogOpen(true);
+    consumeExportRequest();
+  }, [consumeExportRequest, page, requestedExportType]);
 
   useEffect(() => {
     if (conflict) setConflictDialogOpen(true);
@@ -285,18 +301,14 @@ export function WikiView({ capabilities }: WikiViewProps) {
 
   const handleGenerateHtml = (type: ExportType) => {
     if (!page) return;
-    requestWorkflowLaunch({
-      projectId,
-      projectRootPath: rootPath,
-      kind: "generate_content",
-      origin: "wiki",
-      scopePreset: {
-        kind: "generate_content",
-        artifactType: type,
-        pagePaths: type === "project_report" ? [] : [page.meta.path],
-        outputPath: null,
-      },
-    });
+    if (!SINGLE_PAGE_EXPORT_TYPES.includes(type)) return;
+    setHtmlTemplate(type);
+    setHtmlDialogOpen(true);
+  };
+
+  const handleDialogGenerate = (type: ExportType) => {
+    if (SINGLE_PAGE_EXPORT_TYPES.includes(type)) setHtmlTemplate(type);
+    setHtmlDialogOpen(false);
   };
 
   const handleRegenerateHtml = () => {
@@ -851,6 +863,14 @@ export function WikiView({ capabilities }: WikiViewProps) {
           onManualMerge={(content) =>
             void resolveConflict(projectId, rootPath, "manual_merge", content)
           }
+        />
+      ) : null}
+      {htmlDialogOpen && page ? (
+        <GenerateHtmlDialog
+          pagePath={page.meta.path}
+          initialType={htmlTemplate}
+          onCancel={() => setHtmlDialogOpen(false)}
+          onGenerate={handleDialogGenerate}
         />
       ) : null}
     </div>

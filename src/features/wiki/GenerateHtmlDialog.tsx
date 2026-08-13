@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { FileOutput, LayoutGrid, Network, Newspaper } from "lucide-react";
+import { LayoutGrid, Network, Newspaper } from "lucide-react";
 
-import type { ExportType } from "../../types/export";
+import { SINGLE_PAGE_EXPORT_TYPES, type ExportType } from "../../types/export";
 import { useModalDialog } from "../../hooks/useModalDialog";
 
 interface GenerateHtmlDialogProps {
@@ -16,7 +16,6 @@ const templates = [
   { type: "beautiful_read", icon: Newspaper, skill: "html-beautiful-read" },
   { type: "knowledge_card", icon: LayoutGrid, skill: "html-knowledge-card" },
   { type: "concept_map", icon: Network, skill: "html-concept-map" },
-  { type: "project_report", icon: FileOutput, skill: "html-project-report" },
 ] satisfies Array<{ type: ExportType; icon: typeof Newspaper; skill: string }>;
 
 export function GenerateHtmlDialog({
@@ -26,7 +25,10 @@ export function GenerateHtmlDialog({
   onGenerate,
 }: GenerateHtmlDialogProps) {
   const { t } = useTranslation();
-  const [selected, setSelected] = useState<ExportType>(initialType);
+  const initialSelection = SINGLE_PAGE_EXPORT_TYPES.includes(initialType)
+    ? initialType
+    : "beautiful_read";
+  const [selected, setSelected] = useState<ExportType>(initialSelection);
   const dialogRef = useModalDialog<HTMLDivElement>({ onClose: onCancel });
 
   return (
@@ -40,6 +42,9 @@ export function GenerateHtmlDialog({
         <div className="p-4">
           <p className="mb-3 text-[12px] text-[var(--text-muted)]">
             {t("wiki.html.templateHint")}
+          </p>
+          <p className="mb-3 text-[12px] text-[var(--text-muted)]">
+            {t("wiki.html.entryHint")}
           </p>
           <div className="tmpl-grid">
             {templates.map(({ type, icon: Icon, skill }) => {

@@ -9,7 +9,7 @@ import type {
   WikiTree,
   WikiTreeNode,
 } from "../../types/wiki";
-import { SINGLE_PAGE_EXPORT_TYPES, type ExportRecord, type ExportType } from "../../types/export";
+import { SINGLE_PAGE_EXPORT_TYPES, type ExportRecord } from "../../types/export";
 import { RightContextPanel } from "../../components/app/RightContextPanel";
 import { MarkdownReader } from "./MarkdownReader";
 import { WikiEditor } from "./WikiEditor";
@@ -1150,6 +1150,7 @@ describe("Wiki HTML preview", () => {
 
       expect(requestWorkflowLaunch).not.toHaveBeenCalled();
       expect(useNavigationStore.getState().activeView).toBe("wiki");
+      expect(screen.getByRole("dialog")).toBeInTheDocument();
     } finally {
       requestWorkflowLaunch.mockRestore();
     }
@@ -1166,7 +1167,6 @@ describe("Wiki HTML preview", () => {
 
   it("routes Wiki reading-page and knowledge-card actions through wikiStore.requestExport", () => {
     const page = pageContent();
-    const requestExport = vi.fn<(type: ExportType) => void>();
     useProjectStore.setState({
       currentProject: {
         ...defaultProject,
@@ -1179,16 +1179,8 @@ describe("Wiki HTML preview", () => {
     const requestWorkflowLaunch = vi
       .spyOn(useNavigationStore.getState(), "requestWorkflowLaunch")
       .mockImplementation(() => undefined);
-    useWikiStore.setState({
-      page,
-      selectedPath: page.meta.path,
-      tree: {
-        root: { name: "wiki", kind: "folder", path: "wiki", starred: false, bookmarked: false, fileCount: 1, children: [] },
-        pages: [page.meta],
-        totalPages: 1,
-      },
-      requestExport,
-    } as never);
+    useWikiStore.setState({ page, selectedPath: page.meta.path });
+    const requestExport = vi.spyOn(useWikiStore.getState(), "requestExport");
 
     try {
       render(<RightContextPanel />);
@@ -1199,8 +1191,45 @@ describe("Wiki HTML preview", () => {
       expect(requestExport).toHaveBeenNthCalledWith(2, "knowledge_card");
       expect(requestWorkflowLaunch).not.toHaveBeenCalled();
     } finally {
+      requestExport.mockRestore();
       requestWorkflowLaunch.mockRestore();
     }
+  });
+
+  it("consumes a Wiki export request and opens the dialog with its selected type", async () => {
+    const tree: WikiTree = {
+      root: { name: "wiki", kind: "folder", path: "wiki", starred: false, bookmarked: false, fileCount: 1, children: [] },
+      pages: [pageMeta()],
+      totalPages: 1,
+    };
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "scan_wiki") return Promise.resolve(tree);
+      if (command === "read_wiki_page") return Promise.resolve(pageContent());
+      if (command === "list_exports") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    useProjectStore.setState({
+      currentProject: {
+        ...defaultProject,
+        projectId: "proj-1",
+        rootPath: "D:/wiki",
+        name: "Wiki",
+      },
+    });
+    useNavigationStore.setState({ activeView: "wiki" });
+
+    render(<WikiView capabilities={emptyAiCapabilities} />);
+    act(() => useWikiStore.getState().requestExport("knowledge_card"));
+
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Knowledge card" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(useWikiStore.getState().requestedExportType).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("exposes a resizable wiki tree splitter", async () => {
@@ -1308,10 +1337,11 @@ describe("Wiki HTML preview", () => {
     ).toBeNull();
   });
 
-  it("offers all four export templates", () => {
+  it("offers only single-page export templates", () => {
     render(
       <GenerateHtmlDialog
         pagePath="wiki/concepts/agent.md"
+        initialType="project_report"
         onCancel={vi.fn()}
         onGenerate={vi.fn()}
       />,
@@ -1320,7 +1350,7 @@ describe("Wiki HTML preview", () => {
     expect(screen.getByRole("button", { name: /Beautiful read/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Knowledge card/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Concept map/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Project report/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Project report/i })).not.toBeInTheDocument();
   });
 
   it("renders generated HTML in a sandboxed iframe", () => {

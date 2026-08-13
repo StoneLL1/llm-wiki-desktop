@@ -75,7 +75,6 @@ function ProjectRightContextPanel({
   const { t } = useTranslation();
   const rightPanelMode = useNavigationStore((state) => state.rightPanelMode);
   const setActiveView = useNavigationStore((state) => state.setActiveView);
-  const requestWorkflowLaunch = useNavigationStore((state) => state.requestWorkflowLaunch);
   const closeWikiAssistant = useNavigationStore((state) => state.closeWikiAssistant);
   const summaryView = !["chat", "wiki", "graph", "import"].includes(activeView);
   const authority = useProjectStore((state) => summaryView ? state.authority : null);
@@ -87,6 +86,7 @@ function ProjectRightContextPanel({
   const wikiPage = wikiContent?.meta ?? null;
   const wikiTree = useWikiStore((state) => activeView === "wiki" ? state.tree : null);
   const openWikiPage = useWikiStore((state) => state.openPage);
+  const requestWikiExport = useWikiStore((state) => state.requestExport);
   const graphRelevant = activeView === "graph" || activeView === "wiki";
   const graphData = useGraphStore((state) => graphRelevant ? state.data : null);
   const graphStatus = useGraphStore((state) => activeView === "graph" ? state.status : "idle");
@@ -380,36 +380,8 @@ function ProjectRightContextPanel({
             pages={wikiTree?.pages ?? []}
             onOpenPage={openPage}
             onViewAllBacklinks={viewWikiPageInGraph}
-            onGenerateHtml={() => {
-              if (!wikiPage) return;
-              requestWorkflowLaunch({
-                projectId: currentProject.projectId,
-                projectRootPath: currentProject.rootPath,
-                kind: "generate_content",
-                origin: "wiki",
-                scopePreset: {
-                  kind: "generate_content",
-                  artifactType: "beautiful_read",
-                  pagePaths: [wikiPage.path],
-                  outputPath: null,
-                },
-              });
-            }}
-            onGenerateCard={() => {
-              if (!wikiPage) return;
-              requestWorkflowLaunch({
-                projectId: currentProject.projectId,
-                projectRootPath: currentProject.rootPath,
-                kind: "generate_content",
-                origin: "wiki",
-                scopePreset: {
-                  kind: "generate_content",
-                  artifactType: "knowledge_card",
-                  pagePaths: [wikiPage.path],
-                  outputPath: null,
-                },
-              });
-            }}
+            onGenerateHtml={() => requestWikiExport("beautiful_read")}
+            onGenerateCard={() => requestWikiExport("knowledge_card")}
             onViewInGraph={viewWikiPageInGraph}
             onCopyWikilink={() => {
               if (wikiPage) void navigator.clipboard.writeText(`[[${wikiPage.title}]]`);
