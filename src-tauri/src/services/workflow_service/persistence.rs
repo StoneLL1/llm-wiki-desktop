@@ -174,7 +174,19 @@ fn pending_action_is_valid(
                         project_root,
                         workflow,
                     ),
-                    WorkflowKind::HealthCheck => false,
+                    WorkflowKind::HealthCheck => match &workflow.execution_options.operation {
+                        crate::models::workflow::WorkflowOperation::AgentLintRepair { .. } => {
+                            super::runners::agent_lint_repair::agent_lint_repair_candidate_is_valid_for_workflow(
+                                task_id,
+                                candidate_id,
+                                project_root,
+                                workflow,
+                            )
+                        }
+                        // Deterministic Health remains read-only and has no
+                        // task-owned mutation candidate to restore.
+                        crate::models::workflow::WorkflowOperation::BuiltIn => false,
+                    },
                 };
                 if !valid {
                     return false;

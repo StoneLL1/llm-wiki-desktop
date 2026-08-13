@@ -61,6 +61,21 @@ impl<'a> WorkflowStageSink<'a> {
             .fail_stage_and_claim_next(self.tasks, self.task_id, stage_id, error)
     }
 
+    pub(crate) fn fail_with_result(
+        &self,
+        stage_id: &str,
+        error: WorkflowErrorSummary,
+        result: WorkflowResult,
+    ) -> Result<(WorkflowRun, Option<WorkflowRun>), String> {
+        self.coordinator.fail_stage_and_claim_next_with_result(
+            self.tasks,
+            self.task_id,
+            stage_id,
+            error,
+            Some(result),
+        )
+    }
+
     pub fn wait(
         &self,
         stage_id: &str,

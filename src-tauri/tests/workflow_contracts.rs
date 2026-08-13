@@ -227,6 +227,15 @@ fn agent_lint_repair_operation_is_a_health_subtype_not_a_fourth_kind() {
         report_id: "health-report-1".into(),
         selection_revision: "selection-revision-1".into(),
         selected_finding_ids: vec!["duplicate_topic:wiki/主题.md".into()],
+        selected_findings: vec![llm_wiki_desktop_lib::models::lint::AgentLintRepairFinding {
+            id: "duplicate_topic:wiki/a.md".into(),
+            issue_type: llm_wiki_desktop_lib::models::lint::DeepLintIssueType::DuplicateTopic,
+            severity: llm_wiki_desktop_lib::models::lint::LintSeverity::Warning,
+            path: "wiki/a.md".into(),
+            message: "Duplicate topic".into(),
+            evidence: None,
+            suggested_action: None,
+        }],
         skill: WikiLintSkillRef::builtin(),
         authorized_path_hashes: [("wiki/主题.md".into(), Some("a".repeat(64)))]
             .into_iter()
@@ -264,10 +273,15 @@ fn agent_lint_repair_result_has_a_bounded_history_outcome() {
             summary: "bounded".into(),
         }],
         affected_paths: vec!["wiki/主题.md".into()],
+        affected_path_hashes: std::collections::BTreeMap::from([(
+            "wiki/主题.md".into(),
+            Some("a".repeat(64)),
+        )]),
         checkpoint_hash: Some("b".repeat(40)),
         final_commit: None,
         diff_available: true,
         rollback_available: true,
+        index_refresh_warnings: Vec::new(),
     };
     let summary = llm_wiki_desktop_lib::models::workflow::WorkflowRunOutcomeSummary::from(&result);
     let wire = serde_json::to_value(summary).unwrap();
@@ -571,4 +585,74 @@ fn workflow_frontend_commands_are_registered() {
     ] {
         assert!(lib.contains(command), "missing Tauri command: {command}");
     }
+}
+
+#[test]
+fn agent_lint_repair_operation_persists_the_bounded_approved_finding_snapshot() {
+    let operation = json!({
+        "kind": "agent_lint_repair",
+        "preparationId": "preparation-1",
+        "preparationRevision": "preparation-revision-1",
+        "reportId": "report-1",
+        "selectionRevision": "selection-revision-1",
+        "selectedFindingIds": ["contradiction:wiki/a.md"],
+        "selectedFindings": [{
+            "id": "contradiction:wiki/a.md",
+            "issueType": "contradiction",
+            "severity": "warning",
+            "path": "wiki/a.md",
+            "message": "The page conflicts with another current page.",
+            "evidence": "A and B disagree.",
+            "suggestedAction": "Reconcile the claims."
+        }],
+        "skill": WikiLintSkillRef::builtin(),
+        "authorizedPathHashes": {
+            "wiki/a.md": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "expectedGitHead": "abcdef1"
+    });
+    let decoded: WorkflowOperation =
+        serde_json::from_value(operation.clone()).expect("approved finding snapshot is persisted");
+    assert_eq!(serde_json::to_value(decoded).unwrap(), operation);
+
+    let mut missing = operation;
+    missing.as_object_mut().unwrap().remove("selectedFindings");
+    assert!(serde_json::from_value::<WorkflowOperation>(missing).is_err());
+}
+
+#[test]
+fn agent_lint_repair_uses_a_dedicated_persisted_stage_contract() {
+    let stages = llm_wiki_desktop_lib::services::agent_lint_repair_stages();
+    assert_eq!(
+        stages
+            .iter()
+            .map(|stage| stage.id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "create_checkpoint",
+            "prepare_round_1",
+            "run_agent_1",
+            "validate_candidate_1",
+            "review_risk_1",
+            "apply_changes_1",
+            "recheck_lint_1",
+            "prepare_round_2",
+            "run_agent_2",
+            "validate_candidate_2",
+            "review_risk_2",
+            "apply_changes_2",
+            "recheck_lint_2",
+            "prepare_round_3",
+            "run_agent_3",
+            "validate_candidate_3",
+            "review_risk_3",
+            "apply_changes_3",
+            "recheck_lint_3",
+            "finalize_repair",
+        ]
+    );
+    assert!(stages
+        .iter()
+        .enumerate()
+        .all(|(index, stage)| stage.ordinal == index as u32 + 1));
 }

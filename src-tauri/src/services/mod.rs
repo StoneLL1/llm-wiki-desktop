@@ -56,18 +56,27 @@ pub use settings_service::SettingsService;
 pub use wiki_index::{IndexEntry, WikiIndex};
 pub(crate) use workflow_service::recover_workflow;
 pub use workflow_service::{
-    agent_lint_repair_attestation_digest, cancel_generate_content_confirmation, canonical_json,
-    confirm_generate_content_overwrite, confirm_update_wiki_review,
-    discard_generate_content_candidate, discard_update_wiki_candidate,
-    generate_content_candidate_is_valid_for_workflow, persist_update_wiki_review, project_identity,
-    resolve_workflow_persistence_binding, restore_generate_content_confirmation,
-    restore_update_wiki_confirmation, run_generate_content, run_generate_content_authorized,
-    run_generate_content_with_generator, run_health_check, run_health_check_authorized,
-    run_health_check_with_deep, run_update_wiki, run_update_wiki_authorized,
-    update_wiki_candidate_is_valid, update_wiki_decision_review, workflow_baseline_for_scope,
-    workflow_fingerprint, workflow_stages, EnqueueWorkflow, GenerateContentConfirmationFailure,
-    GenerateContentExecutionServices, GenerateContentRunner, HealthCheckExecutionServices,
-    HealthCheckRunner, PrepareWorkflowInput, ProjectWorkflowIdentity,
+    agent_lint_repair_attestation_digest, agent_lint_repair_interrupted_result,
+    agent_lint_repair_result_digest, agent_lint_repair_stages,
+    agent_lint_repair_terminal_file_diff_page, cancel_agent_lint_repair_review,
+    cancel_generate_content_confirmation, canonical_json,
+    confirm_agent_lint_repair_review_authorized,
+    confirm_agent_lint_repair_review_with_round_executor, confirm_generate_content_overwrite,
+    confirm_update_wiki_review, discard_generate_content_candidate, discard_update_wiki_candidate,
+    execute_agent_lint_repair_round_with, generate_content_candidate_is_valid_for_workflow,
+    persist_update_wiki_review, project_identity, reconcile_agent_lint_repair_after_recovery,
+    record_agent_lint_repair_recovery_failure, resolve_workflow_persistence_binding,
+    restore_agent_lint_repair_confirmation, restore_generate_content_confirmation,
+    restore_update_wiki_confirmation, rollback_and_discard_agent_lint_repair_candidate,
+    run_agent_lint_repair_authorized, run_agent_lint_repair_with_round_executor,
+    run_generate_content, run_generate_content_authorized, run_generate_content_with_generator,
+    run_health_check, run_health_check_authorized, run_health_check_with_deep, run_update_wiki,
+    run_update_wiki_authorized, update_wiki_candidate_is_valid, update_wiki_decision_review,
+    workflow_baseline_for_scope, workflow_fingerprint, workflow_stages,
+    AgentLintRepairConfirmationFailure, AgentLintRepairExecutionServices,
+    AgentLintRepairRoundExecution, AgentLintRepairRunner, EnqueueWorkflow,
+    GenerateContentConfirmationFailure, GenerateContentExecutionServices, GenerateContentRunner,
+    HealthCheckExecutionServices, HealthCheckRunner, PrepareWorkflowInput, ProjectWorkflowIdentity,
     UpdateWikiConfirmationFailure, UpdateWikiExecutionServices, UpdateWikiRunner,
     ValidatedWorkflowStart, WorkflowAccessSnapshot, WorkflowCoordinator, WorkflowDispatchFailure,
     WorkflowExternalLaunchPermit, WorkflowLaunchCloseBarrier, WorkflowLaunchPublication,
@@ -77,6 +86,7 @@ pub use workflow_service::{
 };
 #[cfg(feature = "gui")]
 pub(crate) use workflow_service::{
+    agent_lint_repair_decision_review, agent_lint_repair_file_diff_page,
     update_wiki_decision_review_for_workflow, update_wiki_decision_review_summary_for_workflow,
     update_wiki_file_diff_page_for_workflow, update_wiki_review_can_inline,
 };

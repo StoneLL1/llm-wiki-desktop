@@ -566,11 +566,16 @@ impl AppState {
                     true,
                 ));
             }
-            if matches!(
+            let agent_lint_repair = matches!(
+                run.operation,
+                crate::models::workflow::WorkflowOperation::AgentLintRepair { .. }
+            );
+            if (matches!(
                 run.kind,
                 crate::models::workflow::WorkflowKind::UpdateWiki
                     | crate::models::workflow::WorkflowKind::GenerateContent
-            ) && access.filesystem_access != WorkflowFilesystemAccess::Writable
+            ) || agent_lint_repair)
+                && access.filesystem_access != WorkflowFilesystemAccess::Writable
             {
                 return Err(BackendError::new(
                     "PROJECT_WRITE_REQUIRES_TRUST",
@@ -578,6 +583,20 @@ impl AppState {
                     true,
                     true,
                 ));
+            }
+            if agent_lint_repair {
+                self.validate_project_write_access(context, &access)?;
+                if access.persistence
+                    != crate::models::workflow::WorkflowPersistenceMode::Persistent
+                {
+                    return Err(BackendError::new(
+                        "LINT_REPAIR_PERSISTENCE_REQUIRED",
+                        "Agent lint repair requires persistent project task state.",
+                        true,
+                        true,
+                    ));
+                }
+                self.require_project_content_write_root(context, ProjectWriteRootKind::Wiki)?;
             }
             self.workflow_launch_registry.issue(
                 &run.canonical_identity_key,

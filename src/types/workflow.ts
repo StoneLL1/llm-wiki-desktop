@@ -277,10 +277,12 @@ export type WorkflowResult =
       skippedFindingIds: string[];
       rounds: AgentLintRepairRoundSummary[];
       affectedPaths: string[];
+      affectedPathHashes: Record<string, string | null>;
       checkpointHash: string | null;
       finalCommit: string | null;
       diffAvailable: boolean;
       rollbackAvailable: boolean;
+      indexRefreshWarnings: string[];
     };
 
 export type WorkflowProjectMutationState = "not_modified" | "modified" | "rolled_back" | "unknown";

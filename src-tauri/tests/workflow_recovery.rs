@@ -2,8 +2,16 @@
 mod workflow_baseline;
 
 use llm_wiki_desktop_lib::models::agent::AgentKind;
-use llm_wiki_desktop_lib::models::confirmation::{PendingActionType, RiskLevel};
-use llm_wiki_desktop_lib::models::lint::WikiLintSkillRef;
+use llm_wiki_desktop_lib::models::confirmation::{
+    ConfirmationRegistry, PendingActionType, RiskLevel,
+};
+use llm_wiki_desktop_lib::models::lint::{
+    AgentLintRepairDeclaredChange, AgentLintRepairDeclaredChangeOperation,
+    AgentLintRepairFindingResult, AgentLintRepairFindingStatus, AgentLintRepairOperation,
+    AgentLintRepairRoundOutput, WikiLintSkillRef, WIKI_LINT_SCHEMA_VERSION,
+};
+use llm_wiki_desktop_lib::models::paths::ProjectContext;
+use llm_wiki_desktop_lib::models::settings::AgentLintRepairAttestationLifecycle;
 use llm_wiki_desktop_lib::models::task::{BackendEventType, TaskStatus, TaskType};
 use llm_wiki_desktop_lib::models::workflow::{
     HealthCheckMode, UpdateWikiMode, WorkflowCandidateReference, WorkflowDisplayStatus,
@@ -11,11 +19,176 @@ use llm_wiki_desktop_lib::models::workflow::{
     WorkflowRoute, WorkflowScope, WorkflowStage, WorkflowStageStatus, WorkflowStartOutcome,
     WORKFLOW_SCHEMA_VERSION,
 };
-use llm_wiki_desktop_lib::services::{project_identity, EnqueueWorkflow, WorkflowCoordinator};
+use llm_wiki_desktop_lib::services::{
+    agent_lint_repair_attestation_digest, agent_lint_repair_stages, project_identity,
+    run_agent_lint_repair_with_round_executor, AgentLintRepairExecutionServices, AgentService,
+    BookmarkService, EnqueueWorkflow, FileStore, GitService, LintService, SearchService,
+    WorkflowCoordinator,
+};
 use llm_wiki_desktop_lib::tasks::task_events::EventBus;
 use llm_wiki_desktop_lib::tasks::TaskService;
 use std::sync::Arc;
 use workflow_baseline::{controlled_race, RacePoint};
+
+struct WaitingAgentRepairFixture {
+    _temp: tempfile::TempDir,
+    context: ProjectContext,
+    task_id: String,
+    candidate_id: String,
+    operation: WorkflowOperation,
+}
+
+fn waiting_agent_repair_fixture() -> WaitingAgentRepairFixture {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    std::fs::create_dir_all(root.join("raw/sources")).unwrap();
+    std::fs::create_dir_all(root.join(".app/tasks")).unwrap();
+    std::fs::write(root.join("wiki/page.md"), "# Page\n\nOriginal\n").unwrap();
+    let context = ProjectContext::new("project-recovery", root.clone());
+    let task_service = TaskService::default();
+    let coordinator = WorkflowCoordinator::default();
+    let agent_service = AgentService::default();
+    let lint_service = LintService::default();
+    let git_service = GitService;
+    let file_store = FileStore;
+    let bookmark_service = BookmarkService::default();
+    let search_service = SearchService::default();
+    let confirmation_registry = ConfirmationRegistry::default();
+    let settings_service = llm_wiki_desktop_lib::services::SettingsService::with_config_dir(
+        temp.path().join("app-config"),
+    );
+    git_service
+        .initialize_repository(&context, "Initial project")
+        .unwrap();
+    let page_hash = file_store
+        .file_hash_if_exists(&context, "wiki/page.md")
+        .unwrap()
+        .unwrap();
+    let expected_git_head = git_service
+        .repository_status(&context)
+        .unwrap()
+        .head
+        .unwrap();
+    let mut request = agent_repair_request(&context.root, "repair-recovery-baseline");
+    request.project_id = context.project_id.clone();
+    request.task_state_root = Some(context.app_dir.join("tasks"));
+    request.stages = agent_lint_repair_stages();
+    request.execution_options.operation = match request.execution_options.operation {
+        WorkflowOperation::AgentLintRepair {
+            preparation_id,
+            preparation_revision,
+            report_id,
+            selection_revision,
+            mut selected_finding_ids,
+            mut selected_findings,
+            skill,
+            ..
+        } => {
+            selected_finding_ids[0] = "duplicate_topic:wiki/page.md".into();
+            selected_findings[0].id = selected_finding_ids[0].clone();
+            selected_findings[0].path = "wiki/page.md".into();
+            WorkflowOperation::AgentLintRepair {
+                preparation_id,
+                preparation_revision,
+                report_id,
+                selection_revision,
+                selected_finding_ids,
+                selected_findings,
+                skill,
+                authorized_path_hashes: [("wiki/page.md".into(), Some(page_hash))]
+                    .into_iter()
+                    .collect(),
+                expected_git_head,
+            }
+        }
+        _ => unreachable!(),
+    };
+    let operation = request.execution_options.operation.clone();
+    let execution_options = request.execution_options.clone();
+    let run = created(coordinator.enqueue(&task_service, request).unwrap());
+    let attestation_digest =
+        agent_lint_repair_attestation_digest(&run, &execution_options).unwrap();
+    settings_service
+        .record_agent_lint_repair_attestation(
+            &run.canonical_identity_key,
+            &run.identity_revision,
+            &run.task_id,
+            &attestation_digest,
+        )
+        .unwrap();
+    settings_service
+        .transition_agent_lint_repair_attestation(
+            &run.task_id,
+            &attestation_digest,
+            &[AgentLintRepairAttestationLifecycle::QueuedAuthorized],
+            AgentLintRepairAttestationLifecycle::Dispatched,
+        )
+        .unwrap();
+    let services = AgentLintRepairExecutionServices {
+        agent_service: &agent_service,
+        lint_service: &lint_service,
+        git_service: &git_service,
+        file_store: &file_store,
+        bookmark_service: &bookmark_service,
+        search_service: &search_service,
+        confirmation_registry: &confirmation_registry,
+        settings_service: &settings_service,
+        task_service: &task_service,
+        coordinator: &coordinator,
+    };
+    run_agent_lint_repair_with_round_executor(
+        &context,
+        run.clone(),
+        &services,
+        "en",
+        || Ok(()),
+        |repair_request, workspace, _| {
+            std::fs::remove_file(workspace.join("wiki/page.md")).unwrap();
+            let output = AgentLintRepairRoundOutput {
+                schema_version: WIKI_LINT_SCHEMA_VERSION,
+                operation: AgentLintRepairOperation::Repair,
+                skill: WikiLintSkillRef::builtin(),
+                report_id: repair_request.report_id.clone(),
+                selection_revision: repair_request.selection_revision.clone(),
+                round: repair_request.round,
+                finding_results: vec![AgentLintRepairFindingResult {
+                    finding_id: repair_request.findings[0].id.clone(),
+                    status: AgentLintRepairFindingStatus::Attempted,
+                    message: "delete duplicate".into(),
+                }],
+                declared_changes: vec![AgentLintRepairDeclaredChange {
+                    path: "wiki/page.md".into(),
+                    operation: AgentLintRepairDeclaredChangeOperation::Delete,
+                }],
+                summary: "delete duplicate".into(),
+            };
+            Ok(format!(
+                "```json\n{}\n```",
+                serde_json::to_string(&output).unwrap()
+            ))
+        },
+    );
+    let waiting = task_service.get_workflow_run(&run.task_id).unwrap();
+    assert_eq!(
+        waiting.display_status,
+        WorkflowDisplayStatus::WaitingForConfirmation,
+        "repair fixture failed: {:?}",
+        waiting.error
+    );
+    let candidate_id = match waiting.pending_action.unwrap().candidate.unwrap() {
+        WorkflowCandidateReference::TaskOwned { candidate_id } => candidate_id,
+        other => panic!("unexpected candidate owner: {other:?}"),
+    };
+    WaitingAgentRepairFixture {
+        _temp: temp,
+        context,
+        task_id: run.task_id,
+        candidate_id,
+        operation,
+    }
+}
 
 fn stage() -> WorkflowStage {
     WorkflowStage {
@@ -77,6 +250,15 @@ fn agent_repair_request(root: &std::path::Path, baseline: &str) -> EnqueueWorkfl
         report_id: "health-report-1".into(),
         selection_revision: "selection-revision-repair".into(),
         selected_finding_ids: vec!["duplicate_topic:wiki/a.md".into()],
+        selected_findings: vec![llm_wiki_desktop_lib::models::lint::AgentLintRepairFinding {
+            id: "duplicate_topic:wiki/a.md".into(),
+            issue_type: llm_wiki_desktop_lib::models::lint::DeepLintIssueType::DuplicateTopic,
+            severity: llm_wiki_desktop_lib::models::lint::LintSeverity::Warning,
+            path: "wiki/a.md".into(),
+            message: "Duplicate topic".into(),
+            evidence: None,
+            suggested_action: None,
+        }],
         skill: WikiLintSkillRef::builtin(),
         authorized_path_hashes: [("wiki/a.md".into(), Some("a".repeat(64)))]
             .into_iter()
@@ -426,6 +608,88 @@ fn waiting_confirmation_survives_only_with_valid_reconstruction_data() {
                 .display_status,
             expected
         );
+    }
+}
+
+#[test]
+fn waiting_agent_lint_repair_preserves_exact_task_owned_candidate_across_restart() {
+    let fixture = waiting_agent_repair_fixture();
+
+    let restarted = TaskService::default();
+    restarted.recover_tasks(&fixture.context.root).unwrap();
+    let recovered = restarted.get_workflow_run(&fixture.task_id).unwrap();
+
+    assert_eq!(
+        recovered.display_status,
+        WorkflowDisplayStatus::WaitingForConfirmation
+    );
+    assert_eq!(recovered.kind, WorkflowKind::HealthCheck);
+    assert_eq!(recovered.operation, fixture.operation);
+    assert_eq!(recovered.task_id, fixture.task_id);
+    assert_eq!(
+        recovered.pending_action.unwrap().candidate,
+        Some(WorkflowCandidateReference::TaskOwned {
+            candidate_id: fixture.candidate_id,
+        })
+    );
+}
+
+#[test]
+fn waiting_agent_lint_repair_with_missing_or_tampered_candidate_is_interrupted() {
+    for tamper in [
+        "missing-descriptor",
+        "wrong-candidate-id",
+        "tampered-descriptor-action-revision",
+        "tampered-descriptor-operation",
+    ] {
+        let fixture = waiting_agent_repair_fixture();
+        let descriptor_path = std::env::temp_dir()
+            .join("llm-wiki-desktop")
+            .join(&fixture.task_id)
+            .join("agent-lint-repair-candidate.json");
+        match tamper {
+            "missing-descriptor" => std::fs::remove_file(descriptor_path).unwrap(),
+            "wrong-candidate-id" => {
+                let path = fixture
+                    .context
+                    .app_dir
+                    .join("tasks")
+                    .join(format!("{}.json", fixture.task_id));
+                let mut persisted: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                persisted["workflow"]["pendingAction"]["candidate"]["candidateId"] =
+                    serde_json::json!("foreign-task:1:wrong-manifest");
+                std::fs::write(&path, serde_json::to_vec_pretty(&persisted).unwrap()).unwrap();
+            }
+            "tampered-descriptor-action-revision" | "tampered-descriptor-operation" => {
+                let mut descriptor: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&descriptor_path).unwrap()).unwrap();
+                if tamper == "tampered-descriptor-action-revision" {
+                    descriptor["pendingRound"]["actionRevision"] =
+                        serde_json::json!("0".repeat(64));
+                } else {
+                    descriptor["operation"]["reportId"] = serde_json::json!("foreign-report");
+                }
+                std::fs::write(
+                    descriptor_path,
+                    serde_json::to_vec_pretty(&descriptor).unwrap(),
+                )
+                .unwrap();
+            }
+            _ => unreachable!(),
+        }
+
+        let restarted = TaskService::default();
+        restarted.recover_tasks(&fixture.context.root).unwrap();
+        let recovered = restarted.get_workflow_run(&fixture.task_id).unwrap();
+        assert_eq!(
+            recovered.display_status,
+            WorkflowDisplayStatus::Interrupted,
+            "case {tamper}"
+        );
+        assert_eq!(recovered.kind, WorkflowKind::HealthCheck);
+        assert_eq!(recovered.operation, fixture.operation);
+        assert_eq!(recovered.task_id, fixture.task_id);
     }
 }
 

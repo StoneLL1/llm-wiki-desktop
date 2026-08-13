@@ -320,13 +320,31 @@ fn activate_project_with_access(
     let tasks = state.task_service.list_tasks_for_root(&context.root, None);
     let mut next_runs = Vec::new();
     for task in &tasks {
-        let Some(run) = state.task_service.get_workflow_run(&task.id) else {
+        let Some(mut run) = state.task_service.get_workflow_run(&task.id) else {
             continue;
         };
         if run.canonical_identity_key != identity.canonical_identity_key
             || run.identity_revision != identity.identity_revision
         {
             continue;
+        }
+        if matches!(
+            run.operation,
+            crate::models::workflow::WorkflowOperation::AgentLintRepair { .. }
+        ) && run.display_status == crate::models::workflow::WorkflowDisplayStatus::Interrupted
+        {
+            let services = super::workflow_commands::agent_lint_repair_services(state);
+            match crate::services::reconcile_agent_lint_repair_after_recovery(
+                context, &run, &services,
+            ) {
+                Ok(Some(reconciled)) => run = reconciled,
+                Ok(None) => {}
+                Err(error) => {
+                    run = crate::services::record_agent_lint_repair_recovery_failure(
+                        &run, &services, &error,
+                    )?;
+                }
+            }
         }
         if run.display_status
             == crate::models::workflow::WorkflowDisplayStatus::WaitingForConfirmation
@@ -348,7 +366,22 @@ fn activate_project_with_access(
                         &state.confirmation_registry,
                     )
                 }
-                crate::models::workflow::WorkflowKind::HealthCheck => Ok(()),
+                crate::models::workflow::WorkflowKind::HealthCheck => {
+                    if matches!(
+                        run.operation,
+                        crate::models::workflow::WorkflowOperation::AgentLintRepair { .. }
+                    ) {
+                        crate::services::restore_agent_lint_repair_confirmation(
+                            context,
+                            &run,
+                            &state.confirmation_registry,
+                            &state.settings_service,
+                            &state.task_service,
+                        )
+                    } else {
+                        Ok(())
+                    }
+                }
             };
             if let Err(error) = restoration {
                 if let Some(pending) = run.pending_action.as_ref() {

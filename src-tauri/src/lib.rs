@@ -294,6 +294,111 @@ pub fn run() {
                     },
                 )))
                 .map_err(startup_backend_error)?;
+            let lint_repair_runner_handle = handle.clone();
+            state
+                .workflow_service
+                .register_runner(std::sync::Arc::new(services::AgentLintRepairRunner::new(
+                    move |run| {
+                        let app = lint_repair_runner_handle.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let state = app.state::<app_state::AppState>();
+                            let Some(root) = state.task_service.project_root_for_task(&run.task_id)
+                            else {
+                                reject_workflow_dispatch(
+                                    &state,
+                                    &run.task_id,
+                                    "WORKFLOW_PROJECT_CONTEXT_MISSING",
+                                    "Agent lint repair task has no project root.".into(),
+                                );
+                                return;
+                            };
+                            let asserted_root = root.to_string_lossy().into_owned();
+                            let context = match state
+                                .resolve_project_context(&run.project_id, &asserted_root)
+                            {
+                                Ok(context) => context,
+                                Err(error) => {
+                                    reject_workflow_dispatch(
+                                        &state,
+                                        &run.task_id,
+                                        &error.code,
+                                        error.message,
+                                    );
+                                    return;
+                                }
+                            };
+                            match services::project_identity(&context.root) {
+                                Ok(identity)
+                                    if identity.canonical_identity_key
+                                        == run.canonical_identity_key
+                                        && identity.identity_revision == run.identity_revision => {}
+                                Ok(_) | Err(_) => {
+                                    reject_workflow_dispatch(
+                                        &state,
+                                        &run.task_id,
+                                        "WORKFLOW_PROJECT_IDENTITY_CHANGED",
+                                        "Agent lint repair project identity changed while queued."
+                                            .into(),
+                                    );
+                                    return;
+                                }
+                            }
+                            let settings = match state.settings_service.read_settings(&context) {
+                                Ok(settings) => settings,
+                                Err(error) => {
+                                    reject_workflow_dispatch(
+                                        &state,
+                                        &run.task_id,
+                                        &error.code,
+                                        error.message,
+                                    );
+                                    return;
+                                }
+                            };
+                            let selected_agent = match &run.route {
+                                Some(models::workflow::WorkflowRoute::Agent { agent, .. }) => *agent,
+                                _ => {
+                                    reject_workflow_dispatch(
+                                        &state,
+                                        &run.task_id,
+                                        "LINT_AGENT_ROUTE_REQUIRED",
+                                        "Agent lint repair has no exact Agent route.".into(),
+                                    );
+                                    return;
+                                }
+                            };
+                            let repair = services::AgentLintRepairExecutionServices {
+                                agent_service: &state.agent_service,
+                                lint_service: &state.lint_service,
+                                git_service: &state.git_service,
+                                file_store: &state.file_store,
+                                bookmark_service: &state.bookmark_service,
+                                search_service: &state.search_service,
+                                confirmation_registry: &state.confirmation_registry,
+                                settings_service: &state.settings_service,
+                                task_service: &state.task_service,
+                                coordinator: &state.workflow_service.coordinator,
+                            };
+                            let authority_run = run.clone();
+                            if let Some(next) = services::run_agent_lint_repair_authorized(
+                                &context,
+                                run,
+                                &repair,
+                                &settings.language,
+                                settings.agent_default == Some(selected_agent),
+                                || {
+                                    state.publish_workflow_external_launch(
+                                        &context,
+                                        &authority_run,
+                                    )
+                                },
+                            ) {
+                                dispatch_claimed_next(&state, &next);
+                            }
+                        });
+                    },
+                )))
+                .map_err(startup_backend_error)?;
             let generate_runner_handle = handle.clone();
             state
                 .workflow_service
@@ -677,6 +782,7 @@ pub fn run() {
             commands::lint_commands::prepare_agent_lint_repair,
             commands::lint_commands::confirm_agent_lint_repair_start,
             commands::lint_commands::cancel_agent_lint_repair_preparation,
+            commands::lint_commands::rollback_agent_lint_repair,
             commands::lint_commands::get_deep_lint_report,
             commands::lint_commands::list_lint_history,
             commands::lint_commands::read_lint_history_report,

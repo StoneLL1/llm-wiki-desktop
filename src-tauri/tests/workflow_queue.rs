@@ -204,6 +204,15 @@ fn repair_operation(selection: &str) -> WorkflowOperation {
         report_id: "health-report-1".into(),
         selection_revision: format!("selection-revision-{selection}"),
         selected_finding_ids: vec![format!("duplicate_topic:wiki/{selection}.md")],
+        selected_findings: vec![llm_wiki_desktop_lib::models::lint::AgentLintRepairFinding {
+            id: format!("duplicate_topic:wiki/{selection}.md"),
+            issue_type: llm_wiki_desktop_lib::models::lint::DeepLintIssueType::DuplicateTopic,
+            severity: llm_wiki_desktop_lib::models::lint::LintSeverity::Warning,
+            path: format!("wiki/{selection}.md"),
+            message: "Duplicate topic".into(),
+            evidence: None,
+            suggested_action: None,
+        }],
         skill: llm_wiki_desktop_lib::models::lint::WikiLintSkillRef::builtin(),
         authorized_path_hashes: [(format!("wiki/{selection}.md"), Some("a".repeat(64)))]
             .into_iter()

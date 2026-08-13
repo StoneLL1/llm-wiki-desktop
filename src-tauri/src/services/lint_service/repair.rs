@@ -31,6 +31,8 @@ const MAX_REPAIR_WORKSPACE_FILES: usize = 2_000;
 const MAX_REPAIR_WORKSPACE_BYTES: u64 = 64 * 1024 * 1024;
 const REPAIR_WORKSPACE_DESCRIPTOR: &str = "lint-repair-workspace.json";
 
+pub const AGENT_LINT_REPAIR_MAX_ROUNDS: u8 = 3;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentLintRepairWorkspaceDescriptor {
@@ -78,6 +80,14 @@ impl Drop for AgentLintRepairWorkspaceLease {
 pub struct AgentLintRepairCandidate {
     pub manifest: CompileManifest,
     pub changes: CompileChangeSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentLintRepairRecheckAssessment {
+    pub selected_finding_ids: Vec<String>,
+    pub correlation: AgentLintRepairCorrelation,
+    pub next_round_finding_ids: Vec<String>,
+    pub round_limit_reached: bool,
 }
 
 impl LintService {
@@ -132,6 +142,29 @@ impl LintService {
         after_finding_ids: &HashSet<String>,
     ) -> Result<AgentLintRepairCorrelation, BackendError> {
         correlate_agent_lint_repair_findings(request, output, before_finding_ids, after_finding_ids)
+    }
+
+    pub fn validate_agent_lint_repair_round_lineage(
+        request: &AgentLintRepairRequest,
+        selected_finding_ids: &[String],
+    ) -> Result<Vec<String>, BackendError> {
+        validate_agent_lint_repair_round_lineage(request, selected_finding_ids)
+    }
+
+    pub fn correlate_agent_lint_repair_recheck(
+        request: &AgentLintRepairRequest,
+        output: &AgentLintRepairRoundOutput,
+        selected_finding_ids: &[String],
+        before_finding_ids: &HashSet<String>,
+        after_finding_ids: &HashSet<String>,
+    ) -> Result<AgentLintRepairRecheckAssessment, BackendError> {
+        correlate_agent_lint_repair_recheck(
+            request,
+            output,
+            selected_finding_ids,
+            before_finding_ids,
+            after_finding_ids,
+        )
     }
 
     pub fn compute_agent_lint_selection_revision(
@@ -1177,7 +1210,10 @@ pub fn validate_agent_lint_repair_request(
             "Repair request did not match the pinned schema, operation, or Skill ref.",
         ));
     }
-    if request.round == 0 || request.round > 3 || request.max_rounds != 3 {
+    if request.round == 0
+        || request.round > AGENT_LINT_REPAIR_MAX_ROUNDS
+        || request.max_rounds != AGENT_LINT_REPAIR_MAX_ROUNDS
+    {
         return Err(contract_error(
             "Repair round must be in 1..=3 and maxRounds must equal 3.",
         ));
@@ -1446,6 +1482,109 @@ pub fn correlate_agent_lint_repair_findings(
         unresolved_finding_ids,
         introduced_finding_ids,
         skipped_finding_ids,
+    })
+}
+
+pub fn validate_agent_lint_repair_round_lineage(
+    request: &AgentLintRepairRequest,
+    selected_finding_ids: &[String],
+) -> Result<Vec<String>, BackendError> {
+    validate_agent_lint_repair_request(request)?;
+    if selected_finding_ids.is_empty() || selected_finding_ids.len() > MAX_REPAIR_FINDINGS {
+        return Err(contract_error(
+            "Approved repair selection must contain between 1 and 100 Finding IDs.",
+        ));
+    }
+
+    let mut selected = selected_finding_ids.to_vec();
+    if selected.iter().any(|id| id.trim().is_empty()) {
+        return Err(contract_error(
+            "Approved repair selection contains an empty Finding ID.",
+        ));
+    }
+    selected.sort();
+    if selected.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(contract_error(
+            "Approved repair selection contains duplicate Finding IDs.",
+        ));
+    }
+
+    if request.prior_rounds.len() != usize::from(request.round - 1) {
+        return Err(contract_error(
+            "Repair round history must contain every preceding round exactly once.",
+        ));
+    }
+
+    let mut expected = selected.clone();
+    for (index, prior) in request.prior_rounds.iter().enumerate() {
+        if usize::from(prior.round) != index + 1 {
+            return Err(contract_error(
+                "Repair round history must be ordered and contiguous from round one.",
+            ));
+        }
+        let mut unresolved = prior.unresolved_finding_ids.clone();
+        if unresolved.iter().any(|id| id.trim().is_empty()) {
+            return Err(contract_error(
+                "Prior repair round contains an empty unresolved Finding ID.",
+            ));
+        }
+        unresolved.sort();
+        if unresolved.windows(2).any(|pair| pair[0] == pair[1])
+            || !unresolved
+                .iter()
+                .all(|id| expected.binary_search(id).is_ok())
+        {
+            return Err(contract_error(
+                "Prior unresolved Finding IDs must be unique and may only shrink across rounds.",
+            ));
+        }
+        expected = unresolved;
+    }
+
+    let mut current = request
+        .findings
+        .iter()
+        .map(|finding| finding.id.clone())
+        .collect::<Vec<_>>();
+    current.sort();
+    if current != expected {
+        return Err(contract_error(
+            "Current repair Findings must exactly match the unresolved IDs from the preceding round.",
+        ));
+    }
+
+    Ok(selected)
+}
+
+pub fn correlate_agent_lint_repair_recheck(
+    request: &AgentLintRepairRequest,
+    output: &AgentLintRepairRoundOutput,
+    selected_finding_ids: &[String],
+    before_finding_ids: &HashSet<String>,
+    after_finding_ids: &HashSet<String>,
+) -> Result<AgentLintRepairRecheckAssessment, BackendError> {
+    let selected_finding_ids =
+        validate_agent_lint_repair_round_lineage(request, selected_finding_ids)?;
+    let correlation = correlate_agent_lint_repair_findings(
+        request,
+        output,
+        before_finding_ids,
+        after_finding_ids,
+    )?;
+    let round_limit_reached = !correlation.unresolved_finding_ids.is_empty()
+        && request.round == AGENT_LINT_REPAIR_MAX_ROUNDS;
+    let next_round_finding_ids =
+        if correlation.unresolved_finding_ids.is_empty() || round_limit_reached {
+            Vec::new()
+        } else {
+            correlation.unresolved_finding_ids.clone()
+        };
+
+    Ok(AgentLintRepairRecheckAssessment {
+        selected_finding_ids,
+        correlation,
+        next_round_finding_ids,
+        round_limit_reached,
     })
 }
 
@@ -1940,6 +2079,126 @@ mod tests {
             correlate_agent_lint_repair_findings(&request, &unknown_skipped, &before, &after)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn h4b_recheck_keeps_selected_and_unresolved_ids_stable_across_rounds() {
+        let mut first = request();
+        let mut second_finding = first.findings[0].clone();
+        second_finding.id = "contradiction:wiki/concepts/secondary.md".into();
+        second_finding.issue_type = DeepLintIssueType::Contradiction;
+        first.findings.push(second_finding.clone());
+        let selected = vec![second_finding.id.clone(), first.findings[0].id.clone()];
+        let output = parse_agent_lint_repair_round_output(
+            &format!("```json\n{}\n```", output_json(&first)),
+            &first,
+        )
+        .unwrap();
+        let before = HashSet::from([
+            first.findings[0].id.clone(),
+            second_finding.id.clone(),
+            "preexisting:wiki/other.md".into(),
+        ]);
+        let after = HashSet::from([
+            second_finding.id.clone(),
+            "preexisting:wiki/other.md".into(),
+            "introduced:wiki/new.md".into(),
+        ]);
+
+        let assessed =
+            correlate_agent_lint_repair_recheck(&first, &output, &selected, &before, &after)
+                .unwrap();
+
+        assert_eq!(
+            assessed.selected_finding_ids,
+            [second_finding.id.clone(), first.findings[0].id.clone()]
+        );
+        assert_eq!(
+            assessed.correlation.resolved_finding_ids,
+            [first.findings[0].id.clone()]
+        );
+        assert_eq!(
+            assessed.correlation.unresolved_finding_ids,
+            [second_finding.id.clone()]
+        );
+        assert_eq!(
+            assessed.correlation.introduced_finding_ids,
+            ["introduced:wiki/new.md"]
+        );
+        assert_eq!(assessed.next_round_finding_ids, [second_finding.id]);
+        assert!(!assessed.round_limit_reached);
+    }
+
+    #[test]
+    fn h4b_round_lineage_is_contiguous_monotonic_and_never_allows_round_four() {
+        let mut request = request();
+        let selected = vec![
+            request.findings[0].id.clone(),
+            "resolved-in-round-one".into(),
+        ];
+        request.round = 3;
+        request.prior_rounds = vec![
+            crate::models::lint::AgentLintRepairRoundSummary {
+                round: 1,
+                affected_paths: vec![request.writable_paths[0].clone()],
+                unresolved_finding_ids: vec![request.findings[0].id.clone()],
+                summary: "round one".into(),
+            },
+            crate::models::lint::AgentLintRepairRoundSummary {
+                round: 2,
+                affected_paths: vec![request.writable_paths[0].clone()],
+                unresolved_finding_ids: vec![request.findings[0].id.clone()],
+                summary: "round two".into(),
+            },
+        ];
+        let output = parse_agent_lint_repair_round_output(
+            &format!("```json\n{}\n```", output_json(&request)),
+            &request,
+        )
+        .unwrap();
+        let still_unresolved = HashSet::from([request.findings[0].id.clone()]);
+        let assessed = correlate_agent_lint_repair_recheck(
+            &request,
+            &output,
+            &selected,
+            &still_unresolved,
+            &still_unresolved,
+        )
+        .unwrap();
+        assert_eq!(
+            assessed.correlation.unresolved_finding_ids,
+            [request.findings[0].id.clone()]
+        );
+        assert!(assessed.next_round_finding_ids.is_empty());
+        assert!(assessed.round_limit_reached);
+
+        let mut missing_round = request.clone();
+        missing_round.prior_rounds.remove(0);
+        assert!(correlate_agent_lint_repair_recheck(
+            &missing_round,
+            &output,
+            &selected,
+            &still_unresolved,
+            &still_unresolved,
+        )
+        .is_err());
+
+        let mut regressed = request.clone();
+        regressed.prior_rounds[1]
+            .unresolved_finding_ids
+            .push("resolved-in-round-one".into());
+        assert!(correlate_agent_lint_repair_recheck(
+            &regressed,
+            &output,
+            &selected,
+            &still_unresolved,
+            &still_unresolved,
+        )
+        .is_err());
+
+        let mut fourth = request;
+        fourth.round = 4;
+        assert!(validate_agent_lint_repair_round_lineage(&fourth, &selected).is_err());
     }
 
     #[test]

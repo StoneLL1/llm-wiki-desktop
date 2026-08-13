@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -7,7 +8,8 @@ use crate::models::import_v2_agent::AgentAssistancePolicy;
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::paths::ProjectContext;
 use crate::models::settings::{
-    AgentLintRepairAttestation, AgentLintRepairAttestationLifecycle, ChatConvenienceAuthorization,
+    AgentLintRepairAttestation, AgentLintRepairAttestationLifecycle,
+    AgentLintRepairMutationJournal, AgentLintRepairMutationPhase, ChatConvenienceAuthorization,
     CloseBehavior, GlobalSettingsFile, GlobalUiPreferences, ProjectSettingsFile, Settings,
 };
 use crate::services::{FileStore, SecretService};
@@ -17,6 +19,7 @@ pub struct SettingsService {
 }
 
 const MAX_AGENT_LINT_REPAIR_ATTESTATIONS: usize = 256;
+const MAX_AGENT_LINT_REPAIR_JOURNAL_PATHS: usize = 4_096;
 const AGENT_LINT_REPAIR_CANCEL_TOMBSTONE_MINUTES: i64 = 15;
 
 impl Default for SettingsService {
@@ -363,6 +366,11 @@ impl SettingsService {
             operation_digest: operation_digest.to_string(),
             confirmed_at: chrono::Utc::now().to_rfc3339(),
             lifecycle: AgentLintRepairAttestationLifecycle::QueuedAuthorized,
+            descriptor_digest: None,
+            mutation_journal: None,
+            terminal_result_digest: None,
+            terminal_result_json: None,
+            terminal_task_status: None,
         };
         settings
             .agent_lint_repair_attestations
@@ -428,6 +436,11 @@ impl SettingsService {
                     operation_digest: operation_digest.to_string(),
                     confirmed_at: chrono::Utc::now().to_rfc3339(),
                     lifecycle: AgentLintRepairAttestationLifecycle::Cancelled,
+                    descriptor_digest: None,
+                    mutation_journal: None,
+                    terminal_result_digest: None,
+                    terminal_result_json: None,
+                    terminal_task_status: None,
                 });
             prune_agent_lint_repair_attestations(
                 &mut settings.agent_lint_repair_attestations,
@@ -481,7 +494,15 @@ impl SettingsService {
                     true,
                 )
             })?;
-        if !from.contains(&item.lifecycle) {
+        if item.lifecycle == AgentLintRepairAttestationLifecycle::Completed
+            || to == AgentLintRepairAttestationLifecycle::Completed
+            || !from.contains(&item.lifecycle)
+            || (item.lifecycle == AgentLintRepairAttestationLifecycle::Cancelled
+                && to == AgentLintRepairAttestationLifecycle::QueuedAuthorized
+                && (item.descriptor_digest.is_some()
+                    || item.mutation_journal.is_some()
+                    || item.terminal_result_digest.is_some()))
+        {
             return Err(BackendError::new(
                 "LINT_REPAIR_ATTESTATION_STATE_INVALID",
                 "The Agent lint repair approval is no longer dispatchable.",
@@ -495,9 +516,397 @@ impl SettingsService {
         store.write_json_atomic_absolute(&self.global_settings_path(), &settings)
     }
 
+    pub fn get_agent_lint_repair_attestation(
+        &self,
+        canonical_identity_key: &str,
+        identity_revision: &str,
+        task_id: &str,
+        operation_digest: &str,
+    ) -> Result<AgentLintRepairAttestation, BackendError> {
+        let _guard = self.lock_global_settings()?;
+        self.read_global_settings()?
+            .agent_lint_repair_attestations
+            .into_iter()
+            .find(|item| {
+                item.canonical_identity_key == canonical_identity_key
+                    && item.identity_revision == identity_revision
+                    && item.task_id == task_id
+                    && item.operation_digest == operation_digest
+            })
+            .ok_or_else(agent_lint_repair_attestation_required)
+    }
+
+    /// Bind a project-owned descriptor by exact compare-and-swap. This is the
+    /// only supported way to advance the trusted descriptor lineage.
+    pub fn bind_agent_lint_repair_descriptor_digest(
+        &self,
+        task_id: &str,
+        operation_digest: &str,
+        expected_descriptor_digest: Option<&str>,
+        descriptor_digest: &str,
+    ) -> Result<AgentLintRepairAttestation, BackendError> {
+        require_non_empty_repair_receipt_value(descriptor_digest)?;
+        self.update_agent_lint_repair_attestation(task_id, operation_digest, |item| {
+            require_dispatched_repair_attestation(item)?;
+            if item.descriptor_digest.as_deref() != expected_descriptor_digest
+                || item
+                    .mutation_journal
+                    .as_ref()
+                    .and_then(|journal| journal.final_commit.as_ref())
+                    .is_some()
+            {
+                return Err(agent_lint_repair_attestation_state_invalid());
+            }
+            item.descriptor_digest = Some(descriptor_digest.to_string());
+            Ok(())
+        })
+    }
+
+    /// Write or advance a durable pre-mutation journal bound to the exact
+    /// descriptor and the run's initial checkpoint. Applying rounds retain one
+    /// cumulative journal until terminal completion or verified rollback.
+    pub fn begin_agent_lint_repair_mutation_journal(
+        &self,
+        task_id: &str,
+        operation_digest: &str,
+        descriptor_digest: &str,
+        checkpoint_hash: &str,
+        affected_path_hashes: BTreeMap<String, Option<String>>,
+    ) -> Result<AgentLintRepairAttestation, BackendError> {
+        self.begin_agent_lint_repair_mutation_journal_with_pre_hashes(
+            task_id,
+            operation_digest,
+            descriptor_digest,
+            checkpoint_hash,
+            affected_path_hashes.clone(),
+            affected_path_hashes,
+        )
+    }
+
+    pub fn begin_agent_lint_repair_mutation_journal_with_pre_hashes(
+        &self,
+        task_id: &str,
+        operation_digest: &str,
+        descriptor_digest: &str,
+        checkpoint_hash: &str,
+        pre_mutation_path_hashes: BTreeMap<String, Option<String>>,
+        affected_path_hashes: BTreeMap<String, Option<String>>,
+    ) -> Result<AgentLintRepairAttestation, BackendError> {
+        require_valid_repair_mutation_journal_inputs(
+            descriptor_digest,
+            checkpoint_hash,
+            &affected_path_hashes,
+        )?;
+        if pre_mutation_path_hashes
+            .keys()
+            .ne(affected_path_hashes.keys())
+        {
+            return Err(agent_lint_repair_attestation_state_invalid());
+        }
+        let next = AgentLintRepairMutationJournal {
+            phase: AgentLintRepairMutationPhase::Applying,
+            checkpoint_hash: checkpoint_hash.to_string(),
+            pre_mutation_path_hashes,
+            affected_path_hashes,
+            final_commit: None,
+        };
+        self.update_agent_lint_repair_attestation(task_id, operation_digest, |item| {
+            require_dispatched_repair_attestation(item)?;
+            if item.descriptor_digest.as_deref() != Some(descriptor_digest) {
+                return Err(agent_lint_repair_attestation_state_invalid());
+            }
+            match item.mutation_journal.as_ref() {
+                None => item.mutation_journal = Some(next),
+                Some(existing)
+                    if existing.phase == AgentLintRepairMutationPhase::Applying
+                        && existing.checkpoint_hash == checkpoint_hash
+                        && existing.final_commit.is_none()
+                        && existing
+                            .affected_path_hashes
+                            .keys()
+                            .all(|path| next.affected_path_hashes.contains_key(path)) =>
+                {
+                    item.mutation_journal = Some(next);
+                }
+                Some(_) => return Err(agent_lint_repair_attestation_state_invalid()),
+            }
+            Ok(())
+        })
+    }
+
+    pub fn mark_agent_lint_repair_mutation_finalizing(
+        &self,
+        task_id: &str,
+        operation_digest: &str,
+        descriptor_digest: &str,
+        checkpoint_hash: &str,
+    ) -> Result<AgentLintRepairAttestation, BackendError> {
+        require_non_empty_repair_receipt_value(descriptor_digest)?;
+        require_non_empty_repair_receipt_value(checkpoint_hash)?;
+        self.update_agent_lint_repair_attestation(task_id, operation_digest, |item| {
+            require_dispatched_repair_attestation(item)?;
+            if item.descriptor_digest.as_deref() != Some(descriptor_digest) {
+                return Err(agent_lint_repair_attestation_state_invalid());
+            }
+            let journal = item
+                .mutation_journal
+                .as_mut()
+                .ok_or_else(agent_lint_repair_attestation_state_invalid)?;
+            if journal.checkpoint_hash != checkpoint_hash {
+                return Err(agent_lint_repair_attestation_state_invalid());
+            }
+            journal.phase = AgentLintRepairMutationPhase::Finalizing;
+            Ok(())
+        })
+    }
+
+    /// Bind the exact final commit while retaining the journal until the
+    /// terminal result receipt is durable.
+    pub fn mark_agent_lint_repair_final_commit(
+        &self,
+        task_id: &str,
+        operation_digest: &str,
+        descriptor_digest: &str,
+        checkpoint_hash: &str,
+        final_commit: &str,
+    ) -> Result<AgentLintRepairAttestation, BackendError> {
+        require_non_empty_repair_receipt_value(final_commit)?;
+        self.update_agent_lint_repair_attestation(task_id, operation_digest, |item| {
+            require_dispatched_repair_attestation(item)?;
+            if item.descriptor_digest.as_deref() != Some(descriptor_digest) {
+                return Err(agent_lint_repair_attestation_state_invalid());
+            }
+            let journal = item
+                .mutation_journal
+                .as_mut()
+                .ok_or_else(agent_lint_repair_attestation_state_invalid)?;
+            if journal.phase != AgentLintRepairMutationPhase::Finalizing
+                || journal.checkpoint_hash != checkpoint_hash
+                || journal
+                    .final_commit
+                    .as_deref()
+                    .is_some_and(|existing| existing != final_commit)
+            {
+                return Err(agent_lint_repair_attestation_state_invalid());
+            }
+            journal.final_commit = Some(final_commit.to_string());
+            Ok(())
+        })
+    }
+
+    pub fn clear_agent_lint_repair_mutation_journal(
+        &self,
+        task_id: &str,
+        operation_digest: &str,
+        descriptor_digest: &str,
+        checkpoint_hash: &str,
+    ) -> Result<AgentLintRepairAttestation, BackendError> {
+        self.update_agent_lint_repair_attestation(task_id, operation_digest, |item| {
+            let lifecycle = item.lifecycle;
+            if !matches!(
+                item.lifecycle,
+                AgentLintRepairAttestationLifecycle::Dispatched
+                    | AgentLintRepairAttestationLifecycle::Cancelled
+            ) || item.terminal_result_digest.is_some()
+                || item.descriptor_digest.as_deref() != Some(descriptor_digest)
+            {
+                return Err(agent_lint_repair_attestation_state_invalid());
+            }
+            let journal = item
+                .mutation_journal
+                .as_ref()
+                .ok_or_else(agent_lint_repair_attestation_state_invalid)?;
+            if journal.checkpoint_hash != checkpoint_hash
+                || (lifecycle == AgentLintRepairAttestationLifecycle::Dispatched
+                    && journal.final_commit.is_some())
+            {
+                return Err(agent_lint_repair_attestation_state_invalid());
+            }
+            item.mutation_journal = None;
+            Ok(())
+        })
+    }
+
+    /// Consume a finalizing WAL only after the Git owner has created an exact
+    /// compensating rollback from the recorded final commit to its checkpoint.
+    pub fn clear_agent_lint_repair_journal_after_compensating_rollback(
+        &self,
+        task_id: &str,
+        operation_digest: &str,
+        descriptor_digest: &str,
+        checkpoint_hash: &str,
+        final_commit: &str,
+    ) -> Result<AgentLintRepairAttestation, BackendError> {
+        self.update_agent_lint_repair_attestation(task_id, operation_digest, |item| {
+            if !matches!(
+                item.lifecycle,
+                AgentLintRepairAttestationLifecycle::Dispatched
+                    | AgentLintRepairAttestationLifecycle::Cancelled
+            ) || item.terminal_result_digest.is_some()
+                || item.descriptor_digest.as_deref() != Some(descriptor_digest)
+            {
+                return Err(agent_lint_repair_attestation_state_invalid());
+            }
+            let journal = item
+                .mutation_journal
+                .as_ref()
+                .ok_or_else(agent_lint_repair_attestation_state_invalid)?;
+            if journal.phase != AgentLintRepairMutationPhase::Finalizing
+                || journal.checkpoint_hash != checkpoint_hash
+                || journal.final_commit.as_deref() != Some(final_commit)
+            {
+                return Err(agent_lint_repair_attestation_state_invalid());
+            }
+            item.mutation_journal = None;
+            Ok(())
+        })
+    }
+
+    /// Make a terminal result authoritative. Exact retries are idempotent;
+    /// neither a descriptor nor a terminal digest can be rewritten afterward.
+    pub fn complete_agent_lint_repair_attestation(
+        &self,
+        task_id: &str,
+        operation_digest: &str,
+        expected_descriptor_digest: Option<&str>,
+        terminal_result_digest: &str,
+    ) -> Result<AgentLintRepairAttestation, BackendError> {
+        self.complete_agent_lint_repair_attestation_inner(
+            task_id,
+            operation_digest,
+            expected_descriptor_digest,
+            terminal_result_digest,
+            None,
+            None,
+            true,
+        )
+    }
+
+    pub fn complete_agent_lint_repair_success_attestation(
+        &self,
+        task_id: &str,
+        operation_digest: &str,
+        expected_descriptor_digest: Option<&str>,
+        terminal_result_digest: &str,
+        terminal_result_json: &str,
+    ) -> Result<AgentLintRepairAttestation, BackendError> {
+        self.complete_agent_lint_repair_attestation_inner(
+            task_id,
+            operation_digest,
+            expected_descriptor_digest,
+            terminal_result_digest,
+            Some(terminal_result_json),
+            Some("succeeded"),
+            false,
+        )
+    }
+
+    pub fn complete_agent_lint_repair_terminal_attestation(
+        &self,
+        task_id: &str,
+        operation_digest: &str,
+        expected_descriptor_digest: Option<&str>,
+        terminal_result_digest: &str,
+        terminal_result_json: &str,
+        terminal_task_status: &str,
+    ) -> Result<AgentLintRepairAttestation, BackendError> {
+        self.complete_agent_lint_repair_attestation_inner(
+            task_id,
+            operation_digest,
+            expected_descriptor_digest,
+            terminal_result_digest,
+            Some(terminal_result_json),
+            Some(terminal_task_status),
+            true,
+        )
+    }
+
+    fn complete_agent_lint_repair_attestation_inner(
+        &self,
+        task_id: &str,
+        operation_digest: &str,
+        expected_descriptor_digest: Option<&str>,
+        terminal_result_digest: &str,
+        terminal_result_json: Option<&str>,
+        terminal_task_status: Option<&str>,
+        allow_cancelled: bool,
+    ) -> Result<AgentLintRepairAttestation, BackendError> {
+        require_non_empty_repair_receipt_value(terminal_result_digest)?;
+        if terminal_result_json.is_some_and(str::is_empty) {
+            return Err(agent_lint_repair_attestation_state_invalid());
+        }
+        if terminal_task_status.is_some_and(|status| {
+            !matches!(status, "succeeded" | "failed" | "cancelled" | "interrupted")
+        }) {
+            return Err(agent_lint_repair_attestation_state_invalid());
+        }
+        self.update_agent_lint_repair_attestation(task_id, operation_digest, |item| {
+            if item.lifecycle == AgentLintRepairAttestationLifecycle::Completed {
+                if item.descriptor_digest.as_deref() == expected_descriptor_digest
+                    && item.terminal_result_digest.as_deref() == Some(terminal_result_digest)
+                    && (terminal_result_json.is_none()
+                        || item.terminal_result_json.as_deref() == terminal_result_json)
+                    && (terminal_task_status.is_none()
+                        || item.terminal_task_status.as_deref() == terminal_task_status)
+                {
+                    return Ok(());
+                }
+                return Err(agent_lint_repair_attestation_state_invalid());
+            }
+            if item.lifecycle != AgentLintRepairAttestationLifecycle::Dispatched
+                && !(allow_cancelled
+                    && item.lifecycle == AgentLintRepairAttestationLifecycle::Cancelled)
+            {
+                return Err(agent_lint_repair_attestation_state_invalid());
+            }
+            if item.descriptor_digest.as_deref() != expected_descriptor_digest
+                || item.mutation_journal.as_ref().is_some_and(|journal| {
+                    journal.phase != AgentLintRepairMutationPhase::Finalizing
+                        || journal.final_commit.is_none()
+                })
+            {
+                return Err(agent_lint_repair_attestation_state_invalid());
+            }
+            item.lifecycle = AgentLintRepairAttestationLifecycle::Completed;
+            item.terminal_result_digest = Some(terminal_result_digest.to_string());
+            item.terminal_result_json = terminal_result_json.map(str::to_string);
+            item.terminal_task_status = terminal_task_status.map(str::to_string);
+            item.mutation_journal = None;
+            Ok(())
+        })
+    }
+
+    fn update_agent_lint_repair_attestation(
+        &self,
+        task_id: &str,
+        operation_digest: &str,
+        update: impl FnOnce(&mut AgentLintRepairAttestation) -> Result<(), BackendError>,
+    ) -> Result<AgentLintRepairAttestation, BackendError> {
+        let _guard = self.lock_global_settings()?;
+        let mut settings = self.read_global_settings()?;
+        let item = settings
+            .agent_lint_repair_attestations
+            .iter_mut()
+            .find(|item| item.task_id == task_id && item.operation_digest == operation_digest)
+            .ok_or_else(agent_lint_repair_attestation_required)?;
+        update(item)?;
+        let updated = item.clone();
+        let store = FileStore;
+        store.ensure_absolute_dir(&self.config_dir)?;
+        store.write_json_atomic_absolute(&self.global_settings_path(), &settings)?;
+        Ok(updated)
+    }
+
     pub fn revoke_agent_lint_repair_attestation(&self, task_id: &str) -> Result<(), BackendError> {
         let _guard = self.lock_global_settings()?;
         let mut settings = self.read_global_settings()?;
+        if settings.agent_lint_repair_attestations.iter().any(|item| {
+            item.task_id == task_id
+                && (item.lifecycle == AgentLintRepairAttestationLifecycle::Completed
+                    || item.mutation_journal.is_some())
+        }) {
+            return Err(agent_lint_repair_attestation_state_invalid());
+        }
         let old_len = settings.agent_lint_repair_attestations.len();
         settings
             .agent_lint_repair_attestations
@@ -526,6 +935,63 @@ impl SettingsService {
     }
 }
 
+fn require_dispatched_repair_attestation(
+    item: &AgentLintRepairAttestation,
+) -> Result<(), BackendError> {
+    if item.lifecycle != AgentLintRepairAttestationLifecycle::Dispatched
+        || item.terminal_result_digest.is_some()
+    {
+        return Err(agent_lint_repair_attestation_state_invalid());
+    }
+    Ok(())
+}
+
+fn require_valid_repair_mutation_journal_inputs(
+    descriptor_digest: &str,
+    checkpoint_hash: &str,
+    affected_path_hashes: &BTreeMap<String, Option<String>>,
+) -> Result<(), BackendError> {
+    require_non_empty_repair_receipt_value(descriptor_digest)?;
+    require_non_empty_repair_receipt_value(checkpoint_hash)?;
+    if affected_path_hashes.is_empty()
+        || affected_path_hashes.len() > MAX_AGENT_LINT_REPAIR_JOURNAL_PATHS
+        || affected_path_hashes.iter().any(|(path, digest)| {
+            path.trim().is_empty()
+                || digest
+                    .as_deref()
+                    .is_some_and(|value| value.trim().is_empty())
+        })
+    {
+        return Err(agent_lint_repair_attestation_state_invalid());
+    }
+    Ok(())
+}
+
+fn require_non_empty_repair_receipt_value(value: &str) -> Result<(), BackendError> {
+    if value.trim().is_empty() {
+        return Err(agent_lint_repair_attestation_state_invalid());
+    }
+    Ok(())
+}
+
+fn agent_lint_repair_attestation_required() -> BackendError {
+    BackendError::new(
+        "LINT_REPAIR_ATTESTATION_REQUIRED",
+        "The Agent lint repair has no exact app-owned approval attestation.",
+        true,
+        true,
+    )
+}
+
+fn agent_lint_repair_attestation_state_invalid() -> BackendError {
+    BackendError::new(
+        "LINT_REPAIR_ATTESTATION_STATE_INVALID",
+        "The Agent lint repair app-owned receipt no longer matches this transition.",
+        true,
+        true,
+    )
+}
+
 fn prune_agent_lint_repair_attestations(
     attestations: &mut Vec<AgentLintRepairAttestation>,
     protected_task_id: &str,
@@ -546,11 +1012,16 @@ fn prune_agent_lint_repair_attestations(
     while attestations.len() > MAX_AGENT_LINT_REPAIR_ATTESTATIONS {
         let Some(index) = attestations.iter().position(|item| {
             item.task_id != protected_task_id
-                && item.lifecycle != AgentLintRepairAttestationLifecycle::Cancelled
+                && matches!(
+                    item.lifecycle,
+                    AgentLintRepairAttestationLifecycle::QueuedAuthorized
+                        | AgentLintRepairAttestationLifecycle::Completed
+                )
+                && item.mutation_journal.is_none()
         }) else {
             return Err(BackendError::new(
                 "LINT_REPAIR_ATTESTATION_CAPACITY_REACHED",
-                "Cancelled Agent lint repair approvals fill the bounded app-owned receipt store.",
+                "Active or cancelled Agent lint repair receipts fill the bounded app-owned receipt store.",
                 true,
                 true,
             ));
@@ -608,6 +1079,7 @@ fn project_root_fingerprint(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
 
     use serde_json::Value;
@@ -616,7 +1088,9 @@ mod tests {
     use crate::models::agent::{AgentConfig, AgentKind};
     use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
     use crate::models::paths::ProjectContext;
-    use crate::models::settings::AgentLintRepairAttestationLifecycle;
+    use crate::models::settings::{
+        AgentLintRepairAttestationLifecycle, AgentLintRepairMutationPhase,
+    };
     use crate::models::settings::{
         CloseBehavior, GlobalSettingsFile, GlobalUiPreferences, Settings, ThemePreference,
     };
@@ -975,6 +1449,440 @@ mod tests {
     }
 
     #[test]
+    fn repair_attestation_h4b_transitions_reject_exact_digest_mismatches() {
+        let (_context, root, config_dir) = tmp_paths("repair-attestation-h4b-mismatch");
+        let service = SettingsService::with_config_dir(config_dir.clone());
+        service
+            .record_agent_lint_repair_attestation(
+                "identity-key",
+                "identity-revision",
+                "task-1",
+                "operation-digest",
+            )
+            .unwrap();
+        service
+            .transition_agent_lint_repair_attestation(
+                "task-1",
+                "operation-digest",
+                &[AgentLintRepairAttestationLifecycle::QueuedAuthorized],
+                AgentLintRepairAttestationLifecycle::Dispatched,
+            )
+            .unwrap();
+
+        service
+            .bind_agent_lint_repair_descriptor_digest(
+                "task-1",
+                "operation-digest",
+                None,
+                "descriptor-v1",
+            )
+            .unwrap();
+        assert_eq!(
+            service
+                .bind_agent_lint_repair_descriptor_digest(
+                    "task-1",
+                    "operation-digest",
+                    Some("forged-prior"),
+                    "descriptor-v2",
+                )
+                .unwrap_err()
+                .code,
+            "LINT_REPAIR_ATTESTATION_STATE_INVALID"
+        );
+        assert_eq!(
+            service
+                .begin_agent_lint_repair_mutation_journal(
+                    "task-1",
+                    "operation-digest",
+                    "forged-descriptor",
+                    "checkpoint-1",
+                    BTreeMap::from([("wiki/page.md".into(), Some("post-hash".into()))]),
+                )
+                .unwrap_err()
+                .code,
+            "LINT_REPAIR_ATTESTATION_STATE_INVALID"
+        );
+
+        let exact = service
+            .get_agent_lint_repair_attestation(
+                "identity-key",
+                "identity-revision",
+                "task-1",
+                "operation-digest",
+            )
+            .unwrap();
+        assert_eq!(exact.descriptor_digest.as_deref(), Some("descriptor-v1"));
+        assert_eq!(exact.mutation_journal, None);
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn repair_mutation_journal_survives_a_new_settings_service_instance() {
+        let (_context, root, config_dir) = tmp_paths("repair-attestation-h4b-journal");
+        let service = SettingsService::with_config_dir(config_dir.clone());
+        service
+            .record_agent_lint_repair_attestation(
+                "identity-key",
+                "identity-revision",
+                "task-1",
+                "operation-digest",
+            )
+            .unwrap();
+        service
+            .transition_agent_lint_repair_attestation(
+                "task-1",
+                "operation-digest",
+                &[AgentLintRepairAttestationLifecycle::QueuedAuthorized],
+                AgentLintRepairAttestationLifecycle::Dispatched,
+            )
+            .unwrap();
+        service
+            .bind_agent_lint_repair_descriptor_digest(
+                "task-1",
+                "operation-digest",
+                None,
+                "descriptor-v1",
+            )
+            .unwrap();
+        service
+            .begin_agent_lint_repair_mutation_journal_with_pre_hashes(
+                "task-1",
+                "operation-digest",
+                "descriptor-v1",
+                "checkpoint-1",
+                BTreeMap::from([
+                    ("wiki/deleted.md".into(), Some("deleted-before".into())),
+                    ("wiki/page.md".into(), Some("pre-hash".into())),
+                ]),
+                BTreeMap::from([
+                    ("wiki/deleted.md".into(), None),
+                    ("wiki/page.md".into(), Some("post-hash".into())),
+                ]),
+            )
+            .unwrap();
+        service
+            .begin_agent_lint_repair_mutation_journal(
+                "task-1",
+                "operation-digest",
+                "descriptor-v1",
+                "checkpoint-1",
+                BTreeMap::from([
+                    ("wiki/deleted.md".into(), None),
+                    ("wiki/page.md".into(), Some("post-hash".into())),
+                    ("wiki/round-two.md".into(), Some("round-two-hash".into())),
+                ]),
+            )
+            .unwrap();
+        assert_eq!(
+            service
+                .begin_agent_lint_repair_mutation_journal(
+                    "task-1",
+                    "operation-digest",
+                    "descriptor-v1",
+                    "checkpoint-1",
+                    BTreeMap::from([("wiki/round-two.md".into(), Some("round-two-hash".into()),)]),
+                )
+                .unwrap_err()
+                .code,
+            "LINT_REPAIR_ATTESTATION_STATE_INVALID"
+        );
+        service
+            .mark_agent_lint_repair_mutation_finalizing(
+                "task-1",
+                "operation-digest",
+                "descriptor-v1",
+                "checkpoint-1",
+            )
+            .unwrap();
+
+        let reopened = SettingsService::with_config_dir(config_dir.clone());
+        let receipt = reopened
+            .get_agent_lint_repair_attestation(
+                "identity-key",
+                "identity-revision",
+                "task-1",
+                "operation-digest",
+            )
+            .unwrap();
+        let journal = receipt.mutation_journal.unwrap();
+        assert_eq!(journal.checkpoint_hash, "checkpoint-1");
+        assert_eq!(journal.phase, AgentLintRepairMutationPhase::Finalizing);
+        assert_eq!(
+            journal.pre_mutation_path_hashes["wiki/page.md"].as_deref(),
+            Some("post-hash")
+        );
+        assert_eq!(journal.affected_path_hashes["wiki/deleted.md"], None);
+        assert_eq!(
+            journal.affected_path_hashes["wiki/page.md"].as_deref(),
+            Some("post-hash")
+        );
+        assert_eq!(
+            journal.affected_path_hashes["wiki/round-two.md"].as_deref(),
+            Some("round-two-hash")
+        );
+        reopened
+            .cancel_agent_lint_repair_attestation(
+                "identity-key",
+                "identity-revision",
+                "task-1",
+                "operation-digest",
+            )
+            .unwrap();
+        let cancelled = reopened
+            .get_agent_lint_repair_attestation(
+                "identity-key",
+                "identity-revision",
+                "task-1",
+                "operation-digest",
+            )
+            .unwrap();
+        assert_eq!(
+            cancelled.lifecycle,
+            AgentLintRepairAttestationLifecycle::Cancelled
+        );
+        assert!(cancelled.mutation_journal.is_some());
+        assert_eq!(
+            reopened
+                .bind_agent_lint_repair_descriptor_digest(
+                    "task-1",
+                    "operation-digest",
+                    Some("descriptor-v1"),
+                    "descriptor-v2",
+                )
+                .unwrap_err()
+                .code,
+            "LINT_REPAIR_ATTESTATION_STATE_INVALID"
+        );
+        let recovered = reopened
+            .clear_agent_lint_repair_mutation_journal(
+                "task-1",
+                "operation-digest",
+                "descriptor-v1",
+                "checkpoint-1",
+            )
+            .unwrap();
+        assert_eq!(recovered.mutation_journal, None);
+        assert_eq!(
+            recovered.lifecycle,
+            AgentLintRepairAttestationLifecycle::Cancelled
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn completed_repair_attestation_terminal_digest_cannot_be_rewritten() {
+        let (_context, root, config_dir) = tmp_paths("repair-attestation-h4b-terminal");
+        let service = SettingsService::with_config_dir(config_dir.clone());
+        service
+            .record_agent_lint_repair_attestation(
+                "identity-key",
+                "identity-revision",
+                "task-1",
+                "operation-digest",
+            )
+            .unwrap();
+        service
+            .transition_agent_lint_repair_attestation(
+                "task-1",
+                "operation-digest",
+                &[AgentLintRepairAttestationLifecycle::QueuedAuthorized],
+                AgentLintRepairAttestationLifecycle::Dispatched,
+            )
+            .unwrap();
+        service
+            .bind_agent_lint_repair_descriptor_digest(
+                "task-1",
+                "operation-digest",
+                None,
+                "descriptor-v1",
+            )
+            .unwrap();
+        service
+            .begin_agent_lint_repair_mutation_journal(
+                "task-1",
+                "operation-digest",
+                "descriptor-v1",
+                "checkpoint-1",
+                BTreeMap::from([("wiki/page.md".into(), Some("post-hash".into()))]),
+            )
+            .unwrap();
+        assert_eq!(
+            service
+                .complete_agent_lint_repair_attestation(
+                    "task-1",
+                    "operation-digest",
+                    Some("descriptor-v1"),
+                    "terminal-v1",
+                )
+                .unwrap_err()
+                .code,
+            "LINT_REPAIR_ATTESTATION_STATE_INVALID"
+        );
+        service
+            .mark_agent_lint_repair_mutation_finalizing(
+                "task-1",
+                "operation-digest",
+                "descriptor-v1",
+                "checkpoint-1",
+            )
+            .unwrap();
+        assert_eq!(
+            service
+                .complete_agent_lint_repair_attestation(
+                    "task-1",
+                    "operation-digest",
+                    Some("descriptor-v1"),
+                    "terminal-v1",
+                )
+                .unwrap_err()
+                .code,
+            "LINT_REPAIR_ATTESTATION_STATE_INVALID"
+        );
+        service
+            .mark_agent_lint_repair_final_commit(
+                "task-1",
+                "operation-digest",
+                "descriptor-v1",
+                "checkpoint-1",
+                "final-commit-1",
+            )
+            .unwrap();
+        assert_eq!(
+            service
+                .mark_agent_lint_repair_final_commit(
+                    "task-1",
+                    "operation-digest",
+                    "descriptor-v1",
+                    "checkpoint-1",
+                    "forged-final-commit",
+                )
+                .unwrap_err()
+                .code,
+            "LINT_REPAIR_ATTESTATION_STATE_INVALID"
+        );
+        let completed = service
+            .complete_agent_lint_repair_attestation(
+                "task-1",
+                "operation-digest",
+                Some("descriptor-v1"),
+                "terminal-v1",
+            )
+            .unwrap();
+        assert_eq!(
+            completed.lifecycle,
+            AgentLintRepairAttestationLifecycle::Completed
+        );
+        assert_eq!(
+            completed.terminal_result_digest.as_deref(),
+            Some("terminal-v1")
+        );
+        assert_eq!(completed.mutation_journal, None);
+        assert_eq!(
+            service
+                .complete_agent_lint_repair_attestation(
+                    "task-1",
+                    "operation-digest",
+                    Some("descriptor-v1"),
+                    "terminal-v2",
+                )
+                .unwrap_err()
+                .code,
+            "LINT_REPAIR_ATTESTATION_STATE_INVALID"
+        );
+        assert_eq!(
+            service
+                .revoke_agent_lint_repair_attestation("task-1")
+                .unwrap_err()
+                .code,
+            "LINT_REPAIR_ATTESTATION_STATE_INVALID"
+        );
+        assert_eq!(
+            service
+                .transition_agent_lint_repair_attestation(
+                    "task-1",
+                    "operation-digest",
+                    &[AgentLintRepairAttestationLifecycle::Completed],
+                    AgentLintRepairAttestationLifecycle::Cancelled,
+                )
+                .unwrap_err()
+                .code,
+            "LINT_REPAIR_ATTESTATION_STATE_INVALID"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn cancelled_receipt_rejects_success_but_accepts_terminal_settlement() {
+        let (_context, root, config_dir) = tmp_paths("repair-cancel-success-race");
+        let service = SettingsService::with_config_dir(config_dir.clone());
+        service
+            .record_agent_lint_repair_attestation(
+                "identity-key",
+                "identity-revision",
+                "task-1",
+                "operation-digest",
+            )
+            .unwrap();
+        service
+            .transition_agent_lint_repair_attestation(
+                "task-1",
+                "operation-digest",
+                &[AgentLintRepairAttestationLifecycle::QueuedAuthorized],
+                AgentLintRepairAttestationLifecycle::Dispatched,
+            )
+            .unwrap();
+        service
+            .cancel_agent_lint_repair_attestation(
+                "identity-key",
+                "identity-revision",
+                "task-1",
+                "operation-digest",
+            )
+            .unwrap();
+
+        assert_eq!(
+            service
+                .complete_agent_lint_repair_success_attestation(
+                    "task-1",
+                    "operation-digest",
+                    None,
+                    "success-digest",
+                    "{\"outcome\":\"succeeded\"}",
+                )
+                .unwrap_err()
+                .code,
+            "LINT_REPAIR_ATTESTATION_STATE_INVALID"
+        );
+        let completed = service
+            .complete_agent_lint_repair_terminal_attestation(
+                "task-1",
+                "operation-digest",
+                None,
+                "cancelled-digest",
+                "{\"outcome\":\"cancelled\"}",
+                "cancelled",
+            )
+            .unwrap();
+        assert_eq!(
+            completed.lifecycle,
+            AgentLintRepairAttestationLifecycle::Completed
+        );
+        assert_eq!(
+            completed.terminal_result_json.as_deref(),
+            Some("{\"outcome\":\"cancelled\"}")
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
     fn repair_cancellation_tombstone_blocks_late_authorization_and_supports_exact_undo() {
         let (_context, root, config_dir) = tmp_paths("repair-cancel-tombstone");
         let service = SettingsService::with_config_dir(config_dir.clone());
@@ -1096,6 +2004,11 @@ mod tests {
                     operation_digest: format!("cancelled-digest-{index}"),
                     confirmed_at: fresh.clone(),
                     lifecycle: AgentLintRepairAttestationLifecycle::Cancelled,
+                    descriptor_digest: None,
+                    mutation_journal: None,
+                    terminal_result_digest: None,
+                    terminal_result_json: None,
+                    terminal_task_status: None,
                 },
             );
         }

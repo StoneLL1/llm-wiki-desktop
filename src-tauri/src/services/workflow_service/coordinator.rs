@@ -384,6 +384,17 @@ impl WorkflowCoordinator {
         stage_id: &str,
         error: WorkflowErrorSummary,
     ) -> Result<(WorkflowRun, Option<WorkflowRun>), String> {
+        self.fail_stage_and_claim_next_with_result(tasks, task_id, stage_id, error, None)
+    }
+
+    pub(crate) fn fail_stage_and_claim_next_with_result(
+        &self,
+        tasks: &TaskService,
+        task_id: &str,
+        stage_id: &str,
+        error: WorkflowErrorSummary,
+        result: Option<WorkflowResult>,
+    ) -> Result<(WorkflowRun, Option<WorkflowRun>), String> {
         let _operation = self
             .operation_lock
             .lock()
@@ -397,7 +408,7 @@ impl WorkflowCoordinator {
         if cancellation_wins(tasks, task_id) {
             return self.cancel_and_claim_next_locked(tasks, &owner);
         }
-        let failed = tasks.fail_workflow_stage(task_id, stage_id, error)?;
+        let failed = tasks.fail_workflow_stage_with_result(task_id, stage_id, error, result)?;
         let next = self.claim_next_locked(
             tasks,
             &owner.canonical_identity_key,
@@ -411,6 +422,15 @@ impl WorkflowCoordinator {
         tasks: &TaskService,
         task_id: &str,
     ) -> Result<(WorkflowRun, Option<WorkflowRun>), String> {
+        self.finish_cancelled_and_claim_next_with_result(tasks, task_id, None)
+    }
+
+    pub(crate) fn finish_cancelled_and_claim_next_with_result(
+        &self,
+        tasks: &TaskService,
+        task_id: &str,
+        result: Option<WorkflowResult>,
+    ) -> Result<(WorkflowRun, Option<WorkflowRun>), String> {
         let _operation = self
             .operation_lock
             .lock()
@@ -421,7 +441,13 @@ impl WorkflowCoordinator {
         if is_terminal(&owner) {
             return Ok((owner, None));
         }
-        self.cancel_and_claim_next_locked(tasks, &owner)
+        let cancelled = tasks.finalize_workflow_cancellation_with_result(task_id, result)?;
+        let next = self.claim_next_locked(
+            tasks,
+            &owner.canonical_identity_key,
+            &owner.identity_revision,
+        )?;
+        Ok((cancelled, next))
     }
 
     /// Permanently cancel a run created by an initial approval that lost a
@@ -635,6 +661,16 @@ impl WorkflowCoordinator {
         task_id: &str,
         error: WorkflowErrorSummary,
     ) -> Result<(WorkflowRun, Option<WorkflowRun>), String> {
+        self.interrupt_invalid_confirmation_with_result(tasks, task_id, error, None)
+    }
+
+    pub(crate) fn interrupt_invalid_confirmation_with_result(
+        &self,
+        tasks: &TaskService,
+        task_id: &str,
+        error: WorkflowErrorSummary,
+        result: Option<WorkflowResult>,
+    ) -> Result<(WorkflowRun, Option<WorkflowRun>), String> {
         let _operation = self
             .operation_lock
             .lock()
@@ -648,7 +684,8 @@ impl WorkflowCoordinator {
         if cancellation_wins(tasks, task_id) {
             return self.cancel_and_claim_next_locked(tasks, &current);
         }
-        let interrupted = tasks.interrupt_workflow_confirmation(task_id, error)?;
+        let interrupted =
+            tasks.interrupt_workflow_confirmation_with_result(task_id, error, result)?;
         let next = self.claim_next_locked(
             tasks,
             &current.canonical_identity_key,

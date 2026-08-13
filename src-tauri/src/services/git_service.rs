@@ -1,6 +1,7 @@
 #[derive(Default)]
 pub struct GitService;
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Read;
 use std::path::Path;
@@ -510,6 +511,60 @@ impl GitService {
         })
     }
 
+    /// Capture the current HEAD while tolerating an exact, caller-owned set of
+    /// workflow state paths. The allowed paths are never staged or committed;
+    /// any other dirty path still fails closed before an external Agent starts.
+    pub fn clean_head_checkpoint_allowing_paths(
+        &self,
+        context: &ProjectContext,
+        purpose: CheckpointPurpose,
+        message: &str,
+        allowed_dirty_paths: &[String],
+    ) -> Result<GitCheckpoint, BackendError> {
+        for path in allowed_dirty_paths {
+            validate_relative_git_path(path)?;
+        }
+        let status = self.repository_status(context)?;
+        if !status.is_repository {
+            return Err(BackendError::new(
+                "GIT_REPOSITORY_MISSING",
+                "Git repository is required before creating a checkpoint.",
+                true,
+                true,
+            ));
+        }
+        let affected_paths = status_paths(context)?;
+        let unexpected = affected_paths
+            .iter()
+            .filter(|path| !allowed_dirty_paths.iter().any(|allowed| allowed == *path))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !unexpected.is_empty() {
+            return Err(BackendError::new(
+                "GIT_WORKTREE_DIRTY",
+                "The project changed after preparation. Resolve or checkpoint those edits, then run again.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "affectedPaths": unexpected })));
+        }
+        let commit_hash = status.head.ok_or_else(|| {
+            BackendError::new(
+                "GIT_HEAD_MISSING",
+                "Git HEAD is unavailable for the required checkpoint.",
+                true,
+                true,
+            )
+        })?;
+        Ok(GitCheckpoint {
+            created: false,
+            commit_hash: Some(commit_hash),
+            message: message.to_string(),
+            purpose,
+            affected_paths: Vec::new(),
+        })
+    }
+
     pub fn unstage_paths(
         &self,
         context: &ProjectContext,
@@ -766,6 +821,175 @@ impl GitService {
             }
         }
         Ok(())
+    }
+
+    /// Restore an exact path set from an earlier checkpoint and commit only
+    /// those restored paths. The current HEAD binding prevents replay after a
+    /// later commit, while the scoped path list preserves unrelated worktree
+    /// edits. This is intentionally narrower than a generic Git revert API.
+    pub fn rollback_paths_to_checkpoint(
+        &self,
+        context: &ProjectContext,
+        expected_head: &str,
+        checkpoint: &str,
+        message: &str,
+        paths: &[String],
+    ) -> Result<GitCheckpoint, BackendError> {
+        let status = self.repository_status(context)?;
+        if !status.is_repository {
+            return Err(BackendError::new(
+                "GIT_REPOSITORY_MISSING",
+                "Git repository is required before rolling back a repair batch.",
+                true,
+                true,
+            ));
+        }
+        if status.head.as_deref() != Some(expected_head) {
+            return Err(BackendError::new(
+                "GIT_ROLLBACK_NOT_CURRENT",
+                "The repair can only be rolled back while its final commit is the current Git HEAD.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({
+                "expectedHead": expected_head,
+                "currentHead": status.head,
+            })));
+        }
+        if paths.is_empty() {
+            return Err(BackendError::new(
+                "GIT_ROLLBACK_PATHS_MISSING",
+                "The repair result has no affected paths to roll back.",
+                true,
+                true,
+            ));
+        }
+        for path in paths {
+            validate_relative_git_path(path)?;
+        }
+        run_git(
+            context,
+            &["rev-parse", "--verify", &format!("{checkpoint}^{{commit}}")],
+        )?;
+        let parent = run_git(
+            context,
+            &["rev-parse", "--short", &format!("{expected_head}^")],
+        )?;
+        if parent.trim() != checkpoint {
+            return Err(BackendError::new(
+                "GIT_ROLLBACK_CHECKPOINT_MISMATCH",
+                "The repair checkpoint is not the direct parent of the final repair commit.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({
+                "checkpoint": checkpoint,
+                "finalCommit": expected_head,
+                "parent": parent.trim(),
+            })));
+        }
+
+        let restore_result = (|| {
+            for path in paths {
+                let tracked =
+                    !run_git(context, &["ls-tree", "--name-only", checkpoint, "--", path])?
+                        .trim()
+                        .is_empty();
+                if tracked {
+                    run_git(
+                        context,
+                        &[
+                            "restore",
+                            &format!("--source={checkpoint}"),
+                            "--staged",
+                            "--worktree",
+                            "--",
+                            path,
+                        ],
+                    )?;
+                } else if context.root.join(path).exists() {
+                    remove_project_path(context, path)?;
+                }
+            }
+            self.create_scoped_checkpoint(context, CheckpointPurpose::FinalResult, message, paths)
+        })();
+
+        match restore_result {
+            Ok(checkpoint) if checkpoint.created => Ok(checkpoint),
+            Ok(_) => {
+                let _ = self.rollback_paths_to_head_preserving_ignored(context, paths, &[]);
+                Err(BackendError::new(
+                    "GIT_ROLLBACK_NO_CHANGES",
+                    "The approved repair paths no longer differ from the initial checkpoint.",
+                    true,
+                    true,
+                ))
+            }
+            Err(error) => match self.rollback_paths_to_head_preserving_ignored(context, paths, &[]) {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(BackendError::new(
+                    "GIT_ROLLBACK_FAILED",
+                    format!(
+                        "Repair rollback failed and the worktree could not be restored: rollback={}; cleanup={}",
+                        error.message, cleanup.message
+                    ),
+                    true,
+                    true,
+                )),
+            },
+        }
+    }
+
+    /// Prove that the current HEAD is the exact scoped compensating commit
+    /// produced after `final_commit`, and that it restored the repair paths to
+    /// the checkpoint tree. This lets recovery consume a still-present WAL if
+    /// the process stopped after Git committed but before app settings were
+    /// atomically updated.
+    pub fn is_exact_compensating_rollback(
+        &self,
+        context: &ProjectContext,
+        final_commit: &str,
+        checkpoint: &str,
+        allowed_paths: &[String],
+    ) -> Result<bool, BackendError> {
+        let current = match self.repository_status(context)?.head {
+            Some(head) => head,
+            None => return Ok(false),
+        };
+        if current == final_commit || allowed_paths.is_empty() {
+            return Ok(false);
+        }
+        for path in allowed_paths {
+            validate_relative_git_path(path)?;
+        }
+        let final_full = run_git(context, &["rev-parse", final_commit])?;
+        let checkpoint_full = run_git(context, &["rev-parse", checkpoint])?;
+        let current_parent = run_git(context, &["rev-parse", &format!("{current}^")])?;
+        let final_parent = run_git(context, &["rev-parse", &format!("{final_commit}^")])?;
+        if current_parent.trim() != final_full.trim()
+            || final_parent.trim() != checkpoint_full.trim()
+        {
+            return Ok(false);
+        }
+        let repair_paths = commit_changed_paths(context, checkpoint, final_commit)?;
+        let compensation_paths = commit_changed_paths(context, final_commit, &current)?;
+        let allowed = allowed_paths.iter().cloned().collect::<BTreeSet<_>>();
+        if repair_paths.is_empty()
+            || repair_paths != compensation_paths
+            || !repair_paths.is_subset(&allowed)
+        {
+            return Ok(false);
+        }
+        for path in &repair_paths {
+            let diff = run_git(
+                context,
+                &["diff", "--name-only", checkpoint, &current, "--", path],
+            )?;
+            if !diff.trim().is_empty() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 }
 
@@ -1067,6 +1291,19 @@ fn commit_with_message(
     args.push(message);
     run_git(context, &args)?;
     run_git(context, &["rev-parse", "--short", "HEAD"]).map(|value| value.trim().to_string())
+}
+
+fn commit_changed_paths(
+    context: &ProjectContext,
+    from: &str,
+    to: &str,
+) -> Result<BTreeSet<String>, BackendError> {
+    Ok(run_git(context, &["diff", "--name-only", from, to, "--"])?
+        .lines()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 fn commit_paths_with_message(
@@ -1509,6 +1746,45 @@ mod tests {
     }
 
     #[test]
+    fn workflow_checkpoint_ignores_only_exact_task_state_noise() {
+        let root = unique_temp_dir("workflow-clean-checkpoint");
+        let context = ProjectContext::new("project", root.clone());
+        std::fs::create_dir_all(root.join("wiki")).unwrap();
+        std::fs::create_dir_all(root.join(".app/tasks")).unwrap();
+        std::fs::write(root.join("wiki/a.md"), "# A").unwrap();
+        std::fs::write(root.join(".app/tasks/task-1.json"), "{}").unwrap();
+        let service = GitService;
+        service.initialize_repository(&context, "Initial").unwrap();
+        std::fs::write(root.join(".app/tasks/task-1.json"), "{\"running\":true}").unwrap();
+
+        let checkpoint = service
+            .clean_head_checkpoint_allowing_paths(
+                &context,
+                CheckpointPurpose::HighRiskOperation,
+                "Agent lint repair task-1",
+                &[".app/tasks/task-1.json".into()],
+            )
+            .unwrap();
+        assert!(!checkpoint.created);
+        assert!(checkpoint.commit_hash.is_some());
+
+        std::fs::write(root.join("wiki/a.md"), "# External edit").unwrap();
+        assert_eq!(
+            service
+                .clean_head_checkpoint_allowing_paths(
+                    &context,
+                    CheckpointPurpose::HighRiskOperation,
+                    "Agent lint repair task-1",
+                    &[".app/tasks/task-1.json".into()],
+                )
+                .unwrap_err()
+                .code,
+            "GIT_WORKTREE_DIRTY"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn checkpoint_preview_rejects_new_unconfirmed_paths_without_committing() {
         let root = unique_temp_dir("checkpoint-preview-drift");
         let context = ProjectContext::new("project-1", root.clone());
@@ -1877,6 +2153,80 @@ mod tests {
             fs::read_to_string(root.join("notes.md")).unwrap(),
             "user edit\n"
         );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn scoped_checkpoint_rollback_requires_exact_head_and_preserves_unrelated_edits() {
+        let root = unique_temp_dir("scoped-checkpoint-rollback");
+        let context = ProjectContext::new("project-1", root.clone());
+        fs::create_dir_all(root.join("wiki")).unwrap();
+        fs::write(root.join("wiki/page.md"), "stable\n").unwrap();
+        fs::write(root.join("notes.md"), "stable notes\n").unwrap();
+
+        let service = GitService;
+        let initial = service
+            .initialize_repository(&context, "Initial wiki project")
+            .unwrap()
+            .head
+            .unwrap();
+        fs::write(root.join("wiki/page.md"), "agent edit\n").unwrap();
+        fs::write(root.join("wiki/agent-new.md"), "draft\n").unwrap();
+        let final_commit = service
+            .create_scoped_checkpoint(
+                &context,
+                CheckpointPurpose::FinalResult,
+                "Agent lint repair",
+                &["wiki/page.md".into(), "wiki/agent-new.md".into()],
+            )
+            .unwrap()
+            .commit_hash
+            .unwrap();
+        fs::write(root.join("notes.md"), "user edit\n").unwrap();
+
+        let rollback = service
+            .rollback_paths_to_checkpoint(
+                &context,
+                &final_commit,
+                &initial,
+                "Rollback Agent lint repair",
+                &["wiki/page.md".into(), "wiki/agent-new.md".into()],
+            )
+            .unwrap();
+
+        assert!(rollback.created);
+        assert_ne!(rollback.commit_hash.as_deref(), Some(final_commit.as_str()));
+        assert_eq!(
+            fs::read_to_string(root.join("wiki/page.md"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "stable\n"
+        );
+        assert!(!root.join("wiki/agent-new.md").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("notes.md")).unwrap(),
+            "user edit\n"
+        );
+        assert!(service
+            .is_exact_compensating_rollback(
+                &context,
+                &final_commit,
+                &initial,
+                &["wiki/page.md".into(), "wiki/agent-new.md".into()],
+            )
+            .unwrap());
+
+        let stale = service
+            .rollback_paths_to_checkpoint(
+                &context,
+                &final_commit,
+                &initial,
+                "Rollback Agent lint repair",
+                &["wiki/page.md".into()],
+            )
+            .unwrap_err();
+        assert_eq!(stale.code, "GIT_ROLLBACK_NOT_CURRENT");
 
         fs::remove_dir_all(root).ok();
     }

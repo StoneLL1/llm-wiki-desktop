@@ -90,6 +90,24 @@ pub struct CancelAgentLintRepairPreparationRequest {
     pub preparation_revision: String,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RollbackAgentLintRepairRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub task_id: String,
+    pub expected_final_commit: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentLintRepairRollbackResult {
+    pub task_id: String,
+    pub rolled_back_commit: String,
+    pub rollback_commit: String,
+    pub affected_paths: Vec<String>,
+}
+
 /// Coarse severity for surfacing and grouping lint issues.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -855,6 +873,16 @@ mod tests {
         assert_eq!(cancel.action_id, confirm.action_id);
         assert_eq!(cancel.preparation_id, confirm.preparation_id);
         assert_eq!(cancel.preparation_revision, confirm.preparation_revision);
+
+        let rollback: RollbackAgentLintRepairRequest = serde_json::from_value(json!({
+            "projectId": "project-a",
+            "projectRootPath": "C:/wiki",
+            "taskId": "repair-task-1",
+            "expectedFinalCommit": "final-commit-1"
+        }))
+        .unwrap();
+        assert_eq!(rollback.task_id, "repair-task-1");
+        assert_eq!(rollback.expected_final_commit, "final-commit-1");
     }
 
     #[test]

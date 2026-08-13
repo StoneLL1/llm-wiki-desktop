@@ -581,6 +581,15 @@ mod tests {
             report_id: "older-health".into(),
             selection_revision: "selection-revision-1".into(),
             selected_finding_ids: vec!["contradiction:wiki/a.md".into()],
+            selected_findings: vec![crate::models::lint::AgentLintRepairFinding {
+                id: "contradiction:wiki/a.md".into(),
+                issue_type: crate::models::lint::DeepLintIssueType::Contradiction,
+                severity: crate::models::lint::LintSeverity::Warning,
+                path: "wiki/a.md".into(),
+                message: "Contradiction".into(),
+                evidence: None,
+                suggested_action: None,
+            }],
             skill: crate::models::lint::WikiLintSkillRef::builtin(),
             authorized_path_hashes: [("wiki/a.md".into(), Some("a".repeat(64)))]
                 .into_iter()
@@ -595,10 +604,12 @@ mod tests {
             skipped_finding_ids: Vec::new(),
             rounds: Vec::new(),
             affected_paths: vec!["wiki/a.md".into()],
+            affected_path_hashes: std::collections::BTreeMap::new(),
             checkpoint_hash: Some("c".repeat(40)),
             final_commit: Some("d".repeat(40)),
             diff_available: true,
             rollback_available: true,
+            index_refresh_warnings: Vec::new(),
         });
 
         assert!(is_current_built_in_health(&health, "baseline-a"));
