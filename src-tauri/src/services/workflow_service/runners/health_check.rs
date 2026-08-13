@@ -445,10 +445,13 @@ where
         .iter()
         .map(|(kind, count)| (kind.clone(), *count as u64))
         .collect();
+    let report_digest = LintService::health_check_report_digest(&report)
+        .map_err(|error| task_error(error.message))?;
     let (_, next) = sink
         .finish(WorkflowResult::HealthCheck {
             report_id: Some(report.report_id),
             persistent: report.persistent,
+            report_digest: Some(report_digest),
             error_count: error_count as u64,
             warning_count: warning_count as u64,
             info_count: info_count as u64,

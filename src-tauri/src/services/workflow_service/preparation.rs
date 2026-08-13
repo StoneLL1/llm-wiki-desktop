@@ -822,13 +822,11 @@ fn build_snapshot_from_evaluation(
     input: &PrepareWorkflowInput,
     evaluation: &RequestEvaluationSnapshot,
 ) -> Result<PreparationSnapshot, BackendError> {
+    // Health is read-only with respect to project content and Git. Only a
+    // Complete Health Agent route produces the report consumed by H3 repair;
+    // keep Local Quick and BYOK Health metadata process-local. Trusted,
+    // writable Complete Agent Health still receives a durable owner.
     let mut project_access = evaluation.project_access.clone();
-    if input.kind == WorkflowKind::HealthCheck {
-        // Health is a read-only diagnostic. Keep its queue/run/report state in
-        // the existing memory lane even for writable projects so executing it
-        // cannot change project content or Git metadata/status.
-        project_access.persistence = WorkflowPersistenceMode::MemoryOnly;
-    }
     let available_source_versions = evaluation
         .source_versions
         .iter()
@@ -870,6 +868,18 @@ fn build_snapshot_from_evaluation(
         &evaluation.route_catalog,
     );
     let route = route_resolution.route;
+    let durable_health_owner = matches!(
+        (&scope, &route),
+        (
+            WorkflowScope::HealthCheck {
+                mode: HealthCheckMode::Complete
+            },
+            Some(WorkflowRoute::Agent { .. })
+        )
+    );
+    if input.kind == WorkflowKind::HealthCheck && !durable_health_owner {
+        project_access.persistence = WorkflowPersistenceMode::MemoryOnly;
+    }
     let output = output_summary(environment.context, &scope)?;
     let git_policy = git_policy(environment.context, &scope)?;
     let captured_baseline = capture_baseline(

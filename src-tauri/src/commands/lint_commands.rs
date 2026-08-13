@@ -31,8 +31,8 @@ use crate::models::workflow::{
 };
 use crate::services::{
     agent_lint_repair_attestation_digest, canonical_json, project_identity,
-    resolve_workflow_persistence_binding, workflow_baseline_for_scope, AgentService,
-    EnqueueWorkflow,
+    resolve_workflow_persistence_binding, workflow_baseline_for_scope, workflow_fingerprint,
+    AgentService, EnqueueWorkflow,
 };
 
 const AGENT_LINT_REPAIR_CONFIRMATION_TTL_MINUTES: i64 = 15;
@@ -871,7 +871,13 @@ fn selected_agent_findings(
     }
     let report = state
         .lint_service
-        .read_current_memory_health_report(context, report_id)?;
+        .read_current_health_report(context, report_id)?;
+    if !report.persistent {
+        return Err(lint_repair_error(
+            "LINT_REPAIR_HEALTH_REPORT_REQUIRED",
+            "Agent lint repair requires a persistent Complete Health report.",
+        ));
+    }
     let owner = state
         .task_service
         .get_workflow_run(&report.task_id)
@@ -881,7 +887,37 @@ fn selected_agent_findings(
                 "The Health report has no current Workflow owner.",
             )
         })?;
-    crate::services::LintService::validate_current_memory_health_report_owner(
+    let execution_options = state
+        .task_service
+        .workflow_execution_options(&report.task_id)
+        .ok_or_else(|| {
+            lint_repair_error(
+                "LINT_REPAIR_HEALTH_REPORT_REQUIRED",
+                "The Health report has no current Workflow execution binding.",
+            )
+        })?;
+    let expected_fingerprint = workflow_fingerprint(
+        &owner.canonical_identity_key,
+        &owner.identity_revision,
+        &owner.kind,
+        &owner.scope,
+        &execution_options,
+        &owner.route,
+        &owner.baseline_fingerprint,
+    )
+    .map_err(|_| {
+        lint_repair_error(
+            "LINT_REPAIR_HEALTH_REPORT_REQUIRED",
+            "The Health Workflow owner fingerprint could not be verified.",
+        )
+    })?;
+    if owner.fingerprint != expected_fingerprint {
+        return Err(lint_repair_error(
+            "LINT_REPAIR_HEALTH_REPORT_REQUIRED",
+            "The Health Workflow owner fingerprint is not authoritative.",
+        ));
+    }
+    crate::services::LintService::validate_current_health_report_owner(
         &report,
         &owner,
         &context.project_id,
@@ -1598,10 +1634,13 @@ mod tests {
     use crate::models::project::ProjectTrustKind;
     use crate::models::settings::Settings;
     use crate::models::workflow::{
-        WorkflowFilesystemAccess, WorkflowGitState, WorkflowProjectTrust, WorkflowRoute,
+        WorkflowFilesystemAccess, WorkflowGitState, WorkflowProjectTrust, WorkflowResult,
+        WorkflowRoute, WorkflowScope,
     };
     use crate::services::{
-        workflow_stages, AgentInvocation, AgentProbeTarget, ProcessRunner, SettingsService,
+        run_health_check_with_deep, workflow_stages, AgentInvocation, AgentProbeTarget,
+        HealthCheckExecutionServices, HealthCheckRunner, PrepareWorkflowInput, ProcessRunner,
+        SettingsService, WorkflowPreparationEnvironment,
     };
     use crate::tasks::TaskService;
     use std::path::PathBuf;
@@ -1719,6 +1758,209 @@ mod tests {
             expires_at.signed_duration_since(now),
             chrono::Duration::minutes(AGENT_LINT_REPAIR_CONFIRMATION_TTL_MINUTES)
         );
+    }
+
+    #[test]
+    fn persistent_agent_health_reaches_repair_preparation_after_lint_service_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        for directory in [
+            ".app/tasks",
+            "raw/sources",
+            "wiki/concepts",
+            "exports",
+            "skills",
+        ] {
+            fs::create_dir_all(root.join(directory)).unwrap();
+        }
+        fs::write(
+            root.join("wiki/concepts/主题.md"),
+            "---\ntitle: Topic\ntype: concept\n---\n\n# Topic\n",
+        )
+        .unwrap();
+
+        let config_dir = temp.path().join("config");
+        let mut state = AppState {
+            agent_service: AgentService::with_runner(Arc::new(InstalledCodex)),
+            settings_service: SettingsService::with_config_dir(config_dir),
+            ..AppState::default()
+        };
+        let context = state
+            .project_registry
+            .register_trusted_native("project-a", &root)
+            .unwrap();
+        state
+            .settings_service
+            .save_settings(
+                &context,
+                &Settings {
+                    agent_default: Some(AgentKind::Codex),
+                    ..Settings::default()
+                },
+            )
+            .unwrap();
+        let scope = WorkflowScope::HealthCheck {
+            mode: HealthCheckMode::Complete,
+        };
+        state
+            .workflow_service
+            .register_runner(Arc::new(HealthCheckRunner::new(|_| {})))
+            .unwrap();
+        let access = state.resolve_workflow_access(&context).unwrap();
+        let preparation = state
+            .workflow_service
+            .prepare(
+                &WorkflowPreparationEnvironment {
+                    context: &context,
+                    access: access.clone(),
+                    settings_service: &state.settings_service,
+                    secret_service: &state.secret_service,
+                    agent_service: &state.agent_service,
+                },
+                PrepareWorkflowInput {
+                    kind: WorkflowKind::HealthCheck,
+                    scope: Some(scope.clone()),
+                    route_selection: Some(crate::models::workflow::WorkflowRouteSelection::Agent {
+                        agent: AgentKind::Codex,
+                    }),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            preparation.project_access.persistence,
+            WorkflowPersistenceMode::Persistent
+        );
+        let run = match state
+            .workflow_service
+            .start(
+                &context,
+                access,
+                &state.settings_service,
+                &state.secret_service,
+                &state.agent_service,
+                &state.task_service,
+                &preparation.preparation_id,
+                &preparation.preparation_revision,
+            )
+            .unwrap()
+        {
+            WorkflowStartOutcome::Created { run } => run,
+            _ => panic!("fixture must create the Health owner"),
+        };
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let execution_services = HealthCheckExecutionServices {
+            lint_service: &state.lint_service,
+            search_service: &state.search_service,
+            settings_service: &state.settings_service,
+            secret_service: &state.secret_service,
+            agent_service: &state.agent_service,
+            llm_service: &state.llm_service,
+            task_service: &state.task_service,
+            coordinator: &state.workflow_service.coordinator,
+        };
+        let completed = runtime.block_on(run_health_check_with_deep(
+            &context,
+            run.clone(),
+            &execution_services,
+            |_, _| async {
+                Ok(r#"[{"issueType":"schema_mismatch","severity":"warning","path":"wiki/concepts/主题.md","message":"Agent finding","evidence":"Agent evidence","suggestion":"Review schema"}]"#.into())
+            },
+        ));
+        assert!(completed.is_some(), "the real Health runner must complete");
+        let report = state
+            .lint_service
+            .read_current_health_report(&context, &run.task_id)
+            .unwrap();
+        assert!(report.persistent);
+        assert!(matches!(
+            state
+                .task_service
+                .get_workflow_run(&run.task_id)
+                .unwrap()
+                .result,
+            Some(WorkflowResult::HealthCheck {
+                persistent: true,
+                report_id: Some(_),
+                report_digest: Some(_),
+                ..
+            })
+        ));
+        let finding_id = report
+            .issues
+            .iter()
+            .find(|issue| {
+                issue.source == LintIssueSource::Agent
+                    && issue.issue_type == LintIssueType::SchemaMismatch
+            })
+            .map(|issue| issue.id.clone())
+            .expect("real Agent Health runner must publish a repairable finding");
+        state
+            .git_service
+            .initialize_repository(&context, "Initial repair preparation")
+            .unwrap();
+
+        assert!(context
+            .app_dir
+            .join(format!("lint-reports/{}.json", run.task_id))
+            .is_file());
+
+        // Replace both services to model preparation after the original
+        // Health process has gone away. The Workflow owner must be recovered
+        // from its persisted task snapshot, not borrowed from the old task
+        // table.
+        let restarted_tasks = TaskService::default();
+        restarted_tasks
+            .set_project_root(Some(root.clone()))
+            .unwrap();
+        state.task_service = restarted_tasks;
+        state.lint_service = crate::services::LintService::default();
+        let recovered = state
+            .task_service
+            .get_workflow_run(&run.task_id)
+            .expect("persistent Health owner must survive restart");
+        assert_eq!(recovered.persistence, WorkflowPersistenceMode::Persistent);
+        assert_eq!(recovered.display_status, WorkflowDisplayStatus::Completed);
+        let preparation = prepare_agent_lint_repair_current(
+            &state,
+            &context,
+            &PrepareAgentLintRepairRequest {
+                project_id: context.project_id.clone(),
+                project_root_path: context.root.to_string_lossy().into_owned(),
+                report_id: run.task_id.clone(),
+                selected_finding_ids: vec![finding_id.clone()],
+                agent: AgentKind::Codex,
+            },
+        )
+        .unwrap();
+        assert_eq!(preparation.selected_finding_ids.len(), 1);
+        assert_eq!(preparation.authorized_paths, vec!["wiki/concepts/主题.md"]);
+        // The persisted task snapshot is app-owned storage, not an
+        // authentication token. A tampered owner fingerprint must not make a
+        // valid report eligible for repair preparation.
+        let task_path = root
+            .join(".app/tasks")
+            .join(format!("{}.json", run.task_id));
+        let mut task_json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&task_path).unwrap()).unwrap();
+        task_json["workflow"]["fingerprint"] = serde_json::json!("tampered-fingerprint");
+        fs::write(&task_path, serde_json::to_vec_pretty(&task_json).unwrap()).unwrap();
+        let tampered_tasks = TaskService::default();
+        tampered_tasks.set_project_root(Some(root.clone())).unwrap();
+        state.task_service = tampered_tasks;
+        state.lint_service = crate::services::LintService::default();
+        let error = prepare_agent_lint_repair_current(
+            &state,
+            &context,
+            &PrepareAgentLintRepairRequest {
+                project_id: context.project_id.clone(),
+                project_root_path: context.root.to_string_lossy().into_owned(),
+                report_id: run.task_id,
+                selected_finding_ids: vec![finding_id],
+                agent: AgentKind::Codex,
+            },
+        )
+        .expect_err("tampered workflow owner must fail closed");
+        assert_eq!(error.code, "LINT_REPAIR_HEALTH_REPORT_REQUIRED");
     }
 
     #[test]

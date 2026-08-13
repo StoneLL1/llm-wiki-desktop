@@ -17,8 +17,8 @@ use llm_wiki_desktop_lib::models::workflow::{
     WorkflowScope, WorkflowStageStatus, WorkflowStartOutcome,
 };
 use llm_wiki_desktop_lib::services::{
-    run_health_check, run_health_check_with_deep, workflow_baseline_for_scope, workflow_stages,
-    AgentInvocation, AgentProbeTarget, AgentService, EnqueueWorkflow, GitService,
+    project_identity, run_health_check, run_health_check_with_deep, workflow_baseline_for_scope,
+    workflow_stages, AgentInvocation, AgentProbeTarget, AgentService, EnqueueWorkflow, GitService,
     HealthCheckExecutionServices, LintService, LlmService, PrepareWorkflowInput, ProcessRunner,
     SearchService, SecretService, SettingsService, WorkflowAccessSnapshot,
     WorkflowPreparationEnvironment, WorkflowService,
@@ -388,6 +388,7 @@ impl Fixture {
 
     fn configure_agent(&self, access: WorkflowAccessSnapshot, agent: AgentKind) -> WorkflowRoute {
         let expected_filesystem_access = access.filesystem_access.clone();
+        let expected_persistence = access.persistence.clone();
         self.settings
             .save_settings(
                 &self.context,
@@ -424,10 +425,7 @@ impl Fixture {
             preparation.project_access.filesystem_access,
             expected_filesystem_access
         );
-        assert_eq!(
-            preparation.project_access.persistence,
-            WorkflowPersistenceMode::MemoryOnly
-        );
+        assert_eq!(preparation.project_access.persistence, expected_persistence);
         preparation.route.expect("installed Codex route")
     }
 
@@ -540,6 +538,9 @@ impl Fixture {
         route: WorkflowRoute,
         persistent: bool,
     ) -> llm_wiki_desktop_lib::models::workflow::WorkflowRun {
+        let persistent = persistent
+            && matches!(mode, HealthCheckMode::Complete)
+            && matches!(&route, WorkflowRoute::Agent { .. });
         let scope = WorkflowScope::HealthCheck { mode };
         let baseline = workflow_baseline_for_scope(&self.context, &scope).unwrap();
         let outcome = self
@@ -710,7 +711,8 @@ async fn mixed_compatible_root_counts_as_source_and_wiki_so_index_drift_applies(
 }
 
 #[tokio::test]
-async fn complete_runs_local_first_merges_duplicate_evidence_and_persists_for_lint() {
+async fn complete_byok_runs_local_first_merges_duplicate_evidence_without_persistent_repair_owner()
+{
     let fixture = Fixture::native("complete");
     let route = fixture.configure_ollama();
     let run = fixture.enqueue(HealthCheckMode::Complete, route, true);
@@ -737,7 +739,7 @@ async fn complete_runs_local_first_merges_duplicate_evidence_and_persists_for_li
         .stages
         .iter()
         .all(|stage| stage.status == WorkflowStageStatus::Completed));
-    assert!(fixture
+    assert!(!fixture
         .context
         .app_dir
         .join(format!("lint-reports/{task_id}.json"))
@@ -749,7 +751,7 @@ async fn complete_runs_local_first_merges_duplicate_evidence_and_persists_for_li
         .read_lint_history_report(&fixture.context, &task_id)
         .unwrap();
     let report = stored.health_check_report.unwrap();
-    assert!(report.persistent);
+    assert!(!report.persistent);
     assert_eq!(report.coverage.source_pages, 1);
     assert_eq!(report.coverage.deep_covered_pages, Some(4));
     assert!(!report.coverage.deep_truncated);
@@ -930,7 +932,7 @@ async fn trusted_read_only_claude_health_uses_the_pinned_read_only_profile() {
 }
 
 #[tokio::test]
-async fn complete_codex_health_keeps_exact_git_status_and_report_state_in_memory() {
+async fn trusted_writable_agent_health_persists_report_for_repair_preparation_after_restart() {
     let runner = Arc::new(SuccessfulCodex::default());
     let fixture = Fixture::native_with_runner("agent-persistent-git", runner.clone());
     let route = fixture.configure_codex(trusted_persistent());
@@ -939,7 +941,8 @@ async fn complete_codex_health_keeps_exact_git_status_and_report_state_in_memory
         .unwrap();
     let before = git_status(&fixture.context.root);
     assert!(before.is_empty());
-    let run = fixture.enqueue(HealthCheckMode::Complete, route, false);
+    let wiki_before = fs::read(fixture.context.root.join("wiki/concepts/主题.md")).unwrap();
+    let run = fixture.enqueue(HealthCheckMode::Complete, route.clone(), true);
     let task_id = run.task_id.clone();
 
     run_health_check(&fixture.context, run, &fixture.services()).await;
@@ -947,17 +950,61 @@ async fn complete_codex_health_keeps_exact_git_status_and_report_state_in_memory
     let finished = fixture.tasks.get_workflow_run(&task_id).unwrap();
     assert!(finished.error.is_none());
     assert_eq!(runner.invocations.load(Ordering::SeqCst), 1);
-    assert!(!fixture
+    assert!(matches!(
+        finished.result.as_ref(),
+        Some(WorkflowResult::HealthCheck {
+            report_id: Some(report_id),
+            persistent: true,
+            ..
+        }) if report_id == &task_id
+    ));
+    assert!(fixture
         .context
         .app_dir
         .join(format!("lint-reports/{task_id}.json"))
         .is_file());
-    let stored = fixture
+    let before_restart = fixture
         .lint
-        .read_lint_history_report(&fixture.context, &task_id)
+        .read_current_health_report(&fixture.context, &task_id)
         .unwrap();
-    assert!(!stored.health_check_report.unwrap().persistent);
-    assert_eq!(git_status(&fixture.context.root), before);
+    assert!(before_restart.persistent);
+
+    // Repair preparation may run after the original runner/service instance
+    // is gone. The persistent report is the same authorized body, while the
+    // completed Workflow owner and current project identity remain the source
+    // of authority for repair.
+    let restarted_lint = LintService::default();
+    let after_restart = restarted_lint
+        .read_current_health_report(&fixture.context, &task_id)
+        .unwrap();
+    let identity = project_identity(&fixture.context.root).unwrap();
+    LintService::validate_current_health_report_owner(
+        &after_restart,
+        &finished,
+        &fixture.context.project_id,
+        &identity.canonical_identity_key,
+        &identity.identity_revision,
+        &route,
+        &finished.baseline_fingerprint,
+    )
+    .unwrap();
+    assert!(after_restart
+        .issues
+        .iter()
+        .any(|issue| issue.id == "schema_mismatch:wiki/concepts/主题.md"));
+    let after = git_status(&fixture.context.root);
+    assert!(
+        after.lines().all(|line| line.contains(".app/")),
+        "persistent Health may create app-owned report/task metadata only: {after}"
+    );
+    assert_eq!(
+        fs::read(fixture.context.root.join("wiki/concepts/主题.md")).unwrap(),
+        wiki_before
+    );
+    assert!(
+        before.is_empty(),
+        "fixture must start from a clean Git tree"
+    );
 }
 
 #[tokio::test]

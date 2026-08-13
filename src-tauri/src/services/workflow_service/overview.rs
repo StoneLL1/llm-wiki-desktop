@@ -472,6 +472,7 @@ mod tests {
         health.result = Some(WorkflowResult::HealthCheck {
             report_id: None,
             persistent: true,
+            report_digest: None,
             error_count: 1,
             warning_count: 2,
             info_count: 3,
@@ -525,6 +526,7 @@ mod tests {
         older.result = Some(WorkflowResult::HealthCheck {
             report_id: None,
             persistent: true,
+            report_digest: None,
             error_count: 9,
             warning_count: 0,
             info_count: 0,
@@ -561,6 +563,7 @@ mod tests {
         health.result = Some(WorkflowResult::HealthCheck {
             report_id: Some("older-health".into()),
             persistent: false,
+            report_digest: None,
             error_count: 1,
             warning_count: 2,
             info_count: 3,
@@ -681,6 +684,7 @@ mod tests {
                 WorkflowResult::HealthCheck {
                     report_id: None,
                     persistent: true,
+                    report_digest: None,
                     error_count: 1,
                     warning_count: 2,
                     info_count: 3,
