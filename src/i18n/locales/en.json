@@ -1194,6 +1194,7 @@
   "wiki.html.generateTitle": "Generate HTML · {{path}}",
   "wiki.html.generate": "Generate HTML",
   "wiki.html.templateHint": "Choose an output template. Templates affect presentation only, not Wiki schema, lint rules, or Agent behavior.",
+  "wiki.html.entryHint": "Quick export stays on this Wiki page. Use Workflows for multi-page or project-wide generation.",
   "wiki.html.template.beautiful_read.title": "Beautiful read",
   "wiki.html.template.beautiful_read.desc": "Serif article layout for sharing and archiving.",
   "wiki.html.template.knowledge_card.title": "Knowledge card",

@@ -354,14 +354,18 @@ describe("Workflows architecture", () => {
         /export const SINGLE_PAGE_EXPORT_TYPES: ExportType\[] = \[([\s\S]*?)\n\];/,
       )?.[1] ?? "";
 
-    expect(wikiView).not.toContain("requestWorkflowLaunch");
-    expect(wikiView).toContain("requestExport");
+    const wikiQuickExportSection =
+      wikiView.match(
+        /const handleGenerateHtml =([\s\S]*?)const handleDialogGenerate/,
+      )?.[0] ?? "";
+    expect(wikiQuickExportSection).not.toContain("requestWorkflowLaunch");
+    expect(wikiView).toContain("consumeExportRequest");
     expect(rightPanelSource).not.toContain("requestWorkflowLaunch");
     expect(rightPanelSource).toContain("requestExport");
     expect(exportsView).toContain("requestWorkflowLaunch");
     expect(exportsView).toContain('origin: "exports"');
     expect(workflowsOverview).toContain("onPrepare={() => onPrepare(kind)}");
-    expect(exportTypes).toContain("exportType: ExportType[]");
+    expect(exportTypes).toContain("export type ExportType");
     expect(singlePageTypes).not.toContain('"project_report"');
   });
 });

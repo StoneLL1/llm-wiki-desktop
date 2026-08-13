@@ -1231,6 +1231,7 @@
   "wiki.html.generateTitle": "生成 HTML · {{path}}",
   "wiki.html.generate": "生成 HTML",
   "wiki.html.templateHint": "选择输出模板。模板只影响呈现，不影响 Wiki schema、Lint 规则或 Agent 行为。",
+  "wiki.html.entryHint": "快速导出会留在当前 Wiki 页面；多页面或项目级生成请使用 Workflows。",
   "wiki.html.template.beautiful_read.title": "美化阅读页",
   "wiki.html.template.beautiful_read.desc": "适合分享与归档的衬线文章排版。",
   "wiki.html.template.knowledge_card.title": "知识卡片",

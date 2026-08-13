@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
 import { captureProjectScope, isProjectScopeCurrent } from "../../stores/projectScope";
 import type { ConfirmedAction, PendingAction } from "../../types/backend";
+import type { ExportType } from "../../types/export";
 
 import type {
   CreateWikiPageInput,
@@ -55,6 +56,7 @@ interface WikiState {
   mode: WikiMode;
   saveState: SaveState;
   conflict: WikiSaveConflict | null;
+  requestedExportType: ExportType | null;
   /** Live editor contents (raw markdown including frontmatter). */
   draft: string;
   loadingTree: boolean;
@@ -98,6 +100,8 @@ interface WikiState {
     action: PendingAction,
   ) => Promise<void>;
   cancelPendingAction: (action: PendingAction) => Promise<void>;
+  requestExport: (type: ExportType) => void;
+  consumeExportRequest: () => void;
   reset: () => void;
 }
 
@@ -108,6 +112,7 @@ const initial = {
   mode: "read" as WikiMode,
   saveState: "idle" as SaveState,
   conflict: null as WikiSaveConflict | null,
+  requestedExportType: null as ExportType | null,
   draft: "",
   loadingTree: false,
   loadingPage: false,
@@ -528,6 +533,8 @@ export const useWikiStore = create<WikiState>((set, get) => ({
       set({ error: errorMessage(error) });
     }
   },
+  requestExport: (requestedExportType) => set({ requestedExportType }),
+  consumeExportRequest: () => set({ requestedExportType: null }),
   reset: () => {
     treeRequestEpoch += 1;
     pageRequestEpoch += 1;
