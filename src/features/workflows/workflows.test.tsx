@@ -20,6 +20,7 @@ vi.mock("../../services/workflowApi", () => ({
 }));
 
 import type { WorkflowFileDiffPage, WorkflowPreparation, WorkflowRun, WorkflowRunSummary, WorkflowsOverview } from "../../types/workflow";
+import { WIKI_LINT_SKILL_SHA256 } from "../../types/lint";
 import { WorkflowHistoryView } from "./WorkflowHistoryView";
 import { WorkflowPipeline } from "./WorkflowPipeline";
 import { WorkflowPreparationView } from "./WorkflowPreparationView";
@@ -1801,7 +1802,7 @@ describe("Workflows overview", () => {
         reportId: "report-a",
         selectionRevision: "selection-a",
         selectedFindingIds: ["duplicate_topic:wiki/中文/页面.md"],
-        skill: { id: "builtin.wiki-lint", version: "2026-08-12.1", sha256: "skill-a" },
+        skill: { id: "builtin.wiki-lint", version: "2026-08-12.1", sha256: WIKI_LINT_SKILL_SHA256 },
         authorizedPathHashes: { "wiki/中文/页面.md": "hash-a" },
         expectedGitHead: "head-a",
       },

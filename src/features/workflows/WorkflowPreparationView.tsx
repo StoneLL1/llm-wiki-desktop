@@ -399,9 +399,7 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
         <li className="workflow-preparation-step" data-decision-step="6">
           <div className="workflow-preparation-step__label">{t("workflows.preparation.route")}</div>
           <div className="workflow-preparation-step__value">
-            {preparation.route
-                ? t(`workflows.route.${preparation.route.kind}`)
-                : t("workflows.route.none")}
+            {routeDisplay(preparation.route, t)}
           </div>
         </li>
         <li className="workflow-preparation-step is-expanded" data-decision-step="7">

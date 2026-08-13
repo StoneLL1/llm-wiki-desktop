@@ -48,6 +48,7 @@ const workflowCommands = [
   "retry_workflow",
   "confirm_workflow_action",
   "discard_workflow_result",
+  "rollback_agent_lint_repair",
 ] as const;
 
 const workflowApiExports = [
@@ -64,6 +65,7 @@ const workflowApiExports = [
   "retryWorkflow",
   "confirmWorkflowAction",
   "discardWorkflowResult",
+  "rollbackAgentLintRepair",
 ] as const;
 
 const rustAuthoritySources = (): SourceFile[] => [
@@ -98,6 +100,10 @@ const workflowAuthorityViolations = (files: SourceFile[]): string[] => {
   const forbiddenAuthorityCalls = /\b(?:grant_compatible_project_trust|revoke_project_trust|register_trusted_native|register_trusted_compatible(?:_with_identity)?|revoke_trust|initialize_git_repository|initialize_repository|start_project_open_assessment|assess_project_folder)\s*\(/g;
   const forbiddenAuthorityDerivation = /\b(?:resolve_authority|filesystem_access|has_writable_task_state_root)\s*\(|\b(?:ProjectTrustAuthority|ProjectFilesystemAccess|ProjectTrustState)::|permissions\(\)\.readonly\(\)/g;
   const forbiddenGitDerivation = /\brepository_status(?:_for_assessment)?\s*\(/g;
+  const checkpointRevalidationCallCounts: Record<string, number> = {
+    "src-tauri/src/services/workflow_service/runners/update_wiki.rs": 3,
+    "src-tauri/src/services/workflow_service/runners/agent_lint_repair.rs": 3,
+  };
   for (const file of files) {
     const { path, source } = file;
     const productionSource = source.split(/\r?\n#\[cfg\(test\)\]\r?\n/, 1)[0];
@@ -105,17 +111,15 @@ const workflowAuthorityViolations = (files: SourceFile[]): string[] => {
       violations.push(`${path}: derives or mutates project authority`);
     }
     forbiddenAuthorityCalls.lastIndex = 0;
-    const allowsCheckpointRevalidation = path.endsWith(
-      "src-tauri/src/services/workflow_service/runners/update_wiki.rs",
-    );
+    const gitDerivationCount = [...productionSource.matchAll(forbiddenGitDerivation)].length;
+    const allowedGitDerivationCount = checkpointRevalidationCallCounts[path] ?? 0;
     if (
       forbiddenAuthorityDerivation.test(productionSource) ||
-      (!allowsCheckpointRevalidation && forbiddenGitDerivation.test(productionSource))
+      gitDerivationCount !== allowedGitDerivationCount
     ) {
       violations.push(`${path}: derives trust, writability, or Git state`);
     }
     forbiddenAuthorityDerivation.lastIndex = 0;
-    forbiddenGitDerivation.lastIndex = 0;
     if (
       path.endsWith("task_commands.rs")
       && /(?:app_dir\.join\(\s*"tasks"\s*\)|join\(\s*"\.app"\s*\)\.join\(\s*"tasks"\s*\))/.test(source)
@@ -326,6 +330,15 @@ describe("Workflows architecture", () => {
     expect(lintView).not.toContain("startCompile");
     expect(lintView).toContain('kind: "update_wiki"');
     expect(lintView).toContain("requestWorkflowLaunch");
+  });
+
+  it("rejects extra Git derivation even inside checkpoint-revalidating runners", () => {
+    expect(workflowAuthorityViolations([{
+      path: "src-tauri/src/services/workflow_service/runners/agent_lint_repair.rs",
+      source: "repository_status();\nrepository_status();\nrepository_status();\nrepository_status();",
+    }])).toEqual([
+      "src-tauri/src/services/workflow_service/runners/agent_lint_repair.rs: derives trust, writability, or Git state",
+    ]);
   });
 
   it("keeps Wiki quick exports local while Exports and Workflows retain preparation", () => {
