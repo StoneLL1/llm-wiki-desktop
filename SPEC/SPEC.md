@@ -273,6 +273,8 @@ SKILL.md 遵循 Claude Code 风格的 skill 约定：YAML frontmatter、触发�
 - 无项目时不创建工作流任务；restricted 项目禁止外部 AI/Agent/Skill；任何项目内容写入还要求 trusted writable，并按工作流声明的 Git 策略校验。
 - prepare 与 start 都在后端按 canonical project identity 重新校验 trust、access、writability、Git 状态和 baseline。进入设置或信任流程后返回准备页，但不自动运行。
 
+当前实现状态（2026-08-13）：H3–H5 已将 Agent Health route 与 Lint repair 接入上述 Workflows/Task/Confirmation 边界；H6 只负责最终矩阵和状态收口。由于 full gate 与完整性能、负向和 WebView2 证据未全绿，Decision Gate H 与 Batch 7 不解除。
+
 执行路径管理：
 
 - 自动检测 `claude`、`codex`、`openclaw`、`hermes` 等 CLI，并显示安装状态、版本号和默认绑定。

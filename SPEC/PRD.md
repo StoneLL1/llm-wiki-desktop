@@ -258,6 +258,8 @@ PRD 仅列出当前不纳入 MVP 的内容，后续可重新评估：
 9. 每轮应用后运行 deterministic Lint，最多三轮 Agent 修复；仍未解决时保留 Diff、checkpoint/final commit 与 Git 回滚事实，返回 partial/manual-review typed result，第四次 Agent invocation 必须为 0。
 10. 成功或人工处理终态后提交验证过的结果并刷新现有索引、报告和 UI。
 
+当前实现状态（2026-08-13）：H3–H5 已实现真实 Agent Health route、受保护的 repair task 与 Lint/Workflows 结果入口；只有 deterministic Lint 证明消失的 Finding 才能自动关闭，duplicate_topic、contradiction 等没有 proof 的语义 Finding 保持人工处理。H6 的 full gate 与完整矩阵尚未全绿，因此 Decision Gate H / Batch 7 仍保持阻断。
+
 ## 9. 功能需求
 
 ### 9.1 项目管理

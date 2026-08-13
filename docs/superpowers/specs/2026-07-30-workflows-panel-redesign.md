@@ -208,7 +208,9 @@ Rules whose logical roots do not exist in the active layout are reported as not 
 - Each applied round is followed by deterministic Lint. Agent repair is limited to three rounds; unresolved work retains the verified Diff and Git rollback facts and becomes a typed partial/manual-review result. There is no fourth invocation and no BYOK repair fallback.
 - Claude Code and Codex are the initial Agent kinds eligible for this contract once their exact invocation/output tests and later route-enablement batches pass. OpenClaw and Hermes remain unsupported until equivalent contracts land.
 
-This decision closes the product-choice portion of `WF-D01`, but it does not make the current runtime reachable. Until the staged Agent transport, Health route, repair operation, checkpoint, and three-round implementation batches pass, Health `availableRoutes` must continue to omit Agent, forged Agent routes must fail before invocation, and the visible Overview remains the same fixed three workflows.
+This decision closes the product-choice portion of `WF-D01`. H3 enabled the backend-derived Claude/Codex Complete Health route, H4B registered the guarded repair operation, and H5 exposed the downstream Lint/Workflows repair surface. Forged or stale routes still fail before invocation, and the visible Overview remains the same fixed three workflows.
+
+**Current implementation status (2026-08-13):** H0–H5 implementation and review evidence are recorded, but H6 final validation is no-go because the required from-scratch full gate is not green in the current Windows environment and the complete performance/negative/WebView2 matrix is not closed. Decision Gate H and Batch 7 remain blocked until every H6 hard gate passes.
 
 ### 6.3 Generate Content
 

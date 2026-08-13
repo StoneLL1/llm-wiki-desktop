@@ -433,6 +433,8 @@ Markdown 渲染必须支持：
 9. 每轮应用后执行 deterministic Lint 并按稳定 Finding identity 关联结果；未解决且 round < 3 才进入下一轮。三轮后仍未解决返回 partial/manual-review，保留 Diff、checkpoint/final commit 与 Git rollback；第四轮 invocation 为 0。
 10. 修复作为 Lint 发起的隐藏 workflow operation 复用现有项目串行队列、TaskService、history/cancel/recovery；Overview 仍固定三行。成功或人工处理终态后提交验证结果并刷新 UI。
 
+当前实现状态（2026-08-13）：H5 已提供当前 persistent Agent Health report 的 eligible Finding 选择、一次批准和 linked task/result/rollback UI；语义 Finding 没有 deterministic proof 时保持 manual-review。H6 最终 gate 尚未全绿，因此不把 Gate H 或 Batch 7 标记为已解除。
+
 ### 12.4 高风险操作
 
 以下操作必须确认：
