@@ -2145,17 +2145,26 @@ pub fn agent_lint_repair_stages() -> Vec<WorkflowStage> {
     )];
     for round in 1..=3 {
         for (id, label) in [
-            ("prepare_round", "prepareRound"),
-            ("run_agent", "runAgent"),
-            ("validate_candidate", "validateCandidate"),
-            ("review_risk", "reviewRisk"),
-            ("apply_changes", "applyChanges"),
-            ("recheck_lint", "recheckLint"),
+            (
+                "prepare_round",
+                "workflows.stage.agentLintRepair.prepareRound",
+            ),
+            ("run_agent", "workflows.stage.agentLintRepair.runAgent"),
+            (
+                "validate_candidate",
+                "workflows.stage.agentLintRepair.validateCandidate",
+            ),
+            ("review_risk", "workflows.stage.agentLintRepair.reviewRisk"),
+            (
+                "apply_changes",
+                "workflows.stage.agentLintRepair.applyChanges",
+            ),
+            (
+                "recheck_lint",
+                "workflows.stage.agentLintRepair.recheckLint",
+            ),
         ] {
-            definitions.push((
-                format!("{id}_{round}"),
-                format!("workflows.stage.agentLintRepair.{label}"),
-            ));
+            definitions.push((format!("{id}_{round}"), label.to_string()));
         }
     }
     definitions.push((

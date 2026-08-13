@@ -15,6 +15,7 @@ import {
   prepareWorkflow,
   reorderQueuedWorkflow,
   retryWorkflow,
+  rollbackAgentLintRepair,
   startWorkflow,
   undoCancelQueuedWorkflow,
 } from "./workflowApi";
@@ -414,6 +415,11 @@ describe("workflow API", () => {
         "confirm_workflow_action",
       ],
       [discardWorkflowResult, runRequest, "discard_workflow_result"],
+      [
+        rollbackAgentLintRepair,
+        { ...runRequest, expectedFinalCommit: "commit-1" },
+        "rollback_agent_lint_repair",
+      ],
     ] as const;
 
     for (const [call, request, command] of calls) {

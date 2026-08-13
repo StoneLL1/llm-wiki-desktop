@@ -1,5 +1,7 @@
 # 踩坑清单 (gotchas.txt)
 
+Backend i18n contract scans cannot see dynamically assembled translation keys — Root cause: the cross-language test extracts complete string literals from Rust, so `format!("workflows.stage.agentLintRepair.{label}")` hides every generated stage key and lets untranslated UI labels survive until runtime — How to avoid: keep backend-emitted translation keys as complete string literals, including repeated stage templates, and let the locale contract verify every English and Chinese key.
+
 Wiki 快速导出在页面或项目切换后可能回写旧任务状态 — 根因：受限内容查询、任务启动和任务事实刷新均为异步 continuation，若只依赖当前组件状态会让旧请求解锁新请求或污染新页面 — 避免方式：为每次请求携带 epoch，并同时校验 mounted、project/root/page scope 与全局 runningTaskId 后再提交 UI 状态。
 
 Graphify refresh can update tracked cache metadata before failing on Windows access control — Root cause: `graphify update .` performs AST extraction and cache writes in the managed sandbox, then may stop with `WinError 5` before completing the rebuild — How to avoid: treat the refresh as blocked, do not claim the graph is current, restore only the tracked cache metadata if it changed, and do not repeat the unchanged failing command; ignored graph artifacts may remain dirty for the next approved refresh.

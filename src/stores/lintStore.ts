@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
 
+import { isAgentLintRepairEligible } from "../types/lint";
 import type {
   AddLintIgnoreRequest,
   AgentLintRepairPreparation,
@@ -27,7 +28,6 @@ import type {
   ListLintIgnoresRequest,
   RemoveLintIgnoreRequest,
   StartDeepLintRequest,
-  isAgentLintRepairEligible,
 } from "../types/lint";
 import type { AgentKind } from "../types/agent";
 import type { LlmProviderKind } from "../types/llm";
