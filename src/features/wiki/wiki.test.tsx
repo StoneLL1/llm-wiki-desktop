@@ -9,7 +9,8 @@ import type {
   WikiTree,
   WikiTreeNode,
 } from "../../types/wiki";
-import type { ExportRecord } from "../../types/export";
+import { SINGLE_PAGE_EXPORT_TYPES, type ExportRecord, type ExportType } from "../../types/export";
+import { RightContextPanel } from "../../components/app/RightContextPanel";
 import { MarkdownReader } from "./MarkdownReader";
 import { WikiEditor } from "./WikiEditor";
 import { WikiTree as WikiTreeView } from "./WikiTree";
@@ -1118,6 +1119,90 @@ describe("ConflictDiffDialog", () => {
 });
 
 describe("Wiki HTML preview", () => {
+  it("keeps the Wiki toolbar quick export on Wiki instead of launching Workflows", async () => {
+    const tree: WikiTree = {
+      root: { name: "wiki", kind: "folder", path: "wiki", starred: false, bookmarked: false, fileCount: 1, children: [] },
+      pages: [pageMeta()],
+      totalPages: 1,
+    };
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "scan_wiki") return Promise.resolve(tree);
+      if (command === "read_wiki_page") return Promise.resolve(pageContent());
+      if (command === "list_exports") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    useProjectStore.setState({
+      currentProject: {
+        ...defaultProject,
+        projectId: "proj-1",
+        rootPath: "D:/wiki",
+        name: "Wiki",
+      },
+    });
+    useNavigationStore.setState({ activeView: "wiki", workflowLaunchIntent: null });
+    const requestWorkflowLaunch = vi
+      .spyOn(useNavigationStore.getState(), "requestWorkflowLaunch")
+      .mockImplementation(() => undefined);
+
+    try {
+      render(<WikiView capabilities={emptyAiCapabilities} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Generate HTML" }));
+
+      expect(requestWorkflowLaunch).not.toHaveBeenCalled();
+      expect(useNavigationStore.getState().activeView).toBe("wiki");
+    } finally {
+      requestWorkflowLaunch.mockRestore();
+    }
+  });
+
+  it("keeps Wiki quick export types limited to single-page artifacts", () => {
+    expect(SINGLE_PAGE_EXPORT_TYPES).toEqual([
+      "beautiful_read",
+      "knowledge_card",
+      "concept_map",
+    ]);
+    expect(SINGLE_PAGE_EXPORT_TYPES).not.toContain("project_report");
+  });
+
+  it("routes Wiki reading-page and knowledge-card actions through wikiStore.requestExport", () => {
+    const page = pageContent();
+    const requestExport = vi.fn<(type: ExportType) => void>();
+    useProjectStore.setState({
+      currentProject: {
+        ...defaultProject,
+        projectId: "proj-1",
+        rootPath: "D:/wiki",
+        name: "Wiki",
+      },
+    });
+    useNavigationStore.setState({ activeView: "wiki", rightPanelMode: "default" });
+    const requestWorkflowLaunch = vi
+      .spyOn(useNavigationStore.getState(), "requestWorkflowLaunch")
+      .mockImplementation(() => undefined);
+    useWikiStore.setState({
+      page,
+      selectedPath: page.meta.path,
+      tree: {
+        root: { name: "wiki", kind: "folder", path: "wiki", starred: false, bookmarked: false, fileCount: 1, children: [] },
+        pages: [page.meta],
+        totalPages: 1,
+      },
+      requestExport,
+    } as never);
+
+    try {
+      render(<RightContextPanel />);
+      fireEvent.click(screen.getByRole("button", { name: "Generate HTML reading page" }));
+      fireEvent.click(screen.getByRole("button", { name: "Generate knowledge card" }));
+
+      expect(requestExport).toHaveBeenNthCalledWith(1, "beautiful_read");
+      expect(requestExport).toHaveBeenNthCalledWith(2, "knowledge_card");
+      expect(requestWorkflowLaunch).not.toHaveBeenCalled();
+    } finally {
+      requestWorkflowLaunch.mockRestore();
+    }
+  });
+
   it("exposes a resizable wiki tree splitter", async () => {
     const tree: WikiTree = {
       root: { name: "wiki", kind: "folder", path: "wiki", starred: false, bookmarked: false, fileCount: 1, children: [] },

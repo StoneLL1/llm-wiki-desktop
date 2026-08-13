@@ -400,6 +400,45 @@ describe("ExportsView", () => {
     expect(screen.queryByRole("button", { name: /Open folder/i })).not.toBeInTheDocument();
   });
 
+  it("routes export regeneration through structured Workflows preparation", () => {
+    useExportStore.getState().reset();
+    useExportStore.setState({
+      records: [
+        {
+          id: "export-retry",
+          exportType: "knowledge_card",
+          title: "Agent card",
+          sourcePath: "wiki/concepts/agent.md",
+          outputPath: "exports/html/agent-card.html",
+          createdAt: "2026-06-20T10:00:00Z",
+          route: "agent",
+          status: "failed",
+          bookmarked: false,
+          taskId: "task-retry",
+        },
+      ],
+    });
+    useProjectStore.setState({ currentProject: PROJECT });
+    useNavigationStore.setState({ workflowLaunchIntent: null, activeView: "exports" });
+    render(<ExportsView />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Retry/i }));
+
+    expect(useNavigationStore.getState().activeView).toBe("workflows");
+    expect(useNavigationStore.getState().workflowLaunchIntent).toEqual({
+      projectId: "p",
+      projectRootPath: "/x",
+      kind: "generate_content",
+      origin: "exports",
+      scopePreset: {
+        kind: "generate_content",
+        artifactType: "knowledge_card",
+        pagePaths: ["wiki/concepts/agent.md"],
+        outputPath: "exports/html/agent-card.html",
+      },
+    });
+  });
+
   it("routes new export through structured Workflows preparation", () => {
     useExportStore.getState().reset();
     useProjectStore.setState({ currentProject: PROJECT });

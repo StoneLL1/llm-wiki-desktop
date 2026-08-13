@@ -247,6 +247,36 @@ describe("WorkspaceController", () => {
     expect(useNavigationStore.getState().workflowLaunchIntent).toBeNull();
   });
 
+  it("keeps an Exports launch intent on the structured Workflows preparation route", async () => {
+    useNavigationStore.setState({
+      activeView: "workflows",
+      workflowLaunchIntent: {
+        projectId: project.projectId,
+        projectRootPath: project.rootPath,
+        kind: "generate_content",
+        origin: "exports",
+        scopePreset: {
+          kind: "generate_content",
+          artifactType: "beautiful_read",
+          pagePaths: ["wiki/export-source.md"],
+          outputPath: "exports/html/export-source.html",
+        },
+      },
+    });
+
+    render(<WorkspaceController />);
+
+    expect(workflowsController.prepare).toHaveBeenCalledWith(
+      "generate_content",
+      expect.objectContaining({
+        pagePaths: ["wiki/export-source.md"],
+        outputPath: "exports/html/export-source.html",
+      }),
+      null,
+    );
+    expect(useNavigationStore.getState().workflowLaunchIntent).toBeNull();
+  });
+
   it("clears a launch intent whose project identity no longer matches", () => {
     useNavigationStore.setState({
       activeView: "workflows",
