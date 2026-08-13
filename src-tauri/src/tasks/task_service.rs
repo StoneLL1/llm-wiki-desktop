@@ -905,13 +905,15 @@ impl TaskService {
                 .get_mut(&id)
                 .expect("validated workflow target must remain present while locked");
             let previous = persistence.get(&id);
-            let transition = persistence_transition(previous, task_state_root.as_ref());
             previous_states.push((id.clone(), entry.clone(), previous.cloned()));
             let workflow = entry
                 .workflow
                 .as_mut()
                 .expect("validated workflow target must retain workflow state while locked");
-            match task_state_root.as_ref() {
+            let effective_task_state_root =
+                workflow_persistence_root_for_workflow(workflow, task_state_root.as_ref());
+            let transition = persistence_transition(previous, effective_task_state_root.as_ref());
+            match effective_task_state_root.as_ref() {
                 Some(root) => {
                     persistence.insert(id.clone(), root.clone());
                     workflow.persistence = WorkflowPersistenceMode::Persistent;
@@ -3515,6 +3517,27 @@ fn persistence_transition(
     }
 }
 
+fn workflow_persistence_root_for_workflow(
+    workflow: &WorkflowExecutionState,
+    project_task_state_root: Option<&PathBuf>,
+) -> Option<PathBuf> {
+    if matches!(
+        (&workflow.kind, &workflow.scope, &workflow.route),
+        (
+            WorkflowKind::HealthCheck,
+            crate::models::workflow::WorkflowScope::HealthCheck {
+                mode: crate::models::workflow::HealthCheckMode::Complete
+            },
+            Some(crate::models::workflow::WorkflowRoute::Agent { .. })
+        )
+    ) || workflow.kind != WorkflowKind::HealthCheck
+    {
+        project_task_state_root.cloned()
+    } else {
+        None
+    }
+}
+
 fn persistence_transition_log(
     transition: WorkflowPersistenceTransition,
 ) -> Option<(LogLevel, &'static str)> {
@@ -3642,10 +3665,12 @@ mod tests {
             title: "Health Check".into(),
             kind: WorkflowKind::HealthCheck,
             scope: WorkflowScope::HealthCheck {
-                mode: HealthCheckMode::LocalQuick,
+                mode: HealthCheckMode::Complete,
             },
-            route: Some(WorkflowRoute::Local {
-                route_revision: "local".into(),
+            route: Some(WorkflowRoute::Agent {
+                agent: crate::models::agent::AgentKind::Codex,
+                model: None,
+                route_revision: "agent".into(),
             }),
             baseline_fingerprint: "baseline".into(),
             execution_options: WorkflowExecutionOptions {
@@ -3751,6 +3776,7 @@ mod tests {
                 WorkflowResult::HealthCheck {
                     report_id: None,
                     persistent: false,
+                    report_digest: None,
                     error_count: 0,
                     warning_count: 0,
                     info_count: 0,
@@ -4058,6 +4084,34 @@ mod tests {
         assert!(service.get_logs(&run.task_id).unwrap().iter().any(|line| {
             line.level == LogLevel::Info && line.message.contains("newly derived")
         }));
+    }
+
+    #[test]
+    fn health_local_or_byok_rebind_never_upgrades_to_persistent() {
+        let root = tempfile::tempdir().unwrap();
+        let service = TaskService::default();
+        let coordinator = WorkflowCoordinator::default();
+        let mut request = workflow_request(root.path(), None);
+        request.scope = crate::models::workflow::WorkflowScope::HealthCheck {
+            mode: HealthCheckMode::LocalQuick,
+        };
+        request.route = Some(WorkflowRoute::Local {
+            route_revision: "local".into(),
+        });
+        let run = created_workflow(coordinator.enqueue(&service, request).unwrap());
+        let tasks_root = root.path().join(".app/tasks");
+
+        let transition = service
+            .rebind_workflow_persistence(&run.task_id, root.path(), Some(tasks_root.clone()))
+            .unwrap();
+
+        assert_eq!(transition, WorkflowPersistenceTransition::Unchanged);
+        assert_eq!(service.workflow_persistence_dir(&run.task_id), None);
+        assert_eq!(
+            service.get_workflow_run(&run.task_id).unwrap().persistence,
+            WorkflowPersistenceMode::MemoryOnly
+        );
+        assert!(!tasks_root.join(format!("{}.json", run.task_id)).exists());
     }
 
     #[test]
@@ -4533,6 +4587,7 @@ mod tests {
         let result = WorkflowResult::HealthCheck {
             report_id: Some("report-1".into()),
             persistent: true,
+            report_digest: None,
             error_count: 0,
             warning_count: 1,
             info_count: 2,
@@ -4590,6 +4645,7 @@ mod tests {
                 WorkflowResult::HealthCheck {
                     report_id: None,
                     persistent: true,
+                    report_digest: None,
                     error_count: 0,
                     warning_count: 0,
                     info_count: 1,

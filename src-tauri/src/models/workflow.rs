@@ -635,6 +635,8 @@ pub enum WorkflowResult {
     HealthCheck {
         report_id: Option<String>,
         persistent: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        report_digest: Option<String>,
         error_count: u64,
         warning_count: u64,
         info_count: u64,

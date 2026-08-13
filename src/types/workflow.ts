@@ -249,6 +249,7 @@ export type WorkflowResult =
       kind: "health_check";
       reportId: string | null;
       persistent: boolean;
+      reportDigest?: string;
       errorCount: number;
       warningCount: number;
       infoCount: number;

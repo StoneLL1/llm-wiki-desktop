@@ -246,7 +246,7 @@ fn agent_version_change_after_prepare_fails_start_before_dispatch_or_invocation(
 }
 
 #[test]
-fn complete_health_forces_memory_only_even_when_project_access_is_persistent() {
+fn complete_health_preserves_persistent_project_access_for_repair_ownership() {
     let (_root, context) = project();
     let config = tempfile::tempdir().unwrap();
     let settings = SettingsService::with_config_dir(config.path().to_path_buf());
@@ -298,7 +298,7 @@ fn complete_health_forces_memory_only_even_when_project_access_is_persistent() {
 
     assert_eq!(
         preparation.project_access.persistence,
-        WorkflowPersistenceMode::MemoryOnly
+        WorkflowPersistenceMode::Persistent
     );
     let outcome = service
         .start(
@@ -316,8 +316,8 @@ fn complete_health_forces_memory_only_even_when_project_access_is_persistent() {
         WorkflowStartOutcome::Created { run } => run,
         WorkflowStartOutcome::Existing { .. } => panic!("first start must create"),
     };
-    assert_eq!(run.persistence, WorkflowPersistenceMode::MemoryOnly);
-    assert!(!context.root.join(".app/tasks").exists());
+    assert_eq!(run.persistence, WorkflowPersistenceMode::Persistent);
+    assert!(context.root.join(".app/tasks").is_dir());
 }
 
 fn prepare(

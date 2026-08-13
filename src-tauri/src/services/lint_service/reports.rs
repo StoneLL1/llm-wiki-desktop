@@ -6,9 +6,10 @@ use crate::models::lint::{
 };
 use crate::models::paths::ProjectContext;
 use crate::models::workflow::{
-    WorkflowDisplayStatus, WorkflowKind, WorkflowOperation, WorkflowResult, WorkflowRoute,
-    WorkflowRun,
+    WorkflowDisplayStatus, WorkflowKind, WorkflowOperation, WorkflowPersistenceMode,
+    WorkflowResult, WorkflowRoute, WorkflowRun,
 };
+use sha2::{Digest, Sha256};
 
 use super::{LintService, LINT_REPORTS_DIR};
 
@@ -16,6 +17,18 @@ const LINT_HISTORY_PATH: &str = ".app/lint-history.json";
 const LINT_HISTORY_LIMIT: usize = 50;
 
 impl LintService {
+    pub fn health_check_report_digest(report: &HealthCheckReport) -> Result<String, BackendError> {
+        let canonical = crate::services::canonical_json(report).map_err(|error| {
+            BackendError::new(
+                "LINT_REPORT_DIGEST_FAILED",
+                format!("Could not canonicalize the Health report: {error}"),
+                false,
+                true,
+            )
+        })?;
+        Ok(format!("{:x}", Sha256::digest(canonical.as_bytes())))
+    }
+
     pub fn persist_local_report(
         &self,
         context: &ProjectContext,
@@ -134,41 +147,58 @@ impl LintService {
         }
     }
 
-    /// Return a Health report only when it is still owned by this process's
-    /// identity-scoped memory store. Agent repair authorization must never
-    /// revive a copied or stale report body from `.app/lint-reports`.
-    pub fn read_current_memory_health_report(
+    /// Return the current Health report owned by the existing workflow
+    /// authority. Memory-only reports are process-local; persistent reports
+    /// are read from the atomic report file so repair preparation still works
+    /// after the workflow/report crossed a process boundary. The caller must
+    /// continue through `validate_current_health_report_owner` before using
+    /// the report for repair authorization.
+    pub fn read_current_health_report(
         &self,
         context: &ProjectContext,
         id: &str,
     ) -> Result<HealthCheckReport, BackendError> {
         reject_report_id(id)?;
         let project_key = memory_project_key(context)?;
-        let memory = self.memory_reports.read().map_err(|_| {
-            BackendError::new(
-                "LINT_MEMORY_REPORTS_LOCKED",
-                "In-memory Lint reports are temporarily unavailable.",
-                true,
-                false,
-            )
-        })?;
-        memory
-            .get(&project_key)
-            .and_then(|reports| reports.get(id))
-            .and_then(|persisted| persisted.health_check_report.as_ref())
-            .filter(|report| !report.persistent && !report.report_id.is_empty())
-            .cloned()
-            .ok_or_else(|| {
+        let memory_report = {
+            let memory = self.memory_reports.read().map_err(|_| {
                 BackendError::new(
-                    "LINT_MEMORY_HEALTH_REPORT_REQUIRED",
-                    "Agent lint repair requires a current-process Health report.",
+                    "LINT_MEMORY_REPORTS_LOCKED",
+                    "In-memory Lint reports are temporarily unavailable.",
                     true,
-                    true,
+                    false,
                 )
-            })
+            })?;
+            memory
+                .get(&project_key)
+                .and_then(|reports| reports.get(id))
+                .and_then(|persisted| persisted.health_check_report.as_ref())
+                .filter(|report| {
+                    !report.persistent
+                        && report.report_id == id
+                        && report.task_id == id
+                        && !report.report_id.is_empty()
+                })
+                .cloned()
+        };
+        if let Some(report) = memory_report {
+            return Ok(report);
+        }
+
+        let path = format!("{LINT_REPORTS_DIR}/{id}.json");
+        let persisted = self
+            .file_store
+            .read_json::<PersistedLintReport>(context, &path)
+            .map_err(|_| current_health_report_required())?;
+        persisted
+            .health_check_report
+            .as_ref()
+            .filter(|report| is_current_persistent_health_report(&persisted, id, report))
+            .cloned()
+            .ok_or_else(current_health_report_required)
     }
 
-    pub fn validate_current_memory_health_report_owner(
+    pub fn validate_current_health_report_owner(
         report: &HealthCheckReport,
         owner: &WorkflowRun,
         project_id: &str,
@@ -177,19 +207,29 @@ impl LintService {
         current_health_route: &WorkflowRoute,
         current_baseline_fingerprint: &str,
     ) -> Result<(), BackendError> {
+        let report_digest = Self::health_check_report_digest(report)
+            .map_err(|_| current_health_report_required())?;
         let exact_health_result = matches!(
             owner.result.as_ref(),
             Some(WorkflowResult::HealthCheck {
                 report_id: Some(result_report_id),
                 persistent,
+                report_digest: Some(result_report_digest),
                 ..
-            }) if result_report_id == &report.report_id && *persistent == report.persistent
+            }) if result_report_id == &report.report_id
+                && *persistent == report.persistent
+                && result_report_digest == &report_digest
         );
+        let persistence_matches = match report.persistent {
+            true => owner.persistence == WorkflowPersistenceMode::Persistent,
+            false => owner.persistence == WorkflowPersistenceMode::MemoryOnly,
+        };
         if report.task_id != owner.task_id
             || owner.project_id != project_id
             || owner.kind != WorkflowKind::HealthCheck
             || owner.operation != WorkflowOperation::BuiltIn
             || owner.display_status != WorkflowDisplayStatus::Completed
+            || !persistence_matches
             || owner.route.as_ref() != Some(&report.route)
             || !exact_health_result
         {
@@ -398,6 +438,36 @@ impl LintService {
     }
 }
 
+fn current_health_report_required() -> BackendError {
+    BackendError::new(
+        "LINT_MEMORY_HEALTH_REPORT_REQUIRED",
+        "Agent lint repair requires a current authoritative Health report.",
+        true,
+        true,
+    )
+}
+
+fn is_current_persistent_health_report(
+    persisted: &PersistedLintReport,
+    id: &str,
+    report: &HealthCheckReport,
+) -> bool {
+    report.persistent
+        && !report.report_id.is_empty()
+        && report.report_id == id
+        && persisted.entry.id == id
+        && persisted.entry.kind == LintReportKind::HealthCheck
+        && persisted.entry.persistent
+        && report.task_id == id
+        && persisted.entry.task_id.as_deref() == Some(report.task_id.as_str())
+        && persisted.entry.workflow_route.as_ref() == Some(&report.route)
+        && persisted.entry.health_check_mode.as_ref() == Some(&report.mode)
+        && persisted.entry.report_digest.as_deref()
+            == LintService::health_check_report_digest(report)
+                .ok()
+                .as_deref()
+}
+
 fn lint_history_entry_for_local(id: &str, report: &LintReport) -> LintHistoryEntry {
     let (error_count, warning_count, info_count) = count_issue_severities(&report.issues);
     LintHistoryEntry {
@@ -415,6 +485,7 @@ fn lint_history_entry_for_local(id: &str, report: &LintReport) -> LintHistoryEnt
         health_check_mode: None,
         duration_ms: None,
         persistent: true,
+        report_digest: None,
     }
 }
 
@@ -439,6 +510,7 @@ fn lint_history_entry_for_deep(
         health_check_mode: None,
         duration_ms: None,
         persistent: true,
+        report_digest: None,
     }
 }
 
@@ -458,6 +530,7 @@ fn lint_history_entry_for_health_check(report: &HealthCheckReport) -> LintHistor
         health_check_mode: Some(report.mode.clone()),
         duration_ms: Some(report.duration_ms),
         persistent: report.persistent,
+        report_digest: LintService::health_check_report_digest(report).ok(),
     }
 }
 
@@ -528,8 +601,9 @@ mod tests {
     use crate::errors::BackendError;
     use crate::models::agent::AgentKind;
     use crate::models::lint::{HealthCheckCoverage, HealthCheckReport, LintReport};
+    use crate::models::paths::ProjectContext;
     use crate::models::workflow::{
-        HealthCheckMode, WorkflowOperation, WorkflowResult, WorkflowRoute,
+        HealthCheckMode, WorkflowOperation, WorkflowPersistenceMode, WorkflowResult, WorkflowRoute,
     };
 
     fn health_report(id: &str, persistent: bool, generated_at: String) -> HealthCheckReport {
@@ -561,6 +635,7 @@ mod tests {
     }
 
     fn agent_health_owner(report: &HealthCheckReport) -> crate::models::workflow::WorkflowRun {
+        let report_digest = LintService::health_check_report_digest(report).unwrap();
         serde_json::from_value(serde_json::json!({
             "schemaVersion": 2,
             "taskId": report.task_id,
@@ -574,7 +649,11 @@ mod tests {
             "route": report.route,
             "fingerprint": "run-fingerprint",
             "baselineFingerprint": "baseline-a",
-            "persistence": "memory_only",
+            "persistence": if report.persistent {
+                "persistent"
+            } else {
+                "memory_only"
+            },
             "stages": [],
             "currentStageId": null,
             "queuePosition": null,
@@ -585,7 +664,8 @@ mod tests {
             "result": {
                 "kind": "health_check",
                 "reportId": report.report_id,
-                "persistent": false,
+                "persistent": report.persistent,
+                "reportDigest": report_digest,
                 "errorCount": 0,
                 "warningCount": 0,
                 "infoCount": 0,
@@ -696,8 +776,59 @@ mod tests {
     }
 
     #[test]
-    fn repair_report_reader_accepts_only_current_process_memory_health_reports() {
-        let (context, root) = tmp_context("health-repair-memory-only");
+    fn persistent_health_reader_rejects_mismatched_or_malformed_disk_reports() {
+        let (context, root) = tmp_context("health-repair-disk-fail-closed");
+        let service = LintService::default();
+        let report = health_report("health-disk", true, "2026-07-04T00:00:00Z".into());
+        service
+            .store_health_check_report(&context, &report)
+            .unwrap();
+
+        let report_path = ".app/lint-reports/health-disk.json";
+        let mut mismatched = serde_json::to_value(
+            service
+                .read_lint_history_report(&context, "health-disk")
+                .unwrap(),
+        )
+        .unwrap();
+        mismatched["healthCheckReport"]["reportId"] = serde_json::json!("other-report");
+        mismatched["healthCheckReport"]["taskId"] = serde_json::json!("other-task");
+        mismatched["entry"]["taskId"] = serde_json::json!("other-task");
+        write_file(
+            &context,
+            report_path,
+            &serde_json::to_string(&mismatched).unwrap(),
+        );
+        let restarted = LintService::default();
+        let error = restarted
+            .read_current_health_report(&context, "health-disk")
+            .expect_err("mismatched persisted report identity must fail closed");
+        assert_eq!(error.code, "LINT_MEMORY_HEALTH_REPORT_REQUIRED");
+
+        write_file(&context, report_path, "{ malformed report");
+        let error = restarted
+            .read_current_health_report(&context, "health-disk")
+            .expect_err("malformed persisted report must fail closed");
+        assert_eq!(error.code, "LINT_MEMORY_HEALTH_REPORT_REQUIRED");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn current_health_report_rejects_unsafe_ids() {
+        let (context, root) = tmp_context("health-repair-report-id-boundary");
+        let service = LintService::default();
+        for id in ["", "../health", "nested/health", r"nested\health"] {
+            let error = service
+                .read_current_health_report(&context, id)
+                .expect_err("unsafe report ids must fail closed before reading files");
+            assert_eq!(error.code, "LINT_HISTORY_ID_INVALID");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn repair_report_reader_accepts_current_memory_or_persistent_health_reports() {
+        let (context, root) = tmp_context("health-repair-report-authority");
         let service = LintService::default();
         let memory = health_report("health-memory", false, "2026-07-04T00:00:00Z".into());
         service
@@ -705,16 +836,77 @@ mod tests {
             .unwrap();
 
         let selected = service
-            .read_current_memory_health_report(&context, "health-memory")
+            .read_current_health_report(&context, "health-memory")
             .unwrap();
         assert_eq!(selected, memory);
 
+        let mut mismatched_memory = health_report(
+            "health-memory-task-mismatch",
+            false,
+            "2026-07-04T00:00:30Z".into(),
+        );
+        mismatched_memory.task_id = "different-task".into();
+        service
+            .store_health_check_report(&context, &mismatched_memory)
+            .unwrap();
+        let error = service
+            .read_current_health_report(&context, "health-memory-task-mismatch")
+            .expect_err("memory reports must bind report and task identity");
+        assert_eq!(error.code, "LINT_MEMORY_HEALTH_REPORT_REQUIRED");
+
         let disk = health_report("health-disk", true, "2026-07-04T00:01:00Z".into());
         service.store_health_check_report(&context, &disk).unwrap();
-        let error = service
-            .read_current_memory_health_report(&context, "health-disk")
-            .expect_err("repair selection must never fall back to a disk report");
+        assert!(context
+            .app_dir
+            .join("lint-reports/health-disk.json")
+            .is_file());
+
+        // A new LintService represents the process-restart boundary: the
+        // persistent report must remain readable without memory state.
+        let restarted = LintService::default();
+        let selected = restarted
+            .read_current_health_report(&context, "health-disk")
+            .unwrap();
+        assert_eq!(selected, disk);
+
+        let error = restarted
+            .read_current_health_report(&context, "health-memory")
+            .expect_err("memory-only reports must not cross a process boundary");
         assert_eq!(error.code, "LINT_MEMORY_HEALTH_REPORT_REQUIRED");
+
+        // A report file copied to a different project is not enough to pass
+        // repair authorization; the owner/identity check remains mandatory.
+        let other_root = tempfile::tempdir().unwrap().keep();
+        let other_context = ProjectContext::new("project-a", other_root.clone());
+        std::fs::create_dir_all(&other_context.app_dir).unwrap();
+        write_file(
+            &other_context,
+            ".app/lint-reports/health-disk.json",
+            &serde_json::to_string(
+                &restarted
+                    .read_lint_history_report(&context, "health-disk")
+                    .unwrap(),
+            )
+            .unwrap(),
+        );
+        let copied = restarted
+            .read_current_health_report(&other_context, "health-disk")
+            .unwrap();
+        assert_eq!(copied, disk);
+        let copied_owner = agent_health_owner(&disk);
+        let other_identity = crate::services::project_identity(&other_context.root).unwrap();
+        let error = LintService::validate_current_health_report_owner(
+            &copied,
+            &copied_owner,
+            &other_context.project_id,
+            &other_identity.canonical_identity_key,
+            &other_identity.identity_revision,
+            &disk.route,
+            "baseline-a",
+        )
+        .expect_err("a copied report must fail its current project identity check");
+        assert_eq!(error.code, "LINT_REPAIR_REPORT_STALE");
+        std::fs::remove_dir_all(other_root).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -725,12 +917,12 @@ mod tests {
             model: None,
             route_revision: "analysis-route-v1".into(),
         };
-        let mut report = health_report("health-task-1", false, "2026-08-12T00:00:00Z".into());
+        let mut report = health_report("health-task-1", true, "2026-08-12T00:00:00Z".into());
         report.mode = HealthCheckMode::Complete;
         report.route = route.clone();
         let run = agent_health_owner(&report);
 
-        LintService::validate_current_memory_health_report_owner(
+        LintService::validate_current_health_report_owner(
             &report,
             &run,
             "project-a",
@@ -741,10 +933,44 @@ mod tests {
         )
         .unwrap();
 
+        let mut memory_only_owner = run.clone();
+        memory_only_owner.persistence = WorkflowPersistenceMode::MemoryOnly;
+        assert_eq!(
+            LintService::validate_current_health_report_owner(
+                &report,
+                &memory_only_owner,
+                "project-a",
+                "identity-a",
+                "revision-a",
+                &route,
+                "baseline-a",
+            )
+            .unwrap_err()
+            .code,
+            "LINT_REPAIR_HEALTH_REPORT_REQUIRED"
+        );
+
+        let mut tampered_report = report.clone();
+        tampered_report.generated_at = "2026-08-13T00:00:00Z".into();
+        assert_eq!(
+            LintService::validate_current_health_report_owner(
+                &tampered_report,
+                &run,
+                "project-a",
+                "identity-a",
+                "revision-a",
+                &route,
+                "baseline-a",
+            )
+            .unwrap_err()
+            .code,
+            "LINT_REPAIR_HEALTH_REPORT_REQUIRED"
+        );
+
         let mut old_baseline = run.clone();
         old_baseline.baseline_fingerprint = "baseline-old".into();
         assert_eq!(
-            LintService::validate_current_memory_health_report_owner(
+            LintService::validate_current_health_report_owner(
                 &report,
                 &old_baseline,
                 "project-a",
@@ -764,7 +990,7 @@ mod tests {
             route_revision: "analysis-route-v2".into(),
         };
         assert_eq!(
-            LintService::validate_current_memory_health_report_owner(
+            LintService::validate_current_health_report_owner(
                 &report,
                 &run,
                 "project-a",
@@ -816,7 +1042,7 @@ mod tests {
             index_refresh_warnings: Vec::new(),
         });
         assert_eq!(
-            LintService::validate_current_memory_health_report_owner(
+            LintService::validate_current_health_report_owner(
                 &report,
                 &repair_owner,
                 "project-a",

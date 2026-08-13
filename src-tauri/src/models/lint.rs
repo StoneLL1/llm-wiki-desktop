@@ -482,6 +482,11 @@ pub struct LintHistoryEntry {
     pub duration_ms: Option<u64>,
     #[serde(default = "default_persistent")]
     pub persistent: bool,
+    /// Canonical digest of a persisted Health report, retained in the
+    /// existing history wrapper so report-body reads can bind to metadata
+    /// written by the same report service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -822,6 +827,7 @@ mod tests {
             health_check_mode: None,
             duration_ms: None,
             persistent: true,
+            report_digest: None,
         };
         let value = serde_json::to_value(PersistedLintReport {
             entry,
