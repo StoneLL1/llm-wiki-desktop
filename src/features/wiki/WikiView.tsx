@@ -5,9 +5,11 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useRef,
   useState,
 } from "react";
 import { useTranslation } from "react-i18next";
+import { invoke } from "@tauri-apps/api/core";
 import { Book, Edit2, FileOutput, LoaderCircle, MessageSquareText, Sparkles, Star } from "lucide-react";
 
 import { ResizableSplitter } from "../../components/app/ResizableSplitter";
@@ -18,11 +20,16 @@ import type { AiCapabilitiesWorkflow } from "../../hooks/useAiCapabilities";
 import { useExportStore } from "../../stores/exportStore";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
-import { useTaskStore } from "../../stores/taskStore";
+import { fetchTaskById, useTaskStore } from "../../stores/taskStore";
 import { ConfirmationDialog } from "../../components/app/ConfirmationDialog";
 import type { PendingAction } from "../../types/backend";
-import type { ExportRecord, ExportType } from "../../types/export";
-import { SINGLE_PAGE_EXPORT_TYPES } from "../../types/export";
+import {
+  DEFAULT_EXPORT_OPTIONS,
+  SINGLE_PAGE_EXPORT_TYPES,
+  type ExportRecord,
+  type ExportRestrictedContentStatus,
+  type ExportType,
+} from "../../types/export";
 import type { SourceAiOrganizeBinding } from "../../types/source";
 import { isTerminalStatus, type BackendTask } from "../../types/task";
 import type { CreateWikiPageInput, WikiPageContent, WikiPageMeta } from "../../types/wiki";
@@ -36,6 +43,7 @@ import { useWikiStore } from "./wikiStore";
 import { useSourceStore } from "./sourceStore";
 import { SourceLifecycleDialogs, SourceMovePathDialog } from "./SourceLifecycleDialogs";
 import { SourceAiOrganizeDialog } from "./SourceAiOrganizeDialog";
+import { ExportRestrictedContentDialog } from "../exports/ExportRestrictedContentDialog";
 
 // Milkdown + ProseMirror is the heaviest wiki dependency and is only needed
 // when the user enters edit mode. Read/preview modes never load it.
@@ -74,6 +82,25 @@ interface SourceAiWorkbenchScope {
   initialCandidateId: string | null;
 }
 
+export interface PendingWikiQuickExport {
+  taskId: string;
+  projectId: string;
+  projectRootPath: string;
+  pagePath: string;
+  exportType: Exclude<ExportType, "project_report">;
+  autoPreview: boolean;
+}
+
+interface WikiQuickExportRequest {
+  scope: Omit<PendingWikiQuickExport, "taskId">;
+  record: ExportRecord | null;
+}
+
+interface RestrictedWikiQuickExportConfirmation {
+  request: WikiQuickExportRequest;
+  count: number;
+}
+
 export function WikiView({ capabilities }: WikiViewProps) {
   const { t } = useTranslation();
   const currentProject = useProjectStore((state) => state.currentProject);
@@ -94,6 +121,14 @@ export function WikiView({ capabilities }: WikiViewProps) {
   >(null);
   const [htmlDialogOpen, setHtmlDialogOpen] = useState(false);
   const [htmlTemplate, setHtmlTemplate] = useState<ExportType>("beautiful_read");
+  const [exportStartInFlight, setExportStartInFlight] = useState(false);
+  const [pendingWikiQuickExport, setPendingWikiQuickExport] =
+    useState<PendingWikiQuickExport | null>(null);
+  const [restrictedExportConfirmation, setRestrictedExportConfirmation] =
+    useState<RestrictedWikiQuickExportConfirmation | null>(null);
+  const quickExportMountedRef = useRef(true);
+  const quickExportInFlightRef = useRef(false);
+  const quickExportRequestEpochRef = useRef(0);
   const [conflictDialogOpen, setConflictDialogOpen] = useState(true);
   const [sourceMovePath, setSourceMovePath] = useState<string | null>(null);
   const [sourceAiWorkbench, setSourceAiWorkbench] =
@@ -141,9 +176,12 @@ export function WikiView({ capabilities }: WikiViewProps) {
 
   const exportRecords = useExportStore((state) => state.records);
   const runningExportTaskId = useExportStore((state) => state.runningTaskId);
+  const exportError = useExportStore((state) => state.error);
   const previewHtml = useExportStore((state) => state.previewHtml);
   const previewId = useExportStore((state) => state.previewId);
   const loadExports = useExportStore((state) => state.loadExports);
+  const startExport = useExportStore((state) => state.startExport);
+  const regenerateExport = useExportStore((state) => state.regenerateExport);
   const clearRunningTask = useExportStore((state) => state.clearRunningTask);
   const loadPreview = useExportStore((state) => state.loadPreview);
   const openFolder = useExportStore((state) => state.openFolder);
@@ -154,6 +192,19 @@ export function WikiView({ capabilities }: WikiViewProps) {
   const layoutStyle = {
     "--wiki-tree-w-current": `${paneSizes.wikiTree}px`,
   } as CSSProperties;
+
+  const isCurrentQuickExportPresentation = (
+    scope: Pick<PendingWikiQuickExport, "projectId" | "projectRootPath" | "pagePath">,
+  ) => quickExportMountedRef.current && isCurrentWikiQuickExport(scope);
+
+  useEffect(() => {
+    quickExportMountedRef.current = true;
+    return () => {
+      quickExportMountedRef.current = false;
+      quickExportRequestEpochRef.current += 1;
+      quickExportInFlightRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     setSourceAiWorkbench((current) =>
@@ -184,6 +235,28 @@ export function WikiView({ capabilities }: WikiViewProps) {
   }, [consumeExportRequest, page, requestedExportType]);
 
   useEffect(() => {
+    quickExportRequestEpochRef.current += 1;
+    quickExportInFlightRef.current = false;
+    setExportStartInFlight(false);
+    setPendingWikiQuickExport((current) =>
+      current &&
+      current.projectId === projectId &&
+      sameProjectRoot(current.projectRootPath, rootPath) &&
+      current.pagePath === selectedPath
+        ? current
+        : null,
+    );
+    setRestrictedExportConfirmation((current) =>
+      current &&
+      current.request.scope.projectId === projectId &&
+      sameProjectRoot(current.request.scope.projectRootPath, rootPath) &&
+      current.request.scope.pagePath === selectedPath
+        ? current
+        : null,
+    );
+  }, [projectId, rootPath, selectedPath]);
+
+  useEffect(() => {
     if (conflict) setConflictDialogOpen(true);
   }, [conflict?.currentHash]);
 
@@ -193,8 +266,19 @@ export function WikiView({ capabilities }: WikiViewProps) {
     }
   }, [rightPanelMode, page?.meta.path, setWikiAssistantPagePath]);
 
-  const runningExportTask = runningExportTaskId
-    ? tasks.find((task) => task.id === runningExportTaskId) ?? null
+  const currentPendingWikiQuickExport =
+    pendingWikiQuickExport &&
+    pendingWikiQuickExport.projectId === projectId &&
+    sameProjectRoot(pendingWikiQuickExport.projectRootPath, rootPath) &&
+    pendingWikiQuickExport.pagePath === selectedPath
+      ? pendingWikiQuickExport
+      : null;
+  const currentRunningExportTaskId =
+    currentPendingWikiQuickExport?.taskId === runningExportTaskId
+      ? runningExportTaskId
+      : null;
+  const runningExportTask = currentRunningExportTaskId
+    ? tasks.find((task) => task.id === currentRunningExportTaskId) ?? null
     : null;
   const selectedSourceId = page?.meta.sourceBinding?.sourceId ?? null;
   const selectedSourceAiTasks = selectedSourceId
@@ -266,10 +350,21 @@ export function WikiView({ capabilities }: WikiViewProps) {
   ]);
 
   useEffect(() => {
-    if (!runningExportTask || !isTerminalStatus(runningExportTask.status)) return;
+    if (
+      !runningExportTask ||
+      !currentPendingWikiQuickExport ||
+      !isTerminalStatus(runningExportTask.status)
+    ) return;
+    const finishedTask = runningExportTask;
+    const exportScope = currentPendingWikiQuickExport;
     void loadExports(projectId, rootPath).then(() => {
+      if (
+        !quickExportMountedRef.current ||
+        !isCurrentWikiQuickExport(exportScope)
+      ) return;
+      if (useExportStore.getState().runningTaskId !== finishedTask.id) return;
       clearRunningTask();
-      if (runningExportTask.status !== "succeeded") return;
+      if (finishedTask.status !== "succeeded") return;
       const latest = useExportStore
         .getState()
         .records.filter(
@@ -280,9 +375,13 @@ export function WikiView({ capabilities }: WikiViewProps) {
       void loadPreview(
         { projectId, projectRootPath: rootPath, outputPath: latest.outputPath },
         latest.id,
+        () =>
+          quickExportMountedRef.current &&
+          isCurrentWikiQuickExport(exportScope),
       );
     });
   }, [
+    currentPendingWikiQuickExport,
     runningExportTask,
     projectId,
     rootPath,
@@ -299,6 +398,126 @@ export function WikiView({ capabilities }: WikiViewProps) {
   const previewRecord = selectWikiPreviewRecord(exportRecords, previewId, selectedPath);
   const pagePreviewHtml = previewRecord?.id === previewId ? previewHtml : null;
 
+  const showExportTask = (taskId: string, scope: PendingWikiQuickExport) => {
+    void fetchTaskById(taskId).catch(() => undefined);
+    if (isCurrentQuickExportPresentation(scope)) openTaskDrawer(taskId);
+  };
+
+  const startWikiQuickExport = async (
+    request: WikiQuickExportRequest,
+    acknowledgeRestrictedContent: boolean,
+    requestEpoch: number,
+  ) => {
+    let taskId: string | null = null;
+    try {
+      taskId = request.record
+        ? await regenerateExport(projectId, rootPath, request.record, {
+            route: "auto",
+            options: DEFAULT_EXPORT_OPTIONS,
+            acknowledgeRestrictedContent,
+          })
+        : await startExport(
+            projectId,
+            rootPath,
+            request.scope.exportType,
+            request.scope.pagePath,
+            {
+              route: "auto",
+              options: DEFAULT_EXPORT_OPTIONS,
+              acknowledgeRestrictedContent,
+            },
+          );
+    } catch {
+      // The store owns the normal backend error path. This guard keeps a
+      // mocked or unexpected rejection from leaving the quick-export lock.
+      taskId = null;
+    }
+
+    const stillCurrent =
+      requestEpoch === quickExportRequestEpochRef.current &&
+      isCurrentQuickExportPresentation(request.scope);
+    if (!stillCurrent) return;
+
+    quickExportInFlightRef.current = false;
+    setExportStartInFlight(false);
+
+    if (!taskId || !stillCurrent) {
+      if (!taskId && stillCurrent && request.record === null) {
+        setHtmlDialogOpen(true);
+      }
+      return;
+    }
+
+    const pending: PendingWikiQuickExport = {
+      ...request.scope,
+      taskId,
+    };
+    setPendingWikiQuickExport(pending);
+    setRestrictedExportConfirmation(null);
+    setHtmlDialogOpen(false);
+    setMode("preview");
+    showExportTask(taskId, pending);
+  };
+
+  const requestWikiQuickExport = (
+    scope: WikiQuickExportRequest["scope"],
+    record: ExportRecord | null,
+  ) => {
+    if (
+      quickExportInFlightRef.current ||
+      !isCurrentQuickExportPresentation(scope)
+    ) return;
+
+    quickExportInFlightRef.current = true;
+    setExportStartInFlight(true);
+    const requestEpoch = ++quickExportRequestEpochRef.current;
+    const request: WikiQuickExportRequest = { scope, record };
+
+    void (async () => {
+      let status: ExportRestrictedContentStatus | null = null;
+      try {
+        status = await invoke<ExportRestrictedContentStatus>(
+          "get_export_restricted_content_status",
+          {
+            request: {
+              projectId: scope.projectId,
+              projectRootPath: scope.projectRootPath,
+              exportType: scope.exportType,
+              sourcePath: scope.pagePath,
+            },
+          },
+        );
+      } catch {
+        // The backend remains the authorization source. If the advisory
+        // lookup is unavailable, let the direct command return its decision.
+      }
+
+      if (
+        requestEpoch !== quickExportRequestEpochRef.current ||
+        !isCurrentQuickExportPresentation(scope)
+      ) {
+        if (requestEpoch === quickExportRequestEpochRef.current) {
+          quickExportInFlightRef.current = false;
+          setExportStartInFlight(false);
+        }
+        return;
+      }
+
+      if (status?.containsRestrictedContent) {
+        quickExportInFlightRef.current = false;
+        setExportStartInFlight(false);
+        setHtmlDialogOpen(false);
+        setRestrictedExportConfirmation({
+          request,
+          count: status.restrictedSourceCount,
+        });
+        return;
+      }
+
+      await startWikiQuickExport(request, false, requestEpoch);
+    })();
+  };
+
   const handleGenerateHtml = (type: ExportType) => {
     if (!page) return;
     if (!SINGLE_PAGE_EXPORT_TYPES.includes(type)) return;
@@ -306,25 +525,83 @@ export function WikiView({ capabilities }: WikiViewProps) {
     setHtmlDialogOpen(true);
   };
 
-  const handleDialogGenerate = (type: ExportType) => {
-    if (SINGLE_PAGE_EXPORT_TYPES.includes(type)) setHtmlTemplate(type);
+  const handleHtmlDialogCancel = () => {
+    quickExportRequestEpochRef.current += 1;
+    quickExportInFlightRef.current = false;
+    setExportStartInFlight(false);
     setHtmlDialogOpen(false);
+  };
+
+  const handleDialogGenerate = (type: ExportType) => {
+    if (!page || !SINGLE_PAGE_EXPORT_TYPES.includes(type)) return;
+    setHtmlTemplate(type);
+    requestWikiQuickExport(
+      {
+        projectId,
+        projectRootPath: rootPath,
+        pagePath: page.meta.path,
+        exportType: type as PendingWikiQuickExport["exportType"],
+        autoPreview: true,
+      },
+      null,
+    );
   };
 
   const handleRegenerateHtml = () => {
     if (!page) return;
-    requestWorkflowLaunch({
-      projectId,
-      projectRootPath: rootPath,
-      kind: "generate_content",
-      origin: "wiki",
-      scopePreset: {
+    if (!previewRecord) {
+      handleGenerateHtml("beautiful_read");
+      return;
+    }
+    if (!SINGLE_PAGE_EXPORT_TYPES.includes(previewRecord.exportType)) {
+      requestWorkflowLaunch({
+        projectId,
+        projectRootPath: rootPath,
         kind: "generate_content",
-        artifactType: previewRecord?.exportType ?? "beautiful_read",
-        pagePaths: previewRecord?.sourcePath ? [previewRecord.sourcePath] : [page.meta.path],
-        outputPath: previewRecord?.outputPath ?? null,
+        origin: "wiki",
+        scopePreset: {
+          kind: "generate_content",
+          artifactType: previewRecord.exportType,
+          pagePaths: previewRecord.sourcePath
+            ? [previewRecord.sourcePath]
+            : [page.meta.path],
+          outputPath: previewRecord.outputPath,
+        },
+      });
+      return;
+    }
+    setHtmlTemplate(previewRecord.exportType);
+    requestWikiQuickExport(
+      {
+        projectId,
+        projectRootPath: rootPath,
+        pagePath: page.meta.path,
+        exportType: previewRecord.exportType as PendingWikiQuickExport["exportType"],
+        autoPreview: true,
       },
-    });
+      previewRecord,
+    );
+  };
+
+  const handleRestrictedExportConfirm = () => {
+    const confirmation = restrictedExportConfirmation;
+    if (!confirmation || quickExportInFlightRef.current) return;
+    if (!isCurrentQuickExportPresentation(confirmation.request.scope)) {
+      setRestrictedExportConfirmation(null);
+      return;
+    }
+    quickExportInFlightRef.current = true;
+    setExportStartInFlight(true);
+    setRestrictedExportConfirmation(null);
+    const requestEpoch = ++quickExportRequestEpochRef.current;
+    void startWikiQuickExport(confirmation.request, true, requestEpoch);
+  };
+
+  const handleRestrictedExportCancel = () => {
+    const request = restrictedExportConfirmation?.request ?? null;
+    setRestrictedExportConfirmation(null);
+    if (!request || !isCurrentQuickExportPresentation(request.scope)) return;
+    if (request.record === null) setHtmlDialogOpen(true);
   };
 
   const handlePageFormSubmit = (input: CreateWikiPageInput) => {
@@ -518,7 +795,11 @@ export function WikiView({ capabilities }: WikiViewProps) {
             </div>
             <button
               type="button"
-              disabled={!page || Boolean(runningExportTaskId)}
+              disabled={
+                !page ||
+                exportStartInFlight ||
+                Boolean(runningExportTaskId)
+              }
               onClick={() => handleGenerateHtml("beautiful_read")}
               className="inline-flex h-[28px] items-center gap-1.5 rounded-[var(--radius-sm)] bg-[var(--foreground)] px-3 text-[11.5px] font-medium text-[var(--text-inverse)] disabled:opacity-40"
             >
@@ -625,6 +906,11 @@ export function WikiView({ capabilities }: WikiViewProps) {
             {wikiError}
           </div>
         ) : null}
+        {exportError ? (
+          <div role="alert" className="shrink-0 border-b border-[var(--border-subtle)] bg-[var(--warning-soft)] px-4 py-2 text-[12px] text-[var(--text-primary)]">
+            {exportError}
+          </div>
+        ) : null}
 
         <div className="min-h-0 flex-1 overflow-y-auto">
           {!page ? (
@@ -658,7 +944,7 @@ export function WikiView({ capabilities }: WikiViewProps) {
               html={pagePreviewHtml}
               outputPath={previewRecord?.outputPath ?? null}
               templateLabel={t(`wiki.html.template.${previewRecord?.exportType ?? "beautiful_read"}.title`)}
-              busy={Boolean(runningExportTaskId)}
+              busy={Boolean(currentRunningExportTaskId) || exportStartInFlight}
               onBack={() => setMode("read")}
               onRegenerate={handleRegenerateHtml}
               onOpenFolder={() => {
@@ -869,8 +1155,15 @@ export function WikiView({ capabilities }: WikiViewProps) {
         <GenerateHtmlDialog
           pagePath={page.meta.path}
           initialType={htmlTemplate}
-          onCancel={() => setHtmlDialogOpen(false)}
+          onCancel={handleHtmlDialogCancel}
           onGenerate={handleDialogGenerate}
+        />
+      ) : null}
+      {restrictedExportConfirmation ? (
+        <ExportRestrictedContentDialog
+          count={restrictedExportConfirmation.count}
+          onCancel={handleRestrictedExportCancel}
+          onConfirm={handleRestrictedExportConfirm}
         />
       ) : null}
     </div>
@@ -948,6 +1241,20 @@ export function sameProjectRoot(
       : normalized;
   };
   return normalize(stored) === normalize(current);
+}
+
+function isCurrentWikiQuickExport(
+  scope: Pick<PendingWikiQuickExport, "projectId" | "projectRootPath" | "pagePath">,
+): boolean {
+  const project = useProjectStore.getState().currentProject;
+  const page = useWikiStore.getState().page;
+  const selectedPath = useWikiStore.getState().selectedPath;
+  return (
+    project.projectId === scope.projectId &&
+    sameProjectRoot(project.rootPath, scope.projectRootPath) &&
+    page?.meta.path === scope.pagePath &&
+    selectedPath === scope.pagePath
+  );
 }
 
 export function selectSourceAiWorkbenchTask(
