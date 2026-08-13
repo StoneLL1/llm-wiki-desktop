@@ -24,3 +24,7 @@ Project-scoped presentation for the three fixed product workflows: Update Wiki, 
 - No replacement for technical Agent services, Agent types, capability detection, or the unchanged sidebar Agent status foot.
 
 The superseded Agent page, right panel, and generic Run Agent dialog were retired in Workflows Batch 8. Compatibility-only Agent concepts remain under their existing technical names.
+
+## Decision Gate H status
+
+As of 2026-08-13, H3–H5 provide backend-derived Agent Health availability and the guarded Lint repair task surface while preserving the existing queue, confirmation, checkpoint, result, and Diff contracts. H6 final validation remains no-go: the recorded full gate is not green in the current Windows environment, and the complete performance/negative/WebView2 evidence matrix is not closed. Do not mark Decision Gate H or Batch 7 unblocked.

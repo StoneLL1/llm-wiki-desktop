@@ -562,6 +562,8 @@ pub struct BackendTask {
 - 取消后不得把未确认的部分结果提升到正式 Wiki 或 Exports 路径。
 - 系统通知只在 `waiting_for_confirmation`、`succeeded` 和 `failed` 时触发。
 
+当前实现状态（2026-08-13）：H3–H5 复用本节的 ProjectContext、Workflow queue、TaskService、confirmation、Git checkpoint、candidate manifest 与 typed result 边界完成 Agent Health/repair bridge；H6 未改变 backend runtime。由于最终 full gate 与完整验证矩阵未全绿，Gate H / Batch 7 继续 fail closed。
+
 ## 11. ProjectService
 
 职责：

@@ -597,7 +597,7 @@ waiting、terminal 与 confirmation 先 flush 同 task 的 buffered progress 并
 
 > 2026-08-12 superseding status：产品所有者已批准 Agent 路线，并以 [Agent Deep Lint / Agent 修复实施计划](2026-08-12-decision-gate-h-agent-deep-lint-repair-implementation.md) 的 1A/2A/3A/4A 取代下列旧 Path A/B 选择：内置固定 `wiki-lint`；Agent 只写 task-owned candidate 的授权 Wiki，raw/Source 只读；一次批批准且仅 delete/overwrite/conflict 二次确认；最多三轮 deterministic recheck 并保留 Diff/rollback。旧 `credential broker`、专门 no-tools/no-network 项目和逐工具审批不再是 Gate H 前置条件；trust、writable、Git checkpoint、path/link、no-secret、route revision、cancel/timeout、checked apply、no fallback 等 Hard Rules 保持不变。
 >
-> 这关闭 `WF-D01` 的产品未决状态，不表示 runtime 已启用。H0–H2 期间 `supports_lint_agent` 仍为 false、Health 不广告 Agent、repair command/operation 不可达；只有新计划 H3–H6 全部通过后，Batch 7 才可解除阻断。以下 13.1–13.3 保留为决策前历史证据，不再作为当前实施前置条件。
+> 这关闭 `WF-D01` 的产品未决状态，不表示最终交付门已通过。H3 已启用后端真实 route，H4B 已接入 guarded repair operation，H5 已完成 Lint/Workflows repair UI；H6 的 full gate 与完整负向、性能、WebView2 证据尚未全绿，因此 Batch 7 仍保持 blocked。以下 13.1–13.3 保留为决策前历史证据，不再作为当前实施前置条件。
 
 这是安全/产品决策，不是可以顺手修掉的普通 bug。
 
