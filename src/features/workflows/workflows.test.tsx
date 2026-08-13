@@ -113,6 +113,9 @@ describe("Workflows overview", () => {
     expect(screen.getAllByText("workflows.recommended")).toHaveLength(1);
     fireEvent.click(screen.getAllByRole("button", { name: /^workflows\.action\.run:/ })[1]!);
     expect(prepare).toHaveBeenCalledWith("health_check");
+
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.run: workflows.kind.generate_content" }));
+    expect(prepare).toHaveBeenCalledWith("generate_content");
   });
 
   it("orders attention, the three available workflows, and the backend-bounded recent five", () => {

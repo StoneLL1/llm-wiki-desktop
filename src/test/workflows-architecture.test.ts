@@ -327,4 +327,41 @@ describe("Workflows architecture", () => {
     expect(lintView).toContain('kind: "update_wiki"');
     expect(lintView).toContain("requestWorkflowLaunch");
   });
+
+  it("keeps Wiki quick exports local while Exports and Workflows retain preparation", () => {
+    const wikiView = readFileSync(
+      join(root, "src", "features", "wiki", "WikiView.tsx"),
+      "utf8",
+    );
+    const rightPanelSource = readFileSync(
+      join(root, "src", "components", "app", "RightContextPanel.tsx"),
+      "utf8",
+    );
+    const exportsView = readFileSync(
+      join(root, "src", "features", "exports", "ExportsView.tsx"),
+      "utf8",
+    );
+    const workflowsOverview = readFileSync(
+      join(root, "src", "features", "workflows", "WorkflowsOverview.tsx"),
+      "utf8",
+    );
+    const exportTypes = readFileSync(
+      join(root, "src", "types", "export.ts"),
+      "utf8",
+    );
+    const singlePageTypes =
+      exportTypes.match(
+        /export const SINGLE_PAGE_EXPORT_TYPES: ExportType\[] = \[([\s\S]*?)\n\];/,
+      )?.[1] ?? "";
+
+    expect(wikiView).not.toContain("requestWorkflowLaunch");
+    expect(wikiView).toContain("requestExport");
+    expect(rightPanelSource).not.toContain("requestWorkflowLaunch");
+    expect(rightPanelSource).toContain("requestExport");
+    expect(exportsView).toContain("requestWorkflowLaunch");
+    expect(exportsView).toContain('origin: "exports"');
+    expect(workflowsOverview).toContain("onPrepare={() => onPrepare(kind)}");
+    expect(exportTypes).toContain("exportType: ExportType[]");
+    expect(singlePageTypes).not.toContain('"project_report"');
+  });
 });
