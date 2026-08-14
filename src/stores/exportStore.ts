@@ -16,7 +16,9 @@ import type {
   ToggleExportBookmarkRequest,
   ToggleExportBookmarkResponse,
 } from "../types/export";
+import type { BackendTask } from "../types/task";
 import { captureProjectScope, isProjectScopeCurrent } from "./projectScope";
+import { useTaskStore } from "./taskStore";
 
 const hasTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -134,8 +136,14 @@ export const useExportStore = create<ExportState>((set, get) => ({
       acknowledgeRestrictedContent: prefs?.acknowledgeRestrictedContent ?? false,
     };
     try {
-      const task = await invoke<{ id: string }>("start_export", { request });
-      if (!isProjectScopeCurrent(scope)) return null;
+      const task = await invoke<BackendTask>("start_export", { request });
+      // Task facts are global audit state. Keep a valid backend response even
+      // when its originating project stopped owning the current presentation.
+      if (!isProjectScopeCurrent(scope)) {
+        useTaskStore.getState().recordTaskFact(task);
+        return task.id;
+      }
+      useTaskStore.getState().upsertTask(task);
       set({ runningTaskId: task.id });
       return task.id;
     } catch (error) {
@@ -162,8 +170,12 @@ export const useExportStore = create<ExportState>((set, get) => ({
       acknowledgeRestrictedContent: prefs?.acknowledgeRestrictedContent ?? false,
     };
     try {
-      const task = await invoke<{ id: string }>("regenerate_export", { request });
-      if (!isProjectScopeCurrent(scope)) return null;
+      const task = await invoke<BackendTask>("regenerate_export", { request });
+      if (!isProjectScopeCurrent(scope)) {
+        useTaskStore.getState().recordTaskFact(task);
+        return task.id;
+      }
+      useTaskStore.getState().upsertTask(task);
       set({ runningTaskId: task.id });
       return task.id;
     } catch (error) {

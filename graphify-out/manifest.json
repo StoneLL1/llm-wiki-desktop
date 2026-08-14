@@ -2260,8 +2260,8 @@
     "semantic_hash": ""
   },
   "src/features/workflows/workflows.test.tsx": {
-    "mtime": 1786618861.5290473,
-    "ast_hash": "f83324e7131027babe2e3982a10e8dcc",
+    "mtime": 1786673959.390111,
+    "ast_hash": "aa153fb87005296e6bbdd356cb8a9154",
     "semantic_hash": ""
   },
   "src/hooks/useAiCapabilities.test.tsx": {
@@ -2470,8 +2470,8 @@
     "semantic_hash": ""
   },
   "src/stores/exportStore.ts": {
-    "mtime": 1786290320.299908,
-    "ast_hash": "8b5ad2f2d1fec3d976dd15b947d15df3",
+    "mtime": 1786676556.1060035,
+    "ast_hash": "e4f4d56c0805202643bf89d693572c22",
     "semantic_hash": ""
   },
   "src/stores/graphStore.ts": {
@@ -2545,8 +2545,8 @@
     "semantic_hash": ""
   },
   "src/stores/taskStore.ts": {
-    "mtime": 1786029212.0216315,
-    "ast_hash": "2c3262526f30120e6aef9bccb84afa1c",
+    "mtime": 1786676556.103681,
+    "ast_hash": "9bda8bd65d90ae1ac6913d9f35bdde6e",
     "semantic_hash": ""
   },
   "src/stores/toastStore.ts": {
@@ -2790,8 +2790,8 @@
     "semantic_hash": "01dd6f7c59261000a38458717e43f788"
   },
   "SPEC/APP_flow.md": {
-    "mtime": 1786613647.889033,
-    "ast_hash": "7e7fb9030bdfea5dcaff4f8de1e96b43",
+    "mtime": 1786674455.4366484,
+    "ast_hash": "94bfc0ebb4cad82e8d85fc8b60f13327",
     "semantic_hash": ""
   },
   "SPEC/BACKEND_STRUCTURE.md": {
@@ -2805,18 +2805,18 @@
     "semantic_hash": "173862a09e7e0926fbc44c574eaedca2"
   },
   "SPEC/FRONTEND_GUIDELINES.md": {
-    "mtime": 1785514627.4021828,
-    "ast_hash": "3f0db869b5538aa6f4adf44576663e50",
-    "semantic_hash": "3f0db869b5538aa6f4adf44576663e50"
+    "mtime": 1786674500.2793293,
+    "ast_hash": "421c8d9c3683006eb61ee915d4c7bc8c",
+    "semantic_hash": ""
   },
   "SPEC/PRD.md": {
-    "mtime": 1786613645.875547,
-    "ast_hash": "d56dff15f18afe8d18117481b7964eb4",
+    "mtime": 1786674551.6456096,
+    "ast_hash": "cabe9a52240902add3f4d79e1dc257af",
     "semantic_hash": ""
   },
   "SPEC/SPEC.md": {
-    "mtime": 1786613646.532387,
-    "ast_hash": "2c7df2b6899333b586421340f18c7e7d",
+    "mtime": 1786674500.2760959,
+    "ast_hash": "f8883603bcc80e45214ec1eda86ca8b2",
     "semantic_hash": ""
   },
   "SPEC/TECH_STACK.md": {
@@ -2825,8 +2825,8 @@
     "semantic_hash": "678701704f553a827612a7eb8143fd07"
   },
   "SPEC/gotchas.txt": {
-    "mtime": 1786620831.9105394,
-    "ast_hash": "7afaab13c6991ae65de7058e569f3a6f",
+    "mtime": 1786677997.9295533,
+    "ast_hash": "a5f3ff1998a38e304906c2526f7cc3e6",
     "semantic_hash": ""
   },
   "SPEC/plans/agent.md": {
@@ -2905,8 +2905,8 @@
     "semantic_hash": "35ef62685304280209d4cbf4013fbacb"
   },
   "SPEC/progress.txt": {
-    "mtime": 1786620831.9075391,
-    "ast_hash": "096b834ae241f35e6bd30388008cfdaa",
+    "mtime": 1786677997.927552,
+    "ast_hash": "4713a3bda1143f55a57f3a60cf70c4b2",
     "semantic_hash": ""
   },
   "SPEC/roadmap/README.md": {
@@ -2915,9 +2915,9 @@
     "semantic_hash": "6e129ee04522e0e76c8bee5f897ba217"
   },
   "SPEC/roadmap/agent.md": {
-    "mtime": 1785727051.723417,
-    "ast_hash": "78df9577c8d8e6648dbaf762a0d9c2fc",
-    "semantic_hash": "78df9577c8d8e6648dbaf762a0d9c2fc"
+    "mtime": 1786674733.370412,
+    "ast_hash": "e6986d21e4f04a39d050a1f7caef131d",
+    "semantic_hash": ""
   },
   "SPEC/roadmap/chat.md": {
     "mtime": 1785514627.4102435,
@@ -2930,9 +2930,9 @@
     "semantic_hash": "79979793cbd2e6a39a2f741d8f449240"
   },
   "SPEC/roadmap/exports.md": {
-    "mtime": 1786088254.773078,
-    "ast_hash": "0cdc174f45ec8a68121552bd7be4e466",
-    "semantic_hash": "0cdc174f45ec8a68121552bd7be4e466"
+    "mtime": 1786676895.328208,
+    "ast_hash": "caf45f1b82c9fa42b7676e5e1dea9d71",
+    "semantic_hash": ""
   },
   "SPEC/roadmap/graph.md": {
     "mtime": 1785514627.4102435,
@@ -3430,8 +3430,8 @@
     "semantic_hash": "43e9cc8e4ea5646053708228991a6dae"
   },
   "docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md": {
-    "mtime": 1786613643.756916,
-    "ast_hash": "3384d3e75e057572ccb4fd2697d6ddb4",
+    "mtime": 1786674455.4271777,
+    "ast_hash": "72afabd53a2c2fa690adef29a2973859",
     "semantic_hash": ""
   },
   "gotchas.txt": {

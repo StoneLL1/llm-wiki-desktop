@@ -8,6 +8,7 @@ import { useModalDialog } from "../../hooks/useModalDialog";
 interface GenerateHtmlDialogProps {
   pagePath: string;
   initialType?: ExportType;
+  busy?: boolean;
   onCancel: () => void;
   onGenerate: (type: ExportType) => void;
 }
@@ -21,6 +22,7 @@ const templates = [
 export function GenerateHtmlDialog({
   pagePath,
   initialType = "beautiful_read",
+  busy = false,
   onCancel,
   onGenerate,
 }: GenerateHtmlDialogProps) {
@@ -29,10 +31,14 @@ export function GenerateHtmlDialog({
     ? initialType
     : "beautiful_read";
   const [selected, setSelected] = useState<ExportType>(initialSelection);
-  const dialogRef = useModalDialog<HTMLDivElement>({ onClose: onCancel });
+  const dialogRef = useModalDialog<HTMLDivElement>({
+    onClose: () => {
+      if (!busy) onCancel();
+    },
+  });
 
   return (
-    <div ref={dialogRef} className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 px-4" role="dialog" aria-modal="true" aria-labelledby="generate-html-title" tabIndex={-1}>
+    <div ref={dialogRef} className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 px-4" role="dialog" aria-modal="true" aria-labelledby="generate-html-title" aria-busy={busy} tabIndex={-1}>
       <section className="w-full max-w-[820px] rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--surface-raised)] shadow-lg">
         <header className="flex min-h-[52px] items-center border-b border-[var(--border)] px-4">
           <h2 id="generate-html-title" className="text-[16px] font-semibold text-[var(--text-primary)]">
@@ -54,6 +60,7 @@ export function GenerateHtmlDialog({
                 <button
                   key={type}
                   type="button"
+                  disabled={busy}
                   aria-label={label}
                   aria-pressed={active}
                   onClick={() => setSelected(type)}
@@ -72,10 +79,10 @@ export function GenerateHtmlDialog({
           </div>
         </div>
         <footer className="flex min-h-[52px] items-center justify-end gap-2 border-t border-[var(--border)] px-4">
-          <button type="button" onClick={onCancel} className="h-[28px] rounded-[var(--radius-md)] border border-[var(--border)] px-3 text-[12px]">
+          <button type="button" disabled={busy} onClick={onCancel} className="h-[28px] rounded-[var(--radius-md)] border border-[var(--border)] px-3 text-[12px] disabled:opacity-40">
             {t("confirmation.cancel")}
           </button>
-          <button type="button" onClick={() => onGenerate(selected)} className="h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)]">
+          <button type="button" disabled={busy} onClick={() => onGenerate(selected)} className="h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] disabled:opacity-40">
             {t("wiki.html.generateAndPreview")}
           </button>
         </footer>

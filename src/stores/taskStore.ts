@@ -16,6 +16,8 @@ import { useProjectStore } from "./projectStore";
 interface TaskState {
   activeProjectId: string | null;
   activeProjectRootPath: string | null;
+  /** Global task facts received from authoritative backend responses. */
+  taskFacts: Record<string, BackendTask>;
   tasks: BackendTask[];
   logs: Record<string, LogLine[]>;
   activities: Record<string, TaskActivity[]>;
@@ -28,6 +30,7 @@ interface TaskState {
   projectPersistenceReason: TaskProjectPersistenceReason | null;
 
   setTasks: (tasks: BackendTask[]) => void;
+  recordTaskFact: (task: BackendTask) => void;
   upsertTask: (task: BackendTask) => void;
   upsertTasks: (tasks: readonly BackendTask[]) => void;
   appendLog: (taskId: string, line: LogLine) => void;
@@ -126,6 +129,7 @@ function applyBackendEvent(state: TaskState, event: BackendEvent): TaskState {
 export const useTaskStore = create<TaskState>((set, get) => ({
   activeProjectId: null,
   activeProjectRootPath: null,
+  taskFacts: {},
   tasks: [],
   logs: {},
   activities: {},
@@ -143,8 +147,14 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   // for a list request that started before task creation.
   setTasks: (tasks) => set((state) => {
     const nextTasks = replaceTaskSnapshot(state.tasks, tasks);
-    return { tasks: nextTasks, runningCount: countRunning(nextTasks) };
+    return {
+      taskFacts: mergeTaskFacts(state.taskFacts, tasks),
+      tasks: nextTasks,
+      runningCount: countRunning(nextTasks),
+    };
   }),
+  recordTaskFact: (task) =>
+    set((state) => ({ taskFacts: mergeTaskFacts(state.taskFacts, [task]) })),
   upsertTask: (task) =>
     set((state) => {
       const idx = state.tasks.findIndex((t) => t.id === task.id);
@@ -152,7 +162,11 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         idx >= 0
           ? state.tasks.map((t, i) => (i === idx ? preferFreshTask(t, task) : t))
           : [...state.tasks, task];
-      return { tasks, runningCount: countRunning(tasks) };
+      return {
+        taskFacts: mergeTaskFacts(state.taskFacts, [task]),
+        tasks,
+        runningCount: countRunning(tasks),
+      };
     }),
   upsertTasks: (incoming) =>
     set((state) => {
@@ -165,7 +179,11 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         return preferFreshTask(task, next);
       });
       tasks.push(...incomingById.values());
-      return { tasks, runningCount: countRunning(tasks) };
+      return {
+        taskFacts: mergeTaskFacts(state.taskFacts, incoming),
+        tasks,
+        runningCount: countRunning(tasks),
+      };
     }),
   appendLog: (taskId, line) =>
     set((state) => {
@@ -230,6 +248,17 @@ function preferFreshTask(current: BackendTask, incoming: BackendTask): BackendTa
   return withBatch.operation === undefined && current.operation !== undefined
     ? { ...withBatch, operation: current.operation }
     : withBatch;
+}
+
+function mergeTaskFacts(
+  current: Readonly<Record<string, BackendTask>>,
+  incoming: readonly BackendTask[],
+): Record<string, BackendTask> {
+  const next = { ...current };
+  for (const task of incoming) {
+    next[task.id] = next[task.id] ? preferFreshTask(next[task.id], task) : task;
+  }
+  return next;
 }
 
 /**

@@ -102,6 +102,7 @@ beforeEach(() => {
   useTaskStore.setState({
     activeProjectId: null,
     activeProjectRootPath: null,
+    taskFacts: {},
     tasks: [],
     logs: {},
     activities: {},
@@ -1199,21 +1200,7 @@ describe("Wiki HTML preview", () => {
       pages: [pageMeta()],
       totalPages: 1,
     };
-    const task = {
-      id: "task-export",
-      taskType: "export" as const,
-      projectId: "proj-1",
-      title: "Export Transformer",
-      status: "running" as const,
-      progress: 0.1,
-      startedAt: "2026-08-13T10:00:00Z",
-      updatedAt: "2026-08-13T10:00:00Z",
-      completedAt: null,
-      cancellable: true,
-      logPath: null,
-      result: null,
-      error: null,
-    };
+    const task = exportTask();
     invokeMock.mockImplementation((command: string) => {
       if (command === "scan_wiki") return Promise.resolve(tree);
       if (command === "read_wiki_page") return Promise.resolve(pageContent());
@@ -1221,7 +1208,7 @@ describe("Wiki HTML preview", () => {
       if (command === "get_export_restricted_content_status") {
         return Promise.resolve({ containsRestrictedContent: false, restrictedSourceCount: 0 });
       }
-      if (command === "start_export") return Promise.resolve({ id: task.id });
+      if (command === "start_export") return Promise.resolve(task);
       if (command === "get_task") return Promise.resolve(task);
       return Promise.resolve(null);
     });
@@ -1273,6 +1260,192 @@ describe("Wiki HTML preview", () => {
     expect(useWikiStore.getState().mode).toBe("preview");
   });
 
+  it.each(["page", "project"] as const)(
+    "keeps a deferred start task fact without stale %s presentation",
+    async (switchKind) => {
+      const firstPage = pageMeta();
+      const secondPage: WikiPageMeta = {
+        ...firstPage,
+        path: "wiki/concepts/attention.md",
+        title: "Attention",
+      };
+      const tree: WikiTree = {
+        root: {
+          name: "wiki",
+          kind: "folder",
+          path: "wiki",
+          starred: false,
+          bookmarked: false,
+          fileCount: 2,
+          children: [],
+        },
+        pages: [firstPage, secondPage],
+        totalPages: 2,
+      };
+      const task = exportTask({ id: `task-deferred-${switchKind}` });
+      const startResponse = deferred<BackendTask>();
+      invokeMock.mockImplementation((command: string) => {
+        if (command === "scan_wiki") return Promise.resolve(tree);
+        if (command === "read_wiki_page") return Promise.resolve(pageContent());
+        if (command === "list_exports") return Promise.resolve([]);
+        if (command === "get_export_restricted_content_status") {
+          return Promise.resolve({ containsRestrictedContent: false, restrictedSourceCount: 0 });
+        }
+        if (command === "start_export") return startResponse.promise;
+        if (command === "get_task") return Promise.resolve(task);
+        return Promise.resolve(null);
+      });
+      useProjectStore.getState().setCurrentProject({
+        ...defaultProject,
+        projectId: "proj-1",
+        rootPath: "D:/wiki",
+        name: "Wiki",
+      });
+      useTaskStore.setState({
+        activeProjectId: "proj-1",
+        activeProjectRootPath: "D:/wiki",
+      });
+      Object.defineProperty(window, "__TAURI_INTERNALS__", {
+        value: {},
+        configurable: true,
+      });
+
+      render(<WikiView capabilities={emptyAiCapabilities} />);
+      await waitFor(() => expect(useWikiStore.getState().page).not.toBeNull());
+      fireEvent.click(screen.getByRole("button", { name: "Generate HTML" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Generate and preview" }));
+      await waitFor(() =>
+        expect(
+          invokeMock.mock.calls.filter(([command]) => command === "start_export"),
+        ).toHaveLength(1),
+      );
+      expect(screen.getByRole("dialog")).toHaveAttribute("aria-busy", "true");
+      expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Generate and preview" })).toBeDisabled();
+
+      act(() => {
+        if (switchKind === "page") {
+          useWikiStore.setState({
+            selectedPath: secondPage.path,
+            page: pageContent({ meta: secondPage }),
+            mode: "read",
+          });
+        } else {
+          useProjectStore.getState().setCurrentProject({
+            ...defaultProject,
+            projectId: "proj-2",
+            rootPath: "D:/wiki-two",
+            name: "Wiki Two",
+          });
+          useTaskStore.setState({
+            activeProjectId: "proj-2",
+            activeProjectRootPath: "D:/wiki-two",
+            tasks: [],
+            drawerOpen: false,
+            selectedTaskId: null,
+          });
+        }
+        startResponse.resolve(task);
+      });
+
+      await waitFor(() =>
+        expect(useTaskStore.getState().taskFacts[task.id]).toMatchObject({ id: task.id }),
+      );
+      expect(useTaskStore.getState()).toMatchObject({
+        drawerOpen: false,
+        selectedTaskId: null,
+      });
+      expect(useExportStore.getState().runningTaskId).toBeNull();
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(
+        invokeMock.mock.calls.filter(([command]) => command === "read_export_preview"),
+      ).toHaveLength(0);
+      if (switchKind === "page") {
+        expect(useTaskStore.getState().tasks.some((candidate) => candidate.id === task.id)).toBe(true);
+        expect(useWikiStore.getState().selectedPath).toBe(secondPage.path);
+      } else {
+        expect(useTaskStore.getState()).toMatchObject({ tasks: [], runningCount: 0 });
+        expect(useProjectStore.getState().currentProject.projectId).toBe("proj-2");
+      }
+    },
+  );
+
+  it.each(["failed", "cancelled"] as const)(
+    "cleans a %s quick export before a delayed record refresh resolves",
+    async (terminalStatus) => {
+      const tree: WikiTree = {
+        root: {
+          name: "wiki",
+          kind: "folder",
+          path: "wiki",
+          starred: false,
+          bookmarked: false,
+          fileCount: 1,
+          children: [],
+        },
+        pages: [pageMeta()],
+        totalPages: 1,
+      };
+      const task = exportTask({ id: `task-${terminalStatus}` });
+      const terminalRefresh = deferred<ExportRecord[]>();
+      let listExportsCalls = 0;
+      invokeMock.mockImplementation((command: string) => {
+        if (command === "scan_wiki") return Promise.resolve(tree);
+        if (command === "read_wiki_page") return Promise.resolve(pageContent());
+        if (command === "list_exports") {
+          listExportsCalls += 1;
+          return listExportsCalls === 1 ? Promise.resolve([]) : terminalRefresh.promise;
+        }
+        if (command === "get_export_restricted_content_status") {
+          return Promise.resolve({ containsRestrictedContent: false, restrictedSourceCount: 0 });
+        }
+        if (command === "start_export") return Promise.resolve(task);
+        if (command === "get_task") return Promise.resolve(task);
+        return Promise.resolve(null);
+      });
+      useProjectStore.getState().setCurrentProject({
+        ...defaultProject,
+        projectId: "proj-1",
+        rootPath: "D:/wiki",
+        name: "Wiki",
+      });
+      useTaskStore.setState({
+        activeProjectId: "proj-1",
+        activeProjectRootPath: "D:/wiki",
+      });
+      Object.defineProperty(window, "__TAURI_INTERNALS__", {
+        value: {},
+        configurable: true,
+      });
+
+      render(<WikiView capabilities={emptyAiCapabilities} />);
+      await waitFor(() => expect(useWikiStore.getState().page).not.toBeNull());
+      fireEvent.click(screen.getByRole("button", { name: "Generate HTML" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Generate and preview" }));
+      await waitFor(() => expect(useWikiStore.getState().mode).toBe("preview"));
+
+      act(() => {
+        useTaskStore.setState({
+          tasks: [
+            exportTask({
+              id: task.id,
+              status: terminalStatus,
+              updatedAt: "2026-08-13T10:05:00Z",
+              completedAt: "2026-08-13T10:05:00Z",
+            }),
+          ],
+        });
+      });
+
+      await waitFor(() => expect(useExportStore.getState().runningTaskId).toBeNull());
+      expect(useWikiStore.getState().mode).toBe("read");
+      expect(screen.queryByTitle("HTML preview")).not.toBeInTheDocument();
+      expect(listExportsCalls).toBe(2);
+
+      act(() => terminalRefresh.resolve([]));
+    },
+  );
+
   it("previews the ExportRecord produced by the terminal task instead of the newest same-page export", async () => {
     const tree: WikiTree = {
       root: { name: "wiki", kind: "folder", path: "wiki", starred: false, bookmarked: false, fileCount: 1, children: [] },
@@ -1311,7 +1484,7 @@ describe("Wiki HTML preview", () => {
       if (command === "get_export_restricted_content_status") {
         return Promise.resolve({ containsRestrictedContent: false, restrictedSourceCount: 0 });
       }
-      if (command === "start_export") return Promise.resolve({ id: task.id });
+      if (command === "start_export") return Promise.resolve(task);
       if (command === "get_task") return Promise.resolve(task);
       if (command === "read_export_preview") return Promise.resolve("<h1>Transformer from task</h1>");
       return Promise.resolve(null);
@@ -1393,7 +1566,7 @@ describe("Wiki HTML preview", () => {
       if (command === "get_export_restricted_content_status") {
         return Promise.resolve({ containsRestrictedContent: false, restrictedSourceCount: 0 });
       }
-      if (command === "start_export") return Promise.resolve({ id: task.id });
+      if (command === "start_export") return Promise.resolve(task);
       if (command === "get_task") return Promise.resolve(task);
       if (command === "read_export_preview") return Promise.resolve("<h1>Once</h1>");
       return Promise.resolve(null);
@@ -1467,7 +1640,7 @@ describe("Wiki HTML preview", () => {
       if (command === "get_export_restricted_content_status") {
         return Promise.resolve({ containsRestrictedContent: false, restrictedSourceCount: 0 });
       }
-      if (command === "start_export") return Promise.resolve({ id: task.id });
+      if (command === "start_export") return Promise.resolve(task);
       if (command === "get_task") return Promise.resolve(task);
       if (command === "read_export_preview") return Promise.resolve("<h1>Should not load</h1>");
       return Promise.resolve(null);
@@ -1535,7 +1708,7 @@ describe("Wiki HTML preview", () => {
       if (command === "get_export_restricted_content_status") {
         return Promise.resolve({ containsRestrictedContent: false, restrictedSourceCount: 0 });
       }
-      if (command === "start_export") return Promise.resolve({ id: task.id });
+      if (command === "start_export") return Promise.resolve(task);
       if (command === "get_task") return Promise.resolve(task);
       if (command === "read_export_preview") return Promise.resolve("<h1>Should not load</h1>");
       return Promise.resolve(null);
@@ -1631,7 +1804,7 @@ describe("Wiki HTML preview", () => {
       if (command === "get_export_restricted_content_status") {
         return Promise.resolve({ containsRestrictedContent: false, restrictedSourceCount: 0 });
       }
-      if (command === "regenerate_export") return Promise.resolve({ id: regeneratedTask.id });
+      if (command === "regenerate_export") return Promise.resolve(regeneratedTask);
       if (command === "get_task") return Promise.resolve(regeneratedTask);
       if (command === "read_export_preview") {
         return Promise.resolve(
@@ -1816,7 +1989,9 @@ describe("Wiki HTML preview", () => {
       if (command === "get_export_restricted_content_status") {
         return Promise.resolve({ containsRestrictedContent: true, restrictedSourceCount: 2 });
       }
-      if (command === "start_export") return Promise.resolve({ id: "task-restricted" });
+      if (command === "start_export") {
+        return Promise.resolve(exportTask({ id: "task-restricted" }));
+      }
       if (command === "get_task") return Promise.resolve(null);
       return Promise.resolve(null);
     });
