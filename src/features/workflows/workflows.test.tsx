@@ -30,6 +30,7 @@ import { WorkflowsOverviewView } from "./WorkflowsOverview";
 import { WorkflowsView } from "./WorkflowsView";
 import { attentionRun, groupWorkflowAttempts, WORKFLOW_STATUSES } from "./workflowPresentation";
 import { WorkflowsRightPanel } from "./WorkflowsRightPanel";
+import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useWorkflowStore } from "../../stores/workflowStore";
 import enLocale from "../../i18n/locales/en.json";
@@ -101,12 +102,47 @@ function workflowRun(overrides: Partial<WorkflowRun> & Pick<WorkflowRun, "taskId
 afterEach(() => {
   i18nMocks.t = (key: string) => key;
   i18nMocks.language = "en-US";
+  useNavigationStore.setState({ activeView: "dashboard", workflowLaunchIntent: null });
   useWorkflowStore.getState().reset();
   workflowApiMocks.getWorkflowFileDiff.mockReset();
   workflowApiMocks.rollbackAgentLintRepair.mockReset();
 });
 
 describe("Workflows overview", () => {
+  it("routes Generate Content from the overview into full Workflows preparation", () => {
+    const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "filterHistory", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
+    const currentProject = useProjectStore.getState().currentProject;
+    useProjectStore.setState({
+      currentProject: {
+        ...currentProject,
+        projectId: "project-a",
+        rootPath: "D:/知识库",
+      },
+    });
+    useWorkflowStore.setState({
+      overview,
+      overviewStatus: "ready",
+      surface: "overview",
+    });
+    useNavigationStore.setState({
+      activeView: "workflows",
+      workflowLaunchIntent: null,
+    });
+
+    render(<WorkflowsView controller={controller} onOpenTask={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.run: workflows.kind.generate_content" }));
+
+    expect(useNavigationStore.getState().activeView).toBe("workflows");
+    expect(useNavigationStore.getState().workflowLaunchIntent).toEqual({
+      projectId: "project-a",
+      projectRootPath: "D:/知识库",
+      kind: "generate_content",
+      origin: "workflows",
+      scopePreset: null,
+    });
+    expect(controller.prepare).not.toHaveBeenCalled();
+  });
+
   it("renders exactly the three fixed workflows and a single recommendation", () => {
     const prepare = vi.fn();
     render(<WorkflowsOverviewView overview={overview} overviewStatus="ready" error={null} onRetry={vi.fn()} onPrepare={prepare} onPrerequisite={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);

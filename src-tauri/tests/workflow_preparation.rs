@@ -418,6 +418,104 @@ fn overview_is_fixed_order_and_no_project_is_actionable() {
 }
 
 #[test]
+fn generate_content_artifact_types_keep_their_page_scope_contracts() {
+    let (root, context) = project();
+    std::fs::write(root.path().join("wiki/第二页.md"), "# 第二页\n").unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let settings = SettingsService::with_config_dir(config.path().to_path_buf());
+    let secrets = SecretService::memory();
+    let agents = AgentService::with_runner(Arc::new(NoAgents));
+    let service = WorkflowService::default();
+    let project_access = access(
+        WorkflowProjectTrust::Trusted,
+        WorkflowFilesystemAccess::Writable,
+        WorkflowPersistenceMode::Persistent,
+    );
+    let environment = WorkflowPreparationEnvironment {
+        context: &context,
+        access: project_access,
+        settings_service: &settings,
+        secret_service: &secrets,
+        agent_service: &agents,
+    };
+
+    let valid_cases = [
+        (
+            WorkflowArtifactType::BeautifulRead,
+            vec!["wiki/概览.md".into()],
+        ),
+        (
+            WorkflowArtifactType::KnowledgeCard,
+            vec!["wiki/概览.md".into(), "wiki/第二页.md".into()],
+        ),
+        (
+            WorkflowArtifactType::ConceptMap,
+            vec!["wiki/概览.md".into(), "wiki/第二页.md".into()],
+        ),
+        (WorkflowArtifactType::ProjectReport, Vec::new()),
+    ];
+    for (artifact_type, page_paths) in valid_cases {
+        let preparation = service
+            .prepare(
+                &environment,
+                PrepareWorkflowInput {
+                    kind: WorkflowKind::GenerateContent,
+                    scope: Some(WorkflowScope::GenerateContent {
+                        artifact_type: artifact_type.clone(),
+                        page_paths: page_paths.clone(),
+                        output_path: None,
+                    }),
+                    route_selection: None,
+                },
+            )
+            .unwrap();
+        match preparation.scope {
+            WorkflowScope::GenerateContent {
+                artifact_type: prepared_artifact_type,
+                page_paths: prepared_page_paths,
+                output_path,
+            } => {
+                assert_eq!(prepared_artifact_type, artifact_type);
+                assert_eq!(prepared_page_paths, page_paths);
+                assert!(output_path.is_some());
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    let invalid_cases = [
+        (WorkflowArtifactType::BeautifulRead, Vec::new()),
+        (
+            WorkflowArtifactType::BeautifulRead,
+            vec!["wiki/概览.md".into(), "wiki/第二页.md".into()],
+        ),
+        (WorkflowArtifactType::KnowledgeCard, Vec::new()),
+        (WorkflowArtifactType::ConceptMap, Vec::new()),
+        (
+            WorkflowArtifactType::ProjectReport,
+            vec!["wiki/概览.md".into()],
+        ),
+    ];
+    for (artifact_type, page_paths) in invalid_cases {
+        let error = service
+            .prepare(
+                &environment,
+                PrepareWorkflowInput {
+                    kind: WorkflowKind::GenerateContent,
+                    scope: Some(WorkflowScope::GenerateContent {
+                        artifact_type,
+                        page_paths,
+                        output_path: None,
+                    }),
+                    route_selection: None,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "WORKFLOW_ARTIFACT_SCOPE_INVALID");
+    }
+}
+
+#[test]
 fn empty_project_surfaces_import_and_update_prerequisites_without_inventing_content() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(root.path().join(".app")).unwrap();
