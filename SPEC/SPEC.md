@@ -253,7 +253,7 @@ SKILL.md 遵循 Claude Code 风格的 skill 约定：YAML frontmatter、触发�
 
 ### 7.4 工作流与执行编排
 
-`工作流 / Workflows` 是更新、检查和生成知识库的统一产品入口。首版固定提供三个内建工作流：
+`工作流 / Workflows` 是更新、检查和复杂生成知识库的统一产品入口。首版固定提供三个内建工作流；Wiki 当前文章的单篇快速导出是明确例外，留在 Wiki 内以普通 Export task 执行，不进入 Workflow 队列或历史：
 
 | 工作流 | 说明 | 执行方式 | 结果归属 |
 |---|---|---|---|
@@ -306,6 +306,18 @@ SKILL.md 遵循 Claude Code 风格的 skill 约定：YAML frontmatter、触发�
 - HTML 模板只影响生成页面样式，不影响 Wiki schema、Lint 规则或 Agent 行为。
 - 输出存放在 `ProjectContext.layout` 返回的导出根；新建原生项目默认解析为 `exports/html/`，兼容项目不得被强制改造成该目录结构。
 - 应用内 iframe 预览，支持打开导出文件所在位置。
+
+生成入口职责固定如下：
+
+| 维度 | Wiki 单篇快速导出 | Workflows“生成内容” |
+|---|---|---|
+| 入口与容器 | Wiki 顶栏、空预览或右侧快捷动作；打开 `GenerateHtmlDialog`，不离开 Wiki | Workflows 总览、Exports 新建/重新生成及项目级入口；进入完整主区准备页 |
+| 范围 | 当前一篇 Wiki 页面；仅美化阅读页、知识卡片、概念图 | 单页、多页、主题相关页或整个项目；包含项目报告 |
+| 编排 | 普通可取消 Export task；立即进入全局任务抽屉 | 项目级串行 Workflow 队列；九阶段、确认、结果、关联重试和历史 |
+| 写入 | 只创建新的 layout-defined HTML 和 ExportRecord，不覆盖 | 可新建；显式覆盖既有制品时必须先 checkpoint 并确认 |
+| 完成后 | 按 taskId 精确定位记录并在 Wiki 就地自动预览 | 在 Workflows 展示结果摘要并跳转 Exports 管理/预览 |
+
+两条链路共享 `ExportService`、`ExportRecord` 持久化和 Exports 结果管理，但 Wiki 快速导出不产生 Workflow history。Wiki 预览“重新生成”同样创建新文件；覆盖指定输出、复杂范围、项目报告或显式路线选择必须进入 Workflows。
 
 ### 7.7 知识图谱
 
@@ -700,6 +712,8 @@ npm install @milkdown/core @milkdown/react @milkdown/plugin-math
 - Exports 已作为主导航一等视图；导出记录列表需要在表格中保留操作列，避免文件名、路径和操作按钮互相挤压。
 - 导出列表的次级路径行显示 basename；完整输出路径保留在 tooltip/title 中。跨平台路径展示统一通过 `pathDisplay` helpers 处理，不在组件内临时拆字符串。
 - 成功导出提供收藏、预览、浏览器打开、打开所在文件夹等 icon actions；失败导出保留日志和重试入口。
+- Wiki 当前页的快速生成使用专用 `GenerateHtmlDialog` 和直接 Export task，只提供三种单篇类型、只创建新文件，并在成功后按 taskId 精确定位 ExportRecord、就地自动预览；它不进入 Workflow queue/history。
+- Workflows Generate Content 继续拥有多页/项目范围、显式输出路径与路线、覆盖 checkpoint/confirmation、九阶段进度、结果、重试和历史。Exports 的新建与重新生成继续进入该完整 preparation；两条链路共享 ExportService、ExportRecord 与 Exports 制品管理。
 
 ### 16.6 任务、日志与审计约束
 
