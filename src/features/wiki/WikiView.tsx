@@ -109,7 +109,6 @@ export function WikiView({ capabilities }: WikiViewProps) {
   const resetPaneSize = useNavigationStore((state) => state.resetPaneSize);
   const rightPanelMode = useNavigationStore((state) => state.rightPanelMode);
   const openWikiAssistant = useNavigationStore((state) => state.openWikiAssistant);
-  const requestWorkflowLaunch = useNavigationStore((state) => state.requestWorkflowLaunch);
   const setWikiAssistantPagePath = useNavigationStore((state) => state.setWikiAssistantPagePath);
   const [pageForm, setPageForm] = useState<
     { mode: "create" | "rename"; path: string } | null
@@ -581,25 +580,13 @@ export function WikiView({ capabilities }: WikiViewProps) {
 
   const handleRegenerateHtml = () => {
     if (!page) return;
-    if (!previewRecord) {
+    if (
+      !previewRecord ||
+      !SINGLE_PAGE_EXPORT_TYPES.includes(previewRecord.exportType) ||
+      !previewRecord.sourcePath ||
+      previewRecord.sourcePath !== page.meta.path
+    ) {
       handleGenerateHtml("beautiful_read");
-      return;
-    }
-    if (!SINGLE_PAGE_EXPORT_TYPES.includes(previewRecord.exportType)) {
-      requestWorkflowLaunch({
-        projectId,
-        projectRootPath: rootPath,
-        kind: "generate_content",
-        origin: "wiki",
-        scopePreset: {
-          kind: "generate_content",
-          artifactType: previewRecord.exportType,
-          pagePaths: previewRecord.sourcePath
-            ? [previewRecord.sourcePath]
-            : [page.meta.path],
-          outputPath: previewRecord.outputPath,
-        },
-      });
       return;
     }
     setHtmlTemplate(previewRecord.exportType);
@@ -607,7 +594,7 @@ export function WikiView({ capabilities }: WikiViewProps) {
       {
         projectId,
         projectRootPath: rootPath,
-        pagePath: page.meta.path,
+        pagePath: previewRecord.sourcePath,
         exportType: previewRecord.exportType as PendingWikiQuickExport["exportType"],
         autoPreview: true,
       },

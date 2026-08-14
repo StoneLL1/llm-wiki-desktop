@@ -1588,7 +1588,7 @@ describe("Wiki HTML preview", () => {
     expect(useExportStore.getState().previewId).toBeNull();
   });
 
-  it("uses the direct regenerate task for an existing single-page preview", async () => {
+  it("keeps the old preview and switches to the new direct-regenerate record on completion", async () => {
     const tree: WikiTree = {
       root: { name: "wiki", kind: "folder", path: "wiki", starred: false, bookmarked: false, fileCount: 1, children: [] },
       pages: [pageMeta()],
@@ -1605,15 +1605,41 @@ describe("Wiki HTML preview", () => {
       status: "succeeded",
       bookmarked: false,
     };
-    invokeMock.mockImplementation((command: string) => {
+    const regeneratedTask = exportTask({ id: "task-regenerate" });
+    const regeneratedRecord: ExportRecord = {
+      ...record,
+      id: "export-regenerated",
+      title: "Transformer card v2",
+      outputPath: "exports/html/transformer-card-v2.html",
+      createdAt: "2026-08-13T10:05:00Z",
+      route: "byok",
+      taskId: regeneratedTask.id,
+    };
+    let listExportsCalls = 0;
+    invokeMock.mockImplementation((
+      command: string,
+      payload?: { request?: { outputPath?: string } },
+    ) => {
       if (command === "scan_wiki") return Promise.resolve(tree);
       if (command === "read_wiki_page") return Promise.resolve(pageContent());
-      if (command === "list_exports") return Promise.resolve([record]);
+      if (command === "list_exports") {
+        listExportsCalls += 1;
+        return Promise.resolve(
+          listExportsCalls === 1 ? [record] : [regeneratedRecord, record],
+        );
+      }
       if (command === "get_export_restricted_content_status") {
         return Promise.resolve({ containsRestrictedContent: false, restrictedSourceCount: 0 });
       }
-      if (command === "regenerate_export") return Promise.resolve({ id: "task-regenerate" });
-      if (command === "get_task") return Promise.resolve(null);
+      if (command === "regenerate_export") return Promise.resolve({ id: regeneratedTask.id });
+      if (command === "get_task") return Promise.resolve(regeneratedTask);
+      if (command === "read_export_preview") {
+        return Promise.resolve(
+          payload?.request?.outputPath === record.outputPath
+            ? "<h1>Transformer card v1</h1>"
+            : "<h1>Transformer card v2</h1>",
+        );
+      }
       return Promise.resolve(null);
     });
     useProjectStore.setState({
@@ -1632,36 +1658,149 @@ describe("Wiki HTML preview", () => {
       value: {},
       configurable: true,
     });
+    const requestWorkflowLaunch = vi
+      .spyOn(useNavigationStore.getState(), "requestWorkflowLaunch")
+      .mockImplementation(() => undefined);
 
-    render(<WikiView capabilities={emptyAiCapabilities} />);
-    await waitFor(() => expect(useWikiStore.getState().page).not.toBeNull());
-    await waitFor(() => expect(useExportStore.getState().records).toEqual([record]));
-    act(() => useWikiStore.setState({ mode: "preview" }));
-    fireEvent.click(screen.getByRole("button", { name: "Regenerate" }));
+    try {
+      render(<WikiView capabilities={emptyAiCapabilities} />);
+      await waitFor(() => expect(useWikiStore.getState().page).not.toBeNull());
+      await waitFor(() => expect(useExportStore.getState().records).toEqual([record]));
+      fireEvent.click(screen.getByRole("tab", { name: "HTML preview" }));
+      await waitFor(() =>
+        expect(screen.getByTitle("HTML preview")).toHaveAttribute(
+          "srcdoc",
+          "<h1>Transformer card v1</h1>",
+        ),
+      );
+      expect(screen.getAllByText(record.outputPath)).toHaveLength(2);
+      fireEvent.click(screen.getByRole("button", { name: "Regenerate" }));
 
-    await waitFor(() =>
+      await waitFor(() =>
+        expect(
+          invokeMock.mock.calls.filter(([command]) => command === "regenerate_export"),
+        ).toHaveLength(1),
+      );
+      const regenerateCall = invokeMock.mock.calls.find(
+        ([command]) => command === "regenerate_export",
+      );
+      expect(regenerateCall?.[1]).toEqual({
+        request: expect.objectContaining({
+          projectId: "proj-1",
+          projectRootPath: "D:/wiki",
+          exportType: "knowledge_card",
+          sourcePath: pageMeta().path,
+          route: "auto",
+          options: {
+            includeFrontmatter: true,
+            embedCss: true,
+            embedImages: false,
+          },
+          acknowledgeRestrictedContent: false,
+        }),
+      });
+      await waitFor(() =>
+        expect(useExportStore.getState().runningTaskId).toBe(regeneratedTask.id),
+      );
+      expect(screen.getAllByText(record.outputPath)).toHaveLength(2);
+      expect(screen.getByTitle("HTML preview")).toHaveAttribute(
+        "srcdoc",
+        "<h1>Transformer card v1</h1>",
+      );
+      expect(requestWorkflowLaunch).not.toHaveBeenCalled();
+
+      act(() => {
+        useTaskStore.setState({
+          tasks: [
+            exportTask({
+              id: regeneratedTask.id,
+              status: "succeeded",
+              updatedAt: "2026-08-13T10:05:00Z",
+              completedAt: "2026-08-13T10:05:00Z",
+            }),
+          ],
+        });
+      });
+
+      await waitFor(() =>
+        expect(useExportStore.getState().previewId).toBe(regeneratedRecord.id),
+      );
+      expect(useExportStore.getState().records).toEqual([regeneratedRecord, record]);
+      expect(screen.getAllByText(regeneratedRecord.outputPath)).toHaveLength(2);
+      expect(screen.queryByText(record.outputPath)).not.toBeInTheDocument();
+      expect(screen.getByTitle("HTML preview")).toHaveAttribute(
+        "srcdoc",
+        "<h1>Transformer card v2</h1>",
+      );
+      expect(invokeMock).toHaveBeenCalledWith("read_export_preview", {
+        request: {
+          projectId: "proj-1",
+          projectRootPath: "D:/wiki",
+          outputPath: regeneratedRecord.outputPath,
+        },
+      });
+    } finally {
+      requestWorkflowLaunch.mockRestore();
+    }
+  });
+
+  it("reopens the single-page dialog when preview regeneration has no valid Wiki record", async () => {
+    const tree: WikiTree = {
+      root: { name: "wiki", kind: "folder", path: "wiki", starred: false, bookmarked: false, fileCount: 1, children: [] },
+      pages: [pageMeta()],
+      totalPages: 1,
+    };
+    const projectReport: ExportRecord = {
+      id: "project-report",
+      exportType: "project_report",
+      title: "Project report",
+      outputPath: "exports/html/project-report.html",
+      createdAt: "2026-08-13T09:00:00Z",
+      route: "agent",
+      status: "succeeded",
+      bookmarked: false,
+    };
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "scan_wiki") return Promise.resolve(tree);
+      if (command === "read_wiki_page") return Promise.resolve(pageContent());
+      if (command === "list_exports") return Promise.resolve([projectReport]);
+      return Promise.resolve(null);
+    });
+    useProjectStore.setState({
+      currentProject: {
+        ...defaultProject,
+        projectId: "proj-1",
+        rootPath: "D:/wiki",
+        name: "Wiki",
+      },
+    });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      value: {},
+      configurable: true,
+    });
+    const requestWorkflowLaunch = vi
+      .spyOn(useNavigationStore.getState(), "requestWorkflowLaunch")
+      .mockImplementation(() => undefined);
+
+    try {
+      render(<WikiView capabilities={emptyAiCapabilities} />);
+      await waitFor(() => expect(useWikiStore.getState().page).not.toBeNull());
+      await waitFor(() => expect(useExportStore.getState().records).toEqual([projectReport]));
+      act(() => useWikiStore.setState({ mode: "preview" }));
+      fireEvent.click(screen.getByRole("button", { name: "Regenerate" }));
+
+      expect(screen.getByRole("dialog")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Beautiful read" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      expect(requestWorkflowLaunch).not.toHaveBeenCalled();
       expect(
         invokeMock.mock.calls.filter(([command]) => command === "regenerate_export"),
-      ).toHaveLength(1),
-    );
-    const regenerateCall = invokeMock.mock.calls.find(
-      ([command]) => command === "regenerate_export",
-    );
-    expect(regenerateCall?.[1]).toEqual({
-      request: expect.objectContaining({
-        projectId: "proj-1",
-        projectRootPath: "D:/wiki",
-        exportType: "knowledge_card",
-        sourcePath: pageMeta().path,
-        route: "auto",
-        options: {
-          includeFrontmatter: true,
-          embedCss: true,
-          embedImages: false,
-        },
-        acknowledgeRestrictedContent: false,
-      }),
-    });
+      ).toHaveLength(0);
+    } finally {
+      requestWorkflowLaunch.mockRestore();
+    }
   });
 
   it("pauses for restricted-content confirmation before starting the direct export", async () => {
