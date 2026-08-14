@@ -129,6 +129,7 @@ export function WikiView({ capabilities }: WikiViewProps) {
   const quickExportMountedRef = useRef(true);
   const quickExportInFlightRef = useRef(false);
   const quickExportRequestEpochRef = useRef(0);
+  const processedExportTerminalTaskRef = useRef<string | null>(null);
   const [conflictDialogOpen, setConflictDialogOpen] = useState(true);
   const [sourceMovePath, setSourceMovePath] = useState<string | null>(null);
   const [sourceAiWorkbench, setSourceAiWorkbench] =
@@ -238,6 +239,19 @@ export function WikiView({ capabilities }: WikiViewProps) {
     quickExportRequestEpochRef.current += 1;
     quickExportInFlightRef.current = false;
     setExportStartInFlight(false);
+    if (
+      pendingWikiQuickExport &&
+      (pendingWikiQuickExport.projectId !== projectId ||
+        !sameProjectRoot(pendingWikiQuickExport.projectRootPath, rootPath) ||
+        pendingWikiQuickExport.pagePath !== selectedPath)
+    ) {
+      // The task continues in the background, but it no longer owns the
+      // current Wiki presentation. Clear only the task that started this
+      // quick export so a newer task cannot be interrupted by a stale scope.
+      if (useExportStore.getState().runningTaskId === pendingWikiQuickExport.taskId) {
+        clearRunningTask();
+      }
+    }
     setPendingWikiQuickExport((current) =>
       current &&
       current.projectId === projectId &&
@@ -254,7 +268,7 @@ export function WikiView({ capabilities }: WikiViewProps) {
         ? current
         : null,
     );
-  }, [projectId, rootPath, selectedPath]);
+  }, [clearRunningTask, pendingWikiQuickExport, projectId, rootPath, selectedPath]);
 
   useEffect(() => {
     if (conflict) setConflictDialogOpen(true);
@@ -357,29 +371,46 @@ export function WikiView({ capabilities }: WikiViewProps) {
     ) return;
     const finishedTask = runningExportTask;
     const exportScope = currentPendingWikiQuickExport;
-    void loadExports(projectId, rootPath).then(() => {
+    if (processedExportTerminalTaskRef.current === finishedTask.id) return;
+    processedExportTerminalTaskRef.current = finishedTask.id;
+    const isCurrentQuickExportTask = () =>
+      quickExportMountedRef.current &&
+      isCurrentWikiQuickExport(exportScope) &&
+      (useExportStore.getState().runningTaskId === null ||
+        useExportStore.getState().runningTaskId === finishedTask.id);
+
+    void (async () => {
+      await loadExports(projectId, rootPath);
+
+      // A project/page switch may have reset the store, or a newer export may
+      // have started while the record refresh was in flight. Never clear that
+      // newer task with the old terminal result.
+      if (useExportStore.getState().runningTaskId === finishedTask.id) {
+        clearRunningTask();
+      }
+
       if (
-        !quickExportMountedRef.current ||
-        !isCurrentWikiQuickExport(exportScope)
+        !isCurrentQuickExportTask() ||
+        finishedTask.status !== "succeeded"
       ) return;
-      if (useExportStore.getState().runningTaskId !== finishedTask.id) return;
-      clearRunningTask();
-      if (finishedTask.status !== "succeeded") return;
-      const latest = useExportStore
+
+      // The task id is the primary association. The source path is only a
+      // second semantic guard for the still-current Wiki page; do not choose
+      // the newest same-type export as a fallback.
+      const target = useExportStore
         .getState()
-        .records.filter(
-          (record) => record.sourcePath === useWikiStore.getState().selectedPath,
-        )
-        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
-      if (!latest) return;
-      void loadPreview(
-        { projectId, projectRootPath: rootPath, outputPath: latest.outputPath },
-        latest.id,
-        () =>
-          quickExportMountedRef.current &&
-          isCurrentWikiQuickExport(exportScope),
+        .records.find((record) => record.taskId === finishedTask.id);
+      if (!target || target.sourcePath !== exportScope.pagePath) return;
+
+      await loadPreview(
+        { projectId, projectRootPath: rootPath, outputPath: target.outputPath },
+        target.id,
+        isCurrentQuickExportTask,
       );
-    });
+      if (isCurrentQuickExportTask()) {
+        setMode("preview");
+      }
+    })();
   }, [
     currentPendingWikiQuickExport,
     runningExportTask,
@@ -388,6 +419,7 @@ export function WikiView({ capabilities }: WikiViewProps) {
     loadExports,
     clearRunningTask,
     loadPreview,
+    setMode,
   ]);
 
   const handleOpen = useCallback((path: string) => {
