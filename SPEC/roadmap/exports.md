@@ -13,10 +13,10 @@ Exports 的**当前原生项目后端链路已完整落地**：4 种导出类型
 
 **主要落差集中在 UI 层与设计稿的偏差**：
 1. 设计稿的“卡片式输出类型选择 + 缩略示意图”和 `dlg-export` 信息需求（源页、输出位置、执行路径等）不再由 Exports 结果页内联承接；完整 Generate Content preparation 当前使用类型化控件收集这些信息，未来如增强视觉也应在 Workflows 范围内完成。Exports 大型 `dlg-export` 不再作为待实现的独立对话框；当前恢复的是只服务 Wiki 单篇动作的 `GenerateHtmlDialog`，不得把两者混同。
-2. 设计稿"已生成 · exports/html/" 是带状态徽章/失败重试/大小列/源列/执行路径列的 **表格**；当前实现是简化列表，缺失：文件大小、状态徽章、失败重试入口、执行路径列、缩略图标颜色（成功/失败）。
+2. 设计稿"已生成 · exports/html/" 是带状态徽章/失败重试/大小列/源列/执行路径列的 **表格**；当前实现已展示成功/失败状态并让失败重试进入 Workflows preparation，仍缺文件大小、执行路径独立列和缩略图标颜色（成功/失败）。
 3. 设计稿右侧面板是"模拟浏览器 chrome + 文件信息 dl + 操作列 + 模板说明"四段式；当前实现只有 iframe + 关闭按钮。
 4. 状态栏（路径/总数/体积/失败计数）缺失；主标题 "exports/html/ · 12 个已生成" 计数缺失。
-5. 操作（在外部浏览器打开 / 复制路径 / 删除 / 重新生成 / 打开所在位置）除预览+重新生成+打开位置外均缺失。
+5. 操作已包含预览、在外部浏览器打开、重新生成和打开所在位置；复制路径与删除仍缺失。
 6. 未实现模板选择（default-serif / modern-sans / editorial-magazine）—— `template.html` 存在但 prompt 未让用户选择模板样式。
 
 ## 1. 区块 / 组件清单
@@ -33,12 +33,12 @@ Exports 的**当前原生项目后端链路已完整落地**：4 种导出类型
 | 项目访问与兼容布局 | 无项目不可启动；restricted/read-only/trusted-writable 分层；输出根由 `ProjectLayout` 决定；执行前后端重验项目身份、访问级别与 Git 条件 | 当前主要按原生 `exports/html/` 与已打开项目假设运行，缺少统一访问合同 | ❌缺失 | P0 | `export_commands.rs`、`export_service.rs`、ProjectService/ProjectContext |
 | 执行路径 | 在完整 Generate Content 准备页读取 Settings 默认值，允许单次显式覆盖 | Workflows preparation 展示有效路线并提供本次 route override；Wiki quick export 继续使用直接链路的 `auto` 默认路线 | ✅已完成 | P0（合同） | `WorkflowPreparationView.tsx`、[agent.md](agent.md) |
 | 选项 checkbox | frontmatter 元数据 / 嵌入 CSS / 嵌入图片 base64 / 完成后打开预览 | 全部缺失 | ❌缺失 | P2 | 无对应字段 |
-| 已生成表格 | 9 列：图标/文件名/类型/源/大小/生成时间/执行路径/状态/操作 | 4 列简化列表（图标/标题+类型+执行路径/输出路径/时间戳）；无大小、无状态徽章、无失败重试 | 🟡部分实现 | P0 | `ExportsView.tsx:204-264` |
-| 失败记录重试 | 失败行显示 `重试` 按钮 | 未实现（`status` 字段在前端甚至未展示） | ❌缺失 | P0 | `ExportsView.tsx:204-264`，`src/types/export.ts:8`（已有 `failed` 状态） |
-| 状态徽章 | `badge--success` 成功 / `badge--danger` 失败 + 圆点 | 未渲染 | ❌缺失 | P0 | `ExportsView.tsx` |
+| 已生成表格 | 9 列：图标/文件名/类型/源/大小/生成时间/执行路径/状态/操作 | 简化表格已展示标题、类型、输出路径、时间、状态与操作；仍无大小和执行路径独立列 | 🟡部分实现 | P0 | `ExportsView.tsx` |
+| 失败记录重试 | 失败行显示 `重试` 按钮 | 已实现；携带既有 type/source/outputPath 进入 Workflows Generate Content preparation，不直接调用 `regenerate_export` | ✅已完成 | P0（合同） | `ExportsView.tsx`、`WorkspaceController.tsx` |
+| 状态徽章 | `badge--success` 成功 / `badge--danger` 失败 + 圆点 | 已渲染成功/失败状态徽章 | ✅已完成 | P0 | `ExportsView.tsx` |
 | 右侧面板：模拟浏览器 chrome | 红黄绿 3 圆点 + 文件名 + 刷新图标 | 无 chrome | ❌缺失 | P2 | `ExportsView.tsx:273-291` |
 | 右侧面板：文件信息 dl | 路径/类型/大小/源页面/生成时间/Skill 版本 | 无 | ❌缺失 | P1 | `ExportsView.tsx:273-291` |
-| 右侧面板：操作列 | 外部浏览器打开/打开所在位置/复制路径/重新生成/删除 | 仅"关闭预览" | 🟡部分实现 | P1 | `ExportsView.tsx:278-286` |
+| 右侧面板：操作列 | 外部浏览器打开/打开所在位置/复制路径/重新生成/删除 | 已有外部浏览器打开和关闭预览；打开所在位置与重新生成在记录行提供，复制路径与删除仍缺失 | 🟡部分实现 | P1 | `ExportsView.tsx` |
 | 右侧面板：模板说明 | "HTML 模板只影响输出样式…" | 无 | ❌缺失 | P2 | — |
 | 预览 iframe | sandbox 静态预览 | `srcDoc` + `sandbox=""`，实现正确且安全 | ✅已完成 | — | `src/features/exports/HtmlPreviewPane.tsx:14-32` |
 | 预览空态 | — | 空态文案 + FileText 图标 | ✅已完成 | — | `HtmlPreviewPane.tsx:16-22` |
@@ -53,12 +53,12 @@ Exports 的**当前原生项目后端链路已完整落地**：4 种导出类型
 
 - [ ] **项目访问与兼容布局 P0**：无项目时只展示可返回“新建/打开”的空态，不创建任务；restricted 项目可查看已存在的安全静态结果但不能调用外部 Agent、Skill 或 Provider；read-only 项目不能生成或覆盖文件；只有 trusted + writable 项目能生成新导出。准备页和 `start` 命令都要按 canonical folder identity 重验项目、访问级别、可写性、解析后的输出根及 Git 状态；覆盖、删除和批量改写必须先给出受影响路径、检查点状态并显式确认。兼容项目只能写入评估返回的布局目录，不能自行补建根级 `.app/` 或强行迁移到 `exports/html/`。
 - [x] **PRD-HTML-001/002/003 P0 导出类型 UI 可发现性**：Workflows preparation 已展示 4 种类型并按类型约束范围；Wiki `GenerateHtmlDialog` 只展示三种单篇类型。卡片缩略/描述/Skill 信息属于 Workflows 的可选 P1 视觉增强，不在 Exports 结果页恢复选择器。
-- [ ] **PRD-HTML-001/002/003 失败重试**：现状 `ExportStatus::Failed` 已建模但前端列表不渲染状态徽章也不提供重试 → 目标：失败行显示 `badge--danger` 与 `重试` 按钮（调 `regenerate_export`） → `ExportsView.tsx:204-264`、`exportStore.ts:118-141` → 验收：人为制造一次失败（断网/无 Agent/无 BYOK）后能在 UI 看到红色状态并一键重试成功。
+- [x] **PRD-HTML-001/002/003 失败重试**：失败行已显示失败状态与 `重试` 按钮；重试携带既有 type/source/outputPath 进入 Workflows Generate Content preparation，由完整路线、确认、队列和历史合同继续执行，不恢复 Exports 直接 `regenerate_export` 入口。
 - [x] **完整生成准备与 Wiki 快速例外（Workflows/Wiki 边界）**：Exports 与 Workflows 进入同一个 Generate Content 准备页，由其收集内建类型、适用范围、输出位置摘要和高级执行路径；不要新增 Exports 大型 `ExportDialog`。Wiki 文章的单篇快捷动作使用既有 `GenerateHtmlDialog` 直接创建普通 Export task，只创建新文件且不进入 Workflow history。
 - [x] **执行路径选择（Workflows 范围）**：完整准备页读取有效默认路径并允许本次显式覆盖，所选路径不可用时由准备/启动合同阻止；Wiki quick export 作为低摩擦例外继续沿用直接导出的 `auto` 路线。
 - [ ] **自定义模板选择（已延期）**：首版只使用内建输出类型及其内建 Skill/template，不增加用户模板、任意模板内容或自定义运行指令。
 - [ ] **文件信息面板**：现状右侧只有 iframe → 目标：设计稿四段（chrome + dl + 操作 + 模板说明） → `ExportsView.tsx:273-291` → 验收：选中记录后 dl 显示路径/类型/大小/源/时间/Skill；操作列含 5 个按钮。
-- [ ] **外部浏览器打开**：现状 iframe 预览是唯一预览入口 → 目标：新增"在外部浏览器打开"（`open` 协议或 shell 命令，走后端） → `export_commands.rs`（新 `open_export_external`） → 验收：默认浏览器打开 HTML。
+- [x] **外部浏览器打开**：记录行和右侧预览工具栏均已通过现有 `openInBrowser` 能力提供入口，并由后端处理本地路径打开。
 - [ ] **删除导出**：现状无删除入口，原生 `.app/exports.json` 只增不减 → 目标：操作列“删除”调后端，删除 layout-defined artifact + record（注意 Git 检查点硬约束） → `export_commands.rs`、`export_service.rs` → 验收：删除后文件与记录同步消失；高风险操作走 `ConfirmationDialog`。
 - [ ] **复制路径**：现状无 → 目标：操作列"复制路径"把绝对路径写剪贴板 → `ExportsView.tsx` → 验收：剪贴板含项目根 + 相对路径。
 - [ ] **标题计数 + 状态栏统计**：现状无 → 目标：主标题带 `· N 个已生成`；状态栏显示 layout-defined export root（原生示例 `exports/html/`）及 `N 个文件 · NB`、`M 个失败` → `ExportsView.tsx`、`AppShell.tsx` → 验收：路径来自后端 layout，数字随列表实时更新。
@@ -92,6 +92,6 @@ Exports 的**当前原生项目后端链路已完整落地**：4 种导出类型
 6. **P0 执行路径合同**：准备页读取 Settings 默认值并允许单次覆盖；后端不可静默回退。
 7. **P1 右侧面板四段式**：补 preview-frame chrome + 文件信息 dl + 5 个操作按钮 + 模板说明。
 8. **P1 标题计数 + 状态栏统计**：聚合 `records.length`、失败数、总体积（需后端 `list_exports` 返回 size，或前端 `stat` 补齐）。
-9. **P1 外部浏览器打开 + 复制路径**：后端加 `open_export_external`（macOS `open`、Win `start`、Linux `xdg-open`）；复制路径纯前端 `navigator.clipboard`。
+9. **P1 复制路径**：外部浏览器打开已完成；剩余工作是通过前端 `navigator.clipboard` 提供复制路径。
 10. **P2 删除导出**：后端 `delete_export`（删 HTML + 从 `exports.json` 移除 + Git 检查点 + `ConfirmationDialog` 确认）。
 11. **P2 视觉打磨**：引入 `Panel`/`Table`/`Badge` 组件统一 token；preview-frame chrome；i18n iframe title；错误码到文案映射。

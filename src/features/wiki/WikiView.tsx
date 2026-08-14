@@ -238,6 +238,7 @@ export function WikiView({ capabilities }: WikiViewProps) {
     quickExportRequestEpochRef.current += 1;
     quickExportInFlightRef.current = false;
     setExportStartInFlight(false);
+    setHtmlDialogOpen(false);
     if (
       pendingWikiQuickExport &&
       (pendingWikiQuickExport.projectId !== projectId ||
@@ -379,7 +380,25 @@ export function WikiView({ capabilities }: WikiViewProps) {
         useExportStore.getState().runningTaskId === finishedTask.id);
 
     void (async () => {
-      await loadExports(projectId, rootPath);
+      if (finishedTask.status !== "succeeded") {
+        if (useExportStore.getState().runningTaskId === finishedTask.id) {
+          clearRunningTask();
+        }
+        setPendingWikiQuickExport(null);
+        const exportState = useExportStore.getState();
+        const hasExistingPreview =
+          Boolean(exportState.previewHtml) &&
+          exportState.records.some(
+            (record) =>
+              record.id === exportState.previewId &&
+              record.sourcePath === exportScope.pagePath,
+          );
+        if (!hasExistingPreview) setMode("read");
+        void loadExports(projectId, rootPath, isCurrentQuickExportTask);
+        return;
+      }
+
+      await loadExports(projectId, rootPath, isCurrentQuickExportTask);
 
       // A project/page switch may have reset the store, or a newer export may
       // have started while the record refresh was in flight. Never clear that
@@ -389,8 +408,7 @@ export function WikiView({ capabilities }: WikiViewProps) {
       }
 
       if (
-        !isCurrentQuickExportTask() ||
-        finishedTask.status !== "succeeded"
+        !isCurrentQuickExportTask()
       ) return;
 
       // The task id is the primary association. The source path is only a
@@ -399,7 +417,10 @@ export function WikiView({ capabilities }: WikiViewProps) {
       const target = useExportStore
         .getState()
         .records.find((record) => record.taskId === finishedTask.id);
-      if (!target || target.sourcePath !== exportScope.pagePath) return;
+      if (!target || target.sourcePath !== exportScope.pagePath) {
+        setPendingWikiQuickExport(null);
+        return;
+      }
 
       await loadPreview(
         { projectId, projectRootPath: rootPath, outputPath: target.outputPath },
@@ -408,6 +429,7 @@ export function WikiView({ capabilities }: WikiViewProps) {
       );
       if (isCurrentQuickExportTask()) {
         setMode("preview");
+        setPendingWikiQuickExport(null);
       }
     })();
   }, [
@@ -467,7 +489,15 @@ export function WikiView({ capabilities }: WikiViewProps) {
     const stillCurrent =
       requestEpoch === quickExportRequestEpochRef.current &&
       isCurrentQuickExportPresentation(request.scope);
-    if (!stillCurrent) return;
+    if (!stillCurrent) {
+      if (
+        taskId &&
+        useExportStore.getState().runningTaskId === taskId
+      ) {
+        clearRunningTask();
+      }
+      return;
+    }
 
     quickExportInFlightRef.current = false;
     setExportStartInFlight(false);
@@ -1174,6 +1204,7 @@ export function WikiView({ capabilities }: WikiViewProps) {
         <GenerateHtmlDialog
           pagePath={page.meta.path}
           initialType={htmlTemplate}
+          busy={exportStartInFlight}
           onCancel={handleHtmlDialogCancel}
           onGenerate={handleDialogGenerate}
         />
