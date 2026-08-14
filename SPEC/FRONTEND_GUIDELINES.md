@@ -405,6 +405,8 @@ Use dialogs for blocking decisions:
 - Initialize a normal folder as project.
 - Store or replace provider credentials.
 
+Wiki single-page quick export uses the existing `GenerateHtmlDialog` as a scoped action modal, not as a generic workflow runner. It may collect only the current page's single-page output type and the existing restricted-content acknowledgement; project scope, output paths, route overrides, overwrite, custom prompts, and custom Skills belong to Workflows preparation.
+
 Workflow-generated high-risk changes use a persistent, non-modal `waiting for confirmation` task state with an impact summary and optional Diff. Users may navigate elsewhere before confirming; do not interrupt them with a modal as soon as the task reaches the checkpoint.
 
 Permanent Source deletion is not a generic compact dialog. Use a dedicated second-confirmation page that shows the whole source package, freed space, referencing Wiki pages, checkpoint behavior, and the explicit action `永久删除此来源`.
@@ -471,6 +473,14 @@ Editor surface:
 - Keep toolbar compact and icon-driven.
 - Save state must be visible.
 - External modification conflicts must interrupt save with a clear diff path.
+
+Single-page quick export:
+
+- `生成 HTML / Generate HTML`, the empty HTML-preview action, and the Wiki right-panel reading-page/card shortcuts keep the user in Wiki and open `GenerateHtmlDialog`.
+- The dialog is centered, no wider than 820px, uses the established 52px header/footer density, traps focus, closes on Escape/cancel, and restores focus to the trigger. Its three bilingual choices are `舒适阅读页 / Beautiful reading page`, `知识卡片 / Knowledge card`, and `概念图 / Concept map`; do not show project reports.
+- The primary action is `生成并预览 / Generate and preview`. Starting makes the ordinary Export task immediately visible in the global task drawer with status, logs, and cancel; it must not navigate to Workflows preparation.
+- On success, keep the user on the initiating page and automatically preview the exact task-correlated ExportRecord. Direct regenerate keeps the existing preview visible while the new create-only task runs, then switches to the exact new record.
+- Multi-page scope, project reports, explicit output paths/routes, overwrite, checkpoint confirmation, structured workflow stages, retry, and history remain in Workflows Generate Content.
 
 Source surface:
 
@@ -583,7 +593,7 @@ Rules:
 - Task state labels cover queued, running, waiting for confirmation, completed, failed, cancelled, and interrupted. Do not communicate state by color alone.
 - Workflows, task selection, confirmation, and history are isolated to the active project; same-project work runs serially.
 - Running state survives navigation. Cancellation, linked retry, and interrupted-run explanation remain available from task detail.
-- Health Check launches from Workflows but the unchanged Lint page owns findings and repair. Generate Content launches from Workflows but the unchanged Exports page owns artifacts and preview.
+- Health Check launches from Workflows but the unchanged Lint page owns findings and repair. Full Generate Content launches from Workflows (including Exports new/regenerate entry points) and Exports owns artifacts and reusable preview; Wiki single-page quick export is the documented local-dialog/direct-task exception and still writes into the same Exports result model.
 
 ### 8.7 Lint
 
@@ -637,7 +647,7 @@ Selected state should be visible without relying on color alone.
 
 ### 9.2 Long Tasks
 
-Long tasks include import parsing, Update Wiki, graph building, Health Check, and Generate Content.
+Long tasks include import parsing, Update Wiki, graph building, Health Check, Workflows Generate Content, and Wiki quick export.
 
 Every long task must provide:
 
@@ -650,6 +660,8 @@ Every long task must provide:
 Do not block the whole UI for long tasks.
 
 Workflow tasks additionally show a structured stage timeline, current item, count progress, activity history, and queued/running/waiting/completed/failed/cancelled/interrupted state. Queueing, task start, and ordinary stage progress do not produce system notifications.
+
+Wiki quick export is an ordinary Export task rather than a Workflow task: show it immediately in the global task drawer with status, logs, and cancel, then return the successful result to the initiating Wiki preview. Do not invent a structured Workflow timeline or Workflow history entry for it.
 
 Import navigation and window minimization keep tasks running. After an application restart, heavy download, OCR and ASR tasks return as `Paused, ready to continue`; do not resume them automatically. Reuse completed chunks, and clean temporary media only after explicit cancellation.
 
@@ -824,6 +836,7 @@ Rules:
 - Chinese labels should not be forced into narrow English-sized controls.
 - User-facing terms are `原始资料`, `来源库 / 来源`, and `Wiki 页面`; normal UI does not expose staging, artifact, manifest, or baseline.
 - Core Chinese actions are `导入到来源库`, `用这些来源更新 Wiki`, and `AI 整理`; English equivalents must preserve the same separation.
+- Wiki quick-export copy is `生成 HTML / Generate HTML` and `生成并预览 / Generate and preview`. Full project/multi-page generation remains `生成内容 / Generate Content`; translations must preserve that responsibility boundary.
 - First-screen actions are `新建知识库` and `打开已有知识库`. `导入` always means adding material to the currently open knowledge base; it never means opening or initializing a selected folder.
 - Use `受限`, `已信任`, and `只读` for permission; use native/compatible wording for format; do not compress both dimensions into `兼容模式`.
 

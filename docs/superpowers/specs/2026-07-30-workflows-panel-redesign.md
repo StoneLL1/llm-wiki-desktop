@@ -225,7 +225,9 @@ Output types:
 | 概念图 | One topic and related pages |
 | 项目报告 | Entire project, with optional exclusions |
 
-From a Wiki article, carry the current page into preparation. From Workflows, ask for the applicable scope.
+Wiki has one deliberate quick-export exception: the current article's `生成 HTML` / `Generate HTML`, empty-preview action, and Wiki right-panel reading-page/card shortcuts open the Wiki-local `GenerateHtmlDialog`, keep the user on the article, and start a direct single-page Export task. That dialog offers only `beautiful_read`, `knowledge_card`, and `concept_map`; it does not expose project reports, multi-page scope, output paths, route overrides, custom prompts, or overwrite.
+
+When the user starts Generate Content from Workflows, ask for the applicable scope in the full preparation view. Exports new and regenerate actions also enter this full path, with the existing record's type, source, and output path carried into preparation where applicable.
 
 Expose user-facing template names. Keep Skill IDs in technical details:
 
@@ -236,7 +238,9 @@ Expose user-facing template names. Keep Skill IDs in technical details:
 | 概念图 | `html-concept-map` |
 | 项目报告 | `html-project-report` |
 
-Workflows owns preparation and generation progress. The unchanged Exports page continues to own generated-artifact management and preview.
+Workflows owns full preparation, the project-scoped serial queue, overwrite checkpoint and confirmation, the structured nine-stage pipeline, results, linked retry, and workflow history. Wiki quick export instead creates an ordinary cancellable Export task, makes it immediately inspectable in the global task drawer, writes only a new artifact, and opens the exact task-correlated result in Wiki preview after success. It does not create Workflow history.
+
+Both paths reuse `ExportService`, write `ExportRecord` entries, and leave generated-artifact management and reusable preview to the unchanged Exports page. This exception does not restore a generic `Run Agent` dialog.
 
 ## 7. Shared Preparation Model
 
@@ -493,15 +497,16 @@ Agent, BYOK, model, and provider settings are read-only summaries with a link to
 
 ## 16. Cross-surface Entry Points
 
-Keep all current task-relevant launch points:
+Keep all current task-relevant launch points, with the Wiki single-page exception called out explicitly:
 
 - Dashboard → Update Wiki
-- Wiki article → Generate Content
+- Wiki article quick actions → Wiki-local `GenerateHtmlDialog` → direct single-page Export task
+- Workflows Generate Content → full preparation with single-page, multi-page, topic, or project scope
 - Lint → Run Health Check again
-- Exports → Generate again
+- Exports new / generate again → full Generate Content preparation
 - Workflows → all three built-in workflows
 
-Every entry opens the same workflow preparation model and creates tasks in the same project-scoped task service.
+Dashboard, Lint, Exports, and Workflows entries use the shared workflow preparation model and project-scoped Workflow task service. Wiki quick export is intentionally outside that orchestration: it stays in Wiki, creates an ordinary Export task, never enters the Workflow queue or history, and still converges on the same ExportService, ExportRecord, and Exports result management.
 
 ## 17. Notifications and Logs
 
@@ -542,7 +547,7 @@ The three workflow rows explain their outcomes and the current project state. Pr
 - A user can understand current stage, progress, and required intervention without opening raw logs.
 - Agent, BYOK, model, and Skill details do not dominate the primary workspace.
 - Every write result exposes affected files, Git state, and a recovery path.
-- Dashboard, Wiki, Lint, Exports, and Workflows launch into one task model.
+- Dashboard, Lint, Exports, and Workflows launch full workflows into one task model; Wiki single-page quick export remains the documented direct-Export exception.
 - Queue, cancellation, interruption, failure, conflict, waiting confirmation, and completion all have explicit recoverable states.
 - Settings, Lint, and Exports remain behaviorally unchanged in this redesign.
 - All workflow text and layouts remain usable in Chinese and English.

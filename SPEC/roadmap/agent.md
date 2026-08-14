@@ -13,7 +13,7 @@
 
 - 首版固定提供 `更新 Wiki`、`健康检查`、`生成内容`。
 - Agent CLI、BYOK、模型和 Provider 是执行路径，配置继续留在设置页。
-- Workflows 统一负责准备、排队、进度、确认、结果、重试和历史。
+- Workflows 统一负责完整工作流的准备、排队、结构化进度、确认、结果、重试和历史；Wiki 当前文章的单篇快速导出是明确例外，使用 Wiki 专用弹窗与普通 Export task，不进入 Workflow 队列或历史。
 - Lint 与 Exports 页面保持现状，继续分别拥有检查结果 / 修复和制品 / 预览。
 - 所有工作流、任务、确认和历史按 canonical project identity 隔离；一个项目内串行运行。项目 app state 不可写时，允许的只读检查与结果仅在内存中存在并标注 non-persistent。
 - 无项目时不创建任务；untrusted restricted 仍可运行 Local Quick，trusted read-only 在有具体 AI 路径时可运行 ephemeral Complete Check。写入工作流才要求 writable 与适用 Git；后端在 start 时重新校验，不能依赖前端状态。
@@ -42,7 +42,7 @@
 Batch 8 收口后的生产基线：
 
 - 导航使用 Knowledge Processing / Workflows 与 Lucide `Workflow`，且只展示三个固定内建工作流。
-- 所有共享入口进入同一项目绑定的准备、队列、确认、结果与历史模型。
+- 所有完整工作流的共享入口进入同一项目绑定的准备、队列、确认、结果与历史模型；Wiki 单篇 quick export 不属于该集合。
 - 后端按 canonical identity、backend-issued trust authority、filesystem access 与 Git 状态重新验证准备、启动、重试、确认和异步 dispatch。
 - 健康原生项目由后端创建或严格原生检测 provenance 授信；普通注册和兼容库不会被提升为 trusted。
 - Agent 页面、右面板、`RunAgentDialog`、四卡启动器和跨项目通用启动路径已删除；Settings、Lint、Exports 与侧栏 Agent 状态脚继续拥有原领域职责。
@@ -172,23 +172,24 @@ Batch 8 收口后的生产基线：
 - 进程中断后说明已完成阶段与可复用产物，不显示虚假的“继续运行”。
 - 通知只用于等待确认、完成和失败。
 
-### WF-P0-06：入口统一
+### WF-P0-06：完整工作流入口统一与 Wiki 快速例外
 
-以下入口必须落入同一个准备模型和项目级 TaskService：
+以下完整工作流入口必须落入同一个准备模型和项目级 Workflow TaskService：
 
 - Import 完成摘要 → Update Wiki。
 - Dashboard → 对应工作流。
-- Wiki 文章 → Generate Content，并预填当前文章。
 - Lint → Health Check 或后续修复动作。
-- Exports → Generate Content。
+- Exports 新建/重新生成 → Generate Content，并携带适用的类型、source 和 output path。
 - Workflows → 三个内建工作流。
+
+Wiki 文章的单篇快捷动作不进入上述准备模型：它保持在 Wiki，打开 `GenerateHtmlDialog`，只提供 `beautiful_read`、`knowledge_card`、`concept_map`，并以普通 Export task 创建新文件、在成功后就地预览。用户若从 Workflows 主动发起 Generate Content，才进入完整范围准备；多页、项目报告、显式输出路径、覆盖、队列和历史均只在该完整路径中提供。
 
 验收：
 
-- 不同入口产生相同的 scope、route、task、confirmation 和 history 语义。
+- 不同完整工作流入口产生相同的 scope、route、task、confirmation 和 history 语义；Wiki quick export 保持明确不同的普通 Export 编排，且不写 Workflow history。
 - Import 确认仍不得自动编译。
 - Health Check 只读，修复继续在 Lint。
-- 生成内容完成后，制品继续在 Exports 管理。
+- 两条生成链路共享 ExportService、ExportRecord，并在完成后继续由 Exports 管理制品。
 
 ## 4. P1 收口
 
@@ -218,6 +219,7 @@ Batch 8 收口后的生产基线：
 - Settings 的 Agent / BYOK / Provider 配置首轮保持现状，只补必要的默认路径读取和配置跳转。
 - Lint 页面首轮保持现状。
 - Exports 页面首轮保持现状。
+- Wiki 专用 `GenerateHtmlDialog` 作为单篇快速入口保留；不把它扩成通用 `RunAgentDialog` 或 Exports 大型生成弹窗。
 - 侧栏底部 Agent 状态行保持现状。
 - AgentService、LlmService、LintService、ExportService 和 CompileService 继续作为后端能力，不因页面更名而机械重命名。
 

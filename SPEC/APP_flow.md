@@ -457,19 +457,27 @@ Markdown 渲染必须支持：
 - 思维导图或概念关系图。
 - 项目级 HTML 报告。
 
-### 13.2 用户路径
+### 13.2 Wiki 单篇快速导出
 
-1. 用户从文章页、项目级入口或工作流总览选择“生成内容”。
-2. 应用打开统一准备页，选择内建输出类型及其适用范围；首版不支持自定义模板或自定义运行指令。
-3. 后端确认项目已信任且可写，选择对应 `skills/html-*`，在当前项目的串行队列中创建任务。
-4. Agent Skill 或可用 BYOK 路径生成 HTML / 卡片 / 报告，并在工作流任务详情中展示结构化阶段。
-5. 输出保存到 layout-defined exports root（原生项目为 `exports/html/`）；覆盖既有制品前创建 checkpoint 并等待确认。
-6. 生成完成后进入现有 Exports 页面管理和预览；当前导出页首版保持不变。
-7. 用户可打开导出文件所在位置。
+1. 用户在 Wiki 阅读页点击“生成 HTML”、无已有 HTML 时点击预览，或使用右侧“生成 HTML 阅读页 / 生成知识卡片”快捷动作。
+2. 应用保持在当前 Wiki 页面并打开 `GenerateHtmlDialog`；弹窗只提供美化阅读页、知识卡片和概念图，输入固定为当前一篇 Wiki 页面。
+3. 用户确认后，应用沿用直接导出默认路线，创建一个普通、可取消的 Export 后台任务；任务立即进入全局任务抽屉，可查看状态与日志。
+4. 快速导出只以 create-new 方式写入新的 layout-defined HTML 文件和带 `taskId` 的 ExportRecord，不选择输出路径、不覆盖既有制品，也不进入项目 Workflow 串行队列或 history。
+5. 任务成功后，Wiki 按本次 `taskId` 精确刷新并定位 ExportRecord，在当前页面自动打开内嵌 HTML 预览；制品同时可在 Exports 中继续管理。
+6. Wiki 预览中的“重新生成”沿用相同直接链路并创建新文件；需要覆盖指定输出时改走 Exports / Workflows 完整路径。
 
-### 13.3 边界
+### 13.3 Workflows Generate Content
 
-HTML 模板只影响输出样式，不影响 Wiki schema、Lint 规则或 Agent 行为。
+1. 用户从 Workflows 总览、Exports 的“新建导出 / 重新生成”或其他项目级入口选择“生成内容”。
+2. 应用打开完整主区准备页，选择内建输出类型及其适用范围；单篇阅读页要求恰好一页，知识卡片和概念图可使用多页，项目报告使用项目范围。首版不支持自定义模板或自定义运行指令。
+3. 后端确认项目已信任且可写，解析默认或单次覆盖的 Agent/BYOK 路线和 `skills/html-*`，在当前项目的串行 Workflow 队列中创建任务。
+4. 任务详情展示九阶段结构化进度、取消、恢复说明、关联重试和历史；复杂范围、显式输出路径、项目报告均只由此路径承担。
+5. 新建制品不要求 checkpoint；覆盖既有制品前创建 checkpoint 并等待确认。
+6. 生成完成后，Workflows 展示结果摘要与领域跳转，制品进入现有 Exports 页面管理和预览。
+
+### 13.4 共享能力与边界
+
+两条链路共享 `ExportService`、`ExportRecord` 持久化和 Exports 结果管理，但任务编排不同：Wiki 使用普通 Export task，Workflows 使用项目级 Workflow queue/history。HTML 模板只影响输出样式，不影响 Wiki schema、Lint 规则或 Agent 行为。不要恢复通用“运行 Agent”弹窗，也不要在 Exports 恢复大型 `ExportDialog`。
 
 ## 14. 工作流流程
 
