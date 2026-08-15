@@ -16,6 +16,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 import { defaultProject, useProjectStore } from "./projectStore";
 import { captureProjectScope, isProjectScopeCurrent } from "./projectScope";
+import { useWikiStore } from "../features/wiki/wikiStore";
 
 const recent: RecentProject = {
   projectId: "project-a",
@@ -150,6 +151,19 @@ describe("projectStore bootstrap", () => {
       request: { projectId: summary.projectId, projectRootPath: summary.rootPath },
     });
     expect(useProjectStore.getState().authority).toEqual(refreshed);
+  });
+
+  it("resets project presentation when the canonical identity revision changes", async () => {
+    useProjectStore.getState().setCurrentProject(summary);
+    useProjectStore.setState({ authority });
+    useWikiStore.setState({
+      selectedPath: "wiki/a.md",
+    });
+    invokeMock.mockResolvedValueOnce({ ...authority, identityRevision: "identity-b" });
+
+    await useProjectStore.getState().refreshProjectAuthority();
+
+    expect(useWikiStore.getState().selectedPath).toBeNull();
   });
 
   it("opens an ambiguous Markdown folder only through the explicit typed choice", async () => {

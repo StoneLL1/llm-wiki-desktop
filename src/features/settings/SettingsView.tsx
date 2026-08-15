@@ -18,6 +18,7 @@ import type { LlmProviderConfig, LlmProviderKind, ProviderStatus, ProviderTestRe
 import type { ProjectSummary } from "../../types/project";
 import type { SettingsSectionKey } from "../../stores/navigationStore";
 import { useSettingsStore } from "../../stores/settingsStore";
+import { observeProjectResources } from "../../stores/projectScope";
 import { AiSettings } from "./AiSettings";
 import { AppearanceSettings } from "./AppearanceSettings";
 import { BackgroundTaskSettings } from "./BackgroundTaskSettings";
@@ -119,7 +120,7 @@ export function SettingsView({
   const error = useSettingsStore((state) => state.error);
   const chatConvenienceAuthorization = useSettingsStore((state) => state.chatConvenienceAuthorization);
   const loadSettings = useSettingsStore((state) => state.loadSettings);
-  const loadChatConvenienceAuthorization = useSettingsStore((state) => state.loadChatConvenienceAuthorization);
+  const ensureChatConvenienceAuthorization = useSettingsStore((state) => state.ensureChatConvenienceAuthorization);
   const setChatConvenienceAuthorization = useSettingsStore((state) => state.setChatConvenienceAuthorization);
   const revokeAllChatConvenienceAuthorizations = useSettingsStore(
     (state) => state.revokeAllChatConvenienceAuthorizations,
@@ -137,9 +138,14 @@ export function SettingsView({
   }
 
   useEffect(() => {
+    const unobserve = observeProjectResources(
+      { projectId: project.projectId, rootPath: project.rootPath },
+      ["settings-chat-authorization"],
+    );
     void loadSettings(project.projectId, project.rootPath);
-    void loadChatConvenienceAuthorization(project.projectId, project.rootPath);
-  }, [project.projectId, project.rootPath, loadSettings, loadChatConvenienceAuthorization]);
+    void ensureChatConvenienceAuthorization(project.projectId, project.rootPath);
+    return unobserve;
+  }, [project.projectId, project.rootPath, loadSettings, ensureChatConvenienceAuthorization]);
 
   useEffect(() => {
     if (!hasTauri()) return;
@@ -224,7 +230,19 @@ export function SettingsView({
           ) : null}
 
           {error ? (
-            <div className="settings-view__error" role="alert">{error}</div>
+            <div className="settings-view__error flex items-center justify-between gap-3" role="alert">
+              <span>{error}</span>
+              <button
+                type="button"
+                className="btn btn--secondary btn--sm"
+                onClick={() => {
+                  void loadSettings(project.projectId, project.rootPath);
+                  void ensureChatConvenienceAuthorization(project.projectId, project.rootPath);
+                }}
+              >
+                {t("workflows.action.retry")}
+              </button>
+            </div>
           ) : null}
 
           {activeSection === "general" ? (

@@ -49,7 +49,7 @@ function seedActiveSession(messages: ChatMessage[] = []) {
       projectId: PROJECT.projectId,
       rootPathFingerprint: "fp",
     },
-    loadChatConvenienceAuthorization: async () => ({
+    ensureChatConvenienceAuthorization: async () => ({
       enabled: true,
       confirmedAt: "2026-07-05T00:00:00Z",
       projectId: PROJECT.projectId,
@@ -60,7 +60,7 @@ function seedActiveSession(messages: ChatMessage[] = []) {
     sessions: [],
     activeSessionId: "session-1",
     activeSession: session(messages),
-    loadSessions: async () => {},
+    ensureSessions: async () => {},
     send: sendSpy as never,
   });
   return sendSpy;
@@ -80,7 +80,7 @@ describe("ChatView", () => {
     useChatStore.getState().reset();
     useChatStore.setState({
       sessions: [],
-      loadSessions: async () => {},
+      ensureSessions: async () => {},
     });
     render(<ChatView />);
     expect(screen.getByPlaceholderText(/Ask about this wiki/i)).toBeInTheDocument();
@@ -98,7 +98,7 @@ describe("ChatView", () => {
           messageCount: 2,
         },
       ],
-      loadSessions: async () => {},
+      ensureSessions: async () => {},
     });
     render(<ChatView />);
 
@@ -154,6 +154,7 @@ describe("ChatView", () => {
           citations: [],
         }]),
       });
+      return true;
     });
     useChatStore.setState({
       sendTaskId: "task-terminal",
@@ -196,6 +197,102 @@ describe("ChatView", () => {
       );
     });
     expect(useChatStore.getState().streamingText).toBe("");
+  });
+
+  it("reconciles a send that completed while Chat was unmounted", async () => {
+    seedActiveSession();
+    const reloadActive = vi.fn(async () => {
+      useChatStore.setState({
+        activeSession: session([{
+          id: "assistant-after-return",
+          role: "assistant",
+          content: "Persisted after leaving Chat",
+          createdAt: "2026-08-16T00:00:01Z",
+          citations: [],
+        }]),
+      });
+      return true;
+    });
+    useChatStore.setState({
+      sendTaskId: "task-away",
+      sendSessionId: "session-1",
+      streamingText: "temporary",
+      reloadActive: reloadActive as never,
+    });
+    const runningTask: BackendTask = {
+      id: "task-away",
+      taskType: "llm_request",
+      projectId: PROJECT.projectId,
+      title: "Chat",
+      status: "running",
+      progress: null,
+      startedAt: "2026-08-16T00:00:00Z",
+      updatedAt: "2026-08-16T00:00:00Z",
+      completedAt: null,
+      cancellable: true,
+      logPath: null,
+      result: null,
+      error: null,
+    };
+    useTaskStore.getState().setTasks([runningTask]);
+    const mounted = render(<ChatView />);
+    mounted.unmount();
+
+    act(() => {
+      useTaskStore.getState().setTasks([{
+        ...runningTask,
+        status: "succeeded",
+        completedAt: "2026-08-16T00:00:01Z",
+        updatedAt: "2026-08-16T00:00:01Z",
+        cancellable: false,
+      }]);
+    });
+    render(<ChatView />);
+
+    await waitFor(() => expect(reloadActive).toHaveBeenCalledTimes(1));
+    expect(screen.getByText("Persisted after leaving Chat")).toBeInTheDocument();
+    expect(useChatStore.getState().sendTaskId).toBeNull();
+    expect(useChatStore.getState().streamingText).toBe("");
+  });
+
+  it("keeps terminal stream presentation until a failed persisted reload is retried", async () => {
+    seedActiveSession();
+    const reloadActive = vi.fn()
+      .mockImplementationOnce(async () => {
+        useChatStore.setState({ error: "offline" });
+        return false;
+      })
+      .mockResolvedValueOnce(true);
+    useChatStore.setState({
+      sendTaskId: "task-retry",
+      sendSessionId: "session-1",
+      streamingText: "temporary answer",
+      reloadActive: reloadActive as never,
+    });
+    useTaskStore.getState().setTasks([{
+      id: "task-retry",
+      taskType: "llm_request",
+      projectId: PROJECT.projectId,
+      title: "Chat",
+      status: "succeeded",
+      progress: null,
+      startedAt: "2026-08-16T00:00:00Z",
+      updatedAt: "2026-08-16T00:00:01Z",
+      completedAt: "2026-08-16T00:00:01Z",
+      cancellable: false,
+      logPath: null,
+      result: null,
+      error: null,
+    }]);
+    render(<ChatView />);
+
+    await waitFor(() => expect(screen.getByText("offline")).toBeInTheDocument());
+    expect(useChatStore.getState().sendTaskId).toBe("task-retry");
+    expect(useChatStore.getState().streamingText).toBe("temporary answer");
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(useChatStore.getState().sendTaskId).toBeNull());
+    expect(reloadActive).toHaveBeenCalledTimes(2);
   });
 
   it("does not move scrollTop after the user unpins during streaming", () => {
@@ -305,8 +402,8 @@ describe("ChatView", () => {
       },
       sendTaskId: failedTask.id,
       sendSessionId: "session-1",
-      loadSessions: async () => {},
-      reloadActive: async () => {},
+      ensureSessions: async () => {},
+      reloadActive: async () => true,
     });
     useTaskStore.getState().setTasks([failedTask]);
 
@@ -376,7 +473,7 @@ describe("ChatView", () => {
       activeSession: null,
       sessions: [],
       createSession: vi.fn(async () => null) as never,
-      loadSessions: async () => {},
+      ensureSessions: async () => {},
     });
     render(<ChatView />);
 
@@ -414,7 +511,7 @@ describe("ChatView", () => {
       activeSession: session(),
       sessions: [],
       deleteSession: deleteSession as never,
-      loadSessions: async () => {},
+      ensureSessions: async () => {},
     });
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
     render(<ChatView />);
@@ -447,7 +544,7 @@ describe("ChatView", () => {
         },
       ],
       deleteSession: deleteSession as never,
-      loadSessions: async () => {},
+      ensureSessions: async () => {},
     });
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     const { container } = render(<ChatView />);

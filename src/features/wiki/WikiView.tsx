@@ -40,6 +40,7 @@ import { HtmlPreviewPane } from "./HtmlPreviewPane";
 import { WikiPageFormDialog } from "./WikiPageFormDialog";
 import { WikiTree } from "./WikiTree";
 import { useWikiStore } from "./wikiStore";
+import { observeProjectResources } from "../../stores/projectScope";
 import { useSourceStore } from "./sourceStore";
 import { SourceLifecycleDialogs, SourceMovePathDialog } from "./SourceLifecycleDialogs";
 import { SourceAiOrganizeDialog } from "./SourceAiOrganizeDialog";
@@ -145,6 +146,7 @@ export function WikiView({ capabilities }: WikiViewProps) {
   const loadingPage = useWikiStore((state) => state.loadingPage);
   const wikiError = useWikiStore((state) => state.error);
   const scan = useWikiStore((state) => state.scan);
+  const ensureScanned = useWikiStore((state) => state.ensureScanned);
   const openPage = useWikiStore((state) => state.openPage);
   const startEdit = useWikiStore((state) => state.startEdit);
   const setMode = useWikiStore((state) => state.setMode);
@@ -180,6 +182,7 @@ export function WikiView({ capabilities }: WikiViewProps) {
   const previewHtml = useExportStore((state) => state.previewHtml);
   const previewId = useExportStore((state) => state.previewId);
   const loadExports = useExportStore((state) => state.loadExports);
+  const ensureExports = useExportStore((state) => state.ensureExports);
   const startExport = useExportStore((state) => state.startExport);
   const regenerateExport = useExportStore((state) => state.regenerateExport);
   const clearRunningTask = useExportStore((state) => state.clearRunningTask);
@@ -218,12 +221,14 @@ export function WikiView({ capabilities }: WikiViewProps) {
   }, [projectId, rootPath]);
 
   useEffect(() => {
-    void scan(projectId, rootPath);
-  }, [projectId, rootPath, scan]);
-
-  useEffect(() => {
-    void loadExports(projectId, rootPath);
-  }, [projectId, rootPath, loadExports]);
+    const unobserve = observeProjectResources(
+      { projectId, rootPath },
+      ["wiki", "exports"],
+    );
+    void ensureScanned(projectId, rootPath);
+    void ensureExports(projectId, rootPath);
+    return unobserve;
+  }, [projectId, rootPath, ensureScanned, ensureExports]);
 
   useEffect(() => {
     if (!requestedExportType || !page) return;

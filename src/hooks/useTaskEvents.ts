@@ -20,6 +20,12 @@ import {
 } from "../stores/taskStore";
 import type { BackendEvent } from "../types/task";
 import type { ProjectSummary } from "../types/project";
+import {
+  captureProjectScope,
+  invalidateObservedProjectResourcesOnFocus,
+  invalidateProjectResources,
+  isProjectScopeCurrent,
+} from "../stores/projectScope";
 
 const hasTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -74,11 +80,18 @@ export function useTaskEvents(): void {
 
     const unregisterStoreListener = registerTaskEventOwner((event) => {
       const activeProject = useProjectStore.getState().currentProject;
+      const scopeEpoch = captureProjectScope();
       if (!isTaskEventForProject(event, activeProject.projectId)) return;
       if (event.eventType === "project_refreshed" && isProjectSummary(event.payload)) {
         useProjectStore.getState().setCurrentProject(event.payload);
       }
       handleTaskEvent(event);
+      void import("../services/projectResourceInvalidation").then((service) =>
+        isProjectScopeCurrent(scopeEpoch) && invalidateProjectResources(
+          { projectId: activeProject.projectId, rootPath: activeProject.rootPath },
+          service.projectResourcesForBackendEvent(event),
+          true,
+        ));
       if (event.eventType !== "workflow_updated") void notifyTaskEvent(event);
     });
 
@@ -112,7 +125,14 @@ export function useTaskEvents(): void {
         // Notification actions are unavailable in browser-only development.
       });
 
-    const refreshPermissionEpoch = () => invalidateNotificationPermissionEpoch();
+    const refreshPermissionEpoch = () => {
+      invalidateNotificationPermissionEpoch();
+      const activeProject = useProjectStore.getState().currentProject;
+      invalidateObservedProjectResourcesOnFocus({
+        projectId: activeProject.projectId,
+        rootPath: activeProject.rootPath,
+      });
+    };
     window.addEventListener("focus", refreshPermissionEpoch);
 
     return () => {

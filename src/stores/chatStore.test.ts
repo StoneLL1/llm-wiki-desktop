@@ -46,6 +46,29 @@ beforeEach(() => {
 });
 
 describe("chatStore", () => {
+  it("single-flights session ensures without resetting the current selection", async () => {
+    useChatStore.setState({ activeSessionId: "kept", activeSession: session({ id: "kept" }) });
+    invokeMock.mockResolvedValue([sessionSummary({ id: "kept" })]);
+
+    await Promise.all(Array.from({ length: 20 }, () =>
+      useChatStore.getState().ensureSessions(PROJECT.projectId, PROJECT.rootPath)));
+
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().activeSessionId).toBe("kept");
+  });
+
+  it("falls back to the newest session when the selected session disappeared", async () => {
+    useChatStore.setState({ activeSessionId: "missing", activeSession: session({ id: "missing" }) });
+    invokeMock
+      .mockResolvedValueOnce([sessionSummary({ id: "new" })])
+      .mockResolvedValueOnce(session({ id: "new" }));
+
+    await useChatStore.getState().ensureSessions(PROJECT.projectId, PROJECT.rootPath);
+
+    expect(useChatStore.getState().activeSessionId).toBe("new");
+    expect(useChatStore.getState().activeSession?.id).toBe("new");
+  });
+
   it("loads sessions and selects the first one via selectSession", async () => {
     invokeMock.mockResolvedValueOnce([sessionSummary(), sessionSummary({ id: "s2", title: "Two" })]);
     await useChatStore.getState().loadSessions(PROJECT.projectId, PROJECT.rootPath);

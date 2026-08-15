@@ -15,6 +15,23 @@ const session = (overrides: Partial<ChatSessionSummary> = {}): ChatSessionSummar
 });
 
 describe("ChatSessionList", () => {
+  it("keeps stale session rows visible during background revalidation", () => {
+    render(
+      <ChatSessionList
+        sessions={[session()]}
+        activeSessionId="s1"
+        loading
+        onSelect={vi.fn()}
+        onCreate={vi.fn()}
+        onRename={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Agent planning")).toBeInTheDocument();
+    expect(screen.queryByText("Loading chats…")).not.toBeInTheDocument();
+  });
+
   it("shows an empty filter state when no session title matches the search", () => {
     render(
       <ChatSessionList

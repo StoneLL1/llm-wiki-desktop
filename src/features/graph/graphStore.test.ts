@@ -10,6 +10,7 @@ import { invalidateProjectScope } from "../../stores/projectScope";
 import { useTaskStore } from "../../stores/taskStore";
 import type { GraphData } from "../../types/graph";
 import type { BackendTask } from "../../types/task";
+import { invalidateProjectResources } from "../../stores/projectScope";
 
 const graphData = (overrides: Partial<GraphData> = {}): GraphData => ({
   nodes: [{ id: "wiki/a.md", path: "wiki/a.md", label: "A", type: "concept", tags: [], starred: false, degree: 1 }],
@@ -143,6 +144,54 @@ describe("graphStore", () => {
     expect(useGraphStore.getState().data).toEqual(emptyData);
   });
 
+  it("single-flights ensures and retains presentation when the content hash is unchanged", async () => {
+    const first = graphData();
+    invokeMock.mockResolvedValue({ data: first, cached: true, layoutStale: false });
+    await Promise.all(Array.from({ length: 20 }, () =>
+      useGraphStore.getState().ensureGraph("project-1", "D:/wiki")));
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    useGraphStore.getState().setSelectedNode("wiki/a.md");
+    useGraphStore.getState().setSearch("kept");
+
+    await Promise.all(Array.from({ length: 20 }, () =>
+      useGraphStore.getState().ensureGraph("project-1", "D:/wiki")));
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+
+    invokeMock.mockResolvedValueOnce({
+      data: graphData({ contentHash: first.contentHash }),
+      cached: true,
+      layoutStale: false,
+    });
+    await useGraphStore.getState().load("project-1", "D:/wiki");
+
+    expect(useGraphStore.getState().data).toBe(first);
+    expect(useGraphStore.getState().selectedNodeId).toBe("wiki/a.md");
+    expect(useGraphStore.getState().search).toBe("kept");
+  });
+
+  it("drops incompatible node focus when refreshed topology changes", async () => {
+    invokeMock
+      .mockResolvedValueOnce({ data: graphData(), cached: true, layoutStale: false })
+      .mockResolvedValueOnce({
+        data: graphData({
+          contentHash: "hash-b",
+          nodes: [{ id: "wiki/b.md", path: "wiki/b.md", label: "B", type: "entity", tags: [], starred: false, degree: 0 }],
+        }),
+        cached: true,
+        layoutStale: false,
+      });
+    await useGraphStore.getState().ensureGraph("project-1", "D:/wiki");
+    useGraphStore.getState().setSelectedNode("wiki/a.md");
+    invalidateProjectResources(
+      { projectId: "project-1", rootPath: "D:/wiki" },
+      ["graph"],
+    );
+    await useGraphStore.getState().ensureGraph("project-1", "D:/wiki");
+
+    expect(useGraphStore.getState().data?.contentHash).toBe("hash-b");
+    expect(useGraphStore.getState().selectedNodeId).toBeNull();
+  });
+
   it("uses waitForTaskTerminal instead of polling get_task during rebuild", async () => {
     const started = task({ status: "running" });
     const completed = task({ status: "succeeded", completedAt: "2026-07-04T00:01:00Z" });
@@ -226,6 +275,71 @@ describe("graphStore", () => {
     expect(invokeMock).toHaveBeenCalledTimes(1);
     resolveTerminal(task({ status: "succeeded", completedAt: "2026-07-04T00:01:00Z" }));
     await Promise.all([first, second]);
+    expect(useGraphStore.getState()).toMatchObject({
+      status: "ready",
+      activeBuildPromise: null,
+    });
+    expect(useGraphStore.getState().data).toEqual(existing);
+  });
+
+  it("runs one follow-up read when invalidated repeatedly during a build", async () => {
+    const existing = graphData({ contentHash: "existing" });
+    useGraphStore.setState({
+      data: existing,
+      status: "ready",
+      projectKey: "project-1\0D:/wiki",
+    });
+    const started = task({ status: "running" });
+    let resolveTerminal!: (value: BackendTask) => void;
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "build_graph") return Promise.resolve(started);
+      if (command === "get_graph") {
+        return Promise.resolve({ data: graphData({ contentHash: "after" }), cached: true, layoutStale: false });
+      }
+      return Promise.resolve(null);
+    });
+    waitForTaskTerminalMock.mockReturnValue(new Promise<BackendTask>((resolve) => {
+      resolveTerminal = resolve;
+    }));
+
+    const rebuilding = useGraphStore.getState().rebuild("project-1", "D:/wiki");
+    await vi.waitFor(() => expect(useGraphStore.getState().activeBuildPromise).not.toBeNull());
+    invalidateProjectResources({ projectId: "project-1", rootPath: "D:/wiki" }, ["graph"], true);
+    invalidateProjectResources({ projectId: "project-1", rootPath: "D:/wiki" }, ["graph"], true);
+    resolveTerminal(task({ status: "succeeded", completedAt: "2026-07-04T00:01:00Z" }));
+    await rebuilding;
+    await vi.waitFor(() => expect(useGraphStore.getState().data?.contentHash).toBe("after"));
+
+    expect(invokeMock.mock.calls.filter(([command]) => command === "build_graph")).toHaveLength(1);
+    expect(invokeMock.mock.calls.filter(([command]) => command === "get_graph")).toHaveLength(2);
+  });
+
+  it("clears a dirty build follow-up when the project store resets", async () => {
+    const terminalResolvers: Array<(value: BackendTask) => void> = [];
+    waitForTaskTerminalMock.mockImplementation(() => new Promise<BackendTask>((resolve) => {
+      terminalResolvers.push(resolve);
+    }));
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "build_graph") return Promise.resolve(task());
+      if (command === "get_graph") {
+        return Promise.resolve({ data: graphData(), cached: true, layoutStale: false });
+      }
+      return Promise.resolve(null);
+    });
+
+    const projectA = useGraphStore.getState().rebuild("project-a", "D:/a");
+    await vi.waitFor(() => expect(terminalResolvers).toHaveLength(1));
+    invalidateProjectResources({ projectId: "project-a", rootPath: "D:/a" }, ["graph"]);
+    useGraphStore.getState().reset();
+    terminalResolvers[0]!(task({ status: "succeeded" }));
+    await projectA;
+
+    const projectB = useGraphStore.getState().rebuild("project-b", "D:/b");
+    await vi.waitFor(() => expect(terminalResolvers).toHaveLength(2));
+    terminalResolvers[1]!(task({ status: "succeeded", projectId: "project-b" }));
+    await projectB;
+
+    expect(invokeMock.mock.calls.filter(([command]) => command === "get_graph")).toHaveLength(1);
   });
 
   it("ignores terminal task results from a previous project scope", async () => {

@@ -51,6 +51,23 @@ beforeEach(() => {
 });
 
 describe("lintStore", () => {
+  it("single-flights ignore and history ensures within one project", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_lint_ignores") return { ignored: [] } satisfies LintIgnoreFile;
+      if (command === "list_lint_history") return { version: 1, entries: [] } satisfies LintHistoryFile;
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    const request = { projectId: PROJECT.projectId, projectRootPath: PROJECT.rootPath };
+
+    await Promise.all(Array.from({ length: 20 }, () => Promise.all([
+      useLintStore.getState().ensureIgnores(request),
+      useLintStore.getState().ensureHistory(request),
+    ])));
+
+    expect(invokeMock.mock.calls.filter(([command]) => command === "list_lint_ignores")).toHaveLength(1);
+    expect(invokeMock.mock.calls.filter(([command]) => command === "list_lint_history")).toHaveLength(1);
+  });
+
   it("does not cancel an existing confirmation for guarded workflow-result navigation", async () => {
     useLintStore.setState({
       fixConfirm: {
@@ -528,6 +545,34 @@ describe("lintStore", () => {
     expect(ok).toBe(true);
     expect(useLintStore.getState().ignores).toHaveLength(1);
     expect(invokeMock.mock.calls[0][0]).toBe("add_lint_ignore");
+  });
+
+  it("does not let an older ignore refresh overwrite a mutation", async () => {
+    let resolveList!: (file: LintIgnoreFile) => void;
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "list_lint_ignores") {
+        return new Promise<LintIgnoreFile>((resolve) => { resolveList = resolve; });
+      }
+      if (command === "add_lint_ignore") {
+        return Promise.resolve({
+          ignored: [{ path: "wiki/a.md", rule: "dead_link", createdAt: "2026-06-29T00:00:00Z" }],
+        } satisfies LintIgnoreFile);
+      }
+      return Promise.resolve({ version: 1, entries: [] });
+    });
+    const request = {
+      projectId: PROJECT.projectId,
+      projectRootPath: PROJECT.rootPath,
+      path: "wiki/a.md",
+      rule: "dead_link" as const,
+    };
+
+    const refreshing = useLintStore.getState().ensureIgnores(request);
+    await useLintStore.getState().addIgnore(request);
+    resolveList({ ignored: [] });
+    await refreshing;
+
+    expect(useLintStore.getState().ignores).toHaveLength(1);
   });
 
   it("removeIgnore restores a rule from the backend response", async () => {

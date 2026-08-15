@@ -85,7 +85,7 @@ export function ChatSessionList({
         </button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto py-1">
-        {loading ? (
+        {loading && sessions.length === 0 ? (
           <p className="m-0 px-3 py-2 text-[11px] text-[var(--text-muted)]">{t("chat.sessions.loading")}</p>
         ) : sessions.length === 0 ? (
           <p className="m-0 px-3 py-2 text-[11px] text-[var(--text-muted)]">{t("chat.sessions.empty")}</p>

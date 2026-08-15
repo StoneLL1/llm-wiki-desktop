@@ -1,6 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
-import { captureProjectScope, isProjectScopeCurrent } from "../../stores/projectScope";
+import { createProjectResourceController } from "../../lib/projectResourceFreshness";
+import {
+  captureProjectScope,
+  invalidateProjectResources,
+  isProjectScopeCurrent,
+  registerProjectResource,
+} from "../../stores/projectScope";
 import type { ConfirmedAction, PendingAction } from "../../types/backend";
 import type { ExportType } from "../../types/export";
 
@@ -47,7 +53,7 @@ const RECENT_PAGE_LIMIT = 8;
 // Project scope rejects cross-project work; this serial also rejects older
 // requests inside the same project, including A -> B -> A navigation.
 let pageRequestEpoch = 0;
-let treeRequestEpoch = 0;
+const wikiResource = createProjectResourceController<void>("wiki");
 
 interface WikiState {
   tree: WikiTree | null;
@@ -64,6 +70,7 @@ interface WikiState {
   error: string | null;
   recentPages: RecentPageEntry[];
   scan: (projectId: string, rootPath: string, commitGuard?: () => boolean) => Promise<void>;
+  ensureScanned: (projectId: string, rootPath: string) => Promise<void>;
   openPage: (projectId: string, rootPath: string, path: string, commitGuard?: () => boolean) => Promise<void>;
   setMode: (mode: WikiMode) => void;
   startEdit: () => void;
@@ -150,31 +157,64 @@ export const useWikiStore = create<WikiState>((set, get) => ({
   ...initial,
   scan: async (projectId, rootPath, commitGuard = () => true) => {
     const scope = captureProjectScope();
-    const requestEpoch = ++treeRequestEpoch;
+    const requestEpoch = wikiResource.beginRequest();
     const previous = { loadingTree: get().loadingTree, error: get().error };
     set({ loadingTree: true, error: null });
     try {
       const tree = await invoke<WikiTree>("scan_wiki", {
         request: { projectId, projectRootPath: rootPath },
       });
-      if (!isProjectScopeCurrent(scope) || requestEpoch !== treeRequestEpoch) return;
+      if (!isProjectScopeCurrent(scope) || !wikiResource.isCurrent(requestEpoch)) return;
       if (!commitGuard()) {
         set({ loadingTree: false, error: previous.loadingTree ? null : previous.error });
         return;
       }
-      const firstPage = tree.pages[0]?.path ?? null;
-      set({ tree, loadingTree: false });
-      if (firstPage && !get().selectedPath) {
-        await get().openPage(projectId, rootPath, firstPage, commitGuard);
+      const selectedPath = get().selectedPath;
+      const selectedStillExists = Boolean(
+        selectedPath && tree.pages.some((page) => page.path === selectedPath),
+      );
+      const fallbackPath = tree.pages[0]?.path ?? null;
+      const nextSelectedPath = selectedStillExists ? selectedPath : fallbackPath;
+      wikiResource.markLoaded(projectId, rootPath);
+      set({
+        tree,
+        loadingTree: false,
+        selectedPath: nextSelectedPath,
+        page: selectedStillExists ? get().page : null,
+        draft: selectedStillExists ? get().draft : "",
+      });
+      if (nextSelectedPath && !selectedStillExists) {
+        await get().openPage(projectId, rootPath, nextSelectedPath, commitGuard);
       }
     } catch (error) {
-      if (!isProjectScopeCurrent(scope) || requestEpoch !== treeRequestEpoch) return;
+      if (!isProjectScopeCurrent(scope) || !wikiResource.isCurrent(requestEpoch)) return;
       if (!commitGuard()) {
         set({ loadingTree: false, error: previous.loadingTree ? null : previous.error });
         return;
       }
       set({ loadingTree: false, error: errorMessage(error) });
     }
+  },
+  ensureScanned: (projectId, rootPath) => {
+    const state = get();
+    const refreshSelectedPath = state.tree && state.mode === "read" ? state.selectedPath : null;
+    return wikiResource.ensure(
+      { projectId, rootPath },
+      async () => {
+        const scanPromise = get().scan(projectId, rootPath);
+        const requestEpoch = wikiResource.epoch();
+        await scanPromise;
+        const current = get();
+        if (
+          wikiResource.isCurrent(requestEpoch)
+          && refreshSelectedPath
+          && current.selectedPath === refreshSelectedPath
+          && current.tree?.pages.some((page) => page.path === refreshSelectedPath)
+        ) {
+          await current.openPage(projectId, rootPath, refreshSelectedPath);
+        }
+      },
+    );
   },
   openPage: async (projectId, rootPath, path, commitGuard = () => true) => {
     const scope = captureProjectScope();
@@ -266,6 +306,7 @@ export const useWikiStore = create<WikiState>((set, get) => ({
         },
       });
       if (!isProjectScopeCurrent(scope)) return;
+      invalidateProjectResources({ projectId, rootPath }, ["graph"]);
       // The write succeeded — re-read to reflect saved bytes, but don't let a
       // transient re-read failure mask the successful save. Skip applying only
       // if the user navigated to a different page mid-save.
@@ -358,6 +399,7 @@ export const useWikiStore = create<WikiState>((set, get) => ({
         },
       });
       if (!isProjectScopeCurrent(scope)) return;
+      invalidateProjectResources({ projectId, rootPath }, ["graph"]);
       const refreshed = await invoke<WikiPageContent>("read_wiki_page", {
         request: {
           projectId,
@@ -464,6 +506,7 @@ export const useWikiStore = create<WikiState>((set, get) => ({
       });
       if (!isProjectScopeCurrent(scope)) return;
       set({ selectedPath: response.relativePath });
+      invalidateProjectResources({ projectId, rootPath }, ["graph"]);
       await get().scan(projectId, rootPath);
       if (!isProjectScopeCurrent(scope)) return;
       await get().openPage(projectId, rootPath, response.relativePath);
@@ -486,6 +529,7 @@ export const useWikiStore = create<WikiState>((set, get) => ({
       });
       if (!isProjectScopeCurrent(scope)) return;
       set({ selectedPath: response.relativePath });
+      invalidateProjectResources({ projectId, rootPath }, ["graph"]);
       await get().scan(projectId, rootPath);
       if (!isProjectScopeCurrent(scope)) return;
       await get().openPage(projectId, rootPath, response.relativePath);
@@ -518,6 +562,7 @@ export const useWikiStore = create<WikiState>((set, get) => ({
       });
       if (!isProjectScopeCurrent(scope)) return;
       set({ selectedPath: null, page: null, draft: "", mode: "read" });
+      invalidateProjectResources({ projectId, rootPath }, ["graph"]);
       await get().scan(projectId, rootPath);
     } catch (error) {
       if (!isProjectScopeCurrent(scope)) return;
@@ -536,7 +581,7 @@ export const useWikiStore = create<WikiState>((set, get) => ({
   requestExport: (requestedExportType) => set({ requestedExportType }),
   consumeExportRequest: () => set({ requestedExportType: null }),
   reset: () => {
-    treeRequestEpoch += 1;
+    wikiResource.reset();
     pageRequestEpoch += 1;
     stablePagePresentation = {
       loadingPage: initial.loadingPage,
@@ -549,6 +594,12 @@ export const useWikiStore = create<WikiState>((set, get) => ({
     set({ ...initial });
   },
 }));
+
+registerProjectResource(
+  "wiki",
+  wikiResource,
+  ({ projectId, rootPath }) => useWikiStore.getState().ensureScanned(projectId, rootPath),
+);
 
 function errorMessage(error: unknown): string {
   if (typeof error === "object" && error !== null && "message" in error) {

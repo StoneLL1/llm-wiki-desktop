@@ -17,7 +17,12 @@ import type {
   ToggleExportBookmarkResponse,
 } from "../types/export";
 import type { BackendTask } from "../types/task";
-import { captureProjectScope, isProjectScopeCurrent } from "./projectScope";
+import { createProjectResourceController } from "../lib/projectResourceFreshness";
+import {
+  captureProjectScope,
+  isProjectScopeCurrent,
+  registerProjectResource,
+} from "./projectScope";
 import { useTaskStore } from "./taskStore";
 
 const hasTauri = (): boolean =>
@@ -32,7 +37,7 @@ function errorMessage(error: unknown): string {
 }
 
 const ROUTE_PREFERENCE: ExportRoutePreference = "auto";
-let loadExportsEpoch = 0;
+const exportsResource = createProjectResourceController<void>("exports");
 let loadPreviewEpoch = 0;
 
 /**
@@ -58,6 +63,7 @@ export interface ExportState {
   error: string | null;
 
   loadExports: (projectId: string, rootPath: string, commitGuard?: () => boolean) => Promise<void>;
+  ensureExports: (projectId: string, rootPath: string) => Promise<void>;
   startExport: (
     projectId: string,
     rootPath: string,
@@ -97,26 +103,43 @@ export const useExportStore = create<ExportState>((set, get) => ({
   loadExports: async (projectId, rootPath, commitGuard = () => true) => {
     if (!hasTauri()) return;
     const scope = captureProjectScope();
-    const requestEpoch = ++loadExportsEpoch;
+    const requestEpoch = exportsResource.beginRequest();
     const previous = { loading: get().loading, error: get().error };
     set({ loading: true, error: null });
     try {
       const request: ListExportsRequest = { projectId, projectRootPath: rootPath };
       const records = await invoke<ExportRecord[]>("list_exports", { request });
-      if (!isProjectScopeCurrent(scope) || requestEpoch !== loadExportsEpoch) return;
+      if (!isProjectScopeCurrent(scope) || !exportsResource.isCurrent(requestEpoch)) return;
       if (!commitGuard()) {
         set({ loading: false, error: previous.loading ? null : previous.error });
         return;
       }
-      set({ records, loading: false });
+      exportsResource.markLoaded(projectId, rootPath);
+      set((state) => {
+        const previewExists = !state.previewId
+          || records.some((record) => record.id === state.previewId);
+        return {
+          records,
+          loading: false,
+          previewId: previewExists ? state.previewId : null,
+          previewHtml: previewExists ? state.previewHtml : null,
+        };
+      });
     } catch (error) {
-      if (!isProjectScopeCurrent(scope) || requestEpoch !== loadExportsEpoch) return;
+      if (!isProjectScopeCurrent(scope) || !exportsResource.isCurrent(requestEpoch)) return;
       if (!commitGuard()) {
         set({ loading: false, error: previous.loading ? null : previous.error });
         return;
       }
       set({ loading: false, error: errorMessage(error) });
     }
+  },
+
+  ensureExports: (projectId, rootPath) => {
+    return exportsResource.ensure(
+      { projectId, rootPath },
+      () => get().loadExports(projectId, rootPath),
+    );
   },
 
   startExport: async (projectId, rootPath, type, sourcePath, prefs) => {
@@ -221,8 +244,9 @@ export const useExportStore = create<ExportState>((set, get) => ({
 
   toggleBookmark: async (projectId, rootPath, recordId) => {
     if (!hasTauri()) return;
+    const requestEpoch = exportsResource.beginRequest();
     const scope = captureProjectScope();
-    set({ error: null });
+    set({ loading: false, error: null });
     const request: ToggleExportBookmarkRequest = {
       projectId,
       projectRootPath: rootPath,
@@ -233,7 +257,8 @@ export const useExportStore = create<ExportState>((set, get) => ({
         "toggle_export_bookmark",
         { request },
       );
-      if (!isProjectScopeCurrent(scope)) return;
+      if (!isProjectScopeCurrent(scope) || !exportsResource.isCurrent(requestEpoch)) return;
+      exportsResource.markLoaded(projectId, rootPath);
       set((state) => ({
         records: state.records.map((record) =>
           record.id === response.exportRecordId
@@ -242,7 +267,7 @@ export const useExportStore = create<ExportState>((set, get) => ({
         ),
       }));
     } catch (error) {
-      if (!isProjectScopeCurrent(scope)) return;
+      if (!isProjectScopeCurrent(scope) || !exportsResource.isCurrent(requestEpoch)) return;
       set({ error: errorMessage(error) });
     }
   },
@@ -272,11 +297,17 @@ export const useExportStore = create<ExportState>((set, get) => ({
   },
 
   reset: () => {
-    loadExportsEpoch += 1;
+    exportsResource.reset();
     loadPreviewEpoch += 1;
     set({ ...initial });
   },
 }));
+
+registerProjectResource(
+  "exports",
+  exportsResource,
+  ({ projectId, rootPath }) => useExportStore.getState().ensureExports(projectId, rootPath),
+);
 
 // Re-exported for tests; mirrors lintStore's selectAllIssues helper shape.
 export function selectHasRecords(state: ExportState): boolean {

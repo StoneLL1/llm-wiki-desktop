@@ -21,6 +21,32 @@ const PROJECT = {
 } satisfies ProjectSummary;
 
 describe("ExportsView", () => {
+  it("offers a working retry action without hiding stale records", () => {
+    const loadExports = vi.fn();
+    useExportStore.getState().reset();
+    useExportStore.setState({
+      records: [{
+        id: "export-stale",
+        exportType: "beautiful_read",
+        title: "Still visible",
+        outputPath: "exports/html/stale.html",
+        createdAt: "2026-06-20T10:00:00Z",
+        route: "byok",
+        status: "succeeded",
+        bookmarked: false,
+      }],
+      error: "offline",
+      loadExports,
+      ensureExports: vi.fn(),
+    });
+    useProjectStore.setState({ currentProject: PROJECT });
+    render(<ExportsView />);
+
+    expect(screen.getByText("Still visible")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(loadExports).toHaveBeenCalledWith("p", "/x");
+  });
+
   it("renders the empty state and new-export control before any export", () => {
     useExportStore.getState().reset();
     useProjectStore.setState({ currentProject: PROJECT });

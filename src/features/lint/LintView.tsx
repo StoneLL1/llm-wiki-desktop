@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { ResizableSplitter } from "../../components/app/ResizableSplitter";
 import { PANE_WIDTH_LIMITS } from "../../hooks/useResizablePane";
 import { useLintStore } from "../../stores/lintStore";
+import { observeProjectResources } from "../../stores/projectScope";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { cancelTaskRequest, useTaskStore } from "../../stores/taskStore";
@@ -71,9 +72,9 @@ export function LintView() {
   const selectIssue = useLintStore((state) => state.selectIssue);
   const setMode = useLintStore((state) => state.setMode);
   const setSafetyPrefs = useLintStore((state) => state.setSafetyPrefs);
-  const loadHistory = useLintStore((state) => state.loadHistory);
+  const ensureHistory = useLintStore((state) => state.ensureHistory);
   const openHistoryReport = useLintStore((state) => state.openHistoryReport);
-  const loadIgnores = useLintStore((state) => state.loadIgnores);
+  const ensureIgnores = useLintStore((state) => state.ensureIgnores);
   const addIgnore = useLintStore((state) => state.addIgnore);
   const removeIgnore = useLintStore((state) => state.removeIgnore);
   const applyFix = useLintStore((state) => state.applyFix);
@@ -164,8 +165,13 @@ export function LintView() {
   // Load ignored-issue entries + the persisted deep-lint report when the
   // background task lands.
   useEffect(() => {
-    void loadIgnores({ projectId, projectRootPath: rootPath });
-  }, [projectId, rootPath, loadIgnores]);
+    const unobserve = observeProjectResources(
+      { projectId, rootPath },
+      ["lint-ignores", "lint-history"],
+    );
+    void ensureIgnores({ projectId, projectRootPath: rootPath });
+    return unobserve;
+  }, [projectId, rootPath, ensureIgnores]);
 
   useEffect(() => {
     const selectionReportId = useLintStore.getState().agentRepairSelectionReportId;
@@ -185,7 +191,7 @@ export function LintView() {
 
   useEffect(() => {
     let cancelled = false;
-    void loadHistory({ projectId, projectRootPath: rootPath }).then((entries) => {
+    void ensureHistory({ projectId, projectRootPath: rootPath }).then((entries) => {
       const hasLoadedReport =
         useLintStore.getState().localReport ||
         useLintStore.getState().deepReport ||
@@ -199,7 +205,7 @@ export function LintView() {
     return () => {
       cancelled = true;
     };
-  }, [projectId, rootPath, loadHistory, openHistoryReport]);
+  }, [projectId, rootPath, ensureHistory, openHistoryReport]);
 
   useEffect(() => {
     if (deepTask?.status === "succeeded") {
@@ -448,8 +454,15 @@ export function LintView() {
           </div>
         ) : null}
         {error ? (
-          <div className="border-b border-[var(--border-subtle)] bg-[var(--warning-soft)] px-4 py-2 text-[12px] text-[var(--text-primary)]">
-            {error}
+          <div className="flex items-center justify-between gap-3 border-b border-[var(--border-subtle)] bg-[var(--warning-soft)] px-4 py-2 text-[12px] text-[var(--text-primary)]">
+            <span>{error}</span>
+            <button
+              type="button"
+              className="btn btn--secondary btn--sm"
+              onClick={() => void ensureIgnores({ projectId, projectRootPath: rootPath })}
+            >
+              {t("workflows.action.retry")}
+            </button>
           </div>
         ) : null}
 
@@ -476,6 +489,7 @@ export function LintView() {
           onOpen={(id) =>
             void openHistoryReport({ projectId, projectRootPath: rootPath, id })
           }
+          onRetry={() => void ensureHistory({ projectId, projectRootPath: rootPath })}
         />
 
         {ignores.length > 0 ? (

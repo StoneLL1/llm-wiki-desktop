@@ -7,6 +7,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import { applyColorThemePresetPreference, useSettingsStore } from "./settingsStore";
+import { invalidateProjectResources } from "./projectScope";
 
 let darkModeListener: ((event: MediaQueryListEvent) => void) | null = null;
 
@@ -88,6 +89,20 @@ describe("settingsStore chat convenience authorization", () => {
     expect(useSettingsStore.getState().chatConvenienceAuthorization).toEqual(authorization);
   });
 
+  it("single-flights authorization ensures inside the freshness window", async () => {
+    invokeMock.mockResolvedValue({
+      enabled: false,
+      confirmedAt: "",
+      projectId: "project-1",
+      rootPathFingerprint: "",
+    });
+
+    await Promise.all(Array.from({ length: 20 }, () =>
+      useSettingsStore.getState().ensureChatConvenienceAuthorization("project-1", "D:/wiki")));
+
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+  });
+
   it("falls back to disabled authorization when loading fails", async () => {
     useSettingsStore.setState({
       chatConvenienceAuthorization: {
@@ -126,6 +141,45 @@ describe("settingsStore chat convenience authorization", () => {
 
     expect(invokeMock).toHaveBeenCalledWith("set_chat_convenience_authorization", {
       request: { projectId: "project-1", projectRootPath: "D:/wiki", enabled: true },
+    });
+    expect(useSettingsStore.getState().chatConvenienceAuthorization?.enabled).toBe(true);
+  });
+
+  it("finishes an authorization mutation when focus invalidation arrives mid-save", async () => {
+    let resolveSave!: (authorization: {
+      enabled: boolean;
+      confirmedAt: string;
+      projectId: string;
+      rootPathFingerprint: string;
+    }) => void;
+    useSettingsStore.setState({
+      chatConvenienceAuthorization: {
+        enabled: false,
+        confirmedAt: "",
+        projectId: "project-1",
+        rootPathFingerprint: "",
+      },
+    });
+    invokeMock.mockReturnValueOnce(new Promise((resolve) => { resolveSave = resolve; }));
+
+    const saving = useSettingsStore
+      .getState()
+      .setChatConvenienceAuthorization("project-1", "D:/wiki", true);
+    invalidateProjectResources(
+      { projectId: "project-1", rootPath: "D:/wiki" },
+      ["settings-chat-authorization"],
+      true,
+    );
+    resolveSave({
+      enabled: true,
+      confirmedAt: "2026-07-05T00:00:00Z",
+      projectId: "project-1",
+      rootPathFingerprint: "0123456789abcdef",
+    });
+    await saving;
+
+    expect(useSettingsStore.getState()).toMatchObject({
+      chatConvenienceSaving: false,
     });
     expect(useSettingsStore.getState().chatConvenienceAuthorization?.enabled).toBe(true);
   });
@@ -184,5 +238,40 @@ describe("settingsStore chat convenience authorization", () => {
 
     expect(invokeMock).toHaveBeenCalledWith("revoke_all_chat_convenience_authorizations");
     expect(useSettingsStore.getState().chatConvenienceAuthorization).toBeNull();
+  });
+
+  it("clears a pending authorization save when revoke-all supersedes it", async () => {
+    let resolveSave!: (value: {
+      enabled: boolean;
+      confirmedAt: string;
+      projectId: string;
+      rootPathFingerprint: string;
+    }) => void;
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "set_chat_convenience_authorization") {
+        return new Promise((resolve) => { resolveSave = resolve; });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const saving = useSettingsStore.getState()
+      .setChatConvenienceAuthorization("project-1", "D:/wiki", true);
+    await useSettingsStore.getState().revokeAllChatConvenienceAuthorizations();
+    expect(useSettingsStore.getState()).toMatchObject({
+      chatConvenienceAuthorization: null,
+      chatConvenienceSaving: false,
+    });
+
+    resolveSave({
+      enabled: true,
+      confirmedAt: "2026-07-05T00:00:00Z",
+      projectId: "project-1",
+      rootPathFingerprint: "fingerprint",
+    });
+    await saving;
+    expect(useSettingsStore.getState()).toMatchObject({
+      chatConvenienceAuthorization: null,
+      chatConvenienceSaving: false,
+    });
   });
 });

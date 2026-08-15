@@ -35,7 +35,7 @@ describe("GraphView", () => {
     useGraphStore.setState({
       status: "ready-empty",
       data: { nodes: [], edges: [], contentHash: "empty", builtAt: "2026-07-04T00:00:00Z", layout: null },
-      load: async () => {},
+      ensureGraph: async () => {},
     });
 
     render(<GraphView />);
@@ -49,7 +49,7 @@ describe("GraphView", () => {
     useGraphStore.setState({
       status: "rebuilding",
       data: graphData,
-      load: async () => {},
+      ensureGraph: async () => {},
     });
 
     render(<GraphView />);
@@ -70,7 +70,7 @@ describe("GraphView", () => {
         label: "Building graph",
         error: null,
       },
-      load: async () => {},
+      ensureGraph: async () => {},
     } as Partial<ReturnType<typeof useGraphStore.getState>>);
 
     render(<GraphView />);

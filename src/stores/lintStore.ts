@@ -32,7 +32,13 @@ import type {
 import type { AgentKind } from "../types/agent";
 import type { LlmProviderKind } from "../types/llm";
 import type { WorkflowRun, WorkflowStartOutcome } from "../types/workflow";
-import { captureProjectScope, isProjectScopeCurrent } from "./projectScope";
+import {
+  captureProjectScope,
+  invalidateProjectResources,
+  isProjectScopeCurrent,
+  registerProjectResource,
+} from "./projectScope";
+import { createProjectResourceController } from "../lib/projectResourceFreshness";
 import { useNavigationStore } from "./navigationStore";
 import { useProjectStore } from "./projectStore";
 import { useWorkflowStore } from "./workflowStore";
@@ -219,12 +225,14 @@ export interface LintState {
   setMode: (mode: LintMode) => void;
   setSafetyPrefs: (prefs: Partial<LintSafetyPrefs>) => void;
   loadHistory: (request: ListLintHistoryRequest) => Promise<LintHistoryEntry[]>;
+  ensureHistory: (request: ListLintHistoryRequest) => Promise<LintHistoryEntry[]>;
   openHistoryReport: (
     request: ReadLintHistoryReportRequest,
     commitGuard?: () => boolean,
     preservePendingConfirmations?: boolean,
   ) => Promise<PersistedLintReport | null>;
   loadIgnores: (request: ListLintIgnoresRequest) => Promise<void>;
+  ensureIgnores: (request: ListLintIgnoresRequest) => Promise<void>;
   addIgnore: (request: AddLintIgnoreRequest) => Promise<boolean>;
   removeIgnore: (request: RemoveLintIgnoreRequest) => Promise<boolean>;
   applyFix: (
@@ -289,6 +297,9 @@ const initial = {
   agentRepairCanonicalIdentityKey: null as string | null,
   agentRepairIdentityRevision: null as string | null,
 };
+
+const ignoresResource = createProjectResourceController<void>("lint-ignores");
+const historyResource = createProjectResourceController<LintHistoryEntry[]>("lint-history");
 
 export const useLintStore = create<LintState>((set, get) => ({
   ...initial,
@@ -428,18 +439,34 @@ export const useLintStore = create<LintState>((set, get) => ({
   loadHistory: async (request) => {
     if (!hasTauri()) return [];
     const scope = captureProjectScope();
-    set({ historyLoading: true, historyError: null });
+    const requestEpoch = historyResource.beginRequest();
+    set({
+      historyLoading: true,
+      historyError: null,
+    });
     try {
       const file = await invoke<LintHistoryFile>("list_lint_history", { request });
-      if (!isProjectScopeCurrent(scope)) return [];
+      if (!isProjectScopeCurrent(scope) || !historyResource.isCurrent(requestEpoch)) return [];
       const history = file.entries ?? [];
-      set({ history, historyLoading: false });
+      historyResource.markLoaded(request.projectId, request.projectRootPath);
+      set({
+        history,
+        historyLoading: false,
+      });
       return history;
     } catch (error) {
-      if (!isProjectScopeCurrent(scope)) return [];
+      if (!isProjectScopeCurrent(scope) || !historyResource.isCurrent(requestEpoch)) return [];
       set({ historyLoading: false, historyError: errorMessage(error) });
       return [];
     }
+  },
+
+  ensureHistory: (request) => {
+    return historyResource.ensure(
+      { projectId: request.projectId, rootPath: request.projectRootPath },
+      () => get().loadHistory(request),
+      get().history,
+    );
   },
 
   openHistoryReport: async (
@@ -543,32 +570,51 @@ export const useLintStore = create<LintState>((set, get) => ({
   loadIgnores: async (request) => {
     if (!hasTauri()) return;
     const scope = captureProjectScope();
+    const requestEpoch = ignoresResource.beginRequest();
     try {
       const file = await invoke<{ ignored: LintIgnoreEntry[] }>(
         "list_lint_ignores",
         { request },
       );
-      if (!isProjectScopeCurrent(scope)) return;
-      set({ ignores: file.ignored ?? [] });
+      if (!isProjectScopeCurrent(scope) || !ignoresResource.isCurrent(requestEpoch)) return;
+      ignoresResource.markLoaded(request.projectId, request.projectRootPath);
+      set({
+        ignores: file.ignored ?? [],
+      });
     } catch (error) {
-      if (!isProjectScopeCurrent(scope)) return;
+      if (!isProjectScopeCurrent(scope) || !ignoresResource.isCurrent(requestEpoch)) return;
       set({ error: errorMessage(error) });
     }
   },
 
+  ensureIgnores: (request) => {
+    return ignoresResource.ensure(
+      { projectId: request.projectId, rootPath: request.projectRootPath },
+      () => get().loadIgnores(request),
+    );
+  },
+
   addIgnore: async (request) => {
     if (!hasTauri()) return false;
+    const requestEpoch = ignoresResource.beginRequest();
     const scope = captureProjectScope();
     try {
       const file = await invoke<{ ignored: LintIgnoreEntry[] }>(
         "add_lint_ignore",
         { request },
       );
-      if (!isProjectScopeCurrent(scope)) return false;
-      set({ ignores: file.ignored ?? [] });
+      if (!isProjectScopeCurrent(scope) || !ignoresResource.isCurrent(requestEpoch)) return false;
+      ignoresResource.markLoaded(request.projectId, request.projectRootPath);
+      set({
+        ignores: file.ignored ?? [],
+      });
+      invalidateProjectResources(
+        { projectId: request.projectId, rootPath: request.projectRootPath },
+        ["lint-history"],
+      );
       return true;
     } catch (error) {
-      if (!isProjectScopeCurrent(scope)) return false;
+      if (!isProjectScopeCurrent(scope) || !ignoresResource.isCurrent(requestEpoch)) return false;
       set({ error: errorMessage(error) });
       return false;
     }
@@ -576,17 +622,25 @@ export const useLintStore = create<LintState>((set, get) => ({
 
   removeIgnore: async (request) => {
     if (!hasTauri()) return false;
+    const requestEpoch = ignoresResource.beginRequest();
     const scope = captureProjectScope();
     try {
       const file = await invoke<{ ignored: LintIgnoreEntry[] }>(
         "remove_lint_ignore",
         { request },
       );
-      if (!isProjectScopeCurrent(scope)) return false;
-      set({ ignores: file.ignored ?? [] });
+      if (!isProjectScopeCurrent(scope) || !ignoresResource.isCurrent(requestEpoch)) return false;
+      ignoresResource.markLoaded(request.projectId, request.projectRootPath);
+      set({
+        ignores: file.ignored ?? [],
+      });
+      invalidateProjectResources(
+        { projectId: request.projectId, rootPath: request.projectRootPath },
+        ["lint-history"],
+      );
       return true;
     } catch (error) {
-      if (!isProjectScopeCurrent(scope)) return false;
+      if (!isProjectScopeCurrent(scope) || !ignoresResource.isCurrent(requestEpoch)) return false;
       set({ error: errorMessage(error) });
       return false;
     }
@@ -1069,8 +1123,26 @@ export const useLintStore = create<LintState>((set, get) => ({
     }
   },
 
-  reset: () => set({ ...initial }),
+  reset: () => {
+    ignoresResource.reset();
+    historyResource.reset();
+    set({ ...initial });
+  },
 }));
+
+registerProjectResource(
+  "lint-ignores",
+  ignoresResource,
+  ({ projectId, rootPath }) =>
+    useLintStore.getState().ensureIgnores({ projectId, projectRootPath: rootPath }),
+);
+
+registerProjectResource(
+  "lint-history",
+  historyResource,
+  ({ projectId, rootPath }) =>
+    useLintStore.getState().ensureHistory({ projectId, projectRootPath: rootPath }).then(() => undefined),
+);
 
 /** All issues currently in view: local pass + the latest deep-lint report. */
 export function selectAllIssues(state: LintState): LintIssue[] {

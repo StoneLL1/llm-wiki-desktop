@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
+import { createProjectResourceController } from "../lib/projectResourceFreshness";
 import { i18next } from "../i18n";
 
 import type {
@@ -13,7 +14,12 @@ import type {
 } from "../types/chat";
 import type { AgentKind } from "../types/agent";
 import type { LlmProviderKind } from "../types/llm";
-import { captureProjectScope, isProjectScopeCurrent } from "./projectScope";
+import {
+  captureProjectScope,
+  invalidateProjectResources,
+  isProjectScopeCurrent,
+  registerProjectResource,
+} from "./projectScope";
 import { fetchTaskActivities, useTaskStore } from "./taskStore";
 import type { BackendTask } from "../types/task";
 
@@ -106,6 +112,7 @@ interface ChatState {
     rootPath: string,
     options?: { autoSelect?: boolean },
   ) => Promise<void>;
+  ensureSessions: (projectId: string, rootPath: string) => Promise<void>;
   createSession: (
     projectId: string,
     rootPath: string,
@@ -148,9 +155,9 @@ interface ChatState {
   cancelTask: (taskId: string) => Promise<void>;
   clearSendTask: (error?: string | null) => void;
   /** Reload the active session (used by the view once the send task reaches terminal status). */
-  reloadActive: (projectId: string, rootPath: string) => Promise<void>;
+  reloadActive: (projectId: string, rootPath: string) => Promise<boolean>;
   /** Reload a known session without allowing a later selection to clobber it. */
-  reloadSession: (projectId: string, rootPath: string, sessionId: string) => Promise<void>;
+  reloadSession: (projectId: string, rootPath: string, sessionId: string) => Promise<boolean>;
   saveAnswer: (
     projectId: string,
     rootPath: string,
@@ -200,6 +207,8 @@ const initial = {
   selectionEpoch: 0,
 };
 
+const sessionsResource = createProjectResourceController<void>("chat-sessions");
+
 export const useChatStore = create<ChatState>((set, get) => ({
   ...initial,
 
@@ -207,27 +216,48 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!hasTauri()) return;
     const autoSelect = options?.autoSelect ?? true;
     const scope = captureProjectScope();
+    const selectionEpoch = get().selectionEpoch;
+    const requestEpoch = sessionsResource.beginRequest();
     set({ loadingSessions: true, error: null });
     try {
       const sessions = await invoke<ChatSessionSummary[]>("list_chat_sessions", {
         request: { projectId, projectRootPath: rootPath },
       });
-      if (!isProjectScopeCurrent(scope)) return;
-      set({ sessions, loadingSessions: false });
+      if (!isProjectScopeCurrent(scope) || !sessionsResource.isCurrent(requestEpoch)) return;
+      const selectedId = get().activeSessionId;
+      const selectionIsCurrent = get().selectionEpoch === selectionEpoch;
+      const selectedExists = selectedId
+        ? sessions.some((session) => session.id === selectedId)
+        : false;
+      sessionsResource.markLoaded(projectId, rootPath);
+      set({
+        sessions,
+        loadingSessions: false,
+      });
       // Auto-select the newest session (summaries are sorted newest-first by
       // the backend) only when the user has not already selected one. This
       // restores a usable composer when reopening Chat; an explicit selection
       // survives a list refresh. Suppressed during page-session resolution,
       // where ensurePageSession owns selection and a mid-flight auto-select
       // could race a page switch.
-      if (autoSelect && !get().activeSessionId && sessions[0]) {
+      if (selectionIsCurrent && selectedId && !selectedExists) {
+        set({ activeSessionId: null, activeSession: null });
+      }
+      if (autoSelect && selectionIsCurrent && !selectedExists && sessions[0]) {
         await get().selectSession(projectId, rootPath, sessions[0].id);
         if (!isProjectScopeCurrent(scope)) return;
       }
     } catch (error) {
-      if (!isProjectScopeCurrent(scope)) return;
+      if (!isProjectScopeCurrent(scope) || !sessionsResource.isCurrent(requestEpoch)) return;
       set({ loadingSessions: false, error: errorMessage(error) });
     }
+  },
+
+  ensureSessions: (projectId, rootPath) => {
+    return sessionsResource.ensure(
+      { projectId, rootPath },
+      () => get().loadSessions(projectId, rootPath),
+    );
   },
 
   createSession: async (projectId, rootPath, title, contextPagePath) => {
@@ -501,12 +531,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Only reload the session the send targeted; if the user switched away
     // mid-send, leave their current view alone rather than yanking it back.
     const sessionId = get().sendSessionId;
-    if (!sessionId) return;
-    await get().reloadSession(projectId, rootPath, sessionId);
+    if (!sessionId || get().activeSessionId !== sessionId) return true;
+    return get().reloadSession(projectId, rootPath, sessionId);
   },
 
   reloadSession: async (projectId, rootPath, sessionId) => {
-    if (!hasTauri() || get().activeSessionId !== sessionId) return;
+    if (!hasTauri() || get().activeSessionId !== sessionId) return false;
     const scope = captureProjectScope();
     const selectionEpoch = get().selectionEpoch;
     set({ loadingSession: true });
@@ -518,15 +548,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
         !isProjectScopeCurrent(scope) ||
         get().selectionEpoch !== selectionEpoch ||
         get().activeSessionId !== sessionId
-      ) return;
+      ) return false;
       set({ activeSession: session, loadingSession: false });
+      return true;
     } catch (error) {
       if (
         !isProjectScopeCurrent(scope) ||
         get().selectionEpoch !== selectionEpoch ||
         get().activeSessionId !== sessionId
-      ) return;
+      ) return false;
       set({ loadingSession: false, error: errorMessage(error) });
+      return false;
     }
   },
 
@@ -569,6 +601,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         saveStatus: { ...state.saveStatus, [messageId]: "saved" },
         savedAnswerPaths: { ...state.savedAnswerPaths, [messageId]: result.path },
       }));
+      invalidateProjectResources({ projectId, rootPath }, ["wiki", "graph"]);
       return result;
     } catch (error) {
       if (!isProjectScopeCurrent(scope)) return null;
@@ -629,6 +662,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         savedAnswerPaths: { ...state.savedAnswerPaths, [messageId]: result.path },
         overwriteRequest: null,
       }));
+      invalidateProjectResources({ projectId, rootPath }, ["wiki", "graph"]);
     } catch (error) {
       if (!isProjectScopeCurrent(scope)) return;
       set((state) => ({
@@ -677,6 +711,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set({ activeSession: session, activeSessionId: session.id });
       }
       await get().loadSessions(projectId, rootPath, { autoSelect: false });
+      invalidateProjectResources({ projectId, rootPath }, ["wiki", "graph"]);
     } catch (error) {
       if (!isProjectScopeCurrent(scope)) return;
       if (get().selectionEpoch === selectionEpoch && get().activeSessionId === sessionId) {
@@ -710,6 +745,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set({ activeSession: session, activeSessionId: session.id });
       }
       await get().loadSessions(projectId, rootPath, { autoSelect: false });
+      invalidateProjectResources({ projectId, rootPath }, ["wiki", "graph"]);
     } catch (error) {
       if (!isProjectScopeCurrent(scope)) return;
       if (get().selectionEpoch === selectionEpoch && get().activeSessionId === sessionId) {
@@ -761,8 +797,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
   },
 
-  reset: () => set({ ...initial }),
+  reset: () => {
+    sessionsResource.reset();
+    set({ ...initial });
+  },
 }));
+
+registerProjectResource(
+  "chat-sessions",
+  sessionsResource,
+  ({ projectId, rootPath }) => useChatStore.getState().ensureSessions(projectId, rootPath),
+);
 
 function normalizePagePath(path: string): string {
   const normalized = path.replace(/\\/g, "/").trim();
