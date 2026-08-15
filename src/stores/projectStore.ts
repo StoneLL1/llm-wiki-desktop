@@ -567,6 +567,14 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       get().currentProject.projectId === project.projectId &&
       get().currentProject.rootPath === project.rootPath
     ) {
+      const previousAuthority = get().authority;
+      if (
+        previousAuthority
+        && previousAuthority.identityRevision !== authority.identityRevision
+      ) {
+        invalidateProjectScope();
+        resetProjectScopedStores();
+      }
       set({ authority });
     }
     return authority;

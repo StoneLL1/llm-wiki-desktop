@@ -15,6 +15,10 @@ import {
   isTaskEventForProject,
   useTaskEvents,
 } from "./useTaskEvents";
+import {
+  observeProjectResources,
+  registerProjectResource,
+} from "../stores/projectScope";
 
 const listenMock = vi.hoisted(() => vi.fn());
 const notifyTaskEventMock = vi.hoisted(() => vi.fn());
@@ -107,6 +111,80 @@ describe("task event listener bridge", () => {
       listenMock.mock.calls.filter(([channel]) => channel === "task://stream-output"),
     ).toHaveLength(1);
     unmount();
+  });
+
+  it("marks and revalidates only observed resources on window focus", async () => {
+    useProjectStore.setState({
+      currentProject: {
+        ...defaultProject,
+        projectId: "project-a",
+        rootPath: "D:/wiki",
+      },
+    });
+    const invalidate = vi.fn();
+    const revalidate = vi.fn();
+    const unregister = registerProjectResource("wiki", { invalidate }, revalidate);
+    const unobserve = observeProjectResources(
+      { projectId: "project-a", rootPath: "D:/wiki" },
+      ["wiki"],
+    );
+    const mounted = renderHook(() => useTaskEvents());
+    await waitFor(() => expect(listenMock).toHaveBeenCalled());
+
+    act(() => window.dispatchEvent(new Event("focus")));
+
+    await waitFor(() => expect(invalidate).toHaveBeenCalledTimes(1));
+    expect(revalidate).toHaveBeenCalledWith({ projectId: "project-a", rootPath: "D:/wiki" });
+    mounted.unmount();
+    unobserve();
+    unregister();
+  });
+
+  it("drops deferred invalidation after the active project switches", async () => {
+    let wikiChanged!: (event: { payload: BackendEvent }) => void;
+    listenMock.mockImplementation(async (channel: string, callback: typeof wikiChanged) => {
+      if (channel === "wiki://changed") wikiChanged = callback;
+      return vi.fn();
+    });
+    const invalidate = vi.fn();
+    const unregister = registerProjectResource("wiki", { invalidate }, vi.fn());
+    const mounted = renderHook(() => useTaskEvents());
+    await waitFor(() => expect(wikiChanged).toBeTypeOf("function"));
+
+    act(() => {
+      wikiChanged({ payload: { ...event, eventType: "wiki_changed" } });
+      useProjectStore.getState().setCurrentProject({
+        ...defaultProject,
+        projectId: "project-b",
+        rootPath: "D:/b",
+      });
+    });
+    await Promise.resolve();
+
+    expect(invalidate).not.toHaveBeenCalled();
+    mounted.unmount();
+    unregister();
+  });
+
+  it("keeps deferred invalidation after a same-scope project summary refresh", async () => {
+    let wikiChanged!: (event: { payload: BackendEvent }) => void;
+    listenMock.mockImplementation(async (channel: string, callback: typeof wikiChanged) => {
+      if (channel === "wiki://changed") wikiChanged = callback;
+      return vi.fn();
+    });
+    const invalidate = vi.fn();
+    const unregister = registerProjectResource("wiki", { invalidate }, vi.fn());
+    const mounted = renderHook(() => useTaskEvents());
+    await waitFor(() => expect(wikiChanged).toBeTypeOf("function"));
+
+    act(() => {
+      wikiChanged({ payload: { ...event, eventType: "wiki_changed" } });
+      useProjectStore.getState().setCurrentProject({ ...useProjectStore.getState().currentProject });
+    });
+    await waitFor(() => expect(invalidate).toHaveBeenCalledTimes(1));
+
+    mounted.unmount();
+    unregister();
   });
 
   it("ignores callbacks from a delayed listener after StrictMode-style remount", () => {

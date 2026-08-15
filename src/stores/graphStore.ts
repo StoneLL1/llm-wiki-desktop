@@ -9,8 +9,16 @@ import type {
   SaveGraphLayoutRequest,
 } from "../types/graph";
 import { waitForTaskTerminal } from "../lib/waitForTaskTerminal";
+import {
+  createProjectResourceController,
+  projectResourceKey,
+} from "../lib/projectResourceFreshness";
 import type { WikiPageType } from "../types/wiki";
-import { captureProjectScope, isProjectScopeCurrent } from "./projectScope";
+import {
+  captureProjectScope,
+  isProjectScopeCurrent,
+  registerProjectResource,
+} from "./projectScope";
 import { useTaskStore } from "./taskStore";
 import type { BackendTask } from "../types/task";
 
@@ -49,6 +57,7 @@ interface GraphState {
   exportPng: (() => void) | null;
   recomputeLayout: (() => void) | null;
   load: (projectId: string, rootPath: string) => Promise<void>;
+  ensureGraph: (projectId: string, rootPath: string) => Promise<void>;
   rebuild: (projectId: string, rootPath: string) => Promise<void>;
   saveLayout: (
     projectId: string,
@@ -67,6 +76,9 @@ interface GraphState {
   reset: () => void;
   projectKey: string | null;
 }
+
+const graphResource = createProjectResourceController<void>("graph");
+let graphBuildDirty = 0;
 
 const initial = {
   data: null as GraphData | null,
@@ -91,7 +103,8 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   ...initial,
   load: async (projectId, rootPath) => {
     const scope = captureProjectScope();
-    const projectKey = createProjectKey(projectId, rootPath);
+    const projectKey = projectResourceKey(projectId, rootPath);
+    const requestEpoch = graphResource.beginRequest();
     const state = get();
     const sameProject = state.projectKey === projectKey;
     if (!sameProject) {
@@ -123,23 +136,38 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       const result = await invoke<GraphBuildResult>("get_graph", {
         request: { projectId, projectRootPath: rootPath },
       });
-      if (!isProjectScopeCurrent(scope)) return;
-      set({
-        data: result.data,
+      if (!isProjectScopeCurrent(scope) || !graphResource.isCurrent(requestEpoch)) return;
+      graphResource.markLoaded(projectId, rootPath);
+      set((current) => ({
+        data: current.data?.contentHash === result.data.contentHash ? current.data : result.data,
         cached: result.cached,
         layoutStale: result.layoutStale,
         status: graphStatusForData(result.data),
         error: null,
         buildUi: idleBuildUi(),
         projectKey,
-      });
+        selectedNodeId: nodeStillExists(result.data, current.selectedNodeId)
+          ? current.selectedNodeId
+          : null,
+        focusedNodeId: nodeStillExists(result.data, current.focusedNodeId)
+          ? current.focusedNodeId
+          : null,
+      }));
     } catch (error) {
-      if (!isProjectScopeCurrent(scope)) return;
+      if (!isProjectScopeCurrent(scope) || !graphResource.isCurrent(requestEpoch)) return;
       if (errorCode(error) === "GRAPH_BUILD_REQUIRED") {
+        const buildPromise = runGraphBuild(
+          projectId,
+          rootPath,
+          scope,
+          projectKey,
+          requestEpoch,
+        );
+        set({ activeBuildPromise: buildPromise });
         try {
-          await runGraphBuild(projectId, rootPath, scope, projectKey);
+          await buildPromise;
         } catch (buildError) {
-          if (!isProjectScopeCurrent(scope)) return;
+          if (!isProjectScopeCurrent(scope) || !graphResource.isCurrent(requestEpoch)) return;
           set((state) => ({
             status: state.data ? graphStatusForData(state.data) : "error",
             error: errorMessage(buildError),
@@ -151,8 +179,11 @@ export const useGraphStore = create<GraphState>((set, get) => ({
               error: errorMessage(buildError),
             },
           }));
+        } finally {
+          finishGraphBuild(buildPromise, projectId, rootPath);
         }
       } else {
+        if (!graphResource.isCurrent(requestEpoch)) return;
         set((state) => ({
           status: state.data ? graphStatusForData(state.data) : "error",
           error: errorMessage(error),
@@ -167,13 +198,22 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       }
     }
   },
+  ensureGraph: (projectId, rootPath) => {
+    const state = get();
+    if (state.activeBuildPromise) return state.activeBuildPromise;
+    return graphResource.ensure(
+      { projectId, rootPath },
+      () => get().load(projectId, rootPath),
+    );
+  },
   rebuild: async (projectId, rootPath) => {
-    const scope = captureProjectScope();
-    const projectKey = createProjectKey(projectId, rootPath);
     const current = get();
     if ((current.buildUi.phase === "loading" || current.buildUi.phase === "rebuilding") && current.activeBuildPromise) {
       return current.activeBuildPromise;
     }
+    const scope = captureProjectScope();
+    const projectKey = projectResourceKey(projectId, rootPath);
+    const requestEpoch = graphResource.beginRequest();
     set((state) => ({
       status: state.data ? "rebuilding" : "loading",
       error: null,
@@ -188,9 +228,15 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     }));
     const buildPromise = (async () => {
       try {
-        await runGraphBuild(projectId, rootPath, scope, projectKey);
+        await runGraphBuild(
+          projectId,
+          rootPath,
+          scope,
+          projectKey,
+          requestEpoch,
+        );
       } catch (error) {
-        if (!isProjectScopeCurrent(scope)) return;
+        if (!isProjectScopeCurrent(scope) || !graphResource.isCurrent(requestEpoch)) return;
         setBuildFailure(errorMessage(error));
       }
     })();
@@ -198,9 +244,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     try {
       await buildPromise;
     } finally {
-      if (get().activeBuildPromise === buildPromise) {
-        set({ activeBuildPromise: null });
-      }
+      finishGraphBuild(buildPromise, projectId, rootPath);
     }
   },
   saveLayout: async (projectId, rootPath, positions, communities) => {
@@ -242,7 +286,11 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     }),
   setDegreeThreshold: (degreeThreshold) => set({ degreeThreshold: Math.max(0, Math.floor(degreeThreshold)) }),
   registerActions: (actions) => set({ exportPng: actions.exportPng, recomputeLayout: actions.recomputeLayout }),
-  reset: () => set({ ...initial, buildUi: idleBuildUi(), typeFilter: new Set<WikiPageType>() }),
+  reset: () => {
+    graphResource.reset();
+    graphBuildDirty = 0;
+    set({ ...initial, buildUi: idleBuildUi(), typeFilter: new Set<WikiPageType>() });
+  },
 }));
 
 async function runGraphBuild(
@@ -250,11 +298,13 @@ async function runGraphBuild(
   rootPath: string,
   scope: ReturnType<typeof captureProjectScope>,
   projectKey: string,
+  requestEpoch: number,
 ): Promise<void> {
   const task = await invoke<BackendTask>("build_graph", {
     request: { projectId, projectRootPath: rootPath },
   });
   useTaskStore.getState().upsertTask(task);
+  if (!isProjectScopeCurrent(scope) || !graphResource.isCurrent(requestEpoch)) return;
   useGraphStore.setState((state) => ({
     buildUi: {
       phase: state.data ? "rebuilding" : "loading",
@@ -269,7 +319,7 @@ async function runGraphBuild(
     projectRootPath: rootPath,
   });
   useTaskStore.getState().upsertTask(terminalTask);
-  if (!isProjectScopeCurrent(scope)) return;
+  if (!isProjectScopeCurrent(scope) || !graphResource.isCurrent(requestEpoch)) return;
   if (terminalTask.status !== "succeeded") {
     const message =
       terminalTask.status === "cancelled"
@@ -291,9 +341,10 @@ async function runGraphBuild(
   const result = await invoke<GraphBuildResult>("get_graph", {
     request: { projectId, projectRootPath: rootPath },
   });
-  if (!isProjectScopeCurrent(scope)) return;
-  useGraphStore.setState({
-    data: result.data,
+  if (!isProjectScopeCurrent(scope) || !graphResource.isCurrent(requestEpoch)) return;
+  graphResource.markLoaded(projectId, rootPath);
+  useGraphStore.setState((current) => ({
+    data: current.data?.contentHash === result.data.contentHash ? current.data : result.data,
     cached: result.cached,
     layoutStale: result.layoutStale,
     status: graphStatusForData(result.data),
@@ -306,7 +357,24 @@ async function runGraphBuild(
       error: null,
     },
     projectKey,
-  });
+    selectedNodeId: nodeStillExists(result.data, current.selectedNodeId)
+      ? current.selectedNodeId
+      : null,
+    focusedNodeId: nodeStillExists(result.data, current.focusedNodeId)
+      ? current.focusedNodeId
+      : null,
+  }));
+}
+
+function finishGraphBuild(buildPromise: Promise<void>, projectId: string, rootPath: string): void {
+  const state = useGraphStore.getState();
+  if (state.activeBuildPromise !== buildPromise) return;
+  useGraphStore.setState({ activeBuildPromise: null });
+  if (graphBuildDirty) {
+    graphBuildDirty = 0;
+    graphResource.invalidate({ projectId, rootPath });
+    void useGraphStore.getState().ensureGraph(projectId, rootPath);
+  }
 }
 
 function setBuildFailure(message: string): void {
@@ -343,9 +411,20 @@ function graphStatusForData(data: GraphData): GraphStatus {
   return data.nodes.length === 0 ? "ready-empty" : "ready";
 }
 
-function createProjectKey(projectId: string, rootPath: string): string {
-  return `${projectId}\u0000${rootPath}`;
+function nodeStillExists(data: GraphData, nodeId: string | null): boolean {
+  return nodeId === null || data.nodes.some((node) => node.id === nodeId);
 }
+
+registerProjectResource("graph", {
+  invalidate: (scope) => {
+    const key = projectResourceKey(scope.projectId, scope.rootPath);
+    const state = useGraphStore.getState();
+    if (state.projectKey !== key) return;
+    const invalidatedActiveLoad = graphResource.invalidate(scope);
+    if (state.activeBuildPromise && !invalidatedActiveLoad) graphBuildDirty = 1;
+  },
+}, ({ projectId, rootPath }) =>
+  useGraphStore.getState().ensureGraph(projectId, rootPath));
 
 function errorMessage(error: unknown): string {
   if (typeof error === "object" && error !== null && "message" in error) {

@@ -18,6 +18,7 @@ import { ResizableSplitter } from "../../components/app/ResizableSplitter";
 import { PANE_WIDTH_LIMITS } from "../../hooks/useResizablePane";
 import { pathBasename } from "../../lib/pathDisplay";
 import { useExportStore } from "../../stores/exportStore";
+import { observeProjectResources } from "../../stores/projectScope";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { cancelTaskRequest, useTaskStore } from "../../stores/taskStore";
@@ -55,6 +56,7 @@ export function ExportsView() {
   const error = useExportStore((state) => state.error);
 
   const loadExports = useExportStore((state) => state.loadExports);
+  const ensureExports = useExportStore((state) => state.ensureExports);
   const clearRunningTask = useExportStore((state) => state.clearRunningTask);
   const loadPreview = useExportStore((state) => state.loadPreview);
   const clearPreview = useExportStore((state) => state.clearPreview);
@@ -80,8 +82,10 @@ export function ExportsView() {
 
   // Load the export history when the view mounts or the project changes.
   useEffect(() => {
-    void loadExports(projectId, rootPath);
-  }, [projectId, rootPath, loadExports]);
+    const unobserve = observeProjectResources({ projectId, rootPath }, ["exports"]);
+    void ensureExports(projectId, rootPath);
+    return unobserve;
+  }, [projectId, rootPath, ensureExports]);
 
   useEffect(() => {
     return () => {
@@ -244,8 +248,11 @@ export function ExportsView() {
           </div>
         </div>
         {error ? (
-          <div className="border-b border-[var(--border-subtle)] bg-[var(--warning-soft)] px-4 py-2 text-[12px] text-[var(--text-primary)]">
-            {error}
+          <div className="flex items-center justify-between gap-3 border-b border-[var(--border-subtle)] bg-[var(--warning-soft)] px-4 py-2 text-[12px] text-[var(--text-primary)]">
+            <span>{error}</span>
+            <button type="button" className="btn btn--secondary btn--sm" onClick={() => void loadExports(projectId, rootPath)}>
+              {t("workflows.action.retry")}
+            </button>
           </div>
         ) : null}
         <div className="min-h-0 flex-1 overflow-auto">

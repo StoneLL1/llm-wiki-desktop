@@ -8,6 +8,7 @@ import { useTranslation } from "react-i18next";
 import { RefreshCw } from "lucide-react";
 
 import { useGraphStore } from "../../stores/graphStore";
+import { observeProjectResources } from "../../stores/projectScope";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useTaskStore } from "../../stores/taskStore";
@@ -103,7 +104,7 @@ export function GraphView() {
   const focusedNodeId = useGraphStore((state) => state.focusedNodeId);
   const typeFilter = useGraphStore((state) => state.typeFilter);
   const degreeThreshold = useGraphStore((state) => state.degreeThreshold);
-  const load = useGraphStore((state) => state.load);
+  const ensureGraph = useGraphStore((state) => state.ensureGraph);
   const rebuild = useGraphStore((state) => state.rebuild);
   const setColorMode = useGraphStore((state) => state.setColorMode);
   const setSelectedNode = useGraphStore((state) => state.setSelectedNode);
@@ -196,9 +197,11 @@ export function GraphView() {
 
   useEffect(() => {
     if (projectId && rootPath) {
-      void load(projectId, rootPath);
+      const unobserve = observeProjectResources({ projectId, rootPath }, ["graph"]);
+      void ensureGraph(projectId, rootPath);
+      return unobserve;
     }
-  }, [projectId, rootPath, load]);
+  }, [projectId, rootPath, ensureGraph]);
 
   // (Re)build the graphology graph + sigma renderer whenever the topology
   // changes. Recomputes layout only when no cached layout is present.

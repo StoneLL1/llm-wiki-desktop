@@ -16,6 +16,7 @@ import { ChatConveniencePanel } from "./ChatConveniencePanel";
 import { ChatSessionList } from "./ChatSessionList";
 import { MessageContent } from "./MessageContent";
 import { AgentActivityTimeline } from "../../components/agent/AgentActivityTimeline";
+import { observeProjectResources } from "../../stores/projectScope";
 
 const SEGMENT_OPTIONS: readonly { value: ChatRoutePreference; key: string }[] = [
   { value: "auto", key: "chat.composer.route.auto" },
@@ -64,7 +65,7 @@ export function ChatView() {
   const streamRevision = useChatStore((state) => state.streamRevision);
   const pendingUserMessages = useChatStore((state) => state.pendingUserMessages);
 
-  const loadSessions = useChatStore((state) => state.loadSessions);
+  const ensureSessions = useChatStore((state) => state.ensureSessions);
   const createSession = useChatStore((state) => state.createSession);
   const selectSession = useChatStore((state) => state.selectSession);
   const renameSession = useChatStore((state) => state.renameSession);
@@ -79,7 +80,7 @@ export function ChatView() {
   const rollbackLastConvenienceEdit = useChatStore((state) => state.rollbackLastConvenienceEdit);
   const chatConvenienceAuthorization = useSettingsStore((state) => state.chatConvenienceAuthorization);
   const chatConvenienceSaving = useSettingsStore((state) => state.chatConvenienceSaving);
-  const loadChatConvenienceAuthorization = useSettingsStore((state) => state.loadChatConvenienceAuthorization);
+  const ensureChatConvenienceAuthorization = useSettingsStore((state) => state.ensureChatConvenienceAuthorization);
   const setChatConvenienceAuthorization = useSettingsStore((state) => state.setChatConvenienceAuthorization);
 
   const tasks = useTaskStore((state) => state.tasks);
@@ -125,9 +126,14 @@ export function ChatView() {
   );
 
   useEffect(() => {
-    void loadSessions(projectId, rootPath);
-    void loadChatConvenienceAuthorization(projectId, rootPath);
-  }, [projectId, rootPath, loadSessions, loadChatConvenienceAuthorization]);
+    const unobserve = observeProjectResources(
+      { projectId, rootPath },
+      ["chat-sessions", "settings-chat-authorization"],
+    );
+    void ensureSessions(projectId, rootPath);
+    void ensureChatConvenienceAuthorization(projectId, rootPath);
+    return unobserve;
+  }, [projectId, rootPath, ensureSessions, ensureChatConvenienceAuthorization]);
 
   useEffect(() => {
     const taskIds = activityTaskIds ? activityTaskIds.split("|") : [];
@@ -143,8 +149,8 @@ export function ChatView() {
     const terminalError = sendSessionId === activeSessionId
       ? (sendTask.error?.message ?? (sendTask.status === "failed" ? sendTask.title : null))
       : null;
-    void reloadActive(projectId, rootPath).finally(() => {
-      if (!cancelled) clearSendTask(terminalError);
+    void reloadActive(projectId, rootPath).then((reloaded) => {
+      if (!cancelled && reloaded) clearSendTask(terminalError);
     });
     return () => {
       cancelled = true;
@@ -223,8 +229,23 @@ export function ChatView() {
 
       <div className="chat-stream-wrap flex min-h-0 min-w-0 flex-col overflow-hidden">
         {error ? (
-          <div className="border-b border-[var(--border-subtle)] bg-[var(--warning-soft)] px-4 py-2 text-[12px] text-[var(--text-primary)]">
-            {error}
+          <div className="flex items-center justify-between gap-3 border-b border-[var(--border-subtle)] bg-[var(--warning-soft)] px-4 py-2 text-[12px] text-[var(--text-primary)]">
+            <span>{error}</span>
+            <button
+              type="button"
+              className="btn btn--secondary btn--sm"
+              onClick={() => {
+                if (sendTask && isTerminalStatus(sendTask.status)) {
+                  void reloadActive(projectId, rootPath).then((reloaded) => {
+                    if (reloaded) clearSendTask(null);
+                  });
+                } else {
+                  void ensureSessions(projectId, rootPath);
+                }
+              }}
+            >
+              {t("workflows.action.retry")}
+            </button>
           </div>
         ) : null}
         {activeSession ? (

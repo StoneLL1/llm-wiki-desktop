@@ -3,8 +3,13 @@ import { create } from "zustand";
 
 import { i18next, LANGUAGE_STORAGE_KEY } from "../i18n";
 import { applyColorThemePresetToRoot } from "../lib/colorThemePresets";
+import { createProjectResourceController } from "../lib/projectResourceFreshness";
 import type { ChatConvenienceAuthorization, Settings, ThemePreference } from "../types/settings";
-import { captureProjectScope, isProjectScopeCurrent } from "./projectScope";
+import {
+  captureProjectScope,
+  isProjectScopeCurrent,
+  registerProjectResource,
+} from "./projectScope";
 
 const THEME_STORAGE_KEY = "llm-wiki-desktop.theme";
 const COLOR_THEME_STORAGE_KEY = "llm-wiki-desktop.colorThemePreset";
@@ -235,6 +240,10 @@ export interface SettingsState {
     projectId: string,
     projectRootPath: string,
   ) => Promise<ChatConvenienceAuthorization>;
+  ensureChatConvenienceAuthorization: (
+    projectId: string,
+    projectRootPath: string,
+  ) => Promise<ChatConvenienceAuthorization>;
   setChatConvenienceAuthorization: (
     projectId: string,
     projectRootPath: string,
@@ -248,6 +257,10 @@ export interface SettingsState {
   ) => Promise<Settings>;
   reset: () => void;
 }
+
+const chatAuthorizationResource = createProjectResourceController<ChatConvenienceAuthorization>(
+  "settings-chat-authorization",
+);
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   settings: defaultSettings,
@@ -294,27 +307,50 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   loadChatConvenienceAuthorization: async (projectId, projectRootPath) => {
     const scope = captureProjectScope();
+    const requestEpoch = chatAuthorizationResource.beginRequest();
     try {
       const authorization = hasTauri()
         ? await invoke<ChatConvenienceAuthorization>("get_chat_convenience_authorization", {
             request: { projectId, projectRootPath },
           })
         : disabledChatConvenienceAuthorization(projectId);
-      if (!isProjectScopeCurrent(scope)) {
+      if (!isProjectScopeCurrent(scope) || !chatAuthorizationResource.isCurrent(requestEpoch)) {
         return disabledChatConvenienceAuthorization(projectId);
       }
-      set({ chatConvenienceAuthorization: authorization, error: null });
+      chatAuthorizationResource.markLoaded(projectId, projectRootPath);
+      set({
+        chatConvenienceAuthorization: authorization,
+        error: null,
+      });
       return authorization;
     } catch (error) {
-      const fallback = disabledChatConvenienceAuthorization(projectId);
-      if (isProjectScopeCurrent(scope)) {
+      const current = get().chatConvenienceAuthorization;
+      const fallback = current?.projectId === projectId
+        ? current
+        : disabledChatConvenienceAuthorization(projectId);
+      if (isProjectScopeCurrent(scope) && chatAuthorizationResource.isCurrent(requestEpoch)) {
         set({ chatConvenienceAuthorization: fallback, error: errorMessage(error) });
       }
       return fallback;
     }
   },
 
+  ensureChatConvenienceAuthorization: (projectId, projectRootPath) => {
+    const state = get();
+    if (state.chatConvenienceSaving) {
+      return Promise.resolve(
+        state.chatConvenienceAuthorization ?? disabledChatConvenienceAuthorization(projectId),
+      );
+    }
+    return chatAuthorizationResource.ensure(
+      { projectId, rootPath: projectRootPath },
+      () => get().loadChatConvenienceAuthorization(projectId, projectRootPath),
+      get().chatConvenienceAuthorization ?? disabledChatConvenienceAuthorization(projectId),
+    );
+  },
+
   setChatConvenienceAuthorization: async (projectId, projectRootPath, enabled) => {
+    const requestEpoch = chatAuthorizationResource.beginRequest();
     const scope = captureProjectScope();
     set({ chatConvenienceSaving: true, error: null });
     try {
@@ -330,18 +366,27 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
               rootPathFingerprint: "",
             }
           : disabledChatConvenienceAuthorization(projectId);
-      if (isProjectScopeCurrent(scope)) {
-        set({ chatConvenienceAuthorization: authorization, error: null });
+      if (isProjectScopeCurrent(scope) && chatAuthorizationResource.isCurrent(requestEpoch)) {
+        chatAuthorizationResource.markLoaded(projectId, projectRootPath);
+        set({
+          chatConvenienceAuthorization: authorization,
+          error: null,
+        });
       }
       return authorization;
     } catch (error) {
-      const fallback = disabledChatConvenienceAuthorization(projectId);
-      if (isProjectScopeCurrent(scope)) {
+      const current = get().chatConvenienceAuthorization;
+      const fallback = current?.projectId === projectId
+        ? current
+        : disabledChatConvenienceAuthorization(projectId);
+      if (isProjectScopeCurrent(scope) && chatAuthorizationResource.isCurrent(requestEpoch)) {
         set({ chatConvenienceAuthorization: fallback, error: errorMessage(error) });
       }
       return fallback;
     } finally {
-      if (isProjectScopeCurrent(scope)) set({ chatConvenienceSaving: false });
+      if (isProjectScopeCurrent(scope) && chatAuthorizationResource.isCurrent(requestEpoch)) {
+        set({ chatConvenienceSaving: false });
+      }
     }
   },
 
@@ -350,7 +395,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       if (hasTauri()) {
         await invoke("revoke_all_chat_convenience_authorizations");
       }
-      set({ chatConvenienceAuthorization: null, error: null });
+      set({ chatConvenienceAuthorization: null, chatConvenienceSaving: false, error: null });
+      chatAuthorizationResource.reset();
     } catch (error) {
       set({ error: errorMessage(error) });
     }
@@ -413,7 +459,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     }
   },
 
-  reset: () =>
+  reset: () => {
+    chatAuthorizationResource.reset();
     set((state) => ({
       settings: {
         ...state.settings,
@@ -427,5 +474,14 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       chatConvenienceAuthorization: null,
       chatConvenienceSaving: false,
       error: null,
-    })),
+    }));
+  },
 }));
+
+registerProjectResource("settings-chat-authorization", {
+  invalidate: (scope) => {
+    const state = useSettingsStore.getState();
+    if (!state.chatConvenienceSaving) chatAuthorizationResource.invalidate(scope);
+  },
+}, ({ projectId, rootPath }) =>
+  useSettingsStore.getState().ensureChatConvenienceAuthorization(projectId, rootPath).then(() => undefined));

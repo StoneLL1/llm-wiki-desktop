@@ -4,7 +4,17 @@ const invokeMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
+import {
+  invalidateProjectResources,
+  invalidateProjectScope,
+} from "../../stores/projectScope";
 import { useWikiStore } from "./wikiStore";
+
+const emptyTree = {
+  root: { name: "wiki", kind: "folder", path: "wiki", starred: false, bookmarked: false, fileCount: 0, children: [] },
+  pages: [],
+  totalPages: 0,
+};
 
 beforeEach(() => {
   invokeMock.mockReset();
@@ -12,6 +22,66 @@ beforeEach(() => {
 });
 
 describe("wikiStore identity commit guard", () => {
+  it("single-flights repeated ensures and refreshes once after invalidation", async () => {
+    invokeMock.mockResolvedValue(emptyTree);
+    await Promise.all(Array.from({ length: 20 }, () =>
+      useWikiStore.getState().ensureScanned("p", "/x")));
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+
+    invalidateProjectResources({ projectId: "p", rootPath: "/x" }, ["wiki"]);
+    await useWikiStore.getState().ensureScanned("p", "/x");
+    expect(invokeMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a usable tree when a stale background refresh fails", async () => {
+    invokeMock.mockResolvedValueOnce(emptyTree).mockRejectedValueOnce(new Error("offline"));
+    await useWikiStore.getState().ensureScanned("p", "/x");
+    const tree = useWikiStore.getState().tree;
+    invalidateProjectResources({ projectId: "p", rootPath: "/x" }, ["wiki"]);
+    await useWikiStore.getState().ensureScanned("p", "/x");
+
+    expect(useWikiStore.getState().tree).toBe(tree);
+    expect(useWikiStore.getState().error).toBe("offline");
+  });
+
+  it("does not reopen an old project page after an A to B switch", async () => {
+    const pagePath = "wiki/same.md";
+    const tree = {
+      ...emptyTree,
+      pages: [{ path: pagePath }],
+      totalPages: 1,
+    } as never;
+    let resolveA!: (tree: never) => void;
+    let scanCount = 0;
+    invokeMock.mockImplementation((command: string, args: { request: { projectId: string } }) => {
+      if (command === "scan_wiki") {
+        scanCount += 1;
+        if (scanCount === 1) return new Promise((resolve) => { resolveA = resolve; });
+        return Promise.resolve(tree);
+      }
+      if (command === "read_wiki_page") {
+        return Promise.resolve({ path: pagePath, title: "Same", content: args.request.projectId });
+      }
+      return Promise.resolve(null);
+    });
+    useWikiStore.setState({
+      tree,
+      selectedPath: pagePath,
+      mode: "read",
+    });
+
+    const oldA = useWikiStore.getState().ensureScanned("a", "/a");
+    invalidateProjectScope();
+    useWikiStore.getState().reset();
+    await useWikiStore.getState().ensureScanned("b", "/b");
+    resolveA(tree);
+    await oldA;
+
+    const pageReads = invokeMock.mock.calls.filter(([command]) => command === "read_wiki_page");
+    expect(pageReads).toHaveLength(1);
+    expect(pageReads[0][1].request.projectId).toBe("b");
+  });
+
   it("rolls back scan loading when the guard expires", async () => {
     let resolve!: (tree: never) => void;
     invokeMock.mockReturnValueOnce(new Promise((done) => { resolve = done; }));

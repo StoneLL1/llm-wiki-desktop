@@ -9,6 +9,7 @@ interface LintHistoryListProps {
   loading: boolean;
   error: string | null;
   onOpen: (id: string) => void;
+  onRetry: () => void;
 }
 
 function formatHistoryTime(value: string): string {
@@ -23,6 +24,7 @@ export function LintHistoryList({
   loading,
   error,
   onOpen,
+  onRetry,
 }: LintHistoryListProps) {
   const { t } = useTranslation();
   const displayError = error === "lint.history.waitForFix" ? t(error) : error;
@@ -41,6 +43,9 @@ export function LintHistoryList({
         <div className="lint-history__error" role="status">
           <TriangleAlert size={13} aria-hidden />
           <span>{displayError}</span>
+          <button type="button" className="btn btn--secondary btn--sm" onClick={onRetry}>
+            {t("workflows.action.retry")}
+          </button>
         </div>
       ) : null}
       {entries.length === 0 && !loading ? (
