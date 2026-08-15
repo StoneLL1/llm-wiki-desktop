@@ -2,8 +2,10 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
 
+import { bundleGraphPlugin } from "./scripts/bundle-graph-plugin.mjs";
+
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), bundleGraphPlugin()],
   clearScreen: false,
   server: {
     port: 1420,

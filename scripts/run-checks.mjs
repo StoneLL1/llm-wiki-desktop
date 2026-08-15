@@ -10,7 +10,7 @@ const activeChildren = new Set();
 const fullLanes = [
   {
     name: "frontend",
-    scripts: ["check:import-source-media", "test", "test:capability-tools", "lint", "build", "check:console"],
+    scripts: ["check:import-source-media", "test", "test:capability-tools", "lint", "build", "check:bundle", "check:console"],
   },
   {
     name: "rust",
@@ -21,7 +21,7 @@ const fullLanes = [
 const quickLanes = [
   {
     name: "frontend",
-    scripts: ["lint", "build", "check:console"],
+    scripts: ["lint", "build", "check:bundle", "check:console"],
   },
   {
     name: "rust",
