@@ -8,6 +8,12 @@ import { useTranslation } from "react-i18next";
 import { RefreshCw } from "lucide-react";
 
 import { useGraphStore } from "../../stores/graphStore";
+import {
+  activateRoutePresentationProject,
+  readGraphCameraSnapshot,
+  saveGraphCameraSnapshot,
+} from "../../hooks/useRouteScrollRestoration";
+import { projectResourceKey } from "../../lib/projectResourceFreshness";
 import { observeProjectResources } from "../../stores/projectScope";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
@@ -30,6 +36,11 @@ import { createLatestLayoutSaveQueue } from "./graphLayoutSaveQueue";
 import { GRAPH_DEFAULT_EDGE_COLOR, renderedNodeColor, visualForEdge, visualForNode } from "./graphRenderStyle";
 import { buildRenderSnapshot, type RenderSnapshot } from "./graphRenderModel";
 import { edgeSizeForWeight, GRAPH_VISUAL_SCALE, nodeSizeForDegree } from "./graphVisualScale";
+import {
+  captureGraphCameraSnapshot,
+  createGraphCameraSnapshotGate,
+  restoreGraphCameraSnapshot,
+} from "./graphCameraSnapshot";
 
 const EDGE_COLOR = GRAPH_DEFAULT_EDGE_COLOR;
 const PLAIN_COLOR = "#9b9b9b";
@@ -149,6 +160,7 @@ export function GraphView() {
   const [canvasAvailable, setCanvasAvailable] = useState(true);
   const [zoom, setZoom] = useState<number | null>(null);
   const [layoutSaveQueue] = useState(createLatestLayoutSaveQueue);
+  const [cameraSnapshotGate] = useState(createGraphCameraSnapshotGate);
 
   useEffect(() => {
     stateRef.current.selectedNodeId = selectedNodeId;
@@ -236,6 +248,13 @@ export function GraphView() {
     applyColors(graph, colorMode);
     refresh(refs.current, renderer);
 
+    const camera = renderer.getCamera();
+    activateRoutePresentationProject(projectResourceKey(projectId, rootPath));
+    const storedCamera = readGraphCameraSnapshot();
+    if (storedCamera && !restoreGraphCameraSnapshot(data.contentHash, camera, storedCamera)) {
+      saveGraphCameraSnapshot(null);
+    }
+
     if (computed) {
       startBackgroundLayout(refs.current, graph, () => {
         refresh(refs.current, renderer);
@@ -285,14 +304,37 @@ export function GraphView() {
     // Report the live zoom ratio to the floating info card. Sigma's camera
     // ratio is inverse to zoom (ratio 1 ≈ fit), so display 1/ratio. Guard
     // against degenerate ratios (dispose, NaN) that would render Infinity.
-    const camera = renderer.getCamera();
+    let cameraSnapshotTimer: ReturnType<typeof setTimeout> | null = null;
+    const saveCamera = () => {
+      if (!cameraSnapshotGate.canCapture()) return;
+      const snapshot = captureGraphCameraSnapshot(data.contentHash, camera);
+      saveGraphCameraSnapshot(
+        snapshot?.contentHash === useGraphStore.getState().data?.contentHash ? snapshot : null,
+      );
+    };
+    const scheduleCameraSave = () => {
+      if (cameraSnapshotTimer) clearTimeout(cameraSnapshotTimer);
+      cameraSnapshotTimer = setTimeout(() => {
+        cameraSnapshotTimer = null;
+        saveCamera();
+      }, 250);
+    };
     const syncZoom = () => {
       const ratio = camera.getState().ratio;
       const z = ratio > 0 && Number.isFinite(ratio) ? 1 / ratio : 1;
       if (Number.isFinite(z)) setZoom(z);
+      if (cameraSnapshotGate.cameraUpdated()) scheduleCameraSave();
     };
-    syncZoom();
+    const initialRatio = camera.getState().ratio;
+    const initialZoom = initialRatio > 0 && Number.isFinite(initialRatio) ? 1 / initialRatio : 1;
+    if (Number.isFinite(initialZoom)) setZoom(initialZoom);
     camera.on("updated", syncZoom);
+    const noteCameraIntent = () => cameraSnapshotGate.noteUserIntent();
+    const clearCameraIntent = () => cameraSnapshotGate.clearUserIntent();
+    container.addEventListener("pointerdown", noteCameraIntent);
+    container.addEventListener("pointerup", clearCameraIntent);
+    container.addEventListener("pointercancel", clearCameraIntent);
+    container.addEventListener("wheel", noteCameraIntent, { passive: true });
 
     return () => {
       renderer?.off("clickNode", onClick);
@@ -301,6 +343,12 @@ export function GraphView() {
       renderer?.off("leaveNode", onLeave);
       unbindCanvasInteractions();
       camera.off("updated", syncZoom);
+      container.removeEventListener("pointerdown", noteCameraIntent);
+      container.removeEventListener("pointerup", clearCameraIntent);
+      container.removeEventListener("pointercancel", clearCameraIntent);
+      container.removeEventListener("wheel", noteCameraIntent);
+      if (cameraSnapshotTimer) clearTimeout(cameraSnapshotTimer);
+      saveCamera();
       disposeRenderer(refs.current);
     };
   }, [data?.contentHash, data?.nodes.length, data?.edges.length, layoutStale]);
@@ -316,16 +364,26 @@ export function GraphView() {
     }
   }, [colorMode]);
 
-  const handleZoomIn = () => refs.current.renderer?.getCamera().animatedZoom({ duration: 200 });
-  const handleZoomOut = () => refs.current.renderer?.getCamera().animatedUnzoom({ duration: 200 });
+  const handleZoomIn = () => {
+    cameraSnapshotGate.noteUserIntent();
+    refs.current.renderer?.getCamera().animatedZoom({ duration: 200 });
+  };
+  const handleZoomOut = () => {
+    cameraSnapshotGate.noteUserIntent();
+    refs.current.renderer?.getCamera().animatedUnzoom({ duration: 200 });
+  };
   const handleFit = () => {
     const renderer = refs.current.renderer;
     if (!renderer) return;
+    cameraSnapshotGate.invalidate();
+    saveGraphCameraSnapshot(null);
     fitGraphToViewport(renderer, () => refresh(refs.current, renderer));
   };
   const handleResetLayout = () => {
     const graph = refs.current.graph;
     if (!graph) return;
+    cameraSnapshotGate.invalidate();
+    saveGraphCameraSnapshot(null);
     refs.current.renderer?.setCustomBBox(null);
     seedRandomPositions(graph);
     startBackgroundLayout(refs.current, graph, () => {
@@ -334,7 +392,11 @@ export function GraphView() {
     });
   };
   const handleRebuild = () => {
-    if (projectId && rootPath) void rebuild(projectId, rootPath);
+    if (projectId && rootPath) {
+      cameraSnapshotGate.invalidate();
+      saveGraphCameraSnapshot(null);
+      void rebuild(projectId, rootPath);
+    }
   };
   const handleExportSvg = () => {
     const graph = refs.current.graph;
@@ -371,6 +433,8 @@ export function GraphView() {
     const recomputeLayout = () => {
       const graph = refs.current.graph;
       if (!graph) return;
+      cameraSnapshotGate.invalidate();
+      saveGraphCameraSnapshot(null);
       refs.current.renderer?.setCustomBBox(null);
       seedRandomPositions(graph);
       startBackgroundLayout(refs.current, graph, () => {

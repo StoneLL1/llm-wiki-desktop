@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type Ref } from "react";
 import { useTranslation } from "react-i18next";
 import {
   ChevronDown,
@@ -43,6 +43,7 @@ interface WikiTreeProps {
   onDelete: (path: string) => void;
   onSourceRename?: (sourceId: string, path: string) => void;
   onSourceDelete?: (sourceId: string) => void;
+  scrollRef?: Ref<HTMLDivElement>;
 }
 
 type TypeFilter = WikiPageType | "all";
@@ -58,6 +59,7 @@ export function WikiTree({
   onDelete,
   onSourceRename = () => {},
   onSourceDelete = () => {},
+  scrollRef,
 }: WikiTreeProps) {
   const { t } = useTranslation();
   const [filterText, setFilterText] = useState("");
@@ -142,7 +144,7 @@ export function WikiTree({
         ))}
       </div>
 
-      <div className="flex-1 overflow-y-auto px-2 py-2">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto px-2 py-2" data-testid="wiki-tree-scroll">
         <div className="px-2 pb-1 text-[10.5px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)]">
           wiki/
         </div>

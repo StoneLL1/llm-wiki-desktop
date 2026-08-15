@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 import { AlertCircle, AlertTriangle, Info } from "lucide-react";
 
@@ -6,6 +6,7 @@ import { SEVERITY_ORDER } from "../../types/lint";
 import type { LintIssue, LintSeverity } from "../../types/lint";
 
 interface LintIssueListProps {
+  scrollRef?: RefObject<HTMLDivElement | null>;
   issues: LintIssue[];
   selectedIssueId: string | null;
   actionsDisabled?: boolean;
@@ -49,6 +50,7 @@ function subLine(issue: LintIssue): string {
 }
 
 export function LintIssueList({
+  scrollRef,
   issues,
   selectedIssueId,
   actionsDisabled = false,
@@ -87,7 +89,7 @@ export function LintIssueList({
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+    <div ref={scrollRef} className="flex min-h-0 flex-1 flex-col overflow-y-auto" data-testid="lint-issue-list-scroll">
       {grouped.map(([key, group]) => {
         const first = group[0]!;
         return (

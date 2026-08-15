@@ -17,6 +17,14 @@ import { ChatSessionList } from "./ChatSessionList";
 import { MessageContent } from "./MessageContent";
 import { AgentActivityTimeline } from "../../components/agent/AgentActivityTimeline";
 import { observeProjectResources } from "../../stores/projectScope";
+import { projectResourceKey } from "../../lib/projectResourceFreshness";
+import {
+  activateRoutePresentationProject,
+  readChatRoutePreference,
+  readRouteScrollPosition,
+  saveChatRoutePreference,
+  saveRouteScrollPosition,
+} from "../../hooks/useRouteScrollRestoration";
 
 const SEGMENT_OPTIONS: readonly { value: ChatRoutePreference; key: string }[] = [
   { value: "auto", key: "chat.composer.route.auto" },
@@ -42,12 +50,12 @@ function hasPendingConvenienceEdit(session: { messages: ChatMessage[] } | null):
 export function ChatView() {
   const { t } = useTranslation();
   const currentProject = useProjectStore((state) => state.currentProject);
-  const [routePreference, setRoutePreference] = useState<ChatRoutePreference>("auto");
   const [creatingSession, setCreatingSession] = useState(false);
 
   const sessions = useChatStore((state) => state.sessions);
   const activeSessionId = useChatStore((state) => state.activeSessionId);
   const activeSession = useChatStore((state) => state.activeSession);
+  const [routePreference, setRoutePreferenceState] = useState<ChatRoutePreference>(readChatRoutePreference);
   const loadingSessions = useChatStore((state) => state.loadingSessions);
   const loadingSession = useChatStore((state) => state.loadingSession);
   const sendTaskId = useChatStore((state) => state.sendTaskId);
@@ -90,6 +98,16 @@ export function ChatView() {
   const openWikiPage = useWikiStore((state) => state.openPage);
 
   const { projectId, rootPath } = currentProject;
+  const presentationProjectKey = projectResourceKey(projectId, rootPath);
+  const setRoutePreference = useCallback((route: ChatRoutePreference) => {
+    saveChatRoutePreference(route);
+    setRoutePreferenceState(route);
+  }, []);
+
+  useEffect(() => {
+    activateRoutePresentationProject(presentationProjectKey);
+    setRoutePreferenceState(readChatRoutePreference());
+  }, [presentationProjectKey]);
   const sendTask = sendTaskId ? tasks.find((task) => task.id === sendTaskId) ?? null : null;
   const generating =
     sendSessionId === activeSessionId &&
@@ -123,6 +141,7 @@ export function ChatView() {
     activeSession?.messages.length ?? 0,
     streamRevision,
     streamActivities.length,
+    presentationProjectKey,
   );
 
   useEffect(() => {
@@ -720,10 +739,12 @@ export function useTranscriptScroll(
   messageCount: number,
   streamRevision: number,
   activityCount: number,
+  presentationProjectKey?: string,
 ) {
   const ref = useRef<HTMLDivElement>(null);
   const [isPinned, setIsPinned] = useState(true);
   const pinnedRef = useRef(true);
+  const scrollTopRef = useRef(0);
   const scheduledFrameRef = useRef<{ id: number; kind: "raf" | "timeout" } | null>(null);
 
   const cancelScheduledScroll = useCallback(() => {
@@ -746,6 +767,7 @@ export function useTranscriptScroll(
   const onScroll = useCallback(() => {
     const element = ref.current;
     if (!element) return;
+    scrollTopRef.current = element.scrollTop;
     const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
     setPinned(distance < 72);
   }, [setPinned]);
@@ -755,7 +777,10 @@ export function useTranscriptScroll(
     const scroll = () => {
       scheduledFrameRef.current = null;
       const element = ref.current;
-      if (element && pinnedRef.current) element.scrollTop = element.scrollHeight;
+      if (element && pinnedRef.current) {
+        element.scrollTop = element.scrollHeight;
+        scrollTopRef.current = element.scrollTop;
+      }
     };
     if (typeof window.requestAnimationFrame === "function") {
       scheduledFrameRef.current = {
@@ -772,17 +797,44 @@ export function useTranscriptScroll(
 
   useEffect(() => {
     cancelScheduledScroll();
-    pinnedRef.current = true;
-    setIsPinned((current) => (current ? current : true));
     const element = ref.current;
-    if (element) element.scrollTop = element.scrollHeight;
-  }, [sessionId, cancelScheduledScroll]);
+    const routeKey = `chat:transcript:${sessionId ?? "empty"}`;
+    const restored = presentationProjectKey
+      ? (() => {
+          activateRoutePresentationProject(presentationProjectKey);
+          return readRouteScrollPosition(presentationProjectKey, routeKey);
+        })()
+      : null;
+
+    if (element && restored !== null) {
+      element.scrollTop = restored;
+      scrollTopRef.current = element.scrollTop;
+      const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
+      setPinned(distance < 72);
+    } else {
+      pinnedRef.current = true;
+      setIsPinned((current) => (current ? current : true));
+      if (element) {
+        element.scrollTop = element.scrollHeight;
+        scrollTopRef.current = element.scrollTop;
+      }
+    }
+
+    return () => {
+      cancelScheduledScroll();
+      if (presentationProjectKey) {
+        saveRouteScrollPosition(
+          presentationProjectKey,
+          routeKey,
+          ref.current?.scrollTop ?? scrollTopRef.current,
+        );
+      }
+    };
+  }, [sessionId, presentationProjectKey, cancelScheduledScroll, setPinned]);
 
   useEffect(() => {
     if (isPinned) schedulePinnedScroll();
   }, [isPinned, messageCount, streamRevision, activityCount, schedulePinnedScroll]);
-
-  useEffect(() => cancelScheduledScroll, [cancelScheduledScroll]);
 
   return {
     ref,
@@ -793,6 +845,7 @@ export function useTranscriptScroll(
       if (!element) return;
       cancelScheduledScroll();
       element.scrollTo({ top: element.scrollHeight, behavior: "smooth" });
+      scrollTopRef.current = element.scrollHeight;
       setPinned(true);
     },
   };

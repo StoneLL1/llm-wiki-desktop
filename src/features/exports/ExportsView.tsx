@@ -16,6 +16,7 @@ import {
 
 import { ResizableSplitter } from "../../components/app/ResizableSplitter";
 import { PANE_WIDTH_LIMITS } from "../../hooks/useResizablePane";
+import { useRouteScrollRestoration } from "../../hooks/useRouteScrollRestoration";
 import { pathBasename } from "../../lib/pathDisplay";
 import { useExportStore } from "../../stores/exportStore";
 import { observeProjectResources } from "../../stores/projectScope";
@@ -73,6 +74,7 @@ export function ExportsView() {
 
   const { projectId, rootPath } = currentProject;
   const layoutRef = useRef<HTMLDivElement>(null);
+  const listScrollRef = useRouteScrollRestoration(projectId, rootPath, "exports:list");
   const layoutStyle = {
     "--exports-list-w-current": `${exportsListWidth}px`,
   } as CSSProperties;
@@ -255,7 +257,7 @@ export function ExportsView() {
             </button>
           </div>
         ) : null}
-        <div className="min-h-0 flex-1 overflow-auto">
+        <div ref={listScrollRef} className="min-h-0 flex-1 overflow-auto" data-testid="exports-list-scroll">
           {sortedRecords.length === 0 ? (
             <div className="px-4 py-8 text-[12px] text-[var(--text-muted)]">
               {t("exports.list.empty")}

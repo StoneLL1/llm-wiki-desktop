@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import { ResizableSplitter } from "../../components/app/ResizableSplitter";
 import { PANE_WIDTH_LIMITS } from "../../hooks/useResizablePane";
+import { useRouteScrollRestoration } from "../../hooks/useRouteScrollRestoration";
 import { useLintStore } from "../../stores/lintStore";
 import { observeProjectResources } from "../../stores/projectScope";
 import { useNavigationStore } from "../../stores/navigationStore";
@@ -91,6 +92,7 @@ export function LintView() {
 
   const { projectId, rootPath } = currentProject;
   const layoutRef = useRef<HTMLDivElement>(null);
+  const issueListScrollRef = useRouteScrollRestoration(projectId, rootPath, "lint:issues");
   const authorityIdentity = authority?.projectId === projectId
     ? `${authority.canonicalIdentityKey}\0${authority.identityRevision}`
     : null;
@@ -539,6 +541,7 @@ export function LintView() {
         ) : null}
 
         <LintIssueList
+          scrollRef={issueListScrollRef}
           issues={modeIssues}
           selectedIssueId={selectedIssueId}
           actionsDisabled={
