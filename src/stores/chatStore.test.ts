@@ -161,6 +161,35 @@ describe("chatStore", () => {
     expect(useChatStore.getState().pendingStreamDeltas).toEqual({});
   });
 
+  it("publishes one exact active answer for an aggregated 256 KiB stream batch", () => {
+    const text = "0123456789abcdef".repeat(16 * 1024);
+    useChatStore.setState({ sendTaskId: "task-stream", sendSessionId: "s1" });
+    let publications = 0;
+    const unsubscribe = useChatStore.subscribe(() => { publications += 1; });
+
+    useChatStore.getState().appendStreamDelta("task-stream", text, "byok");
+
+    unsubscribe();
+    expect(publications).toBe(1);
+    expect(useChatStore.getState().streamingText).toBe(text);
+  });
+
+  it("does not truncate a pre-bind stream before replaying it to the returned task", async () => {
+    const text = "界".repeat(300 * 1024);
+    useChatStore.getState().appendStreamDelta("task-early-large", text, "byok");
+    invokeMock.mockResolvedValueOnce({ id: "task-early-large" });
+
+    await useChatStore.getState().send(
+      PROJECT.projectId,
+      PROJECT.rootPath,
+      "s1",
+      "Hello",
+      "auto",
+    );
+
+    expect(useChatStore.getState().streamingText).toBe(text);
+  });
+
   it("send includes pinnedPagePath when provided", async () => {
     invokeMock.mockResolvedValueOnce({ id: "task-pinned" });
     const taskId = await useChatStore.getState().send(

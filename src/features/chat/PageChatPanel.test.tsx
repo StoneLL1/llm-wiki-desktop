@@ -306,6 +306,41 @@ describe("PageChatPanel", () => {
     expect(screen.getByText("No usable Agent CLI is configured.")).toBeInTheDocument();
   });
 
+  it("shares the lightweight active-stream rendering contract", () => {
+    useChatStore.setState({
+      activeSessionId: "session-1",
+      activeSession: session({ contextPagePath: page.meta.path }),
+      sendTaskId: "task-stream",
+      sendSessionId: "session-1",
+      streamingText: "**plain while streaming**\n\n```ts\nconst x = 1;\n```",
+      ensurePageSession: vi.fn(async () => session({ contextPagePath: page.meta.path })) as never,
+    });
+    useTaskStore.getState().setTasks([{
+      id: "task-stream",
+      taskType: "llm_request",
+      projectId: "project-1",
+      title: "Chat",
+      status: "running",
+      progress: null,
+      startedAt: "2026-08-16T00:00:00Z",
+      updatedAt: "2026-08-16T00:00:00Z",
+      completedAt: null,
+      cancellable: true,
+      logPath: null,
+      result: null,
+      error: null,
+    }]);
+
+    const { container } = render(
+      <PageChatPanel page={page} projectId="project-1" rootPath="/wiki" />,
+    );
+
+    expect(screen.getByText(/\*\*plain while streaming\*\*/)).toBeInTheDocument();
+    expect(container.querySelector("pre")).toBeNull();
+    expect(container.querySelector(".katex")).toBeNull();
+    expect(container.querySelector(".hljs")).toBeNull();
+  });
+
   it("opens cited wiki pages from page chat messages", () => {
     const openCitation = vi.fn();
     useChatStore.setState({

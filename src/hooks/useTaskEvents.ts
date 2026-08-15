@@ -9,6 +9,12 @@ import {
   registerNotificationActionListener,
 } from "../services/notifications";
 import {
+  clearPendingTaskEvents,
+  dispatchTaskEvent,
+  registerTaskEventOwner,
+  retainTaskEventProject,
+} from "../services/taskEventDispatcher";
+import {
   handleTaskEvent,
   recoverTasksForProject,
 } from "../stores/taskStore";
@@ -39,18 +45,6 @@ const TASK_EVENT_CHANNELS = [
   "import://session-patch",
 ] as const;
 
-type TaskEventListener = (event: BackendEvent) => void;
-const taskEventListeners = new Set<TaskEventListener>();
-
-export function registerTaskEventListener(listener: TaskEventListener): () => void {
-  taskEventListeners.add(listener);
-  return () => taskEventListeners.delete(listener);
-}
-
-export function notifyTaskEventListeners(event: BackendEvent): void {
-  for (const listener of taskEventListeners) listener(event);
-}
-
 function isProjectSummary(payload: unknown): payload is ProjectSummary {
   return typeof payload === "object"
     && payload !== null
@@ -78,18 +72,24 @@ export function useTaskEvents(): void {
     const unlisteners: Array<() => void> = [];
     let cancelled = false;
 
+    const unregisterStoreListener = registerTaskEventOwner((event) => {
+      const activeProject = useProjectStore.getState().currentProject;
+      if (!isTaskEventForProject(event, activeProject.projectId)) return;
+      if (event.eventType === "project_refreshed" && isProjectSummary(event.payload)) {
+        useProjectStore.getState().setCurrentProject(event.payload);
+      }
+      handleTaskEvent(event);
+      if (event.eventType !== "workflow_updated") void notifyTaskEvent(event);
+    });
+
     for (const channel of TASK_EVENT_CHANNELS) {
       listen<BackendEvent>(channel, (evt) => {
+        if (cancelled) return;
         const event = evt.payload as BackendEvent;
         if (event.eventType === "workflow_updated") void notifyTaskEvent(event);
         const activeProject = useProjectStore.getState().currentProject;
         if (!isTaskEventForProject(event, activeProject.projectId)) return;
-        if (event.eventType === "project_refreshed" && isProjectSummary(event.payload)) {
-          useProjectStore.getState().setCurrentProject(event.payload);
-        }
-        handleTaskEvent(event);
-        notifyTaskEventListeners(event);
-        if (event.eventType !== "workflow_updated") void notifyTaskEvent(event);
+        dispatchTaskEvent(event);
       })
         .then((unlisten) => {
           if (cancelled) {
@@ -117,10 +117,17 @@ export function useTaskEvents(): void {
 
     return () => {
       cancelled = true;
+      const activeProjectId = useProjectStore.getState().currentProject.projectId;
+      clearPendingTaskEvents((event) => event.projectId === activeProjectId);
+      unregisterStoreListener();
       window.removeEventListener("focus", refreshPermissionEpoch);
       unlisteners.forEach((fn) => fn());
     };
-  }, [pushToast]);
+  }, []);
+
+  useEffect(() => {
+    retainTaskEventProject(currentProject.projectId);
+  }, [currentProject.projectId]);
 
   // Recover persisted tasks whenever the active project root changes.
   useEffect(() => {

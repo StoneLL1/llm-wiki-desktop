@@ -46,6 +46,7 @@ export function PageChatPanel({
   const overwriteRequest = useChatStore((state) => state.overwriteRequest);
   const streamingText = useChatStore((state) => state.streamingText);
   const streamingRoute = useChatStore((state) => state.streamingRoute);
+  const streamRevision = useChatStore((state) => state.streamRevision);
   const pendingUserMessages = useChatStore((state) => state.pendingUserMessages);
   const ensurePageSession = useChatStore((state) => state.ensurePageSession);
   const send = useChatStore((state) => state.send);
@@ -102,7 +103,7 @@ export function PageChatPanel({
   const transcriptScroll = useTranscriptScroll(
     pageSessionId,
     pageSession?.messages.length ?? 0,
-    streamingText,
+    streamRevision,
     streamActivities.length,
   );
 

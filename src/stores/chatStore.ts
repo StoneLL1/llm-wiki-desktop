@@ -86,6 +86,8 @@ interface ChatState {
    *  reloads). Backend channel: `task://stream-output`. */
   streamingText: string;
   streamingRoute: ChatRoute | null;
+  /** Bounded scroll/render dependency that advances once per aggregated batch. */
+  streamRevision: number;
   /** Deltas can arrive before the send IPC response binds the task id. */
   pendingStreamDeltas: Record<string, { text: string; route: ChatRoute | null; receivedAt: number }>;
   /** User messages accepted by the backend but not yet visible in a reloaded session. */
@@ -191,6 +193,7 @@ const initial = {
   loadingSession: false,
   streamingText: "",
   streamingRoute: null as ChatRoute | null,
+  streamRevision: 0,
   pendingStreamDeltas: {} as ChatState["pendingStreamDeltas"],
   pendingUserMessages: {} as ChatState["pendingUserMessages"],
   pageSessionEpoch: 0,
@@ -432,6 +435,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           sendSessionId: sessionId,
           streamingText: pending?.text ?? "",
           streamingRoute: pending?.route ?? null,
+          streamRevision: state.streamRevision + (pending?.text ? 1 : 0),
           pendingUserMessages: {
             ...state.pendingUserMessages,
             [task.id]: {
@@ -486,6 +490,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         sendStarting: false,
         streamingText: "",
         streamingRoute: null,
+        streamRevision: state.streamingText ? state.streamRevision + 1 : state.streamRevision,
         pendingStreamDeltas,
         pendingUserMessages,
         error: error ?? state.error,
@@ -737,7 +742,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             .slice(-7),
         ) as ChatState["pendingStreamDeltas"];
         const existing = pendingStreamDeltas[taskId] ?? { text: "", route: null, receivedAt: now };
-        const text = `${existing.text}${delta}`.slice(-256 * 1024);
+        const text = `${existing.text}${delta}`;
         pendingStreamDeltas[taskId] = {
           text,
           route: route ?? existing.route,
@@ -752,6 +757,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((state) => ({
       streamingText: state.streamingText + delta,
       streamingRoute: route ?? state.streamingRoute,
+      streamRevision: state.streamRevision + 1,
     }));
   },
 

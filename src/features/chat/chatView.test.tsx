@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import "../../i18n";
@@ -9,7 +9,17 @@ import { useTaskStore } from "../../stores/taskStore";
 import { useWikiStore } from "../wiki/wikiStore";
 import type { ChatMessage, ChatSession } from "../../types/chat";
 import type { BackendTask } from "../../types/task";
-import { ChatView } from "./ChatView";
+import { ChatView, StreamingBubble, useTranscriptScroll } from "./ChatView";
+
+function ScrollHarness({ streamRevision }: { streamRevision: number }) {
+  const transcript = useTranscriptScroll("session-1", 1, streamRevision, 0);
+  return (
+    <div>
+      <div ref={transcript.ref} role="log" onScroll={transcript.onScroll} />
+      {transcript.showBackToLatest ? <span>Back to latest</span> : null}
+    </div>
+  );
+}
 
 const PROJECT = {
   ...defaultProject,
@@ -109,6 +119,124 @@ describe("ChatView", () => {
     expect(log.querySelector(".view-toolbar")).toBeNull();
     // It lives inside the fixed chat-stream-wrap column instead.
     expect(document.querySelector(".chat-stream-wrap .view-toolbar")).toBeInTheDocument();
+  });
+
+  it("renders active stream text without Markdown, KaTeX, or highlight structures", () => {
+    const { container } = render(
+      <StreamingBubble
+        text={"**bold**\n\n```ts\nconst answer = 42;\n```\n\n$E=mc^2$"}
+        activities={[]}
+        taskStatus="running"
+        routeLabel="BYOK"
+        agentLabel="Agent"
+        placeholder="Generating"
+        onOpenLogs={() => {}}
+        openLogsLabel="Open logs"
+      />,
+    );
+
+    expect(screen.getByText(/\*\*bold\*\*/)).toBeInTheDocument();
+    expect(container.querySelector("pre")).toBeNull();
+    expect(container.querySelector(".katex")).toBeNull();
+    expect(container.querySelector(".hljs")).toBeNull();
+  });
+
+  it("reloads a terminal answer and restores full Markdown rendering", async () => {
+    seedActiveSession();
+    const persistedAnswer = "**Finished answer with complete tail**";
+    const reloadActive = vi.fn(async () => {
+      useChatStore.setState({
+        activeSession: session([{
+          id: "assistant-terminal",
+          role: "assistant",
+          content: persistedAnswer,
+          createdAt: "2026-08-16T00:00:01Z",
+          citations: [],
+        }]),
+      });
+    });
+    useChatStore.setState({
+      sendTaskId: "task-terminal",
+      sendSessionId: "session-1",
+      streamingText: "**Finished answer with complete tail**",
+      reloadActive: reloadActive as never,
+    });
+    const runningTask: BackendTask = {
+      id: "task-terminal",
+      taskType: "llm_request",
+      projectId: PROJECT.projectId,
+      title: "Chat",
+      status: "running",
+      progress: null,
+      startedAt: "2026-08-16T00:00:00Z",
+      updatedAt: "2026-08-16T00:00:00Z",
+      completedAt: null,
+      cancellable: true,
+      logPath: null,
+      result: null,
+      error: null,
+    };
+    useTaskStore.getState().setTasks([runningTask]);
+    const { container } = render(<ChatView />);
+
+    act(() => {
+      useTaskStore.getState().setTasks([{
+        ...runningTask,
+        status: "succeeded",
+        updatedAt: "2026-08-16T00:00:01Z",
+        completedAt: "2026-08-16T00:00:01Z",
+        cancellable: false,
+      }]);
+    });
+
+    await waitFor(() => {
+      expect(reloadActive).toHaveBeenCalledTimes(1);
+      expect(container.querySelector("strong")).toHaveTextContent(
+        "Finished answer with complete tail",
+      );
+    });
+    expect(useChatStore.getState().streamingText).toBe("");
+  });
+
+  it("does not move scrollTop after the user unpins during streaming", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<ScrollHarness streamRevision={0} />);
+    const log = screen.getByRole("log");
+    Object.defineProperty(log, "scrollHeight", { value: 1_000, configurable: true });
+    Object.defineProperty(log, "clientHeight", { value: 200, configurable: true });
+    log.scrollTop = 300;
+    fireEvent.scroll(log);
+
+    expect(screen.getByText("Back to latest")).toBeInTheDocument();
+    rerender(<ScrollHarness streamRevision={1} />);
+    act(() => vi.runAllTimers());
+
+    expect(log.scrollTop).toBe(300);
+    vi.useRealTimers();
+  });
+
+  it("coalesces transcript updates into one RAF and cancels it on unmount", () => {
+    const callbacks = new Map<number, FrameRequestCallback>();
+    let nextFrame = 1;
+    const requestFrame = vi.fn((callback: FrameRequestCallback) => {
+      const id = nextFrame++;
+      callbacks.set(id, callback);
+      return id;
+    });
+    const cancelFrame = vi.fn((id: number) => {
+      callbacks.delete(id);
+    });
+    vi.stubGlobal("requestAnimationFrame", requestFrame);
+    vi.stubGlobal("cancelAnimationFrame", cancelFrame);
+
+    const { rerender, unmount } = render(<ScrollHarness streamRevision={0} />);
+    rerender(<ScrollHarness streamRevision={1} />);
+    rerender(<ScrollHarness streamRevision={2} />);
+
+    expect(requestFrame).toHaveBeenCalledTimes(1);
+    unmount();
+    expect(cancelFrame).toHaveBeenCalledTimes(1);
+    vi.unstubAllGlobals();
   });
 
   it("opens model source markers by source id rather than citation-card index", () => {

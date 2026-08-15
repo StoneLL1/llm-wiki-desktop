@@ -14,7 +14,7 @@ import type { ProjectSessionAuthority } from "../../types/project";
 import type { ImportHistoryPage } from "../../types/importV2Presentation";
 import type { LegacyInventory, MigrationConfirmation, MigrationPlan, MigrationReport } from "../../types/importV2Migration";
 import type { AppView } from "../../stores/navigationStore";
-import { notifyTaskEventListeners } from "../../hooks/useTaskEvents";
+import { dispatchTaskEvent as notifyTaskEventListeners } from "../../services/taskEventDispatcher";
 import { useWikiStore } from "../wiki/wikiStore";
 
 const api = vi.hoisted(() => ({
