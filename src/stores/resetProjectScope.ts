@@ -16,13 +16,15 @@ export function resetProjectScopedStores(): void {
   // best-effort and expired actions are rejected server-side.
   void useLintStore.getState().cancelPendingActions();
   useImportStore.getState().resetProjectPresentation("");
-  useWikiStore.getState().reset();
-  useSourceStore.getState().reset();
-  useChatStore.getState().reset();
-  useExportStore.getState().reset();
-  useGraphStore.getState().reset();
-  useLintStore.getState().reset();
-  useSettingsStore.getState().reset();
-  useWorkflowStore.getState().reset();
+  for (const store of [
+    useWikiStore,
+    useSourceStore,
+    useChatStore,
+    useExportStore,
+    useGraphStore,
+    useLintStore,
+    useSettingsStore,
+    useWorkflowStore,
+  ]) store.getState().reset();
   useNavigationStore.getState().setActiveView("dashboard");
 }

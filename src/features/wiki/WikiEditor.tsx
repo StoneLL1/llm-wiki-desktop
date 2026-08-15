@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type Ref } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Bold,
@@ -46,6 +46,7 @@ interface WikiEditorProps {
   onReload: () => void;
   onReviewConflict?: () => void;
   disabled?: boolean;
+  scrollRef?: Ref<HTMLDivElement>;
 }
 
 /**
@@ -208,6 +209,7 @@ export function WikiEditor({
   onReload,
   onReviewConflict,
   disabled = false,
+  scrollRef,
 }: WikiEditorProps) {
   const { t } = useTranslation();
   const saving = saveState === "saving";
@@ -293,7 +295,9 @@ export function WikiEditor({
         </div>
       ) : null}
       <div
+        ref={scrollRef}
         className="wiki-editor min-h-0 flex-1 overflow-y-auto px-2 pb-2 text-[13px] leading-[1.7] text-[var(--text-primary)]"
+        data-testid="wiki-editor-scroll"
         aria-disabled={disabled}
         onKeyDown={(event) => {
           if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {

@@ -16,6 +16,9 @@ import { ResizableSplitter } from "../../components/app/ResizableSplitter";
 import { ViewErrorBoundary } from "../../components/app/ViewErrorBoundary";
 import { ViewFallback } from "../../components/app/ViewFallback";
 import { PANE_WIDTH_LIMITS } from "../../hooks/useResizablePane";
+import {
+  useRouteScrollCallbackRestoration,
+} from "../../hooks/useRouteScrollRestoration";
 import type { AiCapabilitiesWorkflow } from "../../hooks/useAiCapabilities";
 import { useExportStore } from "../../stores/exportStore";
 import { useNavigationStore } from "../../stores/navigationStore";
@@ -193,6 +196,22 @@ export function WikiView({ capabilities }: WikiViewProps) {
 
   const { projectId, rootPath } = currentProject;
   const layoutRef = useRef<HTMLDivElement>(null);
+  const pageScrollKey = selectedPath ?? "empty";
+  const treeScrollRef = useRouteScrollCallbackRestoration<HTMLDivElement>(
+    projectId,
+    rootPath,
+    "wiki:tree",
+  );
+  const readScrollRef = useRouteScrollCallbackRestoration<HTMLDivElement>(
+    projectId,
+    rootPath,
+    `wiki:page:${pageScrollKey}:read`,
+  );
+  const editorScrollRef = useRouteScrollCallbackRestoration<HTMLDivElement>(
+    projectId,
+    rootPath,
+    `wiki:page:${pageScrollKey}:edit`,
+  );
   const layoutStyle = {
     "--wiki-tree-w-current": `${wikiTreeWidth}px`,
   } as CSSProperties;
@@ -746,6 +765,7 @@ export function WikiView({ capabilities }: WikiViewProps) {
           onDelete={handleDeleteRequest}
           onSourceRename={handleSourceMoveRequest}
           onSourceDelete={handleSourceDeleteRequest}
+          scrollRef={treeScrollRef}
         />
       ) : (
         <div className="wiki-tree items-center justify-center text-[12px] text-[var(--text-muted)]">
@@ -969,7 +989,11 @@ export function WikiView({ capabilities }: WikiViewProps) {
           </div>
         ) : null}
 
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <div
+          ref={mode === "read" ? readScrollRef : undefined}
+          className="min-h-0 flex-1 overflow-y-auto"
+          data-testid="wiki-content-scroll"
+        >
           {!page ? (
             <div className="flex h-full items-center justify-center text-[13px] text-[var(--text-muted)]">
               {loadingPage ? (
@@ -992,6 +1016,7 @@ export function WikiView({ capabilities }: WikiViewProps) {
                     onReload={() => void reload(projectId, rootPath)}
                     onReviewConflict={() => setConflictDialogOpen(true)}
                     disabled={sourceMutating && page.meta.pageType === "source"}
+                    scrollRef={editorScrollRef}
                   />
                 </Suspense>
               </ViewErrorBoundary>

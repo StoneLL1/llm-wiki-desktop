@@ -6,6 +6,7 @@ import { useChatStore } from "../../stores/chatStore";
 import { defaultProject, useProjectStore } from "../../stores/projectStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useTaskStore } from "../../stores/taskStore";
+import { resetRoutePresentation } from "../../hooks/useRouteScrollRestoration";
 import { useWikiStore } from "../wiki/wikiStore";
 import type { ChatMessage, ChatSession } from "../../types/chat";
 import type { BackendTask } from "../../types/task";
@@ -19,6 +20,11 @@ function ScrollHarness({ streamRevision }: { streamRevision: number }) {
       {transcript.showBackToLatest ? <span>Back to latest</span> : null}
     </div>
   );
+}
+
+function RestoredScrollHarness() {
+  const transcript = useTranscriptScroll("session-1", 1, 0, 0, "project-1\0d:/wiki");
+  return <div ref={transcript.ref} role="log" onScroll={transcript.onScroll} />;
 }
 
 const PROJECT = {
@@ -310,6 +316,21 @@ describe("ChatView", () => {
 
     expect(log.scrollTop).toBe(300);
     vi.useRealTimers();
+  });
+
+  it("restores an unpinned transcript after the chat route remounts", () => {
+    resetRoutePresentation();
+    const first = render(<RestoredScrollHarness />);
+    const log = screen.getByRole("log");
+    Object.defineProperty(log, "scrollHeight", { value: 1_000, configurable: true });
+    Object.defineProperty(log, "clientHeight", { value: 200, configurable: true });
+    log.scrollTop = 320;
+    fireEvent.scroll(log);
+    first.unmount();
+
+    const second = render(<RestoredScrollHarness />);
+    expect(screen.getByRole("log").scrollTop).toBe(320);
+    second.unmount();
   });
 
   it("coalesces transcript updates into one RAF and cancels it on unmount", () => {
