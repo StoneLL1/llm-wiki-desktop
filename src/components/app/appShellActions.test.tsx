@@ -1,8 +1,12 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { i18next } from "../../i18n";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { defaultProject, useProjectStore } from "../../stores/projectStore";
+import {
+  resetProjectFactsStoreForTests,
+} from "../../stores/projectFactsStore";
 import { AppShell } from "./AppShell";
 import type { PendingAction } from "../../types/backend";
 
@@ -45,6 +49,7 @@ beforeEach(async () => {
   });
   useProjectStore.getState().setPendingAction(undefined);
   invokeMock.mockReset();
+  resetProjectFactsStoreForTests();
 });
 
 afterEach(() => {
@@ -242,6 +247,120 @@ describe("AppShell first-screen agent detection", () => {
 
     await waitFor(() => {
       expect(useProjectStore.getState().currentProject.agentRoute).toBe("agent");
+    });
+  });
+
+  it("single-flights StrictMode shell status consumers and the AI controller", async () => {
+    tauriWindow.__TAURI_INTERNALS__ = {};
+    useProjectStore.getState().setCurrentProject({
+      ...defaultProject,
+      projectId: "proj-single-flight",
+      rootPath: "/tmp/proj-single-flight",
+    });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "git_status") {
+        return Promise.resolve({
+          isRepository: false,
+          branch: null,
+          head: null,
+          hasChanges: false,
+        });
+      }
+      if (command === "detect_agents" || command === "list_llm_providers") {
+        return Promise.resolve([]);
+      }
+      return Promise.resolve([]);
+    });
+
+    render(<StrictMode><AppShell /></StrictMode>);
+
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(1);
+      expect(invokeMock.mock.calls.filter(([command]) => command === "detect_agents")).toHaveLength(1);
+      expect(invokeMock.mock.calls.filter(([command]) => command === "list_llm_providers")).toHaveLength(1);
+    });
+  });
+
+  it("single-flights one revalidation per fact when the app window regains focus", async () => {
+    tauriWindow.__TAURI_INTERNALS__ = {};
+    useProjectStore.getState().setCurrentProject({
+      ...defaultProject,
+      projectId: "proj-focus",
+      rootPath: "/tmp/proj-focus",
+    });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "git_status") {
+        return Promise.resolve({
+          isRepository: false,
+          branch: null,
+          head: null,
+          hasChanges: false,
+        });
+      }
+      return Promise.resolve([]);
+    });
+    render(<AppShell />);
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(1);
+      expect(invokeMock.mock.calls.filter(([command]) => command === "detect_agents")).toHaveLength(1);
+      expect(invokeMock.mock.calls.filter(([command]) => command === "list_llm_providers")).toHaveLength(1);
+    });
+
+    fireEvent.focus(window);
+
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(2);
+      expect(invokeMock.mock.calls.filter(([command]) => command === "detect_agents")).toHaveLength(2);
+      expect(invokeMock.mock.calls.filter(([command]) => command === "list_llm_providers")).toHaveLength(2);
+    });
+  });
+
+  it("reprobes mounted observers after the project authority identity changes", async () => {
+    tauriWindow.__TAURI_INTERNALS__ = {};
+    const project = {
+      ...defaultProject,
+      projectId: "proj-authority",
+      rootPath: "/tmp/proj-authority",
+    };
+    useProjectStore.getState().setCurrentProject(project);
+    useNavigationStore.getState().setRightPanelOpen(false);
+    useProjectStore.setState({
+      authority: {
+        projectId: project.projectId,
+        canonicalIdentityKey: "identity-a",
+        identityRevision: "revision-1",
+      } as never,
+    });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "git_status") {
+        return Promise.resolve({
+          isRepository: false,
+          branch: null,
+          head: null,
+          hasChanges: false,
+        });
+      }
+      return Promise.resolve([]);
+    });
+    render(<AppShell />);
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(1);
+      expect(invokeMock.mock.calls.filter(([command]) => command === "detect_agents")).toHaveLength(1);
+      expect(invokeMock.mock.calls.filter(([command]) => command === "list_llm_providers")).toHaveLength(1);
+    });
+
+    act(() => useProjectStore.setState({
+      authority: {
+        projectId: project.projectId,
+        canonicalIdentityKey: "identity-a",
+        identityRevision: "revision-2",
+      } as never,
+    }));
+
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(2);
+      expect(invokeMock.mock.calls.filter(([command]) => command === "detect_agents")).toHaveLength(2);
+      expect(invokeMock.mock.calls.filter(([command]) => command === "list_llm_providers")).toHaveLength(2);
     });
   });
 });

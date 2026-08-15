@@ -31,6 +31,9 @@ pub fn list_llm_providers(
     request: ProviderProjectRequest,
 ) -> Result<Vec<ProviderStatus>, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    // Provider status is a live project-file + credential-store read. Keep
+    // force_refresh in the typed contract so future caching cannot ignore it.
+    let _force_refresh = request.force_refresh;
     crate::services::LlmService::list_providers(&context)?
         .into_iter()
         .map(|config| status_with_secret(&state.secret_service, config))

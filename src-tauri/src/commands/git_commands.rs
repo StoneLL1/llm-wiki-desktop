@@ -11,6 +11,8 @@ use crate::models::project::AssessmentId;
 pub struct GitProjectRequest {
     pub project_id: String,
     pub project_root_path: String,
+    #[serde(default)]
+    pub force_refresh: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -36,6 +38,9 @@ pub fn git_status(
     request: GitProjectRequest,
 ) -> Result<GitRepositoryStatus, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    // Git status is always a live repository read. Accepting force_refresh
+    // keeps the typed IPC contract explicit if a cache is introduced later.
+    let _force_refresh = request.force_refresh;
     state.git_service.repository_status(&context)
 }
 

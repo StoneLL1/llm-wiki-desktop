@@ -57,6 +57,8 @@ pub struct ProviderStatus {
 pub struct ProviderProjectRequest {
     pub project_id: String,
     pub project_root_path: String,
+    #[serde(default)]
+    pub force_refresh: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,6 +1,12 @@
-import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 
+import {
+  ensureProjectFacts,
+  nextProjectFactsExpiryAt,
+  projectFactsKey,
+  refreshProjectFacts,
+  useProjectFactsStore,
+} from "../stores/projectFactsStore";
 import { useProjectStore } from "../stores/projectStore";
 import type { AgentInfo } from "../types/agent";
 import type { ProviderStatus } from "../types/llm";
@@ -13,24 +19,26 @@ export interface AiCapabilitiesWorkflow {
   refresh: (forceRefresh?: boolean) => Promise<void>;
 }
 
-const hasTauri = (): boolean =>
-  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+const EMPTY_AGENTS: AgentInfo[] = [];
+const EMPTY_PROVIDERS: ProviderStatus[] = [];
+const CAPABILITY_FACTS = ["agents", "providers"] as const;
 
-function resolveRoute(
-  agents: AgentInfo[],
-  providers: ProviderStatus[],
-): AgentRoute {
-  const agentReady = agents.some(
+function resolveKnownRoute(
+  agents: AgentInfo[] | null,
+  providers: ProviderStatus[] | null,
+): AgentRoute | null {
+  const agentReady = agents?.some(
     (agent) => agent.isDefault && agent.state === "installed",
   );
   if (agentReady) return "agent";
 
-  const byokReady = providers.some(
+  const byokReady = providers?.some(
     (provider) =>
       provider.config.enabled &&
       (provider.hasSecret || provider.config.provider === "ollama"),
   );
-  return byokReady ? "byok" : "unconfigured";
+  if (byokReady) return "byok";
+  return agents !== null && providers !== null ? "unconfigured" : null;
 }
 
 export function useAiCapabilities(
@@ -39,55 +47,77 @@ export function useAiCapabilities(
 ): AiCapabilitiesWorkflow {
   const projectId = project.projectId;
   const rootPath = project.rootPath;
-  const projectKey = `${projectId}\0${rootPath}`;
-  const latestProjectKey = useRef(projectKey);
-  latestProjectKey.current = projectKey;
-  const requestEpoch = useRef(0);
-  const visibleRef = useRef(refreshWhenVisible);
+  const scope = useMemo(() => ({ projectId, rootPath }), [projectId, rootPath]);
+  const projectKey = projectFactsKey(scope);
+  const authorityIdentityKey = useProjectStore((state) =>
+    state.currentProject.projectId === projectId
+      && state.currentProject.rootPath === rootPath
+      && state.authority?.projectId === projectId
+      ? `${state.authority.canonicalIdentityKey}\0${state.authority.identityRevision}`
+      : null
+  );
+  const storedEntry = useProjectFactsStore((state) => state.entries[projectKey] ?? null);
+  const authorityMatches = !storedEntry
+    || storedEntry.authorityIdentityKey === authorityIdentityKey;
+  const entry = storedEntry && authorityMatches
+    ? storedEntry
+    : null;
   const setAgentRoute = useProjectStore((state) => state.setAgentRoute);
-  const [agents, setAgents] = useState<AgentInfo[]>([]);
-  const [providers, setProviders] = useState<ProviderStatus[]>([]);
-  const [refreshing, setRefreshing] = useState(false);
+  const visibleRef = useRef(refreshWhenVisible);
+  const agents = entry?.agents.value ?? EMPTY_AGENTS;
+  const providers = entry?.providers.value ?? EMPTY_PROVIDERS;
+  const expiryAt = nextProjectFactsExpiryAt(entry, CAPABILITY_FACTS);
+  const refreshing = entry?.agents.status === "loading"
+    || entry?.agents.status === "stale"
+    || entry?.providers.status === "loading"
+    || entry?.providers.status === "stale";
 
-  const refresh = useCallback(async (forceRefresh = false) => {
-    if (!hasTauri() || !projectId) return;
-    const requestKey = projectKey;
-    const epoch = ++requestEpoch.current;
-    setRefreshing(true);
-    try {
-      const request = { projectId, projectRootPath: rootPath, forceRefresh };
-      const [detectedAgents, providerStatuses] = await Promise.all([
-        invoke<AgentInfo[]>("detect_agents", { request }),
-        invoke<ProviderStatus[]>("list_llm_providers", { request }),
-      ]);
-      if (latestProjectKey.current !== requestKey || requestEpoch.current !== epoch) return;
-      setAgents(detectedAgents);
-      setProviders(providerStatuses);
-      setAgentRoute(
-        projectId,
-        rootPath,
-        resolveRoute(detectedAgents, providerStatuses),
-      );
-    } finally {
-      if (latestProjectKey.current === requestKey && requestEpoch.current === epoch) {
-        setRefreshing(false);
-      }
-    }
-  }, [projectId, projectKey, rootPath, setAgentRoute]);
+  const refresh = useCallback((forceRefresh = false) => {
+    return forceRefresh
+      ? refreshProjectFacts(scope, CAPABILITY_FACTS)
+      : ensureProjectFacts(scope, CAPABILITY_FACTS);
+  }, [scope]);
 
   useEffect(() => {
-    setAgents([]);
-    setProviders([]);
-    void refresh().catch(() => undefined);
-  }, [projectKey, refresh]);
+    if (!authorityMatches) return;
+    void ensureProjectFacts(scope, CAPABILITY_FACTS).catch(() => undefined);
+  }, [authorityMatches, scope]);
+
+  useEffect(() => {
+    if (
+      entry?.agents.status !== "idle"
+      && entry?.agents.status !== "stale"
+      && entry?.providers.status !== "idle"
+      && entry?.providers.status !== "stale"
+    ) return;
+    void ensureProjectFacts(scope, CAPABILITY_FACTS).catch(() => undefined);
+  }, [entry?.agents.status, entry?.providers.status, scope]);
+
+  useEffect(() => {
+    if (expiryAt === null) return;
+    const delay = Math.max(1, expiryAt - Date.now() + 1);
+    const timeout = window.setTimeout(() => {
+      void ensureProjectFacts(scope, CAPABILITY_FACTS).catch(() => undefined);
+    }, delay);
+    return () => window.clearTimeout(timeout);
+  }, [expiryAt, scope]);
 
   useEffect(() => {
     const wasVisible = visibleRef.current;
     visibleRef.current = refreshWhenVisible;
     if (refreshWhenVisible && !wasVisible) {
-      void refresh().catch(() => undefined);
+      void ensureProjectFacts(scope, CAPABILITY_FACTS).catch(() => undefined);
     }
-  }, [refreshWhenVisible, refresh]);
+  }, [refreshWhenVisible, scope]);
+
+  useEffect(() => {
+    if (!entry) return;
+    const route = resolveKnownRoute(entry.agents.value, entry.providers.value);
+    if (route === null) return;
+    const current = useProjectStore.getState().currentProject;
+    if (current.projectId !== projectId || current.rootPath !== rootPath) return;
+    setAgentRoute(projectId, rootPath, route);
+  }, [entry?.agents.value, entry?.providers.value, projectId, rootPath, setAgentRoute]);
 
   return { agents, providers, refreshing, refresh };
 }

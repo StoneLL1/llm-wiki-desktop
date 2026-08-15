@@ -3,6 +3,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AiCapabilitiesWorkflow } from "../../hooks/useAiCapabilities";
 import { defaultProject } from "../../stores/projectStore";
+import {
+  ensureProjectFacts,
+  projectFactsKey,
+  resetProjectFactsStoreForTests,
+  useProjectFactsStore,
+} from "../../stores/projectFactsStore";
 import type { LlmProviderConfig, ProviderStatus } from "../../types/llm";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -29,11 +35,12 @@ const status: ProviderStatus = {
   secretMask: null,
 };
 
-let refresh: ReturnType<typeof vi.fn<() => Promise<void>>>;
+let refresh: ReturnType<typeof vi.fn<(forceRefresh?: boolean) => Promise<void>>>;
 let capabilities: AiCapabilitiesWorkflow;
 
 beforeEach(() => {
   invokeMock.mockReset();
+  resetProjectFactsStoreForTests();
   Object.defineProperty(window, "__TAURI_INTERNALS__", {
     value: {},
     configurable: true,
@@ -48,7 +55,12 @@ beforeEach(() => {
 });
 
 describe("useProviderWorkflow", () => {
-  it("does not refresh capabilities for a mutation that completed after project switch", async () => {
+  it("invalidates the original project without refreshing it after a project switch", async () => {
+    invokeMock.mockResolvedValueOnce([status]);
+    await ensureProjectFacts(
+      { projectId: project.projectId, rootPath: project.rootPath },
+      ["providers"],
+    );
     let resolve!: (value: void) => void;
     invokeMock.mockReturnValue(new Promise<void>((next) => { resolve = next; }));
     const projectB = { ...project, projectId: "project-b", rootPath: "D:/wiki/project-b" };
@@ -60,6 +72,11 @@ describe("useProviderWorkflow", () => {
     resolve();
     await act(async () => pending);
     expect(refresh).not.toHaveBeenCalled();
+    expect(
+      useProjectFactsStore.getState().entries[
+        projectFactsKey({ projectId: project.projectId, rootPath: project.rootPath })
+      ]?.providers.status,
+    ).toBe("stale");
   });
 
   it("saves config and refreshes capabilities exactly once", async () => {
@@ -78,6 +95,7 @@ describe("useProviderWorkflow", () => {
       },
     });
     expect(refresh).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveBeenCalledWith(true);
     expect(result.current.providers).toEqual([status]);
   });
 
@@ -97,8 +115,31 @@ describe("useProviderWorkflow", () => {
     expect(invokeMock).toHaveBeenNthCalledWith(2, "delete_provider_secret", {
       request: { provider: "anthropic", secret: null },
     });
-    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(refresh).toHaveBeenNthCalledWith(1, true);
+    expect(refresh).toHaveBeenNthCalledWith(2, true);
     expect(result.current).not.toHaveProperty("secret");
+  });
+
+  it("invalidates retained provider facts for every project after a global secret change", async () => {
+    const projectB = { ...project, projectId: "project-b", rootPath: "D:/wiki/project-b" };
+    invokeMock.mockResolvedValueOnce([status]).mockResolvedValueOnce([status]);
+    await ensureProjectFacts(
+      { projectId: project.projectId, rootPath: project.rootPath },
+      ["providers"],
+    );
+    await ensureProjectFacts(
+      { projectId: projectB.projectId, rootPath: projectB.rootPath },
+      ["providers"],
+    );
+    invokeMock.mockResolvedValue(undefined);
+    const { result } = renderHook(() => useProviderWorkflow(project, capabilities));
+
+    await act(async () => result.current.saveSecret("anthropic", "global-secret"));
+
+    const entries = useProjectFactsStore.getState().entries;
+    expect(entries[projectFactsKey(project)]?.providers.status).toBe("stale");
+    expect(entries[projectFactsKey(projectB)]?.providers.status).toBe("stale");
+    expect(refresh).toHaveBeenCalledWith(true);
   });
 
   it("does not refresh or swallow a failed mutation", async () => {

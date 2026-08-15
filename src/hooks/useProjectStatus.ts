@@ -1,15 +1,18 @@
-import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo } from "react";
 
+import {
+  ensureProjectFacts,
+  nextProjectFactsExpiryAt,
+  projectFactsKey,
+  useProjectFactsStore,
+  type GitRepositoryStatus,
+  type ProjectFactKind,
+} from "../stores/projectFactsStore";
+import { useProjectStore } from "../stores/projectStore";
 import type { AgentInfo } from "../types/agent";
 import type { ProviderStatus } from "../types/llm";
 
-export interface GitRepositoryStatus {
-  isRepository: boolean;
-  branch: string | null;
-  head: string | null;
-  hasChanges: boolean;
-}
+export type { GitRepositoryStatus } from "../stores/projectFactsStore";
 
 export interface ProjectStatusSnapshot {
   git: GitRepositoryStatus | null;
@@ -17,60 +20,85 @@ export interface ProjectStatusSnapshot {
   providers: ProviderStatus[];
 }
 
-interface CachedEntry {
-  key: string;
-  snapshot: ProjectStatusSnapshot;
-}
-
-const hasTauri = (): boolean =>
-  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-
-let cache: CachedEntry | null = null;
+const ALL_FACT_KINDS: readonly ProjectFactKind[] = ["git", "agents", "providers"];
 
 /**
- * Fetches git status + detected Agent CLIs + BYOK providers for the current
- * project. Results are cached per project key so the three shell surfaces that
- * need this data (right panel, status bar, sidebar foot) don't each re-spawn
- * the CLI probes. The cache is replaced on project switch.
+ * Read-only shell adapter over the shared project facts coordinator. The
+ * legacy snapshot shape stays stable while loading/error/freshness remain
+ * explicit inside projectFactsStore.
  */
 export function useProjectStatus(
   projectId: string,
   rootPath: string,
   enabled = true,
+  kinds: readonly ProjectFactKind[] = ALL_FACT_KINDS,
 ): ProjectStatusSnapshot | null {
-  const key = `${projectId}@${rootPath}`;
-  const [snapshot, setSnapshot] = useState<ProjectStatusSnapshot | null>(
-    () => (cache && cache.key === key ? cache.snapshot : null),
+  const scope = useMemo(() => ({ projectId, rootPath }), [projectId, rootPath]);
+  const key = projectFactsKey(scope);
+  const kindsKey = [...new Set(kinds)].sort().join(",");
+  const requestedKinds = useMemo(
+    () => kindsKey ? kindsKey.split(",") as ProjectFactKind[] : [],
+    [kindsKey],
   );
+  const authorityIdentityKey = useProjectStore((state) =>
+    state.currentProject.projectId === projectId
+      && state.currentProject.rootPath === rootPath
+      && state.authority?.projectId === projectId
+      ? `${state.authority.canonicalIdentityKey}\0${state.authority.identityRevision}`
+      : null
+  );
+  const storedEntry = useProjectFactsStore((state) => state.entries[key] ?? null);
+  const authorityMatches = !storedEntry
+    || storedEntry.authorityIdentityKey === authorityIdentityKey;
+  const entry = storedEntry && authorityMatches
+    ? storedEntry
+    : null;
+  const staleSignature = requestedKinds
+    .map((kind) => `${kind}:${entry?.[kind].status ?? "idle"}`)
+    .join("|");
+  const expiryAt = nextProjectFactsExpiryAt(entry, requestedKinds);
 
   useEffect(() => {
-    if (!enabled || !hasTauri() || !projectId || !rootPath) return;
-    if (cache && cache.key === key) {
-      setSnapshot(cache.snapshot);
+    if (!enabled || !projectId || !rootPath || requestedKinds.length === 0) return;
+    if (!authorityMatches) return;
+    void ensureProjectFacts(scope, requestedKinds).catch(() => undefined);
+  }, [authorityMatches, enabled, requestedKinds, scope]);
+
+  useEffect(() => {
+    if (
+      !enabled
+      || !projectId
+      || !rootPath
+      || !requestedKinds.some((kind) => {
+        const status = entry?.[kind].status;
+        return status === "idle" || status === "stale";
+      })
+    ) {
       return;
     }
-    let active = true;
-    const request = { projectId, projectRootPath: rootPath };
-    void Promise.all([
-      invoke<GitRepositoryStatus>("git_status", { request }).catch(
-        (): GitRepositoryStatus | null => null,
-      ),
-      invoke<AgentInfo[]>("detect_agents", { request }).catch(
-        (): AgentInfo[] => [],
-      ),
-      invoke<ProviderStatus[]>("list_llm_providers", { request }).catch(
-        (): ProviderStatus[] => [],
-      ),
-    ]).then(([git, agents, providers]) => {
-      if (!active) return;
-      const next: ProjectStatusSnapshot = { git, agents, providers };
-      cache = { key, snapshot: next };
-      setSnapshot(next);
-    });
-    return () => {
-      active = false;
-    };
-  }, [enabled, key, projectId, rootPath]);
+    void ensureProjectFacts(scope, requestedKinds).catch(() => undefined);
+  }, [enabled, entry, requestedKinds, scope, staleSignature]);
 
-  return enabled ? snapshot : null;
+  useEffect(() => {
+    if (!enabled) return;
+    if (expiryAt === null) return;
+    const delay = Math.max(1, expiryAt - Date.now() + 1);
+    const timeout = window.setTimeout(() => {
+      void ensureProjectFacts(scope, requestedKinds).catch(() => undefined);
+    }, delay);
+    return () => window.clearTimeout(timeout);
+  }, [enabled, expiryAt, requestedKinds, scope]);
+
+  if (!enabled || !entry) return null;
+  const hasKnownResult = requestedKinds.length > 0 && requestedKinds.every((kind) => {
+    const resource = entry[kind];
+    return resource.value !== null || resource.status === "error";
+  });
+  if (!hasKnownResult) return null;
+
+  return {
+    git: entry.git.value,
+    agents: entry.agents.value ?? [],
+    providers: entry.providers.value ?? [],
+  };
 }

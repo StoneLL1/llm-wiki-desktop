@@ -9,6 +9,7 @@ const invokeMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
+import { resetProjectFactsStoreForTests } from "../stores/projectFactsStore";
 import { defaultProject, useProjectStore } from "../stores/projectStore";
 import { useAiCapabilities } from "./useAiCapabilities";
 
@@ -65,6 +66,7 @@ function deferred<T>() {
 
 beforeEach(() => {
   invokeMock.mockReset();
+  resetProjectFactsStoreForTests();
   Object.defineProperty(window, "__TAURI_INTERNALS__", {
     value: {},
     configurable: true,
@@ -154,6 +156,18 @@ describe("useAiCapabilities", () => {
     expect(useProjectStore.getState().currentProject.agentRoute).toBe("unconfigured");
   });
 
+  it("keeps an explicitly installed Agent route when provider probing fails", async () => {
+    invokeMock
+      .mockResolvedValueOnce([installedAgent])
+      .mockRejectedValueOnce(new Error("provider read failed"));
+
+    renderHook(() => useAiCapabilities(projectA, false));
+
+    await waitFor(() => {
+      expect(useProjectStore.getState().currentProject.agentRoute).toBe("agent");
+    });
+  });
+
   it("does not let a slow project A probe overwrite project B", async () => {
     const agentsA = deferred<AgentInfo[]>();
     const providersA = deferred<ProviderStatus[]>();
@@ -188,7 +202,7 @@ describe("useAiCapabilities", () => {
     });
   });
 
-  it("keeps only the latest same-project capability refresh", async () => {
+  it("keeps only the latest same-project forced capability refresh", async () => {
     const firstAgents = deferred<AgentInfo[]>();
     const firstProviders = deferred<ProviderStatus[]>();
     invokeMock
@@ -198,7 +212,7 @@ describe("useAiCapabilities", () => {
       .mockResolvedValueOnce([provider("ollama", true, false)]);
     const { result } = renderHook(() => useAiCapabilities(projectA, false));
 
-    await act(async () => result.current.refresh());
+    await act(async () => result.current.refresh(true));
     await waitFor(() => expect(result.current.providers).toEqual([provider("ollama", true, false)]));
     act(() => {
       firstAgents.resolve([installedAgent]);
@@ -211,7 +225,7 @@ describe("useAiCapabilities", () => {
     expect(useProjectStore.getState().currentProject.agentRoute).toBe("byok");
   });
 
-  it("refreshes once when capability management becomes visible", async () => {
+  it("reuses fresh capability facts when capability management becomes visible", async () => {
     invokeMock.mockResolvedValue([]);
     const { result, rerender } = renderHook(
       ({ visible }) => useAiCapabilities(projectA, visible),
@@ -221,9 +235,9 @@ describe("useAiCapabilities", () => {
     expect(invokeMock).toHaveBeenCalledTimes(2);
 
     rerender({ visible: true });
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(2));
     rerender({ visible: true });
 
-    expect(invokeMock).toHaveBeenCalledTimes(4);
+    expect(invokeMock).toHaveBeenCalledTimes(2);
   });
 });
