@@ -1,4 +1,4 @@
-import { type CSSProperties, useEffect, useMemo, useState } from "react";
+import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ResizableSplitter } from "../../components/app/ResizableSplitter";
@@ -31,7 +31,7 @@ export function LintView() {
   const { t } = useTranslation();
   const currentProject = useProjectStore((state) => state.currentProject);
   const authority = useProjectStore((state) => state.authority);
-  const paneSizes = useNavigationStore((state) => state.paneSizes);
+  const lintDetailsWidth = useNavigationStore((state) => state.paneSizes.lintDetails);
   const setPaneSize = useNavigationStore((state) => state.setPaneSize);
   const resetPaneSize = useNavigationStore((state) => state.resetPaneSize);
   const requestWorkflowLaunch = useNavigationStore((state) => state.requestWorkflowLaunch);
@@ -89,11 +89,12 @@ export function LintView() {
   const tasks = useTaskStore((state) => state.tasks);
 
   const { projectId, rootPath } = currentProject;
+  const layoutRef = useRef<HTMLDivElement>(null);
   const authorityIdentity = authority?.projectId === projectId
     ? `${authority.canonicalIdentityKey}\0${authority.identityRevision}`
     : null;
   const layoutStyle = {
-    "--lint-details-w-current": `${paneSizes.lintDetails}px`,
+    "--lint-details-w-current": `${lintDetailsWidth}px`,
   } as CSSProperties;
   const healthIssues = healthReport
     ? healthReport.issues.map((issue) => ({
@@ -372,7 +373,7 @@ export function LintView() {
   );
 
   return (
-    <div className="lint-view-layout" style={layoutStyle}>
+    <div ref={layoutRef} className="lint-view-layout" style={layoutStyle}>
       <div className="lint-view__list-pane">
         <div className="view-toolbar border-b border-[var(--border)] px-4">
           <div className="seg" role="group" aria-label={t("view.lint.paneTitle")}>
@@ -563,8 +564,10 @@ export function LintView() {
         label={t("shell.splitter.lintDetails")}
         min={PANE_WIDTH_LIMITS.lintDetails.min}
         max={PANE_WIDTH_LIMITS.lintDetails.max}
-        value={paneSizes.lintDetails}
-        onChange={(value) => setPaneSize("lintDetails", value)}
+        value={lintDetailsWidth}
+        previewTargetRef={layoutRef}
+        previewCssVariable="--lint-details-w-current"
+        onCommit={(value) => setPaneSize("lintDetails", value)}
         onReset={() => resetPaneSize("lintDetails")}
       />
 

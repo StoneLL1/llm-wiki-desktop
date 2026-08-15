@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { createElement } from "react";
 import type { ReactNode } from "react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clampPaneWidth,
   DEFAULT_LAYOUT_PREFERENCES,
@@ -93,7 +93,8 @@ interface ResizeHarnessProps {
   direction?: 1 | -1;
   max?: number;
   min?: number;
-  onChange: (value: number) => void;
+  onCommit: (value: number) => void;
+  onPreview: (value: number) => void;
   onReset: () => void;
   value?: number;
 }
@@ -103,7 +104,8 @@ function ResizeHarness({
   direction = 1,
   max = 360,
   min = 180,
-  onChange,
+  onCommit,
+  onPreview,
   onReset,
   value = 240,
 }: ResizeHarnessProps) {
@@ -112,7 +114,8 @@ function ResizeHarness({
     min,
     max,
     direction,
-    onChange,
+    onCommit,
+    onPreview,
     onReset,
   });
 
@@ -120,6 +123,9 @@ function ResizeHarness({
     "div",
     {
       "aria-label": "Resize test pane",
+      "aria-valuemax": max,
+      "aria-valuemin": min,
+      "aria-valuenow": value,
       role: "separator",
       tabIndex: 0,
       ...separatorProps,
@@ -136,12 +142,41 @@ function dispatchPointerEvent(target: Document | Element | Window, type: string,
 }
 
 describe("useResizablePane", () => {
+  let animationFrames: Map<number, FrameRequestCallback>;
+  let nextAnimationFrameId: number;
+
+  beforeEach(() => {
+    animationFrames = new Map();
+    nextAnimationFrameId = 1;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      const id = nextAnimationFrameId;
+      nextAnimationFrameId += 1;
+      animationFrames.set(id, callback);
+      return id;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => {
+      animationFrames.delete(id);
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const flushAnimationFrame = () => {
+    const callbacks = [...animationFrames.values()];
+    animationFrames.clear();
+    callbacks.forEach((callback) => callback(0));
+  };
+
   it("adjusts pane width with keyboard commands", () => {
-    const changes: number[] = [];
+    const commits: number[] = [];
+    const previews: number[] = [];
     let resetCount = 0;
     render(
       createElement(ResizeHarness, {
-        onChange: (value) => changes.push(value),
+        onCommit: (value) => commits.push(value),
+        onPreview: (value) => previews.push(value),
         onReset: () => {
           resetCount += 1;
         },
@@ -155,18 +190,53 @@ describe("useResizablePane", () => {
     fireEvent.keyDown(separator, { key: "End" });
     fireEvent.keyDown(separator, { key: "Enter" });
 
-    expect(changes).toEqual([252, 228, 180, 360]);
+    expect(commits).toEqual([252, 228, 180, 360]);
+    expect(previews).toEqual([]);
     expect(resetCount).toBe(1);
   });
 
-  it("uses pointer delta and direction when dragging", () => {
-    const changes: number[] = [];
+  it("coalesces pointer moves to the final preview in each animation frame", () => {
+    const commits: number[] = [];
+    const previews: number[] = [];
+    render(
+      createElement(ResizeHarness, {
+        onCommit: (value) => commits.push(value),
+        onPreview: (value) => previews.push(value),
+        onReset: () => undefined,
+      }),
+    );
+
+    const separator = screen.getByRole("separator", { name: "Resize test pane" });
+    dispatchPointerEvent(separator, "pointerdown", 200);
+    for (let clientX = 201; clientX <= 220; clientX += 1) {
+      dispatchPointerEvent(document, "pointermove", clientX);
+    }
+
+    expect(previews).toEqual([]);
+    expect(animationFrames.size).toBe(1);
+
+    flushAnimationFrame();
+    expect(previews).toEqual([260]);
+
+    dispatchPointerEvent(document, "pointermove", 230);
+    dispatchPointerEvent(document, "pointermove", 240);
+    expect(animationFrames.size).toBe(1);
+    flushAnimationFrame();
+
+    expect(previews).toEqual([260, 280]);
+    expect(commits).toEqual([]);
+  });
+
+  it("flushes the final pointer position and commits exactly once on pointerup", () => {
+    const commits: number[] = [];
+    const previews: number[] = [];
     render(
       createElement(ResizeHarness, {
         direction: -1,
         max: 520,
         min: 280,
-        onChange: (value) => changes.push(value),
+        onCommit: (value) => commits.push(value),
+        onPreview: (value) => previews.push(value),
         onReset: () => undefined,
         value: 320,
       }),
@@ -175,10 +245,78 @@ describe("useResizablePane", () => {
     const separator = screen.getByRole("separator", { name: "Resize test pane" });
     dispatchPointerEvent(separator, "pointerdown", 200);
     dispatchPointerEvent(document, "pointermove", 170);
-    dispatchPointerEvent(document, "pointermove", 260);
     dispatchPointerEvent(document, "pointerup", 260);
 
-    expect(changes).toEqual([350, 280]);
+    expect(previews).toEqual([280]);
+    expect(commits).toEqual([280]);
+    expect(animationFrames.size).toBe(0);
+    expect(separator).toHaveAttribute("aria-valuenow", "280");
+    expect(document.body).not.toHaveClass("is-resizing-pane");
+  });
+
+  it("does not commit a pointer interaction whose final value is unchanged", () => {
+    const commits: number[] = [];
+    const previews: number[] = [];
+    render(
+      createElement(ResizeHarness, {
+        onCommit: (value) => commits.push(value),
+        onPreview: (value) => previews.push(value),
+        onReset: () => undefined,
+      }),
+    );
+
+    const separator = screen.getByRole("separator", { name: "Resize test pane" });
+    dispatchPointerEvent(separator, "pointerdown", 240);
+    dispatchPointerEvent(document, "pointerup", 240);
+
+    expect(previews).toEqual([240]);
+    expect(commits).toEqual([]);
+  });
+
+  it("rolls back a preview without committing when pointer capture is cancelled", () => {
+    const commits: number[] = [];
+    const previews: number[] = [];
+    render(
+      createElement(ResizeHarness, {
+        onCommit: (value) => commits.push(value),
+        onPreview: (value) => previews.push(value),
+        onReset: () => undefined,
+      }),
+    );
+
+    const separator = screen.getByRole("separator", { name: "Resize test pane" });
+    dispatchPointerEvent(separator, "pointerdown", 200);
+    dispatchPointerEvent(document, "pointermove", 260);
+    flushAnimationFrame();
+    dispatchPointerEvent(document, "pointermove", 280);
+    dispatchPointerEvent(document, "pointercancel", 280);
+
+    expect(previews).toEqual([300, 240]);
+    expect(commits).toEqual([]);
+    expect(animationFrames.size).toBe(0);
+    expect(separator).toHaveAttribute("aria-valuenow", "240");
+  });
+
+  it("cancels a pending preview on unmount without a late commit", () => {
+    const commits: number[] = [];
+    const previews: number[] = [];
+    const view = render(
+      createElement(ResizeHarness, {
+        onCommit: (value) => commits.push(value),
+        onPreview: (value) => previews.push(value),
+        onReset: () => undefined,
+      }),
+    );
+
+    const separator = screen.getByRole("separator", { name: "Resize test pane" });
+    dispatchPointerEvent(separator, "pointerdown", 200);
+    dispatchPointerEvent(document, "pointermove", 260);
+    view.unmount();
+    flushAnimationFrame();
+
+    expect(previews).toEqual([240]);
+    expect(commits).toEqual([]);
+    expect(animationFrames.size).toBe(0);
     expect(document.body).not.toHaveClass("is-resizing-pane");
   });
 });

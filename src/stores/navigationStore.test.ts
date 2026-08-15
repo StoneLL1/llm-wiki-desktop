@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useNavigationStore } from "./navigationStore";
 
 describe("navigationStore layout preferences", () => {
@@ -145,8 +145,11 @@ describe("navigationStore layout preferences", () => {
   });
 
   it("clamps and persists pane size changes", () => {
+    const storageSpy = vi.spyOn(Storage.prototype, "setItem");
     useNavigationStore.getState().setPaneSize("rightPanel", 900);
     expect(useNavigationStore.getState().paneSizes.rightPanel).toBe(520);
+    expect(storageSpy).toHaveBeenCalledTimes(1);
+    storageSpy.mockRestore();
   });
 
   it("focuses the export preview workspace and restores the previous right panel state", () => {
