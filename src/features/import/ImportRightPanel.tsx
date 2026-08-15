@@ -11,7 +11,7 @@ import type { ImportItem } from "../../types/importV2";
 import type { ImportPreviewContent } from "../../types/importV2Presentation";
 import { presentImportItem, type ImportItemAction } from "./importStatusPresentation";
 import { ImportItemStatus } from "./ImportItemStatus";
-import { previewImageUrl } from "./ImportMarkdownPreviewDialog";
+import { previewImageUrl } from "./importPreviewUrl";
 import { displayHostForImportLocator } from "./importLocator";
 import { ImportQualitySummary } from "./ImportQualitySummary";
 import { ImportAttemptTimeline } from "./ImportAttemptTimeline";

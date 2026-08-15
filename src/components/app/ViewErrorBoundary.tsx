@@ -4,11 +4,11 @@ import { RefreshCw } from "lucide-react";
 
 interface ViewErrorBoundaryProps {
   children: ReactNode;
+  onReload?: () => void;
 }
 
 interface ViewErrorBoundaryState {
   error: Error | null;
-  retryKey: number;
 }
 
 /**
@@ -19,7 +19,7 @@ interface ViewErrorBoundaryState {
  * state, this handles the *rejected* state.
  */
 export class ViewErrorBoundary extends Component<ViewErrorBoundaryProps, ViewErrorBoundaryState> {
-  state: ViewErrorBoundaryState = { error: null, retryKey: 0 };
+  state: ViewErrorBoundaryState = { error: null };
 
   static getDerivedStateFromError(error: Error): Partial<ViewErrorBoundaryState> {
     return { error };
@@ -29,22 +29,19 @@ export class ViewErrorBoundary extends Component<ViewErrorBoundaryProps, ViewErr
     console.error("[shell] view failed to load", error, info);
   }
 
-  private handleRetry = () => {
-    this.setState((state) => ({
-      error: null,
-      retryKey: state.retryKey + 1,
-    }));
-  };
-
   render(): ReactNode {
     if (this.state.error) {
-      return <ViewLoadError onRetry={this.handleRetry} />;
+      return <ViewLoadError onReload={this.props.onReload ?? reloadApplication} />;
     }
-    return <Fragment key={this.state.retryKey}>{this.props.children}</Fragment>;
+    return <Fragment>{this.props.children}</Fragment>;
   }
 }
 
-function ViewLoadError({ onRetry }: { onRetry: () => void }) {
+function reloadApplication() {
+  window.location.reload();
+}
+
+function ViewLoadError({ onReload }: { onReload: () => void }) {
   const { t } = useTranslation();
   return (
     <div
@@ -54,7 +51,7 @@ function ViewLoadError({ onRetry }: { onRetry: () => void }) {
       <p className="m-0 max-w-sm leading-5">{t("shell.view.loadError")}</p>
       <button
         type="button"
-        onClick={onRetry}
+        onClick={onReload}
         className="inline-flex h-[28px] items-center gap-1.5 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] font-medium text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"
       >
         <RefreshCw size={13} aria-hidden="true" />

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
+import { registerProjectScopeResetHandler } from "./projectScopeResetRegistry";
 
 import type {
   GraphBuildResult,
@@ -441,3 +442,5 @@ function errorCode(error: unknown): string | null {
   }
   return null;
 }
+
+registerProjectScopeResetHandler("graph", () => useGraphStore.getState().reset());

@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { registerProjectScopeResetHandler } from "./projectScopeResetRegistry";
 import type {
   WorkflowKind,
   WorkflowRouteSelection,
@@ -292,3 +293,7 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   setPendingImportPath: (pendingImportPath) => set({ pendingImportPath }),
   clearPendingImportPath: () => set({ pendingImportPath: null }),
 }));
+
+registerProjectScopeResetHandler("navigation", () => {
+  useNavigationStore.getState().setActiveView("dashboard");
+});

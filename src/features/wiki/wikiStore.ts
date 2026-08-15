@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
+import { registerProjectScopeResetHandler } from "../../stores/projectScopeResetRegistry";
 import { createProjectResourceController } from "../../lib/projectResourceFreshness";
 import {
   captureProjectScope,
@@ -608,3 +609,5 @@ function errorMessage(error: unknown): string {
   }
   return String(error);
 }
+
+registerProjectScopeResetHandler("wiki", () => useWikiStore.getState().reset());

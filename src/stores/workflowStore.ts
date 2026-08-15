@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { registerProjectScopeResetHandler } from "./projectScopeResetRegistry";
 
 import type {
   WorkflowDecisionReview,
@@ -411,3 +412,5 @@ export function selectWorkflowRun(taskId: string | null): WorkflowRun | null {
 export function recommendedWorkflowKind(overview: WorkflowsOverview | null): WorkflowKind | null {
   return overview?.rows.find((row) => row.recommended)?.kind ?? null;
 }
+
+registerProjectScopeResetHandler("workflows", () => useWorkflowStore.getState().reset());

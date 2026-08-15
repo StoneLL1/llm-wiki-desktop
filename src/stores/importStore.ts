@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { registerProjectScopeResetHandler } from "./projectScopeResetRegistry";
 
 import type { ImportCompletion, ImportItem, ImportSession } from "../types/importV2";
 
@@ -215,3 +216,8 @@ export const useImportStore = create<ImportState>((set, get) => ({
       isConfirming: false,
     }),
 }));
+
+registerProjectScopeResetHandler("import", () => {
+  useImportStore.getState().resetProjectPresentation("");
+  useImportStore.getState().reset();
+});

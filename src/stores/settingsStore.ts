@@ -1,7 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
+import { registerProjectScopeResetHandler } from "./projectScopeResetRegistry";
 
-import { i18next, LANGUAGE_STORAGE_KEY } from "../i18n";
+import { activateLocale, LANGUAGE_STORAGE_KEY } from "../i18n";
 import { applyColorThemePresetToRoot } from "../lib/colorThemePresets";
 import { createProjectResourceController } from "../lib/projectResourceFreshness";
 import type { ChatConvenienceAuthorization, Settings, ThemePreference } from "../types/settings";
@@ -218,14 +219,23 @@ export function applyFontPreference(fonts: FontPreference) {
   }
 }
 
-async function applyLanguagePreference(language: Settings["language"]) {
+async function applyLanguagePreference(
+  language: Settings["language"],
+  isCurrent: () => boolean = () => true,
+): Promise<boolean> {
+  const activated = await activateLocale(language, undefined, undefined, isCurrent);
+  if (!activated || !isCurrent()) return false;
   try {
     window.localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
   } catch {
     // Ignore localStorage errors in restricted environments.
   }
-  await i18next.changeLanguage(language);
+  return true;
 }
+
+let languagePreferenceEpoch = 0;
+let settingsLoadEpoch = 0;
+let settingsSaveEpoch = 0;
 
 export interface SettingsState {
   settings: Settings;
@@ -272,7 +282,14 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   error: null,
 
   loadSettings: async (projectId, projectRootPath) => {
+    if (get().saving) return get().settings;
     const scope = captureProjectScope();
+    const loadEpoch = ++settingsLoadEpoch;
+    const saveEpochAtStart = settingsSaveEpoch;
+    const isCurrentLoad = () =>
+      isProjectScopeCurrent(scope)
+      && loadEpoch === settingsLoadEpoch
+      && saveEpochAtStart === settingsSaveEpoch;
     const projectKey = `${projectId}:${projectRootPath}`;
     set({ loading: true, error: null });
     try {
@@ -281,7 +298,15 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
             request: { projectId, projectRootPath },
           })
         : defaultSettings;
-      if (!isProjectScopeCurrent(scope)) return get().settings;
+      if (!isCurrentLoad()) return get().settings;
+      const languageApplied = await applyLanguagePreference(
+        settings.language,
+        isCurrentLoad,
+      );
+      if (!languageApplied || !isCurrentLoad()) {
+        if (isCurrentLoad()) set({ loading: false });
+        return get().settings;
+      }
       applyThemePreference(settings.theme);
       applyColorThemePresetPreference(settings.colorThemePreset, settings.theme);
       applyDensityPreference(settings.density);
@@ -290,8 +315,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         reading: settings.readingFont,
         code: settings.codeFont,
       });
-      await applyLanguagePreference(settings.language);
-      if (!isProjectScopeCurrent(scope)) return get().settings;
       set({
         settings,
         loading: false,
@@ -299,7 +322,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       });
       return settings;
     } catch (error) {
-      if (!isProjectScopeCurrent(scope)) return get().settings;
+      if (!isCurrentLoad()) return get().settings;
       set({ loading: false, error: errorMessage(error) });
       return get().settings;
     }
@@ -404,9 +427,15 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   persistPatch: async (projectId, projectRootPath, patch) => {
     const scope = captureProjectScope();
+    const saveEpoch = ++settingsSaveEpoch;
     const previous = get().settings;
     const next = { ...previous, ...patch };
-    set({ settings: next, saving: true, error: null });
+    const languageEpoch = ++languagePreferenceEpoch;
+    const isCurrentRequest = () =>
+      isProjectScopeCurrent(scope)
+      && saveEpoch === settingsSaveEpoch
+      && languageEpoch === languagePreferenceEpoch;
+    set({ settings: next, loading: false, saving: true, error: null });
     applyThemePreference(next.theme);
     applyColorThemePresetPreference(next.colorThemePreset, next.theme);
     applyDensityPreference(next.density);
@@ -415,18 +444,26 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       reading: next.readingFont,
       code: next.codeFont,
     });
-    await applyLanguagePreference(next.language);
-
-    if (!hasTauri()) {
-      set({ saving: false });
-      return next;
-    }
-
     try {
+      const languageApplied = await applyLanguagePreference(next.language, isCurrentRequest);
+      if (!languageApplied || !isCurrentRequest()) {
+        if (isCurrentRequest()) set({ saving: false });
+        return get().settings;
+      }
+
+      if (!hasTauri()) {
+        set({ saving: false });
+        return next;
+      }
+
       const saved = await invoke<Settings>("save_settings", {
         request: { projectId, projectRootPath, settings: next },
       });
-      if (!isProjectScopeCurrent(scope)) return get().settings;
+      if (!isCurrentRequest()) return get().settings;
+      if (saved.language !== next.language) {
+        const languageApplied = await applyLanguagePreference(saved.language, isCurrentRequest);
+        if (!languageApplied || !isCurrentRequest()) return get().settings;
+      }
       applyThemePreference(saved.theme);
       applyColorThemePresetPreference(saved.colorThemePreset, saved.theme);
       applyDensityPreference(saved.density);
@@ -435,8 +472,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         reading: saved.readingFont,
         code: saved.codeFont,
       });
-      await applyLanguagePreference(saved.language);
-      if (!isProjectScopeCurrent(scope)) return get().settings;
       set({
         settings: saved,
         saving: false,
@@ -444,7 +479,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       });
       return saved;
     } catch (error) {
-      if (!isProjectScopeCurrent(scope)) return get().settings;
+      if (!isCurrentRequest()) return get().settings;
       set({ settings: previous, saving: false, error: errorMessage(error) });
       applyThemePreference(previous.theme);
       applyColorThemePresetPreference(previous.colorThemePreset, previous.theme);
@@ -454,12 +489,19 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         reading: previous.readingFont,
         code: previous.codeFont,
       });
-      await applyLanguagePreference(previous.language);
+      try {
+        await applyLanguagePreference(previous.language, isCurrentRequest);
+      } catch {
+        // The previous locale was already active; retain it if its chunk cannot be reloaded.
+      }
       return previous;
     }
   },
 
   reset: () => {
+    settingsLoadEpoch += 1;
+    settingsSaveEpoch += 1;
+    languagePreferenceEpoch += 1;
     chatAuthorizationResource.reset();
     set((state) => ({
       settings: {
@@ -485,3 +527,5 @@ registerProjectResource("settings-chat-authorization", {
   },
 }, ({ projectId, rootPath }) =>
   useSettingsStore.getState().ensureChatConvenienceAuthorization(projectId, rootPath).then(() => undefined));
+
+registerProjectScopeResetHandler("settings", () => useSettingsStore.getState().reset());

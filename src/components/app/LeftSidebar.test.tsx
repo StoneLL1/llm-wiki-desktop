@@ -10,10 +10,17 @@ import type { ExportRecord } from "../../types/export";
 import type { WikiPageMeta, WikiTree } from "../../types/wiki";
 import { LeftSidebar } from "./LeftSidebar";
 
-const invokeMock = vi.hoisted(() => vi.fn());
+const { invokeMock, preloadWorkspaceViewMock } = vi.hoisted(() => ({
+  invokeMock: vi.fn(),
+  preloadWorkspaceViewMock: vi.fn(() => Promise.resolve()),
+}));
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
+}));
+
+vi.mock("./workspaceViewLoaders", () => ({
+  preloadWorkspaceView: preloadWorkspaceViewMock,
 }));
 
 const wikiPage: WikiPageMeta = {
@@ -77,6 +84,7 @@ describe("LeftSidebar favorites", () => {
   beforeEach(() => {
     Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
     invokeMock.mockResolvedValue([]);
+    preloadWorkspaceViewMock.mockClear();
     useNavigationStore.setState({ activeView: "dashboard" });
     useProjectStore.getState().setCurrentProject({
       ...defaultProject,
@@ -88,6 +96,17 @@ describe("LeftSidebar favorites", () => {
     useExportStore.setState(originalExportActions);
     useWikiStore.setState({ tree: wikiTree, recentPages: [wikiPage] });
     useExportStore.setState({ records: [exportRecord] });
+  });
+
+  it("preloads a route from the shared loader on hover and keyboard focus", () => {
+    render(<LeftSidebar />);
+    const graph = screen.getByRole("button", { name: "Graph" });
+
+    fireEvent.pointerEnter(graph);
+    fireEvent.focus(graph);
+
+    expect(preloadWorkspaceViewMock).toHaveBeenNthCalledWith(1, "graph");
+    expect(preloadWorkspaceViewMock).toHaveBeenNthCalledWith(2, "graph");
   });
 
   it("renders favorites between workflow and recent pages", () => {

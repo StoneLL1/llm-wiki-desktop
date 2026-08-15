@@ -2075,7 +2075,7 @@ describe("Wiki HTML preview", () => {
     expect(SINGLE_PAGE_EXPORT_TYPES).not.toContain("project_report");
   });
 
-  it("routes Wiki reading-page and knowledge-card actions through wikiStore.requestExport", () => {
+  it("routes Wiki reading-page and knowledge-card actions through wikiStore.requestExport", async () => {
     const page = pageContent();
     useProjectStore.setState({
       currentProject: {
@@ -2094,7 +2094,9 @@ describe("Wiki HTML preview", () => {
 
     try {
       render(<RightContextPanel />);
-      fireEvent.click(screen.getByRole("button", { name: "Generate HTML reading page" }));
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Generate HTML reading page" }),
+      );
       fireEvent.click(screen.getByRole("button", { name: "Generate knowledge card" }));
 
       expect(requestExport).toHaveBeenNthCalledWith(1, "beautiful_read");

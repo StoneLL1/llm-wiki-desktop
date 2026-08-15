@@ -3,7 +3,7 @@ import { X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { i18next, LANGUAGE_STORAGE_KEY } from "../../i18n";
+import { activateLocale, i18next, LANGUAGE_STORAGE_KEY } from "../../i18n";
 import { useModalDialog } from "../../hooks/useModalDialog";
 import { applyThemePreference } from "../../stores/settingsStore";
 import type { ThemePreference } from "../../types/settings";
@@ -33,6 +33,7 @@ export function NoProjectSettingsDialog({ open, onClose }: { open: boolean; onCl
     theme: (document.documentElement.dataset.theme as ThemePreference | undefined) ?? "auto",
   });
   const [error, setError] = useState<string | null>(null);
+  const saveEpochRef = useRef(0);
 
   useEffect(() => {
     if (!open || !hasTauri()) return;
@@ -51,23 +52,38 @@ export function NoProjectSettingsDialog({ open, onClose }: { open: boolean; onCl
   }, [open]);
 
   const save = async (next: GlobalUiPreferences) => {
-    setPreferences(next);
+    const saveEpoch = ++saveEpochRef.current;
+    const isCurrent = () => saveEpoch === saveEpochRef.current;
     setError(null);
-    applyThemePreference(next.theme);
-    await i18next.changeLanguage(next.language);
     try {
-      window.localStorage.setItem(LANGUAGE_STORAGE_KEY, next.language);
-    } catch {
-      // The backend preference remains the source of truth in desktop builds.
-    }
-    if (!hasTauri()) return;
-    try {
+      const activated = await activateLocale(next.language, undefined, undefined, isCurrent);
+      if (!activated || !isCurrent()) return;
+      setPreferences(next);
+      applyThemePreference(next.theme);
+      try {
+        window.localStorage.setItem(LANGUAGE_STORAGE_KEY, next.language);
+      } catch {
+        // The backend preference remains the source of truth in desktop builds.
+      }
+      if (!hasTauri()) return;
       const saved = await invoke<GlobalUiPreferences>("save_global_ui_preferences", { preferences: next });
+      if (!isCurrent()) return;
+      const savedLanguageActivated = await activateLocale(
+        saved.language,
+        undefined,
+        undefined,
+        isCurrent,
+      );
+      if (!savedLanguageActivated || !isCurrent()) return;
       setPreferences(saved);
       applyThemePreference(saved.theme);
-      await i18next.changeLanguage(saved.language);
+      try {
+        window.localStorage.setItem(LANGUAGE_STORAGE_KEY, saved.language);
+      } catch {
+        // The backend preference remains the source of truth in desktop builds.
+      }
     } catch (reason) {
-      setError(errorMessage(reason));
+      if (isCurrent()) setError(errorMessage(reason));
     }
   };
 

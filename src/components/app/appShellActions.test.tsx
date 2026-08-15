@@ -68,13 +68,15 @@ function workspaceHeader() {
 }
 
 describe("AppShell workspace header", () => {
-  it("keeps only the view title and context control in shared chrome", () => {
+  it("keeps only the view title and context control in shared chrome", async () => {
     render(<AppShell />);
 
     expect(workspaceHeader().getByRole("heading", { name: "Dashboard" })).toBeInTheDocument();
     expect(workspaceHeader().queryByText("Health · recent activity · quick actions")).not.toBeInTheDocument();
     expect(workspaceHeader().queryByRole("button", { name: "Import" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Collapse context panel" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "Collapse context panel" }),
+    ).toBeInTheDocument();
   });
 
   it("opens settings as a floating dialog without leaving the active workspace view", () => {

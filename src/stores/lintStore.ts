@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
+import { registerProjectScopeResetHandler } from "./projectScopeResetRegistry";
 
 import { isAgentLintRepairEligible } from "../types/lint";
 import type {
@@ -1151,3 +1152,8 @@ export function selectAllIssues(state: LintState): LintIssue[] {
   const deep = state.deepReport?.issues ?? [];
   return [...local, ...deep];
 }
+
+registerProjectScopeResetHandler("lint", () => {
+  void useLintStore.getState().cancelPendingActions();
+  useLintStore.getState().reset();
+});
