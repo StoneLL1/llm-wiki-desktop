@@ -131,7 +131,35 @@ Batch 5 需要相对本文件 Batch 0 基线至少降低 raw 30%、gzip 25%，�
 
 Batch 4C 的强制分支结论是 **停止，不实现 Graph warm host**。500 页热返回同时满足 p95 和 long-task 门槛；继续保活 renderer 只会增加隐藏 DOM、GPU/heap 常驻、listener/TTL/project-switch 竞态，并违反“先测后决定”。现有 4B camera/data 恢复与正常 mount/unmount 生命周期保持不变；Batch 5 继续只负责 lazy 边界和首屏预算。
 
-## 10. 结果记录模板
+## 10. Batch 6 整体验收（2026-08-16）
+
+Windows 参考机使用 packaged debug executable 完成最终自动化、启动、路由、Graph、Chat 与 splitter 测量。脱敏汇总、失败项和 Pending 平台项保存在 [`results/2026-08-16-core-interaction-performance-batch-6.json`](results/2026-08-16-core-interaction-performance-batch-6.json)；CDP/Ollama 测量驱动位于 [`../../scripts/run-core-interaction-packaged-benchmark.mjs`](../../scripts/run-core-interaction-packaged-benchmark.mjs)。Chat 的 256 KiB fixture 由脚本确定性生成；本次 500 页 route fixture（500 个 Markdown、2,069,919 B）在独立临时项目中准备，脚本尚未自动生成或校验该规模，因此 route 数据只作观察证据。原始合成回答、绝对路径和 raw trace 未提交。
+
+| 场景 | 结果 | 判定 |
+| --- | --- | --- |
+| 聚焦测试 / bundle / quick | 43 files、533 tests；38 个初始 JS 文件，616,366 B raw / 187,483 B gzip；quick gate 通过 | 通过 |
+| fresh-profile / warm-profile debug 启动 | 各 n=10；interactive p50 约 9.62 s，p95 分别 9.77 / 9.77 s | 仅记录；前者每次使用全新 WebView profile，不等同本协议的稳定 profile 进程冷启动 |
+| 首次项目 facts IPC | single-flight/TTL/force/retry/A-B 自动化合同通过 | packaged command 计数 `Pending`；Tauri `invoke` 在 WebView 中不可写，未把不可观测结果伪报为 0 |
+| 20 次板块往返 | 500 页临时 fixture 的 click→`aria-current`+2 RAF CDP proxy 五路 p95 23.8–94.0 ms；追加合成 Chat session 后 p95 24.0–99.9 ms | 仅观察；没有 route-specific ready、逐次 loading 或 IPC 证据，`PERF-P2-01` 不关闭 |
+| 500 / 10k Graph | 复用 Batch 4C：500 页 p95 44.1 ms 且无 long task；10k p95 350.0 ms 但 20/20 有 long task | 普通产品门槛通过；10k 保持压力风险 |
+| 256 KiB Chat | 1k/10k delta 各 20 个已完成样本，40/40 终态 262,144 B byte-equal；中途输入、pane、滚离底部和 Wiki↔Chat 往返可执行 | 数据完整通过；终态附近相关 long task 峰值约 1.7 s 且路由往返后草稿丢失，`PERF-P1-01` 不关闭 |
+| 五种 splitter | 每种 20 个已完成 drag、2,400 个 input 样本；input→next-RAF CDP proxy p95 17.82–18.03 ms | 不是 presentation/input-to-paint 指标；稳态 trace 仍有 >50 ms long task，部分重复 CDP drag 未产生有效宽度变化，`PERF-P2-02` 不关闭 |
+| Windows fallback / RDP / AV | WebGL fallback 通过；GPU memory、真实 RDP、杀软开启状态不可得 | 后三项 `Pending` |
+| macOS / Linux | 无真实 runner | 发布前 `Pending` |
+
+本次是验收 Batch，不把失败测量转化为未授权的后续实现。仅 `PERF-P1-02` 有足够证据关闭；`PERF-P1-01`、`PERF-P1-03`、`PERF-P2-01`、`PERF-P2-02` 因真实失败或缺失 packaged 证据保持未关闭。最初采样版本只在整轮成功后输出 JSON，未保存中断/失败尝试，因此结果中的次数均表述为“已完成样本”，不推导零失败；提交的脚本已加入逐次 attempt ledger、CDP timeout/socket-close rejection 和 `finally` 清理，供后续复测。后续应另行批准终态渲染主线程归因与优化、Chat draft 路由保留、build-supported IPC 计数、route-specific ready 观测与 element-targeted splitter trace；不得在本 Batch 顺带扩大重构。
+
+可复现命令形态如下；`<...>` 必须指向显式临时目录或合成项目，禁止对真实知识库运行 Chat fixture：
+
+```text
+node scripts/run-core-interaction-packaged-benchmark.mjs --mode startup --exe <packaged-exe> --app-data <isolated-appdata> --webview-root <isolated-webview-root> --runs 10
+node scripts/run-core-interaction-packaged-benchmark.mjs --mode routes-and-splitters --endpoint http://127.0.0.1:<debug-port> --splitter-repetitions 20
+node scripts/run-core-interaction-packaged-benchmark.mjs --mode chat --endpoint http://127.0.0.1:<debug-port> --project-id <synthetic-project-id> --project-root <.../fixture-project> --confirm-synthetic-fixture yes --chat-repetitions 20
+```
+
+Chat 模式会修改 provider 配置并创建 session，只能用于显式确认、运行后整体丢弃的 `fixture-project`；不得指向真实知识库。脚本默认输出汇总和不含原文的 attempt ledger；仅在本地诊断需要逐样本/browser metrics 时追加 `--output-detail raw`，且 raw 输出不得直接提交。
+
+## 11. 结果记录模板
 
 ```text
 Commit / build / packaged:

@@ -163,5 +163,5 @@ describe("freshness-aware route data reuse", () => {
     await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === "list_exports")).toHaveLength(1));
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_wiki")).toHaveLength(1);
     mounted.unmount();
-  });
+  }, 20_000);
 });

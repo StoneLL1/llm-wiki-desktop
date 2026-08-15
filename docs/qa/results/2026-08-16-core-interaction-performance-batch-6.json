@@ -1,0 +1,207 @@
+{
+  "schemaVersion": 1,
+  "batch": "Core interaction performance remediation Batch 6",
+  "measuredAt": "2026-08-16",
+  "outcome": "completed_with_failed_and_pending_acceptance_gates",
+  "source": {
+    "baseCommit": "ca94a600280fbc336fc862d34bc3b15b072b423d",
+    "buildMode": "debug",
+    "packaged": true,
+    "buildCommand": "npm run tauri -- build --debug --no-bundle",
+    "appVersion": "0.1.0",
+    "tauriCliVersion": "2.9.6",
+    "benchmarkHarness": "scripts/run-core-interaction-packaged-benchmark.mjs",
+    "privacy": "Only synthetic fixture labels, counts, byte sizes, durations, and status summaries are retained. Absolute paths, project text, credentials, raw provider payloads, and raw traces are excluded."
+  },
+  "environment": {
+    "os": "Windows 10 Home China 25H2 build 26200.9168",
+    "cpu": "AMD Ryzen AI 9 HX 370 with Radeon 890M",
+    "physicalMemoryBytes": 33412722688,
+    "webView2Version": "151.0.4129.86",
+    "gpu": "AMD Radeon 890M through ANGLE Direct3D11",
+    "powerPlan": "Balanced",
+    "displayPixels": "1440x900",
+    "session": "local packaged run",
+    "antivirus": "Pending (status was not readable from the managed session)",
+    "displayScaleAndRefresh": "Pending"
+  },
+  "automation": {
+    "focusedTests": {
+      "status": "passed",
+      "files": 43,
+      "tests": 533
+    },
+    "checkBundle": {
+      "status": "passed",
+      "nodeTests": 4,
+      "initialJsFiles": 38,
+      "initialJsRawBytes": 616366,
+      "initialJsGzipBytes": 187483,
+      "initialCssRawBytes": 244472,
+      "initialCssGzipBytes": 52951,
+      "relativeToBatch0": {
+        "rawReductionPercent": 61.3,
+        "gzipReductionPercent": 59.5,
+        "jsFileReductionPercent": 15.6
+      }
+    },
+    "checkQuick": {
+      "status": "passed",
+      "note": "The first managed-sandbox build attempt hit a WebView/Tailwind child-process EPERM; the approved unsandboxed rerun passed lint, production build, bundle, console scan, and Rust core compilation."
+    },
+    "fullCheck": {
+      "status": "passed",
+      "duration": "13m 7.4s",
+      "frontend": "137 files / 1,154 tests passed; lint, production build, bundle budget, and console scan passed",
+      "rust": "GUI cargo check plus the complete no-default-features unit/integration/doc-test matrix passed"
+    },
+    "graphifyUpdate": {
+      "status": "passed",
+      "nodes": 14488,
+      "edges": 40823,
+      "communities": 657,
+      "note": "The local incremental refresh retained the pre-existing 756 fail-closed nodes from 82 still-present excluded files and reported stale community labels."
+    }
+  },
+  "startup": {
+    "repetitions": 10,
+    "freshProfileInteractiveMs": {
+      "p50": 9619.576,
+      "p95": 9774.815,
+      "max": 9774.815
+    },
+    "warmProfileInteractiveMs": {
+      "p50": 9619.998,
+      "p95": 9766.664,
+      "max": 9766.664
+    },
+    "stableProfileProcessCold": "Pending: the collected fresh-profile samples do not satisfy the protocol definition.",
+    "interpretation": "Fresh-profile and warm-profile debug-packaged starts were effectively identical and slow on this reference run. Fresh-profile samples used a new WebView profile each time and are not the protocol's stable-profile process-cold measurement. No startup threshold was defined for this Batch, so these numbers are evidence, not a pass claim."
+  },
+  "projectFacts": {
+    "automatedContract": "Git, Agent, and provider each execute once when all shell consumers mount; fresh remounts add zero calls; force, TTL, retry, and A/B stale-response cases passed.",
+    "packagedFirstOpenIpc": "Pending",
+    "pendingReason": "Tauri v2 exposes window.__TAURI_INTERNALS__.invoke as a non-writable, non-configurable property in the packaged WebView. A source-free CDP wrapper could not count commands without adding build instrumentation, so zero was not reported as a measurement."
+  },
+  "routeLoop": {
+    "fixtureId": "route-loop-observation-v1",
+    "fixturePreparation": "A disposable 500-Markdown / 2,069,919-byte project was prepared separately. The original harness did not generate or assert this scale, so the observation is not a reproducible acceptance fixture.",
+    "repetitions": 20,
+    "completedTransitions": 100,
+    "attemptLedger": "Not retained by the original sampling run; zero failures is not claimed. The committed harness now emits a per-transition attempt ledger.",
+    "metric": "click-to-aria-current-plus-two-RAF CDP proxy; it does not assert destination-view interactive readiness",
+    "cleanFixtureP95Ms": {
+      "Wiki": 94.0,
+      "Chat": 33.0,
+      "Graph": 39.2,
+      "Exports": 34.5,
+      "Lint": 23.8
+    },
+    "afterSyntheticChatSessionAccumulationP95Ms": {
+      "Wiki": 99.9,
+      "Chat": 31.6,
+      "Graph": 24.0,
+      "Exports": 24.0,
+      "Lint": 24.1
+    },
+    "bodyHasLoadingTextAtEndOfRun": false,
+    "transientLoadingPerTransition": "Not measured by the original run",
+    "thresholdMs": 150,
+    "status": "observation only; acceptance Pending because route-specific ready, per-transition loading, and IPC evidence are missing"
+  },
+  "graph": {
+    "evidence": "docs/qa/results/2026-08-16-core-interaction-performance-batch-4c.json",
+    "wiki500HotReturnP95Ms": 44.1,
+    "wiki500LongTasksOver50Ms": 0,
+    "graph10kStressP95Ms": 350.0,
+    "graph10kLongTaskSamples": 20,
+    "webGlFallback": "passed",
+    "status": "passed ordinary-product gate; 10k remains a documented stress risk"
+  },
+  "chat": {
+    "fixtureUtf8Bytes": 262144,
+    "fixtureKinds": [
+      "chat-256k-1k-v1",
+      "chat-256k-10k-v1"
+    ],
+    "runsPerKind": 20,
+    "completedRuns": 40,
+    "attemptLedger": "Not retained by the original sampling run; zero failures is not claimed. The committed harness now emits per-run status/error entries.",
+    "byteEqual": {
+      "1000Delta": "20/20",
+      "10000Delta": "20/20"
+    },
+    "sessionFileCreatedToUpdatedMs": {
+      "source": "Read-only post-run aggregation of the synthetic persisted session JSON createdAt and updatedAt timestamps; this is not send-to-persistence latency emitted by the benchmark harness.",
+      "1000Delta": {
+        "min": 13866.9886,
+        "p50": 14044.9491,
+        "p95": 14583.6883,
+        "max": 15602.5712
+      },
+      "10000Delta": {
+        "min": 14002.8975,
+        "p50": 14133.3714,
+        "p95": 14262.3546,
+        "max": 14332.2587
+      }
+    },
+    "interactionChecks": {
+      "draftEditableDuringGeneration": true,
+      "paneDragDuringGeneration": true,
+      "scrollAwayFromBottomPreserved": true,
+      "backToLatestVisible": true,
+      "wikiChatRoundTripCompleted": true,
+      "draftAfterRouteRoundTrip": "lost"
+    },
+    "longTasks": {
+      "status": "failed",
+      "observation": "Every completed terminal path emitted multiple >50 ms long tasks. Peaks near terminal rendering were approximately 1.7 seconds with additional approximately 0.8 second tasks. The duration-only observer establishes correlation, not attribution to Markdown, math, or highlighting."
+    },
+    "status": "byte integrity and basic mid-stream interaction passed; main-thread and draft-retention acceptance did not pass"
+  },
+  "splitters": {
+    "fixtureId": "splitter-2s-v1",
+    "runsPerSplitter": 20,
+    "inputSamplesPerSplitter": 2400,
+    "inputToNextRafCdpProxyP95Ms": {
+      "sidebar": 18.03,
+      "rightPanel": 17.98,
+      "wikiTree": 17.93,
+      "exportsList": 17.82,
+      "lintDetails": 17.90
+    },
+    "thresholdMs": 100,
+    "storageContract": {
+      "automatedTests": "passed: one commit and one storage write for a changed drag; pointermove performs neither",
+      "packagedRepeatedTrace": "inconclusive for wikiTree/exportsList/rightPanel because several repeated CDP drags did not change aria-valuenow and therefore correctly produced no persistence call; sidebar and lintDetails produced one write for every effective drag"
+    },
+    "longTasks": {
+      "status": "failed",
+      "observation": "Steady-state route-plus-splitter traces still contained >50 ms long tasks even though the input-to-next-RAF CDP proxy p95 stayed below 100 ms."
+    },
+    "status": "proxy stayed below 100 ms, but this is not a presentation/input-to-paint metric; full long-task/storage packaged acceptance is not closed"
+  },
+  "platformSmoke": {
+    "windowsWebGlFallback": "passed in Batch 4C",
+    "windowsRemoteDesktop": "Pending",
+    "windowsGpuMemory": "Pending (not exposed by WebView2 performance APIs)",
+    "windowsAntivirusOn": "Pending",
+    "macOsBuildRouteStreamSplitter": "Pending: no real runner",
+    "linuxBuildRouteStreamSplitter": "Pending: no real runner"
+  },
+  "auditClosure": {
+    "PERF-P1-01": "Not Closed: byte integrity passed, but packaged Chat long-task and draft-retention gates failed.",
+    "PERF-P1-02": "Closed: initial dependency closure beat the relative and absolute budgets with forbidden-module and lazy-recovery tests.",
+    "PERF-P1-03": "Not Closed: automated single-flight contract passed; packaged first-open IPC trace remains Pending.",
+    "PERF-P2-01": "Not Closed: route timing was only a click-to-current-route-plus-two-RAF proxy; route-specific readiness, transient loading, and packaged IPC remain unmeasured.",
+    "PERF-P2-02": "Not Closed: the input-to-next-RAF CDP proxy is not input-to-paint, steady-state long tasks remained, and repeated packaged storage tracing was not conclusive for every splitter."
+  },
+  "pending": [
+    "Add build-supported packaged Tauri command instrumentation or backend trace counters for the first-open IPC measurement.",
+    "Generate and validate the 500-page route fixture in the harness, then add route-specific interactive markers and per-transition loading/IPC observations.",
+    "Capture an attributed performance trace for the 256 KiB terminal-rendering-correlated long tasks, then remediate the confirmed cause and the lost Chat draft after route round-trip in a later approved Batch.",
+    "Repeat effective-width packaged storage traces for wikiTree, exportsList, and rightPanel with element-targeted pointer instrumentation.",
+    "Run antivirus-on, real RDP, macOS, and Linux release-gate smoke tests."
+  ]
+}
