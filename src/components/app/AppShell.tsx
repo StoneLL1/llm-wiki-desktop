@@ -1,4 +1,4 @@
-import { type CSSProperties, useEffect, useState } from "react";
+import { type CSSProperties, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 
@@ -63,14 +63,15 @@ export function AppShell() {
   const clearWorkspaceFocus = useNavigationStore(
     (state) => state.clearWorkspaceFocus,
   );
-  const paneSizes = useNavigationStore((state) => state.paneSizes);
+  const sidebarWidth = useNavigationStore((state) => state.paneSizes.sidebar);
+  const rightPanelWidth = useNavigationStore((state) => state.paneSizes.rightPanel);
   const setPaneSize = useNavigationStore((state) => state.setPaneSize);
   const resetPaneSize = useNavigationStore((state) => state.resetPaneSize);
   const toggleSettings = useNavigationStore((state) => state.toggleSettings);
   const currentProject = useProjectStore((state) => state.currentProject);
   const authority = useProjectStore((state) => state.authority);
-  const sidebarCollapsed =
-    paneSizes.sidebar <= SIDEBAR_COLLAPSE_THRESHOLD;
+  const sidebarCollapsed = sidebarWidth <= SIDEBAR_COLLAPSE_THRESHOLD;
+  const shellRef = useRef<HTMLDivElement>(null);
   const narrowDesktop = useNarrowDesktop();
   const showRightPanel = rightPanelOpen && workspaceFocus === null;
   const showRightPanelDialog = showRightPanel && narrowDesktop;
@@ -80,8 +81,8 @@ export function AppShell() {
     returnFocusSelector: '[aria-controls="right-context-panel"][aria-label]',
   });
   const shellStyle = {
-    "--sidebar-w-current": `${paneSizes.sidebar}px`,
-    "--rightpanel-w-current": `${paneSizes.rightPanel}px`,
+    "--sidebar-w-current": `${sidebarWidth}px`,
+    "--rightpanel-w-current": `${rightPanelWidth}px`,
   } as CSSProperties;
 
   useEffect(() => {
@@ -171,6 +172,7 @@ export function AppShell() {
 
   return (
     <div
+      ref={shellRef}
       className={[
         "app-shell",
         showRightPanel ? "is-right-open" : "is-right-collapsed",
@@ -191,8 +193,10 @@ export function AppShell() {
           label={t("shell.splitter.sidebar")}
           min={PANE_WIDTH_LIMITS.sidebar.min}
           max={PANE_WIDTH_LIMITS.sidebar.max}
-          value={paneSizes.sidebar}
-          onChange={(value) => setPaneSize("sidebar", value)}
+          value={sidebarWidth}
+          previewTargetRef={shellRef}
+          previewCssVariable="--sidebar-w-current"
+          onCommit={(value) => setPaneSize("sidebar", value)}
           onReset={() => resetPaneSize("sidebar")}
         />
         <main className="app-shell__main">
@@ -204,9 +208,11 @@ export function AppShell() {
             label={t("shell.splitter.rightPanel")}
             min={PANE_WIDTH_LIMITS.rightPanel.min}
             max={PANE_WIDTH_LIMITS.rightPanel.max}
-            value={paneSizes.rightPanel}
+            value={rightPanelWidth}
             direction={-1}
-            onChange={(value) => setPaneSize("rightPanel", value)}
+            previewTargetRef={shellRef}
+            previewCssVariable="--rightpanel-w-current"
+            onCommit={(value) => setPaneSize("rightPanel", value)}
             onReset={() => resetPaneSize("rightPanel")}
           />
         ) : null}

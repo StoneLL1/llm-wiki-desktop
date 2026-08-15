@@ -1,3 +1,5 @@
+import { useCallback } from "react";
+import type { RefObject } from "react";
 import type { ResizablePaneId } from "../../hooks/useResizablePane";
 import { useResizablePane } from "../../hooks/useResizablePane";
 
@@ -9,7 +11,9 @@ export interface ResizableSplitterProps {
   value: number;
   direction?: 1 | -1;
   className?: string;
-  onChange: (value: number) => void;
+  previewTargetRef: RefObject<HTMLElement | null>;
+  previewCssVariable: `--${string}`;
+  onCommit: (value: number) => void;
   onReset: () => void;
 }
 
@@ -21,15 +25,24 @@ export function ResizableSplitter({
   value,
   direction = 1,
   className,
-  onChange,
+  previewTargetRef,
+  previewCssVariable,
+  onCommit,
   onReset,
 }: ResizableSplitterProps) {
+  const onPreview = useCallback(
+    (nextValue: number) => {
+      previewTargetRef.current?.style.setProperty(previewCssVariable, `${nextValue}px`);
+    },
+    [previewCssVariable, previewTargetRef],
+  );
   const { separatorProps } = useResizablePane({
     value,
     min,
     max,
     direction,
-    onChange,
+    onPreview,
+    onCommit,
     onReset,
   });
 

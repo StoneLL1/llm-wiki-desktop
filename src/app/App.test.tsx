@@ -16,6 +16,41 @@ import { PANE_WIDTH_LIMITS } from "../hooks/useResizablePane";
 const invokeMock = vi.hoisted(() => vi.fn());
 const openDialogMock = vi.hoisted(() => vi.fn());
 
+function dispatchPointerEvent(
+  target: Document | Element,
+  type: string,
+  clientX: number,
+  pointerId = 1,
+) {
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clientX", { value: clientX });
+  Object.defineProperty(event, "pointerId", { value: pointerId });
+  fireEvent(target, event);
+}
+
+function installAnimationFrameHarness() {
+  const callbacks = new Map<number, FrameRequestCallback>();
+  let nextId = 1;
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+    const id = nextId;
+    nextId += 1;
+    callbacks.set(id, callback);
+    return id;
+  });
+  vi.stubGlobal("cancelAnimationFrame", (id: number) => {
+    callbacks.delete(id);
+  });
+
+  return {
+    callbacks,
+    flush() {
+      const pending = [...callbacks.values()];
+      callbacks.clear();
+      pending.forEach((callback) => callback(0));
+    },
+  };
+}
+
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
 }));
@@ -658,10 +693,122 @@ describe("App", () => {
     expect(useNavigationStore.getState().paneSizes.sidebar).toBe(
       PANE_WIDTH_LIMITS.sidebar.defaultValue + 12,
     );
+    expect(sidebarSplitter).toHaveAttribute(
+      "aria-valuenow",
+      String(PANE_WIDTH_LIMITS.sidebar.defaultValue + 12),
+    );
+    fireEvent.keyDown(sidebarSplitter, { key: "Home" });
+    expect(sidebarSplitter).toHaveAttribute("aria-valuenow", String(PANE_WIDTH_LIMITS.sidebar.min));
+    fireEvent.keyDown(sidebarSplitter, { key: "End" });
+    expect(sidebarSplitter).toHaveAttribute("aria-valuenow", String(PANE_WIDTH_LIMITS.sidebar.max));
+    fireEvent.keyDown(sidebarSplitter, { key: "Enter" });
+    expect(sidebarSplitter).toHaveAttribute(
+      "aria-valuenow",
+      String(PANE_WIDTH_LIMITS.sidebar.defaultValue),
+    );
     expect(rightPanelSplitter).toHaveAttribute("aria-valuenow", String(PANE_WIDTH_LIMITS.rightPanel.defaultValue));
 
     fireEvent.click(screen.getByRole("button", { name: "Collapse context panel" }));
     expect(screen.queryByRole("separator", { name: "Resize context panel" })).not.toBeInTheDocument();
+  });
+
+  it("previews a two-second pane drag outside the store and persists only the final commit", () => {
+    const animationFrames = installAnimationFrameHarness();
+    render(<App />);
+
+    const shell = document.querySelector<HTMLElement>(".app-shell");
+    const sidebarSplitter = screen.getByRole("separator", { name: "Resize sidebar" });
+    const storageSpy = vi.spyOn(Storage.prototype, "setItem");
+
+    dispatchPointerEvent(sidebarSplitter, "pointerdown", 240);
+    for (let move = 1; move <= 120; move += 1) {
+      dispatchPointerEvent(document, "pointermove", 240 + move);
+    }
+
+    expect(useNavigationStore.getState().paneSizes.sidebar).toBe(240);
+    expect(storageSpy).not.toHaveBeenCalled();
+    expect(animationFrames.callbacks.size).toBe(1);
+
+    animationFrames.flush();
+    expect(shell?.style.getPropertyValue("--sidebar-w-current")).toBe("360px");
+    expect(sidebarSplitter).toHaveAttribute("aria-valuenow", "360");
+    expect(useNavigationStore.getState().paneSizes.sidebar).toBe(240);
+
+    dispatchPointerEvent(document, "pointerup", 360);
+
+    expect(useNavigationStore.getState().paneSizes.sidebar).toBe(360);
+    expect(storageSpy).toHaveBeenCalledTimes(1);
+    storageSpy.mockRestore();
+  });
+
+  it("changes sidebar collapse state only on commit and keeps the splitter usable", () => {
+    const animationFrames = installAnimationFrameHarness();
+    render(<App />);
+
+    const shell = document.querySelector<HTMLElement>(".app-shell");
+    const sidebarSplitter = screen.getByRole("separator", { name: "Resize sidebar" });
+    dispatchPointerEvent(sidebarSplitter, "pointerdown", 240);
+    dispatchPointerEvent(document, "pointermove", 80);
+    animationFrames.flush();
+
+    expect(useNavigationStore.getState().sidebarCollapsed).toBe(false);
+    expect(shell).not.toHaveClass("is-sidebar-collapsed");
+    expect(sidebarSplitter).toHaveAttribute("aria-valuenow", "80");
+
+    dispatchPointerEvent(document, "pointerup", 80);
+    expect(useNavigationStore.getState().sidebarCollapsed).toBe(true);
+    expect(shell).toHaveClass("is-sidebar-collapsed");
+
+    const collapsedSplitter = screen.getByRole("separator", { name: "Resize sidebar" });
+    dispatchPointerEvent(collapsedSplitter, "pointerdown", 80, 2);
+    dispatchPointerEvent(document, "pointerup", 160, 2);
+
+    expect(useNavigationStore.getState().paneSizes.sidebar).toBe(160);
+    expect(useNavigationStore.getState().sidebarCollapsed).toBe(false);
+    expect(shell).not.toHaveClass("is-sidebar-collapsed");
+  });
+
+  it("rolls back splitter DOM preview without persisting on pointercancel", () => {
+    const animationFrames = installAnimationFrameHarness();
+    render(<App />);
+
+    const shell = document.querySelector<HTMLElement>(".app-shell");
+    const sidebarSplitter = screen.getByRole("separator", { name: "Resize sidebar" });
+    const storageSpy = vi.spyOn(Storage.prototype, "setItem");
+
+    dispatchPointerEvent(sidebarSplitter, "pointerdown", 240);
+    dispatchPointerEvent(document, "pointermove", 300);
+    animationFrames.flush();
+    expect(shell?.style.getPropertyValue("--sidebar-w-current")).toBe("300px");
+    expect(sidebarSplitter).toHaveAttribute("aria-valuenow", "300");
+
+    dispatchPointerEvent(document, "pointercancel", 300);
+
+    expect(shell?.style.getPropertyValue("--sidebar-w-current")).toBe("240px");
+    expect(sidebarSplitter).toHaveAttribute("aria-valuenow", "240");
+    expect(useNavigationStore.getState().paneSizes.sidebar).toBe(240);
+    expect(storageSpy).not.toHaveBeenCalled();
+    storageSpy.mockRestore();
+  });
+
+  it("persists a double-click reset once without no-op pointerup commits", () => {
+    render(<App />);
+
+    useNavigationStore.getState().setPaneSize("sidebar", 300);
+    const sidebarSplitter = screen.getByRole("separator", { name: "Resize sidebar" });
+    const storageSpy = vi.spyOn(Storage.prototype, "setItem");
+
+    dispatchPointerEvent(sidebarSplitter, "pointerdown", 300);
+    dispatchPointerEvent(document, "pointerup", 300);
+    dispatchPointerEvent(sidebarSplitter, "pointerdown", 300, 2);
+    dispatchPointerEvent(document, "pointerup", 300, 2);
+    fireEvent.doubleClick(sidebarSplitter);
+
+    expect(useNavigationStore.getState().paneSizes.sidebar).toBe(
+      PANE_WIDTH_LIMITS.sidebar.defaultValue,
+    );
+    expect(storageSpy).toHaveBeenCalledTimes(1);
+    storageSpy.mockRestore();
   });
 
   it("starts the project context panel closed on narrow viewports", () => {

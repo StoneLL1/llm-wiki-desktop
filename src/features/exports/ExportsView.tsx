@@ -41,7 +41,7 @@ function formatTimestamp(iso: string): string {
 export function ExportsView() {
   const { t } = useTranslation();
   const currentProject = useProjectStore((state) => state.currentProject);
-  const paneSizes = useNavigationStore((state) => state.paneSizes);
+  const exportsListWidth = useNavigationStore((state) => state.paneSizes.exportsList);
   const setPaneSize = useNavigationStore((state) => state.setPaneSize);
   const resetPaneSize = useNavigationStore((state) => state.resetPaneSize);
   const requestWorkflowLaunch = useNavigationStore((state) => state.requestWorkflowLaunch);
@@ -70,8 +70,9 @@ export function ExportsView() {
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
 
   const { projectId, rootPath } = currentProject;
+  const layoutRef = useRef<HTMLDivElement>(null);
   const layoutStyle = {
-    "--exports-list-w-current": `${paneSizes.exportsList}px`,
+    "--exports-list-w-current": `${exportsListWidth}px`,
   } as CSSProperties;
   // Guards the terminal handler against re-running for the same task if the
   // task event stream emits two rapid updates before the running-task id clears.
@@ -202,6 +203,7 @@ export function ExportsView() {
 
   return (
     <div
+      ref={layoutRef}
       className={`exports-view-layout ${workspaceFocus === "exportPreview" ? "is-preview-focused" : ""}`.trim()}
       style={layoutStyle}
     >
@@ -401,8 +403,10 @@ export function ExportsView() {
         label={t("shell.splitter.exportsList")}
         min={PANE_WIDTH_LIMITS.exportsList.min}
         max={PANE_WIDTH_LIMITS.exportsList.max}
-        value={paneSizes.exportsList}
-        onChange={(value) => setPaneSize("exportsList", value)}
+        value={exportsListWidth}
+        previewTargetRef={layoutRef}
+        previewCssVariable="--exports-list-w-current"
+        onCommit={(value) => setPaneSize("exportsList", value)}
         onReset={() => resetPaneSize("exportsList")}
       />
 

@@ -104,7 +104,7 @@ interface RestrictedWikiQuickExportConfirmation {
 export function WikiView({ capabilities }: WikiViewProps) {
   const { t } = useTranslation();
   const currentProject = useProjectStore((state) => state.currentProject);
-  const paneSizes = useNavigationStore((state) => state.paneSizes);
+  const wikiTreeWidth = useNavigationStore((state) => state.paneSizes.wikiTree);
   const setPaneSize = useNavigationStore((state) => state.setPaneSize);
   const resetPaneSize = useNavigationStore((state) => state.resetPaneSize);
   const rightPanelMode = useNavigationStore((state) => state.rightPanelMode);
@@ -189,8 +189,9 @@ export function WikiView({ capabilities }: WikiViewProps) {
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
 
   const { projectId, rootPath } = currentProject;
+  const layoutRef = useRef<HTMLDivElement>(null);
   const layoutStyle = {
-    "--wiki-tree-w-current": `${paneSizes.wikiTree}px`,
+    "--wiki-tree-w-current": `${wikiTreeWidth}px`,
   } as CSSProperties;
 
   const isCurrentQuickExportPresentation = (
@@ -727,7 +728,7 @@ export function WikiView({ capabilities }: WikiViewProps) {
   };
 
   return (
-    <div className="wiki-view-layout" style={layoutStyle}>
+    <div ref={layoutRef} className="wiki-view-layout" style={layoutStyle}>
       {tree ? (
         <WikiTree
           root={tree.root}
@@ -756,8 +757,10 @@ export function WikiView({ capabilities }: WikiViewProps) {
         label={t("shell.splitter.wikiTree")}
         min={PANE_WIDTH_LIMITS.wikiTree.min}
         max={PANE_WIDTH_LIMITS.wikiTree.max}
-        value={paneSizes.wikiTree}
-        onChange={(value) => setPaneSize("wikiTree", value)}
+        value={wikiTreeWidth}
+        previewTargetRef={layoutRef}
+        previewCssVariable="--wiki-tree-w-current"
+        onCommit={(value) => setPaneSize("wikiTree", value)}
         onReset={() => resetPaneSize("wikiTree")}
       />
 
