@@ -8,6 +8,13 @@ import {
 } from "../../hooks/useResizablePane";
 import { useModalDialog } from "../../hooks/useModalDialog";
 import { useNavigationStore } from "../../stores/navigationStore";
+import {
+  bindProjectFactsAuthority,
+  invalidateProjectFacts,
+  projectFactsKey,
+  pruneProjectFacts,
+} from "../../stores/projectFactsStore";
+import { useProjectStore } from "../../stores/projectStore";
 import { BottomStatusBar } from "./BottomStatusBar";
 import { LeftSidebar } from "./LeftSidebar";
 import { ProjectConfirmationController } from "./ProjectConfirmationController";
@@ -60,6 +67,8 @@ export function AppShell() {
   const setPaneSize = useNavigationStore((state) => state.setPaneSize);
   const resetPaneSize = useNavigationStore((state) => state.resetPaneSize);
   const toggleSettings = useNavigationStore((state) => state.toggleSettings);
+  const currentProject = useProjectStore((state) => state.currentProject);
+  const authority = useProjectStore((state) => state.authority);
   const sidebarCollapsed =
     paneSizes.sidebar <= SIDEBAR_COLLAPSE_THRESHOLD;
   const narrowDesktop = useNarrowDesktop();
@@ -78,6 +87,41 @@ export function AppShell() {
   useEffect(() => {
     if (narrowDesktop) setRightPanelOpen(false);
   }, [narrowDesktop, setRightPanelOpen]);
+
+  useEffect(() => {
+    if (!currentProject.projectId || !currentProject.rootPath) {
+      pruneProjectFacts(null);
+      return;
+    }
+    const scope = {
+      projectId: currentProject.projectId,
+      rootPath: currentProject.rootPath,
+    };
+    const authorityIdentityKey = authority
+      ? `${authority.canonicalIdentityKey}\0${authority.identityRevision}`
+      : null;
+    bindProjectFactsAuthority(scope, authorityIdentityKey);
+    pruneProjectFacts(projectFactsKey(scope));
+  }, [
+    authority?.canonicalIdentityKey,
+    authority?.identityRevision,
+    currentProject.projectId,
+    currentProject.rootPath,
+  ]);
+
+  useEffect(() => {
+    const invalidateActiveProjectFacts = () => {
+      const project = useProjectStore.getState().currentProject;
+      if (!project.projectId || !project.rootPath) return;
+      invalidateProjectFacts(
+        { projectId: project.projectId, rootPath: project.rootPath },
+        ["git", "agents", "providers"],
+        "window_focus",
+      );
+    };
+    window.addEventListener("focus", invalidateActiveProjectFacts);
+    return () => window.removeEventListener("focus", invalidateActiveProjectFacts);
+  }, []);
 
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {

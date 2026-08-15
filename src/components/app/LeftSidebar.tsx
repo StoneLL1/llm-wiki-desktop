@@ -29,7 +29,12 @@ export function LeftSidebar() {
   const pushToast = useToastStore((state) => state.pushToast);
   const localReport = useLintStore((state) => state.localReport);
   const lintIssueCount = localReport?.issues.length ?? 0;
-  const status = useProjectStatus(currentProject.projectId, currentProject.rootPath);
+  const status = useProjectStatus(
+    currentProject.projectId,
+    currentProject.rootPath,
+    true,
+    ["agents"],
+  );
   const hasProject = Boolean(currentProject.projectId && currentProject.rootPath);
 
   const defaultAgent = status?.agents?.find((a) => a.isDefault) ?? null;

@@ -7,7 +7,12 @@ export function BottomStatusBar() {
   const { i18n, t } = useTranslation();
   const currentProject = useProjectStore((state) => state.currentProject);
   const runningCount = useTaskStore((state) => state.runningCount);
-  const status = useProjectStatus(currentProject.projectId, currentProject.rootPath);
+  const status = useProjectStatus(
+    currentProject.projectId,
+    currentProject.rootPath,
+    true,
+    ["git", "agents"],
+  );
 
   if (!currentProject.projectId || !currentProject.rootPath) {
     return (

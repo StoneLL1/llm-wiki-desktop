@@ -3,6 +3,10 @@ import { useCallback, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { AiCapabilitiesWorkflow } from "../../hooks/useAiCapabilities";
+import {
+  invalidateAllProjectFacts,
+  invalidateProjectFacts,
+} from "../../stores/projectFactsStore";
 import type {
   LlmProviderConfig,
   LlmProviderKind,
@@ -45,7 +49,10 @@ export function useProviderWorkflow(
       await invoke("save_llm_provider", {
         request: { projectId, projectRootPath: rootPath, config },
       });
-      if (latestProjectKey.current === requestKey) await refresh();
+      invalidateProjectFacts({ projectId, rootPath }, ["agents", "providers"], "provider_saved");
+      if (latestProjectKey.current === requestKey) {
+        await refresh(true);
+      }
     },
     [projectId, projectKey, refresh, rootPath],
   );
@@ -57,9 +64,12 @@ export function useProviderWorkflow(
       await invoke("store_provider_secret", {
         request: { provider, secret },
       });
-      if (latestProjectKey.current === requestKey) await refresh();
+      invalidateAllProjectFacts(["providers"], "provider_secret_saved");
+      if (latestProjectKey.current === requestKey) {
+        await refresh(true);
+      }
     },
-    [projectKey, refresh],
+    [projectId, projectKey, refresh, rootPath],
   );
 
   const deleteSecret = useCallback(
@@ -69,9 +79,12 @@ export function useProviderWorkflow(
       await invoke("delete_provider_secret", {
         request: { provider, secret: null },
       });
-      if (latestProjectKey.current === requestKey) await refresh();
+      invalidateAllProjectFacts(["providers"], "provider_secret_deleted");
+      if (latestProjectKey.current === requestKey) {
+        await refresh(true);
+      }
     },
-    [projectKey, refresh],
+    [projectId, projectKey, refresh, rootPath],
   );
 
   const testProvider = useCallback(
