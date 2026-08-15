@@ -217,6 +217,25 @@ describe("recoverTasksForProject", () => {
     expect(useTaskStore.getState().tasks).toHaveLength(100);
   });
 
+  it("publishes one exact bounded tail for an aggregated stream delta", () => {
+    const fullText = "x".repeat(600 * 1024);
+    let publications = 0;
+    const unsubscribe = useTaskStore.subscribe(() => { publications += 1; });
+
+    handleTaskEvent({
+      eventId: "stream-batch",
+      eventType: "task_stream_output",
+      projectId: "project-a",
+      taskId: "task-a",
+      timestamp: "2026-08-16T00:00:00Z",
+      payload: { delta: fullText, route: "chat-byok" },
+    });
+
+    unsubscribe();
+    expect(publications).toBe(1);
+    expect(useTaskStore.getState().taskOutputs["task-a"]).toBe(fullText.slice(-512 * 1024));
+  });
+
   it("propagates task list and recovery failures so the UI can report them", async () => {
     invokeMock.mockRejectedValueOnce(new Error("task registry unavailable"));
     await expect(fetchTasks("project-a", "D:/project-a")).rejects.toThrow(

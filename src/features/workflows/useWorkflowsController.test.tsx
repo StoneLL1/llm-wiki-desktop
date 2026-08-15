@@ -28,7 +28,7 @@ vi.mock("../../services/workflowApi", () => ({
   undoCancelQueuedWorkflow: vi.fn(), reorderQueuedWorkflow: vi.fn(), retryWorkflow: vi.fn(),
   confirmWorkflowAction: mocks.confirm, discardWorkflowResult: mocks.discard, continueQueuedWorkflows: vi.fn(),
 }));
-vi.mock("../../hooks/useTaskEvents", () => ({
+vi.mock("../../services/taskEventDispatcher", () => ({
   registerTaskEventListener: (listener: (event: BackendEvent) => void) => {
     mocks.listener = listener;
     return () => { mocks.listener = null; };

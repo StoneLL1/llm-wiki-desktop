@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { TaskLauncher } from "../../hooks/useTaskLauncher";
-import { registerTaskEventListener } from "../../hooks/useTaskEvents";
+import { registerTaskEventListener } from "../../services/taskEventDispatcher";
 import { importV2Api } from "../../services/importV2Api";
 import { useWikiStore } from "../wiki/wikiStore";
 import { useImportStore } from "../../stores/importStore";

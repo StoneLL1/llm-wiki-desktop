@@ -2337,6 +2337,14 @@ select:focus-visible {
 }
 .chat-prose .citation-ref__btn:hover { background: var(--accent-border); }
 
+.chat-streaming-text {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  color: var(--reading-text);
+  font-size: 14px;
+  line-height: 1.65;
+}
+
 /* Streaming cursor */
 .stream-cursor {
   display: inline-block;

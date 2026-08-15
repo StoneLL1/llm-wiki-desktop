@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ChevronDown, Pencil, Sparkles, Trash2 } from "lucide-react";
 
@@ -61,6 +61,7 @@ export function ChatView() {
   const error = useChatStore((state) => state.error);
   const streamingText = useChatStore((state) => state.streamingText);
   const streamingRoute = useChatStore((state) => state.streamingRoute);
+  const streamRevision = useChatStore((state) => state.streamRevision);
   const pendingUserMessages = useChatStore((state) => state.pendingUserMessages);
 
   const loadSessions = useChatStore((state) => state.loadSessions);
@@ -119,7 +120,7 @@ export function ChatView() {
   const transcriptScroll = useTranscriptScroll(
     activeSessionId,
     activeSession?.messages.length ?? 0,
-    streamingText,
+    streamRevision,
     streamActivities.length,
   );
 
@@ -678,13 +679,8 @@ export function StreamingBubble({ text, activities, taskStatus, routeLabel, agen
       <AgentActivityTimeline activities={activities} taskStatus={taskStatus} />
       <div className="chat-agent-answer">
         {text ? (
-          <div className="chat-prose">
-            <MessageContent
-              content={text}
-              citationCount={0}
-              enableCitations={false}
-              onCitationClick={() => {}}
-            />
+          <div className="chat-streaming-text">
+            <span>{text}</span>
             <span className="stream-cursor" aria-hidden="true" />
           </div>
         ) : (
@@ -701,30 +697,71 @@ export function StreamingBubble({ text, activities, taskStatus, routeLabel, agen
 export function useTranscriptScroll(
   sessionId: string | null,
   messageCount: number,
-  streamingText: string,
+  streamRevision: number,
   activityCount: number,
 ) {
   const ref = useRef<HTMLDivElement>(null);
   const [isPinned, setIsPinned] = useState(true);
+  const pinnedRef = useRef(true);
+  const scheduledFrameRef = useRef<{ id: number; kind: "raf" | "timeout" } | null>(null);
 
-  const onScroll = () => {
+  const cancelScheduledScroll = useCallback(() => {
+    const scheduled = scheduledFrameRef.current;
+    if (!scheduled) return;
+    if (scheduled.kind === "raf" && typeof window.cancelAnimationFrame === "function") {
+      window.cancelAnimationFrame(scheduled.id);
+    } else {
+      window.clearTimeout(scheduled.id);
+    }
+    scheduledFrameRef.current = null;
+  }, []);
+
+  const setPinned = useCallback((nextPinned: boolean) => {
+    if (pinnedRef.current === nextPinned) return;
+    pinnedRef.current = nextPinned;
+    setIsPinned(nextPinned);
+  }, []);
+
+  const onScroll = useCallback(() => {
     const element = ref.current;
     if (!element) return;
     const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
-    setIsPinned(distance < 72);
-  };
+    setPinned(distance < 72);
+  }, [setPinned]);
+
+  const schedulePinnedScroll = useCallback(() => {
+    if (!pinnedRef.current || scheduledFrameRef.current) return;
+    const scroll = () => {
+      scheduledFrameRef.current = null;
+      const element = ref.current;
+      if (element && pinnedRef.current) element.scrollTop = element.scrollHeight;
+    };
+    if (typeof window.requestAnimationFrame === "function") {
+      scheduledFrameRef.current = {
+        id: window.requestAnimationFrame(scroll),
+        kind: "raf",
+      };
+    } else {
+      scheduledFrameRef.current = {
+        id: window.setTimeout(scroll, 16),
+        kind: "timeout",
+      };
+    }
+  }, []);
 
   useEffect(() => {
-    setIsPinned(true);
+    cancelScheduledScroll();
+    pinnedRef.current = true;
+    setIsPinned((current) => (current ? current : true));
     const element = ref.current;
     if (element) element.scrollTop = element.scrollHeight;
-  }, [sessionId]);
+  }, [sessionId, cancelScheduledScroll]);
 
   useEffect(() => {
-    if (!isPinned) return;
-    const element = ref.current;
-    if (element) element.scrollTop = element.scrollHeight;
-  }, [isPinned, messageCount, streamingText, activityCount]);
+    if (isPinned) schedulePinnedScroll();
+  }, [isPinned, messageCount, streamRevision, activityCount, schedulePinnedScroll]);
+
+  useEffect(() => cancelScheduledScroll, [cancelScheduledScroll]);
 
   return {
     ref,
@@ -733,8 +770,9 @@ export function useTranscriptScroll(
     backToLatest: () => {
       const element = ref.current;
       if (!element) return;
+      cancelScheduledScroll();
       element.scrollTo({ top: element.scrollHeight, behavior: "smooth" });
-      setIsPinned(true);
+      setPinned(true);
     },
   };
 }

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 
 import { i18next } from "../../i18n";
 
-import { registerTaskEventListener } from "../../hooks/useTaskEvents";
+import { registerTaskEventListener } from "../../services/taskEventDispatcher";
 import {
   cancelWorkflowRun,
   confirmWorkflowAction,
