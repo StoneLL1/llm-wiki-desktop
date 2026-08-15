@@ -1,0 +1,143 @@
+{
+  "schemaVersion": 1,
+  "batch": "Core interaction performance remediation Batch 4C",
+  "measuredAt": "2026-08-16",
+  "decision": "stop_without_graph_warm_host",
+  "source": {
+    "baseCommit": "48e2545629bccafc21ae0cc9f92aef7089650c86",
+    "buildMode": "debug",
+    "packaged": true,
+    "buildCommand": "npm run tauri -- build --debug --no-bundle",
+    "appVersion": "0.1.0",
+    "tauriCliVersion": "2.9.6",
+    "instrumentation": "Temporary VITE_CORE_INTERACTION_PERF build-only counters; removed before final verification and commit.",
+    "notes": "The WebView2 remote-debugging endpoint was local-only. No project text, real filename, absolute path, credential, prompt, or provider payload was captured."
+  },
+  "environment": {
+    "os": "Windows 10 Home China 25H2 build 26200.9168",
+    "cpu": "AMD Ryzen AI 9 HX 370 with Radeon 890M",
+    "physicalMemoryBytes": 33412722688,
+    "webView2Version": "151.0.4129.86",
+    "gpu": "AMD Radeon 890M through ANGLE Direct3D11",
+    "powerPlan": "Balanced",
+    "displayPixels": "1440x900",
+    "session": "local packaged run; remote-desktop run Pending",
+    "antivirus": "Pending (status was not readable from the managed session)",
+    "displayScaleAndRefresh": "Pending"
+  },
+  "wiki500": {
+    "fixtureId": "wiki-500-v1",
+    "seed": "llm-wiki-perf-v1",
+    "generation": "Temporary native project skeleton plus 497 deterministic approximately-4-KiB linked pages; the three native template pages make 500 total. Fixture deleted after the run.",
+    "markdownFiles": 500,
+    "markdownBytes": 2071190,
+    "graphNodes": 500,
+    "graphEdges": 994,
+    "contentHash": "5566897b6dda6444f3492749ac38179640007890596788109b6b447a44fad77a",
+    "firstEverRoute": {
+      "durationMs": 392.9,
+      "graphologyBuildMs": 7.6,
+      "rendererCreateMs": 59.2,
+      "workerStarts": 1,
+      "longTasksOver50Ms": [82.0]
+    },
+    "hotReturn": {
+      "repetitions": 20,
+      "failures": 0,
+      "durationMs": {
+        "min": 29.3,
+        "p50": 33.8,
+        "p95": 44.1,
+        "max": 45.8,
+        "raw": [45.8, 41.2, 44.1, 42.1, 36.2, 35.5, 41.3, 33.5, 40.2, 34.4, 40.4, 33.8, 32.9, 31.1, 31.1, 30.5, 31.6, 29.3, 29.8, 31.5]
+      },
+      "graphologyBuildMs": {
+        "min": 0.8,
+        "p50": 1.0,
+        "p95": 1.6,
+        "max": 1.9,
+        "raw": [1.9, 1.6, 1.3, 1.2, 1.1, 1.2, 1.0, 1.0, 1.0, 1.0, 1.1, 1.0, 1.1, 1.1, 0.9, 1.0, 0.9, 1.0, 0.8, 1.0]
+      },
+      "rendererCreateMs": {
+        "min": 18.8,
+        "p50": 21.5,
+        "p95": 26.1,
+        "max": 27.8,
+        "raw": [27.8, 26.1, 23.7, 24.1, 21.8, 22.1, 25.0, 21.4, 24.8, 21.8, 23.9, 21.3, 21.5, 19.9, 20.3, 19.3, 20.3, 18.8, 18.9, 20.9]
+      },
+      "counts": {
+        "getGraphBeforeHotLoop": 1,
+        "getGraphDuringHotLoop": 0,
+        "rendererCreated": 20,
+        "rendererKilled": 20,
+        "workerStarted": 0,
+        "workerKilled": 0,
+        "rendererInitFailed": 0
+      },
+      "longTasksOver50Ms": [],
+      "jsHeapUsedBytes": {
+        "min": 11606205,
+        "max": 24911937,
+        "raw": [12032965, 11890519, 11606205, 15229846, 15176650, 24911937, 20935993, 15276477, 24024216, 15328177, 23750976, 15236697, 23448516, 19943213, 19936161, 19890521, 20025249, 19877317, 19896125, 19886821]
+      }
+    }
+  },
+  "graph10k": {
+    "fixtureId": "graph-10k-v1",
+    "seed": "llm-wiki-perf-v1",
+    "nodes": 10000,
+    "edges": 40000,
+    "layout": "deterministic in-memory circular positions; no ForceAtlas2 worker",
+    "repetitions": 20,
+    "failures": 0,
+    "hotReturnMs": {
+      "min": 276.2,
+      "p50": 304.7,
+      "p95": 350.0,
+      "max": 385.3,
+      "raw": [343.9, 334.1, 288.9, 321.4, 305.3, 304.7, 289.2, 289.4, 341.8, 321.2, 385.3, 286.8, 285.3, 350.0, 303.3, 336.1, 283.6, 276.2, 345.8, 300.8]
+    },
+    "graphologyBuildMs": {
+      "min": 46.0,
+      "p50": 52.8,
+      "p95": 68.3,
+      "max": 72.8,
+      "raw": [72.8, 61.6, 46.5, 55.1, 51.1, 53.8, 50.9, 46.3, 54.2, 56.9, 68.3, 50.5, 47.5, 57.5, 52.8, 57.7, 49.8, 46.0, 55.8, 51.2]
+    },
+    "rendererCreateMs": {
+      "min": 47.2,
+      "p50": 59.6,
+      "p95": 79.9,
+      "max": 81.1,
+      "raw": [54.8, 69.7, 52.8, 60.6, 64.6, 59.6, 47.2, 51.9, 79.9, 61.9, 77.3, 48.0, 54.5, 81.1, 60.6, 67.4, 48.8, 50.0, 78.7, 47.7]
+    },
+    "counts": {
+      "getGraph": 0,
+      "rendererCreated": 20,
+      "rendererKilled": 20,
+      "workerStarted": 0,
+      "workerKilled": 0,
+      "rendererInitFailed": 0
+    },
+    "longTasksOver50Ms": [341.0, 331.0, 285.0, 318.0, 302.0, 301.0, 287.0, 286.0, 339.0, 315.0, 381.0, 285.0, 282.0, 347.0, 301.0, 333.0, 281.0, 272.0, 342.0, 299.0],
+    "jsHeapUsedBytes": {
+      "min": 57318616,
+      "max": 128364997
+    }
+  },
+  "webGlFallback": {
+    "browserArguments": ["--disable-gpu", "--disable-software-rasterizer"],
+    "webGlAvailable": false,
+    "fallbackVisible": true,
+    "rendererInitFailuresAfterTwoSeconds": 1,
+    "rendererCreates": 0,
+    "longTasksOver50Ms": []
+  },
+  "pending": [
+    "GPU memory is not exposed by WebView2 performance APIs.",
+    "Remote Desktop behavior requires a real RDP session.",
+    "Display scaling/refresh and antivirus state were not readable from the managed session.",
+    "macOS and Linux packaged runs remain release-gate work."
+  ],
+  "decisionRationale": "The required 500-page hot-return gate passed with p95 44.1 ms (limit 500 ms) and zero >50 ms long tasks. The plan therefore requires stopping at the decision gate. A Graph warm host or renderer keepalive was not implemented. The 10k fixture remains a documented stress risk rather than the ordinary-product keepalive trigger."
+}

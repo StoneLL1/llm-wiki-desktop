@@ -116,7 +116,22 @@ Batch 5 需要相对本文件 Batch 0 基线至少降低 raw 30%、gzip 25%，�
 
 最大静态可达模块贡献者依次为 KaTeX、React DOM client、英文 locale、中文 locale 和 i18next；这些是 Batch 5 的依赖泄漏诊断输入，不在 Batch 0 改动或拆包。
 
-## 9. 结果记录模板
+## 9. Batch 4C Graph 有界保活决策（2026-08-16）
+
+在 Windows 参考机使用 packaged debug executable 和本文件固定 fixture 完成 Graph 决策测量。完整环境、原始 20 次样本、计数、heap 与 fallback 结果保存在 [`results/2026-08-16-core-interaction-performance-batch-4c.json`](results/2026-08-16-core-interaction-performance-batch-4c.json)。本次仅使用临时 build-only 计数器，最终源码和验证构建不包含诊断入口。
+
+| 场景 | 结果 | 判定 |
+| --- | --- | --- |
+| `wiki-500-v1` 热返回 | n=20；p50 33.8 ms；p95 44.1 ms；max 45.8 ms | 通过 p95 ≤ 500 ms |
+| `wiki-500-v1` 主线程 | 0 个 >50 ms long task | 通过 |
+| `wiki-500-v1` 热循环资源 | `get_graph` 0；renderer create/kill 20/20；worker start 0 | 现有卸载模型释放完整，无 stale worker/timer |
+| `graph-10k-v1` smoke | p95 350.0 ms；20/20 次存在 >50 ms long task；JS heap max 128,364,997 B | 记录为压力风险，不替代 500 页产品门槛 |
+| WebGL 强制不可用 | 显式 fallback 可见；2 秒内仅 1 次 init failure；0 次成功 create | 通过，不重复创建 |
+| GPU memory / RDP | `Pending` | WebView2 不暴露 GPU memory；真实 RDP 会话留给 Batch 6/release gate |
+
+Batch 4C 的强制分支结论是 **停止，不实现 Graph warm host**。500 页热返回同时满足 p95 和 long-task 门槛；继续保活 renderer 只会增加隐藏 DOM、GPU/heap 常驻、listener/TTL/project-switch 竞态，并违反“先测后决定”。现有 4B camera/data 恢复与正常 mount/unmount 生命周期保持不变；Batch 5 继续只负责 lazy 边界和首屏预算。
+
+## 10. 结果记录模板
 
 ```text
 Commit / build / packaged:
