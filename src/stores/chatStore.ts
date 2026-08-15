@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
+import { registerProjectScopeResetHandler } from "./projectScopeResetRegistry";
 import { createProjectResourceController } from "../lib/projectResourceFreshness";
 import { i18next } from "../i18n";
 
@@ -827,3 +828,5 @@ export function latestAssistantMessage(session: ChatSession | null): ChatMessage
   }
   return null;
 }
+
+registerProjectScopeResetHandler("chat", () => useChatStore.getState().reset());

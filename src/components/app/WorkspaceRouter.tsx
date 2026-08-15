@@ -8,39 +8,40 @@ import type { AiCapabilitiesWorkflow } from "../../hooks/useAiCapabilities";
 import type { AppView } from "../../stores/navigationStore";
 import { ViewErrorBoundary } from "./ViewErrorBoundary";
 import { ViewFallback } from "./ViewFallback";
+import { loadWorkspaceView } from "./workspaceViewLoaders";
 
 const ChatView = lazy(() =>
-  import("../../features/chat/ChatView").then((module) => ({
+  loadWorkspaceView("chat").then((module) => ({
     default: module.ChatView,
   })),
 );
 const ExportsView = lazy(() =>
-  import("../../features/exports/ExportsView").then((module) => ({
+  loadWorkspaceView("exports").then((module) => ({
     default: module.ExportsView,
   })),
 );
 const GraphView = lazy(() =>
-  import("../../features/graph/GraphView").then((module) => ({
+  loadWorkspaceView("graph").then((module) => ({
     default: module.GraphView,
   })),
 );
 const ImportView = lazy(() =>
-  import("../../features/import/ImportView").then((module) => ({
+  loadWorkspaceView("import").then((module) => ({
     default: module.ImportView,
   })),
 );
 const LintView = lazy(() =>
-  import("../../features/lint/LintView").then((module) => ({
+  loadWorkspaceView("lint").then((module) => ({
     default: module.LintView,
   })),
 );
 const WikiView = lazy(() =>
-  import("../../features/wiki/WikiView").then((module) => ({
+  loadWorkspaceView("wiki").then((module) => ({
     default: module.WikiView,
   })),
 );
 const WorkflowsView = lazy(() =>
-  import("../../features/workflows/WorkflowsView").then((module) => ({
+  loadWorkspaceView("workflows").then((module) => ({
     default: module.WorkflowsView,
   })),
 );

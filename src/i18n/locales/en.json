@@ -1797,6 +1797,7 @@
   "settings.language.option.zh-CN": "中文",
   "settings.language.help.en": "Compact English labels for the full desktop shell.",
   "settings.language.help.zh-CN": "Chinese labels apply immediately and persist to settings.",
+  "settings.language.loadError": "The language pack could not be loaded. The current language was kept; try again.",
   "settings.agent.title": "Agent",
   "settings.agent.description": "Choose the default CLI route for this project and verify installation state.",
   "settings.agent.refresh": "Refresh",

@@ -1,6 +1,12 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
-import { afterEach } from "vitest";
+import { afterEach, beforeAll } from "vitest";
+
+import { i18nReady } from "../i18n";
+
+beforeAll(async () => {
+  await i18nReady;
+});
 
 // sigma.js references WebGL context constructors at module load time. jsdom
 // does not define them, so importing anything that pulls in sigma (GraphView,

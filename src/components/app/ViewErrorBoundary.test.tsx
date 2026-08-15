@@ -15,25 +15,23 @@ describe("ViewErrorBoundary", () => {
     consoleError.mockClear();
   });
 
-  it("retries the failed view locally instead of reloading the whole app", () => {
-    let shouldThrow = true;
+  it("offers a real application reload for a rejected lazy identity", () => {
+    const reload = vi.fn();
 
-    function MaybeThrowingView() {
-      if (shouldThrow) throw new Error("view chunk failed");
-      return <div>Recovered view</div>;
+    function ThrowingView(): null {
+      throw new Error("view chunk failed");
     }
 
     render(
-      <ViewErrorBoundary>
-        <MaybeThrowingView />
+      <ViewErrorBoundary onReload={reload}>
+        <ThrowingView />
       </ViewErrorBoundary>,
     );
 
     expect(screen.getByRole("alert")).toBeInTheDocument();
 
-    shouldThrow = false;
     fireEvent.click(screen.getByRole("button", { name: /reload|retry/i }));
 
-    expect(screen.getByText("Recovered view")).toBeInTheDocument();
+    expect(reload).toHaveBeenCalledOnce();
   });
 });

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
+import { registerProjectScopeResetHandler } from "./projectScopeResetRegistry";
 
 import type {
   ExportContentOptions,
@@ -313,3 +314,5 @@ registerProjectResource(
 export function selectHasRecords(state: ExportState): boolean {
   return state.records.length > 0;
 }
+
+registerProjectScopeResetHandler("exports", () => useExportStore.getState().reset());

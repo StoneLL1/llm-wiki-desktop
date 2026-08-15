@@ -2,11 +2,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { ChevronDown, FolderOpen, FolderSearch, LayoutDashboard, RotateCcw, Search, Settings, Trash2 } from "lucide-react";
 import { type KeyboardEvent as ReactKeyboardEvent, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { i18next, LANGUAGE_STORAGE_KEY } from "../../i18n";
+import { activateLocale, LANGUAGE_STORAGE_KEY } from "../../i18n";
 import { compactPath } from "../../lib/pathDisplay";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useSettingsStore } from "../../stores/settingsStore";
+import { useToastStore } from "../../stores/toastStore";
 import { useWikiStore } from "../../features/wiki/wikiStore";
 import { pickDirectory } from "../../features/import/nativeFilePicker";
 import type { ProjectOpenAssessment, RecentProject } from "../../types/project";
@@ -45,6 +46,7 @@ export function TopBar() {
   const recentProjects = useProjectStore((state) => state.recentProjects);
   const removeRecentProject = useProjectStore((state) => state.removeRecentProject);
   const persistPatch = useSettingsStore((state) => state.persistPatch);
+  const pushToast = useToastStore((state) => state.pushToast);
   const openPage = useWikiStore((state) => state.openPage);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
@@ -60,6 +62,7 @@ export function TopBar() {
   const menuItemRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const pendingMenuFocus = useRef<"first" | "last" | null>(null);
   const requestSequence = useRef(0);
+  const languageRequestEpoch = useRef(0);
   const activeLanguage = i18n.resolvedLanguage ?? i18n.language;
   const hasProject = Boolean(currentProject.projectId && currentProject.rootPath);
 
@@ -67,16 +70,36 @@ export function TopBar() {
   const kbdLabel = isMac ? "⌘K" : "Ctrl K";
   const settingsKbdHint = isMac ? "⌘," : "Ctrl+,";
 
-  const setLanguage = (language: "en" | "zh-CN") => {
+  const setLanguage = async (language: "en" | "zh-CN") => {
+    const requestEpoch = ++languageRequestEpoch.current;
+    const requestProjectId = currentProject.projectId;
+    const requestRootPath = currentProject.rootPath;
+    const isCurrentRequest = () => {
+      const activeProject = useProjectStore.getState().currentProject;
+      return requestEpoch === languageRequestEpoch.current
+        && activeProject.projectId === requestProjectId
+        && activeProject.rootPath === requestRootPath;
+    };
     if (hasProject) {
-      void persistPatch(currentProject.projectId, currentProject.rootPath, { language });
+      const saved = await persistPatch(requestProjectId, requestRootPath, {
+        language,
+      });
+      if (!isCurrentRequest()) return;
+      if (saved.language !== language) {
+        pushToast("error", t("settings.language.loadError"));
+      }
       return;
     }
-    void i18next.changeLanguage(language);
     try {
-      window.localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
+      const activated = await activateLocale(language);
+      if (!activated || !isCurrentRequest()) return;
+      try {
+        window.localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
+      } catch {
+        /* localStorage may be unavailable in an embedded preview. */
+      }
     } catch {
-      /* localStorage may be unavailable in an embedded preview. */
+      if (isCurrentRequest()) pushToast("error", t("settings.language.loadError"));
     }
   };
 
@@ -474,7 +497,7 @@ export function TopBar() {
             className={`rounded-[var(--radius-sm)] px-2 py-0.5 ${
               activeLanguage === "zh-CN" ? "bg-[var(--background)] font-medium" : "text-[var(--text-muted)]"
             }`}
-            onClick={() => setLanguage("zh-CN")}
+            onClick={() => void setLanguage("zh-CN")}
             type="button"
           >
             {t("language.zhCN")}
@@ -484,7 +507,7 @@ export function TopBar() {
             className={`rounded-[var(--radius-sm)] px-2 py-0.5 ${
               activeLanguage === "en" ? "bg-[var(--background)] font-medium" : "text-[var(--text-muted)]"
             }`}
-            onClick={() => setLanguage("en")}
+            onClick={() => void setLanguage("en")}
             type="button"
           >
             {t("language.en")}

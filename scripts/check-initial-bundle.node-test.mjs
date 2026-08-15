@@ -128,3 +128,32 @@ test("an oversized initial import fails the budget and reports its module source
   assert.deepEqual(result.violations.map(({ metric }) => metric), ["initialJsRawBytes"]);
   assert.match(formatBudgetFailure(graph, result), /src\/accidental-large-module\.ts/);
 });
+
+test("denied feature and dependency sources fail even when byte budgets pass", () => {
+  const bundle = fixture("denied");
+  const entry = Object.values(bundle).find((output) => output.type === "chunk" && output.isEntry);
+  const deniedFile = "assets/ImportView-denied.js";
+  entry.imports.push(deniedFile);
+  bundle[deniedFile] = chunk({
+    fileName: deniedFile,
+    code: "export const importView = true;",
+    modules: {
+      [path.join(fixtureRoot, "src", "features", "import", "ImportView.tsx")]: moduleDetails(31),
+    },
+  });
+
+  const graph = createBundleGraph(bundle, { root: fixtureRoot });
+  const result = evaluateBundleBudget(graph, {
+    maxInitialJsRawBytes: 1_610_000,
+    maxInitialJsGzipBytes: 470_000,
+    maxInitialJsFiles: 45,
+    deniedInitialModulePatterns: ["src/features/import/ImportView.tsx"],
+  });
+
+  assert.deepEqual(result.violations, [{
+    metric: "deniedInitialModule",
+    moduleId: "src/features/import/ImportView.tsx",
+    pattern: "src/features/import/ImportView.tsx",
+  }]);
+  assert.match(formatBudgetFailure(graph, result), /denied initial module.*ImportView\.tsx/i);
+});

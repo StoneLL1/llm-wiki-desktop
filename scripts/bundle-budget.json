@@ -1,5 +1,22 @@
 {
-  "maxInitialJsRawBytes": 1610000,
-  "maxInitialJsGzipBytes": 470000,
-  "maxInitialJsFiles": 45
+  "maxInitialJsRawBytes": 625000,
+  "maxInitialJsGzipBytes": 192000,
+  "maxInitialJsFiles": 40,
+  "deniedInitialModulePatterns": [
+    "node_modules/@milkdown/",
+    "node_modules/sigma/",
+    "node_modules/graphology",
+    "node_modules/katex/",
+    "node_modules/highlight.js/",
+    "node_modules/rehype-katex/",
+    "node_modules/rehype-highlight/",
+    "node_modules/remark-math/",
+    "src/features/wiki/WikiEditor",
+    "src/features/workflows/WorkflowsView.tsx",
+    "src/features/import/ImportView.tsx",
+    "src/features/lint/LintView.tsx",
+    "src/features/exports/ExportsView.tsx",
+    "src/i18n/locales/en.json",
+    "src/i18n/locales/zh-CN.json"
+  ]
 }

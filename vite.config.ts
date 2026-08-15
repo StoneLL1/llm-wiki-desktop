@@ -16,6 +16,19 @@ export default defineConfig({
     target: "es2022",
     minify: !process.env.TAURI_DEBUG ? "esbuild" : false,
     sourcemap: Boolean(process.env.TAURI_DEBUG),
+    rollupOptions: {
+      output: {
+        codeSplitting: {
+          groups: [
+            {
+              name: "lucide-icons",
+              test: /node_modules[\\/]lucide-react/,
+              tags: ["$initial"],
+            },
+          ],
+        },
+      },
+    },
   },
   test: {
     environment: "jsdom",

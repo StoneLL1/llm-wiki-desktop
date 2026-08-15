@@ -12,6 +12,7 @@ import { useWikiStore } from "../../features/wiki/wikiStore";
 import type { FavoriteSidebarItem } from "../../types/bookmark";
 import type { NavigationItem } from "./shellNavigation";
 import { mainViews, workflowViews } from "./shellNavigation";
+import { preloadWorkspaceView } from "./workspaceViewLoaders";
 
 export function LeftSidebar() {
   const { t } = useTranslation();
@@ -114,6 +115,8 @@ export function LeftSidebar() {
               : "text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"
           }`}
           onClick={() => setActiveView(item.view)}
+          onFocus={() => void preloadWorkspaceView(item.view)}
+          onPointerEnter={() => void preloadWorkspaceView(item.view)}
           title={t(item.labelKey)}
           type="button"
         >

@@ -11,7 +11,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { i18next, LANGUAGE_STORAGE_KEY } from "../../i18n";
+import { activateLocale, LANGUAGE_STORAGE_KEY } from "../../i18n";
 import { useProjectStore } from "../../stores/projectStore";
 import type { AgentInfo } from "../../types/agent";
 import type { ProviderStatus } from "../../types/llm";
@@ -79,16 +79,28 @@ export function ProjectStartView() {
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
   const templatesRequestedRef = useRef(false);
   const runEpochRef = useRef(0);
+  const languageEpochRef = useRef(0);
   const cancelledRunEpochsRef = useRef(new Set<number>());
 
   const activeLanguage = i18n.resolvedLanguage ?? i18n.language;
 
-  const setLanguage = (language: "en" | "zh-CN") => {
-    void i18next.changeLanguage(language);
+  const setLanguage = async (language: "en" | "zh-CN") => {
+    const languageEpoch = ++languageEpochRef.current;
     try {
-      window.localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
-    } catch {
-      /* localStorage may be unavailable in some embed contexts */
+      const activated = await activateLocale(
+        language,
+        undefined,
+        undefined,
+        () => languageEpoch === languageEpochRef.current,
+      );
+      if (!activated || languageEpoch !== languageEpochRef.current) return;
+      try {
+        window.localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
+      } catch {
+        /* localStorage may be unavailable in some embed contexts */
+      }
+    } catch (error) {
+      if (languageEpoch === languageEpochRef.current) setLocalError(errorMessage(error));
     }
   };
 
@@ -219,8 +231,8 @@ export function ProjectStartView() {
         </nav>
         <div className="launch__top-actions">
           <div className="launch__langswitch" role="group" aria-label={t("settings.language.title")}>
-            <button type="button" className={activeLanguage === "zh-CN" ? "is-active" : ""} onClick={() => setLanguage("zh-CN")}>中</button>
-            <button type="button" className={activeLanguage === "en" ? "is-active" : ""} onClick={() => setLanguage("en")}>EN</button>
+            <button type="button" className={activeLanguage === "zh-CN" ? "is-active" : ""} onClick={() => void setLanguage("zh-CN")}>中</button>
+            <button type="button" className={activeLanguage === "en" ? "is-active" : ""} onClick={() => void setLanguage("en")}>EN</button>
           </div>
           <button
             type="button"

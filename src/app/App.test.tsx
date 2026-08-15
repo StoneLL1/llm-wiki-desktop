@@ -547,12 +547,12 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "Import" })).toBeInTheDocument();
   });
 
-  it("keeps context and status surfaces visible while navigation changes", () => {
+  it("keeps context and status surfaces visible while navigation changes", async () => {
     render(<App />);
 
     fireEvent.click(screen.getByRole("button", { name: "Chat" }));
 
-    expect(screen.getByRole("complementary", { name: "Sources" })).toBeInTheDocument();
+    expect(await screen.findByRole("complementary", { name: "Sources" })).toBeInTheDocument();
     expect(screen.getAllByText("D:/Users/Aletta/Documents/wiki/agent-llm").length).toBeGreaterThan(0);
     expect(screen.getByText("Wiki pages: 237")).toBeInTheDocument();
     expect(screen.getByText("Tasks: 1 running")).toBeInTheDocument();
@@ -573,12 +573,17 @@ describe("App", () => {
         layout: { positions: { a: [0, 0], b: [1, 1] }, communities: { a: 0, b: 0 } },
       },
       selectedNodeId: "a",
+      projectKey: "sample\0D:/Users/Aletta/Documents/wiki/agent-llm",
       load: async () => {},
     });
-
     render(<App />);
+    await screen.findByRole("heading", { name: "Graph" });
 
-    fireEvent.click(screen.getByRole("button", { name: "Focus neighbors" }));
+    fireEvent.click(await screen.findByRole(
+      "button",
+      { name: "Focus neighbors" },
+      { timeout: 5_000 },
+    ));
 
     expect(useGraphStore.getState().focusedNodeId).toBe("a");
   });

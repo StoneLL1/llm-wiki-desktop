@@ -67,4 +67,12 @@ describe("backend-emitted i18n keys", () => {
     const onlyZh = [...emitted].filter((key) => zh.has(key) && !en.has(key));
     expect({ onlyEn, onlyZh }).toEqual({ onlyEn: [], onlyZh: [] });
   });
+
+  it("keeps exact key parity across complete locale bundles", () => {
+    const [en, zh] = LOCALES.map(localeKeys);
+    expect({
+      onlyEn: [...en].filter((key) => !zh.has(key)).sort(),
+      onlyZh: [...zh].filter((key) => !en.has(key)).sort(),
+    }).toEqual({ onlyEn: [], onlyZh: [] });
+  });
 });

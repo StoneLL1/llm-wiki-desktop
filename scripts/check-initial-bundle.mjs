@@ -40,6 +40,26 @@ export const evaluateBundleBudget = (graph, budget) => {
     }
   }
 
+  const deniedPatterns = budget.deniedInitialModulePatterns ?? [];
+  if (!Array.isArray(deniedPatterns) || deniedPatterns.some((pattern) => typeof pattern !== "string")) {
+    violations.push({
+      metric: "deniedInitialModulePatterns",
+      error: "deniedInitialModulePatterns must be an array of strings",
+    });
+  } else {
+    for (const contributor of graph.initial.moduleContributors) {
+      for (const pattern of deniedPatterns) {
+        if (contributor.moduleId.includes(pattern)) {
+          violations.push({
+            metric: "deniedInitialModule",
+            moduleId: contributor.moduleId,
+            pattern,
+          });
+        }
+      }
+    }
+  }
+
   return { actual, violations };
 };
 
@@ -54,6 +74,12 @@ export const formatBudgetFailure = (graph, result, contributorLimit = 10) => {
   for (const violation of result.violations) {
     if (violation.error) {
       lines.push(`- ${violation.error}`);
+      continue;
+    }
+    if (violation.metric === "deniedInitialModule") {
+      lines.push(
+        `- denied initial module: ${violation.moduleId} (matched ${violation.pattern})`,
+      );
       continue;
     }
     const formatter = violation.metric === "initialJsFiles"

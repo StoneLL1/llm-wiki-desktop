@@ -294,6 +294,10 @@ describe("Workflows architecture", () => {
       join(root, "src", "components", "app", "WorkspaceRouter.tsx"),
       "utf8",
     );
+    const loaders = readFileSync(
+      join(root, "src", "components", "app", "workspaceViewLoaders.ts"),
+      "utf8",
+    );
     const controller = readFileSync(
       join(root, "src", "components", "app", "WorkspaceController.tsx"),
       "utf8",
@@ -318,7 +322,8 @@ describe("Workflows architecture", () => {
     expect(router).not.toContain('case "agent"');
     expect(router).not.toContain("features/agent/AgentView");
     expect(router).toContain('case "workflows"');
-    expect(router).toContain("features/workflows/WorkflowsView");
+    expect(router).toContain('loadWorkspaceView("workflows")');
+    expect(loaders).toContain("features/workflows/WorkflowsView");
     expect(controller).not.toContain("RunAgentDialog");
     expect(controller).not.toContain("useAgentWorkflow");
     expect(rightPanel).not.toContain("AgentRightPanel");
@@ -346,8 +351,8 @@ describe("Workflows architecture", () => {
       join(root, "src", "features", "wiki", "WikiView.tsx"),
       "utf8",
     );
-    const rightPanelSource = readFileSync(
-      join(root, "src", "components", "app", "RightContextPanel.tsx"),
+    const wikiRightPanelSource = readFileSync(
+      join(root, "src", "components", "app", "right-panels", "WikiRightPanelHost.tsx"),
       "utf8",
     );
     const exportsView = readFileSync(
@@ -373,8 +378,8 @@ describe("Workflows architecture", () => {
       )?.[0] ?? "";
     expect(wikiQuickExportSection).not.toContain("requestWorkflowLaunch");
     expect(wikiView).toContain("consumeExportRequest");
-    expect(rightPanelSource).not.toContain("requestWorkflowLaunch");
-    expect(rightPanelSource).toContain("requestExport");
+    expect(wikiRightPanelSource).not.toContain("requestWorkflowLaunch");
+    expect(wikiRightPanelSource).toContain("requestExport");
     expect(exportsView).toContain("requestWorkflowLaunch");
     expect(exportsView).toContain('origin: "exports"');
     expect(workflowsOverview).toContain("onPrepare={() => onPrepare(kind)}");

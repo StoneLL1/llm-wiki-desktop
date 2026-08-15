@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
+import { registerProjectScopeResetHandler } from "../../stores/projectScopeResetRegistry";
 
 import { captureProjectScope, isProjectScopeCurrent } from "../../stores/projectScope";
 import { useTaskStore } from "../../stores/taskStore";
@@ -685,3 +686,5 @@ function scopedSourceError(
     errorsBySourceId,
   };
 }
+
+registerProjectScopeResetHandler("source", () => useSourceStore.getState().reset());
