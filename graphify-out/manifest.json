@@ -275,9 +275,9 @@
     "semantic_hash": "f2959fda0f7521863570abd9ad96db3a"
   },
   "package.json": {
-    "mtime": 1785749773.5717647,
-    "ast_hash": "46d65c699224d1fc8de4ba4f741e72fb",
-    "semantic_hash": "46d65c699224d1fc8de4ba4f741e72fb"
+    "mtime": 1786806106.7963543,
+    "ast_hash": "f5e45142ce62f174e93054185679b3cd",
+    "semantic_hash": ""
   },
   "src-tauri/build.rs": {
     "mtime": 1781964638.526146,
@@ -2570,9 +2570,9 @@
     "semantic_hash": "f16051cc4889f60eb02f2d44d712d503"
   },
   "src/test/ci-contracts.test.ts": {
-    "mtime": 1785202393.7806973,
-    "ast_hash": "4d917190537a2303deaa6417bcb4d4b6",
-    "semantic_hash": "4d917190537a2303deaa6417bcb4d4b6"
+    "mtime": 1786806653.3368201,
+    "ast_hash": "a8ee40d67434c9afec41dbc5c44c0808",
+    "semantic_hash": ""
   },
   "src/test/i18n-backend-keys.test.ts": {
     "mtime": 1785730489.7364552,
@@ -2765,9 +2765,9 @@
     "semantic_hash": "e59fa6bdb00097ff42c7c1b101e4b475"
   },
   "vite.config.ts": {
-    "mtime": 1784390077.9240115,
-    "ast_hash": "f6125fee41f146db3caedb673225cc7d",
-    "semantic_hash": "f6125fee41f146db3caedb673225cc7d"
+    "mtime": 1786806085.565296,
+    "ast_hash": "44466b6d440b4e9191c7743868d41db3",
+    "semantic_hash": ""
   },
   "AGENTS.md": {
     "mtime": 1786618535.256438,
@@ -3445,8 +3445,8 @@
     "semantic_hash": "8a5a3953ec9eb051bebb7c1add12f71a"
   },
   "progress.txt": {
-    "mtime": 1786530153.1488993,
-    "ast_hash": "dd6f1f1a0294b168dc2a0c253d5d0356",
+    "mtime": 1786807214.7839177,
+    "ast_hash": "b5a41546c1279b1cdff0e972d7fb0712",
     "semantic_hash": ""
   },
   "src-tauri/templates/projects/business/purpose.md": {
@@ -3660,8 +3660,8 @@
     "semantic_hash": ""
   },
   "scripts/run-checks.mjs": {
-    "mtime": 1785202215.8477561,
-    "ast_hash": "8191e8dfe00e36f7b02f417b4dcb59ca",
+    "mtime": 1786806086.4267495,
+    "ast_hash": "29fe2acf7753eb4c72a5c2df713aa00d",
     "semantic_hash": ""
   },
   "scripts/stage-node-capability.mjs": {
@@ -4417,6 +4417,101 @@
   "src/features/lint/AgentLintRepairPanel.tsx": {
     "mtime": 1786612971.2242362,
     "ast_hash": "fcede3f261fe6eea7d973ac2498fa017",
+    "semantic_hash": ""
+  },
+  "scripts/bundle-budget.json": {
+    "mtime": 1786806085.1493807,
+    "ast_hash": "a2c719f499e5f191609a4e943bfaf8b1",
+    "semantic_hash": ""
+  },
+  "scripts/bundle-graph-plugin.d.mts": {
+    "mtime": 1786806083.836403,
+    "ast_hash": "7bb08214c9d3c4c19bd8f495c5d6319a",
+    "semantic_hash": ""
+  },
+  "scripts/bundle-graph-plugin.mjs": {
+    "mtime": 1786806289.4281037,
+    "ast_hash": "0b445dccbc6d0886cb7ed5caba999441",
+    "semantic_hash": ""
+  },
+  "scripts/check-initial-bundle.mjs": {
+    "mtime": 1786806084.2694836,
+    "ast_hash": "ac67c71706212b57795cd70545d3f451",
+    "semantic_hash": ""
+  },
+  "scripts/check-initial-bundle.node-test.mjs": {
+    "mtime": 1786806406.8063197,
+    "ast_hash": "3e5d8f5a8bb197a8137eb19889e78e5e",
+    "semantic_hash": ""
+  },
+  "docs/audits/2026-08-14-audit-accessibility-i18n-and-product-quality.md": {
+    "mtime": 1786775204.6340697,
+    "ast_hash": "53ecd5e47a22c6730ead3eacdfc7edc2",
+    "semantic_hash": ""
+  },
+  "docs/audits/2026-08-14-audit-performance-and-interaction.md": {
+    "mtime": 1786775204.9902856,
+    "ast_hash": "7678646608b39412d1e9267c73b334ec",
+    "semantic_hash": ""
+  },
+  "docs/audits/2026-08-14-audit-plain-language-impact-and-benefits.md": {
+    "mtime": 1786775141.398568,
+    "ast_hash": "ff09a4f72c1c1996128b5a3d1fd91c3c",
+    "semantic_hash": ""
+  },
+  "docs/audits/2026-08-14-audit-release-testing-and-operations.md": {
+    "mtime": 1786774930.8314648,
+    "ast_hash": "994801f316248ada4e4666ff1ea7f57a",
+    "semantic_hash": ""
+  },
+  "docs/audits/2026-08-14-audit-reliability-and-data-integrity.md": {
+    "mtime": 1786774864.0226257,
+    "ast_hash": "fe7c8de17212053020ecfb71c49b1717",
+    "semantic_hash": ""
+  },
+  "docs/audits/2026-08-14-audit-security-and-privacy.md": {
+    "mtime": 1786774790.9975336,
+    "ast_hash": "0eefe61a98227beada3a46fde1dccd60",
+    "semantic_hash": ""
+  },
+  "docs/audits/2026-08-14-first-principles-project-maturity-audit.md": {
+    "mtime": 1786775160.279203,
+    "ast_hash": "a9560abf102535f6f0d864529b16fb89",
+    "semantic_hash": ""
+  },
+  "docs/qa/core-interaction-performance-benchmark.md": {
+    "mtime": 1786806289.9324644,
+    "ast_hash": "7c89356fd50c5c513aa85b5575e19a99",
+    "semantic_hash": ""
+  },
+  "docs/superpowers/plans/2026-08-12-wiki-quick-export-and-workflows-dual-entry-implementation.md": {
+    "mtime": 1786636472.259189,
+    "ast_hash": "22c057fb02725e1a77c345b9b6b4ef8a",
+    "semantic_hash": ""
+  },
+  "docs/superpowers/plans/2026-08-15-core-interaction-performance-remediation-plan.md": {
+    "mtime": 1786777955.7071598,
+    "ast_hash": "dfc51a1630d41f4c3faa8265e86ab46a",
+    "semantic_hash": ""
+  },
+  "graphify-out/memory/query_20260814_130548_\u73b0\u5728\u6211\u5df2\u7ecf\u5b8c\u6210\u4e86\u8ba1\u5212_\u5f53\u524d\u5728wiki\u4e2d\u70b9\u51fb\u5bfc\u51fa_\u7528\u7684\u662fagent\u8fd8\u662fbyok\u7684\u65b9\u5f0f\u751f\u6210html_\u597d\u50cf.md": {
+    "mtime": 1786712748.6668122,
+    "ast_hash": "ee33fea1d2d75fe19c5dfeb0358b18c1",
+    "semantic_hash": ""
+  },
+  "graphify-out/memory/query_20260815_062716_\u628a\u62a5\u544a\u62c6\u5206\u4e3a\u4e0d\u540c\u89d2\u5ea6\u7684\u5ba1\u67e5\u62a5\u544a_\u6bd4\u5982\u6027\u80fd_\u5b89\u5168\u7b49\u7b49_\u7136\u540e\u53e6\u5199\u4e00\u4efdmarkdown_\u5185\u5bb9\u662f\u5206\u522b\u544a\u8bc9\u6211\u6bcf.md": {
+    "mtime": 1786775236.4033463,
+    "ast_hash": "ef6a1ab065578b823b9da8893b71717e",
+    "semantic_hash": ""
+  },
+  "graphify-out/memory/query_20260815_065201_2026_08_14_audit_performance_and_interaction_md_\u6211\u6253.md": {
+    "mtime": 1786776721.9944117,
+    "ast_hash": "5674ee3b4d02d7d68c777c91a63ebc68",
+    "semantic_hash": ""
+  },
+  "graphify-out/memory/query_20260815_071320_\u4e3a\u6027\u80fd\u5ba1\u67e5\u4e2d\u6700\u91cd\u8981\u7684\u4e94\u4e2a\u7528\u6237\u4f53\u611f\u95ee\u9898\u5236\u5b9a\u9762\u5411_agent_\u7684\u5206_batch_\u8be6\u7ec6\u4fee\u590d\u8ba1\u5212.md": {
+    "mtime": 1786778000.2444003,
+    "ast_hash": "246b936e14acdf7381e8d852a785bd88",
     "semantic_hash": ""
   }
 }

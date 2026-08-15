@@ -1,0 +1,131 @@
+# 核心交互性能测量协议
+
+## 1. 用途与判定边界
+
+本协议为核心交互性能修复 Batch 0–6 提供可复现的本地证据。自动化测试只固定调用次数、状态发布频率、数据完整性和 bundle 闭包；启动、输入响应、long task、Graph 热返回等绝对时延必须在 packaged Tauri WebView 中测量。Vite dev server、浏览器标签页或 jsdom 数据不能替代桌面结论。
+
+所有记录必须关联 commit、构建模式、应用/Tauri 版本、机器环境、fixture 版本和重复次数。没有真实 packaged 环境或无法读取环境字段时写 `Pending`，不得用估算值补齐。
+
+## 2. 隐私与脱敏
+
+允许保存汇总 JSON、bundle graph、脱敏 trace 和统计表。不得记录或提交：
+
+- 知识库正文、真实文件名和绝对路径；
+- API key、token、Cookie、凭据状态详情；
+- raw provider payload、真实 Chat prompt/answer 或 Agent 命令参数；
+- 用户名、设备名以及可反推私人项目的信息。
+
+fixture 统一使用 `perf-page-0001.md`、`fixture-project` 等合成标识。trace 导出前检查 Network、Console、User Timing 和截图内容；只保留事件类型、相对时间、匿名计数和字节数。
+
+## 3. 每次运行的环境记录
+
+| 字段 | 记录要求 |
+| --- | --- |
+| Commit / dirty state | 完整 commit SHA；有未提交变更时列出本次 Batch 文件，不复制绝对路径 |
+| 构建 | `production` / `debug`，执行命令，是否 packaged，Tauri app/CLI 版本 |
+| 操作系统 | Windows/macOS/Linux 版本与 build |
+| CPU / 内存 | CPU 型号或稳定标识、物理内存容量 |
+| WebView | WebView2/WebKit/WKWebView 版本 |
+| 图形环境 | GPU 型号、硬件加速或 fallback、驱动版本 |
+| 会话环境 | 本地/远程桌面、电源模式、前后台状态 |
+| 安全软件 | 实时防护开启/关闭；只写类别和状态，不写产品账户信息 |
+| 显示 | 分辨率、缩放、刷新率 |
+| Fixture | 生成器/测试版本、seed、页/节点/边/字节/delta 数 |
+
+Windows 参考机应同时记录杀软开启和 GPU fallback/远程桌面 smoke；macOS/Linux 若没有真实 runner，发布前状态保持 `Pending`。
+
+## 4. 固定 fixture
+
+fixture 必须由确定性生成器或测试内存数据创建，固定 seed 为 `llm-wiki-perf-v1`，不得提交生成后的巨型目录或 trace。
+
+| Fixture ID | 固定规模与内容 | 用途 |
+| --- | --- | --- |
+| `wiki-500-v1` | 原生测试知识库；500 个约 4 KiB Markdown 页面，稳定双向链接；无私人内容 | 普通板块重入、500 页 Graph |
+| `graph-10k-v1` | 10,000 节点、40,000 条确定性边；测试内存数据或临时 cache | 压力 smoke，不作为普通产品门槛 |
+| `chat-256k-1k-v1` | 最终 UTF-8 可见文本 262,144 B，恰好 1,000 个有序 delta，包含 CJK、代码块、数学和长段落 | 正常长流 publication/解析/滚动 |
+| `chat-256k-10k-v1` | 与上一项逐字节相同终态，恰好 10,000 个有序 delta | 高频 delta 压力与尾部完整性 |
+| `chat-history-long-v1` | 100 轮合成长 Markdown 历史，总可见文本至少 1 MiB | 历史渲染与生成期间输入 |
+| `route-loop-20-v1` | 同一 `wiki-500-v1` 项目连续执行 20 次 Wiki → Chat → Graph → Exports → Lint → Wiki | 热切换、IPC、spinner、状态恢复 |
+| `splitter-2s-v1` | sidebar、right panel、Wiki tree、Exports list、Lint details 分别连续拖动 2 秒 | input-to-paint、commit/storage、long task |
+
+生成器必须写入显式临时目录并在运行结束后删除；不得覆盖现有目录。Chat fixture 的 1,000/10,000 delta 由同一最终 byte buffer 按确定性边界切分，验收时重新拼接并做 byte equality。
+
+## 5. 冷/热定义与采样规则
+
+- **Cold start**：结束所有应用进程，确认无后台 WebView；使用新启动的 packaged binary。不得清理操作系统文件缓存冒充普通冷启动；若额外测试“清 OS cache”，须单独命名。
+- **Warm start**：同一构建、同一 fixture 已成功打开一次，正常退出后 30 秒内再次启动；不修改项目文件或设置。
+- **Cold route**：该进程中首次进入目标板块。
+- **Hot return**：目标板块至少成功显示一次，期间未修改 fixture，按规定路由序列返回。
+
+启动各做至少 10 次；板块往返、Graph 热返回、Chat 和 splitter 各做至少 20 次。原始样本按场景分开，失败/取消样本不得静默删除；异常值只有在记录明确外部原因后才可另表展示。
+
+统计采用 nearest-rank：排序后 `p50 = x[ceil(0.50 × n)]`，`p95 = x[ceil(0.95 × n)]`（下标从 1 开始）。同时记录 n、min、max 和失败数。持续动作的 input-to-paint 对每个输入样本计算，再汇总 p50/p95；不要先平均每次运行再算百分位。
+
+## 6. Trace 起止与场景步骤
+
+每次 trace 开始前静置 2 秒，结束动作完成后再静置 2 秒。使用相同窗口尺寸和系统缩放。
+
+| 场景 | Trace 起点 | 固定动作 | Trace 终点 / 记录项 |
+| --- | --- | --- | --- |
+| Cold/warm 启动 | 启动 packaged binary 前 | 打开应用并等待 shell 可交互 | 首次 shell paint、interactive、long task、入口文件读取 |
+| 项目状态探测 | 点击打开 `wiki-500-v1` 前 | 打开项目并保持 Dashboard | shell 稳定；Git/Agent/provider IPC 次数和完成时间 |
+| 普通板块热切换 | 第一次 Wiki 已稳定 | 执行 `route-loop-20-v1` | 每次导航到可交互、全页 loading、完整扫描 IPC、p50/p95 |
+| Graph | 点击 Graph 前 | 首次进入、操作选择/过滤/搜索/镜头，离开后返回 | 首次/热返回、500 页 p95、状态恢复；另跑 10k smoke |
+| Chat stream | 发送 fixture 消息前 | 回放指定 1k/10k delta；中途输入、拖 pane、滚离底部 | terminal 后持久会话稳定；publication、React commit、parse、scroll、GC、byte equality |
+| Splitter | pointerdown 前 | 每种 splitter 按固定路径拖 2 秒 | pointerup 后一帧；input-to-paint、store/storage 次数、long task |
+
+用户主动滚离 Chat 底部后必须单独标记，确认后续 delta 不强制拉回。Chat terminal 分发前的同步 flush 作为一次允许的额外 publication 单独计数。
+
+## 7. 指标与通过条件
+
+| 指标 | 采集方式 | 门槛 |
+| --- | --- | --- |
+| 初始 JS 闭包 | `npm run build` 后 `npm run check:bundle` | Batch 0 非回归：raw ≤ 1,610,000 B；gzip ≤ 470,000 B；JS 文件 ≤ 45 |
+| 项目 facts IPC | Tauri command 计数/脱敏 trace | 首次全部 shell consumer：Git/Agent/provider 各 1 次；新鲜命中 0 次新增 |
+| Pane 写入 | Profiler + store/storage spy + trace | 连续 drag 只 commit 1 次、`localStorage.setItem` 1 次；move 不直接写 store |
+| Chat publication | store instrumentation | ≤ 25 Hz，terminal 前允许额外 flush 1 次；10,000 delta 终态 byte-equal |
+| 普通热切换 | User Timing / trace | 新鲜 cache p95 ≤ 150 ms，无全页 loading、无重复完整扫描 |
+| 500 页 Graph 热返回 | User Timing / trace | p95 ≤ 500 ms，选择/过滤/搜索/镜头可预测恢复 |
+| 主线程输入 | Performance trace | 本轮路径无 >50 ms long task；input-to-paint p95 ≤ 100 ms |
+
+Batch 5 需要相对本文件 Batch 0 基线至少降低 raw 30%、gzip 25%，并把预算收紧到实测值上方的小余量；不得通过全量 preload、粗粒度 `manualChunks` 或增加单一巨大 vendor chunk 达标。
+
+## 8. Batch 0 重建基线（2026-08-15）
+
+本节只记录 production bundle；尚未执行 packaged Tauri 交互测量。
+
+| 字段 | 当前记录 |
+| --- | --- |
+| Commit | `1ea9ad2d2609756a16fc270cdeca3b7bd9dffed1`，另含 Batch 0 构建门禁的未提交改动；无运行时 feature 改动 |
+| Build | `npm run build`，production/minified；app `0.1.0`，Tauri CLI `2.9.5` |
+| OS | Windows NT `10.0.26200.0` |
+| CPU | `AMD64 Family 26 Model 36 Stepping 0` |
+| 内存 / WebView2 / GPU / 显示 / 杀软 / RDP | `Pending` |
+| Packaged 指标 | `Pending`；不得用本次 Vite build 时间代替 |
+
+机器可读图为构建产物 `dist/bundle-graph.json`（被 `dist/` 忽略，不提交）；模块路径相对仓库或归一为 `node_modules/...`，不写本机绝对路径。
+
+| 指标 | 重建值 | Batch 0 上限 |
+| --- | ---: | ---: |
+| 初始 JS 文件数 | 45 | 45 |
+| 初始 JS raw | 1,593,268 B | 1,610,000 B |
+| 初始 JS gzip | 462,400 B | 470,000 B |
+| 初始 CSS 文件数 | 1 | 仅记录 |
+| 初始 CSS raw | 244,349 B | 仅记录 |
+| 初始 CSS gzip | 52,937 B | 仅记录 |
+
+最大静态可达模块贡献者依次为 KaTeX、React DOM client、英文 locale、中文 locale 和 i18next；这些是 Batch 5 的依赖泄漏诊断输入，不在 Batch 0 改动或拆包。
+
+## 9. 结果记录模板
+
+```text
+Commit / build / packaged:
+OS / CPU / RAM / WebView / GPU / AV / RDP / display:
+Fixture ID / seed / exact counts:
+Scenario / repetitions / failures:
+Metric: min / p50 / p95 / max / unit:
+Long tasks (>50 ms):
+IPC / store publications / React commits / storage writes:
+Correctness checks (byte equality, state restoration, focus/ARIA):
+Trace filename (desensitized) / notes / Pending items:
+```
