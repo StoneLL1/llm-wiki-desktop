@@ -11,21 +11,36 @@ on:
         description: Public key ID already committed to capabilities/trusted-keys.json
         required: true
         type: string
-      base_url:
-        description: Optional HTTPS asset base; defaults to this repository's GitHub release
-        required: false
-        type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: capability-release-${{ inputs.release_tag }}
   cancel-in-progress: false
 
 jobs:
+  preflight:
+    name: Validate frozen release coordinate
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout exact default-branch commit with release history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Require the canonical repository, existing tag, version, and exact commit
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 'StoneLL1/llm-wiki-desktop'
+          node scripts/check-release-version.mjs --tag "$RELEASE_TAG"
+          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$GITHUB_SHA"
+
   node-packs:
     name: Node packs (${{ matrix.target }})
+    needs: preflight
     runs-on: ${{ matrix.os }}
     environment: capability-release
     strategy:
@@ -158,7 +173,6 @@ jobs:
         shell: pwsh
         env:
           LLM_WIKI_CAPABILITY_SIGNING_KEY_PKCS8_HEX: ${{ secrets.LLM_WIKI_CAPABILITY_SIGNING_KEY_PKCS8_HEX }}
-          BASE_URL_INPUT: ${{ inputs.base_url }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           SIGNING_KEY_ID: ${{ inputs.signing_key_id }}
         run: |
@@ -172,10 +186,7 @@ jobs:
           }
           $stageRoot = Join-Path $env:RUNNER_TEMP 'capability-stage'
           $dist = Join-Path $env:GITHUB_WORKSPACE 'capability-dist'
-          $baseUrl = $env:BASE_URL_INPUT.TrimEnd('/')
-          if ([string]::IsNullOrWhiteSpace($baseUrl)) {
-            $baseUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG"
-          }
+          $baseUrl = "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/$env:RELEASE_TAG"
           foreach ($pack in @('browser-runtime', 'browser-runtime-lite', 'media-metadata')) {
             & '${{ matrix.release_tool }}' assemble `
               --template "capabilities/$pack/manifest.json" `
@@ -204,6 +215,7 @@ jobs:
 
   sensevoice-packs:
     name: SenseVoice pack (${{ matrix.target }})
+    needs: preflight
     runs-on: ${{ matrix.os }}
     environment: capability-release
     strategy:
@@ -288,7 +300,6 @@ jobs:
         shell: pwsh
         env:
           LLM_WIKI_CAPABILITY_SIGNING_KEY_PKCS8_HEX: ${{ secrets.LLM_WIKI_CAPABILITY_SIGNING_KEY_PKCS8_HEX }}
-          BASE_URL_INPUT: ${{ inputs.base_url }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           SIGNING_KEY_ID: ${{ inputs.signing_key_id }}
         run: |
@@ -302,10 +313,7 @@ jobs:
           }
           $stageRoot = Join-Path $env:RUNNER_TEMP 'sensevoice-stage'
           $dist = Join-Path $env:GITHUB_WORKSPACE 'capability-dist'
-          $baseUrl = $env:BASE_URL_INPUT.TrimEnd('/')
-          if ([string]::IsNullOrWhiteSpace($baseUrl)) {
-            $baseUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG"
-          }
+          $baseUrl = "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/$env:RELEASE_TAG"
           $modelBytes = (Get-Item -LiteralPath (Join-Path $stageRoot 'models/model.int8.onnx')).Length
           & '${{ matrix.release_tool }}' assemble `
             --template capabilities/asr-sensevoice-small/manifest.json `
@@ -334,6 +342,7 @@ jobs:
 
   ocr-packs:
     name: RapidOCR pack (${{ matrix.target }})
+    needs: preflight
     runs-on: ${{ matrix.os }}
     environment: capability-release
     strategy:
@@ -421,7 +430,6 @@ jobs:
         shell: pwsh
         env:
           LLM_WIKI_CAPABILITY_SIGNING_KEY_PKCS8_HEX: ${{ secrets.LLM_WIKI_CAPABILITY_SIGNING_KEY_PKCS8_HEX }}
-          BASE_URL_INPUT: ${{ inputs.base_url }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           SIGNING_KEY_ID: ${{ inputs.signing_key_id }}
         run: |
@@ -435,10 +443,7 @@ jobs:
           }
           $stageRoot = Join-Path $env:RUNNER_TEMP 'rapidocr-stage'
           $dist = Join-Path $env:GITHUB_WORKSPACE 'capability-dist'
-          $baseUrl = $env:BASE_URL_INPUT.TrimEnd('/')
-          if ([string]::IsNullOrWhiteSpace($baseUrl)) {
-            $baseUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG"
-          }
+          $baseUrl = "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/$env:RELEASE_TAG"
           $modelBytes = (Get-ChildItem -LiteralPath (Join-Path $stageRoot 'models') -Filter '*.onnx' -File | Measure-Object -Property Length -Sum).Sum
           & '${{ matrix.release_tool }}' assemble `
             --template capabilities/ocr-cjk-accurate/manifest.json `
@@ -470,6 +475,8 @@ jobs:
     needs: [node-packs, sensevoice-packs, ocr-packs]
     runs-on: ubuntu-24.04
     environment: capability-release
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -526,5 +533,11 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || { echo 'release_tag contains unsupported characters.' >&2; exit 2; }
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --notes 'Qualified LLM Wiki Desktop capability packs.'
+          is_draft="$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft 2>/dev/null || true)"
+          if [[ -z "$is_draft" ]]; then
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "$RELEASE_TAG" --notes 'Qualified LLM Wiki Desktop capability packs.'
+          elif [[ "$is_draft" != 'true' ]]; then
+            echo 'Capability assets may only be uploaded to a draft release.' >&2
+            exit 1
+          fi
           find capability-dist -maxdepth 1 -type f \( -name '*.zip' -o -name 'install-catalog.json' \) -print0 | xargs -0 gh release upload "$RELEASE_TAG"

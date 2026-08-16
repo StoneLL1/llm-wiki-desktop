@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "redlines": [
+    {
+      "id": "capability-release-catalog",
+      "ownerBatch": "3A",
+      "expected": "red"
+    },
+    {
+      "id": "signed-updater-foundation",
+      "ownerBatch": "4A",
+      "expected": "red"
+    },
+    {
+      "id": "real-update-offer",
+      "ownerBatch": "4B",
+      "expected": "red"
+    },
+    {
+      "id": "structured-backend-error-presentation",
+      "ownerBatch": "1",
+      "expected": "red"
+    },
+    {
+      "id": "provider-secret-origin-binding",
+      "ownerBatch": "2A",
+      "expected": "red"
+    },
+    {
+      "id": "mutation-write-authority-inventory",
+      "ownerBatch": "2B",
+      "expected": "red"
+    },
+    {
+      "id": "atomic-stable-release-workflow",
+      "ownerBatch": "5",
+      "expected": "red"
+    }
+  ]
+}

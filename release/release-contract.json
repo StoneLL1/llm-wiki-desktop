@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "repository": {
+    "slug": "StoneLL1/llm-wiki-desktop",
+    "visibility": "public",
+    "originHttps": "https://github.com/StoneLL1/llm-wiki-desktop.git",
+    "defaultBranch": "master",
+    "releaseCommitPolicy": "tag-commit-must-be-ancestor-of-default-branch"
+  },
+  "application": {
+    "productName": "LLM Wiki Desktop",
+    "identifier": "com.llmwiki.desktop",
+    "firstPublicVersion": "0.1.0"
+  },
+  "tags": {
+    "stablePattern": "^app-v([0-9]+\\.[0-9]+\\.[0-9]+)$",
+    "prereleasePattern": "^app-v([0-9]+\\.[0-9]+\\.[0-9]+)-rc\\.([1-9][0-9]*)$",
+    "firstStable": "app-v0.1.0"
+  },
+  "endpoints": {
+    "stableUpdaterManifest": "https://github.com/StoneLL1/llm-wiki-desktop/releases/latest/download/latest.json",
+    "capabilityAssetBaseTemplate": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/<exact-tag>/"
+  },
+  "publishing": {
+    "latestManifestChannel": "stable-only",
+    "stableEnvironment": "desktop-release",
+    "capabilityEnvironment": "capability-release",
+    "approvalOwner": null,
+    "approvalOwnerRole": "StoneLL1 repository owner",
+    "approvalOwnerStatus": "pending-human-input",
+    "environmentReviewerStatus": "unverified"
+  },
+  "signing": {
+    "privateKeyPolicy": "protected-environment-secrets-and-offline-backup-only",
+    "updater": {
+      "publicKey": null,
+      "owner": null,
+      "ownerRole": "StoneLL1 repository owner",
+      "status": "pending-human-input"
+    },
+    "capability": {
+      "publicKeyId": null,
+      "owner": null,
+      "ownerRole": "StoneLL1 repository owner",
+      "status": "pending-human-input"
+    },
+    "windows": {
+      "publisherSubject": null,
+      "owner": null,
+      "ownerRole": "StoneLL1 repository owner",
+      "status": "pending-human-input"
+    },
+    "apple": {
+      "bundleIdentifier": "com.llmwiki.desktop",
+      "teamId": null,
+      "owner": null,
+      "ownerRole": "StoneLL1 repository owner",
+      "status": "pending-human-input"
+    }
+  }
+}

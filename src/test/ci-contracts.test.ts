@@ -86,13 +86,13 @@ describe("CI validation contract", () => {
 
     expect(packageJson.scripts.check).toBe("node scripts/run-checks.mjs");
     expect(checkOrchestrator).toContain(
-      'scripts: ["check:import-source-media", "test", "test:capability-tools", "lint", "build", "check:bundle", "check:console"]',
+      'scripts: ["check:release-config", "test:final-four-redlines", "check:import-source-media", "test", "test:capability-tools", "lint", "build", "check:bundle", "check:console"]',
     );
     expect(checkOrchestrator).toContain(
       'scripts: ["check:rust:gui", "test:rust"]',
     );
     expect(checkOrchestrator).toContain(
-      'scripts: ["lint", "build", "check:bundle", "check:console"]',
+      'scripts: ["check:release-config", "test:final-four-redlines", "lint", "build", "check:bundle", "check:console"]',
     );
     expect(checkOrchestrator).toContain(
       'scripts: ["check:rust:core"]',
@@ -105,6 +105,12 @@ describe("CI validation contract", () => {
     );
     expect(packageJson.scripts["check:import-source-media"]).toBe(
       "node scripts/check-import-source-media-flow.mjs",
+    );
+    expect(packageJson.scripts["check:release-config"]).toBe(
+      "node --test --test-isolation=none scripts/check-release-config.node-test.mjs && node scripts/check-release-version.mjs",
+    );
+    expect(packageJson.scripts["test:final-four-redlines"]).toBe(
+      "node --test --test-isolation=none scripts/check-final-four-redlines.node-test.mjs",
     );
     expect(packageJson.scripts["check:rust:gui"]).toBe(
       "cargo check --manifest-path src-tauri/Cargo.toml",
@@ -139,6 +145,8 @@ describe("CI validation contract", () => {
     expect(workflow).toContain("libwebkit2gtk-4.1-dev");
     expectCommandsInOrder(runCommands, [
       "npm ci",
+      "npm run check:release-config",
+      "npm run test:final-four-redlines",
       "npm run check:import-source-media",
       "npm run test",
       "npm run test:capability-tools",
