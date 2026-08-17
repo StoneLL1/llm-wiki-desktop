@@ -5,14 +5,14 @@ use std::sync::{Mutex, OnceLock};
 use crate::errors::BackendError;
 use crate::models::agent::{AgentConfig, AgentKind};
 use crate::models::import_v2_agent::AgentAssistancePolicy;
-use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
+use crate::models::llm::{LlmProviderConfig, LlmProviderKind, ProviderCredentialBinding};
 use crate::models::paths::ProjectContext;
 use crate::models::settings::{
     AgentLintRepairAttestation, AgentLintRepairAttestationLifecycle,
     AgentLintRepairMutationJournal, AgentLintRepairMutationPhase, ChatConvenienceAuthorization,
     CloseBehavior, GlobalSettingsFile, GlobalUiPreferences, ProjectSettingsFile, Settings,
 };
-use crate::services::{FileStore, SecretService};
+use crate::services::FileStore;
 
 pub struct SettingsService {
     config_dir: PathBuf,
@@ -63,6 +63,15 @@ impl SettingsService {
         context: &ProjectContext,
         settings: &Settings,
     ) -> Result<Settings, BackendError> {
+        self.save_settings_internal(context, settings, false)
+    }
+
+    fn save_settings_internal(
+        &self,
+        context: &ProjectContext,
+        settings: &Settings,
+        allow_provider_binding_update: bool,
+    ) -> Result<Settings, BackendError> {
         let store = FileStore;
         store.ensure_absolute_dir(&self.config_dir)?;
         let _guard = self.lock_global_settings()?;
@@ -80,7 +89,19 @@ impl SettingsService {
             context.layout.agent_config_path.as_deref(),
             "agent configuration",
         )?;
-        store.write_json_atomic(context, settings_path, &settings.to_project_file())?;
+        let mut project = settings.to_project_file();
+        if !allow_provider_binding_update {
+            let absolute_settings_path = context.resolve_project_path(settings_path)?;
+            if absolute_settings_path.exists() {
+                let existing: ProjectSettingsFile = store.read_json(context, settings_path)?;
+                project.llm_providers = existing.llm_providers;
+                project.provider_credential_bindings = existing.provider_credential_bindings;
+            } else {
+                project.llm_providers.clear();
+                project.provider_credential_bindings.clear();
+            }
+        }
+        store.write_json_atomic(context, settings_path, &project)?;
         store.write_json_atomic(
             context,
             agent_config_path,
@@ -175,14 +196,40 @@ impl SettingsService {
         self.save_settings(context, &settings)
     }
 
-    pub fn get_provider_secret_status(
+    pub fn save_provider_with_binding(
         &self,
-        secret_service: &SecretService,
+        context: &ProjectContext,
+        config: LlmProviderConfig,
+        binding: ProviderCredentialBinding,
+    ) -> Result<Settings, BackendError> {
+        let mut settings = self.read_settings(context)?;
+        settings
+            .llm_providers
+            .retain(|item| item.provider != config.provider);
+        settings.llm_providers.push(config);
+        settings
+            .llm_providers
+            .sort_by_key(|item| item.provider.credential_account().to_string());
+        settings
+            .provider_credential_bindings
+            .retain(|item| item.provider_kind != binding.provider_kind);
+        settings.provider_credential_bindings.push(binding);
+        settings
+            .provider_credential_bindings
+            .sort_by_key(|item| item.provider_kind.binding_slug().to_string());
+        self.save_settings_internal(context, &settings, true)
+    }
+
+    pub fn provider_credential_binding(
+        &self,
+        context: &ProjectContext,
         provider: LlmProviderKind,
-    ) -> Result<Option<String>, BackendError> {
-        Ok(secret_service
-            .get(provider)?
-            .map(|_| "configured".to_string()))
+    ) -> Result<Option<ProviderCredentialBinding>, BackendError> {
+        Ok(self
+            .read_settings(context)?
+            .provider_credential_bindings
+            .into_iter()
+            .find(|binding| binding.provider_kind == provider))
     }
 
     pub fn read_global_settings(&self) -> Result<GlobalSettingsFile, BackendError> {
@@ -1086,7 +1133,7 @@ mod tests {
 
     use super::SettingsService;
     use crate::models::agent::{AgentConfig, AgentKind};
-    use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
+    use crate::models::llm::{LlmProviderConfig, LlmProviderKind, ProviderCredentialBinding};
     use crate::models::paths::ProjectContext;
     use crate::models::settings::{
         AgentLintRepairAttestationLifecycle, AgentLintRepairMutationPhase,
@@ -1138,15 +1185,37 @@ mod tests {
         settings.language = "zh-CN".into();
         settings.check_updates = false;
         settings.agent_default = Some(AgentKind::Codex);
-        settings.llm_providers = vec![LlmProviderConfig {
+        let provider = LlmProviderConfig {
             provider: LlmProviderKind::OpenAi,
             model: "gpt-4.1".into(),
             base_url: "https://api.openai.com".into(),
             context_window: 128_000,
             enabled: true,
-        }];
+        };
 
         service.save_settings(&context, &settings).unwrap();
+        let config_id = uuid::Uuid::new_v4().to_string();
+        service
+            .save_provider_with_binding(
+                &context,
+                provider,
+                ProviderCredentialBinding {
+                    credential_account_id: SecretService::provider_binding_account_id(
+                        &context,
+                        LlmProviderKind::OpenAi,
+                        &config_id,
+                        "https://api.openai.com",
+                        1,
+                    )
+                    .unwrap(),
+                    config_id,
+                    provider_kind: LlmProviderKind::OpenAi,
+                    canonical_origin: "https://api.openai.com".into(),
+                    approved_at: None,
+                    revision: 1,
+                },
+            )
+            .unwrap();
 
         let project_value: Value = FileStore.read_json(&context, ".app/settings.json").unwrap();
         let global_value: Value = FileStore
@@ -1162,6 +1231,47 @@ mod tests {
         assert_eq!(global_value["language"], "zh-CN");
         assert_eq!(global_value["checkUpdates"], false);
 
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn generic_settings_save_cannot_replace_backend_provider_state() {
+        let (context, root, config_dir) = tmp_paths("protected-provider-binding");
+        let service = SettingsService::with_config_dir(config_dir.clone());
+        let provider = LlmProviderConfig {
+            provider: LlmProviderKind::Custom,
+            model: "model".into(),
+            base_url: "https://provider.example".into(),
+            context_window: 8_000,
+            enabled: true,
+        };
+        let binding = ProviderCredentialBinding {
+            config_id: uuid::Uuid::new_v4().to_string(),
+            provider_kind: LlmProviderKind::Custom,
+            canonical_origin: "https://provider.example".into(),
+            credential_account_id: "backend-owned-account".into(),
+            approved_at: None,
+            revision: 3,
+        };
+        service
+            .save_provider_with_binding(&context, provider.clone(), binding.clone())
+            .unwrap();
+
+        let mut submitted = service.read_settings(&context).unwrap();
+        submitted.llm_providers[0].base_url = "https://attacker.example".into();
+        submitted.provider_credential_bindings[0].config_id = "attacker-controlled".into();
+        submitted.provider_credential_bindings[0].canonical_origin =
+            "https://attacker.example".into();
+        service.save_settings(&context, &submitted).unwrap();
+
+        assert_eq!(
+            service
+                .provider_credential_binding(&context, LlmProviderKind::Custom)
+                .unwrap(),
+            Some(binding)
+        );
+        assert_eq!(service.list_providers(&context).unwrap(), vec![provider]);
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(config_dir).unwrap();
     }
@@ -1211,22 +1321,6 @@ mod tests {
 
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(config_dir).unwrap();
-    }
-
-    #[test]
-    fn provider_secret_status_never_reveals_any_secret_characters() {
-        let service = SettingsService::default();
-        let secrets = SecretService::memory();
-        secrets
-            .set(LlmProviderKind::Anthropic, "anthropic-secret-9876")
-            .unwrap();
-
-        let status = service
-            .get_provider_secret_status(&secrets, LlmProviderKind::Anthropic)
-            .unwrap();
-
-        assert_eq!(status.as_deref(), Some("configured"));
-        assert!(!status.unwrap().contains("9876"));
     }
 
     #[test]

@@ -29,13 +29,12 @@ test("quarantined redlines cannot disappear or turn green without updating their
 
 test("completed owner contracts turn green while later batches remain red", () => {
   const actual = evaluateFinalFourRedlines(repositoryRoot);
+  const completed = new Set([
+    "structured-backend-error-presentation",
+    "provider-secret-origin-binding",
+  ]);
   assert.equal(
-    actual.find(({ id }) => id === "structured-backend-error-presentation")?.state,
-    "green",
-  );
-  assert.equal(
-    actual.filter(({ id }) => id !== "structured-backend-error-presentation")
-      .every(({ state }) => state === "red"),
+    actual.every(({ id, state }) => state === (completed.has(id) ? "green" : "red")),
     true,
   );
   assert.equal(actual.every(({ detail }) => detail.length > 30), true);

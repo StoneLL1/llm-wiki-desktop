@@ -15,6 +15,18 @@ pub struct SessionWebTarget {
     pub public: NormalizedWebUrl,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderNetworkClass {
+    PublicHttps,
+    LoopbackHttp,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderNetworkTarget {
+    pub session: SessionWebTarget,
+    pub class: ProviderNetworkClass,
+}
+
 #[derive(Debug, Clone)]
 pub struct PrivateTargetGrant {
     pub item_id: String,
@@ -30,46 +42,69 @@ pub struct UrlPolicy;
 
 impl UrlPolicy {
     pub fn normalize_for_session(&self, raw: &str) -> Result<SessionWebTarget, BackendError> {
-        let mut request_url = Url::parse(raw).map_err(|_| rejected("URL is invalid."))?;
-        if !matches!(request_url.scheme(), "http" | "https") {
-            return Err(rejected("Only HTTP and HTTPS URLs are allowed."));
-        }
-        if !request_url.username().is_empty() || request_url.password().is_some() {
-            return Err(rejected("URL user information is not allowed."));
-        }
-        let host = request_url
-            .host_str()
-            .ok_or_else(|| rejected("URL host is required."))?
-            .trim_end_matches('.')
-            .to_ascii_lowercase();
-        if matches!(request_url.host(), Some(Host::Domain(_))) {
-            request_url
-                .set_host(Some(&host))
-                .map_err(|_| rejected("URL host is invalid."))?;
-        }
-        if host == "localhost" || host.ends_with(".localhost") {
-            return Err(rejected("Local targets are blocked."));
-        }
-        request_url.set_fragment(None);
-        let mut public = request_url.clone();
-        let pairs = request_url
-            .query_pairs()
-            .map(|(k, v)| (k.into_owned(), v.into_owned()))
-            .collect::<Vec<_>>();
-        public.set_query(None);
-        for (key, value) in pairs {
-            if is_public_key(&host, &key) {
-                public.query_pairs_mut().append_pair(&key, &value);
+        normalize_http_target(raw, false)
+    }
+
+    pub fn normalize_provider_endpoint(
+        &self,
+        raw: &str,
+    ) -> Result<ProviderNetworkTarget, BackendError> {
+        let session = normalize_http_target(raw, true)?;
+        let loopback = is_syntactic_loopback(&session.request_url);
+        let class = match (session.request_url.scheme(), loopback) {
+            ("http", true) => ProviderNetworkClass::LoopbackHttp,
+            ("https", false) => ProviderNetworkClass::PublicHttps,
+            ("http", false) => {
+                return Err(private_target_blocked(
+                    "Plain HTTP provider endpoints are allowed only on loopback.",
+                ));
+            }
+            ("https", true) => {
+                return Err(private_target_blocked(
+                    "Local provider endpoints must use explicit loopback HTTP.",
+                ));
+            }
+            _ => return Err(rejected("Only HTTP and HTTPS URLs are allowed.")),
+        };
+        Ok(ProviderNetworkTarget { session, class })
+    }
+
+    pub fn validate_provider_resolution(
+        &self,
+        target: &ProviderNetworkTarget,
+        resolved: &[IpAddr],
+        connected: IpAddr,
+        trusted_public_host: bool,
+    ) -> Result<(), BackendError> {
+        match target.class {
+            ProviderNetworkClass::PublicHttps => self.validate_resolved_target_for_fetch(
+                &target.session,
+                resolved,
+                connected,
+                None,
+                "provider",
+                trusted_public_host,
+            ),
+            ProviderNetworkClass::LoopbackHttp => {
+                if resolved.is_empty()
+                    || !resolved.contains(&connected)
+                    || !resolved.iter().copied().all(is_strict_loopback_ip)
+                {
+                    return Err(private_target_blocked(
+                        "The local provider name resolved outside loopback.",
+                    ));
+                }
+                Ok(())
             }
         }
-        Ok(SessionWebTarget {
-            request_url,
-            public: NormalizedWebUrl {
-                public_url: public.to_string(),
-                host,
-                scheme: public.scheme().into(),
-            },
-        })
+    }
+
+    pub fn canonical_origin(&self, target: &ProviderNetworkTarget) -> String {
+        target.session.request_url.origin().ascii_serialization()
+    }
+
+    pub fn public_persistence_url<'a>(&self, target: &'a SessionWebTarget) -> &'a str {
+        &target.public.public_url
     }
 
     pub fn validate_resolved_target(
@@ -124,10 +159,63 @@ impl UrlPolicy {
             .map_err(|_| rejected("Redirect URL is invalid."))?;
         self.normalize_for_session(joined.as_str())
     }
+}
 
-    pub fn public_persistence_url<'a>(&self, target: &'a SessionWebTarget) -> &'a str {
-        &target.public.public_url
+fn normalize_http_target(raw: &str, allow_local: bool) -> Result<SessionWebTarget, BackendError> {
+    let mut request_url = Url::parse(raw).map_err(|_| rejected("URL is invalid."))?;
+    if !matches!(request_url.scheme(), "http" | "https") {
+        return Err(rejected("Only HTTP and HTTPS URLs are allowed."));
     }
+    if !request_url.username().is_empty() || request_url.password().is_some() {
+        return Err(rejected("URL user information is not allowed."));
+    }
+    let host = request_url
+        .host_str()
+        .ok_or_else(|| rejected("URL host is required."))?
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if matches!(request_url.host(), Some(Host::Domain(_))) {
+        request_url
+            .set_host(Some(&host))
+            .map_err(|_| rejected("URL host is invalid."))?;
+    }
+    if !allow_local && (host == "localhost" || host.ends_with(".localhost")) {
+        return Err(rejected("Local targets are blocked."));
+    }
+    request_url.set_fragment(None);
+    let mut public = request_url.clone();
+    let pairs = request_url
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect::<Vec<_>>();
+    public.set_query(None);
+    for (key, value) in pairs {
+        if is_public_key(&host, &key) {
+            public.query_pairs_mut().append_pair(&key, &value);
+        }
+    }
+    Ok(SessionWebTarget {
+        request_url,
+        public: NormalizedWebUrl {
+            public_url: public.to_string(),
+            host,
+            scheme: public.scheme().into(),
+        },
+    })
+}
+
+fn is_syntactic_loopback(url: &Url) -> bool {
+    match url.host() {
+        Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(ip)) => ip == Ipv4Addr::LOCALHOST,
+        Some(Host::Ipv6(ip)) => ip == Ipv6Addr::LOCALHOST,
+        None => false,
+    }
+}
+
+fn is_strict_loopback_ip(ip: IpAddr) -> bool {
+    matches!(ip, IpAddr::V4(v4) if v4 == Ipv4Addr::LOCALHOST)
+        || matches!(ip, IpAddr::V6(v6) if v6 == Ipv6Addr::LOCALHOST)
 }
 
 /// Fake-IP TUN resolvers commonly map public hostnames into the RFC 2544
@@ -193,7 +281,12 @@ fn blocked_v4(v: Ipv4Addr) -> bool {
         || o[0] >= 224
         || o == [169, 254, 169, 254]
         || o[0] == 100 && (64..=127).contains(&o[1])
+        || o[0..3] == [192, 0, 0]
+        || o[0..3] == [192, 0, 2]
+        || o[0..3] == [192, 88, 99]
         || o[0] == 198 && (o[1] == 18 || o[1] == 19)
+        || o[0..3] == [198, 51, 100]
+        || o[0..3] == [203, 0, 113]
 }
 fn blocked_v6(v: Ipv6Addr) -> bool {
     let s = v.segments();
@@ -203,6 +296,17 @@ fn blocked_v6(v: Ipv6Addr) -> bool {
         || (s[0] & 0xfe00) == 0xfc00
         || (s[0] & 0xffc0) == 0xfe80
         || (s[0] & 0xffc0) == 0xfec0
+        || s[..6] == [0, 0, 0, 0, 0, 0]
+        || s[..6] == [0x0064, 0xff9b, 0, 0, 0, 0]
+        || s[..3] == [0x0064, 0xff9b, 0x0001]
+        || s[0..4] == [0x0100, 0, 0, 0]
+        || s[..3] == [0x2001, 0x0002, 0]
+        || (s[0] == 0x2001 && s[1] == 0x0db8)
+        || (s[0] == 0x2001 && (s[1] & 0xfff0) == 0x0010)
+        || (s[0] == 0x2001 && (s[1] & 0xfff0) == 0x0020)
+        || s[0] == 0x2002
+        || (s[0] == 0x3fff && (s[1] & 0xf000) == 0)
+        || s[0] == 0x5f00
         || v.to_ipv4_mapped().is_some_and(blocked_v4)
 }
 fn rejected(message: &str) -> BackendError {

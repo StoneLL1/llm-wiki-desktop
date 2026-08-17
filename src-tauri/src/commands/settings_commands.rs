@@ -51,9 +51,45 @@ pub fn get_provider_secret_status(
     state: State<'_, AppState>,
     request: ProviderSecretStatusRequest,
 ) -> Result<Option<String>, BackendError> {
-    state
-        .settings_service
-        .get_provider_secret_status(&state.secret_service, request.provider)
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.require_external_ai_access(&context)?;
+    let config = crate::services::LlmService::list_providers(&context)?
+        .into_iter()
+        .find(|config| config.provider == request.provider)
+        .ok_or_else(|| {
+            BackendError::new(
+                "PROVIDER_CREDENTIAL_REAUTH_REQUIRED",
+                "Save this provider destination and authorize its credential before using it.",
+                true,
+                true,
+            )
+        })?;
+    let binding =
+        crate::services::LlmService::credential_binding(&context, &config)?.ok_or_else(|| {
+            BackendError::new(
+                "PROVIDER_CREDENTIAL_REAUTH_REQUIRED",
+                "Save this provider destination and authorize its credential before using it.",
+                true,
+                true,
+            )
+        })?;
+    if binding.config_id != request.config_id
+        || binding.revision != request.binding_revision
+        || binding.canonical_origin != request.expected_canonical_origin
+    {
+        return Err(BackendError::new(
+            "PROVIDER_CREDENTIAL_BINDING_CHANGED",
+            "The provider destination changed; review it and authorize the credential again.",
+            true,
+            true,
+        ));
+    }
+    Ok(crate::services::LlmService::bound_secret_available(
+        &context,
+        &state.secret_service,
+        &config,
+    )?
+    .then(|| "configured".to_string()))
 }
 
 #[tauri::command]

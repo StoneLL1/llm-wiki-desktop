@@ -36,6 +36,13 @@ const defaultBaseUrls: Record<LlmProviderKind, string> = {
   custom: "",
 };
 
+const providerBaseUrl = (
+  provider: LlmProviderKind,
+  saved?: string,
+): string => provider === "custom" || provider === "ollama"
+  ? saved ?? defaultBaseUrls[provider]
+  : defaultBaseUrls[provider];
+
 const defaultModels: Record<LlmProviderKind, string> = {
   open_ai: "gpt-5.4",
   anthropic: "claude-sonnet-4-6",
@@ -90,12 +97,13 @@ export function AiSettings({
   const [activeProvider, setActiveProvider] = useState<LlmProviderKind>("anthropic");
   const activeProviderStatus = providers.find((item) => item.config.provider === activeProvider);
   const [model, setModel] = useState(activeProviderStatus?.config.model ?? defaultModels.anthropic);
-  const [baseUrl, setBaseUrl] = useState(activeProviderStatus?.config.baseUrl ?? defaultBaseUrls.anthropic);
+  const [baseUrl, setBaseUrl] = useState(providerBaseUrl("anthropic", activeProviderStatus?.config.baseUrl));
   const [secret, setSecret] = useState("");
   const [formDirty, setFormDirty] = useState(false);
   const [providerSaved, setProviderSaved] = useState(false);
   const [secretSaved, setSecretSaved] = useState(false);
   const [testStatus, setTestStatus] = useState<string | null>(null);
+  const [pendingSecretApproval, setPendingSecretApproval] = useState(false);
   const [providerError, setProviderError] = useState<NormalizedBackendError | null>(null);
   const [failedProviderOperation, setFailedProviderOperation] = useState<FailedProviderOperation | null>(null);
   const secretInputRef = useRef<HTMLInputElement>(null);
@@ -114,7 +122,7 @@ export function AiSettings({
   useEffect(() => {
     if (formDirty) return;
     setModel(activeProviderModel ?? defaultModels[activeProvider]);
-    setBaseUrl(activeProviderBaseUrl ?? defaultBaseUrls[activeProvider]);
+    setBaseUrl(providerBaseUrl(activeProvider, activeProviderBaseUrl));
   }, [activeProvider, activeProviderBaseUrl, activeProviderModel, formDirty]);
 
   const providerStatuses = useMemo(
@@ -126,12 +134,13 @@ export function AiSettings({
     const status = providers.find((item) => item.config.provider === provider);
     setActiveProvider(provider);
     setModel(status?.config.model ?? defaultModels[provider]);
-    setBaseUrl(status?.config.baseUrl ?? defaultBaseUrls[provider]);
+    setBaseUrl(providerBaseUrl(provider, status?.config.baseUrl));
     setSecret("");
     setFormDirty(false);
     setProviderSaved(false);
     setSecretSaved(false);
     setTestStatus(null);
+    setPendingSecretApproval(false);
     setProviderError(null);
     setFailedProviderOperation(null);
   };
@@ -149,6 +158,7 @@ export function AiSettings({
       });
       setFormDirty(false);
       setProviderSaved(true);
+      setPendingSecretApproval(false);
     } catch (error) {
       setFailedProviderOperation("save_provider");
       setProviderError(normalizeBackendError(error, {
@@ -157,13 +167,33 @@ export function AiSettings({
     }
   };
 
-  const saveKey = async () => {
+  const saveKey = async (originApproved = false) => {
     setProviderError(null);
     setFailedProviderOperation(null);
+    const binding = activeProviderStatus?.credentialBinding;
+    if (!binding || formDirty) {
+      setFailedProviderOperation("save_provider");
+      setProviderError(normalizeBackendError({
+        code: "PROVIDER_CREDENTIAL_REAUTH_REQUIRED",
+        message: t("provider.binding.saveFirst"),
+        recoverable: true,
+        userActionRequired: true,
+      }, {
+        defaultSummaryKey: "backendError.summary.provider",
+        defaultActionKind: "retry",
+        defaultUserActionRequired: true,
+      }));
+      return;
+    }
+    if (activeProvider === "custom" && !activeProviderStatus?.hasSecret && !originApproved) {
+      setPendingSecretApproval(true);
+      return;
+    }
     try {
       await onSaveSecret(activeProvider, secret);
       setSecret("");
       setSecretSaved(true);
+      setPendingSecretApproval(false);
     } catch (error) {
       setFailedProviderOperation("save_secret");
       setProviderError(normalizeBackendError(error, {
@@ -410,8 +440,10 @@ export function AiSettings({
                   onChange={(event) => {
                     setFormDirty(true);
                     setProviderSaved(false);
+                    setPendingSecretApproval(false);
                     setBaseUrl(event.target.value);
                   }}
+                  readOnly={activeProvider !== "custom" && activeProvider !== "ollama"}
                 />
               </label>
               {activeProvider !== "ollama" ? (
@@ -436,7 +468,12 @@ export function AiSettings({
               <button type="button" className="settings-button" onClick={() => void saveProvider()}>
                 {t("provider.saveProvider")}
               </button>
-              <button type="button" className="settings-button settings-button--secondary" onClick={() => void testProvider()}>
+              <button
+                type="button"
+                className="settings-button settings-button--secondary"
+                onClick={() => void testProvider()}
+                disabled={formDirty || !activeProviderStatus?.credentialBinding}
+              >
                 {t("provider.test")}
               </button>
               {activeProvider !== "ollama" && secret ? (
@@ -450,6 +487,40 @@ export function AiSettings({
                 </button>
               ) : null}
             </div>
+            {pendingSecretApproval && activeProviderStatus?.credentialBinding ? (
+              <div
+                role="alertdialog"
+                aria-labelledby="provider-origin-approval-title"
+                aria-describedby="provider-origin-approval-description"
+                className="grid gap-2 rounded-[var(--radius-md)] border border-[var(--accent-border)] bg-[var(--accent-soft)] p-3 text-[12px]"
+              >
+                <strong id="provider-origin-approval-title">
+                  {t("provider.binding.reviewTitle")}
+                </strong>
+                <span id="provider-origin-approval-description">
+                  {t("provider.binding.reviewDescription")}
+                </span>
+                <code className="break-all font-mono text-[11px]">
+                  {activeProviderStatus.credentialBinding.canonicalOrigin}
+                </code>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    className="settings-button"
+                    onClick={() => void saveKey(true)}
+                  >
+                    {t("provider.binding.authorize")}
+                  </button>
+                  <button
+                    type="button"
+                    className="settings-button settings-button--secondary"
+                    onClick={() => setPendingSecretApproval(false)}
+                  >
+                    {t("common.cancel")}
+                  </button>
+                </div>
+              </div>
+            ) : null}
             {providerSaved ? <span className="settings-inline-status text-[var(--accent)]">{t("provider.settingsSaved")}</span> : null}
             {secretSaved ? <span className="settings-inline-status text-[var(--accent)]">{t("provider.keySaved")}</span> : null}
             {testStatus ? <span role="status" className="settings-inline-status">{testStatus}</span> : null}

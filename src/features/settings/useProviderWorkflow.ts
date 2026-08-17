@@ -8,7 +8,6 @@ import {
   type NormalizedBackendError,
 } from "../../lib/backendError";
 import {
-  invalidateAllProjectFacts,
   invalidateProjectFacts,
 } from "../../stores/projectFactsStore";
 import type {
@@ -73,15 +72,44 @@ export function useProviderWorkflow(
     [projectId, projectKey, refresh, rootPath],
   );
 
+  const boundRequest = useCallback((provider: LlmProviderKind) => {
+    const binding = capabilities.providers.find(
+      (status) => status.config.provider === provider,
+    )?.credentialBinding;
+    if (!binding) {
+      throw {
+        code: "PROVIDER_CREDENTIAL_REAUTH_REQUIRED",
+        message: "Save and review the provider destination before using its credential.",
+        recoverable: true,
+        userActionRequired: true,
+      };
+    }
+    return {
+      projectId,
+      projectRootPath: rootPath,
+      provider,
+      configId: binding.configId,
+      bindingRevision: binding.revision,
+      expectedCanonicalOrigin: binding.canonicalOrigin,
+    };
+  }, [capabilities.providers, projectId, rootPath]);
+
   const saveSecret = useCallback(
     async (provider: LlmProviderKind, secret: string) => {
       if (!hasTauri()) return;
       const requestKey = projectKey;
       try {
         await invoke("store_provider_secret", {
-          request: { provider, secret },
+          request: {
+            ...boundRequest(provider),
+            secret,
+          },
         });
-        invalidateAllProjectFacts(["providers"], "provider_secret_saved");
+        invalidateProjectFacts(
+          { projectId, rootPath },
+          ["providers"],
+          "provider_secret_saved",
+        );
         if (latestProjectKey.current === requestKey) {
           await refresh(true);
         }
@@ -89,7 +117,7 @@ export function useProviderWorkflow(
         throw providerWorkflowError(error);
       }
     },
-    [projectId, projectKey, refresh, rootPath],
+    [boundRequest, projectId, projectKey, refresh, rootPath],
   );
 
   const deleteSecret = useCallback(
@@ -98,9 +126,16 @@ export function useProviderWorkflow(
       const requestKey = projectKey;
       try {
         await invoke("delete_provider_secret", {
-          request: { provider, secret: null },
+          request: {
+            ...boundRequest(provider),
+            secret: null,
+          },
         });
-        invalidateAllProjectFacts(["providers"], "provider_secret_deleted");
+        invalidateProjectFacts(
+          { projectId, rootPath },
+          ["providers"],
+          "provider_secret_deleted",
+        );
         if (latestProjectKey.current === requestKey) {
           await refresh(true);
         }
@@ -108,7 +143,7 @@ export function useProviderWorkflow(
         throw providerWorkflowError(error);
       }
     },
-    [projectId, projectKey, refresh, rootPath],
+    [boundRequest, projectId, projectKey, refresh, rootPath],
   );
 
   const testProvider = useCallback(
@@ -120,7 +155,7 @@ export function useProviderWorkflow(
       const epoch = ++testEpoch.current;
       try {
         const result = await invoke<ProviderTestResult>("test_llm_provider", {
-          request: { projectId, projectRootPath: rootPath, config },
+          request: boundRequest(config.provider),
         });
         if (latestProjectKey.current !== requestKey || testEpoch.current !== epoch) {
           return { ok: false, message: t("provider.testUnavailable") };
@@ -130,7 +165,7 @@ export function useProviderWorkflow(
         throw providerWorkflowError(error);
       }
     },
-    [projectId, projectKey, rootPath, t],
+    [boundRequest, projectKey, t],
   );
 
   return {

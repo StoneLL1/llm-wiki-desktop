@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use crate::errors::BackendError;
-use crate::models::llm::LlmProviderKind;
+use crate::models::llm::{LlmProviderKind, ProviderCredentialBinding};
+use crate::models::paths::ProjectContext;
 
 const SERVICE_NAME: &str = "LLM Wiki Desktop";
 
@@ -20,6 +21,69 @@ impl SecretService {
 
     pub fn set(&self, provider: LlmProviderKind, secret: &str) -> Result<(), BackendError> {
         self.set_account(provider.credential_account(), secret)
+    }
+
+    pub fn provider_binding_account_id(
+        context: &ProjectContext,
+        provider: LlmProviderKind,
+        config_id: &str,
+        canonical_origin: &str,
+        revision: u64,
+    ) -> Result<String, BackendError> {
+        uuid::Uuid::parse_str(config_id).map_err(|_| binding_invalid())?;
+        if revision == 0 || canonical_origin.is_empty() || canonical_origin.len() > 512 {
+            return Err(binding_invalid());
+        }
+        let project_scope = binding_hash(&project_scope_key(context));
+        let origin_scope = binding_hash(canonical_origin);
+        let account = format!(
+            "provider.binding.v1.{project_scope}.{}.{config_id}.{origin_scope}.{revision}",
+            provider.binding_slug()
+        );
+        valid_account(&account)?;
+        Ok(account)
+    }
+
+    pub fn set_bound(
+        &self,
+        context: &ProjectContext,
+        binding: &ProviderCredentialBinding,
+        secret: &str,
+    ) -> Result<(), BackendError> {
+        let account = validate_binding_account(context, binding)?;
+        if binding.approved_at.is_none() {
+            return Err(binding_invalid());
+        }
+        self.set_account(&account, secret)
+    }
+
+    pub fn get_bound(
+        &self,
+        context: &ProjectContext,
+        binding: &ProviderCredentialBinding,
+    ) -> Result<Option<String>, BackendError> {
+        let account = validate_binding_account(context, binding)?;
+        if binding.approved_at.is_none() {
+            return Ok(None);
+        }
+        self.get_account(&account)
+    }
+
+    pub fn delete_bound(
+        &self,
+        context: &ProjectContext,
+        binding: &ProviderCredentialBinding,
+    ) -> Result<(), BackendError> {
+        let account = validate_binding_account(context, binding)?;
+        self.delete_account(&account)
+    }
+
+    pub fn mask_bound(
+        &self,
+        context: &ProjectContext,
+        binding: &ProviderCredentialBinding,
+    ) -> Result<Option<String>, BackendError> {
+        Ok(self.get_bound(context, binding)?.map(mask_secret))
     }
 
     pub fn set_account(&self, account: &str, secret: &str) -> Result<(), BackendError> {
@@ -81,18 +145,64 @@ impl SecretService {
     }
 
     pub fn mask(&self, provider: LlmProviderKind) -> Result<Option<String>, BackendError> {
-        Ok(self.get(provider)?.map(|secret| {
-            let suffix: String = secret
-                .chars()
-                .rev()
-                .take(4)
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect();
-            format!("\u{2022}\u{2022}\u{2022}\u{2022}{suffix}")
-        }))
+        Ok(self.get(provider)?.map(mask_secret))
     }
+}
+
+fn validate_binding_account(
+    context: &ProjectContext,
+    binding: &ProviderCredentialBinding,
+) -> Result<String, BackendError> {
+    let expected = SecretService::provider_binding_account_id(
+        context,
+        binding.provider_kind,
+        &binding.config_id,
+        &binding.canonical_origin,
+        binding.revision,
+    )?;
+    if binding.credential_account_id != expected {
+        return Err(binding_invalid());
+    }
+    Ok(expected)
+}
+
+fn project_scope_key(context: &ProjectContext) -> String {
+    let mut root = context.root.to_string_lossy().replace('\\', "/");
+    if cfg!(windows) {
+        root = root.to_ascii_lowercase();
+    }
+    format!("{}\0{root}", context.project_id)
+}
+
+fn binding_hash(value: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(value.as_bytes());
+    digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn mask_secret(secret: String) -> String {
+    let suffix: String = secret
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    format!("\u{2022}\u{2022}\u{2022}\u{2022}{suffix}")
+}
+
+fn binding_invalid() -> BackendError {
+    BackendError::new(
+        "PROVIDER_CREDENTIAL_BINDING_INVALID",
+        "The saved provider credential binding is invalid or changed.",
+        true,
+        true,
+    )
 }
 
 fn keyring_account(account: &str) -> Result<keyring::Entry, BackendError> {

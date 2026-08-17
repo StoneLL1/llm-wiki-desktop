@@ -1156,14 +1156,20 @@ impl RouteCatalog {
             .collect();
         let mut providers = Vec::new();
         for config in settings.llm_providers {
-            let configured_secret = !config.provider.requires_secret()
-                || environment
-                    .settings_service
-                    .get_provider_secret_status(environment.secret_service, config.provider)?
-                    .is_some();
+            let binding =
+                crate::services::LlmService::credential_binding(environment.context, &config)?;
+            let configured_secret = if project_access.trust == WorkflowProjectTrust::Trusted {
+                crate::services::LlmService::bound_secret_available(
+                    environment.context,
+                    environment.secret_service,
+                    &config,
+                )?
+            } else {
+                false
+            };
             let available = config.enabled
                 && !config.model.trim().is_empty()
-                && valid_provider_url(&config.base_url)
+                && crate::services::LlmService::validate_config(&config).is_ok()
                 && configured_secret;
             let revision = hex_sha256(
                 canonical_json(&(
@@ -1173,6 +1179,8 @@ impl RouteCatalog {
                     config.context_window,
                     config.enabled,
                     configured_secret,
+                    binding.as_ref().map(|binding| &binding.config_id),
+                    binding.as_ref().map(|binding| binding.revision),
                 ))
                 .map_err(serialization_error)?
                 .as_bytes(),
@@ -1923,11 +1931,6 @@ fn normalize_project_relative(value: &str) -> Result<String, BackendError> {
     Ok(normalized)
 }
 
-fn valid_provider_url(value: &str) -> bool {
-    let lower = value.trim().to_ascii_lowercase();
-    lower.starts_with("https://") || lower.starts_with("http://")
-}
-
 pub(crate) const REMOTE_PROVIDER_DISCLOSURE_REVISION: &str = "workflow-remote-provider-v1";
 
 pub(crate) fn route_is_remote_provider(
@@ -2236,8 +2239,7 @@ fn serialization_error(message: String) -> BackendError {
 #[cfg(test)]
 mod batch_zero_cost_tests {
     use super::*;
-    use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
-    use crate::models::settings::Settings;
+    use crate::models::llm::{LlmProviderConfig, LlmProviderKind, ProviderCredentialBinding};
     use crate::services::WorkflowService;
     use crate::tasks::TaskService;
     use std::collections::{HashSet, VecDeque};
@@ -2420,15 +2422,32 @@ mod batch_zero_cost_tests {
         let context = ProjectContext::new("provider-freshness", root.path().to_path_buf());
         let config = tempfile::tempdir().unwrap();
         let settings = SettingsService::with_config_dir(config.path().to_path_buf());
-        let mut saved = Settings::default();
-        saved.llm_providers.push(LlmProviderConfig {
+        let provider = LlmProviderConfig {
             provider: LlmProviderKind::OpenAi,
             model: "gpt-test".into(),
-            base_url: "https://api.openai.com/v1".into(),
+            base_url: "https://api.openai.com".into(),
             context_window: 8_192,
             enabled: true,
-        });
-        settings.save_settings(&context, &saved).unwrap();
+        };
+        let config_id = uuid::Uuid::new_v4().to_string();
+        let mut binding = ProviderCredentialBinding {
+            credential_account_id: SecretService::provider_binding_account_id(
+                &context,
+                LlmProviderKind::OpenAi,
+                &config_id,
+                "https://api.openai.com",
+                1,
+            )
+            .unwrap(),
+            config_id,
+            provider_kind: LlmProviderKind::OpenAi,
+            canonical_origin: "https://api.openai.com".into(),
+            approved_at: None,
+            revision: 1,
+        };
+        settings
+            .save_provider_with_binding(&context, provider.clone(), binding.clone())
+            .unwrap();
         let secrets = SecretService::memory();
         let agents = AgentService::with_runner(Arc::new(DeterministicMissingProcessRunner));
         let environment = WorkflowPreparationEnvironment {
@@ -2455,7 +2474,24 @@ mod batch_zero_cost_tests {
                 provider: LlmProviderKind::OpenAi,
             }));
 
-        secrets.set(LlmProviderKind::OpenAi, "secret").unwrap();
+        secrets
+            .set(LlmProviderKind::OpenAi, "legacy-kind-only-secret")
+            .unwrap();
+        let with_legacy_secret = RequestEvaluationSnapshot::capture(&environment, false).unwrap();
+        assert!(!with_legacy_secret
+            .route_catalog
+            .available_selections()
+            .contains(&WorkflowRouteSelection::Byok {
+                provider: LlmProviderKind::OpenAi,
+            }));
+
+        binding.approved_at = Some("2026-08-18T00:00:00Z".into());
+        secrets
+            .set_bound(&context, &binding, "origin-bound-secret")
+            .unwrap();
+        settings
+            .save_provider_with_binding(&context, provider, binding)
+            .unwrap();
         let with_secret = RequestEvaluationSnapshot::capture(&environment, false).unwrap();
         assert!(with_secret.route_catalog.available_selections().contains(
             &WorkflowRouteSelection::Byok {
@@ -2467,6 +2503,68 @@ mod batch_zero_cost_tests {
             AgentKind::ALL.len(),
             "provider secret changes must stay live without invalidating warm Agent probes"
         );
+    }
+
+    #[test]
+    fn untrusted_or_recovery_access_never_exposes_bound_provider_availability() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".app")).unwrap();
+        std::fs::create_dir_all(root.path().join("wiki")).unwrap();
+        let context = ProjectContext::new("provider-restricted", root.path().to_path_buf());
+        let config = tempfile::tempdir().unwrap();
+        let settings = SettingsService::with_config_dir(config.path().to_path_buf());
+        let secrets = SecretService::memory();
+        let provider = LlmProviderConfig {
+            provider: LlmProviderKind::OpenAi,
+            model: "gpt-test".into(),
+            base_url: "https://api.openai.com".into(),
+            context_window: 8_192,
+            enabled: true,
+        };
+        let config_id = uuid::Uuid::new_v4().to_string();
+        let binding = ProviderCredentialBinding {
+            credential_account_id: SecretService::provider_binding_account_id(
+                &context,
+                LlmProviderKind::OpenAi,
+                &config_id,
+                "https://api.openai.com",
+                1,
+            )
+            .unwrap(),
+            config_id,
+            provider_kind: LlmProviderKind::OpenAi,
+            canonical_origin: "https://api.openai.com".into(),
+            approved_at: Some("2026-08-18T00:00:00Z".into()),
+            revision: 1,
+        };
+        secrets
+            .set_bound(&context, &binding, "restricted-project-secret")
+            .unwrap();
+        settings
+            .save_provider_with_binding(&context, provider, binding)
+            .unwrap();
+        let agents = AgentService::with_runner(Arc::new(DeterministicMissingProcessRunner));
+        let environment = WorkflowPreparationEnvironment {
+            context: &context,
+            access: WorkflowAccessSnapshot {
+                trust: WorkflowProjectTrust::Untrusted,
+                trust_kind: None,
+                filesystem_access: WorkflowFilesystemAccess::ReadOnly,
+                persistence: WorkflowPersistenceMode::MemoryOnly,
+                git_state: WorkflowGitState::Unavailable,
+                authority_revision: "restricted-or-recovery-authority".into(),
+            },
+            settings_service: &settings,
+            secret_service: &secrets,
+            agent_service: &agents,
+        };
+
+        let snapshot = RequestEvaluationSnapshot::capture(&environment, false).unwrap();
+        assert!(!snapshot.route_catalog.available_selections().contains(
+            &WorkflowRouteSelection::Byok {
+                provider: LlmProviderKind::OpenAi,
+            }
+        ));
     }
 
     #[test]

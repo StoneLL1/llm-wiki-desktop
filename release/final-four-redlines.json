@@ -24,7 +24,7 @@
     {
       "id": "provider-secret-origin-binding",
       "ownerBatch": "2A",
-      "expected": "red"
+      "expected": "green"
     },
     {
       "id": "mutation-write-authority-inventory",

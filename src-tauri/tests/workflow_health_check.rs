@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use llm_wiki_desktop_lib::errors::BackendError;
 use llm_wiki_desktop_lib::models::agent::AgentKind;
-use llm_wiki_desktop_lib::models::llm::{LlmProviderConfig, LlmProviderKind};
+use llm_wiki_desktop_lib::models::llm::{
+    LlmProviderConfig, LlmProviderKind, ProviderCredentialBinding,
+};
 use llm_wiki_desktop_lib::models::paths::ProjectContext;
 use llm_wiki_desktop_lib::models::project::ProjectTrustKind;
 use llm_wiki_desktop_lib::models::settings::Settings;
@@ -491,20 +493,36 @@ impl Fixture {
     }
 
     fn configure_ollama(&self) -> WorkflowRoute {
-        self.settings
-            .save_settings(
+        let provider = LlmProviderConfig {
+            provider: LlmProviderKind::Ollama,
+            model: "qwen-health".into(),
+            base_url: "http://127.0.0.1:11434".into(),
+            context_window: 8192,
+            enabled: true,
+        };
+        let target = llm_wiki_desktop_lib::services::import_v2::url_policy::UrlPolicy
+            .normalize_provider_endpoint(&provider.base_url)
+            .unwrap();
+        let canonical_origin = llm_wiki_desktop_lib::services::import_v2::url_policy::UrlPolicy
+            .canonical_origin(&target);
+        let config_id = uuid::Uuid::new_v4().to_string();
+        let binding = ProviderCredentialBinding {
+            credential_account_id: SecretService::provider_binding_account_id(
                 &self.context,
-                &Settings {
-                    llm_providers: vec![LlmProviderConfig {
-                        provider: LlmProviderKind::Ollama,
-                        model: "qwen-health".into(),
-                        base_url: "http://127.0.0.1:11434".into(),
-                        context_window: 8192,
-                        enabled: true,
-                    }],
-                    ..Settings::default()
-                },
+                provider.provider,
+                &config_id,
+                &canonical_origin,
+                1,
             )
+            .unwrap(),
+            config_id,
+            provider_kind: provider.provider,
+            canonical_origin,
+            approved_at: None,
+            revision: 1,
+        };
+        self.settings
+            .save_provider_with_binding(&self.context, provider, binding)
             .unwrap();
         self.workflows
             .prepare(
@@ -822,9 +840,16 @@ async fn stale_complete_route_fails_in_deep_stage_without_downgrading() {
     let route = fixture.configure_ollama();
     let run = fixture.enqueue(HealthCheckMode::Complete, route, true);
     let task_id = run.task_id.clone();
+    let mut provider = fixture.settings.list_providers(&fixture.context).unwrap()[0].clone();
+    provider.model = "qwen-health-changed".into();
+    let binding = fixture
+        .settings
+        .provider_credential_binding(&fixture.context, LlmProviderKind::Ollama)
+        .unwrap()
+        .unwrap();
     fixture
         .settings
-        .save_settings(&fixture.context, &Settings::default())
+        .save_provider_with_binding(&fixture.context, provider, binding)
         .unwrap();
     run_health_check_with_deep(&fixture.context, run, &fixture.services(), |_, _| async {
         panic!("a stale prepared route must fail before deep execution")

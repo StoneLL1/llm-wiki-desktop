@@ -5,6 +5,7 @@ use crate::errors::BackendError;
 use crate::models::agent::{AgentDetectionState, AgentKind};
 use crate::models::compile::CompileRoutePreference;
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
+use crate::models::paths::ProjectContext;
 use crate::models::source::{
     ApplySourceCandidateRequest, DeleteSourcePreview, DeleteSourceRequest,
     DiscardSourceCandidateRequest, GetSourceDetailRequest, GetSourceVersionsRequest,
@@ -481,7 +482,11 @@ async fn run_source_ai_organize(
             )
         }
         ResolvedSourceAiRoute::Byok(provider) => {
-            let secret = state.secret_service.get(provider.provider)?;
+            let secret = crate::services::LlmService::bound_secret_for_config(
+                context,
+                &state.secret_service,
+                &provider,
+            )?;
             let prompt = source_ai_organize::provider_prompt(&input, &language)?;
             state.task_service.emit_activity(
                 task_id,
@@ -608,6 +613,7 @@ fn resolve_source_ai_route(
     };
     let resolve_provider = || -> Result<Option<ResolvedSourceAiRoute>, BackendError> {
         Ok(select_source_ai_provider(
+            context,
             explicit_provider,
             &LlmService::list_providers(context)?,
             &state.secret_service,
@@ -624,6 +630,7 @@ fn resolve_source_ai_route(
 }
 
 fn select_source_ai_provider(
+    context: &ProjectContext,
     explicit: Option<LlmProviderKind>,
     providers: &[LlmProviderConfig],
     secrets: &crate::services::SecretService,
@@ -634,7 +641,7 @@ fn select_source_ai_provider(
             .find(|provider| provider.enabled && provider.provider == kind)
             .cloned()
             .ok_or_else(provider_unavailable)?;
-        if provider.provider.requires_secret() && secrets.get(provider.provider)?.is_none() {
+        if !LlmService::bound_secret_available(context, secrets, &provider)? {
             return Err(BackendError::new(
                 "LLM_SECRET_MISSING",
                 "The selected BYOK provider has no configured secret.",
@@ -645,7 +652,7 @@ fn select_source_ai_provider(
         return Ok(Some(provider));
     }
     for provider in providers.iter().filter(|provider| provider.enabled) {
-        if !provider.provider.requires_secret() || secrets.get(provider.provider)?.is_some() {
+        if LlmService::bound_secret_available(context, secrets, provider)? {
             return Ok(Some(provider.clone()));
         }
     }

@@ -1,6 +1,8 @@
 use llm_wiki_desktop_lib::errors::BackendError;
 use llm_wiki_desktop_lib::models::agent::AgentKind;
-use llm_wiki_desktop_lib::models::llm::{LlmProviderConfig, LlmProviderKind};
+use llm_wiki_desktop_lib::models::llm::{
+    LlmProviderConfig, LlmProviderKind, ProviderCredentialBinding,
+};
 use llm_wiki_desktop_lib::models::paths::ProjectContext;
 use llm_wiki_desktop_lib::models::project::ProjectTrustKind;
 use llm_wiki_desktop_lib::models::settings::Settings;
@@ -1035,20 +1037,36 @@ fn dirty_git_blocks_overwrite_until_the_host_supplies_remediated_access_and_repr
     std::fs::write(root.path().join(output_path), "existing artifact").unwrap();
     let config = tempfile::tempdir().unwrap();
     let settings = SettingsService::with_config_dir(config.path().to_path_buf());
-    settings
-        .save_settings(
+    let provider = LlmProviderConfig {
+        provider: LlmProviderKind::Ollama,
+        model: "qwen".into(),
+        base_url: "http://127.0.0.1:11434".into(),
+        context_window: 8192,
+        enabled: true,
+    };
+    let target = llm_wiki_desktop_lib::services::import_v2::url_policy::UrlPolicy
+        .normalize_provider_endpoint(&provider.base_url)
+        .unwrap();
+    let canonical_origin =
+        llm_wiki_desktop_lib::services::import_v2::url_policy::UrlPolicy.canonical_origin(&target);
+    let config_id = uuid::Uuid::new_v4().to_string();
+    let binding = ProviderCredentialBinding {
+        credential_account_id: SecretService::provider_binding_account_id(
             &context,
-            &Settings {
-                llm_providers: vec![LlmProviderConfig {
-                    provider: LlmProviderKind::Ollama,
-                    model: "qwen".into(),
-                    base_url: "http://127.0.0.1:11434".into(),
-                    context_window: 8192,
-                    enabled: true,
-                }],
-                ..Settings::default()
-            },
+            provider.provider,
+            &config_id,
+            &canonical_origin,
+            1,
         )
+        .unwrap(),
+        config_id,
+        provider_kind: provider.provider,
+        canonical_origin,
+        approved_at: None,
+        revision: 1,
+    };
+    settings
+        .save_provider_with_binding(&context, provider, binding)
         .unwrap();
     let secrets = SecretService::memory();
     let agents = AgentService::default();

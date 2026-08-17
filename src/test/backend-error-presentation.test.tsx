@@ -418,7 +418,25 @@ describe("BackendError presentation", () => {
     render(
       <AiSettings
         agents={[]}
-        providers={[]}
+        providers={[{
+          config: {
+            provider: "anthropic",
+            model: "claude-sonnet-4-6",
+            baseUrl: "https://api.anthropic.com",
+            contextWindow: 32_000,
+            enabled: true,
+          },
+          credentialBinding: {
+            configId: "2d40f995-0dad-4d50-9a91-737664542dc0",
+            providerKind: "anthropic",
+            canonicalOrigin: "https://api.anthropic.com",
+            credentialAccountId: "provider.binding.v1.project.anthropic.config.origin.1",
+            approvedAt: "2026-08-18T00:00:00Z",
+            revision: 1,
+          },
+          hasSecret: true,
+          secretMask: "****test",
+        }]}
         agentDefault={null}
         contextWindow={32_000}
         onRefreshAgents={vi.fn()}
