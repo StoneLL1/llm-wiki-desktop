@@ -1,5 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
+import {
+  normalizeBackendError,
+  type NormalizedBackendError,
+} from "../lib/backendError";
 
 import type { ConfirmedAction } from "../types/backend";
 import type { TaskProjectPersistenceReason } from "../types/task";
@@ -34,10 +38,10 @@ interface ProjectState {
   assessmentOperationId: string | null;
   assessment: ProjectOpenAssessment | null;
   assessing: boolean;
-  assessmentError: string | null;
+  assessmentError: NormalizedBackendError | string | null;
   initializing: boolean;
   initialized: boolean;
-  error: string | null;
+  error: NormalizedBackendError | string | null;
   taskPersistence: WorkflowPersistenceMode | null;
   taskPersistenceReason: TaskProjectPersistenceReason | null;
   setCurrentProject: (project: ProjectSummary) => void;
@@ -122,12 +126,12 @@ export const defaultProject: ProjectSummary = {
 
 export const defaultRecentProjects: RecentProject[] = [];
 
-function errorMessage(error: unknown): string {
-  if (typeof error === "object" && error !== null && "message" in error) {
-    const message = (error as { message: unknown }).message;
-    if (typeof message === "string") return message;
-  }
-  return String(error);
+function projectError(error: unknown): NormalizedBackendError {
+  return normalizeBackendError(error, {
+    defaultSummaryKey: "backendError.summary.project",
+    defaultActionKind: "retry",
+    defaultRecoverable: true,
+  });
 }
 
 function cancelAssessmentOperation(operationId: string | null): void {
@@ -416,7 +420,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
           continue;
         }
         if (operation.status === "failed" || !operation.assessment) {
-          throw new Error(operation.error?.message ?? "Project assessment failed.");
+          throw operation.error ?? new Error("Project assessment failed.");
         }
         set({
           assessment: operation.assessment,
@@ -427,7 +431,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       }
     } catch (error) {
       if (requestEpoch === assessmentEpoch) {
-        set({ assessing: false, assessmentError: errorMessage(error) });
+        set({ assessing: false, assessmentError: projectError(error) });
       }
       throw error;
     }
@@ -843,7 +847,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       const last = recentProjects[0];
       if (last?.missing) {
         set({
-          error: `The most recently used knowledge base is unavailable: ${last.rootPath}`,
+          error: projectError(new Error(`The most recently used knowledge base is unavailable: ${last.rootPath}`)),
         });
       } else if (last && bootstrapEpoch === selectionEpoch) {
         const assessment = await get().assessProject(last.rootPath);
@@ -860,7 +864,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         currentProject: defaultProject,
         initializing: false,
         initialized: true,
-        error: errorMessage(error),
+        error: projectError(error),
         taskPersistence: null,
         taskPersistenceReason: null,
       });

@@ -16,6 +16,7 @@
     "src/features/import/ImportView.tsx",
     "src/features/lint/LintView.tsx",
     "src/features/exports/ExportsView.tsx",
+    "src/components/app/ActionableErrorNotice.tsx",
     "src/i18n/locales/en.json",
     "src/i18n/locales/zh-CN.json"
   ]

@@ -4,7 +4,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import "../../i18n";
 import { useChatStore } from "../../stores/chatStore";
 import { useTaskStore } from "../../stores/taskStore";
+import { normalizeBackendError } from "../../lib/backendError";
 import type { ChatSession } from "../../types/chat";
+import type { BackendTask } from "../../types/task";
 import type { WikiPageContent } from "../../types/wiki";
 import { PageChatPanel } from "./PageChatPanel";
 
@@ -298,12 +300,72 @@ describe("PageChatPanel", () => {
     expect(header).not.toHaveTextContent("Current page");
   });
 
-  it("displays the chat store error string", () => {
-    useChatStore.setState({ error: "No usable Agent CLI is configured." });
+  it("presents a contextless chat error without a fake retry action", () => {
+    useChatStore.setState({
+      error: normalizeBackendError("No usable Agent CLI is configured.", {
+        defaultSummaryKey: "backendError.summary.chat",
+        defaultActionKind: "retry",
+        defaultRecoverable: true,
+      }),
+    });
 
     render(<PageChatPanel page={page} projectId="project-1" rootPath="/wiki" />);
 
-    expect(screen.getByText("No usable Agent CLI is configured.")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("The message could not be sent or saved.");
+    expect(screen.getByText("No usable Agent CLI is configured.")).not.toBeVisible();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  });
+
+  it("keeps a terminal page-chat task until a failed reload is retried successfully", async () => {
+    const reloadActive = vi.fn()
+      .mockImplementationOnce(async () => {
+        useChatStore.setState({
+          error: normalizeBackendError("offline", {
+            defaultSummaryKey: "backendError.summary.chat",
+            defaultActionKind: "retry",
+            defaultRecoverable: true,
+          }),
+        });
+        return false;
+      })
+      .mockResolvedValueOnce(true);
+    useChatStore.setState({
+      activeSessionId: "session-1",
+      activeSession: session({ contextPagePath: page.meta.path }),
+      sendTaskId: "task-retry",
+      sendSessionId: "session-1",
+      streamingText: "temporary answer",
+      reloadActive: reloadActive as never,
+      ensurePageSession: vi.fn(async () => session({ contextPagePath: page.meta.path })) as never,
+    });
+    useTaskStore.getState().setTasks([{
+      id: "task-retry",
+      taskType: "llm_request",
+      projectId: "project-1",
+      title: "Chat",
+      status: "succeeded",
+      progress: null,
+      startedAt: "2026-08-16T00:00:00Z",
+      updatedAt: "2026-08-16T00:00:01Z",
+      completedAt: "2026-08-16T00:00:01Z",
+      cancellable: false,
+      logPath: null,
+      result: null,
+      error: null,
+    } satisfies BackendTask]);
+
+    render(<PageChatPanel page={page} projectId="project-1" rootPath="/wiki" />);
+
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(
+      "The message could not be sent or saved.",
+    ));
+    expect(useChatStore.getState().sendTaskId).toBe("task-retry");
+    expect(useChatStore.getState().streamingText).toBe("temporary answer");
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(useChatStore.getState().sendTaskId).toBeNull());
+    expect(useChatStore.getState().error).toBeNull();
+    expect(reloadActive).toHaveBeenCalledTimes(2);
   });
 
   it("shares the lightweight active-stream rendering contract", () => {

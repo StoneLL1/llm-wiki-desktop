@@ -1,6 +1,7 @@
 import { useCallback, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
+import { translateBackendError } from "../lib/backendError";
 import { cancelTaskRequest } from "../stores/taskStore";
 import { useToastStore } from "../stores/toastStore";
 import type { ProjectSummary } from "../types/project";
@@ -12,14 +13,6 @@ export interface TaskCancelOptions {
 export interface TaskLauncher {
   /** Resolves true when the backend accepted the cancellation request. */
   cancel: (taskId: string, options?: TaskCancelOptions) => Promise<boolean>;
-}
-
-function errorMessage(error: unknown): string {
-  if (typeof error === "object" && error !== null && "message" in error) {
-    const message = (error as { message: unknown }).message;
-    if (typeof message === "string") return message;
-  }
-  return String(error);
 }
 
 export function useTaskLauncher(project: ProjectSummary): TaskLauncher {
@@ -42,7 +35,7 @@ export function useTaskLauncher(project: ProjectSummary): TaskLauncher {
         if (!options.suppressToast) {
           pushToast(
             "error",
-            t("task.cancelError", { message: errorMessage(error) }),
+            t("task.cancelError", { message: translateBackendError(error, t) }),
           );
         }
         return false;

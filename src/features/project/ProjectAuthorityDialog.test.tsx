@@ -55,6 +55,43 @@ beforeEach(async () => {
 });
 
 describe("ProjectAuthorityDialog", () => {
+  it("shows a neutral scanning state instead of a false error before assessment starts", async () => {
+    invokeMock.mockReturnValue(new Promise(() => {}));
+
+    render(
+      <ProjectAuthorityDialog
+        action="manage"
+        project={useProjectStore.getState().currentProject}
+        onClose={vi.fn()}
+        onSatisfied={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent("Checking the selected folder");
+    await vi.dynamicImportSettled();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("shows assessment failures through the shared error notice", async () => {
+    invokeMock.mockRejectedValueOnce({
+      code: "PROJECT_ACCESS_DENIED",
+      message: "Project assessment failed.",
+      recoverable: true,
+      userActionRequired: false,
+    });
+
+    render(
+      <ProjectAuthorityDialog
+        action="manage"
+        project={useProjectStore.getState().currentProject}
+        onClose={vi.fn()}
+        onSatisfied={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("blocked by the current access or safety settings");
+  });
+
   it("closes stale workflow authority context without assessing or re-preparing another project", async () => {
     useProjectStore.setState({
       currentProject: {

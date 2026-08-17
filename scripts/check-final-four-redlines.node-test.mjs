@@ -27,9 +27,17 @@ test("quarantined redlines cannot disappear or turn green without updating their
   assert.deepEqual(actual, declared);
 });
 
-test("Batch 0 starts all seven strict contracts red without using test skip", () => {
+test("completed owner contracts turn green while later batches remain red", () => {
   const actual = evaluateFinalFourRedlines(repositoryRoot);
-  assert.deepEqual(actual.map(({ state }) => state), Array(7).fill("red"));
+  assert.equal(
+    actual.find(({ id }) => id === "structured-backend-error-presentation")?.state,
+    "green",
+  );
+  assert.equal(
+    actual.filter(({ id }) => id !== "structured-backend-error-presentation")
+      .every(({ state }) => state === "red"),
+    true,
+  );
   assert.equal(actual.every(({ detail }) => detail.length > 30), true);
 });
 
@@ -80,7 +88,7 @@ test("the strict checker can turn every owned contract green", async (context) =
     },
   }));
   await write("src-tauri/src/lib.rs", "tauri_plugin_updater::Builder::new();\n");
-  await write("src/features/settings/UpdateSettings.tsx", "invoke(\"check_app_update\");\n");
+  await write("src/features/settings/UpdateSettings.tsx", "ActionableErrorNotice normalizeBackendError invoke(\"check_app_update\");\n");
   await write("src/stores/updateStore.ts", "export const latestVersion = 'available';\n");
   await write("src/features/update/useUpdateController.ts", "invoke('check_app_update');\n");
   await write("src/features/update/UpdateController.test.tsx", [
@@ -99,15 +107,38 @@ test("the strict checker can turn every owned contract green", async (context) =
     "#[test] fn ignores_same_version() {}",
     "#[test] fn rejects_downgrade() {}",
   ].join("\n"));
-  await write("src/lib/backendError.ts", "export interface NormalizedBackendError {}\nexport function normalizeBackendError() {}\n");
-  await write("src/test/backend-error-presentation.test.tsx", [
-    "test('serialized BackendError is normalized', () => {});",
-    "test('unknown object never renders Object object', () => {});",
-    "test('circular input is safe', () => {});",
-    "test('redacts Authorization api key and cookie', () => {});",
-    "test('presents a zh-CN message', () => {});",
-    "test('presents an English message', () => {});",
-  ].join("\n"));
+  await write(
+    "src/lib/backendError.ts",
+    await fs.readFile(path.join(repositoryRoot, "src/lib/backendError.ts"), "utf8"),
+  );
+  await write(
+    "src/components/app/ActionableErrorNotice.tsx",
+    await fs.readFile(path.join(repositoryRoot, "src/components/app/ActionableErrorNotice.tsx"), "utf8"),
+  );
+  await write(
+    "src/components/app/LazyActionableErrorNotice.tsx",
+    await fs.readFile(path.join(repositoryRoot, "src/components/app/LazyActionableErrorNotice.tsx"), "utf8"),
+  );
+  await write(
+    "src/test/backend-error-presentation.test.tsx",
+    await fs.readFile(path.join(repositoryRoot, "src/test/backend-error-presentation.test.tsx"), "utf8"),
+  );
+  for (const relativePath of [
+    "src/features/project/NoProjectWorkspace.tsx",
+    "src/stores/projectStore.ts",
+    "src/features/import/ImportCapabilityDialog.tsx",
+    "src/features/settings/useProviderWorkflow.ts",
+    "src/features/chat/ChatView.tsx",
+    "src/features/chat/PageChatPanel.tsx",
+    "src/components/app/TaskLogDrawer.tsx",
+    "src/hooks/useTaskLauncher.ts",
+    "src/hooks/useTaskEvents.ts",
+    "src/features/workflows/useWorkflowsController.ts",
+    "src/features/workflows/WorkflowsRightPanel.tsx",
+    "src/features/workflows/WorkflowTaskDetail.tsx",
+  ]) {
+    await write(relativePath, await fs.readFile(path.join(repositoryRoot, relativePath), "utf8"));
+  }
   await write("src-tauri/src/services/llm_service.rs", [
     "struct ProviderCredentialBinding { canonical_origin: String, credential_account_id: String }",
     "redirect(Policy::none())",
@@ -256,4 +287,124 @@ test("comments and token lists cannot satisfy behavioral redlines", async (conte
   assert.equal(states.get("real-update-offer"), "red");
   assert.equal(states.get("structured-backend-error-presentation"), "red");
   assert.equal(states.get("provider-secret-origin-binding"), "red");
+});
+
+test("empty named tests and a stub backend adapter cannot turn Batch 1 green", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "llm-wiki-final-four-backend-stub-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const write = async (relativePath, contents) => {
+    const target = path.join(root, relativePath);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, contents);
+  };
+
+  await write(
+    "src/lib/backendError.ts",
+    "export interface NormalizedBackendError {}\nexport function normalizeBackendError() {}\n",
+  );
+  await write("src/components/app/ActionableErrorNotice.tsx", "export function ActionableErrorNotice() {}\n");
+  await write("src/features/settings/UpdateSettings.tsx", "ActionableErrorNotice normalizeBackendError\n");
+  await write("src/test/backend-error-presentation.test.tsx", [
+    "test('serialized BackendError is normalized', () => {});",
+    "test('unknown object never renders Object object', () => {});",
+    "test('plain Error string null and array stay safe', () => {});",
+    "test('circular input is safe', () => {});",
+    "test('redacts Authorization api key and cookie', () => {});",
+    "test('presents a zh-CN message', () => {});",
+    "test('presents an English message', () => {});",
+    "test('retry failure twice restores the action', () => {});",
+    "test('updater uses the shared error', () => {});",
+    "test('provider uses the shared error', () => {});",
+  ].join("\n"));
+
+  const backendState = evaluateFinalFourRedlines(root)
+    .find(({ id }) => id === "structured-backend-error-presentation")?.state;
+  assert.equal(backendState, "red");
+});
+
+test("a missing priority migration keeps the Batch 1 redline red", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "llm-wiki-final-four-backend-migration-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const write = async (relativePath, contents) => {
+    const target = path.join(root, relativePath);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, contents);
+  };
+  const copy = async (relativePath) => write(
+    relativePath,
+    await fs.readFile(path.join(repositoryRoot, relativePath), "utf8"),
+  );
+
+  await copy("src/lib/backendError.ts");
+  await copy("src/components/app/ActionableErrorNotice.tsx");
+  await copy("src/components/app/LazyActionableErrorNotice.tsx");
+  await copy("src/test/backend-error-presentation.test.tsx");
+  for (const relativePath of [
+    "src/features/project/NoProjectWorkspace.tsx",
+    "src/stores/projectStore.ts",
+    "src/features/import/ImportCapabilityDialog.tsx",
+    "src/features/settings/UpdateSettings.tsx",
+    "src/features/settings/useProviderWorkflow.ts",
+    "src/features/chat/ChatView.tsx",
+    // PageChatPanel is deliberately absent.
+    "src/components/app/TaskLogDrawer.tsx",
+    "src/hooks/useTaskLauncher.ts",
+    "src/hooks/useTaskEvents.ts",
+    "src/features/workflows/useWorkflowsController.ts",
+    "src/features/workflows/WorkflowsRightPanel.tsx",
+    "src/features/workflows/WorkflowTaskDetail.tsx",
+  ]) {
+    await copy(relativePath);
+  }
+
+  const backendState = evaluateFinalFourRedlines(root)
+    .find(({ id }) => id === "structured-backend-error-presentation")?.state;
+  assert.equal(backendState, "red");
+});
+
+test("a stub lazy notice keeps the Batch 1 redline red", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "llm-wiki-final-four-backend-lazy-stub-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const write = async (relativePath, contents) => {
+    const target = path.join(root, relativePath);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, contents);
+  };
+  const copy = async (relativePath) => write(
+    relativePath,
+    await fs.readFile(path.join(repositoryRoot, relativePath), "utf8"),
+  );
+
+  await copy("src/lib/backendError.ts");
+  await copy("src/components/app/ActionableErrorNotice.tsx");
+  await write(
+    "src/components/app/LazyActionableErrorNotice.tsx",
+    [
+      "export function LazyActionableErrorNotice() { return null; }",
+      "const noop = 0; // const ActionableErrorNotice = lazy(async () => { const module = await import(\"./ActionableErrorNotice\"); return { default: module.ActionableErrorNotice }; });",
+      "const noop2 = 0; // export function LazyActionableErrorNotice(props: ActionableErrorNoticeProps) { return (<ViewErrorBoundary errorRole={props.role}><Suspense fallback={<ErrorNoticeLoading />}><ActionableErrorNotice {...props} /></Suspense></ViewErrorBoundary>); }",
+    ].join("\n"),
+  );
+  await copy("src/test/backend-error-presentation.test.tsx");
+  for (const relativePath of [
+    "src/features/project/NoProjectWorkspace.tsx",
+    "src/stores/projectStore.ts",
+    "src/features/import/ImportCapabilityDialog.tsx",
+    "src/features/settings/UpdateSettings.tsx",
+    "src/features/settings/useProviderWorkflow.ts",
+    "src/features/chat/ChatView.tsx",
+    "src/features/chat/PageChatPanel.tsx",
+    "src/components/app/TaskLogDrawer.tsx",
+    "src/hooks/useTaskLauncher.ts",
+    "src/hooks/useTaskEvents.ts",
+    "src/features/workflows/useWorkflowsController.ts",
+    "src/features/workflows/WorkflowsRightPanel.tsx",
+    "src/features/workflows/WorkflowTaskDetail.tsx",
+  ]) {
+    await copy(relativePath);
+  }
+
+  const backendState = evaluateFinalFourRedlines(root)
+    .find(({ id }) => id === "structured-backend-error-presentation")?.state;
+  assert.equal(backendState, "red");
 });

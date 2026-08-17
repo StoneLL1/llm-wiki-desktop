@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 
 import { i18next } from "../../i18n";
+import {
+  backendErrorCode,
+  normalizeBackendError,
+} from "../../lib/backendError";
 
 import { registerTaskEventListener } from "../../services/taskEventDispatcher";
 import {
@@ -66,31 +70,11 @@ const hasTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 function operationError(summaryKey: string, error: unknown): WorkflowOperationError {
-  const summary = i18next.t(summaryKey);
-  if (typeof error !== "object" || error === null) {
-    return { summary, technicalDetails: String(error) };
-  }
-  const candidate = error as { code?: unknown; message?: unknown; details?: unknown };
-  const code = typeof candidate.code === "string" ? candidate.code : null;
-  const message = typeof candidate.message === "string" ? candidate.message : String(error);
-  let details: string | null = null;
-  if (candidate.details !== undefined && candidate.details !== null) {
-    try {
-      details = JSON.stringify(candidate.details, null, 2);
-    } catch {
-      details = String(candidate.details);
-    }
-  }
+  const normalized = normalizeBackendError(error);
   return {
-    summary,
-    technicalDetails: [code, message, details].filter(Boolean).join("\n") || null,
+    summary: i18next.t(summaryKey),
+    technicalDetails: normalized.technicalDetails,
   };
-}
-
-function backendErrorCode(error: unknown): string | null {
-  if (typeof error !== "object" || error === null) return null;
-  const code = (error as { code?: unknown }).code;
-  return typeof code === "string" ? code : null;
 }
 
 function workflowRequestScopeMatches(guard: WorkflowRequestGuard): boolean {

@@ -4,6 +4,7 @@ import { RefreshCw } from "lucide-react";
 
 interface ViewErrorBoundaryProps {
   children: ReactNode;
+  errorRole?: "alert" | "status";
   onReload?: () => void;
 }
 
@@ -31,7 +32,12 @@ export class ViewErrorBoundary extends Component<ViewErrorBoundaryProps, ViewErr
 
   render(): ReactNode {
     if (this.state.error) {
-      return <ViewLoadError onReload={this.props.onReload ?? reloadApplication} />;
+      return (
+        <ViewLoadError
+          onReload={this.props.onReload ?? reloadApplication}
+          role={this.props.errorRole ?? "alert"}
+        />
+      );
     }
     return <Fragment>{this.props.children}</Fragment>;
   }
@@ -41,12 +47,18 @@ function reloadApplication() {
   window.location.reload();
 }
 
-function ViewLoadError({ onReload }: { onReload: () => void }) {
+function ViewLoadError({
+  onReload,
+  role,
+}: {
+  onReload: () => void;
+  role: "alert" | "status";
+}) {
   const { t } = useTranslation();
   return (
     <div
       className="flex h-full min-h-[120px] flex-col items-center justify-center gap-3 px-6 text-center text-[12px] text-[var(--text-muted)]"
-      role="alert"
+      role={role}
     >
       <p className="m-0 max-w-sm leading-5">{t("shell.view.loadError")}</p>
       <button

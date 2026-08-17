@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { normalizeBackendError } from "../../lib/backendError";
 
 import { RightPanelHeader } from "../../components/app/RightPanelHeader";
 import { hydrateAndSelectWorkflowRun } from "../../services/workflowNavigation";
@@ -205,7 +206,7 @@ export function WorkflowsRightPanel() {
       ) {
         useWorkflowStore.getState().failOperation(operationKey, operationRequest, {
           summary: t("workflows.operationError.detail"),
-          technicalDetails: String(error),
+          technicalDetails: normalizeBackendError(error).technicalDetails,
         });
       }
     } finally {

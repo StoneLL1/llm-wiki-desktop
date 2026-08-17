@@ -2,7 +2,12 @@ import { Check, Download, LoaderCircle, Package, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { ActionableErrorNotice } from "../../components/app/ActionableErrorNotice";
 import { useModalDialog } from "../../hooks/useModalDialog";
+import {
+  normalizeBackendError,
+  type NormalizedBackendError,
+} from "../../lib/backendError";
 import type { ImportCapabilityRequirement } from "../../types/importV2Presentation";
 import { capabilityDisplayName, capabilityPurpose } from "./importCapabilityPresentation";
 
@@ -25,17 +30,26 @@ export function ImportCapabilityDialog({ open, requirement, onInstall, onCancel 
   const dialogRef = useModalDialog({ open, onClose: onCancel });
   const [acknowledged, setAcknowledged] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [installError, setInstallError] = useState<NormalizedBackendError | null>(null);
   useEffect(() => {
     setAcknowledged(false);
     setBusy(false);
+    setInstallError(null);
   }, [open, requirement?.requirement.capabilityId, requirement?.requirement.minimumVersion]);
   if (!open || !requirement) return null;
   const canInstall = !requirement.available && requirement.installable && acknowledged && !busy;
   async function install() {
     if (!canInstall) return;
     setBusy(true);
+    setInstallError(null);
     try {
       await onInstall(requirement!.requirement.capabilityId);
+    } catch (error) {
+      setInstallError(normalizeBackendError(error, {
+        defaultSummaryKey: "backendError.summary.importCapabilityUnavailable",
+        actionKindOverride: "retry",
+        defaultRecoverable: true,
+      }));
     } finally {
       setBusy(false);
     }
@@ -71,6 +85,9 @@ export function ImportCapabilityDialog({ open, requirement, onInstall, onCancel 
           {requirement.available ? <p className="mt-3 flex items-center gap-1.5 text-[var(--success-text)]" role="status"><Check size={14} aria-hidden="true" />{t("importV2.capability.installedState")}</p> : null}
           {!requirement.installable ? <p className="mt-3 text-[11px] text-[var(--warning-text)]" role="alert">{t("importV2.capability.unavailable")}</p> : null}
           {!requirement.available && requirement.installable ? <label className="mt-3 flex items-start gap-2 rounded-[var(--radius-md)] border border-[var(--border-subtle)] px-3 py-2"><input type="checkbox" aria-label={t("importV2.capability.installAck")} checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} disabled={busy} /><span>{t("importV2.capability.installAck")}</span></label> : null}
+          {installError ? (
+            <ActionableErrorNotice className="mt-3" error={installError} onAction={() => install()} />
+          ) : null}
         </div>
         <footer className="flex items-center justify-end gap-2 border-t border-[var(--border)] px-4 py-3">
           <button type="button" className="btn btn--sm" onClick={onCancel} disabled={busy}>{t("importV2.capability.cancel")}</button>

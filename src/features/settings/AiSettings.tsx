@@ -1,6 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, KeyRound, RefreshCw, Settings2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { ActionableErrorNotice } from "../../components/app/ActionableErrorNotice";
+import {
+  normalizeBackendError,
+  type NormalizedBackendError,
+} from "../../lib/backendError";
 import type { AgentInfo, AgentKind } from "../../types/agent";
 import type { LlmProviderConfig, LlmProviderKind, ProviderStatus, ProviderTestResult } from "../../types/llm";
 import { BrandMark } from "./BrandMark";
@@ -19,6 +24,7 @@ interface AiSettingsProps {
 }
 
 type AiTab = "cli" | "byok";
+type FailedProviderOperation = "save_provider" | "save_secret" | "delete_secret" | "test";
 
 const providerOrder: LlmProviderKind[] = ["anthropic", "open_ai", "google", "ollama", "custom"];
 
@@ -90,6 +96,9 @@ export function AiSettings({
   const [providerSaved, setProviderSaved] = useState(false);
   const [secretSaved, setSecretSaved] = useState(false);
   const [testStatus, setTestStatus] = useState<string | null>(null);
+  const [providerError, setProviderError] = useState<NormalizedBackendError | null>(null);
+  const [failedProviderOperation, setFailedProviderOperation] = useState<FailedProviderOperation | null>(null);
+  const secretInputRef = useRef<HTMLInputElement>(null);
   const activeProviderModel = activeProviderStatus?.config.model;
   const activeProviderBaseUrl = activeProviderStatus?.config.baseUrl;
   const activeAgentExists = activeAgent ? agents.some((agent) => agent.kind === activeAgent) : false;
@@ -123,33 +132,66 @@ export function AiSettings({
     setProviderSaved(false);
     setSecretSaved(false);
     setTestStatus(null);
+    setProviderError(null);
+    setFailedProviderOperation(null);
   };
 
   const saveProvider = async () => {
-    await onSaveProvider({
-      provider: activeProvider,
-      model,
-      baseUrl,
-      contextWindow,
-      enabled: true,
-    });
-    setFormDirty(false);
-    setProviderSaved(true);
+    setProviderError(null);
+    setFailedProviderOperation(null);
+    try {
+      await onSaveProvider({
+        provider: activeProvider,
+        model,
+        baseUrl,
+        contextWindow,
+        enabled: true,
+      });
+      setFormDirty(false);
+      setProviderSaved(true);
+    } catch (error) {
+      setFailedProviderOperation("save_provider");
+      setProviderError(normalizeBackendError(error, {
+        defaultSummaryKey: "backendError.summary.provider",
+      }));
+    }
   };
 
   const saveKey = async () => {
-    await onSaveSecret(activeProvider, secret);
-    setSecret("");
-    setSecretSaved(true);
+    setProviderError(null);
+    setFailedProviderOperation(null);
+    try {
+      await onSaveSecret(activeProvider, secret);
+      setSecret("");
+      setSecretSaved(true);
+    } catch (error) {
+      setFailedProviderOperation("save_secret");
+      setProviderError(normalizeBackendError(error, {
+        defaultSummaryKey: "backendError.summary.provider",
+        defaultActionKind: "reauthorize",
+        defaultUserActionRequired: true,
+      }));
+    }
   };
 
   const deleteKey = async () => {
-    await onDeleteSecret?.(activeProvider);
-    setSecretSaved(false);
+    setProviderError(null);
+    setFailedProviderOperation(null);
+    try {
+      await onDeleteSecret?.(activeProvider);
+      setSecretSaved(false);
+    } catch (error) {
+      setFailedProviderOperation("delete_secret");
+      setProviderError(normalizeBackendError(error, {
+        defaultSummaryKey: "backendError.summary.provider",
+      }));
+    }
   };
 
   const testProvider = async () => {
     setTestStatus(t("provider.testing"));
+    setProviderError(null);
+    setFailedProviderOperation(null);
     try {
       const result = await onTestProvider?.({
         provider: activeProvider,
@@ -158,9 +200,44 @@ export function AiSettings({
         contextWindow,
         enabled: true,
       });
-      setTestStatus(result?.message ?? t("provider.testUnavailable"));
+      if (result?.ok) {
+        setTestStatus(result.message);
+      } else {
+        setTestStatus(null);
+        setFailedProviderOperation("test");
+        setProviderError(normalizeBackendError(result?.message ?? t("provider.testUnavailable"), {
+          defaultSummaryKey: "backendError.summary.provider",
+          defaultActionKind: "retry",
+          defaultRecoverable: true,
+        }));
+      }
     } catch (error) {
-      setTestStatus(error instanceof Error ? error.message : t("provider.testFailed"));
+      setTestStatus(null);
+      setFailedProviderOperation("test");
+      setProviderError(normalizeBackendError(error, {
+        defaultSummaryKey: "backendError.summary.provider",
+        defaultActionKind: "retry",
+        defaultRecoverable: true,
+      }));
+    }
+  };
+
+  const retryProviderOperation = async () => {
+    switch (failedProviderOperation) {
+      case "save_provider":
+        await saveProvider();
+        break;
+      case "save_secret":
+        await saveKey();
+        break;
+      case "delete_secret":
+        await deleteKey();
+        break;
+      case "test":
+        await testProvider();
+        break;
+      default:
+        break;
     }
   };
 
@@ -341,6 +418,7 @@ export function AiSettings({
                 <label>
                   <span>{t("provider.apiKey")}</span>
                   <input
+                    ref={secretInputRef}
                     aria-label={t("provider.apiKey")}
                     type="password"
                     autoComplete="off"
@@ -375,6 +453,17 @@ export function AiSettings({
             {providerSaved ? <span className="settings-inline-status text-[var(--accent)]">{t("provider.settingsSaved")}</span> : null}
             {secretSaved ? <span className="settings-inline-status text-[var(--accent)]">{t("provider.keySaved")}</span> : null}
             {testStatus ? <span role="status" className="settings-inline-status">{testStatus}</span> : null}
+            {providerError ? (
+              <ActionableErrorNotice
+                error={providerError}
+                onAction={providerError.actionKind === "retry" && failedProviderOperation
+                  ? () => retryProviderOperation()
+                  : providerError.actionKind === "reauthorize" && activeProvider !== "ollama"
+                    ? () => secretInputRef.current?.focus()
+                    : undefined}
+                role="status"
+              />
+            ) : null}
           </div>
 
           <div className="settings-safety-note">

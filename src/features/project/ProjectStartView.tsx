@@ -10,6 +10,11 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { ActionableErrorNotice } from "../../components/app/ActionableErrorNotice";
+import {
+  normalizeBackendError,
+  type NormalizedBackendError,
+} from "../../lib/backendError";
 
 import { activateLocale, LANGUAGE_STORAGE_KEY } from "../../i18n";
 import { useProjectStore } from "../../stores/projectStore";
@@ -32,14 +37,6 @@ const TEMPLATES: Array<{ key: ProjectTemplate; titleKey: string; descKey: string
 
 const CATEGORIES = ["all", "research", "reading", "personal-growth", "business", "general"] as const;
 type Category = (typeof CATEGORIES)[number];
-
-function errorMessage(error: unknown): string {
-  if (typeof error === "object" && error !== null && "message" in error) {
-    const message = (error as { message: unknown }).message;
-    if (typeof message === "string") return message;
-  }
-  return String(error);
-}
 
 function hasTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -68,7 +65,7 @@ export function ProjectStartView() {
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<Category>("all");
   const [busy, setBusy] = useState(false);
-  const [localError, setLocalError] = useState<string | null>(null);
+  const [localError, setLocalError] = useState<NormalizedBackendError | null>(null);
   const [newDialogOpen, setNewDialogOpen] = useState(false);
   const [sideOpen, setSideOpen] = useState(() =>
     typeof window === "undefined" ||
@@ -100,7 +97,9 @@ export function ProjectStartView() {
         /* localStorage may be unavailable in some embed contexts */
       }
     } catch (error) {
-      if (languageEpoch === languageEpochRef.current) setLocalError(errorMessage(error));
+      if (languageEpoch === languageEpochRef.current) {
+        setLocalError(normalizeBackendError(error));
+      }
     }
   };
 
@@ -175,7 +174,11 @@ export function ProjectStartView() {
         runEpoch === runEpochRef.current &&
         !cancelledRunEpochsRef.current.has(runEpoch)
       ) {
-        setLocalError(errorMessage(error));
+        setLocalError(normalizeBackendError(error, {
+          defaultSummaryKey: "backendError.summary.project",
+          defaultActionKind: "retry",
+          defaultRecoverable: true,
+        }));
       }
     } finally {
       cancelledRunEpochsRef.current.delete(runEpoch);
@@ -360,7 +363,7 @@ export function ProjectStartView() {
           )}
 
           {localError || storeError || assessmentError ? (
-            <p role="alert" className="mt-4 text-[12px] text-[var(--danger)]">{localError ?? storeError ?? assessmentError}</p>
+            <ActionableErrorNotice className="mt-4" error={localError ?? storeError ?? assessmentError} />
           ) : null}
         </main>
 

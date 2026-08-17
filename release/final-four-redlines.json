@@ -19,7 +19,7 @@
     {
       "id": "structured-backend-error-presentation",
       "ownerBatch": "1",
-      "expected": "red"
+      "expected": "green"
     },
     {
       "id": "provider-secret-origin-binding",

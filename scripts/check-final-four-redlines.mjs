@@ -74,16 +74,39 @@ export function evaluateFinalFourRedlines(root) {
   const updateOfferTests = readText(root, "src/features/update/UpdateController.test.tsx");
   const updateOfferTestNames = javascriptTestNames(updateOfferTests);
   const backendErrorAdapter = readText(root, "src/lib/backendError.ts");
+  const backendErrorNotice = readText(root, "src/components/app/ActionableErrorNotice.tsx");
+  const backendErrorLazyNotice = readText(root, "src/components/app/LazyActionableErrorNotice.tsx");
+  const backendErrorLazyNoticeCode = backendErrorLazyNotice
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/.*$/gm, "");
+  const backendErrorLazyImportReady = /const\s+ActionableErrorNotice\s*=\s*lazy\s*\(\s*async\s*\(\)\s*=>\s*\{\s*const\s+module\s*=\s*await\s+import\(["']\.\/ActionableErrorNotice["']\);\s*return\s*\{\s*default:\s*module\.ActionableErrorNotice\s*\};?\s*\}\s*\);/.test(backendErrorLazyNoticeCode);
+  const backendErrorLazyRenderReady = /export function LazyActionableErrorNotice\s*\(props:\s*ActionableErrorNoticeProps\)\s*\{\s*return\s*\(\s*<ViewErrorBoundary\s+errorRole=\{props\.role\}>[\s\S]*?<Suspense\s+fallback=\{<ErrorNoticeLoading\s*\/>\}>[\s\S]*?<ActionableErrorNotice\s+\{\.\.\.props\}\s*\/>[\s\S]*?<\/Suspense>[\s\S]*?<\/ViewErrorBoundary>\s*\);\s*\}/.test(backendErrorLazyNoticeCode);
   const backendErrorTest = readText(root, "src/test/backend-error-presentation.test.tsx");
   const backendErrorTestNames = javascriptTestNames(backendErrorTest);
-  const backendErrorPriorityUi = [
-    "src/features/project/NoProjectWorkspace.tsx",
-    "src/stores/projectStore.ts",
-    "src/features/import/ImportCapabilityDialog.tsx",
-    "src/features/settings/UpdateSettings.tsx",
-    "src/features/settings/useProviderWorkflow.ts",
-    "src/features/chat/ChatView.tsx",
-  ].map((file) => readText(root, file)).join("\n");
+  const backendErrorPriorityContracts = [
+    ["src/features/project/NoProjectWorkspace.tsx", ["ActionableErrorNotice", "normalizeBackendError"]],
+    ["src/stores/projectStore.ts", ["normalizeBackendError"]],
+    ["src/features/import/ImportCapabilityDialog.tsx", ["ActionableErrorNotice", "normalizeBackendError"]],
+    ["src/features/settings/UpdateSettings.tsx", ["ActionableErrorNotice", "normalizeBackendError"]],
+    ["src/features/settings/useProviderWorkflow.ts", ["normalizeBackendError"]],
+    ["src/features/chat/ChatView.tsx", ["ActionableErrorNotice", "normalizeBackendError"]],
+    ["src/features/chat/PageChatPanel.tsx", ["ActionableErrorNotice", "normalizeBackendError"]],
+    ["src/components/app/TaskLogDrawer.tsx", ["ActionableErrorNotice"]],
+    ["src/hooks/useTaskLauncher.ts", ["translateBackendError"]],
+    ["src/hooks/useTaskEvents.ts", ["translateBackendError"]],
+    ["src/features/workflows/useWorkflowsController.ts", ["normalizeBackendError", "backendErrorCode"]],
+    ["src/features/workflows/WorkflowsRightPanel.tsx", ["normalizeBackendError"]],
+    ["src/features/workflows/WorkflowTaskDetail.tsx", ["backendErrorCode"]],
+  ];
+  const backendErrorPrioritySources = backendErrorPriorityContracts.map(([file, markers]) => ({
+    file,
+    markers,
+    source: readText(root, file),
+  }));
+  const backendErrorPriorityUi = backendErrorPrioritySources.map(({ source }) => source).join("\n");
+  const backendErrorMigrationsReady = backendErrorPrioritySources.every(({ markers, source }) => (
+    source.length > 0 && markers.every((marker) => source.includes(marker))
+  ));
   const rustServices = readTree(root, "src-tauri/src", ".rs");
   const providerContractTests = readText(root, "src-tauri/tests/provider_secret_origin_contracts.rs");
   const providerTestNames = rustTestNames(providerContractTests);
@@ -164,16 +187,38 @@ export function evaluateFinalFourRedlines(root) {
       /installing/i,
     ]);
 
-  const backendErrorReady = backendErrorAdapter.includes("normalizeBackendError")
+  const backendErrorReady = /export function normalizeBackendError\s*\(/.test(backendErrorAdapter)
     && backendErrorAdapter.includes("NormalizedBackendError")
+    && backendErrorAdapter.includes("redactBackendErrorDetails")
+    && backendErrorAdapter.includes("serializeTechnicalDetails")
+    && backendErrorAdapter.includes("safeProperty")
+    && backendErrorAdapter.includes("actionKindOverride")
+    && backendErrorAdapter.includes("MAX_DETAILS_LENGTH")
+    && backendErrorAdapter.includes("REDACTED_PATH")
+    && /export function ActionableErrorNotice\s*\(/.test(backendErrorNotice)
+    && backendErrorNotice.includes("normalizeBackendError")
+    && backendErrorNotice.includes("navigator.clipboard.writeText")
+    && backendErrorNotice.includes("onAction")
+    && backendErrorLazyImportReady
+    && backendErrorLazyRenderReady
     && testNamesCover(backendErrorTestNames, [
       /serialized.backenderror/i,
       /object.object/i,
+      /plain.error.*string.*null.*array/i,
       /circular/i,
       /authorization.*api.key.*cookie/i,
       /zh-cn/i,
       /english/i,
+      /retry.failure.twice/i,
+      /updater/i,
+      /provider/i,
     ])
+    && (backendErrorTest.match(/\bexpect\s*\(/g) ?? []).length >= 20
+    && backendErrorTest.includes("render(<ActionableErrorNotice")
+    && backendErrorTest.includes("new Proxy")
+    && backendErrorTest.includes("navigator, \"clipboard\"")
+    && backendErrorTest.includes('changeLanguage("zh-CN")')
+    && backendErrorMigrationsReady
     && !backendErrorPriorityUi.includes("String(error)");
 
   const providerBindingReady = rustServices.includes("ProviderCredentialBinding")

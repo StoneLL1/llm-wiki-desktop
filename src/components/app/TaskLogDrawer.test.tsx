@@ -11,6 +11,7 @@ vi.mock("react-i18next", () => ({
   useTranslation: () => ({
     t: (key: string, values?: Record<string, string>) =>
       key === "task.cancelError" ? `Could not cancel task: ${values?.message}` :
+        key === "backendError.summary.generic" ? "Something went wrong. Try again or review the technical details." :
         key === "task.importSummary.title" ? "Import activity (visible tasks)" :
           key === "task.importSummary.progress" ? `${values?.processed}/${values?.total} visible import tasks finished` :
             key === "task.importSummary.summary" ? `${values?.active} active / ${values?.waitingForConfirmation} waiting for action / ${values?.failed} failed / ${values?.cancelled} cancelled` :
@@ -82,10 +83,11 @@ describe("TaskLogDrawer", () => {
       expect(useToastStore.getState().toasts).toEqual([
         expect.objectContaining({
           tone: "error",
-          message: "Could not cancel task: backend unavailable",
+          message: "Could not cancel task: Something went wrong. Try again or review the technical details.",
         }),
       ]),
     );
+    expect(useToastStore.getState().toasts[0]?.message).not.toContain("backend unavailable");
   });
 
   it("deduplicates cancellation requests while one is pending", async () => {

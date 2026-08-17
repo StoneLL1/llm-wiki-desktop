@@ -4,6 +4,10 @@ import { useTranslation } from "react-i18next";
 
 import type { AiCapabilitiesWorkflow } from "../../hooks/useAiCapabilities";
 import {
+  normalizeBackendError,
+  type NormalizedBackendError,
+} from "../../lib/backendError";
+import {
   invalidateAllProjectFacts,
   invalidateProjectFacts,
 } from "../../stores/projectFactsStore";
@@ -29,6 +33,14 @@ export interface ProviderWorkflow {
 const hasTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+function providerWorkflowError(error: unknown): NormalizedBackendError {
+  return normalizeBackendError(error, {
+    defaultSummaryKey: "backendError.summary.provider",
+    defaultActionKind: "retry",
+    defaultRecoverable: true,
+  });
+}
+
 export function useProviderWorkflow(
   project: ProjectSummary,
   capabilities: AiCapabilitiesWorkflow,
@@ -46,12 +58,16 @@ export function useProviderWorkflow(
     async (config: LlmProviderConfig) => {
       if (!hasTauri()) return;
       const requestKey = projectKey;
-      await invoke("save_llm_provider", {
-        request: { projectId, projectRootPath: rootPath, config },
-      });
-      invalidateProjectFacts({ projectId, rootPath }, ["agents", "providers"], "provider_saved");
-      if (latestProjectKey.current === requestKey) {
-        await refresh(true);
+      try {
+        await invoke("save_llm_provider", {
+          request: { projectId, projectRootPath: rootPath, config },
+        });
+        invalidateProjectFacts({ projectId, rootPath }, ["agents", "providers"], "provider_saved");
+        if (latestProjectKey.current === requestKey) {
+          await refresh(true);
+        }
+      } catch (error) {
+        throw providerWorkflowError(error);
       }
     },
     [projectId, projectKey, refresh, rootPath],
@@ -61,12 +77,16 @@ export function useProviderWorkflow(
     async (provider: LlmProviderKind, secret: string) => {
       if (!hasTauri()) return;
       const requestKey = projectKey;
-      await invoke("store_provider_secret", {
-        request: { provider, secret },
-      });
-      invalidateAllProjectFacts(["providers"], "provider_secret_saved");
-      if (latestProjectKey.current === requestKey) {
-        await refresh(true);
+      try {
+        await invoke("store_provider_secret", {
+          request: { provider, secret },
+        });
+        invalidateAllProjectFacts(["providers"], "provider_secret_saved");
+        if (latestProjectKey.current === requestKey) {
+          await refresh(true);
+        }
+      } catch (error) {
+        throw providerWorkflowError(error);
       }
     },
     [projectId, projectKey, refresh, rootPath],
@@ -76,12 +96,16 @@ export function useProviderWorkflow(
     async (provider: LlmProviderKind) => {
       if (!hasTauri()) return;
       const requestKey = projectKey;
-      await invoke("delete_provider_secret", {
-        request: { provider, secret: null },
-      });
-      invalidateAllProjectFacts(["providers"], "provider_secret_deleted");
-      if (latestProjectKey.current === requestKey) {
-        await refresh(true);
+      try {
+        await invoke("delete_provider_secret", {
+          request: { provider, secret: null },
+        });
+        invalidateAllProjectFacts(["providers"], "provider_secret_deleted");
+        if (latestProjectKey.current === requestKey) {
+          await refresh(true);
+        }
+      } catch (error) {
+        throw providerWorkflowError(error);
       }
     },
     [projectId, projectKey, refresh, rootPath],
@@ -94,13 +118,17 @@ export function useProviderWorkflow(
       }
       const requestKey = projectKey;
       const epoch = ++testEpoch.current;
-      const result = await invoke<ProviderTestResult>("test_llm_provider", {
-        request: { projectId, projectRootPath: rootPath, config },
-      });
-      if (latestProjectKey.current !== requestKey || testEpoch.current !== epoch) {
-        return { ok: false, message: t("provider.testUnavailable") };
+      try {
+        const result = await invoke<ProviderTestResult>("test_llm_provider", {
+          request: { projectId, projectRootPath: rootPath, config },
+        });
+        if (latestProjectKey.current !== requestKey || testEpoch.current !== epoch) {
+          return { ok: false, message: t("provider.testUnavailable") };
+        }
+        return result;
+      } catch (error) {
+        throw providerWorkflowError(error);
       }
-      return result;
     },
     [projectId, projectKey, rootPath, t],
   );

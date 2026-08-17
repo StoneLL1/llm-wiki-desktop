@@ -3,6 +3,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { LazyActionableErrorNotice } from "../../components/app/LazyActionableErrorNotice";
+import {
+  normalizeBackendError,
+  type NormalizedBackendError,
+} from "../../lib/backendError";
 import { useModalDialog } from "../../hooks/useModalDialog";
 import type { ProjectTemplate } from "../../types/project";
 import { pickDirectory } from "../import/nativeFilePicker";
@@ -42,7 +47,7 @@ export interface NewProjectPayload {
 
 interface NewProjectDialogProps {
   busy: boolean;
-  error?: string | null;
+  error?: unknown;
   onClose: () => void;
   onCreate: (payload: NewProjectPayload) => void;
 }
@@ -52,7 +57,7 @@ export function NewProjectDialog({ busy, error, onClose, onCreate }: NewProjectD
   const [name, setName] = useState("");
   const [parentPath, setParentPath] = useState(readLastProjectParent);
   const [template, setTemplate] = useState<ProjectTemplate>("general");
-  const [pickerError, setPickerError] = useState<string | null>(null);
+  const [pickerError, setPickerError] = useState<NormalizedBackendError | null>(null);
   const nameRef = useRef<HTMLInputElement>(null);
   const dialogRef = useModalDialog({ onClose, initialFocusRef: nameRef });
   const rootPath = buildProjectRootPath(parentPath, name);
@@ -72,7 +77,9 @@ export function NewProjectDialog({ busy, error, onClose, onCreate }: NewProjectD
       })
       .catch((error) => {
         if (!disposed) {
-          setPickerError(error instanceof Error ? error.message : String(error));
+          setPickerError(normalizeBackendError(error, {
+            defaultSummaryKey: "backendError.summary.project",
+          }));
         }
       });
     return () => {
@@ -89,7 +96,9 @@ export function NewProjectDialog({ busy, error, onClose, onCreate }: NewProjectD
         rememberProjectParent(selected);
       }
     } catch (error) {
-      setPickerError(error instanceof Error ? error.message : String(error));
+      setPickerError(normalizeBackendError(error, {
+        defaultSummaryKey: "backendError.summary.project",
+      }));
     }
   };
 
@@ -162,8 +171,8 @@ export function NewProjectDialog({ busy, error, onClose, onCreate }: NewProjectD
                 </span>
               </div>
               {rootPath ? <div aria-label={t("launch.dialog.fullPath")} className="project-path-preview">{rootPath}</div> : null}
-              {pickerError ? <p className="m-0 mt-1 text-[11px] text-[var(--danger)]" role="alert">{pickerError}</p> : null}
-              {error ? <p className="m-0 mt-1 text-[11px] text-[var(--danger)]" role="alert">{error}</p> : null}
+              {pickerError ? <LazyActionableErrorNotice className="mt-1" error={pickerError} /> : null}
+              {error ? <LazyActionableErrorNotice className="mt-1" error={error} /> : null}
             </div>
           </div>
 

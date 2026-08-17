@@ -60,7 +60,7 @@ describe("useTaskLauncher", () => {
     expect(useToastStore.getState().toasts).toEqual([]);
   });
 
-  it("cancels through the existing task request and preserves error context in the toast", async () => {
+  it("cancels through the existing task request without promoting technical error text", async () => {
     invokeMock.mockRejectedValue(new Error("worker already exited"));
     const { result } = renderHook(() => useTaskLauncher(project));
 
@@ -78,8 +78,9 @@ describe("useTaskLauncher", () => {
     expect(useToastStore.getState().toasts).toEqual([
       expect.objectContaining({
         tone: "error",
-        message: expect.stringContaining("worker already exited"),
+        message: "Could not cancel task: Something went wrong. Try again or review the technical details.",
       }),
     ]);
+    expect(useToastStore.getState().toasts[0]?.message).not.toContain("worker already exited");
   });
 });
