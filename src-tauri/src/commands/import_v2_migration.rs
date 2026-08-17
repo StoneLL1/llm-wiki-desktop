@@ -96,21 +96,26 @@ pub fn apply_import_v2_migration(
     state: State<'_, AppState>,
     request: ApplyImportV2MigrationRequest,
 ) -> Result<BackendTask, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let _guard = state.import_v2_service.acquire_migration_lock()?;
-    state
-        .import_v2_service
-        .preflight_migration_locked(&context)?;
-    let task = state
-        .task_service
-        .create_project_task(
-            TaskType::Import,
-            request.project_id.clone(),
-            context.root,
-            "Apply Import V2 migration".into(),
-            true,
-        )
-        .map_err(|error| task_error(&error))?;
+    let task = state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+            let _guard = state.import_v2_service.acquire_migration_lock()?;
+            state
+                .import_v2_service
+                .preflight_migration_locked(context)?;
+            state
+                .task_service
+                .create_project_task(
+                    TaskType::Import,
+                    request.project_id.clone(),
+                    context.root.clone(),
+                    "Apply Import V2 migration".into(),
+                    true,
+                )
+                .map_err(|error| task_error(&error))
+        },
+    )?;
     spawn_migration_task(
         app,
         task.clone(),
@@ -129,21 +134,26 @@ pub fn resume_import_v2_migration(
     state: State<'_, AppState>,
     request: ResumeImportV2MigrationRequest,
 ) -> Result<BackendTask, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let _guard = state.import_v2_service.acquire_migration_lock()?;
-    state
-        .import_v2_service
-        .preflight_migration_locked(&context)?;
-    let task = state
-        .task_service
-        .create_project_task(
-            TaskType::Import,
-            request.project_id.clone(),
-            context.root,
-            "Resume Import V2 migration".into(),
-            true,
-        )
-        .map_err(|error| task_error(&error))?;
+    let task = state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+            let _guard = state.import_v2_service.acquire_migration_lock()?;
+            state
+                .import_v2_service
+                .preflight_migration_locked(context)?;
+            state
+                .task_service
+                .create_project_task(
+                    TaskType::Import,
+                    request.project_id.clone(),
+                    context.root.clone(),
+                    "Resume Import V2 migration".into(),
+                    true,
+                )
+                .map_err(|error| task_error(&error))
+        },
+    )?;
     spawn_migration_task(
         app,
         task.clone(),
@@ -181,31 +191,36 @@ fn spawn_migration_task(
                     "Applying Import V2 migration metadata".into(),
                 )
                 .map_err(|error| task_error(&error))?;
-            let context = state.resolve_project_context(&project_id, &project_root_path)?;
             let cancellation = state
                 .task_service
                 .get_cancellation_token(&task_id)
                 .unwrap_or_else(CancellationToken::new);
             let service = MigrationService::default();
-            if resume {
-                service.resume(
-                    &state.import_v2_service,
-                    &state.git_service,
-                    &context,
-                    &plan,
-                    confirmation,
-                    &cancellation,
-                )
-            } else {
-                service.apply_metadata(
-                    &state.import_v2_service,
-                    &state.git_service,
-                    &context,
-                    &plan,
-                    confirmation,
-                    &cancellation,
-                )
-            }
+            state.with_current_project_write_access(
+                &project_id,
+                &project_root_path,
+                |_permit, context| {
+                    if resume {
+                        service.resume(
+                            &state.import_v2_service,
+                            &state.git_service,
+                            context,
+                            &plan,
+                            confirmation,
+                            &cancellation,
+                        )
+                    } else {
+                        service.apply_metadata(
+                            &state.import_v2_service,
+                            &state.git_service,
+                            context,
+                            &plan,
+                            confirmation,
+                            &cancellation,
+                        )
+                    }
+                },
+            )
         })();
 
         match result {

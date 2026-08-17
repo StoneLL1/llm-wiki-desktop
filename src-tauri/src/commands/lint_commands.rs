@@ -52,8 +52,30 @@ pub fn run_local_lint(
     let report = state
         .lint_service
         .run_local_lint(&context, &state.search_service)?;
-    state.lint_service.persist_local_report(&context, &report)?;
-    Ok(report)
+    let persistence = state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, _context| {
+            state
+                .lint_service
+                .persist_local_report_authorized(permit, &report)
+                .map(|_| ())
+        },
+    );
+    match persistence {
+        Ok(()) => Ok(report),
+        Err(error)
+            if matches!(
+                error.code.as_str(),
+                "PROJECT_WRITE_REQUIRES_TRUST"
+                    | "PROJECT_WRITE_STATE_UNAVAILABLE"
+                    | "PROJECT_WRITE_READ_ONLY"
+            ) =>
+        {
+            Ok(report)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// The legacy task-owned Deep Lint launch path is intentionally migrated to
@@ -88,7 +110,7 @@ pub fn prepare_agent_lint_repair(
     state.with_current_project_write_access(
         &request.project_id,
         &request.project_root_path,
-        |context| prepare_agent_lint_repair_current(&state, context, &request),
+        |_permit, context| prepare_agent_lint_repair_current(&state, context, &request),
     )
 }
 
@@ -158,7 +180,7 @@ pub fn confirm_agent_lint_repair_start(
         state.with_current_project_write_access(
             &request.project_id,
             &request.project_root_path,
-            |context| revalidate_and_enqueue_agent_lint_repair(&state, context, &binding),
+            |_permit, context| revalidate_and_enqueue_agent_lint_repair(&state, context, &binding),
         )
     })();
     // A failed post-claim validation makes this preparation stale; consuming
@@ -261,32 +283,37 @@ pub fn cancel_agent_lint_repair_preparation(
     state: State<'_, AppState>,
     request: CancelAgentLintRepairPreparationRequest,
 ) -> Result<PendingAction, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let stored = state.confirmation_registry.peek(&request.action_id)?;
-    let matches = matches!(
-        stored.execution.as_ref(),
-        Some(ConfirmationExecution::AgentLintRepairStart {
-            project_id,
-            root_path,
-            preparation_id,
-            preparation_revision,
-            ..
-        }) if project_id == &request.project_id
-            && preparation_id == &request.preparation_id
-            && preparation_revision == &request.preparation_revision
-            && project_identity(std::path::Path::new(root_path)).ok().map(|value| value.canonical_root)
-                == project_identity(&context.root).ok().map(|value| value.canonical_root)
-    );
-    if !matches {
-        return Err(lint_repair_error(
-            "LINT_REPAIR_CONFIRMATION_MISMATCH",
-            "The Agent lint approval does not match this preparation.",
-        ));
-    }
-    Ok(state
-        .confirmation_registry
-        .confirm(&request.action_id, ConfirmationStatus::Cancelled)?
-        .action)
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+            let stored = state.confirmation_registry.peek(&request.action_id)?;
+            let matches = matches!(
+                stored.execution.as_ref(),
+                Some(ConfirmationExecution::AgentLintRepairStart {
+                    project_id,
+                    root_path,
+                    preparation_id,
+                    preparation_revision,
+                    ..
+                }) if project_id == &request.project_id
+                    && preparation_id == &request.preparation_id
+                    && preparation_revision == &request.preparation_revision
+                    && project_identity(std::path::Path::new(root_path)).ok().map(|value| value.canonical_root)
+                        == project_identity(&context.root).ok().map(|value| value.canonical_root)
+            );
+            if !matches {
+                return Err(lint_repair_error(
+                    "LINT_REPAIR_CONFIRMATION_MISMATCH",
+                    "The Agent lint approval does not match this preparation.",
+                ));
+            }
+            Ok(state
+                .confirmation_registry
+                .confirm(&request.action_id, ConfirmationStatus::Cancelled)?
+                .action)
+        },
+    )
 }
 
 #[derive(Clone)]
@@ -1260,7 +1287,7 @@ pub fn rollback_agent_lint_repair(
     state.with_current_project_write_access(
         &request.project_id,
         &request.project_root_path,
-        |context| {
+        |_permit, context| {
             state.require_project_content_write_root(context, ProjectWriteRootKind::Wiki)?;
             let identity = project_identity(&context.root).map_err(|message| {
                 BackendError::new("PROJECT_IDENTITY_FAILED", message, true, true)
@@ -1500,14 +1527,15 @@ pub fn apply_lint_fix(
                     true,
                 ));
             };
-            let context = state.resolve_project_context(&project_id, &root_path)?;
-            state.lint_service.apply_fix(
-                &context,
-                &state.git_service,
-                &issue,
-                true,
-                request.expected_hash.as_deref(),
-            )
+            state.with_current_project_write_access(&project_id, &root_path, |permit, _context| {
+                state.lint_service.apply_fix_authorized(
+                    permit,
+                    &state.git_service,
+                    &issue,
+                    true,
+                    request.expected_hash.as_deref(),
+                )
+            })
         })();
         match result {
             Ok(outcome) => {
@@ -1524,25 +1552,30 @@ pub fn apply_lint_fix(
         }
     }
 
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let outcome = state.lint_service.apply_fix(
-        &context,
-        &state.git_service,
-        &request.issue,
-        false,
-        request.expected_hash.as_deref(),
-    )?;
-    if let Some(action) = outcome.pending_action.clone() {
-        state.confirmation_registry.register_with_execution(
-            action,
-            Some(ConfirmationExecution::LintFix {
-                project_id: request.project_id,
-                root_path: request.project_root_path,
-                issue: request.issue,
-            }),
-        )?;
-    }
-    Ok(outcome)
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, _context| {
+            let outcome = state.lint_service.apply_fix_authorized(
+                permit,
+                &state.git_service,
+                &request.issue,
+                false,
+                request.expected_hash.as_deref(),
+            )?;
+            if let Some(action) = outcome.pending_action.clone() {
+                state.confirmation_registry.register_with_execution(
+                    action,
+                    Some(ConfirmationExecution::LintFix {
+                        project_id: request.project_id.clone(),
+                        root_path: request.project_root_path.clone(),
+                        issue: request.issue.clone(),
+                    }),
+                )?;
+            }
+            Ok(outcome)
+        },
+    )
 }
 
 /// Apply many lint fixes in one shot (PRD-LINT-003). One Git checkpoint
@@ -1554,41 +1587,47 @@ pub fn apply_lint_fixes(
     state: State<'_, AppState>,
     request: ApplyLintFixesBatchRequest,
 ) -> Result<LintBatchOutcome, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let outcome = state.lint_service.apply_fixes_batch(
-        &context,
-        &state.git_service,
-        &request.issues,
-        &request.expected_hashes,
-    )?;
-    let mut registered_confirmations = Vec::with_capacity(outcome.needs_confirmation.len());
-    let mut skipped = outcome.skipped.clone();
-    for confirmation in outcome.needs_confirmation {
-        match state.confirmation_registry.register_with_execution(
-            confirmation.pending_action.clone(),
-            Some(ConfirmationExecution::LintFix {
-                project_id: request.project_id.clone(),
-                root_path: request.project_root_path.clone(),
-                issue: confirmation.issue.clone(),
-            }),
-        ) {
-            Ok(()) => registered_confirmations.push(confirmation),
-            Err(error) => skipped.push(LintBatchSkip {
-                issue_id: confirmation.issue.id,
-                path: confirmation.issue.path,
-                reason_code: "LINT_CONFIRMATION_REGISTER_FAILED".into(),
-                reason: format!(
-                    "The safe batch result was kept, but this high-risk confirmation could not be registered: {}",
-                    error.message
-                ),
-            }),
-        }
-    }
-    Ok(LintBatchOutcome {
-        needs_confirmation: registered_confirmations,
-        skipped,
-        ..outcome
-    })
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, _context| {
+            let outcome = state.lint_service.apply_fixes_batch_authorized(
+                permit,
+                &state.git_service,
+                &request.issues,
+                &request.expected_hashes,
+            )?;
+            let mut registered_confirmations =
+                Vec::with_capacity(outcome.needs_confirmation.len());
+            let mut skipped = outcome.skipped.clone();
+            for confirmation in outcome.needs_confirmation {
+                match state.confirmation_registry.register_with_execution(
+                    confirmation.pending_action.clone(),
+                    Some(ConfirmationExecution::LintFix {
+                        project_id: request.project_id.clone(),
+                        root_path: request.project_root_path.clone(),
+                        issue: confirmation.issue.clone(),
+                    }),
+                ) {
+                    Ok(()) => registered_confirmations.push(confirmation),
+                    Err(error) => skipped.push(LintBatchSkip {
+                        issue_id: confirmation.issue.id,
+                        path: confirmation.issue.path,
+                        reason_code: "LINT_CONFIRMATION_REGISTER_FAILED".into(),
+                        reason: format!(
+                            "The safe batch result was kept, but this high-risk confirmation could not be registered: {}",
+                            error.message
+                        ),
+                    }),
+                }
+            }
+            Ok(LintBatchOutcome {
+                needs_confirmation: registered_confirmations,
+                skipped,
+                ..outcome
+            })
+        },
+    )
 }
 
 /// Record an ignored (path, rule) so `run_local_lint` skips it on future scans.
@@ -1597,10 +1636,15 @@ pub fn add_lint_ignore(
     state: State<'_, AppState>,
     request: AddLintIgnoreRequest,
 ) -> Result<LintIgnoreFile, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state
-        .lint_service
-        .add_ignore(&context, &request.path, request.rule)
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, _context| {
+            state
+                .lint_service
+                .add_ignore_authorized(permit, &request.path, request.rule)
+        },
+    )
 }
 
 /// Remove an ignored (path, rule) so it is reported again.
@@ -1609,10 +1653,15 @@ pub fn remove_lint_ignore(
     state: State<'_, AppState>,
     request: RemoveLintIgnoreRequest,
 ) -> Result<LintIgnoreFile, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state
-        .lint_service
-        .remove_ignore(&context, &request.path, request.rule)
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, _context| {
+            state
+                .lint_service
+                .remove_ignore_authorized(permit, &request.path, request.rule)
+        },
+    )
 }
 
 /// Return the current ignore list.

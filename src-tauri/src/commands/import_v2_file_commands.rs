@@ -106,28 +106,39 @@ pub fn start_add_import_paths_v2(
     request: AddImportPathsV2Request,
 ) -> Result<BackendTask, BackendError> {
     let state = app.state::<AppState>();
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state.import_v2_service.ensure_session_accepts_inputs(
-        &context,
-        &state.file_store,
-        &request.session_id,
+    let task = state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+            state.import_v2_service.ensure_session_accepts_inputs(
+                context,
+                &state.file_store,
+                &request.session_id,
+            )?;
+            state
+                .task_service
+                .create_project_task(
+                    TaskType::Import,
+                    request.project_id.clone(),
+                    context.root.clone(),
+                    "Discover import files".into(),
+                    true,
+                )
+                .map_err(task_error)
+        },
     )?;
-    let task = state
-        .task_service
-        .create_project_task(
-            TaskType::Import,
-            request.project_id.clone(),
-            context.root.clone(),
-            "Discover import files".into(),
-            true,
-        )
-        .map_err(task_error)?;
     let task_id = task.id.clone();
-    if let Err(error) = state.import_v2_service.set_discovery_task_id(
-        &context,
-        &state.file_store,
-        &request.session_id,
-        Some(task_id.clone()),
+    if let Err(error) = state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, _context| {
+            state.import_v2_service.set_discovery_task_id_authorized(
+                permit,
+                &state.file_store,
+                &request.session_id,
+                Some(task_id.clone()),
+            )
+        },
     ) {
         let _ = state
             .task_service
@@ -137,16 +148,24 @@ pub fn start_add_import_paths_v2(
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let run = || -> Result<(), BackendError> {
-            state
-                .task_service
-                .transition_status(&task_id, TaskStatus::Running)
-                .map_err(task_error)?;
-            state
-                .task_service
-                .append_log(&task_id, LogLevel::Info, "Scanning selected paths".into())
-                .map_err(task_error)?;
             let context =
                 state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+            state.with_current_project_write_access(
+                &request.project_id,
+                &request.project_root_path,
+                |_permit, _context| {
+                    state
+                        .task_service
+                        .transition_status(&task_id, TaskStatus::Running)
+                        .map_err(task_error)?;
+                    state
+                        .task_service
+                        .append_log(&task_id, LogLevel::Info, "Scanning selected paths".into())
+                        .map_err(task_error)?;
+                    Ok(())
+                },
+            )?;
+            let execution = state.begin_project_external_task(&context, &task_id)?;
             let session = state.import_v2_service.load_session(
                 &context,
                 &state.file_store,
@@ -180,13 +199,7 @@ pub fn start_add_import_paths_v2(
             if state.task_service.is_cancelled(&task_id) {
                 return Ok(());
             }
-            let _ = state.task_service.update_progress(
-                &task_id,
-                discovered,
-                Some(discovered),
-                Some("Discovery complete".into()),
-            );
-            let scan_path = import_scan_path(&context, &request.session_id, &task_id)?;
+            state.require_current_execution_epoch(&context, &execution)?;
             scan.scan_identity = Some(ImportScanIdentity {
                 project_id: request.project_id.clone(),
                 project_root_path: context.root.to_string_lossy().into_owned(),
@@ -197,19 +210,8 @@ pub fn start_add_import_paths_v2(
                 prepare_scan_staging(&mut scan, &session, request.large_data_confirmed, || {
                     Uuid::new_v4().to_string()
                 });
-            state
-                .file_store
-                .write_json_atomic(&context, &scan_path, &scan)?;
             let skipped = scan.skipped.len();
             let added = plan.inputs.len();
-            if !plan.inputs.is_empty() {
-                state.import_v2_service.add_inputs(
-                    &context,
-                    &state.file_store,
-                    &request.session_id,
-                    plan.inputs,
-                )?;
-            }
             let summary = if plan.aggregate_confirmation_pending {
                 format!(
                     "Found {} files ({} bytes, about {} outputs); confirmation is required before adding them.",
@@ -222,27 +224,51 @@ pub fn start_add_import_paths_v2(
             } else {
                 format!("Added {added} files; skipped {skipped}.")
             };
-            state
-                .task_service
-                .append_log(&task_id, LogLevel::Info, summary.clone())
-                .map_err(task_error)?;
-            state
-                .task_service
-                .set_result(
-                    &task_id,
-                    TaskResult {
-                        summary,
-                        affected_paths: vec![scan_path],
-                        reference: None,
-                        pending_action: None,
-                    },
-                )
-                .map_err(task_error)?;
-            state
-                .task_service
-                .transition_status(&task_id, TaskStatus::Succeeded)
-                .map_err(task_error)?;
-            Ok(())
+            state.with_current_project_write_access(
+                &request.project_id,
+                &request.project_root_path,
+                |permit, context| {
+                    let _ = state.task_service.update_progress(
+                        &task_id,
+                        discovered,
+                        Some(discovered),
+                        Some("Discovery complete".into()),
+                    );
+                    let scan_path = import_scan_path(context, &request.session_id, &task_id)?;
+                    state
+                        .file_store
+                        .write_json_atomic(context, &scan_path, &scan)?;
+                    if !plan.inputs.is_empty() {
+                        state.import_v2_service.add_inputs_authorized(
+                            permit,
+                            &state.file_store,
+                            &request.session_id,
+                            plan.inputs,
+                        )?;
+                    }
+                    state
+                        .task_service
+                        .append_log(&task_id, LogLevel::Info, summary.clone())
+                        .map_err(task_error)?;
+                    state
+                        .task_service
+                        .set_result(
+                            &task_id,
+                            TaskResult {
+                                summary,
+                                affected_paths: vec![scan_path],
+                                reference: None,
+                                pending_action: None,
+                            },
+                        )
+                        .map_err(task_error)?;
+                    state
+                        .task_service
+                        .transition_status(&task_id, TaskStatus::Succeeded)
+                        .map_err(task_error)?;
+                    Ok(())
+                },
+            )
         };
         if let Err(error) = run() {
             if error.code == "IMPORT_FILE_SCAN_CANCELLED"
@@ -288,7 +314,7 @@ pub fn accept_import_scan_v2(
     state.with_current_project_write_access(
         &request.project_id,
         &request.project_root_path,
-        |context| {
+        |permit, context| {
             let path = import_scan_path(context, &request.session_id, &request.task_id)?;
             let mut scan: FileScanResult = state.file_store.read_json(context, &path)?;
             let expected_identity = ImportScanIdentity {
@@ -313,8 +339,8 @@ pub fn accept_import_scan_v2(
             let mut fully_accepted = matches!(acceptance, SavedScanAcceptance::AlreadyAccepted);
             if let SavedScanAcceptance::Ready(plan) = acceptance {
                 if !plan.inputs.is_empty() {
-                    state.import_v2_service.add_inputs(
-                        context,
+                    state.import_v2_service.add_inputs_authorized(
+                        permit,
                         &state.file_store,
                         &request.session_id,
                         plan.inputs,
@@ -331,8 +357,8 @@ pub fn accept_import_scan_v2(
                 state.file_store.write_json_atomic(context, &path, &scan)?;
             }
             let session = if fully_accepted {
-                state.import_v2_service.set_discovery_task_id(
-                    context,
+                state.import_v2_service.set_discovery_task_id_authorized(
+                    permit,
                     &state.file_store,
                     &request.session_id,
                     None,
@@ -365,7 +391,7 @@ pub fn discard_import_scan_v2(
     state.with_current_project_write_access(
         &request.project_id,
         &request.project_root_path,
-        |context| {
+        |permit, context| {
             let path = import_scan_path(context, &request.session_id, &request.task_id)?;
             let mut scan: FileScanResult = state.file_store.read_json(context, &path)?;
             let expected_identity = ImportScanIdentity {
@@ -382,8 +408,8 @@ pub fn discard_import_scan_v2(
             )? {
                 state.file_store.write_json_atomic(context, &path, &scan)?;
             }
-            state.import_v2_service.set_discovery_task_id(
-                context,
+            state.import_v2_service.set_discovery_task_id_authorized(
+                permit,
                 &state.file_store,
                 &request.session_id,
                 None,
@@ -423,9 +449,18 @@ pub fn add_import_paths_v2(
     if inputs.is_empty() {
         return Ok(session);
     }
-    state
-        .import_v2_service
-        .add_inputs(&context, &state.file_store, &request.session_id, inputs)
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, _context| {
+            state.import_v2_service.add_inputs_authorized(
+                permit,
+                &state.file_store,
+                &request.session_id,
+                inputs,
+            )
+        },
+    )
 }
 
 #[cfg(test)]

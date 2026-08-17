@@ -9,6 +9,9 @@ use base64::Engine as _;
 use tauri::{AppHandle, Manager, State};
 
 use crate::app_state::AppState;
+use crate::commands::import_v2_commands::{
+    start_import_items_for_state, StartImportItemsV2Request,
+};
 use crate::errors::BackendError;
 use crate::models::import_v2::{
     ArtifactKind, ImportAsrProfile, ImportBatchResult, ImportInputKind, ImportItem,
@@ -62,14 +65,19 @@ pub fn save_import_workbench_preferences_v2(
     state: State<'_, AppState>,
     request: SaveImportWorkbenchPreferencesRequest,
 ) -> Result<ImportWorkbenchPreferences, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    validate_workbench_preferences(&request.preferences)?;
-    state.file_store.write_json_atomic(
-        &context,
-        IMPORT_V2_WORKBENCH_PREFERENCES_PATH,
-        &request.preferences,
-    )?;
-    Ok(request.preferences)
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+            validate_workbench_preferences(&request.preferences)?;
+            state.file_store.write_json_atomic(
+                context,
+                IMPORT_V2_WORKBENCH_PREFERENCES_PATH,
+                &request.preferences,
+            )?;
+            Ok(request.preferences.clone())
+        },
+    )
 }
 
 fn validate_workbench_preferences(
@@ -1224,45 +1232,6 @@ pub fn install_import_capability_v2(
     state: State<'_, AppState>,
     request: InstallImportCapabilityV2Request,
 ) -> Result<BackendTask, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let session =
-        state
-            .import_v2_service
-            .load_session(&context, &state.file_store, &request.session_id)?;
-    let item = session
-        .items
-        .iter()
-        .find(|item| item.item_id == request.item_id)
-        .ok_or_else(|| {
-            presentation_error("IMPORT_V2_ITEM_NOT_FOUND", "Import item was not found.")
-        })?;
-    let asr_choice_allowed = item.issue.as_ref().is_some_and(|issue| {
-        issue
-            .recovery_actions
-            .contains(&ImportRecoveryAction::AuthorizeLocalAsr)
-            || issue
-                .recovery_actions
-                .contains(&ImportRecoveryAction::InstallMediaCapability)
-    }) && matches!(
-        request.capability_id.as_str(),
-        "asr-sensevoice-small" | "asr-whisper"
-    );
-    let required_capability = capability_for_item(item);
-    if required_capability.is_none() && !asr_choice_allowed {
-        return Err(presentation_error(
-            "IMPORT_V2_CAPABILITY_NOT_REQUIRED",
-            "This import item does not currently require a capability pack.",
-        ));
-    }
-    if required_capability.is_some_and(|(expected_capability_id, _, _)| {
-        request.capability_id != expected_capability_id
-    }) && !asr_choice_allowed
-    {
-        return Err(presentation_error(
-            "IMPORT_V2_CAPABILITY_MISMATCH",
-            "The requested capability does not match this import item.",
-        ));
-    }
     if !request.acknowledge_install {
         return Err(presentation_error(
             "IMPORT_V2_CAPABILITY_CONFIRMATION_REQUIRED",
@@ -1282,26 +1251,86 @@ pub fn install_import_capability_v2(
             "Capability installation is unavailable before the application data directory is initialized.",
         )
     })?;
-    let task = state
-        .task_service
-        .create_project_task(
-            TaskType::Import,
-            request.project_id.clone(),
-            context.root.clone(),
-            format!("Install {}", request.capability_id),
-            true,
-        )
-        .map_err(|error| presentation_error("IMPORT_V2_TASK_FAILED", &error))?;
+    let (task, context) = state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+            let session = state.import_v2_service.load_session(
+                context,
+                &state.file_store,
+                &request.session_id,
+            )?;
+            let item = session
+                .items
+                .iter()
+                .find(|item| item.item_id == request.item_id)
+                .ok_or_else(|| {
+                    presentation_error("IMPORT_V2_ITEM_NOT_FOUND", "Import item was not found.")
+                })?;
+            let asr_choice_allowed = item.issue.as_ref().is_some_and(|issue| {
+                issue
+                    .recovery_actions
+                    .contains(&ImportRecoveryAction::AuthorizeLocalAsr)
+                    || issue
+                        .recovery_actions
+                        .contains(&ImportRecoveryAction::InstallMediaCapability)
+            }) && matches!(
+                request.capability_id.as_str(),
+                "asr-sensevoice-small" | "asr-whisper"
+            );
+            let required_capability = capability_for_item(item);
+            if required_capability.is_none() && !asr_choice_allowed {
+                return Err(presentation_error(
+                    "IMPORT_V2_CAPABILITY_NOT_REQUIRED",
+                    "This import item does not currently require a capability pack.",
+                ));
+            }
+            if required_capability.is_some_and(|(expected_capability_id, _, _)| {
+                request.capability_id != expected_capability_id
+            }) && !asr_choice_allowed
+            {
+                return Err(presentation_error(
+                    "IMPORT_V2_CAPABILITY_MISMATCH",
+                    "The requested capability does not match this import item.",
+                ));
+            }
+            let task = state
+                .task_service
+                .create_project_task(
+                    TaskType::Import,
+                    request.project_id.clone(),
+                    context.root.clone(),
+                    format!("Install {}", request.capability_id),
+                    true,
+                )
+                .map_err(|error| presentation_error("IMPORT_V2_TASK_FAILED", &error))?;
+            Ok((task, context.clone()))
+        },
+    )?;
     let task_id = task.id.clone();
-    let project_id = request.project_id;
-    let project_root_path = request.project_root_path;
-    let session_id = request.session_id;
-    let item_id = request.item_id;
+    let execution_lease = match state.begin_project_external_task(&context, &task_id) {
+        Ok(lease) => lease,
+        Err(error) => {
+            let _ = state
+                .task_service
+                .discard_unstarted_tasks(std::slice::from_ref(&task_id));
+            return Err(error);
+        }
+    };
+    let project_id = request.project_id.clone();
+    let project_root_path = request.project_root_path.clone();
+    let session_id = request.session_id.clone();
+    let item_id = request.item_id.clone();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
-        let _ = state
+        let _execution_lease = execution_lease;
+        if state
             .task_service
-            .transition_status(&task_id, TaskStatus::Running);
+            .transition_status(&task_id, TaskStatus::Running)
+            .is_err()
+        {
+            return;
+        }
         let Some(token) = state.task_service.get_cancellation_token(&task_id) else {
             return;
         };
@@ -1343,198 +1372,75 @@ pub fn install_import_capability_v2(
             );
             return;
         }
-        let context = match state.resolve_project_context(&project_id, &project_root_path) {
-            Ok(context) => context,
-            Err(error) => {
-                finish_capability_install_error(&state, &task_id, error);
-                return;
-            }
-        };
-        let loaded_session =
-            match state
-                .import_v2_service
-                .load_session(&context, &state.file_store, &session_id)
-            {
-                Ok(session) => session,
-                Err(error) => {
-                    finish_capability_install_error(&state, &task_id, error);
-                    return;
-                }
-            };
-        let asr_capability = matches!(
-            entry.capability_id.as_str(),
-            "asr-sensevoice-small" | "asr-whisper"
-        );
-        let mut resume_item_ids = loaded_session
-            .items
-            .iter()
-            .filter(|candidate| {
-                capability_for_item(candidate).is_some_and(|(capability_id, _, _)| {
-                    capability_id == entry.capability_id.as_str()
-                }) || (asr_capability
-                    && candidate.issue.as_ref().is_some_and(|issue| {
-                        issue
-                            .recovery_actions
-                            .contains(&ImportRecoveryAction::AuthorizeLocalAsr)
-                            || issue
-                                .recovery_actions
-                                .contains(&ImportRecoveryAction::InstallMediaCapability)
-                    }))
-            })
-            .map(|candidate| candidate.item_id.clone())
-            .collect::<Vec<_>>();
-        if resume_item_ids.is_empty() {
-            resume_item_ids.push(item_id.clone());
-        }
-        let replaced_waiting_task_ids = loaded_session
-            .items
-            .iter()
-            .filter(|candidate| resume_item_ids.contains(&candidate.item_id))
-            .filter_map(|candidate| candidate.task_id.clone())
-            .collect::<Vec<_>>();
-        let mut resume_tasks = Vec::with_capacity(resume_item_ids.len());
-        for resume_item_id in &resume_item_ids {
-            match state.task_service.create_project_task(
-                TaskType::Import,
-                project_id.clone(),
-                context.root.clone(),
-                format!("Resume {}", resume_item_id),
-                true,
-            ) {
-                Ok(task) => resume_tasks.push(task),
-                Err(error) => {
-                    let ids = resume_tasks
-                        .iter()
-                        .map(|task: &BackendTask| task.id.clone())
-                        .collect::<Vec<_>>();
-                    let _ = state.task_service.discard_unstarted_tasks(&ids);
-                    finish_capability_install_error(
-                        &state,
-                        &task_id,
-                        presentation_error("IMPORT_V2_TASK_FAILED", &error),
-                    );
-                    return;
-                }
-            }
-        }
-        let bindings = resume_item_ids
-            .iter()
-            .zip(&resume_tasks)
-            .map(|(resume_item_id, task)| (resume_item_id.clone(), task.id.clone()))
-            .collect::<Vec<_>>();
-        if state
-            .import_v2_service
-            .bind_item_task_ids(&context, &state.file_store, &session_id, &bindings)
-            .is_err()
-        {
-            let ids = resume_tasks
-                .iter()
-                .map(|task| task.id.clone())
-                .collect::<Vec<_>>();
-            let _ = state.task_service.discard_unstarted_tasks(&ids);
-            finish_capability_install_error(
-                &state,
-                &task_id,
-                presentation_error(
-                    "IMPORT_V2_CAPABILITY_RESUME_FAILED",
-                    "The capability was installed, but matching import items could not be bound to their automatic resume tasks.",
-                ),
-            );
-            return;
-        }
-        for replaced_task_id in replaced_waiting_task_ids {
-            if state
-                .task_service
-                .get_task(&replaced_task_id)
-                .is_some_and(|task| task.status == TaskStatus::WaitingForConfirmation)
-            {
-                let _ = state.task_service.cancel_task(&replaced_task_id);
-            }
-        }
-        if state
-            .task_service
-            .complete_running_with_result(
-                &task_id,
-                TaskResult {
-                    summary: format!(
-                        "Installed {} and created {} automatic resume tasks.",
-                        entry.capability_id,
-                        resume_tasks.len()
-                    ),
-                    affected_paths: Vec::new(),
-                    reference: None,
-                    pending_action: None,
-                },
-            )
-            .is_err()
-        {
-            let rollback = resume_item_ids
-                .iter()
-                .map(|resume_item_id| (resume_item_id.clone(), task_id.clone()))
-                .collect::<Vec<_>>();
-            let _ = state.import_v2_service.bind_item_task_ids(
-                &context,
-                &state.file_store,
-                &session_id,
-                &rollback,
-            );
-            let ids = resume_tasks
-                .iter()
-                .map(|task| task.id.clone())
-                .collect::<Vec<_>>();
-            let _ = state.task_service.discard_unstarted_tasks(&ids);
-            finish_capability_install_error(
-                &state,
-                &task_id,
-                presentation_error(
-                    "IMPORT_V2_CAPABILITY_RESUME_FAILED",
-                    "The capability was installed, but its completion state could not be persisted.",
-                ),
-            );
-            return;
-        }
         let resume_action =
             (entry.capability_id == "ocr-cjk-accurate").then_some(ImportRecoveryAction::EnableOcr);
-        for (resume_item_id, resume_task) in resume_item_ids.iter().zip(resume_tasks) {
-            let resume_app = app.clone();
-            let resume_context = context.clone();
-            let resume_session_id = session_id.clone();
-            let resume_item_id = resume_item_id.clone();
-            let resume_task_id = resume_task.id.clone();
-            let resume_action = resume_action.clone();
-            // Capability installation is asynchronous, but ImportEngine is a
-            // synchronous filesystem/process boundary. Resume it on Tokio's
-            // blocking pool so a web engine can never nest its runtime on an
-            // async worker.
-            let result = tauri::async_runtime::spawn_blocking(move || {
-                let state = resume_app.state::<AppState>();
-                state.import_v2_service.run_item_with_recovery(
-                    &resume_context,
+        let resume_result = state.with_current_project_write_access(
+            &project_id,
+            &project_root_path,
+            |permit, context| {
+                let loaded_session = state.import_v2_service.load_session(
+                    context,
                     &state.file_store,
-                    &state.task_service,
-                    &resume_session_id,
-                    &resume_item_id,
-                    &resume_task_id,
-                    resume_action.as_ref(),
-                )
-            })
-            .await;
-            match result {
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => {
-                    finish_capability_install_error(&state, &resume_task.id, error);
+                    &session_id,
+                )?;
+                let asr_capability = matches!(
+                    entry.capability_id.as_str(),
+                    "asr-sensevoice-small" | "asr-whisper"
+                );
+                let mut resume_item_ids = loaded_session
+                    .items
+                    .iter()
+                    .filter(|candidate| {
+                        capability_for_item(candidate).is_some_and(|(capability_id, _, _)| {
+                            capability_id == entry.capability_id.as_str()
+                        }) || (asr_capability
+                            && candidate.issue.as_ref().is_some_and(|issue| {
+                                issue
+                                    .recovery_actions
+                                    .contains(&ImportRecoveryAction::AuthorizeLocalAsr)
+                                    || issue
+                                        .recovery_actions
+                                        .contains(&ImportRecoveryAction::InstallMediaCapability)
+                            }))
+                    })
+                    .map(|candidate| candidate.item_id.clone())
+                    .collect::<Vec<_>>();
+                if resume_item_ids.is_empty() {
+                    resume_item_ids.push(item_id.clone());
                 }
-                Err(_) => {
-                    finish_capability_install_error(
-                        &state,
-                        &resume_task.id,
-                        presentation_error(
-                            "IMPORT_V2_CAPABILITY_RESUME_FAILED",
-                            "The capability was installed, but its import worker stopped unexpectedly.",
-                        ),
-                    );
-                }
-            }
+                let resume_tasks = start_import_items_for_state(
+                    app.clone(),
+                    &state,
+                    permit,
+                    StartImportItemsV2Request {
+                        project_id: project_id.clone(),
+                        project_root_path: project_root_path.clone(),
+                        session_id: session_id.clone(),
+                        item_ids: resume_item_ids,
+                        recovery_action: resume_action.clone(),
+                    },
+                )?;
+                state
+                    .task_service
+                    .complete_running_with_result(
+                        &task_id,
+                        TaskResult {
+                            summary: format!(
+                                "Installed {} and created {} automatic resume task(s).",
+                                entry.capability_id,
+                                resume_tasks.len()
+                            ),
+                            affected_paths: Vec::new(),
+                            reference: None,
+                            pending_action: None,
+                        },
+                    )
+                    .map_err(|error| presentation_error("IMPORT_V2_TASK_FAILED", &error))?;
+                Ok(())
+            },
+        );
+        if let Err(error) = resume_result {
+            finish_capability_install_error(&state, &task_id, error);
         }
     });
     Ok(task)

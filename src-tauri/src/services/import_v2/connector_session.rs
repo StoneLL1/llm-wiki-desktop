@@ -1,4 +1,5 @@
 use crate::{
+    app_state::ProjectExecutionLease,
     errors::BackendError,
     services::import_v2::{
         capability_pack::ResolvedCapabilityPack,
@@ -37,10 +38,31 @@ struct ManagedChild {
     _job: Option<PlatformJob>,
     _runtime_temp: TemporaryMediaWorkspace,
 }
+
+/// Reap a connector process without retaining the child mutex across a
+/// blocking wait. Revocation needs the same mutex to terminate the process;
+/// short `try_wait` polls keep that kill path available even when the helper
+/// closes stdout before it exits.
+fn wait_for_managed_child(child: &Arc<Mutex<ManagedChild>>) {
+    loop {
+        let finished = match child.lock() {
+            Ok(mut managed) => match managed.child.try_wait() {
+                Ok(Some(_)) | Err(_) => true,
+                Ok(None) => false,
+            },
+            Err(_) => true,
+        };
+        if finished {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
 struct SessionEntry {
     reference: ConnectorSessionRef,
     path: PathBuf,
     child: Option<Arc<Mutex<ManagedChild>>>,
+    reader: Option<std::thread::JoinHandle<()>>,
     binding: Option<ConnectorSessionBinding>,
 }
 #[derive(Clone, PartialEq, Eq)]
@@ -69,6 +91,9 @@ impl Drop for ConnectorSessionService {
                     terminate_tree(&mut child.child);
                     child._job.take();
                 }
+            }
+            if let Some(reader) = entry.reader {
+                let _ = reader.join();
             }
             // Connector profiles are intentionally persistent across app
             // restarts. Explicit revoke is the only operation that removes
@@ -127,12 +152,13 @@ impl ConnectorSessionService {
                 reference: r.clone(),
                 path,
                 child: None,
+                reader: None,
                 binding: None,
             },
         );
         Ok(r)
     }
-    pub fn begin_login(
+    pub(crate) fn begin_login(
         &self,
         platform: &str,
         profiles_root: &Path,
@@ -141,6 +167,7 @@ impl ConnectorSessionService {
         project_id: &str,
         import_session_id: &str,
         item_id: &str,
+        execution: ProjectExecutionLease,
     ) -> Result<ConnectorSessionRef, BackendError> {
         validate_entrypoint_unchanged(pack)?;
         let binding = ConnectorSessionBinding {
@@ -264,15 +291,32 @@ impl ConnectorSessionService {
             _job: job,
             _runtime_temp: runtime_temp,
         }));
-        self.sessions
-            .lock()
-            .map_err(|_| e("Connector sessions are unavailable."))?
-            .get_mut(&reference.session_id)
-            .ok_or_else(|| e("Connector session was not found."))?
-            .child = Some(child.clone());
+        let child_registered = {
+            let mut sessions = self
+                .sessions
+                .lock()
+                .map_err(|_| e("Connector sessions are unavailable."))?;
+            match sessions.get_mut(&reference.session_id) {
+                Some(entry) if entry.binding.is_some() => {
+                    entry.child = Some(child.clone());
+                    true
+                }
+                _ => false,
+            }
+        };
+        if !child_registered {
+            if let Ok(mut child) = child.lock() {
+                terminate_tree(&mut child.child);
+                child._job.take();
+            }
+            return Err(e("Project authority changed before browser login started."));
+        }
         let sessions = self.sessions.clone();
         let id = reference.session_id.clone();
-        std::thread::spawn(move || {
+        let reader = std::thread::spawn(move || {
+            // The project epoch remains active for the complete browser and
+            // stdout-reader lifetime, including cookie/status publication.
+            let _execution = execution;
             let mut output = String::new();
             let _ = stdout.take(1024 * 1024).read_to_string(&mut output);
             let login_result =
@@ -286,37 +330,50 @@ impl ConnectorSessionService {
                 .unwrap_or(false);
             let account_summary = login_result.as_ref().and_then(sanitized_account_summary);
             let verified_at = authenticated.then(|| chrono::Utc::now().to_rfc3339());
-            if authenticated {
-                if let Some(cookies) = login_result
-                    .as_ref()
-                    .and_then(|r| r.get("cookies").cloned())
-                {
-                    if cookies.is_array()
-                        && serde_json::to_vec(&cookies).is_ok_and(|v| v.len() <= 64 * 1024)
-                    {
-                        let _ = secrets.set_account(
-                            &format!("connector-cookie:{platform_name}"),
-                            &cookies.to_string(),
-                        );
-                    }
-                }
-            }
-            if let Ok(mut child) = child.lock() {
-                let _ = child.child.wait();
-            }
+            wait_for_managed_child(&child);
             if let Ok(mut entries) = sessions.lock() {
                 if let Some(entry) = entries.get_mut(&id) {
-                    entry.reference.state = if authenticated {
+                    let authority_current = entry.binding.is_some();
+                    if authority_current && authenticated {
+                        if let Some(cookies) = login_result
+                            .as_ref()
+                            .and_then(|r| r.get("cookies").cloned())
+                        {
+                            if cookies.is_array()
+                                && serde_json::to_vec(&cookies).is_ok_and(|v| v.len() <= 64 * 1024)
+                            {
+                                let _ = secrets.set_account(
+                                    &format!("connector-cookie:{platform_name}"),
+                                    &cookies.to_string(),
+                                );
+                            }
+                        }
+                    }
+                    entry.reference.state = if authority_current && authenticated {
                         "authenticated".into()
                     } else {
                         "failed".into()
                     };
-                    entry.reference.account_summary = account_summary;
-                    entry.reference.last_verified_at = verified_at;
+                    entry.reference.account_summary =
+                        authority_current.then_some(account_summary).flatten();
+                    entry.reference.last_verified_at =
+                        authority_current.then_some(verified_at).flatten();
                     entry.child = None;
                 }
             }
         });
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| e("Connector sessions are unavailable."))?;
+        let Some(entry) = sessions.get_mut(&reference.session_id) else {
+            drop(sessions);
+            let _ = reader.join();
+            return Err(e(
+                "Connector session was revoked while browser login started.",
+            ));
+        };
+        entry.reader = Some(reader);
         Ok(reference)
     }
     pub fn resume(&self, id: &str) -> Result<ConnectorSessionRef, BackendError> {
@@ -390,6 +447,9 @@ impl ConnectorSessionService {
                     child._job.take();
                 }
             }
+            if let Some(reader) = entry.reader {
+                let _ = reader.join();
+            }
             let profile = validate_profile_directory(&entry.path)?;
             std::fs::remove_dir_all(profile)
                 .map_err(|_| e("Connector profile could not be removed."))?;
@@ -398,6 +458,49 @@ impl ConnectorSessionService {
         }
         Ok(())
     }
+
+    /// Stop every live connector execution bound to one project without
+    /// deleting the user's reusable browser profile or stored cookies. Trust
+    /// revocation calls this before waiting on the project execution barrier.
+    pub(crate) fn stop_project_executions(&self, project_id: &str) -> Result<(), BackendError> {
+        let executions = {
+            let mut sessions = self
+                .sessions
+                .lock()
+                .map_err(|_| e("Connector sessions are unavailable."))?;
+            sessions
+                .values_mut()
+                .filter(|entry| {
+                    entry
+                        .binding
+                        .as_ref()
+                        .is_some_and(|binding| binding.project_id == project_id)
+                })
+                .map(|entry| {
+                    entry.binding = None;
+                    if entry.child.is_some() || entry.reader.is_some() {
+                        entry.reference.state = "failed".into();
+                    }
+                    (entry.child.take(), entry.reader.take())
+                })
+                .collect::<Vec<_>>()
+        };
+        for (child, _) in &executions {
+            if let Some(child) = child {
+                if let Ok(mut child) = child.lock() {
+                    terminate_tree(&mut child.child);
+                    child._job.take();
+                }
+            }
+        }
+        for (_, reader) in executions {
+            if let Some(reader) = reader {
+                let _ = reader.join();
+            }
+        }
+        Ok(())
+    }
+
     pub fn revoke_platform(
         &self,
         platform: &str,
@@ -429,6 +532,9 @@ impl ConnectorSessionService {
                     terminate_tree(&mut child.child);
                     child._job.take();
                 }
+            }
+            if let Some(reader) = entry.reader {
+                let _ = reader.join();
             }
         }
         if profiles_root.exists() {
@@ -663,6 +769,7 @@ mod binding_tests {
                 },
                 path: profile.clone(),
                 child: None,
+                reader: None,
                 binding: Some(ConnectorSessionBinding {
                     project_id: "project-a".into(),
                     import_session_id: "session-a".into(),
@@ -730,6 +837,201 @@ mod binding_tests {
         std::fs::create_dir(profiles.join("bilibili")).unwrap();
         service.revoke_platform("bilibili", &profiles).unwrap();
         assert!(!profiles.join("bilibili").exists());
+    }
+
+    #[test]
+    fn project_execution_stop_only_unbinds_the_revoked_project() {
+        let service = ConnectorSessionService::default();
+        let root = tempfile::tempdir().unwrap();
+        for (session_id, project_id) in [("connector-a", "project-a"), ("connector-b", "project-b")]
+        {
+            let path = root.path().join(session_id);
+            std::fs::create_dir(&path).unwrap();
+            service.sessions.lock().unwrap().insert(
+                session_id.into(),
+                SessionEntry {
+                    reference: ConnectorSessionRef {
+                        session_id: session_id.into(),
+                        platform: "bilibili".into(),
+                        state: "authenticated".into(),
+                        account_summary: None,
+                        last_verified_at: None,
+                    },
+                    path,
+                    child: None,
+                    reader: None,
+                    binding: Some(ConnectorSessionBinding {
+                        project_id: project_id.into(),
+                        import_session_id: "session-a".into(),
+                        item_id: "item-a".into(),
+                        target_sha256: "digest".into(),
+                    }),
+                },
+            );
+        }
+
+        service.stop_project_executions("project-a").unwrap();
+
+        let sessions = service.sessions.lock().unwrap();
+        assert!(sessions["connector-a"].binding.is_none());
+        assert_eq!(
+            sessions["connector-b"].binding.as_ref().unwrap().project_id,
+            "project-b"
+        );
+    }
+
+    #[test]
+    fn project_execution_stop_terminates_child_and_joins_stdout_reader() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let service = ConnectorSessionService::default();
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.path().join("profile");
+        std::fs::create_dir(&profile).unwrap();
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = Command::new("cmd");
+            command.args(["/C", "ping -n 30 127.0.0.1"]);
+            command
+        };
+        #[cfg(unix)]
+        let mut command = {
+            let mut command = Command::new("sh");
+            command.args(["-c", "sleep 30"]);
+            command
+        };
+        let mut process = command.stdout(Stdio::piped()).spawn().unwrap();
+        let mut stdout = process.stdout.take().unwrap();
+        let child = Arc::new(Mutex::new(ManagedChild {
+            child: process,
+            _job: None,
+            _runtime_temp: TemporaryMediaWorkspace::create_unique(root.path(), ".reader-test")
+                .unwrap(),
+        }));
+        let reader_finished = Arc::new(AtomicBool::new(false));
+        let reader_child = child.clone();
+        let reader_finished_thread = reader_finished.clone();
+        let reader = std::thread::spawn(move || {
+            let mut output = Vec::new();
+            let _ = stdout.read_to_end(&mut output);
+            if let Ok(mut child) = reader_child.lock() {
+                let _ = child.child.wait();
+            }
+            reader_finished_thread.store(true, Ordering::SeqCst);
+        });
+        service.sessions.lock().unwrap().insert(
+            "connector-live".into(),
+            SessionEntry {
+                reference: ConnectorSessionRef {
+                    session_id: "connector-live".into(),
+                    platform: "bilibili".into(),
+                    state: "authenticating".into(),
+                    account_summary: None,
+                    last_verified_at: None,
+                },
+                path: profile,
+                child: Some(child),
+                reader: Some(reader),
+                binding: Some(ConnectorSessionBinding {
+                    project_id: "project-a".into(),
+                    import_session_id: "session-a".into(),
+                    item_id: "item-a".into(),
+                    target_sha256: "digest".into(),
+                }),
+            },
+        );
+
+        service.stop_project_executions("project-a").unwrap();
+
+        assert!(reader_finished.load(Ordering::SeqCst));
+        let sessions = service.sessions.lock().unwrap();
+        assert!(sessions["connector-live"].binding.is_none());
+        assert!(sessions["connector-live"].child.is_none());
+        assert!(sessions["connector-live"].reader.is_none());
+        assert_eq!(sessions["connector-live"].reference.state, "failed");
+    }
+
+    #[test]
+    fn project_execution_stop_can_kill_after_reader_observes_early_stdout_close() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let service = ConnectorSessionService::default();
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.path().join("profile-reader-first");
+        std::fs::create_dir(&profile).unwrap();
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = Command::new("powershell");
+            command.args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"]);
+            command
+        };
+        #[cfg(unix)]
+        let mut command = {
+            let mut command = Command::new("sh");
+            command.args(["-c", "sleep 30"]);
+            command
+        };
+        let mut process = command.stdout(Stdio::piped()).spawn().unwrap();
+        let mut stdout = process.stdout.take().unwrap();
+        let child = Arc::new(Mutex::new(ManagedChild {
+            child: process,
+            _job: None,
+            _runtime_temp: TemporaryMediaWorkspace::create_unique(
+                root.path(),
+                ".reader-first-test",
+            )
+            .unwrap(),
+        }));
+        let reader_waiting = Arc::new(AtomicBool::new(false));
+        let reader_finished = Arc::new(AtomicBool::new(false));
+        let reader_child = child.clone();
+        let reader_waiting_thread = reader_waiting.clone();
+        let reader_finished_thread = reader_finished.clone();
+        let reader = std::thread::spawn(move || {
+            // Simulate the production reader reaching EOF before the helper
+            // itself exits. The lock-order property under test starts at the
+            // subsequent reap step, so explicitly closing the pipe here is
+            // deterministic across Windows, macOS, and Linux shells.
+            drop(stdout);
+            reader_waiting_thread.store(true, Ordering::SeqCst);
+            wait_for_managed_child(&reader_child);
+            reader_finished_thread.store(true, Ordering::SeqCst);
+        });
+        service.sessions.lock().unwrap().insert(
+            "connector-reader-first".into(),
+            SessionEntry {
+                reference: ConnectorSessionRef {
+                    session_id: "connector-reader-first".into(),
+                    platform: "bilibili".into(),
+                    state: "authenticating".into(),
+                    account_summary: None,
+                    last_verified_at: None,
+                },
+                path: profile,
+                child: Some(child),
+                reader: Some(reader),
+                binding: Some(ConnectorSessionBinding {
+                    project_id: "project-a".into(),
+                    import_session_id: "session-a".into(),
+                    item_id: "item-a".into(),
+                    target_sha256: "digest".into(),
+                }),
+            },
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !reader_waiting.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(reader_waiting.load(Ordering::SeqCst));
+
+        service.stop_project_executions("project-a").unwrap();
+
+        assert!(reader_finished.load(Ordering::SeqCst));
+        let sessions = service.sessions.lock().unwrap();
+        assert!(sessions["connector-reader-first"].binding.is_none());
+        assert!(sessions["connector-reader-first"].child.is_none());
+        assert!(sessions["connector-reader-first"].reader.is_none());
     }
 
     #[cfg(unix)]

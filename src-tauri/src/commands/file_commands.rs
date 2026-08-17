@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::app_state::AppState;
+use crate::app_state::{AppState, ProjectAuthorityMutationPermit};
 use crate::errors::BackendError;
 use crate::models::confirmation::{
     ConfirmationExecution, ConfirmationStatus, ConfirmedAction, StoredPendingAction,
@@ -74,22 +74,27 @@ pub fn write_markdown_file(
     state: State<'_, AppState>,
     request: WriteMarkdownRequest,
 ) -> Result<FileHashResponse, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    reject_generic_source_path(&context, &state.file_store, &request.relative_path)?;
-    reject_generic_source_create(&request.relative_path, None, Some(&request.contents))?;
-    state.file_store.write_markdown_checked(
-        &context,
-        &request.relative_path,
-        &request.contents,
-        request.mode,
-    )?;
-    let hash = state
-        .file_store
-        .file_hash(&context, &request.relative_path)?;
-    Ok(FileHashResponse {
-        relative_path: request.relative_path,
-        hash,
-    })
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+            reject_generic_source_path(context, &state.file_store, &request.relative_path)?;
+            reject_generic_source_create(&request.relative_path, None, Some(&request.contents))?;
+            state.file_store.write_markdown_checked(
+                context,
+                &request.relative_path,
+                &request.contents,
+                request.mode,
+            )?;
+            let hash = state
+                .file_store
+                .file_hash(context, &request.relative_path)?;
+            Ok(FileHashResponse {
+                relative_path: request.relative_path.clone(),
+                hash,
+            })
+        },
+    )
 }
 
 #[tauri::command]
@@ -97,20 +102,25 @@ pub fn write_json_file(
     state: State<'_, AppState>,
     request: WriteJsonRequest,
 ) -> Result<FileHashResponse, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state.file_store.write_json_atomic_checked(
-        &context,
-        &request.relative_path,
-        &request.value,
-        request.mode,
-    )?;
-    let hash = state
-        .file_store
-        .file_hash(&context, &request.relative_path)?;
-    Ok(FileHashResponse {
-        relative_path: request.relative_path,
-        hash,
-    })
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+            state.file_store.write_json_atomic_checked(
+                context,
+                &request.relative_path,
+                &request.value,
+                request.mode,
+            )?;
+            let hash = state
+                .file_store
+                .file_hash(context, &request.relative_path)?;
+            Ok(FileHashResponse {
+                relative_path: request.relative_path.clone(),
+                hash,
+            })
+        },
+    )
 }
 
 #[tauri::command]
@@ -148,7 +158,16 @@ pub fn confirm_pending_action(
             )
         ) {
             let stored = state.confirmation_registry.claim(&request.action_id)?;
-            let result = execute_claimed_project_authority_action(&state, stored);
+            let result = (|| {
+                let (project_id, root_path) = project_authority_action_target(&stored)?;
+                state.with_current_project_authority_mutation(
+                    &project_id,
+                    &root_path,
+                    |permit, _context| {
+                        execute_claimed_project_authority_action(&state, permit, stored)
+                    },
+                )
+            })();
             match result {
                 Ok(confirmed) => {
                     state
@@ -309,14 +328,9 @@ pub fn confirm_pending_action(
             root_path,
             target_path,
             target_hash,
-        }) => execute_wiki_page_delete(
-            &state,
-            stored.action,
-            &project_id,
-            &root_path,
-            &target_path,
-            &target_hash,
-        ),
+        }) => state.with_current_project_write_access(&project_id, &root_path, |permit, _| {
+            execute_wiki_page_delete(&state, permit, stored.action, &target_path, &target_hash)
+        }),
         None => Err(BackendError::new(
             "CONFIRMATION_EXECUTION_MISSING",
             "The pending action has no backend execution plan.",
@@ -358,6 +372,7 @@ fn reject_workflow_owned_generic_confirmation(
 
 fn execute_claimed_project_authority_action(
     state: &AppState,
+    permit: &ProjectAuthorityMutationPermit<'_>,
     stored: StoredPendingAction,
 ) -> Result<ConfirmedAction, BackendError> {
     let StoredPendingAction { action, execution } = stored;
@@ -365,7 +380,7 @@ fn execute_claimed_project_authority_action(
         Some(ConfirmationExecution::RepairProject {
             assessment_id,
             project_id,
-            root_path,
+            root_path: _,
             plan,
         }) => {
             let assessment = crate::commands::project_commands::revalidate_project_assessment(
@@ -386,7 +401,7 @@ fn execute_claimed_project_authority_action(
                     true,
                 ));
             }
-            let context = state.resolve_project_context(&project_id, &root_path)?;
+            let context = permit.context();
             let assessed_root = PathBuf::from(&assessment.canonical_root_path)
                 .canonicalize()
                 .map_err(|_| assessed_project_context_mismatch())?;
@@ -457,7 +472,7 @@ fn execute_claimed_project_authority_action(
         Some(ConfirmationExecution::EnableCompatibleProject {
             assessment_id,
             project_id,
-            root_path,
+            root_path: _,
             template,
             initialize_git,
         }) => {
@@ -466,7 +481,7 @@ fn execute_claimed_project_authority_action(
                 &assessment_id,
             )?;
             crate::commands::project_commands::ensure_compatible_trust_candidate(&assessment)?;
-            let context = state.resolve_project_context(&project_id, &root_path)?;
+            let context = permit.context();
             let assessed_root = PathBuf::from(&assessment.canonical_root_path)
                 .canonicalize()
                 .map_err(|_| assessed_project_context_mismatch())?;
@@ -511,8 +526,8 @@ fn execute_claimed_project_authority_action(
         }
         Some(ConfirmationExecution::ConfigureCompatibleLayout {
             assessment_id,
-            project_id,
-            root_path,
+            project_id: _,
+            root_path: _,
             mapping,
             expected_hash,
         }) => {
@@ -521,14 +536,13 @@ fn execute_claimed_project_authority_action(
                 &assessment_id,
             )?;
             crate::commands::project_commands::ensure_compatible_trust_candidate(&assessment)?;
-            let context = state.resolve_project_context(&project_id, &root_path)?;
+            let context = permit.context();
             let assessed_root = PathBuf::from(&assessment.canonical_root_path)
                 .canonicalize()
                 .map_err(|_| assessed_project_context_mismatch())?;
             if context.root != assessed_root {
                 return Err(assessed_project_context_mismatch());
             }
-            state.require_project_write_access(&context)?;
             let checkpoint_exists = if expected_hash.is_some() {
                 let status = state.git_service.repository_status(&context)?;
                 if !status.is_repository {
@@ -622,8 +636,13 @@ fn execute_claimed_project_authority_action(
             expected_head,
             expected_paths,
         }) => {
-            let context =
-                revalidate_assessed_context(state, &assessment_id, &project_id, &root_path)?;
+            let context = revalidate_assessed_context(
+                state,
+                permit,
+                &assessment_id,
+                &project_id,
+                &root_path,
+            )?;
             state.git_service.verify_initialization_state(
                 &context,
                 expected_head.as_deref(),
@@ -651,8 +670,13 @@ fn execute_claimed_project_authority_action(
             expected_head,
             expected_paths,
         }) => {
-            let context =
-                revalidate_assessed_context(state, &assessment_id, &project_id, &root_path)?;
+            let context = revalidate_assessed_context(
+                state,
+                permit,
+                &assessment_id,
+                &project_id,
+                &root_path,
+            )?;
             state.git_service.verify_checkpoint_state(
                 &context,
                 expected_head.as_deref(),
@@ -682,15 +706,69 @@ fn execute_claimed_project_authority_action(
     }
 }
 
+fn project_authority_action_target(
+    stored: &StoredPendingAction,
+) -> Result<(String, String), BackendError> {
+    match stored.execution.as_ref() {
+        Some(
+            ConfirmationExecution::RepairProject {
+                project_id,
+                root_path,
+                ..
+            }
+            | ConfirmationExecution::EnableCompatibleProject {
+                project_id,
+                root_path,
+                ..
+            }
+            | ConfirmationExecution::ConfigureCompatibleLayout {
+                project_id,
+                root_path,
+                ..
+            }
+            | ConfirmationExecution::TrustCompatibleProject {
+                project_id,
+                root_path,
+                ..
+            }
+            | ConfirmationExecution::InitializeAssessedGit {
+                project_id,
+                root_path,
+                ..
+            }
+            | ConfirmationExecution::CheckpointAssessedGit {
+                project_id,
+                root_path,
+                ..
+            },
+        ) => Ok((project_id.clone(), root_path.clone())),
+        _ => Err(BackendError::new(
+            "CONFIRMATION_COMMAND_INVALID",
+            "This confirmation is not a project-authority action.",
+            true,
+            true,
+        )),
+    }
+}
+
 fn revalidate_assessed_context(
     state: &AppState,
+    permit: &ProjectAuthorityMutationPermit<'_>,
     assessment_id: &crate::models::project::AssessmentId,
     project_id: &str,
     root_path: &str,
 ) -> Result<crate::models::paths::ProjectContext, BackendError> {
     let assessment =
         crate::commands::project_commands::revalidate_project_assessment(state, assessment_id)?;
-    let context = state.resolve_project_context(project_id, root_path)?;
+    let context = permit.context();
+    if context.project_id != project_id
+        || context.root
+            != PathBuf::from(root_path)
+                .canonicalize()
+                .map_err(|_| assessed_project_context_mismatch())?
+    {
+        return Err(assessed_project_context_mismatch());
+    }
     let assessed_root = PathBuf::from(&assessment.canonical_root_path)
         .canonicalize()
         .map_err(|_| assessed_project_context_mismatch())?;
@@ -714,7 +792,7 @@ fn revalidate_assessed_context(
             true,
         ));
     }
-    Ok(context)
+    Ok(context.clone())
 }
 
 fn assessed_project_context_mismatch() -> BackendError {
@@ -735,15 +813,13 @@ fn assessed_project_context_mismatch() -> BackendError {
 /// `ConfirmedAction`.
 fn execute_wiki_page_delete(
     state: &AppState,
+    permit: &crate::app_state::ProjectWritePermit<'_>,
     action: crate::models::confirmation::PendingAction,
-    project_id: &str,
-    root_path: &str,
     target_path: &str,
     target_hash: &str,
 ) -> Result<ConfirmedAction, BackendError> {
-    let context = state.resolve_project_context(project_id, root_path)?;
-    let checkpoint_exists = state.search_service.apply_page_delete(
-        &context,
+    let checkpoint_exists = state.search_service.apply_page_delete_authorized(
+        permit,
         &state.git_service,
         target_path,
         target_hash,
@@ -752,7 +828,7 @@ fn execute_wiki_page_delete(
         action,
         status: ConfirmationStatus::Confirmed,
         checkpoint_exists,
-        project_summary: Some(state.project_service.scan_project(&context, None)),
+        project_summary: Some(state.project_service.scan_project(permit.context(), None)),
     })
 }
 

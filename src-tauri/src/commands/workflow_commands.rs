@@ -180,21 +180,23 @@ pub fn start_workflow(
     state: State<'_, AppState>,
     request: StartWorkflowRequest,
 ) -> Result<WorkflowStartOutcome, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let outcome = state.with_workflow_access(&context, |access| {
-        state.workflow_service.enqueue_with_acknowledgements(
-            &context,
-            access,
-            &state.settings_service,
-            &state.secret_service,
-            &state.agent_service,
-            &state.task_service,
-            &request.preparation_id,
-            &request.preparation_revision,
-            request.acknowledge_restricted_content,
-            request.acknowledge_remote_provider,
-        )
-    })?;
+    let outcome = state.with_current_project_task_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit| {
+            state.workflow_service.enqueue_with_acknowledgements(
+                permit,
+                &state.settings_service,
+                &state.secret_service,
+                &state.agent_service,
+                &state.task_service,
+                &request.preparation_id,
+                &request.preparation_revision,
+                request.acknowledge_restricted_content,
+                request.acknowledge_remote_provider,
+            )
+        },
+    )?;
     if let WorkflowStartOutcome::Created { run } = &outcome {
         if run.display_status == WorkflowDisplayStatus::Running {
             state.workflow_service.dispatch_claimed_run_with_settings(
@@ -858,10 +860,21 @@ pub fn cancel_workflow_run(
     state: State<'_, AppState>,
     request: WorkflowRunRequest,
 ) -> Result<WorkflowRun, BackendError> {
-    let context = require_workflow_project(&state, &request)?;
-    let (run, next) = state.with_workflow_access(&context, |_| {
-        cancel_or_discard_workflow(&state, &context, &request.task_id, false)
-    })?;
+    require_workflow_project(&state, &request)?;
+    let (run, next) = state.with_current_project_task_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit| {
+            cancel_or_discard_workflow(
+                &state,
+                permit.context(),
+                &request.task_id,
+                false,
+                permit.workflow_access().persistence
+                    == crate::models::workflow::WorkflowPersistenceMode::Persistent,
+            )
+        },
+    )?;
     dispatch_next(&state, next)?;
     Ok(run)
 }
@@ -871,62 +884,70 @@ pub fn undo_cancel_queued_workflow(
     state: State<'_, AppState>,
     request: WorkflowRunRequest,
 ) -> Result<WorkflowRun, BackendError> {
-    let context = require_workflow_project(&state, &request)?;
+    require_workflow_project(&state, &request)?;
     let before = workflow_run(&state, &request.task_id)?;
     let is_repair = matches!(
         before.operation,
         crate::models::workflow::WorkflowOperation::AgentLintRepair { .. }
     );
-    let (run, claimed) = state.with_workflow_access(&context, |access| {
-        if !is_repair {
-            return state
+    let (run, claimed) = state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, current| {
+            let access = permit.workflow_access();
+            if !is_repair {
+                return state
+                    .workflow_service
+                    .coordinator
+                    .undo_cancel(&state.task_service, &request.task_id)
+                    .map_err(|message| workflow_error("WORKFLOW_UNDO_CANCEL_FAILED", message));
+            }
+            crate::commands::lint_commands::validate_agent_lint_repair_replay_facts(
+                &state,
+                current,
+                &before,
+                &access,
+                crate::commands::lint_commands::AgentLintRepairReplayIntent::Undo,
+            )?;
+            let (held, _) = state
                 .workflow_service
                 .coordinator
-                .undo_cancel(&state.task_service, &request.task_id)
-                .map_err(|message| workflow_error("WORKFLOW_UNDO_CANCEL_FAILED", message));
-        }
-        crate::commands::lint_commands::validate_agent_lint_repair_replay_facts(
-            &state,
-            &context,
-            &before,
-            &access,
-            crate::commands::lint_commands::AgentLintRepairReplayIntent::Undo,
-        )?;
-        let (held, _) = state
-            .workflow_service
-            .coordinator
-            .undo_cancel_pending_approval(&state.task_service, &request.task_id)
-            .map_err(|message| workflow_error("WORKFLOW_UNDO_CANCEL_FAILED", message))?;
-        if let Err(error) =
-            crate::commands::lint_commands::restore_agent_lint_repair_attestation_for_run(
-                &state, &held,
-            )
-        {
-            let _ = state
-                .workflow_service
-                .coordinator
-                .cancel_created_without_undo_and_claim_next(&state.task_service, &held.task_id);
-            return Err(error);
-        }
-        match state
-            .workflow_service
-            .coordinator
-            .release_initial_approval_hold_and_claim_next(&state.task_service, &held.task_id)
-        {
-            Ok(result) => Ok(result),
-            Err(message) => {
-                let _ =
-                    crate::commands::lint_commands::cancel_agent_lint_repair_attestation_for_run(
-                        &state, &held,
-                    );
+                .undo_cancel_pending_approval(&state.task_service, &request.task_id)
+                .map_err(|message| workflow_error("WORKFLOW_UNDO_CANCEL_FAILED", message))?;
+            if let Err(error) =
+                crate::commands::lint_commands::restore_agent_lint_repair_attestation_for_run(
+                    &state, &held,
+                )
+            {
                 let _ = state
                     .workflow_service
                     .coordinator
                     .cancel_created_without_undo_and_claim_next(&state.task_service, &held.task_id);
-                Err(workflow_error("WORKFLOW_UNDO_CANCEL_FAILED", message))
+                return Err(error);
             }
-        }
-    })?;
+            match state
+                .workflow_service
+                .coordinator
+                .release_initial_approval_hold_and_claim_next(&state.task_service, &held.task_id)
+            {
+                Ok(result) => Ok(result),
+                Err(message) => {
+                    let _ =
+                    crate::commands::lint_commands::cancel_agent_lint_repair_attestation_for_run(
+                        &state, &held,
+                    );
+                    let _ = state
+                        .workflow_service
+                        .coordinator
+                        .cancel_created_without_undo_and_claim_next(
+                            &state.task_service,
+                            &held.task_id,
+                        );
+                    Err(workflow_error("WORKFLOW_UNDO_CANCEL_FAILED", message))
+                }
+            }
+        },
+    )?;
     dispatch_next(&state, claimed)?;
     Ok(run)
 }
@@ -952,15 +973,21 @@ pub fn reorder_queued_workflow(
             },
         )?;
     }
-    let runs = state
-        .workflow_service
-        .coordinator
-        .reorder_queued(
-            &state.task_service,
-            &task_request.task_id,
-            request.before_task_id.as_deref(),
-        )
-        .map_err(|message| workflow_error("WORKFLOW_REORDER_FAILED", message))?;
+    let runs = state.with_current_project_write_access(
+        &task_request.project_id,
+        &task_request.project_root_path,
+        |_permit, _context| {
+            state
+                .workflow_service
+                .coordinator
+                .reorder_queued(
+                    &state.task_service,
+                    &task_request.task_id,
+                    request.before_task_id.as_deref(),
+                )
+                .map_err(|message| workflow_error("WORKFLOW_REORDER_FAILED", message))
+        },
+    )?;
     Ok(WorkflowRunPage {
         runs,
         next_cursor: None,
@@ -979,80 +1006,89 @@ pub(crate) fn retry_workflow_for_state(
     state: &AppState,
     request: WorkflowRunRequest,
 ) -> Result<WorkflowStartOutcome, BackendError> {
-    let context = require_workflow_project(state, &request)?;
+    require_workflow_project(state, &request)?;
     let original = workflow_run(state, &request.task_id)?;
     let repair_retry = matches!(
         original.operation,
         crate::models::workflow::WorkflowOperation::AgentLintRepair { .. }
     );
-    let (outcome, released_claim) = state.with_workflow_access(&context, |access| {
-        let replay = revalidate_workflow_replay_with_access(
-            state,
-            &context,
-            &original,
-            access,
-            super::lint_commands::AgentLintRepairReplayIntent::Retry,
-        )?;
-        if let Err(error) = replay.eligibility {
-            state
-                .workflow_service
-                .coordinator
-                .apply_persistence_and_continue_queued(
-                    &state.task_service,
-                    &original.canonical_identity_key,
-                    &original.identity_revision,
-                    &[(original.task_id.clone(), replay.persistence.task_state_root)],
-                    false,
-                )
-                .map_err(|message| workflow_error("WORKFLOW_RETRY_FAILED", message))?;
-            return Err(error);
-        }
-        let outcome = if repair_retry {
-            state.workflow_service.coordinator.retry_pending_approval(
-                &state.task_service,
-                &request.task_id,
-                context.project_id.clone(),
-                context.root.clone(),
-                replay.persistence.task_state_root,
-            )
-        } else {
-            state.workflow_service.coordinator.retry(
-                &state.task_service,
-                &request.task_id,
-                context.project_id.clone(),
-                context.root.clone(),
-                replay.persistence.task_state_root,
-            )
-        }
-        .map_err(|message| workflow_error("WORKFLOW_RETRY_FAILED", message))?;
-        if repair_retry {
-            let WorkflowStartOutcome::Created { run } = outcome else {
-                return Ok((outcome, None));
-            };
-            if let Err(error) = super::lint_commands::attest_agent_lint_repair_run(state, &run) {
-                let (_, next) = state
+    let (outcome, released_claim) = state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, current| {
+            let access = permit.workflow_access();
+            let replay = revalidate_workflow_replay_with_access(
+                state,
+                current,
+                &original,
+                access,
+                super::lint_commands::AgentLintRepairReplayIntent::Retry,
+            )?;
+            if let Err(error) = replay.eligibility {
+                state
                     .workflow_service
                     .coordinator
-                    .cancel_created_without_undo_and_claim_next(&state.task_service, &run.task_id)
-                    .map_err(|message| workflow_error("WORKFLOW_RETRY_FAILED", message))?;
-                if let Some(next) = next {
-                    state.workflow_service.dispatch_claimed_run_with_settings(
+                    .apply_persistence_and_continue_queued(
                         &state.task_service,
-                        &state.settings_service,
-                        &next,
-                    )?;
-                }
+                        &original.canonical_identity_key,
+                        &original.identity_revision,
+                        &[(original.task_id.clone(), replay.persistence.task_state_root)],
+                        false,
+                    )
+                    .map_err(|message| workflow_error("WORKFLOW_RETRY_FAILED", message))?;
                 return Err(error);
             }
-            let (released, claimed) = state
-                .workflow_service
-                .coordinator
-                .release_initial_approval_hold_and_claim_next(&state.task_service, &run.task_id)
-                .map_err(|message| workflow_error("WORKFLOW_RETRY_FAILED", message))?;
-            return Ok((WorkflowStartOutcome::Created { run: released }, claimed));
-        }
-        Ok((outcome, None))
-    })?;
+            let outcome = if repair_retry {
+                state.workflow_service.coordinator.retry_pending_approval(
+                    &state.task_service,
+                    &request.task_id,
+                    current.project_id.clone(),
+                    current.root.clone(),
+                    replay.persistence.task_state_root,
+                )
+            } else {
+                state.workflow_service.coordinator.retry(
+                    &state.task_service,
+                    &request.task_id,
+                    current.project_id.clone(),
+                    current.root.clone(),
+                    replay.persistence.task_state_root,
+                )
+            }
+            .map_err(|message| workflow_error("WORKFLOW_RETRY_FAILED", message))?;
+            if repair_retry {
+                let WorkflowStartOutcome::Created { run } = outcome else {
+                    return Ok((outcome, None));
+                };
+                if let Err(error) = super::lint_commands::attest_agent_lint_repair_run(state, &run)
+                {
+                    let (_, next) = state
+                        .workflow_service
+                        .coordinator
+                        .cancel_created_without_undo_and_claim_next(
+                            &state.task_service,
+                            &run.task_id,
+                        )
+                        .map_err(|message| workflow_error("WORKFLOW_RETRY_FAILED", message))?;
+                    if let Some(next) = next {
+                        state.workflow_service.dispatch_claimed_run_with_settings(
+                            &state.task_service,
+                            &state.settings_service,
+                            &next,
+                        )?;
+                    }
+                    return Err(error);
+                }
+                let (released, claimed) = state
+                    .workflow_service
+                    .coordinator
+                    .release_initial_approval_hold_and_claim_next(&state.task_service, &run.task_id)
+                    .map_err(|message| workflow_error("WORKFLOW_RETRY_FAILED", message))?;
+                return Ok((WorkflowStartOutcome::Created { run: released }, claimed));
+            }
+            Ok((outcome, None))
+        },
+    )?;
     let run = match &outcome {
         WorkflowStartOutcome::Created { run } | WorkflowStartOutcome::Existing { run } => run,
     };
@@ -1194,8 +1230,8 @@ pub fn confirm_workflow_action(
     request: ConfirmWorkflowActionRequest,
 ) -> Result<WorkflowRun, BackendError> {
     let run_request = WorkflowRunRequest {
-        project_id: request.project_id,
-        project_root_path: request.project_root_path,
+        project_id: request.project_id.clone(),
+        project_root_path: request.project_root_path.clone(),
         task_id: request.task_id,
     };
     let context = require_workflow_project(&state, &run_request)?;
@@ -1247,148 +1283,155 @@ pub fn confirm_workflow_action(
             }
         };
     }
-    let execution_result = state.with_workflow_access(&context, |access| {
-        if access.trust != crate::models::workflow::WorkflowProjectTrust::Trusted {
-            return Err(workflow_error(
-                "WORKFLOW_PROJECT_UNTRUSTED",
-                "Workflow confirmation requires a trusted project.",
-            ));
-        }
-        if access.filesystem_access != crate::models::workflow::WorkflowFilesystemAccess::Writable {
-            return Err(workflow_error(
-                "WORKFLOW_PROJECT_READ_ONLY",
-                "Workflow confirmation requires writable project access.",
-            ));
-        }
-        state.require_workflow_content_write_root(&context, &run.kind)?;
-        let stored = state.confirmation_registry.claim(&request.action_id)?;
-        if !crate::models::confirmation::workflow_execution_matches(
-            &run.kind,
-            stored.execution.as_ref(),
-            &context,
-            &run,
-            &pending,
-        ) {
-            let _ = state
-                .confirmation_registry
-                .finish_claim(&request.action_id, false);
-            let _ = state
-                .confirmation_registry
-                .cancel_workflow_binding(&context, &run, &pending);
-            match &run.kind {
-                WorkflowKind::UpdateWiki => {
-                    let _ = crate::services::discard_update_wiki_candidate(&run.task_id);
-                }
-                WorkflowKind::GenerateContent => {
-                    let _ = crate::services::discard_generate_content_candidate(&run.task_id);
-                }
-                WorkflowKind::HealthCheck => {}
+    let execution_result = state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, context| {
+            let access = permit.workflow_access();
+            if access.trust != crate::models::workflow::WorkflowProjectTrust::Trusted {
+                return Err(workflow_error(
+                    "WORKFLOW_PROJECT_UNTRUSTED",
+                    "Workflow confirmation requires a trusted project.",
+                ));
             }
-            let (_, next) = state
-                .workflow_service
-                .coordinator
-                .interrupt_invalid_confirmation(
-                    &state.task_service,
-                    &run.task_id,
-                    WorkflowErrorSummary {
-                        code: "WORKFLOW_CONFIRMATION_EXECUTION_MISMATCH".into(),
-                        message_key: "workflows.error.prepareAgain".into(),
-                        recoverable: false,
-                        user_action_required: true,
-                        suggested_action: Some(WorkflowPrerequisiteAction::PrepareAgain),
-                        project_mutation_state: WorkflowProjectMutationState::NotModified,
-                    },
-                )
-                .map_err(|message| workflow_error("WORKFLOW_CONFIRMATION_FAILED", message))?;
-            return Ok(Err((
-                workflow_error(
-                    "WORKFLOW_CONFIRMATION_EXECUTION_MISMATCH",
-                    "The confirmation execution plan does not match this workflow run.",
-                ),
-                next,
-            )));
-        }
-        let execution_result = match (run.kind.clone(), stored.execution) {
-            (
-                WorkflowKind::GenerateContent,
-                Some(ConfirmationExecution::GenerateContentOverwrite {
-                    project_id,
-                    root_path,
-                    task_id,
-                    ..
-                }),
-            ) if project_id == context.project_id
-                && root_path == context.root.to_string_lossy()
-                && task_id == run_request.task_id =>
+            if access.filesystem_access
+                != crate::models::workflow::WorkflowFilesystemAccess::Writable
             {
-                match crate::services::confirm_generate_content_overwrite(
-                    &context,
-                    &run_request.task_id,
-                    &generate_content_services(&state),
-                ) {
-                    Ok(value) => Ok(value),
-                    Err(failure) => Err((failure.error, failure.next)),
-                }
+                return Err(workflow_error(
+                    "WORKFLOW_PROJECT_READ_ONLY",
+                    "Workflow confirmation requires writable project access.",
+                ));
             }
-            (
-                WorkflowKind::UpdateWiki,
-                Some(ConfirmationExecution::UpdateWikiReview {
-                    project_id,
-                    root_path,
-                    task_id,
-                    ..
-                }),
-            ) if project_id == context.project_id
-                && root_path == context.root.to_string_lossy()
-                && task_id == run_request.task_id =>
-            {
-                let compile = CompileExecutionServices {
-                    agent_service: &state.agent_service,
-                    llm_service: &state.llm_service,
-                    secret_service: &state.secret_service,
-                    settings_service: &state.settings_service,
-                    task_service: &state.task_service,
-                };
-                match crate::services::confirm_update_wiki_review(
-                    &context,
-                    &run_request.task_id,
-                    &UpdateWikiExecutionServices {
-                        compile,
-                        git_service: &state.git_service,
-                        file_store: &state.file_store,
-                        bookmark_service: &state.bookmark_service,
-                        search_service: &state.search_service,
-                        confirmation_registry: &state.confirmation_registry,
-                        coordinator: &state.workflow_service.coordinator,
-                    },
-                ) {
-                    Ok(value) => Ok(value),
-                    Err(failure) => Err((failure.error, failure.next)),
+            state.require_workflow_content_write_root(&context, &run.kind)?;
+            let stored = state.confirmation_registry.claim(&request.action_id)?;
+            if !crate::models::confirmation::workflow_execution_matches(
+                &run.kind,
+                stored.execution.as_ref(),
+                &context,
+                &run,
+                &pending,
+            ) {
+                let _ = state
+                    .confirmation_registry
+                    .finish_claim(&request.action_id, false);
+                let _ = state
+                    .confirmation_registry
+                    .cancel_workflow_binding(&context, &run, &pending);
+                match &run.kind {
+                    WorkflowKind::UpdateWiki => {
+                        let _ = crate::services::discard_update_wiki_candidate(&run.task_id);
+                    }
+                    WorkflowKind::GenerateContent => {
+                        let _ = crate::services::discard_generate_content_candidate(&run.task_id);
+                    }
+                    WorkflowKind::HealthCheck => {}
                 }
+                let (_, next) = state
+                    .workflow_service
+                    .coordinator
+                    .interrupt_invalid_confirmation(
+                        &state.task_service,
+                        &run.task_id,
+                        WorkflowErrorSummary {
+                            code: "WORKFLOW_CONFIRMATION_EXECUTION_MISMATCH".into(),
+                            message_key: "workflows.error.prepareAgain".into(),
+                            recoverable: false,
+                            user_action_required: true,
+                            suggested_action: Some(WorkflowPrerequisiteAction::PrepareAgain),
+                            project_mutation_state: WorkflowProjectMutationState::NotModified,
+                        },
+                    )
+                    .map_err(|message| workflow_error("WORKFLOW_CONFIRMATION_FAILED", message))?;
+                return Ok(Err((
+                    workflow_error(
+                        "WORKFLOW_CONFIRMATION_EXECUTION_MISMATCH",
+                        "The confirmation execution plan does not match this workflow run.",
+                    ),
+                    next,
+                )));
             }
-            _ => Err((
-                workflow_error(
-                    "WORKFLOW_CONFIRMATION_EXECUTION_MISMATCH",
-                    "The confirmation execution plan does not match this workflow run.",
-                ),
-                None,
-            )),
-        };
-        let consume_confirmation = execution_result.is_ok()
-            || state
-                .task_service
-                .get_workflow_run(&run_request.task_id)
-                .is_none_or(|current| {
-                    current
-                        .pending_action
-                        .as_ref()
-                        .is_none_or(|pending| pending.id != request.action_id)
-                });
-        state
-            .confirmation_registry
-            .finish_claim(&request.action_id, consume_confirmation)?;
-        Ok(execution_result)
-    })?;
+            let execution_result = match (run.kind.clone(), stored.execution) {
+                (
+                    WorkflowKind::GenerateContent,
+                    Some(ConfirmationExecution::GenerateContentOverwrite {
+                        project_id,
+                        root_path,
+                        task_id,
+                        ..
+                    }),
+                ) if project_id == context.project_id
+                    && root_path == context.root.to_string_lossy()
+                    && task_id == run_request.task_id =>
+                {
+                    match crate::services::confirm_generate_content_overwrite(
+                        &context,
+                        &run_request.task_id,
+                        &generate_content_services(&state),
+                    ) {
+                        Ok(value) => Ok(value),
+                        Err(failure) => Err((failure.error, failure.next)),
+                    }
+                }
+                (
+                    WorkflowKind::UpdateWiki,
+                    Some(ConfirmationExecution::UpdateWikiReview {
+                        project_id,
+                        root_path,
+                        task_id,
+                        ..
+                    }),
+                ) if project_id == context.project_id
+                    && root_path == context.root.to_string_lossy()
+                    && task_id == run_request.task_id =>
+                {
+                    let compile = CompileExecutionServices {
+                        agent_service: &state.agent_service,
+                        llm_service: &state.llm_service,
+                        secret_service: &state.secret_service,
+                        settings_service: &state.settings_service,
+                        task_service: &state.task_service,
+                    };
+                    match crate::services::confirm_update_wiki_review(
+                        &context,
+                        &run_request.task_id,
+                        &UpdateWikiExecutionServices {
+                            compile,
+                            git_service: &state.git_service,
+                            file_store: &state.file_store,
+                            bookmark_service: &state.bookmark_service,
+                            search_service: &state.search_service,
+                            confirmation_registry: &state.confirmation_registry,
+                            coordinator: &state.workflow_service.coordinator,
+                        },
+                    ) {
+                        Ok(value) => Ok(value),
+                        Err(failure) => Err((failure.error, failure.next)),
+                    }
+                }
+                _ => Err((
+                    workflow_error(
+                        "WORKFLOW_CONFIRMATION_EXECUTION_MISMATCH",
+                        "The confirmation execution plan does not match this workflow run.",
+                    ),
+                    None,
+                )),
+            };
+            let consume_confirmation = execution_result.is_ok()
+                || state
+                    .task_service
+                    .get_workflow_run(&run_request.task_id)
+                    .is_none_or(|current| {
+                        current
+                            .pending_action
+                            .as_ref()
+                            .is_none_or(|pending| pending.id != request.action_id)
+                    });
+            state
+                .confirmation_registry
+                .finish_claim(&request.action_id, consume_confirmation)?;
+            Ok(execution_result)
+        },
+    )?;
     match execution_result {
         Ok((completed, next)) => {
             dispatch_next(&state, next)?;
@@ -1406,10 +1449,14 @@ pub fn discard_workflow_result(
     state: State<'_, AppState>,
     request: WorkflowRunRequest,
 ) -> Result<WorkflowRun, BackendError> {
-    let context = require_workflow_project(&state, &request)?;
-    let (run, next) = state.with_workflow_access(&context, |_| {
-        cancel_or_discard_workflow(&state, &context, &request.task_id, true)
-    })?;
+    require_workflow_project(&state, &request)?;
+    let (run, next) = state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, current| {
+            cancel_or_discard_workflow(&state, current, &request.task_id, true, true)
+        },
+    )?;
     dispatch_next(&state, next)?;
     Ok(run)
 }
@@ -1462,6 +1509,7 @@ pub(crate) fn cancel_or_discard_workflow(
     context: &crate::models::paths::ProjectContext,
     task_id: &str,
     require_waiting: bool,
+    allow_project_cleanup: bool,
 ) -> Result<(WorkflowRun, Option<WorkflowRun>), BackendError> {
     let before = workflow_run(state, task_id)?;
     if require_waiting && before.display_status != WorkflowDisplayStatus::WaitingForConfirmation {
@@ -1475,12 +1523,14 @@ pub(crate) fn cancel_or_discard_workflow(
         .coordinator
         .cancel(&state.task_service, task_id)
         .map_err(|message| workflow_error("WORKFLOW_CANCEL_FAILED", message))?;
-    if matches!(
-        before.display_status,
-        WorkflowDisplayStatus::Queued
-            | WorkflowDisplayStatus::Running
-            | WorkflowDisplayStatus::WaitingForConfirmation
-    ) {
+    if allow_project_cleanup
+        && matches!(
+            before.display_status,
+            WorkflowDisplayStatus::Queued
+                | WorkflowDisplayStatus::Running
+                | WorkflowDisplayStatus::WaitingForConfirmation
+        )
+    {
         // The task owner decides whether cancellation can win (notably, a
         // checked apply is temporarily non-cancellable) before the app-owned
         // receipt is tombstoned. A late success publication only accepts a
@@ -1501,10 +1551,12 @@ pub(crate) fn cancel_or_discard_workflow(
             }
             return Err(error);
         }
-        if matches!(
-            &before.operation,
-            crate::models::workflow::WorkflowOperation::AgentLintRepair { .. }
-        ) {
+        if allow_project_cleanup
+            && matches!(
+                &before.operation,
+                crate::models::workflow::WorkflowOperation::AgentLintRepair { .. }
+            )
+        {
             let result = crate::services::rollback_and_discard_agent_lint_repair_candidate(
                 context,
                 &before,

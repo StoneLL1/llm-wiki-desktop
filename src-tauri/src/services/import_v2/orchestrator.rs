@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
+use crate::app_state::{ProjectExecutionLease, ProjectTaskMutationPermit, ProjectWritePermit};
 use crate::errors::{
     BackendError, IMPORT_V2_CANCELLED, IMPORT_V2_ENGINE_PANICKED, IMPORT_V2_ITEM_NOT_FOUND,
     IMPORT_V2_STATE_INVALID,
@@ -104,7 +105,7 @@ impl Default for ImportV2Service {
 }
 
 impl ImportV2Service {
-    pub fn authorize_media_for_session(
+    fn authorize_media_for_session_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -441,7 +442,7 @@ impl ImportV2Service {
             .unbind_authenticated_profiles(project_id, session_id, item_ids)
     }
 
-    pub fn enable_remote_media_retention(
+    fn enable_remote_media_retention_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -472,7 +473,7 @@ impl ImportV2Service {
         })
     }
 
-    pub fn mark_authenticated_login_group(
+    fn mark_authenticated_login_group_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -526,7 +527,7 @@ impl ImportV2Service {
         Ok(session)
     }
 
-    pub fn clear_authenticated_login_group(
+    fn clear_authenticated_login_group_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -549,7 +550,7 @@ impl ImportV2Service {
         Ok(session)
     }
 
-    pub fn cancel_queued_item(
+    fn cancel_queued_item_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -574,7 +575,7 @@ impl ImportV2Service {
 
     /// A batch item owns only its persisted item fact.  It must never cancel
     /// the shared operation token used by its siblings.
-    pub fn cancel_batch_item(
+    fn cancel_batch_item_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -600,7 +601,7 @@ impl ImportV2Service {
         })
     }
 
-    pub fn skip_item(
+    fn skip_item_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -661,7 +662,7 @@ impl ImportV2Service {
         remove_clipboard_session_input(context, session_id, &item.input);
         Ok(item)
     }
-    pub fn create_session(
+    fn create_session_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -674,7 +675,7 @@ impl ImportV2Service {
         }
         self.sessions.create(context, files, mode)
     }
-    pub fn add_inputs(
+    fn add_inputs_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -697,7 +698,7 @@ impl ImportV2Service {
             .completed_collection_fingerprints(context, files, source_url, platform)
     }
 
-    pub fn add_collection_inputs(
+    fn add_collection_inputs_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -718,7 +719,7 @@ impl ImportV2Service {
     /// it as a normal immutable file input. The session copy is deleted on
     /// cancel/skip/commit; a confirmed import retains only the normal raw
     /// Source evidence and its content-addressed clipboard origin.
-    pub fn add_text_input(
+    fn add_text_input_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -843,7 +844,7 @@ impl ImportV2Service {
         SessionStore::ensure_accepts_new_items(&session)
     }
 
-    pub fn set_discovery_task_id(
+    fn set_discovery_task_id_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -865,7 +866,7 @@ impl ImportV2Service {
     /// Persist the task-to-item relationship before the worker is spawned.
     /// This closes the small restart window in which a task already exists
     /// but the item still looks unclaimed in the durable session file.
-    pub fn bind_item_task_ids(
+    fn bind_item_task_ids_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -977,7 +978,7 @@ impl ImportV2Service {
 
     /// Create the persisted operation before expensive cohort preparation so
     /// callers can return an observable, cancellable task immediately.
-    pub fn create_batch_operation_task(
+    fn create_batch_operation_task_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -1023,7 +1024,7 @@ impl ImportV2Service {
     /// Validate and atomically claim an already-created operation cohort.
     /// Replaced task ids are returned so callers can settle superseded login
     /// or attention operations after the new claim is durable.
-    pub fn prepare_batch_operation<F>(
+    fn prepare_batch_operation_unchecked<F>(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -1118,7 +1119,7 @@ impl ImportV2Service {
     /// atomically claim the requested item cohort before any worker can be
     /// queued. Item JSON remains the state machine; `task_id` is only this
     /// operation's claim token.
-    pub fn begin_batch_operation(
+    fn begin_batch_operation_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -1199,7 +1200,7 @@ impl ImportV2Service {
         Ok(task)
     }
 
-    pub fn begin_agent_assistance(
+    pub(super) fn begin_agent_assistance_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -1265,7 +1266,7 @@ impl ImportV2Service {
         })
     }
 
-    pub fn finish_agent_assistance_attempt(
+    pub(super) fn finish_agent_assistance_attempt_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -1290,7 +1291,7 @@ impl ImportV2Service {
         })
     }
 
-    pub fn register_agent_candidate(
+    pub(super) fn register_agent_candidate(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -1315,7 +1316,7 @@ impl ImportV2Service {
         })
     }
 
-    pub fn begin_agent_candidate_validation(
+    pub(super) fn begin_agent_candidate_validation_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -1348,7 +1349,7 @@ impl ImportV2Service {
         Ok(previous)
     }
 
-    pub fn fail_agent_candidate_validation(
+    pub(super) fn fail_agent_candidate_validation_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -1372,7 +1373,7 @@ impl ImportV2Service {
         })
     }
 
-    pub fn mark_agent_candidate_rejected(
+    pub(super) fn mark_agent_candidate_rejected(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -1404,7 +1405,7 @@ impl ImportV2Service {
         })
     }
 
-    pub fn reject_agent_candidate_validation(
+    pub(super) fn reject_agent_candidate_validation(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -1442,7 +1443,7 @@ impl ImportV2Service {
         })
     }
 
-    pub fn select_agent_candidate(
+    pub(super) fn select_agent_candidate(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -1536,7 +1537,7 @@ impl ImportV2Service {
         Ok(item)
     }
 
-    pub fn discard_agent_candidate(
+    pub(super) fn discard_agent_candidate(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -1590,7 +1591,591 @@ impl ImportV2Service {
         persist_derived(&self.sessions, context, files, session)?;
         Ok(item)
     }
+    pub(crate) fn authorize_media_for_session_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        kind: ImportMediaAuthorizationKind,
+        asr_profile: Option<ImportAsrProfile>,
+        language: Option<String>,
+    ) -> Result<(), BackendError> {
+        self.authorize_media_for_session_unchecked(
+            permit.context(),
+            files,
+            session_id,
+            item_id,
+            kind,
+            asr_profile,
+            language,
+        )
+    }
+
+    pub(crate) fn enable_remote_media_retention_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+    ) -> Result<ImportItem, BackendError> {
+        self.enable_remote_media_retention_unchecked(permit.context(), files, session_id, item_id)
+    }
+
+    pub(crate) fn mark_authenticated_login_group_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        session_id: &str,
+        item_ids: &[String],
+        account_summary: Option<&str>,
+    ) -> Result<ImportSession, BackendError> {
+        self.mark_authenticated_login_group_unchecked(
+            permit.context(),
+            files,
+            session_id,
+            item_ids,
+            account_summary,
+        )
+    }
+
+    pub(crate) fn clear_authenticated_login_group_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        session_id: &str,
+        item_ids: &[String],
+    ) -> Result<ImportSession, BackendError> {
+        self.clear_authenticated_login_group_unchecked(
+            permit.context(),
+            files,
+            session_id,
+            item_ids,
+        )
+    }
+
+    pub(crate) fn cancel_queued_item_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+    ) -> Result<ImportItem, BackendError> {
+        self.cancel_queued_item_unchecked(permit.context(), files, session_id, item_id)
+    }
+
+    pub(crate) fn cancel_batch_item_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+    ) -> Result<ImportItem, BackendError> {
+        self.cancel_batch_item_unchecked(permit.context(), files, session_id, item_id)
+    }
+
+    pub(crate) fn cancel_batch_item_for_task_authorized(
+        &self,
+        permit: &ProjectTaskMutationPermit<'_>,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+    ) -> Result<ImportItem, BackendError> {
+        if permit.workflow_access().persistence
+            != crate::models::workflow::WorkflowPersistenceMode::Persistent
+        {
+            return Err(BackendError::new(
+                "PROJECT_TASK_PERSISTENCE_REVOKED",
+                "Project task persistence is no longer available.",
+                true,
+                false,
+            ));
+        }
+        self.cancel_batch_item_unchecked(permit.context(), files, session_id, item_id)
+    }
+
+    pub(crate) fn skip_item_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        item_id: &str,
+    ) -> Result<ImportItem, BackendError> {
+        self.skip_item_unchecked(permit.context(), files, tasks, session_id, item_id)
+    }
+
+    pub(crate) fn create_session_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        mode: ImportResourceMode,
+    ) -> Result<ImportSession, BackendError> {
+        self.create_session_unchecked(permit.context(), files, mode)
+    }
+
+    pub(crate) fn create_batch_operation_task_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        item_ids: &[String],
+    ) -> Result<BackendTask, BackendError> {
+        self.create_batch_operation_task_unchecked(
+            permit.context(),
+            files,
+            tasks,
+            session_id,
+            item_ids,
+        )
+    }
+
+    pub(crate) fn prepare_batch_operation_authorized<F>(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        task_id: &str,
+        item_ids: &[String],
+        should_cancel: F,
+    ) -> Result<Vec<String>, BackendError>
+    where
+        F: FnMut() -> bool,
+    {
+        self.prepare_batch_operation_unchecked(
+            permit.context(),
+            files,
+            tasks,
+            session_id,
+            task_id,
+            item_ids,
+            should_cancel,
+        )
+    }
+
+    pub(crate) fn add_inputs_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        session_id: &str,
+        inputs: Vec<ImportInput>,
+    ) -> Result<ImportSession, BackendError> {
+        self.add_inputs_unchecked(permit.context(), files, session_id, inputs)
+    }
+
+    pub(crate) fn add_collection_inputs_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        session_id: &str,
+        inputs: Vec<crate::services::import_v2::session_store::CollectionImportInput>,
+        source_url: String,
+        platform: String,
+        title: String,
+    ) -> Result<ImportSession, BackendError> {
+        self.add_collection_inputs_unchecked(
+            permit.context(),
+            files,
+            session_id,
+            inputs,
+            source_url,
+            platform,
+            title,
+        )
+    }
+
+    pub(crate) fn add_text_input_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        session_id: &str,
+        display_name: &str,
+        content: &str,
+    ) -> Result<ImportSession, BackendError> {
+        self.add_text_input_unchecked(permit.context(), files, session_id, display_name, content)
+    }
+
+    pub(crate) fn set_discovery_task_id_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        session_id: &str,
+        task_id: Option<String>,
+    ) -> Result<ImportSession, BackendError> {
+        self.set_discovery_task_id_unchecked(permit.context(), files, session_id, task_id)
+    }
+
+    pub(crate) fn bind_item_task_ids_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        session_id: &str,
+        bindings: &[(String, String)],
+    ) -> Result<(), BackendError> {
+        self.bind_item_task_ids_unchecked(permit.context(), files, session_id, bindings)
+    }
+
+    pub(crate) fn recover_session_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+    ) -> Result<ImportSession, BackendError> {
+        self.recover_session_unchecked(permit.context(), files, tasks, session_id)
+    }
+
+    pub(crate) fn set_item_selected_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        selected: bool,
+    ) -> Result<ImportItem, BackendError> {
+        self.set_item_selected_unchecked(permit.context(), files, session_id, item_id, selected)
+    }
+
+    pub(crate) fn select_subtitle_for_session_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        file_name: &str,
+    ) -> Result<ImportItem, BackendError> {
+        self.select_subtitle_for_session_unchecked(
+            permit.context(),
+            files,
+            session_id,
+            item_id,
+            file_name,
+        )
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn authorize_media_for_session(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        kind: ImportMediaAuthorizationKind,
+        asr_profile: Option<ImportAsrProfile>,
+        language: Option<String>,
+    ) -> Result<(), BackendError> {
+        self.authorize_media_for_session_unchecked(
+            context,
+            files,
+            session_id,
+            item_id,
+            kind,
+            asr_profile,
+            language,
+        )
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn enable_remote_media_retention(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+    ) -> Result<ImportItem, BackendError> {
+        self.enable_remote_media_retention_unchecked(context, files, session_id, item_id)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn mark_authenticated_login_group(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_ids: &[String],
+        account_summary: Option<&str>,
+    ) -> Result<ImportSession, BackendError> {
+        self.mark_authenticated_login_group_unchecked(
+            context,
+            files,
+            session_id,
+            item_ids,
+            account_summary,
+        )
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn clear_authenticated_login_group(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_ids: &[String],
+    ) -> Result<ImportSession, BackendError> {
+        self.clear_authenticated_login_group_unchecked(context, files, session_id, item_ids)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn cancel_queued_item(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+    ) -> Result<ImportItem, BackendError> {
+        self.cancel_queued_item_unchecked(context, files, session_id, item_id)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn cancel_batch_item(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+    ) -> Result<ImportItem, BackendError> {
+        self.cancel_batch_item_unchecked(context, files, session_id, item_id)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn skip_item(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        item_id: &str,
+    ) -> Result<ImportItem, BackendError> {
+        self.skip_item_unchecked(context, files, tasks, session_id, item_id)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn create_session(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        mode: ImportResourceMode,
+    ) -> Result<ImportSession, BackendError> {
+        self.create_session_unchecked(context, files, mode)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn create_batch_operation_task(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        item_ids: &[String],
+    ) -> Result<BackendTask, BackendError> {
+        self.create_batch_operation_task_unchecked(context, files, tasks, session_id, item_ids)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn prepare_batch_operation<F>(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        task_id: &str,
+        item_ids: &[String],
+        should_cancel: F,
+    ) -> Result<Vec<String>, BackendError>
+    where
+        F: FnMut() -> bool,
+    {
+        self.prepare_batch_operation_unchecked(
+            context,
+            files,
+            tasks,
+            session_id,
+            task_id,
+            item_ids,
+            should_cancel,
+        )
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn begin_batch_operation(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        item_ids: &[String],
+    ) -> Result<BackendTask, BackendError> {
+        self.begin_batch_operation_unchecked(context, files, tasks, session_id, item_ids)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn add_inputs(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        inputs: Vec<ImportInput>,
+    ) -> Result<ImportSession, BackendError> {
+        self.add_inputs_unchecked(context, files, session_id, inputs)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn add_collection_inputs(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        inputs: Vec<crate::services::import_v2::session_store::CollectionImportInput>,
+        source_url: String,
+        platform: String,
+        title: String,
+    ) -> Result<ImportSession, BackendError> {
+        self.add_collection_inputs_unchecked(
+            context, files, session_id, inputs, source_url, platform, title,
+        )
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn add_text_input(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        display_name: &str,
+        content: &str,
+    ) -> Result<ImportSession, BackendError> {
+        self.add_text_input_unchecked(context, files, session_id, display_name, content)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn set_discovery_task_id(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        task_id: Option<String>,
+    ) -> Result<ImportSession, BackendError> {
+        self.set_discovery_task_id_unchecked(context, files, session_id, task_id)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn bind_item_task_ids(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        bindings: &[(String, String)],
+    ) -> Result<(), BackendError> {
+        self.bind_item_task_ids_unchecked(context, files, session_id, bindings)
+    }
+
+    #[cfg(debug_assertions)]
     pub fn recover_session(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+    ) -> Result<ImportSession, BackendError> {
+        self.recover_session_unchecked(context, files, tasks, session_id)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn set_item_selected(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        selected: bool,
+    ) -> Result<ImportItem, BackendError> {
+        self.set_item_selected_unchecked(context, files, session_id, item_id, selected)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn select_subtitle_for_session(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        file_name: &str,
+    ) -> Result<ImportItem, BackendError> {
+        self.select_subtitle_for_session_unchecked(context, files, session_id, item_id, file_name)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn begin_agent_assistance(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+        trigger: AgentAssistanceTrigger,
+        agent_kind: crate::models::agent::AgentKind,
+        max_attempts: u8,
+    ) -> Result<ImportItem, BackendError> {
+        self.begin_agent_assistance_unchecked(
+            context,
+            files,
+            session_id,
+            item_id,
+            task_id,
+            trigger,
+            agent_kind,
+            max_attempts,
+        )
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn finish_agent_assistance_attempt(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+        outcome: AttemptOutcome,
+        warnings: Vec<String>,
+    ) -> Result<ImportItem, BackendError> {
+        self.finish_agent_assistance_attempt_unchecked(
+            context, files, session_id, item_id, task_id, outcome, warnings,
+        )
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn begin_agent_candidate_validation(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+    ) -> Result<ImportItemStatus, BackendError> {
+        self.begin_agent_candidate_validation_unchecked(
+            context, files, session_id, item_id, task_id,
+        )
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn fail_agent_candidate_validation(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+        previous: ImportItemStatus,
+    ) -> Result<ImportItem, BackendError> {
+        self.fail_agent_candidate_validation_unchecked(
+            context, files, session_id, item_id, task_id, previous,
+        )
+    }
+
+    fn recover_session_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -1824,7 +2409,7 @@ impl ImportV2Service {
                 self.connector_profiles_root.clone(),
             )))
     }
-    pub fn set_item_selected(
+    fn set_item_selected_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -1851,7 +2436,7 @@ impl ImportV2Service {
         Ok(item)
     }
 
-    pub fn select_subtitle_for_session(
+    fn select_subtitle_for_session_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -1904,6 +2489,9 @@ impl ImportV2Service {
         Ok(item)
     }
 
+    /// Compatibility surface for integration and service tests. Production
+    /// workers must enter through an execution-lease-bearing method.
+    #[cfg(debug_assertions)]
     pub fn run_item(
         &self,
         context: &ProjectContext,
@@ -1913,9 +2501,12 @@ impl ImportV2Service {
         item_id: &str,
         task_id: &str,
     ) -> Result<ImportItem, BackendError> {
-        self.run_item_with_recovery(context, files, tasks, session_id, item_id, task_id, None)
+        self.run_item_with_recovery_mode(
+            context, files, tasks, session_id, item_id, task_id, None, true,
+        )
     }
 
+    #[cfg(debug_assertions)]
     pub fn run_item_with_recovery(
         &self,
         context: &ProjectContext,
@@ -1938,9 +2529,32 @@ impl ImportV2Service {
         )
     }
 
+    pub(crate) fn run_item_with_recovery_authorized(
+        &self,
+        execution: &ProjectExecutionLease,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+        recovery_action: Option<&ImportRecoveryAction>,
+    ) -> Result<ImportItem, BackendError> {
+        self.run_item_with_recovery_mode(
+            execution.task_context(task_id)?,
+            files,
+            tasks,
+            session_id,
+            item_id,
+            task_id,
+            recovery_action,
+            true,
+        )
+    }
+
     /// Batch operations share one persistent task.  Item state remains the
     /// source of truth, so this path never turns the operation task into an
     /// item-sized WaitingForConfirmation/Failed/Succeeded state machine.
+    #[cfg(debug_assertions)]
     pub fn run_item_with_recovery_in_batch(
         &self,
         context: &ProjectContext,
@@ -1953,6 +2567,28 @@ impl ImportV2Service {
     ) -> Result<ImportItem, BackendError> {
         self.run_item_with_recovery_mode(
             context,
+            files,
+            tasks,
+            session_id,
+            item_id,
+            operation_id,
+            recovery_action,
+            false,
+        )
+    }
+
+    pub(crate) fn run_item_with_recovery_in_batch_authorized(
+        &self,
+        execution: &ProjectExecutionLease,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        item_id: &str,
+        operation_id: &str,
+        recovery_action: Option<&ImportRecoveryAction>,
+    ) -> Result<ImportItem, BackendError> {
+        self.run_item_with_recovery_mode(
+            execution.task_context(operation_id)?,
             files,
             tasks,
             session_id,

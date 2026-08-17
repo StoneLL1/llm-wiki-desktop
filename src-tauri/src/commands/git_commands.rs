@@ -198,35 +198,15 @@ pub fn create_git_checkpoint(
     state: State<'_, AppState>,
     request: CreateCheckpointRequest,
 ) -> Result<GitCheckpoint, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    require_git_mutation_access(&state, &context)?;
-    state
-        .git_service
-        .create_checkpoint(&context, request.purpose, &request.message)
-}
-
-fn require_git_mutation_access(
-    state: &AppState,
-    context: &crate::models::paths::ProjectContext,
-) -> Result<(), BackendError> {
-    let access = state.resolve_workflow_access(context)?;
-    if access.trust != crate::models::workflow::WorkflowProjectTrust::Trusted {
-        return Err(BackendError::new(
-            "WORKFLOW_PROJECT_UNTRUSTED",
-            "Git mutations require a trusted project.",
-            true,
-            true,
-        ));
-    }
-    if access.filesystem_access != crate::models::workflow::WorkflowFilesystemAccess::Writable {
-        return Err(BackendError::new(
-            "WORKFLOW_PROJECT_READ_ONLY",
-            "Git mutations require writable project access.",
-            true,
-            true,
-        ));
-    }
-    Ok(())
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+            state
+                .git_service
+                .create_checkpoint(context, request.purpose, &request.message)
+        },
+    )
 }
 
 #[tauri::command]

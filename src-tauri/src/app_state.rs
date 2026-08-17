@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Mutex, MutexGuard, RwLock};
 
 use crate::errors::{BackendError, PATH_INVALID, PROJECT_CONTEXT_MISMATCH};
 use crate::models::confirmation::ConfirmationRegistry;
@@ -30,6 +30,105 @@ pub(crate) enum ProjectWriteRootKind {
     Wiki,
     Export,
     Query,
+}
+
+/// Backend-issued proof that the current project is trusted, healthy, and
+/// writable for the lifetime of one mutation. The private transition-guard
+/// reference makes this capability impossible to construct from IPC data or
+/// retain after [`AppState::with_current_project_write_access`] returns.
+pub struct ProjectWritePermit<'permit> {
+    context: ProjectContext,
+    workflow_access: crate::services::WorkflowAccessSnapshot,
+    _transition_guard: &'permit MutexGuard<'permit, ()>,
+}
+
+/// Narrow capability for explicitly confirmed project-authority mutations
+/// such as repair, compatibility enablement, and initial Git setup. These
+/// operations may be the action that makes a project trusted/healthy, so they
+/// cannot require a normal [`ProjectWritePermit`]; they do still retain the
+/// authority transition lock and prove that the registered root is writable.
+pub(crate) struct ProjectAuthorityMutationPermit<'permit> {
+    context: ProjectContext,
+    _transition_guard: &'permit MutexGuard<'permit, ()>,
+}
+
+/// Narrow capability for project-owned task/workflow state. Unlike a content
+/// write permit it remains available to restricted or read-only projects, but
+/// its access snapshot forces those runs to use memory-only persistence.
+pub(crate) struct ProjectTaskMutationPermit<'permit> {
+    context: ProjectContext,
+    workflow_access: crate::services::WorkflowAccessSnapshot,
+    _transition_guard: &'permit MutexGuard<'permit, ()>,
+}
+
+impl ProjectTaskMutationPermit<'_> {
+    pub(crate) fn context(&self) -> &ProjectContext {
+        &self.context
+    }
+
+    pub(crate) fn workflow_access(&self) -> crate::services::WorkflowAccessSnapshot {
+        self.workflow_access.clone()
+    }
+}
+
+impl ProjectWritePermit<'_> {
+    pub(crate) fn context(&self) -> &ProjectContext {
+        &self.context
+    }
+
+    pub(crate) fn authority_revision(&self) -> &str {
+        &self.workflow_access.authority_revision
+    }
+
+    pub(crate) fn workflow_access(&self) -> crate::services::WorkflowAccessSnapshot {
+        self.workflow_access.clone()
+    }
+
+    pub(crate) fn validates(&self, context: &ProjectContext) -> bool {
+        self.context.project_id == context.project_id
+            && self.context.root == context.root
+            && !self.authority_revision().is_empty()
+    }
+}
+
+impl ProjectAuthorityMutationPermit<'_> {
+    pub(crate) fn context(&self) -> &ProjectContext {
+        &self.context
+    }
+}
+
+/// Epoch-bound guard covering one external publication and every result
+/// commit derived from it. Trust revocation closes the epoch first and cannot
+/// report success until all guards for the revoked root have been dropped.
+pub struct ProjectExecutionLease {
+    context: ProjectContext,
+    authority_revision: String,
+    execution_id: String,
+    task_bound: bool,
+    _publication: crate::services::WorkflowLaunchPublication,
+}
+
+impl ProjectExecutionLease {
+    pub(crate) fn validates(&self, context: &ProjectContext) -> bool {
+        self.context.project_id == context.project_id && self.context.root == context.root
+    }
+
+    pub(crate) fn authority_revision(&self) -> &str {
+        &self.authority_revision
+    }
+
+    pub(crate) fn task_context(&self, task_id: &str) -> Result<&ProjectContext, BackendError> {
+        if self.task_bound && self.execution_id == task_id {
+            Ok(&self.context)
+        } else {
+            Err(BackendError::new(
+                "PROJECT_EXECUTION_CAPABILITY_MISMATCH",
+                "The external execution capability does not own this project task.",
+                false,
+                true,
+            ))
+        }
+    }
 }
 
 impl ProjectWriteRootKind {
@@ -67,6 +166,7 @@ pub struct AppState {
     pub task_service: TaskService,
     pub workflow_service: WorkflowService,
     pub workflow_launch_registry: crate::services::WorkflowLaunchRegistry,
+    pub project_execution_registry: crate::services::WorkflowLaunchRegistry,
     pub confirmation_registry: ConfirmationRegistry,
     pub(crate) project_trust_transition: Mutex<()>,
 }
@@ -681,15 +781,16 @@ impl AppState {
     }
 
     /// Resolve the current layout and hold the authority transition lock for
-    /// the entire mutation. Saved Import scans use this seam so a concurrent
-    /// trust revocation cannot land between validation and app-state writes.
-    pub(crate) fn with_current_project_write_access<T>(
+    /// the entire mutation. The service call receives an unforgeable permit,
+    /// so command handlers cannot validate, release the lock, and later write
+    /// with a naked `ProjectContext`.
+    pub fn with_current_project_write_access<T>(
         &self,
         project_id: &str,
         asserted_root: &str,
-        operation: impl FnOnce(&ProjectContext) -> Result<T, BackendError>,
+        operation: impl FnOnce(&ProjectWritePermit<'_>, &ProjectContext) -> Result<T, BackendError>,
     ) -> Result<T, BackendError> {
-        let _transition = self
+        let transition = self
             .project_trust_transition
             .lock()
             .map_err(|_| trust_transition_locked())?;
@@ -699,7 +800,217 @@ impl AppState {
             .and_then(ProjectContext::with_resolved_layout)?;
         let access = self.resolve_workflow_access_locked(&context)?;
         self.validate_project_write_access(&context, &access)?;
-        operation(&context)
+        let permit = ProjectWritePermit {
+            context: context.clone(),
+            workflow_access: access,
+            _transition_guard: &transition,
+        };
+        operation(&permit, &context)
+    }
+
+    /// Hold the same transition barrier as a normal write permit while an
+    /// explicitly confirmed repair/trust/bootstrap action changes project
+    /// authority. This intentionally validates writability without requiring
+    /// pre-existing trust or healthy state.
+    pub(crate) fn with_current_project_authority_mutation<T>(
+        &self,
+        project_id: &str,
+        asserted_root: &str,
+        operation: impl FnOnce(
+            &ProjectAuthorityMutationPermit<'_>,
+            &ProjectContext,
+        ) -> Result<T, BackendError>,
+    ) -> Result<T, BackendError> {
+        let transition = self
+            .project_trust_transition
+            .lock()
+            .map_err(|_| trust_transition_locked())?;
+        let context = self
+            .project_registry
+            .resolve(project_id, Path::new(asserted_root))
+            .and_then(ProjectContext::with_resolved_layout)?;
+        if self.project_service.filesystem_access(&context, true)
+            != crate::models::project::ProjectFilesystemAccess::Writable
+        {
+            return Err(BackendError::new(
+                "PROJECT_WRITE_READ_ONLY",
+                "This project is read-only. Choose a writable folder before changing project authority.",
+                true,
+                true,
+            ));
+        }
+        let permit = ProjectAuthorityMutationPermit {
+            context: context.clone(),
+            _transition_guard: &transition,
+        };
+        operation(&permit, &context)
+    }
+
+    pub(crate) fn with_current_project_task_access<T>(
+        &self,
+        project_id: &str,
+        asserted_root: &str,
+        operation: impl FnOnce(&ProjectTaskMutationPermit<'_>) -> Result<T, BackendError>,
+    ) -> Result<T, BackendError> {
+        let transition = self
+            .project_trust_transition
+            .lock()
+            .map_err(|_| trust_transition_locked())?;
+        let context = self
+            .project_registry
+            .resolve(project_id, Path::new(asserted_root))
+            .and_then(ProjectContext::with_resolved_layout)?;
+        let workflow_access = self.resolve_workflow_access_locked(&context)?;
+        if workflow_access.persistence == WorkflowPersistenceMode::MemoryOnly {
+            self.task_service
+                .rebind_workflows_for_root(&context.root, None)
+                .map_err(|message| {
+                    BackendError::new("WORKFLOW_PERSISTENCE_REBIND_FAILED", message, true, true)
+                })?;
+            self.task_service
+                .unbind_non_workflow_persistence_for_root(&context.root)
+                .map_err(|message| {
+                    BackendError::new(
+                        "PROJECT_TASK_PERSISTENCE_REVOKE_FAILED",
+                        message,
+                        true,
+                        true,
+                    )
+                })?;
+        }
+        let permit = ProjectTaskMutationPermit {
+            context,
+            workflow_access,
+            _transition_guard: &transition,
+        };
+        operation(&permit)
+    }
+
+    /// Acquire the current project execution epoch immediately before an
+    /// Agent process or BYOK request is published. Retrieval may happen before
+    /// this point; publication and result handling must retain the returned
+    /// lease until they are fully drained.
+    pub fn begin_project_external_task(
+        &self,
+        context: &ProjectContext,
+        task_id: &str,
+    ) -> Result<ProjectExecutionLease, BackendError> {
+        self.begin_project_external_execution_bound(context, task_id, true)
+    }
+
+    /// Acquire the same project execution epoch for short external actions
+    /// that are not represented as TaskService tasks. Revocation cannot
+    /// cancel these directly, so it waits for this lease to drain.
+    pub(crate) fn begin_project_external_execution(
+        &self,
+        context: &ProjectContext,
+        execution_id: &str,
+    ) -> Result<ProjectExecutionLease, BackendError> {
+        self.begin_project_external_execution_bound(context, execution_id, false)
+    }
+
+    fn begin_project_external_execution_bound(
+        &self,
+        context: &ProjectContext,
+        execution_id: &str,
+        require_task: bool,
+    ) -> Result<ProjectExecutionLease, BackendError> {
+        let transition = self
+            .project_trust_transition
+            .lock()
+            .map_err(|_| trust_transition_locked())?;
+        let access = self.resolve_workflow_access_locked(context)?;
+        let health = self
+            .project_assessment_service
+            .inspect_current(context.root.to_string_lossy().as_ref())?
+            .health;
+        if access.trust != WorkflowProjectTrust::Trusted
+            || health != crate::models::project::ProjectHealth::Healthy
+        {
+            return Err(BackendError::new(
+                "PROJECT_EXTERNAL_AI_REQUIRES_TRUST",
+                "Trust this knowledge base before sending its content to an external AI or Agent.",
+                true,
+                true,
+            ));
+        }
+        if require_task
+            && (!self
+                .task_service
+                .task_belongs_to_root(execution_id, &context.root)
+                || self.task_service.is_cancelled(execution_id))
+        {
+            return Err(BackendError::new(
+                "PROJECT_EXTERNAL_LAUNCH_REVOKED",
+                "Project authority changed before external execution started.",
+                true,
+                true,
+            ));
+        }
+        let publication = self
+            .project_execution_registry
+            .issue(
+                &project_execution_owner(&context.root),
+                execution_id,
+                &access.authority_revision,
+            )?
+            .begin()?;
+        drop(transition);
+        Ok(ProjectExecutionLease {
+            context: context.clone(),
+            authority_revision: access.authority_revision,
+            execution_id: execution_id.to_string(),
+            task_bound: require_task,
+            _publication: publication,
+        })
+    }
+
+    pub(crate) fn require_current_execution_epoch(
+        &self,
+        context: &ProjectContext,
+        lease: &ProjectExecutionLease,
+    ) -> Result<(), BackendError> {
+        if !lease.validates(context) {
+            return Err(BackendError::new(
+                "PROJECT_EXTERNAL_LAUNCH_REVOKED",
+                "The external result belongs to a different project authority.",
+                true,
+                true,
+            ));
+        }
+        self.with_workflow_access(context, |access| {
+            if access.trust == WorkflowProjectTrust::Trusted
+                && access.authority_revision == lease.authority_revision()
+            {
+                Ok(())
+            } else {
+                Err(BackendError::new(
+                    "PROJECT_EXTERNAL_LAUNCH_REVOKED",
+                    "Project authority changed before the external result could be committed.",
+                    true,
+                    true,
+                ))
+            }
+        })
+    }
+
+    pub(crate) fn require_current_execution_permit(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        lease: &ProjectExecutionLease,
+    ) -> Result<(), BackendError> {
+        if lease.validates(permit.context())
+            && permit.authority_revision() == lease.authority_revision()
+        {
+            Ok(())
+        } else {
+            Err(BackendError::new(
+                "PROJECT_EXTERNAL_LAUNCH_REVOKED",
+                "Project authority changed before the external result could be committed.",
+                true,
+                true,
+            ))
+        }
     }
 
     fn validate_project_write_access(
@@ -1037,6 +1348,9 @@ impl AppState {
             .project_trust_transition
             .lock()
             .map_err(|_| trust_transition_locked())?;
+        let project_execution_barrier = self
+            .project_execution_registry
+            .close_owner(&project_execution_owner(root));
         let mut launch_owners = self
             .task_service
             .list_workflow_runs()
@@ -1052,6 +1366,36 @@ impl AppState {
             .map(|owner| self.workflow_launch_registry.close_owner(&owner))
             .collect::<Vec<_>>();
         let mut first_error = None;
+        if let Err(error) = self
+            .connector_session_service
+            .stop_project_executions(project_id)
+        {
+            first_error = Some(error);
+        }
+        if let Err(message) = self
+            .task_service
+            .request_cancel_active_project_tasks_for_root(root)
+        {
+            first_error = Some(BackendError::new(
+                "PROJECT_TRUST_REVOCATION_CANCEL_FAILED",
+                message,
+                true,
+                true,
+            ));
+        }
+        if let Err(message) = self
+            .task_service
+            .unbind_non_workflow_persistence_for_root(root)
+        {
+            if first_error.is_none() {
+                first_error = Some(BackendError::new(
+                    "PROJECT_TASK_PERSISTENCE_REVOKE_FAILED",
+                    message,
+                    true,
+                    true,
+                ));
+            }
+        }
         let (stopped_runs, retry_freeze) = match self
             .workflow_service
             .coordinator
@@ -1136,6 +1480,11 @@ impl AppState {
             }
         }
         drop(transition_guard);
+        if let Err(error) = project_execution_barrier.wait() {
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
         for barrier in launch_barriers {
             if let Err(error) = barrier.wait() {
                 if first_error.is_none() {
@@ -1169,6 +1518,17 @@ impl AppState {
     }
 }
 
+fn project_execution_owner(root: &Path) -> String {
+    let normalized = root
+        .canonicalize()
+        .unwrap_or_else(|_| root.to_path_buf())
+        .to_string_lossy()
+        .replace('\\', "/");
+    #[cfg(windows)]
+    let normalized = normalized.to_ascii_lowercase();
+    format!("project-execution:{normalized}")
+}
+
 #[cfg(test)]
 mod project_registry_tests {
     use std::fs;
@@ -1177,12 +1537,12 @@ mod project_registry_tests {
     use std::time::Duration;
 
     use super::{AppState, ProjectRegistry, ProjectTrustAuthority, ProjectWriteRootKind};
-    use crate::errors::PROJECT_CONTEXT_MISMATCH;
+    use crate::errors::{BackendError, PROJECT_CONTEXT_MISMATCH};
     use crate::models::confirmation::{
         ConfirmationExecution, PendingAction, PendingActionType, RiskLevel,
     };
     use crate::models::project::{ProjectTemplate, ProjectTrustKind};
-    use crate::models::task::TaskStatus;
+    use crate::models::task::{TaskStatus, TaskType};
     use crate::models::workflow::{
         HealthCheckMode, WorkflowCandidateReference, WorkflowExecutionOptions,
         WorkflowFilesystemAccess, WorkflowGitState, WorkflowKind, WorkflowPendingAction,
@@ -1318,6 +1678,24 @@ mod project_registry_tests {
         assert_eq!(context.root, project.canonicalize().unwrap());
         assert!(context.root.to_string_lossy().contains("中文资料库"));
         fs::remove_dir_all(project).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn project_execution_owner_folds_case_on_windows() {
+        assert_eq!(
+            super::project_execution_owner(std::path::Path::new(r"C:\Knowledge\CaseRoot")),
+            "project-execution:c:/knowledge/caseroot"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn project_execution_owner_preserves_case_on_case_sensitive_platforms() {
+        assert_ne!(
+            super::project_execution_owner(std::path::Path::new("/tmp/Knowledge/CaseRoot")),
+            super::project_execution_owner(std::path::Path::new("/tmp/knowledge/caseroot"))
+        );
     }
 
     #[test]
@@ -2203,6 +2581,99 @@ mod project_registry_tests {
     }
 
     #[test]
+    fn project_task_mutation_permit_keeps_restricted_projects_memory_only() {
+        let (state, config) = state_with_temp_config("task-permit-restricted-config");
+        let project = compatible_project("task-permit-restricted");
+        state
+            .project_registry
+            .register("project-a", &project)
+            .unwrap();
+        let before = fs::read_dir(&project)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+
+        state
+            .with_current_project_task_access(
+                "project-a",
+                project.to_string_lossy().as_ref(),
+                |permit| {
+                    assert_eq!(permit.context().project_id, "project-a");
+                    let access = permit.workflow_access();
+                    assert_eq!(access.trust, WorkflowProjectTrust::Untrusted);
+                    assert_eq!(access.persistence, WorkflowPersistenceMode::MemoryOnly);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        let after = fs::read_dir(&project)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(after, before);
+        assert!(!project.join(".app").exists());
+        cleanup_paths(&[&project, &config]);
+    }
+
+    #[test]
+    fn task_permit_cancels_in_memory_after_trusted_project_becomes_read_only() {
+        let (state, config) = state_with_temp_config("task-permit-read-only-config");
+        let project = strict_native_project("task-permit-read-only");
+        state
+            .project_registry
+            .register_trusted_native("project-a", &project)
+            .unwrap();
+        let task = state
+            .with_current_project_write_access(
+                "project-a",
+                project.to_string_lossy().as_ref(),
+                |_permit, context| {
+                    state
+                        .task_service
+                        .create_project_task(
+                            TaskType::Import,
+                            "project-a".into(),
+                            context.root.clone(),
+                            "Cancelable import".into(),
+                            true,
+                        )
+                        .map_err(|message| {
+                            BackendError::new("TASK_CREATE_FAILED", message, false, false)
+                        })
+                },
+            )
+            .unwrap();
+        let persisted = project.join(format!(".app/tasks/{}.json", task.id));
+        let before = fs::read(&persisted).unwrap();
+        state.project_service.force_read_only_for_test(&project);
+
+        state
+            .with_current_project_task_access(
+                "project-a",
+                project.to_string_lossy().as_ref(),
+                |permit| {
+                    assert_eq!(
+                        permit.workflow_access().persistence,
+                        WorkflowPersistenceMode::MemoryOnly
+                    );
+                    state
+                        .task_service
+                        .request_cancel(&task.id)
+                        .map_err(|message| {
+                            BackendError::new("TASK_CANCEL_FAILED", message, false, false)
+                        })?;
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert!(state.task_service.is_cancelled(&task.id));
+        assert_eq!(fs::read(persisted).unwrap(), before);
+        cleanup_paths(&[&project, &config]);
+    }
+
+    #[test]
     fn external_ai_access_requires_current_project_trust() {
         let (state, config) = state_with_temp_config("external-ai-trust-config");
         let project = compatible_project("external-ai-trust");
@@ -2454,7 +2925,7 @@ mod project_registry_tests {
             .with_current_project_write_access(
                 "restricted",
                 restricted_project.to_string_lossy().as_ref(),
-                |_| Ok(()),
+                |_, _| Ok(()),
             )
             .unwrap_err();
         assert_eq!(restricted_error.code, "PROJECT_WRITE_REQUIRES_TRUST");
@@ -2477,7 +2948,7 @@ mod project_registry_tests {
                 .with_current_project_write_access(
                     "project-a",
                     worker_project.to_string_lossy().as_ref(),
-                    |_| {
+                    |_, _| {
                         worker_entered.wait();
                         worker_release.wait();
                         Ok(())
@@ -2506,10 +2977,151 @@ mod project_registry_tests {
             .with_current_project_write_access(
                 "project-a",
                 project.to_string_lossy().as_ref(),
-                |_| Ok(()),
+                |_, _| Ok(()),
             )
             .unwrap_err();
         assert_eq!(revoked_error.code, "PROJECT_WRITE_REQUIRES_TRUST");
         cleanup_paths(&[&restricted_project, &restricted_config, &project, &config]);
+    }
+
+    #[test]
+    fn project_execution_epoch_revocation_cancels_root_waits_and_unbinds_persistence() {
+        let (state, config) = state_with_temp_config("project-execution-revoke-config");
+        let state = Arc::new(state);
+        let project_a = strict_native_project("project-execution-a");
+        let project_b = strict_native_project("project-execution-b");
+        let context_a = state
+            .project_registry
+            .register_trusted_native("project-a", &project_a)
+            .unwrap();
+        let context_b = state
+            .project_registry
+            .register_trusted_native("project-b", &project_b)
+            .unwrap();
+        let task_a = state
+            .with_current_project_write_access(
+                "project-a",
+                project_a.to_string_lossy().as_ref(),
+                |_permit, context| {
+                    state
+                        .task_service
+                        .create_project_task(
+                            TaskType::LlmRequest,
+                            "project-a".into(),
+                            context.root.clone(),
+                            "A Chat".into(),
+                            true,
+                        )
+                        .map_err(|message| BackendError::new("TASK_FAILED", message, true, false))
+                },
+            )
+            .unwrap();
+        state
+            .task_service
+            .transition_status(&task_a.id, TaskStatus::Running)
+            .unwrap();
+        let task_b = state
+            .with_current_project_write_access(
+                "project-b",
+                project_b.to_string_lossy().as_ref(),
+                |_permit, context| {
+                    state
+                        .task_service
+                        .create_project_task(
+                            TaskType::LlmRequest,
+                            "project-b".into(),
+                            context.root.clone(),
+                            "B Chat".into(),
+                            true,
+                        )
+                        .map_err(|message| BackendError::new("TASK_FAILED", message, true, false))
+                },
+            )
+            .unwrap();
+        state
+            .task_service
+            .transition_status(&task_b.id, TaskStatus::Running)
+            .unwrap();
+        let lease_a = state
+            .begin_project_external_task(&context_a, &task_a.id)
+            .unwrap();
+        let snapshot_path = project_a
+            .join(".app/tasks")
+            .join(format!("{}.json", task_a.id));
+
+        let revoke_state = Arc::clone(&state);
+        let revoke_root = project_a.clone();
+        let (revoked_tx, revoked_rx) = mpsc::channel();
+        let revoke_worker = std::thread::spawn(move || {
+            revoke_state
+                .revoke_project_trust("project-a", &revoke_root)
+                .unwrap();
+            revoked_tx.send(()).unwrap();
+        });
+
+        assert!(revoked_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        assert!(state.task_service.is_cancelled(&task_a.id));
+        assert!(!state.task_service.is_cancelled(&task_b.id));
+        drop(lease_a);
+        revoked_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        revoke_worker.join().unwrap();
+
+        let bytes_after_revoke = fs::read(&snapshot_path).unwrap();
+        state
+            .task_service
+            .append_log(
+                &task_a.id,
+                crate::tasks::task_model::LogLevel::Warn,
+                "late audit fact".into(),
+            )
+            .unwrap();
+        assert_eq!(fs::read(&snapshot_path).unwrap(), bytes_after_revoke);
+        assert!(state
+            .begin_project_external_task(&context_a, &task_a.id)
+            .is_err());
+        let lease_b = state
+            .begin_project_external_task(&context_b, &task_b.id)
+            .unwrap();
+        drop(lease_b);
+
+        cleanup_paths(&[&project_a, &project_b, &config]);
+    }
+
+    #[test]
+    fn non_task_external_request_drains_before_project_revocation_returns() {
+        let (state, config) = state_with_temp_config("external-request-revoke-config");
+        let state = Arc::new(state);
+        let project = strict_native_project("external-request-revoke");
+        let context = state
+            .project_registry
+            .register_trusted_native("project-a", &project)
+            .unwrap();
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let execution = state
+            .begin_project_external_execution(&context, "provider-probe")
+            .unwrap();
+        request_count.fetch_add(1, Ordering::SeqCst);
+
+        let revoke_state = Arc::clone(&state);
+        let revoke_root = project.clone();
+        let (revoked_tx, revoked_rx) = mpsc::channel();
+        let revoke_worker = std::thread::spawn(move || {
+            revoke_state
+                .revoke_project_trust("project-a", &revoke_root)
+                .unwrap();
+            revoked_tx.send(()).unwrap();
+        });
+
+        assert!(revoked_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        assert_eq!(request_count.load(Ordering::SeqCst), 1);
+        drop(execution);
+        revoked_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        revoke_worker.join().unwrap();
+
+        assert!(state
+            .begin_project_external_execution(&context, "late-provider-probe")
+            .is_err());
+        assert_eq!(request_count.load(Ordering::SeqCst), 1);
+        cleanup_paths(&[&project, &config]);
     }
 }

@@ -73,20 +73,25 @@ pub fn start_wiki_compile(
     state: State<'_, AppState>,
     request: CompileRequest,
 ) -> Result<BackendTask, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state.require_project_write_access(&context)?;
-    state.require_project_content_write_root(&context, ProjectWriteRootKind::Source)?;
-    state.require_project_content_write_root(&context, ProjectWriteRootKind::Wiki)?;
-    let task = state
-        .task_service
-        .create_project_task(
-            TaskType::WikiCompile,
-            request.project_id.clone(),
-            context.root.clone(),
-            "Compile Wiki".into(),
-            true,
-        )
-        .map_err(task_error)?;
+    let (context, task) = state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+            state.require_project_content_write_root(context, ProjectWriteRootKind::Source)?;
+            state.require_project_content_write_root(context, ProjectWriteRootKind::Wiki)?;
+            let task = state
+                .task_service
+                .create_project_task(
+                    TaskType::WikiCompile,
+                    request.project_id.clone(),
+                    context.root.clone(),
+                    "Compile Wiki".into(),
+                    true,
+                )
+                .map_err(task_error)?;
+            Ok((context.clone(), task))
+        },
+    )?;
     let task_id = task.id.clone();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
@@ -117,13 +122,18 @@ async fn run_compile(
     context: &ProjectContext,
     task_id: &str,
 ) -> Result<(), BackendError> {
-    state.require_project_write_access(context)?;
-    state.require_project_content_write_root(context, ProjectWriteRootKind::Source)?;
-    state.require_project_content_write_root(context, ProjectWriteRootKind::Wiki)?;
-    state
-        .task_service
-        .transition_status(task_id, TaskStatus::Running)
-        .map_err(task_error)?;
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, current| {
+            state.require_project_content_write_root(current, ProjectWriteRootKind::Source)?;
+            state.require_project_content_write_root(current, ProjectWriteRootKind::Wiki)?;
+            state
+                .task_service
+                .transition_status(task_id, TaskStatus::Running)
+                .map_err(task_error)
+        },
+    )?;
     state
         .task_service
         .append_log(
@@ -144,15 +154,26 @@ async fn run_compile(
         .task_service
         .append_log(task_id, LogLevel::Info, "Creating Git checkpoint".into())
         .map_err(task_error)?;
-    let checkpoint = state.git_service.create_checkpoint(
-        context,
-        CheckpointPurpose::HighRiskOperation,
-        "Before wiki compile",
-    )?;
-    let baseline = CompileService::snapshot_wiki(context)?;
-    let workspace =
-        CompileService::create_workspace_for_sources(context, task_id, &selected_sources)?;
-    let protected_sources = CompileService::snapshot_workspace_sources(&workspace)?;
+    let (checkpoint, baseline, workspace, protected_sources) = state
+        .with_current_project_write_access(
+            &request.project_id,
+            &request.project_root_path,
+            |_permit, current| {
+                let checkpoint = state.git_service.create_checkpoint(
+                    current,
+                    CheckpointPurpose::HighRiskOperation,
+                    "Before wiki compile",
+                )?;
+                let baseline = CompileService::snapshot_wiki(current)?;
+                let workspace = CompileService::create_workspace_for_sources(
+                    current,
+                    task_id,
+                    &selected_sources,
+                )?;
+                let protected_sources = CompileService::snapshot_workspace_sources(&workspace)?;
+                Ok((checkpoint, baseline, workspace, protected_sources))
+            },
+        )?;
     let outcome = async {
         let services = CompileExecutionServices {
             agent_service: &state.agent_service,
@@ -168,6 +189,7 @@ async fn run_compile(
             request.provider,
             &services,
         )?;
+        let execution_lease = state.begin_project_external_task(context, task_id)?;
         let mut observer = NoopCompileGenerationObserver;
         let candidate = CompileService::generate_candidate(
             context,
@@ -185,6 +207,11 @@ async fn run_compile(
         let route = candidate.route.legacy_kind();
         let plan = candidate.plan;
         let manifest = candidate.manifest;
+        state.require_current_execution_epoch(context, &execution_lease)?;
+        state.with_current_project_write_access(
+            &request.project_id,
+            &request.project_root_path,
+            |_permit, context| {
         ensure_checkpoint_head(state, context, checkpoint.commit_hash.as_deref())?;
         if state.task_service.is_cancelled(task_id) {
             return Err(BackendError::new("COMPILE_CANCELLED", "Wiki compile was cancelled.", true, false));
@@ -253,6 +280,8 @@ async fn run_compile(
             return Err(failure.error);
         }
         Ok(())
+            },
+        )
     }.await;
     let _ = std::fs::remove_dir_all(&workspace);
     outcome
@@ -598,85 +627,85 @@ pub fn resolve_compile_conflict(
             true,
         ));
     };
-    let task = state.task_service.get_task(&task_id).ok_or_else(|| {
-        BackendError::new("TASK_NOT_FOUND", "Compile task not found.", false, false)
-    })?;
-    if task.status != TaskStatus::WaitingForConfirmation {
-        return Err(BackendError::new(
-            "CONFIRMATION_STATE_MISMATCH",
-            "Compile task is no longer waiting for confirmation.",
-            true,
-            true,
-        ));
-    }
-    let context = state.resolve_project_context(&project_id, &root_path)?;
-    let revalidated = CompileService::resolve_source_versions(&context, &source_versions)?;
-    if revalidated.iter().any(|source| source.already_consumed) {
-        return Err(BackendError::new(
-            "COMPILE_SOURCE_VERSION_STALE",
-            "A selected Source version was consumed while conflict review was open.",
-            true,
-            true,
-        ));
-    }
-    ensure_checkpoint_head(&state, &context, checkpoint_hash.as_deref())?;
-    let resolved_manifest = CompileService::resolve_conflict_manifest(
-        &manifest,
-        &conflict_paths,
-        request.resolution,
-        &request.manual_files,
-    )?;
-    state
-        .confirmation_registry
-        .confirm(&request.action_id, ConfirmationStatus::Confirmed)?;
-    state
-        .task_service
-        .transition_status(&task_id, TaskStatus::Running)
-        .map_err(task_error)?;
-    let hashes: HashMap<String, String> = current_hashes.into_iter().collect();
-    let backup = CompileService::backup_outputs(&context, &resolved_manifest)?;
-    let affected_paths = match CompileService::apply_confirmed_manifest(
-        &context,
-        &resolved_manifest,
-        Some(&plan),
-        &hashes,
-    ) {
-        Ok(paths) => paths,
-        Err(error) => {
-            let _ = CompileService::restore_outputs(&context, &backup);
+    state.with_current_project_write_access(&project_id, &root_path, |_permit, context| {
+        let task = state.task_service.get_task(&task_id).ok_or_else(|| {
+            BackendError::new("TASK_NOT_FOUND", "Compile task not found.", false, false)
+        })?;
+        if task.status != TaskStatus::WaitingForConfirmation {
+            return Err(BackendError::new(
+                "CONFIRMATION_STATE_MISMATCH",
+                "Compile task is no longer waiting for confirmation.",
+                true,
+                true,
+            ));
+        }
+        let revalidated = CompileService::resolve_source_versions(context, &source_versions)?;
+        if revalidated.iter().any(|source| source.already_consumed) {
+            return Err(BackendError::new(
+                "COMPILE_SOURCE_VERSION_STALE",
+                "A selected Source version was consumed while conflict review was open.",
+                true,
+                true,
+            ));
+        }
+        ensure_checkpoint_head(&state, context, checkpoint_hash.as_deref())?;
+        let resolved_manifest = CompileService::resolve_conflict_manifest(
+            &manifest,
+            &conflict_paths,
+            request.resolution,
+            &request.manual_files,
+        )?;
+        state
+            .confirmation_registry
+            .confirm(&request.action_id, ConfirmationStatus::Confirmed)?;
+        state
+            .task_service
+            .transition_status(&task_id, TaskStatus::Running)
+            .map_err(task_error)?;
+        let hashes: HashMap<String, String> = current_hashes.into_iter().collect();
+        let backup = CompileService::backup_outputs(context, &resolved_manifest)?;
+        let affected_paths = match CompileService::apply_confirmed_manifest(
+            context,
+            &resolved_manifest,
+            Some(&plan),
+            &hashes,
+        ) {
+            Ok(paths) => paths,
+            Err(error) => {
+                let _ = CompileService::restore_outputs(context, &backup);
+                let _ = state.task_service.set_error(&task_id, error.clone());
+                let _ = state
+                    .task_service
+                    .transition_status(&task_id, TaskStatus::Failed);
+                return Err(error);
+            }
+        };
+        if let Err(failure) = finish_compile(
+            &state,
+            context,
+            &task_id,
+            route,
+            affected_paths,
+            checkpoint_hash,
+            &source_versions,
+        ) {
+            if !failure.durable {
+                let _ = state
+                    .git_service
+                    .unstage_paths(context, &compile_output_paths(&resolved_manifest));
+                CompileService::restore_outputs(context, &backup)?;
+            }
+            let error = failure.error;
             let _ = state.task_service.set_error(&task_id, error.clone());
             let _ = state
                 .task_service
                 .transition_status(&task_id, TaskStatus::Failed);
             return Err(error);
         }
-    };
-    if let Err(failure) = finish_compile(
-        &state,
-        &context,
-        &task_id,
-        route,
-        affected_paths,
-        checkpoint_hash,
-        &source_versions,
-    ) {
-        if !failure.durable {
-            let _ = state
-                .git_service
-                .unstage_paths(&context, &compile_output_paths(&resolved_manifest));
-            CompileService::restore_outputs(&context, &backup)?;
-        }
-        let error = failure.error;
-        let _ = state.task_service.set_error(&task_id, error.clone());
-        let _ = state
-            .task_service
-            .transition_status(&task_id, TaskStatus::Failed);
-        return Err(error);
-    }
-    state
-        .task_service
-        .get_task(&task_id)
-        .ok_or_else(|| BackendError::new("TASK_NOT_FOUND", "Compile task not found.", false, false))
+        state.task_service.get_task(&task_id).ok_or_else(|| {
+            BackendError::new("TASK_NOT_FOUND", "Compile task not found.", false, false)
+        })
+    })
 }
 
 #[tauri::command]
@@ -690,9 +719,7 @@ pub fn confirm_compile_action(
     } else {
         ConfirmationStatus::Cancelled
     };
-    let stored = state
-        .confirmation_registry
-        .confirm(&request.action_id, status)?;
+    let stored = state.confirmation_registry.peek(&request.action_id)?;
     let ConfirmationExecution::CompileMerge {
         project_id,
         root_path,
@@ -719,54 +746,61 @@ pub fn confirm_compile_action(
             true,
         ));
     };
-    if !request.confirmed {
+    state.with_current_project_write_access(&project_id, &root_path, |_permit, context| {
+        state
+            .confirmation_registry
+            .confirm(&request.action_id, status)?;
+        if !request.confirmed {
+            state
+                .task_service
+                .cancel_task(&task_id)
+                .map_err(task_error)?;
+            return state.task_service.get_task(&task_id).ok_or_else(|| {
+                BackendError::new("TASK_NOT_FOUND", "Compile task not found.", false, false)
+            });
+        }
+        let task = state.task_service.get_task(&task_id).ok_or_else(|| {
+            BackendError::new("TASK_NOT_FOUND", "Compile task not found.", false, false)
+        })?;
+        if task.status != TaskStatus::WaitingForConfirmation {
+            return Err(BackendError::new(
+                "CONFIRMATION_STATE_MISMATCH",
+                "Compile task is no longer waiting for confirmation.",
+                true,
+                true,
+            ));
+        }
         state
             .task_service
-            .cancel_task(&task_id)
+            .transition_status(&task_id, TaskStatus::Running)
             .map_err(task_error)?;
-        return state.task_service.get_task(&task_id).ok_or_else(|| {
-            BackendError::new("TASK_NOT_FOUND", "Compile task not found.", false, false)
-        });
-    }
-    let task = state.task_service.get_task(&task_id).ok_or_else(|| {
-        BackendError::new("TASK_NOT_FOUND", "Compile task not found.", false, false)
-    })?;
-    if task.status != TaskStatus::WaitingForConfirmation {
-        return Err(BackendError::new(
-            "CONFIRMATION_STATE_MISMATCH",
-            "Compile task is no longer waiting for confirmation.",
-            true,
-            true,
-        ));
-    }
-    state
-        .task_service
-        .transition_status(&task_id, TaskStatus::Running)
-        .map_err(task_error)?;
-    let context = state.resolve_project_context(&project_id, &root_path)?;
-    let revalidated = CompileService::resolve_source_versions(&context, &source_versions)?;
-    if revalidated.iter().any(|source| source.already_consumed) {
-        return Err(BackendError::new(
-            "COMPILE_SOURCE_VERSION_STALE",
-            "A selected Source version was consumed while confirmation was open.",
-            true,
-            true,
-        ));
-    }
-    if let Err(error) = ensure_checkpoint_head(&state, &context, checkpoint_hash.as_deref()) {
-        let _ = state.task_service.set_error(&task_id, error.clone());
-        let _ = state
-            .task_service
-            .transition_status(&task_id, TaskStatus::Failed);
-        return Err(error);
-    }
-    let hashes: HashMap<String, String> = current_hashes.into_iter().collect();
-    let backup = CompileService::backup_outputs(&context, &manifest)?;
-    let affected_paths =
-        match CompileService::apply_confirmed_manifest(&context, &manifest, Some(&plan), &hashes) {
+        let revalidated = CompileService::resolve_source_versions(context, &source_versions)?;
+        if revalidated.iter().any(|source| source.already_consumed) {
+            return Err(BackendError::new(
+                "COMPILE_SOURCE_VERSION_STALE",
+                "A selected Source version was consumed while confirmation was open.",
+                true,
+                true,
+            ));
+        }
+        if let Err(error) = ensure_checkpoint_head(&state, context, checkpoint_hash.as_deref()) {
+            let _ = state.task_service.set_error(&task_id, error.clone());
+            let _ = state
+                .task_service
+                .transition_status(&task_id, TaskStatus::Failed);
+            return Err(error);
+        }
+        let hashes: HashMap<String, String> = current_hashes.into_iter().collect();
+        let backup = CompileService::backup_outputs(context, &manifest)?;
+        let affected_paths = match CompileService::apply_confirmed_manifest(
+            context,
+            &manifest,
+            Some(&plan),
+            &hashes,
+        ) {
             Ok(paths) => paths,
             Err(error) => {
-                let _ = CompileService::restore_outputs(&context, &backup);
+                let _ = CompileService::restore_outputs(context, &backup);
                 let _ = state.task_service.set_error(&task_id, error.clone());
                 let _ = state
                     .task_service
@@ -774,32 +808,32 @@ pub fn confirm_compile_action(
                 return Err(error);
             }
         };
-    if let Err(failure) = finish_compile(
-        &state,
-        &context,
-        &task_id,
-        route,
-        affected_paths,
-        checkpoint_hash,
-        &source_versions,
-    ) {
-        if !failure.durable {
+        if let Err(failure) = finish_compile(
+            &state,
+            context,
+            &task_id,
+            route,
+            affected_paths,
+            checkpoint_hash,
+            &source_versions,
+        ) {
+            if !failure.durable {
+                let _ = state
+                    .git_service
+                    .unstage_paths(context, &compile_output_paths(&manifest));
+                CompileService::restore_outputs(context, &backup)?;
+            }
+            let error = failure.error;
+            let _ = state.task_service.set_error(&task_id, error.clone());
             let _ = state
-                .git_service
-                .unstage_paths(&context, &compile_output_paths(&manifest));
-            CompileService::restore_outputs(&context, &backup)?;
+                .task_service
+                .transition_status(&task_id, TaskStatus::Failed);
+            return Err(error);
         }
-        let error = failure.error;
-        let _ = state.task_service.set_error(&task_id, error.clone());
-        let _ = state
-            .task_service
-            .transition_status(&task_id, TaskStatus::Failed);
-        return Err(error);
-    }
-    state
-        .task_service
-        .get_task(&task_id)
-        .ok_or_else(|| BackendError::new("TASK_NOT_FOUND", "Compile task not found.", false, false))
+        state.task_service.get_task(&task_id).ok_or_else(|| {
+            BackendError::new("TASK_NOT_FOUND", "Compile task not found.", false, false)
+        })
+    })
 }
 
 fn task_error(message: String) -> BackendError {

@@ -5,6 +5,7 @@ use flate2::{write::GzEncoder, Compression};
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
+use crate::app_state::{ProjectExecutionLease, ProjectWritePermit};
 use crate::errors::{
     BackendError, IMPORT_V2_CANCELLED, IMPORT_V2_COMMIT_CONFLICT, IMPORT_V2_COMMIT_FAILED,
     IMPORT_V2_QUALITY_FAILED, IMPORT_V2_STATE_INVALID,
@@ -283,7 +284,7 @@ impl ImportV2Service {
         })
     }
 
-    pub fn set_item_resolution(
+    fn set_item_resolution_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -359,7 +360,7 @@ impl ImportV2Service {
         Ok(result)
     }
 
-    pub fn stage_manual_merge(
+    fn stage_manual_merge_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -440,6 +441,61 @@ impl ImportV2Service {
         Ok(result)
     }
 
+    pub(crate) fn set_item_resolution_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        resolution: ImportItemResolution,
+    ) -> Result<ImportItem, BackendError> {
+        self.set_item_resolution_unchecked(permit.context(), files, session_id, item_id, resolution)
+    }
+
+    pub(crate) fn stage_manual_merge_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        merged_markdown: &str,
+    ) -> Result<ImportItem, BackendError> {
+        self.stage_manual_merge_unchecked(
+            permit.context(),
+            files,
+            session_id,
+            item_id,
+            merged_markdown,
+        )
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn set_item_resolution(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        resolution: ImportItemResolution,
+    ) -> Result<ImportItem, BackendError> {
+        self.set_item_resolution_unchecked(context, files, session_id, item_id, resolution)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn stage_manual_merge(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        merged_markdown: &str,
+    ) -> Result<ImportItem, BackendError> {
+        self.stage_manual_merge_unchecked(context, files, session_id, item_id, merged_markdown)
+    }
+
+    /// Compatibility surface for integration and service tests. Production
+    /// commits must enter through a capability-bearing authorized method.
+    #[cfg(debug_assertions)]
     pub fn commit_items(
         &self,
         context: &ProjectContext,
@@ -450,6 +506,7 @@ impl ImportV2Service {
         self.commit_items_cancellable(context, file_store, git_service, request, || false)
     }
 
+    #[cfg(debug_assertions)]
     pub fn finalize_exact_duplicate(
         &self,
         context: &ProjectContext,
@@ -460,7 +517,7 @@ impl ImportV2Service {
         restricted_content_acknowledged: bool,
         before_commit: impl FnOnce() -> Result<(), BackendError>,
     ) -> Result<Option<ImportBatchResult>, BackendError> {
-        self.finalize_exact_duplicate_cancellable(
+        self.finalize_exact_duplicate_cancellable_unchecked(
             context,
             file_store,
             git_service,
@@ -472,7 +529,34 @@ impl ImportV2Service {
         )
     }
 
+    #[cfg(debug_assertions)]
     pub fn finalize_exact_duplicate_cancellable<C>(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+        git_service: &GitService,
+        session_id: &str,
+        item_id: &str,
+        restricted_content_acknowledged: bool,
+        cancelled: C,
+        before_commit: impl FnOnce() -> Result<(), BackendError>,
+    ) -> Result<Option<ImportBatchResult>, BackendError>
+    where
+        C: Fn() -> bool,
+    {
+        self.finalize_exact_duplicate_cancellable_unchecked(
+            context,
+            file_store,
+            git_service,
+            session_id,
+            item_id,
+            restricted_content_acknowledged,
+            cancelled,
+            before_commit,
+        )
+    }
+
+    fn finalize_exact_duplicate_cancellable_unchecked<C>(
         &self,
         context: &ProjectContext,
         file_store: &FileStore,
@@ -584,6 +668,57 @@ impl ImportV2Service {
         Ok(Some(batch))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn finalize_exact_duplicate_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        file_store: &FileStore,
+        git_service: &GitService,
+        session_id: &str,
+        item_id: &str,
+        restricted_content_acknowledged: bool,
+        before_commit: impl FnOnce() -> Result<(), BackendError>,
+    ) -> Result<Option<ImportBatchResult>, BackendError> {
+        self.finalize_exact_duplicate_cancellable_unchecked(
+            permit.context(),
+            file_store,
+            git_service,
+            session_id,
+            item_id,
+            restricted_content_acknowledged,
+            || false,
+            before_commit,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn finalize_exact_duplicate_cancellable_authorized<C>(
+        &self,
+        execution: &ProjectExecutionLease,
+        file_store: &FileStore,
+        git_service: &GitService,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+        restricted_content_acknowledged: bool,
+        cancelled: C,
+        before_commit: impl FnOnce() -> Result<(), BackendError>,
+    ) -> Result<Option<ImportBatchResult>, BackendError>
+    where
+        C: Fn() -> bool,
+    {
+        self.finalize_exact_duplicate_cancellable_unchecked(
+            execution.task_context(task_id)?,
+            file_store,
+            git_service,
+            session_id,
+            item_id,
+            restricted_content_acknowledged,
+            cancelled,
+            before_commit,
+        )
+    }
+
     fn record_exact_duplicate_commit_failure(
         &self,
         context: &ProjectContext,
@@ -645,6 +780,7 @@ impl ImportV2Service {
         Ok(true)
     }
 
+    #[cfg(debug_assertions)]
     pub fn commit_items_cancellable(
         &self,
         context: &ProjectContext,
@@ -665,7 +801,7 @@ impl ImportV2Service {
         )
     }
 
-    pub(crate) fn commit_items_cancellable_with_progress(
+    fn commit_items_cancellable_with_progress(
         &self,
         context: &ProjectContext,
         file_store: &FileStore,
@@ -881,6 +1017,30 @@ impl ImportV2Service {
         )?;
         summary_transaction.commit()?;
         Ok(batch)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn commit_items_cancellable_with_progress_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        file_store: &FileStore,
+        git_service: &GitService,
+        request: &CommitImportSessionRequest,
+        is_cancelled: impl Fn() -> bool,
+        on_durable_progress: impl FnMut(&ImportBatchResult),
+        exact_duplicate_precondition: Option<(&str, &ExactDuplicateFinalizationFingerprint)>,
+        before_locked_commit: impl FnOnce() -> Result<(), BackendError>,
+    ) -> Result<ImportBatchResult, BackendError> {
+        self.commit_items_cancellable_with_progress(
+            permit.context(),
+            file_store,
+            git_service,
+            request,
+            is_cancelled,
+            on_durable_progress,
+            exact_duplicate_precondition,
+            before_locked_commit,
+        )
     }
 
     fn commit_one(

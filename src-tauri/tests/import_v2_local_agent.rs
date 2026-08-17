@@ -8,6 +8,7 @@ use std::{
 };
 
 use llm_wiki_desktop_lib::{
+    app_state::AppState,
     errors::BackendError,
     models::{
         agent::AgentKind,
@@ -18,7 +19,6 @@ use llm_wiki_desktop_lib::{
         import_v2_agent::{
             AgentAssistancePolicy, AgentAssistanceTrigger, AgentAuditRecord, AgentRecoveryAction,
         },
-        paths::ProjectContext,
         task::{TaskStatus, TaskType},
     },
     services::{
@@ -218,9 +218,15 @@ fn missing_agent_never_runs_install_and_cancelled_task_stays_terminal() {
 #[test]
 fn start_returns_bound_task_and_run_redacts_output_without_replacing_failure() {
     let root = tempfile::tempdir().unwrap();
-    let context = ProjectContext::new("project", root.path().to_path_buf());
+    seed_native_project(root.path());
     let files = FileStore;
     let imports = ImportV2Service::default();
+    let tasks = TaskService::default();
+    let mut state = AppState::default();
+    state.task_service = tasks.clone();
+    let context = state
+        .register_opened_project_authority("project", root.path())
+        .unwrap();
     let settings_dir = tempfile::tempdir().unwrap();
     let settings = SettingsService::with_config_dir(settings_dir.path().to_path_buf());
     settings
@@ -235,7 +241,6 @@ fn start_returns_bound_task_and_run_redacts_output_without_replacing_failure() {
         ..Default::default()
     });
     let agents = AgentService::with_runner(runner.clone());
-    let tasks = TaskService::default();
     let mut session = ImportSession::new("session-a", "project", ImportResourceMode::Balanced);
     let mut item = ImportItem::queued(
         "item-a",
@@ -281,24 +286,36 @@ fn start_returns_bound_task_and_run_redacts_output_without_replacing_failure() {
     std::fs::write(staging.join("source.bin"), b"untrusted source").unwrap();
     let service = AgentAssistanceService::new(&imports, &files, &settings, &agents, &tasks);
 
-    let task = service
-        .start_local(
-            &context,
-            "session-a",
-            "item-a",
-            AgentAssistanceTrigger::Manual,
-            AgentKind::Claude,
+    let task = state
+        .with_current_project_write_access(
+            &context.project_id,
+            context.root.to_string_lossy().as_ref(),
+            |permit, _current| {
+                service.start_local(
+                    permit,
+                    "session-a",
+                    "item-a",
+                    AgentAssistanceTrigger::Manual,
+                    AgentKind::Claude,
+                )
+            },
         )
         .unwrap();
     assert_eq!(task.task_type, TaskType::AgentRun);
     assert_eq!(task.status, TaskStatus::Queued);
-    assert!(service
-        .start_local(
-            &context,
-            "session-a",
-            "item-a",
-            AgentAssistanceTrigger::Manual,
-            AgentKind::Claude,
+    assert!(state
+        .with_current_project_write_access(
+            &context.project_id,
+            context.root.to_string_lossy().as_ref(),
+            |permit, _current| {
+                service.start_local(
+                    permit,
+                    "session-a",
+                    "item-a",
+                    AgentAssistanceTrigger::Manual,
+                    AgentKind::Claude,
+                )
+            },
         )
         .is_err());
     let bound = imports.load_session(&context, &files, "session-a").unwrap();
@@ -308,8 +325,13 @@ fn start_returns_bound_task_and_run_redacts_output_without_replacing_failure() {
     );
     assert_eq!(bound.items[0].attempts.len(), 2);
 
+    let execution = state
+        .begin_project_external_task(&context, &task.id)
+        .unwrap();
     service
         .run_local(
+            &state,
+            &execution,
             &context,
             "session-a",
             "item-a",
@@ -385,28 +407,39 @@ fn start_returns_bound_task_and_run_redacts_output_without_replacing_failure() {
         runner
             .cancel_during
             .store(mode == "cancel", Ordering::SeqCst);
-        let task = service
-            .start_local(
-                &context,
-                "session-a",
-                item_id,
-                AgentAssistanceTrigger::Manual,
-                AgentKind::Claude,
+        let task = state
+            .with_current_project_write_access(
+                &context.project_id,
+                context.root.to_string_lossy().as_ref(),
+                |permit, _current| {
+                    service.start_local(
+                        permit,
+                        "session-a",
+                        item_id,
+                        AgentAssistanceTrigger::Manual,
+                        AgentKind::Claude,
+                    )
+                },
             )
             .unwrap();
         if mode == "pre_cancel" {
             tasks.cancel_task(&task.id).unwrap();
         }
-        assert!(service
-            .run_local(
-                &context,
-                "session-a",
-                item_id,
-                &task.id,
-                AgentAssistanceTrigger::Manual,
-                AgentKind::Claude,
-            )
-            .is_err());
+        let run_result = state
+            .begin_project_external_task(&context, &task.id)
+            .and_then(|execution| {
+                service.run_local(
+                    &state,
+                    &execution,
+                    &context,
+                    "session-a",
+                    item_id,
+                    &task.id,
+                    AgentAssistanceTrigger::Manual,
+                    AgentKind::Claude,
+                )
+            });
+        assert!(run_result.is_err());
         let terminal = tasks.get_task(&task.id).unwrap();
         let expected = if mode == "cancel" || mode == "pre_cancel" {
             TaskStatus::Cancelled
@@ -449,6 +482,21 @@ fn seed_workspace(root: &std::path::Path) {
         std::fs::create_dir_all(root.join(name)).unwrap();
     }
     std::fs::write(root.join("task.json"), "{}").unwrap();
+}
+
+fn seed_native_project(root: &std::path::Path) {
+    std::fs::write(root.join("purpose.md"), "# Purpose").unwrap();
+    std::fs::write(root.join("schema.md"), "# Schema").unwrap();
+    for path in [
+        root.join("raw").join("sources"),
+        root.join("wiki"),
+        root.join(".app").join("tasks"),
+        root.join("exports"),
+        root.join("skills"),
+    ] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    std::fs::write(root.join("wiki/index.md"), "# Index").unwrap();
 }
 
 #[test]

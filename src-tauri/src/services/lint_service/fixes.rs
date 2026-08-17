@@ -1,6 +1,7 @@
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
+use crate::app_state::ProjectWritePermit;
 use crate::errors::BackendError;
 use crate::models::confirmation::{ActionPreview, PendingAction, PendingActionType, RiskLevel};
 use crate::models::lint::{
@@ -22,7 +23,7 @@ impl LintService {
     /// Apply (or plan) a fix for a single issue. Deterministic safe fixes
     /// create a Git checkpoint before writing; high-risk fixes return a
     /// `PendingAction` until the caller confirms with `confirm_high_risk`.
-    pub fn apply_fix(
+    fn apply_fix_unchecked(
         &self,
         context: &ProjectContext,
         git_service: &GitService,
@@ -777,7 +778,7 @@ impl LintService {
     /// for unified review instead of being written. Per-item failures are
     /// collected into `skipped` rather than aborting the batch — the checkpoint
     /// already preserves the pre-batch state.
-    pub fn apply_fixes_batch(
+    fn apply_fixes_batch_unchecked(
         &self,
         context: &ProjectContext,
         git_service: &GitService,
@@ -1129,6 +1130,62 @@ impl LintService {
             needs_confirmation,
             skipped,
         })
+    }
+
+    pub(crate) fn apply_fix_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        git_service: &GitService,
+        issue: &LintIssue,
+        confirm_high_risk: bool,
+        expected_hash: Option<&str>,
+    ) -> Result<LintFixOutcome, BackendError> {
+        self.apply_fix_unchecked(
+            permit.context(),
+            git_service,
+            issue,
+            confirm_high_risk,
+            expected_hash,
+        )
+    }
+
+    pub(crate) fn apply_fixes_batch_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        git_service: &GitService,
+        issues: &[LintIssue],
+        expected_hashes: &HashMap<String, String>,
+    ) -> Result<LintBatchOutcome, BackendError> {
+        self.apply_fixes_batch_unchecked(permit.context(), git_service, issues, expected_hashes)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn apply_fix(
+        &self,
+        context: &ProjectContext,
+        git_service: &GitService,
+        issue: &LintIssue,
+        confirm_high_risk: bool,
+        expected_hash: Option<&str>,
+    ) -> Result<LintFixOutcome, BackendError> {
+        self.apply_fix_unchecked(
+            context,
+            git_service,
+            issue,
+            confirm_high_risk,
+            expected_hash,
+        )
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn apply_fixes_batch(
+        &self,
+        context: &ProjectContext,
+        git_service: &GitService,
+        issues: &[LintIssue],
+        expected_hashes: &HashMap<String, String>,
+    ) -> Result<LintBatchOutcome, BackendError> {
+        self.apply_fixes_batch_unchecked(context, git_service, issues, expected_hashes)
     }
 }
 

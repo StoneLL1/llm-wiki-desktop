@@ -6,6 +6,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::app_state::ProjectWritePermit;
 use crate::errors::BackendError;
 use crate::models::import_v2::{
     ArtifactKind, ImportArtifact, ImportBatchResult, ImportItem, ImportPreviewArtifact,
@@ -50,7 +51,7 @@ impl<'a> AgentCandidateService<'a> {
         }
     }
 
-    pub fn accept_staged_output(
+    fn accept_staged_output_unchecked(
         &self,
         context: &ProjectContext,
         session_id: &str,
@@ -90,9 +91,9 @@ impl<'a> AgentCandidateService<'a> {
                 "Agent task is not bound to this import item.",
             ));
         }
-        let previous = self
-            .imports
-            .begin_agent_candidate_validation(context, self.files, session_id, item_id, task_id)?;
+        let previous = self.imports.begin_agent_candidate_validation_unchecked(
+            context, self.files, session_id, item_id, task_id,
+        )?;
         match self.accept_staged_output_validating(context, session_id, item_id, task_id) {
             Ok(candidate) => Ok(candidate),
             Err(validation_error) => {
@@ -373,6 +374,27 @@ impl<'a> AgentCandidateService<'a> {
         Ok(candidate)
     }
 
+    pub(crate) fn accept_staged_output_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+    ) -> Result<AgentCandidate, BackendError> {
+        self.accept_staged_output_unchecked(permit.context(), session_id, item_id, task_id)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn accept_staged_output(
+        &self,
+        context: &ProjectContext,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+    ) -> Result<AgentCandidate, BackendError> {
+        self.accept_staged_output_unchecked(context, session_id, item_id, task_id)
+    }
+
     pub fn load_candidate(
         &self,
         context: &ProjectContext,
@@ -385,6 +407,9 @@ impl<'a> AgentCandidateService<'a> {
         Ok((stored.candidate, stored.diff))
     }
 
+    /// Compatibility surface for integration tests. Production selection is
+    /// performed by the write-permit-bearing combined action below.
+    #[cfg(debug_assertions)]
     pub fn select_candidate(
         &self,
         context: &ProjectContext,
@@ -406,9 +431,9 @@ impl<'a> AgentCandidateService<'a> {
         })
     }
 
-    pub fn select_candidate_and_finalize_exact_duplicate(
+    pub(crate) fn select_candidate_and_finalize_exact_duplicate(
         &self,
-        context: &ProjectContext,
+        permit: &ProjectWritePermit<'_>,
         git_service: &GitService,
         session_id: &str,
         item_id: &str,
@@ -417,6 +442,7 @@ impl<'a> AgentCandidateService<'a> {
         expected_current_wiki_sha256: Option<&str>,
         restricted_content_acknowledged: bool,
     ) -> Result<(ImportItem, Option<ImportBatchResult>), BackendError> {
+        let context = permit.context();
         self.imports.with_agent_candidate_action_lock(|| {
             self.select_candidate_locked(
                 context,
@@ -426,8 +452,8 @@ impl<'a> AgentCandidateService<'a> {
                 merged_markdown,
                 expected_current_wiki_sha256,
             )?;
-            let batch = self.imports.finalize_exact_duplicate(
-                context,
+            let batch = self.imports.finalize_exact_duplicate_authorized(
+                permit,
                 self.files,
                 git_service,
                 session_id,
@@ -599,7 +625,7 @@ impl<'a> AgentCandidateService<'a> {
         Ok(selected)
     }
 
-    pub fn discard_candidate(
+    fn discard_candidate_unchecked(
         &self,
         context: &ProjectContext,
         session_id: &str,
@@ -635,7 +661,28 @@ impl<'a> AgentCandidateService<'a> {
         Ok(item)
     }
 
-    pub fn recover_completed_outputs(
+    pub(crate) fn discard_candidate_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        session_id: &str,
+        item_id: &str,
+        candidate_id: &str,
+    ) -> Result<ImportItem, BackendError> {
+        self.discard_candidate_unchecked(permit.context(), session_id, item_id, candidate_id)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn discard_candidate(
+        &self,
+        context: &ProjectContext,
+        session_id: &str,
+        item_id: &str,
+        candidate_id: &str,
+    ) -> Result<ImportItem, BackendError> {
+        self.discard_candidate_unchecked(context, session_id, item_id, candidate_id)
+    }
+
+    fn recover_completed_outputs_unchecked(
         &self,
         context: &ProjectContext,
         session_id: &str,
@@ -683,7 +730,9 @@ impl<'a> AgentCandidateService<'a> {
             })
             .collect::<Vec<_>>();
         for (item_id, task_id) in completed {
-            if let Err(error) = self.accept_staged_output(context, session_id, &item_id, &task_id) {
+            if let Err(error) =
+                self.accept_staged_output_unchecked(context, session_id, &item_id, &task_id)
+            {
                 let latest = self.imports.load_session(context, self.files, session_id)?;
                 let rejection_persisted = latest
                     .items
@@ -732,6 +781,23 @@ impl<'a> AgentCandidateService<'a> {
             }
         }
         Ok(latest)
+    }
+
+    pub(crate) fn recover_completed_outputs_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        session_id: &str,
+    ) -> Result<crate::models::import_v2::ImportSession, BackendError> {
+        self.recover_completed_outputs_unchecked(permit.context(), session_id)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn recover_completed_outputs(
+        &self,
+        context: &ProjectContext,
+        session_id: &str,
+    ) -> Result<crate::models::import_v2::ImportSession, BackendError> {
+        self.recover_completed_outputs_unchecked(context, session_id)
     }
 
     fn load_stored(

@@ -1,3 +1,4 @@
+use crate::app_state::ProjectWritePermit;
 use crate::errors::BackendError;
 use crate::models::compile::CompileRoutePreference;
 use crate::models::lint::{
@@ -29,7 +30,7 @@ impl LintService {
         Ok(format!("{:x}", Sha256::digest(canonical.as_bytes())))
     }
 
-    pub fn persist_local_report(
+    fn persist_local_report_unchecked(
         &self,
         context: &ProjectContext,
         report: &LintReport,
@@ -60,6 +61,26 @@ impl LintService {
         Ok(entry)
     }
 
+    pub(crate) fn persist_local_report_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        report: &LintReport,
+    ) -> Result<LintHistoryEntry, BackendError> {
+        self.persist_local_report_unchecked(permit.context(), report)
+    }
+
+    /// Compatibility surface for integration and service tests. Production
+    /// callers must enter through `persist_local_report_authorized`.
+    #[cfg(debug_assertions)]
+    pub fn persist_local_report(
+        &self,
+        context: &ProjectContext,
+        report: &LintReport,
+    ) -> Result<LintHistoryEntry, BackendError> {
+        self.persist_local_report_unchecked(context, report)
+    }
+
+    #[cfg(debug_assertions)]
     pub fn persist_deep_report(
         &self,
         context: &ProjectContext,
@@ -258,7 +279,7 @@ impl LintService {
     /// Save one composed Health Check report. Persistent runs use the existing
     /// atomic Lint report/history files; read-only/restricted runs remain
     /// process-local and never attempt to create `.app`.
-    pub fn store_health_check_report(
+    fn store_health_check_report(
         &self,
         context: &ProjectContext,
         report: &HealthCheckReport,
@@ -266,7 +287,7 @@ impl LintService {
         self.store_health_check_report_guarded(context, report, || Ok(()))
     }
 
-    pub fn store_health_check_report_guarded<F>(
+    pub(crate) fn store_health_check_report_guarded<F>(
         &self,
         context: &ProjectContext,
         report: &HealthCheckReport,

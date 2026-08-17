@@ -43,6 +43,8 @@ pub use compile_service::{
 pub use export_service::{ExportService, ValidatedExportArtifact};
 pub use file_store::{FileStore, WriteMode};
 pub use git_service::GitService;
+#[cfg(feature = "gui")]
+pub(crate) use graph_service::GraphCachePolicy;
 pub use graph_service::GraphService;
 pub use lint_service::{
     health_source_paths, AgentLintRepairCandidate, AgentLintRepairWorkspaceDescriptor,

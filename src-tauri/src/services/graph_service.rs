@@ -1,6 +1,7 @@
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
+use crate::app_state::ProjectWritePermit;
 use crate::errors::BackendError;
 use crate::models::graph::{
     GraphBuildResult, GraphData, GraphEdge, GraphLayout, GraphNode, SaveGraphLayoutRequest,
@@ -25,7 +26,25 @@ pub struct GraphService {
     file_store: FileStore,
 }
 
+/// Read paths must state whether a rebuilt acceleration cache may be written.
+/// The persistent variant cannot be produced by IPC and remains valid only
+/// inside the current project write critical section.
+pub(crate) enum GraphCachePolicy<'permit> {
+    MemoryOnly,
+    Persistent(&'permit ProjectWritePermit<'permit>),
+}
+
 impl GraphService {
+    /// Public read path for callers that do not hold backend mutation
+    /// authority. It never creates or repairs project cache state.
+    pub fn resolve_memory_only(
+        &self,
+        context: &ProjectContext,
+        pages: &[WikiPageMeta],
+    ) -> Result<GraphBuildResult, BackendError> {
+        self.resolve(context, pages, GraphCachePolicy::MemoryOnly)
+    }
+
     /// Build graph data from a flat page list (typically the output of
     /// `SearchService::scan_wiki`). Pure: no filesystem access.
     pub fn build_from_pages(&self, pages: &[WikiPageMeta]) -> GraphData {
@@ -129,11 +148,12 @@ impl GraphService {
     }
 
     /// Atomic write of the full graph payload.
-    pub fn write_cache(
+    fn write_cache(
         &self,
-        context: &ProjectContext,
+        permit: &ProjectWritePermit<'_>,
         data: &GraphData,
     ) -> Result<(), BackendError> {
+        let context = permit.context();
         self.file_store
             .write_json_atomic(context, ".app/graph-cache.json", data)
     }
@@ -141,10 +161,11 @@ impl GraphService {
     /// Resolve the graph for a project: serve from cache when the content hash
     /// matches, otherwise rebuild and persist. `pages` is the freshly scanned
     /// page list used both to compute the live hash and to rebuild.
-    pub fn resolve(
+    pub(crate) fn resolve(
         &self,
         context: &ProjectContext,
         pages: &[WikiPageMeta],
+        cache_policy: GraphCachePolicy<'_>,
     ) -> Result<GraphBuildResult, BackendError> {
         let live_hash = content_hash_for(pages);
 
@@ -167,7 +188,10 @@ impl GraphService {
         }
 
         let data = self.build_from_pages(pages);
-        self.write_cache(context, &data)?;
+        if let GraphCachePolicy::Persistent(permit) = cache_policy {
+            validate_cache_permit(permit, context)?;
+            self.write_cache(permit, &data)?;
+        }
         Ok(GraphBuildResult {
             layout_stale: true,
             data,
@@ -176,13 +200,13 @@ impl GraphService {
     }
 
     /// Force a rebuild regardless of cache state and persist it.
-    pub fn rebuild(
+    pub(crate) fn rebuild(
         &self,
-        context: &ProjectContext,
+        permit: &ProjectWritePermit<'_>,
         pages: &[WikiPageMeta],
     ) -> Result<GraphBuildResult, BackendError> {
         let data = self.build_from_pages(pages);
-        self.write_cache(context, &data)?;
+        self.write_cache(permit, &data)?;
         Ok(GraphBuildResult {
             layout_stale: true,
             data,
@@ -193,11 +217,12 @@ impl GraphService {
     /// Persist a frontend-computed layout onto an existing, hash-matching cache.
     /// Stale requests (missing cache or mismatched hash) are ignored so we never
     /// attach a layout computed for a different wiki version.
-    pub fn save_layout(
+    pub(crate) fn save_layout(
         &self,
-        context: &ProjectContext,
+        permit: &ProjectWritePermit<'_>,
         request: SaveGraphLayoutRequest,
     ) -> Result<Option<GraphData>, BackendError> {
+        let context = permit.context();
         let Some(mut cached) = self.read_cache(context) else {
             return Ok(None);
         };
@@ -208,8 +233,24 @@ impl GraphService {
             positions: request.positions,
             communities: request.communities,
         });
-        self.write_cache(context, &cached)?;
+        self.write_cache(permit, &cached)?;
         Ok(Some(cached))
+    }
+}
+
+fn validate_cache_permit(
+    permit: &ProjectWritePermit<'_>,
+    context: &ProjectContext,
+) -> Result<(), BackendError> {
+    if permit.validates(context) {
+        Ok(())
+    } else {
+        Err(BackendError::new(
+            "PROJECT_WRITE_PERMIT_MISMATCH",
+            "The graph cache write permit belongs to a different project.",
+            false,
+            true,
+        ))
     }
 }
 
@@ -288,8 +329,10 @@ fn content_hash_for(pages: &[WikiPageMeta]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_state::AppState;
     use crate::models::paths::ProjectContext;
     use crate::models::wiki::{WikiPageMeta, WikiPageType};
+    use crate::services::{ProjectAssessmentService, ProjectService};
     use std::path::PathBuf;
 
     fn meta(path: &str, title: &str, page_type: WikiPageType) -> WikiPageMeta {
@@ -317,14 +360,31 @@ mod tests {
         }
     }
 
-    fn tmp_context(suffix: &str) -> (ProjectContext, PathBuf) {
+    fn tmp_context(suffix: &str) -> (AppState, ProjectContext, PathBuf) {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!("llm-wiki-graph-{stamp}-{suffix}"));
-        std::fs::create_dir_all(&root).unwrap();
-        (ProjectContext::new("project-1", root.clone()), root)
+        std::fs::create_dir_all(root.join("raw/sources")).unwrap();
+        std::fs::create_dir_all(root.join("wiki")).unwrap();
+        std::fs::create_dir_all(root.join(".app/tasks")).unwrap();
+        std::fs::create_dir_all(root.join("exports")).unwrap();
+        std::fs::create_dir_all(root.join("skills")).unwrap();
+        std::fs::write(root.join("purpose.md"), "# Purpose").unwrap();
+        std::fs::write(root.join("schema.md"), "# Schema").unwrap();
+        std::fs::write(root.join("wiki/index.md"), "# Index").unwrap();
+        let config = root.join(".test-global-config");
+        let state = AppState {
+            project_assessment_service: ProjectAssessmentService::new(config.clone()),
+            project_service: ProjectService::with_config_dir(config),
+            ..AppState::default()
+        };
+        let context = state
+            .project_registry
+            .register_trusted_native("project-1", &root)
+            .unwrap();
+        (state, context, root)
     }
 
     #[test]
@@ -429,14 +489,20 @@ mod tests {
 
     #[test]
     fn cache_roundtrip_preserves_data() {
-        let (context, root) = tmp_context("roundtrip");
+        let (state, context, root) = tmp_context("roundtrip");
         let pages = vec![
             meta("wiki/concepts/agent.md", "Agent", WikiPageType::Concept),
             meta("wiki/entities/claude.md", "Claude", WikiPageType::Entity),
         ];
         let service = GraphService::default();
         let data = service.build_from_pages(&pages);
-        service.write_cache(&context, &data).unwrap();
+        state
+            .with_current_project_write_access(
+                "project-1",
+                root.to_string_lossy().as_ref(),
+                |permit, _| service.write_cache(permit, &data),
+            )
+            .unwrap();
 
         let back = service.read_cache(&context).expect("cache should exist");
         assert_eq!(back.nodes.len(), 2);
@@ -447,7 +513,7 @@ mod tests {
 
     #[test]
     fn corrupted_cache_is_recovered_as_missing() {
-        let (context, root) = tmp_context("corrupt");
+        let (_state, context, root) = tmp_context("corrupt");
         std::fs::create_dir_all(&context.app_dir).unwrap();
         std::fs::write(context.app_dir.join("graph-cache.json"), "{ not valid json").unwrap();
 
@@ -455,26 +521,51 @@ mod tests {
         // Corrupt JSON must not panic; it is treated as no cache.
         assert!(service.read_cache(&context).is_none());
 
-        // resolve rebuilds and overwrites the corrupt file.
+        // Recovery/read-only resolution rebuilds in memory and must not make
+        // page availability depend on repairing persistent cache state.
         let pages = vec![meta("wiki/a.md", "A", WikiPageType::Other)];
-        let result = service.resolve(&context, &pages).unwrap();
+        let result = service
+            .resolve(&context, &pages, GraphCachePolicy::MemoryOnly)
+            .unwrap();
         assert!(!result.cached);
-        let healthy = service.read_cache(&context);
-        assert!(healthy.is_some());
+        assert!(service.read_cache(&context).is_none());
 
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn resolve_serves_cache_when_hash_matches() {
-        let (context, root) = tmp_context("cache-hit");
+    fn memory_only_resolution_never_creates_or_repairs_cache_state() {
+        let (_state, context, root) = tmp_context("memory-only");
+        let cache = context.app_dir.join("graph-cache.json");
+        std::fs::write(&cache, "{ not valid json").unwrap();
+        let before = std::fs::read(&cache).unwrap();
         let pages = vec![meta("wiki/a.md", "A", WikiPageType::Other)];
-        let service = GraphService::default();
-        service
-            .write_cache(&context, &service.build_from_pages(&pages))
+
+        let result = GraphService::default()
+            .resolve(&context, &pages, GraphCachePolicy::MemoryOnly)
             .unwrap();
 
-        let result = service.resolve(&context, &pages).unwrap();
+        assert!(!result.cached);
+        assert_eq!(std::fs::read(&cache).unwrap(), before);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolve_serves_cache_when_hash_matches() {
+        let (state, context, root) = tmp_context("cache-hit");
+        let pages = vec![meta("wiki/a.md", "A", WikiPageType::Other)];
+        let service = GraphService::default();
+        state
+            .with_current_project_write_access(
+                "project-1",
+                root.to_string_lossy().as_ref(),
+                |permit, _| service.write_cache(permit, &service.build_from_pages(&pages)),
+            )
+            .unwrap();
+
+        let result = service
+            .resolve(&context, &pages, GraphCachePolicy::MemoryOnly)
+            .unwrap();
         assert!(result.cached);
         assert!(result.layout_stale); // no layout persisted yet
 
@@ -483,11 +574,15 @@ mod tests {
 
     #[test]
     fn resolve_rebuilds_when_hash_diverges() {
-        let (context, root) = tmp_context("stale");
+        let (state, context, root) = tmp_context("stale");
         let old_pages = vec![meta("wiki/a.md", "A", WikiPageType::Other)];
         let service = GraphService::default();
-        service
-            .write_cache(&context, &service.build_from_pages(&old_pages))
+        state
+            .with_current_project_write_access(
+                "project-1",
+                root.to_string_lossy().as_ref(),
+                |permit, _| service.write_cache(permit, &service.build_from_pages(&old_pages)),
+            )
             .unwrap();
 
         // New page set -> different content hash -> cache miss.
@@ -495,7 +590,9 @@ mod tests {
             meta("wiki/a.md", "A", WikiPageType::Other),
             meta("wiki/b.md", "B", WikiPageType::Other),
         ];
-        let result = service.resolve(&context, &new_pages).unwrap();
+        let result = service
+            .resolve(&context, &new_pages, GraphCachePolicy::MemoryOnly)
+            .unwrap();
         assert!(!result.cached);
         assert_eq!(result.data.nodes.len(), 2);
 
@@ -504,7 +601,7 @@ mod tests {
 
     #[test]
     fn resolve_rebuilds_stale_empty_cache_when_live_pages_exist() {
-        let (context, root) = tmp_context("stale-empty");
+        let (state, context, root) = tmp_context("stale-empty");
         let mut a = meta("wiki/A.md", "A", WikiPageType::Other);
         a.wikilinks = vec!["B".to_string()];
         let pages = vec![a, meta("wiki/B.md", "B", WikiPageType::Other)];
@@ -516,9 +613,17 @@ mod tests {
             built_at: "2026-07-04T00:00:00Z".into(),
             layout: None,
         };
-        service.write_cache(&context, &stale).unwrap();
+        state
+            .with_current_project_write_access(
+                "project-1",
+                root.to_string_lossy().as_ref(),
+                |permit, _| service.write_cache(permit, &stale),
+            )
+            .unwrap();
 
-        let result = service.resolve(&context, &pages).unwrap();
+        let result = service
+            .resolve(&context, &pages, GraphCachePolicy::MemoryOnly)
+            .unwrap();
 
         assert!(!result.cached);
         assert!(result.layout_stale);
@@ -531,20 +636,28 @@ mod tests {
 
     #[test]
     fn resolve_marks_layout_stale_when_positions_do_not_cover_nodes() {
-        let (context, root) = tmp_context("partial-layout");
+        let (state, context, root) = tmp_context("partial-layout");
         let mut a = meta("wiki/A.md", "A", WikiPageType::Other);
         a.wikilinks = vec!["B".to_string()];
         let pages = vec![a, meta("wiki/B.md", "B", WikiPageType::Other)];
         let service = GraphService::default();
-        let mut data = service.rebuild(&context, &pages).unwrap().data;
+        let mut data = service.build_from_pages(&pages);
 
         data.layout = Some(GraphLayout {
             positions: HashMap::from([("wiki/A.md".to_string(), [1.0, 2.0])]),
             communities: HashMap::new(),
         });
-        service.write_cache(&context, &data).unwrap();
+        state
+            .with_current_project_write_access(
+                "project-1",
+                root.to_string_lossy().as_ref(),
+                |permit, _| service.write_cache(permit, &data),
+            )
+            .unwrap();
 
-        let result = service.resolve(&context, &pages).unwrap();
+        let result = service
+            .resolve(&context, &pages, GraphCachePolicy::MemoryOnly)
+            .unwrap();
 
         assert!(result.cached);
         assert!(result.layout_stale);
@@ -557,9 +670,17 @@ mod tests {
             ]),
             communities: HashMap::new(),
         });
-        service.write_cache(&context, &data).unwrap();
+        state
+            .with_current_project_write_access(
+                "project-1",
+                root.to_string_lossy().as_ref(),
+                |permit, _| service.write_cache(permit, &data),
+            )
+            .unwrap();
 
-        let wrong_keys = service.resolve(&context, &pages).unwrap();
+        let wrong_keys = service
+            .resolve(&context, &pages, GraphCachePolicy::MemoryOnly)
+            .unwrap();
 
         assert!(wrong_keys.cached);
         assert!(wrong_keys.layout_stale);
@@ -569,27 +690,39 @@ mod tests {
 
     #[test]
     fn save_layout_persists_when_hash_matches_and_ignores_when_stale() {
-        let (context, root) = tmp_context("layout");
+        let (state, context, root) = tmp_context("layout");
         let pages = vec![meta("wiki/a.md", "A", WikiPageType::Other)];
         let service = GraphService::default();
         let built = service.build_from_pages(&pages);
         let hash = built.content_hash.clone();
-        service.write_cache(&context, &built).unwrap();
+        state
+            .with_current_project_write_access(
+                "project-1",
+                root.to_string_lossy().as_ref(),
+                |permit, _| service.write_cache(permit, &built),
+            )
+            .unwrap();
 
         let mut positions = std::collections::HashMap::new();
         positions.insert("wiki/a.md".to_string(), [1.0_f64, 2.0_f64]);
         let mut communities = std::collections::HashMap::new();
         communities.insert("wiki/a.md".to_string(), 0_usize);
 
-        let saved = service
-            .save_layout(
-                &context,
-                SaveGraphLayoutRequest {
-                    project_id: "p".into(),
-                    project_root_path: context.root.to_string_lossy().to_string(),
-                    content_hash: hash.clone(),
-                    positions: positions.clone(),
-                    communities: communities.clone(),
+        let saved = state
+            .with_current_project_write_access(
+                "project-1",
+                root.to_string_lossy().as_ref(),
+                |permit, _| {
+                    service.save_layout(
+                        permit,
+                        SaveGraphLayoutRequest {
+                            project_id: "p".into(),
+                            project_root_path: context.root.to_string_lossy().to_string(),
+                            content_hash: hash.clone(),
+                            positions: positions.clone(),
+                            communities: communities.clone(),
+                        },
+                    )
                 },
             )
             .unwrap();
@@ -598,15 +731,21 @@ mod tests {
         assert_eq!(after.layout.unwrap().positions, positions);
 
         // Stale hash -> no-op.
-        let stale = service
-            .save_layout(
-                &context,
-                SaveGraphLayoutRequest {
-                    project_id: "p".into(),
-                    project_root_path: context.root.to_string_lossy().to_string(),
-                    content_hash: "wrong-hash".to_string(),
-                    positions,
-                    communities,
+        let stale = state
+            .with_current_project_write_access(
+                "project-1",
+                root.to_string_lossy().as_ref(),
+                |permit, _| {
+                    service.save_layout(
+                        permit,
+                        SaveGraphLayoutRequest {
+                            project_id: "p".into(),
+                            project_root_path: context.root.to_string_lossy().to_string(),
+                            content_hash: "wrong-hash".to_string(),
+                            positions,
+                            communities,
+                        },
+                    )
                 },
             )
             .unwrap();

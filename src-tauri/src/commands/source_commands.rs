@@ -79,12 +79,17 @@ pub fn apply_source_candidate(
     state: State<'_, AppState>,
     request: ApplySourceCandidateRequest,
 ) -> Result<SourceMutationResult, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state.import_v2_service.apply_source_candidate(
-        &context,
-        &state.file_store,
-        &state.git_service,
-        &request,
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, _context| {
+            state.import_v2_service.apply_source_candidate_authorized(
+                permit,
+                &state.file_store,
+                &state.git_service,
+                &request,
+            )
+        },
     )
 }
 
@@ -93,12 +98,17 @@ pub fn discard_source_candidate(
     state: State<'_, AppState>,
     request: DiscardSourceCandidateRequest,
 ) -> Result<(), BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state.import_v2_service.discard_source_candidate(
-        &context,
-        &state.file_store,
-        &request.source_id,
-        &request.candidate_id,
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, _context| {
+            state.import_v2_service.discard_source_candidate_authorized(
+                permit,
+                &state.file_store,
+                &request.source_id,
+                &request.candidate_id,
+            )
+        },
     )
 }
 
@@ -107,14 +117,19 @@ pub fn restore_source_version(
     state: State<'_, AppState>,
     request: RestoreSourceVersionRequest,
 ) -> Result<SourceMutationResult, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state.import_v2_service.restore_source_version(
-        &context,
-        &state.file_store,
-        &state.git_service,
-        &request.source_id,
-        &request.version_id,
-        &request.expected_markdown_hash,
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, _context| {
+            state.import_v2_service.restore_source_version_authorized(
+                permit,
+                &state.file_store,
+                &state.git_service,
+                &request.source_id,
+                &request.version_id,
+                &request.expected_markdown_hash,
+            )
+        },
     )
 }
 
@@ -135,7 +150,6 @@ fn start_source_ai_organize_impl(
 ) -> Result<BackendTask, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     state.require_external_ai_access(&context)?;
-    state.require_project_write_access(&context)?;
     let input = state.import_v2_service.prepare_source_ai_organize_input(
         &context,
         &state.file_store,
@@ -164,17 +178,26 @@ fn start_source_ai_organize_impl(
     state
         .import_v2_service
         .reserve_source_ai(reservation_key.clone())?;
-    let task = match state.task_service.create_project_task(
-        TaskType::SourceAiOrganize,
-        request.project_id.clone(),
-        context.root.clone(),
-        format!("AI organize Source: {}", input.title),
-        true,
+    let task = match state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, current| {
+            state
+                .task_service
+                .create_project_task(
+                    TaskType::SourceAiOrganize,
+                    request.project_id.clone(),
+                    current.root.clone(),
+                    format!("AI organize Source: {}", input.title),
+                    true,
+                )
+                .map_err(source_task_error)
+        },
     ) {
         Ok(task) => task,
         Err(error) => {
             state.import_v2_service.release_source_ai(&reservation_key);
-            return Err(source_task_error(error));
+            return Err(error);
         }
     };
     let task = match state.task_service.set_result(
@@ -405,15 +428,19 @@ async fn run_source_ai_organize(
     route: ResolvedSourceAiRoute,
     recovery: SourceAiRecovery,
 ) -> Result<(), BackendError> {
-    state
-        .task_service
-        .transition_status(task_id, TaskStatus::Running)
-        .map_err(source_task_error)?;
+    state.with_current_project_write_access(
+        &context.project_id,
+        context.root.to_string_lossy().as_ref(),
+        |_permit, _| {
+            state
+                .task_service
+                .transition_status(task_id, TaskStatus::Running)
+                .map_err(source_task_error)
+        },
+    )?;
     if state.task_service.is_cancelled(task_id) {
         return Err(source_ai_cancelled());
     }
-    state.require_external_ai_access(context)?;
-    state.require_project_write_access(context)?;
     state
         .task_service
         .append_log(
@@ -428,6 +455,7 @@ async fn run_source_ai_organize(
         .read_settings(context)
         .map(|settings| settings.language)
         .unwrap_or_else(|_| "en".to_string());
+    let execution_lease = state.begin_project_external_task(context, task_id)?;
     let (raw, candidate_route, engine, model, engine_version) = match route {
         ResolvedSourceAiRoute::Agent { kind, version } => {
             state
@@ -532,21 +560,31 @@ async fn run_source_ai_organize(
     if state.task_service.is_cancelled(task_id) {
         return Err(source_ai_cancelled());
     }
+    state.require_current_execution_epoch(context, &execution_lease)?;
     let candidate_markdown =
         source_ai_organize::build_candidate_markdown(&input.current_markdown, &input.title, &raw)?;
     if state.task_service.is_cancelled(task_id) {
         return Err(source_ai_cancelled());
     }
-    let candidate = state.import_v2_service.store_source_ai_organize_candidate(
-        context,
-        &state.file_store,
-        &input,
-        task_id,
-        candidate_route,
-        engine,
-        model,
-        engine_version,
-        candidate_markdown,
+    let candidate = state.with_current_project_write_access(
+        &context.project_id,
+        context.root.to_string_lossy().as_ref(),
+        |permit, _current| {
+            state.require_current_execution_permit(permit, &execution_lease)?;
+            state
+                .import_v2_service
+                .store_source_ai_organize_candidate_authorized(
+                    permit,
+                    &state.file_store,
+                    &input,
+                    task_id,
+                    candidate_route,
+                    engine,
+                    model,
+                    engine_version,
+                    candidate_markdown,
+                )
+        },
     )?;
     let candidate_path = format!(
         ".app/source-candidates/{}/{}.json",
@@ -573,15 +611,22 @@ async fn run_source_ai_organize(
             pending_action: None,
         },
     ) {
-        let _ = state
-            .import_v2_service
-            .discard_source_ai_organize_candidate(
-                context,
-                &state.file_store,
-                &input.source_id,
-                &candidate.candidate_id,
-                task_id,
-            );
+        let _ = state.with_current_project_write_access(
+            &context.project_id,
+            context.root.to_string_lossy().as_ref(),
+            |permit, _current| {
+                state.require_current_execution_permit(permit, &execution_lease)?;
+                state
+                    .import_v2_service
+                    .discard_source_ai_organize_candidate_authorized(
+                        permit,
+                        &state.file_store,
+                        &input.source_id,
+                        &candidate.candidate_id,
+                        task_id,
+                    )
+            },
+        );
         return Err(source_task_error(error));
     }
     Ok(())
@@ -751,17 +796,23 @@ fn reprocess(
     request: ReprocessSourceRequest,
     kind: SourceCandidateKind,
 ) -> Result<SourceCandidateSummary, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let task = state
-        .task_service
-        .create_project_task(
-            TaskType::Import,
-            context.project_id.clone(),
-            context.root.clone(),
-            format!("Reprocess Source ({kind:?})"),
-            true,
-        )
-        .map_err(source_task_error)?;
+    let (context, task) = state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+            let task = state
+                .task_service
+                .create_project_task(
+                    TaskType::Import,
+                    context.project_id.clone(),
+                    context.root.clone(),
+                    format!("Reprocess Source ({kind:?})"),
+                    true,
+                )
+                .map_err(source_task_error)?;
+            Ok((context.clone(), task))
+        },
+    )?;
     state
         .task_service
         .transition_status(&task.id, TaskStatus::Running)
@@ -770,12 +821,20 @@ fn reprocess(
         .task_service
         .get_cancellation_token(&task.id)
         .ok_or_else(|| source_task_error("Source processing task token is unavailable."))?;
-    let result = state.import_v2_service.reprocess_source(
-        &context,
-        &state.file_store,
-        &request,
-        kind,
-        &cancellation,
+    let execution_lease = state.begin_project_external_task(&context, &task.id)?;
+    let result = state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, _current| {
+            state.require_current_execution_permit(permit, &execution_lease)?;
+            state.import_v2_service.reprocess_source_authorized(
+                permit,
+                &state.file_store,
+                &request,
+                kind,
+                &cancellation,
+            )
+        },
     );
     match result {
         Ok(candidate) => {
@@ -838,10 +897,18 @@ pub fn move_source(
     state: State<'_, AppState>,
     request: MoveSourceRequest,
 ) -> Result<SourceMutationResult, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state
-        .import_v2_service
-        .move_source(&context, &state.file_store, &state.git_service, &request)
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, _context| {
+            state.import_v2_service.move_source_authorized(
+                permit,
+                &state.file_store,
+                &state.git_service,
+                &request,
+            )
+        },
+    )
 }
 
 #[tauri::command]
@@ -860,10 +927,18 @@ pub fn delete_source(
     state: State<'_, AppState>,
     request: DeleteSourceRequest,
 ) -> Result<SourceMutationResult, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state
-        .import_v2_service
-        .delete_source(&context, &state.file_store, &state.git_service, &request)
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, _context| {
+            state.import_v2_service.delete_source_authorized(
+                permit,
+                &state.file_store,
+                &state.git_service,
+                &request,
+            )
+        },
+    )
 }
 
 #[cfg(test)]

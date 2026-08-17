@@ -78,27 +78,32 @@ pub fn add_import_url_v2(
     state: State<'_, AppState>,
     request: AddImportUrlV2Request,
 ) -> Result<ImportSession, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let target = UrlPolicy.normalize_for_session(&request.url)?;
-    let target = upgrade_trusted_platform_page_to_https(target)?;
-    let reference = state.import_v2_service.store_web_target(&target)?;
-    let result = state.import_v2_service.add_inputs(
-        &context,
-        &state.file_store,
-        &request.session_id,
-        vec![ImportInput {
-            kind: ImportInputKind::Url,
-            display_name: target.public.host.clone(),
-            locator: reference.clone(),
-            normalized_locator: Some(target.public.public_url),
-            source_identity: None,
-            media_save_mode: request.media_save_mode,
-        }],
-    );
-    if result.is_err() {
-        let _ = state.import_v2_service.delete_web_target(&reference);
-    }
-    result
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, _context| {
+            let target = UrlPolicy.normalize_for_session(&request.url)?;
+            let target = upgrade_trusted_platform_page_to_https(target)?;
+            let reference = state.import_v2_service.store_web_target(&target)?;
+            let result = state.import_v2_service.add_inputs_authorized(
+                permit,
+                &state.file_store,
+                &request.session_id,
+                vec![ImportInput {
+                    kind: ImportInputKind::Url,
+                    display_name: target.public.host.clone(),
+                    locator: reference.clone(),
+                    normalized_locator: Some(target.public.public_url),
+                    source_identity: None,
+                    media_save_mode: request.media_save_mode.clone(),
+                }],
+            );
+            if result.is_err() {
+                let _ = state.import_v2_service.delete_web_target(&reference);
+            }
+            result
+        },
+    )
 }
 
 #[tauri::command]
@@ -110,6 +115,10 @@ pub async fn discover_import_collection_v2(
     state
         .import_v2_service
         .load_session(&context, &state.file_store, &request.session_id)?;
+    let execution = state.begin_project_external_execution(
+        &context,
+        &format!("collection-discovery:{}", request.session_id),
+    )?;
     let target = UrlPolicy.normalize_for_session(&request.url)?;
     if !looks_like_collection_url(&target.public.public_url) {
         return Ok(None);
@@ -179,13 +188,20 @@ pub async fn discover_import_collection_v2(
         estimated_asr_count += usize::from(item.estimated_asr_required);
         pending_items.push((item.title, child, item.discovery_fingerprint));
     }
-    let (collection_ref, page) = state.import_v2_service.store_web_collection(
+    state.require_current_execution_epoch(&context, &execution)?;
+    let (collection_ref, page) = state.with_current_project_write_access(
         &request.project_id,
-        &request.session_id,
-        target.public.public_url.clone(),
-        collection.platform.clone(),
-        collection.title.clone(),
-        pending_items,
+        &request.project_root_path,
+        |_permit, _context| {
+            state.import_v2_service.store_web_collection(
+                &request.project_id,
+                &request.session_id,
+                target.public.public_url.clone(),
+                collection.platform.clone(),
+                collection.title.clone(),
+                pending_items,
+            )
+        },
     )?;
     let items = page
         .items
@@ -217,32 +233,39 @@ pub fn load_import_collection_page_v2(
     state: State<'_, AppState>,
     request: LoadImportCollectionPageV2Request,
 ) -> Result<ImportCollectionPage, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state
-        .import_v2_service
-        .load_session(&context, &state.file_store, &request.session_id)?;
-    let page = state.import_v2_service.load_web_collection_page(
-        &request.collection_ref,
+    state.with_current_project_write_access(
         &request.project_id,
-        &request.session_id,
-        &request.cursor,
-        request.load_all,
-    )?;
-    Ok(ImportCollectionPage {
-        items: page
-            .items
-            .into_iter()
-            .map(|item| ImportCollectionItemPreview {
-                item_ref: item.item_ref,
-                title: item.title,
-                public_url: item.public_url,
+        &request.project_root_path,
+        |_permit, context| {
+            state.import_v2_service.load_session(
+                context,
+                &state.file_store,
+                &request.session_id,
+            )?;
+            let page = state.import_v2_service.load_web_collection_page(
+                &request.collection_ref,
+                &request.project_id,
+                &request.session_id,
+                &request.cursor,
+                request.load_all,
+            )?;
+            Ok(ImportCollectionPage {
+                items: page
+                    .items
+                    .into_iter()
+                    .map(|item| ImportCollectionItemPreview {
+                        item_ref: item.item_ref,
+                        title: item.title,
+                        public_url: item.public_url,
+                    })
+                    .collect(),
+                discovered_total: page.discovered_total,
+                loaded_count: page.loaded_count,
+                has_more: page.has_more,
+                next_cursor: page.next_cursor,
             })
-            .collect(),
-        discovered_total: page.discovered_total,
-        loaded_count: page.loaded_count,
-        has_more: page.has_more,
-        next_cursor: page.next_cursor,
-    })
+        },
+    )
 }
 
 #[tauri::command]
@@ -267,75 +290,82 @@ pub fn add_import_collection_items_v2(
             true,
         ));
     }
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state
-        .import_v2_service
-        .load_session(&context, &state.file_store, &request.session_id)?;
-    let selection = state.import_v2_service.resolve_web_collection_selection(
-        &request.collection_ref,
+    state.with_current_project_write_access(
         &request.project_id,
-        &request.session_id,
-        &request.item_refs,
-    )?;
-    let mut stored_refs = Vec::with_capacity(selection.targets.len());
-    let mut inputs = Vec::with_capacity(selection.targets.len());
-    for selected in selection.targets {
-        let target = selected.target;
-        match state.import_v2_service.store_web_target(&target) {
-            Ok(item_ref) => {
-                stored_refs.push(item_ref.clone());
-                inputs.push(CollectionImportInput {
-                    input: ImportInput {
-                        kind: ImportInputKind::Url,
-                        display_name: target.public.host,
-                        locator: item_ref,
-                        normalized_locator: Some(target.public.public_url),
-                        source_identity: None,
-                        media_save_mode: request.media_save_mode.clone(),
-                    },
-                    discovery_fingerprint: selected.discovery_fingerprint,
-                });
+        &request.project_root_path,
+        |permit, context| {
+            state.import_v2_service.load_session(
+                context,
+                &state.file_store,
+                &request.session_id,
+            )?;
+            let selection = state.import_v2_service.resolve_web_collection_selection(
+                &request.collection_ref,
+                &request.project_id,
+                &request.session_id,
+                &request.item_refs,
+            )?;
+            let mut stored_refs = Vec::with_capacity(selection.targets.len());
+            let mut inputs = Vec::with_capacity(selection.targets.len());
+            for selected in selection.targets {
+                let target = selected.target;
+                match state.import_v2_service.store_web_target(&target) {
+                    Ok(item_ref) => {
+                        stored_refs.push(item_ref.clone());
+                        inputs.push(CollectionImportInput {
+                            input: ImportInput {
+                                kind: ImportInputKind::Url,
+                                display_name: target.public.host,
+                                locator: item_ref,
+                                normalized_locator: Some(target.public.public_url),
+                                source_identity: None,
+                                media_save_mode: request.media_save_mode.clone(),
+                            },
+                            discovery_fingerprint: selected.discovery_fingerprint,
+                        });
+                    }
+                    Err(error) => {
+                        for item_ref in stored_refs {
+                            let _ = state.import_v2_service.delete_web_target(&item_ref);
+                        }
+                        return Err(error);
+                    }
+                }
             }
-            Err(error) => {
-                for item_ref in stored_refs {
+            let result = state.import_v2_service.add_collection_inputs_authorized(
+                permit,
+                &state.file_store,
+                &request.session_id,
+                inputs,
+                selection.source_url,
+                selection.platform,
+                selection.title,
+            );
+            let session = match result {
+                Ok(session) => session,
+                Err(error) => {
+                    for item_ref in stored_refs {
+                        let _ = state.import_v2_service.delete_web_target(&item_ref);
+                    }
+                    return Err(error);
+                }
+            };
+            let used_refs = session
+                .items
+                .iter()
+                .map(|item| item.input.locator.as_str())
+                .collect::<HashSet<_>>();
+            for item_ref in stored_refs {
+                if !used_refs.contains(item_ref.as_str()) {
                     let _ = state.import_v2_service.delete_web_target(&item_ref);
                 }
-                return Err(error);
             }
-        }
-    }
-    let result = state.import_v2_service.add_collection_inputs(
-        &context,
-        &state.file_store,
-        &request.session_id,
-        inputs,
-        selection.source_url,
-        selection.platform,
-        selection.title,
-    );
-    let session = match result {
-        Ok(session) => session,
-        Err(error) => {
-            for item_ref in stored_refs {
-                let _ = state.import_v2_service.delete_web_target(&item_ref);
-            }
-            return Err(error);
-        }
-    };
-    let used_refs = session
-        .items
-        .iter()
-        .map(|item| item.input.locator.as_str())
-        .collect::<HashSet<_>>();
-    for item_ref in stored_refs {
-        if !used_refs.contains(item_ref.as_str()) {
-            let _ = state.import_v2_service.delete_web_target(&item_ref);
-        }
-    }
-    state
-        .import_v2_service
-        .delete_web_collection(&request.collection_ref)?;
-    Ok(session)
+            state
+                .import_v2_service
+                .delete_web_collection(&request.collection_ref)?;
+            Ok(session)
+        },
+    )
 }
 
 #[tauri::command]
@@ -384,41 +414,49 @@ pub fn confirm_remote_media_retention_v2(
             true,
         ));
     }
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let session =
-        state
-            .import_v2_service
-            .load_session(&context, &state.file_store, &request.session_id)?;
-    let item = session
-        .items
-        .iter()
-        .find(|item| item.item_id == request.item_id)
-        .ok_or_else(|| {
-            BackendError::new(
-                "IMPORT_V2_ITEM_NOT_FOUND",
-                "Import item was not found.",
-                false,
-                true,
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, context| {
+            let session = state.import_v2_service.load_session(
+                context,
+                &state.file_store,
+                &request.session_id,
+            )?;
+            let item = session
+                .items
+                .iter()
+                .find(|item| item.item_id == request.item_id)
+                .ok_or_else(|| {
+                    BackendError::new(
+                        "IMPORT_V2_ITEM_NOT_FOUND",
+                        "Import item was not found.",
+                        false,
+                        true,
+                    )
+                })?;
+            let plan = build_remote_media_retention_plan(context, &request.session_id, item)?;
+            if plan.enough_disk != Some(true) {
+                return Err(BackendError::new(
+                    "IMPORT_WEB_MEDIA_RETENTION_DISK_INSUFFICIENT",
+                    "Remote media cannot be retained because verified free disk space is insufficient.",
+                    true,
+                    true,
+                ));
+            }
+            state.import_v2_service.enable_remote_media_retention_authorized(
+                permit,
+                &state.file_store,
+                &request.session_id,
+                &request.item_id,
+            )?;
+            state.import_v2_service.load_session(
+                context,
+                &state.file_store,
+                &request.session_id,
             )
-        })?;
-    let plan = build_remote_media_retention_plan(&context, &request.session_id, item)?;
-    if plan.enough_disk != Some(true) {
-        return Err(BackendError::new(
-            "IMPORT_WEB_MEDIA_RETENTION_DISK_INSUFFICIENT",
-            "Remote media cannot be retained because verified free disk space is insufficient.",
-            true,
-            true,
-        ));
-    }
-    state.import_v2_service.enable_remote_media_retention(
-        &context,
-        &state.file_store,
-        &request.session_id,
-        &request.item_id,
-    )?;
-    state
-        .import_v2_service
-        .load_session(&context, &state.file_store, &request.session_id)
+        },
+    )
 }
 
 #[tauri::command]
@@ -427,67 +465,79 @@ pub fn begin_import_login_v2(
     state: State<'_, AppState>,
     request: LoginRequest,
 ) -> Result<ConnectorSessionRef, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let session =
-        state
-            .import_v2_service
-            .load_session(&context, &state.file_store, &request.session_id)?;
-    let item = session
-        .items
-        .iter()
-        .find(|item| item.item_id == request.item_id)
-        .ok_or_else(|| {
-            BackendError::new(
-                "IMPORT_V2_ITEM_NOT_FOUND",
-                "Import item was not found.",
-                false,
-                true,
-            )
-        })?;
-    if item.input.kind != ImportInputKind::Url {
-        return Err(BackendError::new(
-            "IMPORT_V2_BROWSER_SESSION_FAILED",
-            "Login is available only for URL imports.",
-            false,
-            true,
-        ));
-    }
-    let target = state.import_v2_service.resolve_web_target(
-        &item.input.locator,
-        item.input.normalized_locator.as_deref(),
+    let (context, target, pack, root) = state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+            let session = state.import_v2_service.load_session(
+                context,
+                &state.file_store,
+                &request.session_id,
+            )?;
+            let item = session
+                .items
+                .iter()
+                .find(|item| item.item_id == request.item_id)
+                .ok_or_else(|| {
+                    BackendError::new(
+                        "IMPORT_V2_ITEM_NOT_FOUND",
+                        "Import item was not found.",
+                        false,
+                        true,
+                    )
+                })?;
+            if item.input.kind != ImportInputKind::Url {
+                return Err(BackendError::new(
+                    "IMPORT_V2_BROWSER_SESSION_FAILED",
+                    "Login is available only for URL imports.",
+                    false,
+                    true,
+                ));
+            }
+            let target = state.import_v2_service.resolve_web_target(
+                &item.input.locator,
+                item.input.normalized_locator.as_deref(),
+            )?;
+            if !platform_matches_host(&request.platform, &target.public.host) {
+                return Err(BackendError::new(
+                    "IMPORT_V2_BROWSER_SESSION_FAILED",
+                    "The connector platform does not match the import target.",
+                    false,
+                    true,
+                ));
+            }
+            let pack = state
+                .import_capability_runtime
+                .browser_pack()
+                .ok_or_else(|| {
+                    BackendError::new(
+                        "IMPORT_V2_CAPABILITY_UNAVAILABLE",
+                        "The signed browser capability is unavailable.",
+                        true,
+                        true,
+                    )
+                })?;
+            let root = app
+                .path()
+                .app_data_dir()
+                .map_err(|_| {
+                    BackendError::new(
+                        "IMPORT_V2_BROWSER_SESSION_FAILED",
+                        "App data path is unavailable.",
+                        true,
+                        true,
+                    )
+                })?
+                .join("connector-profiles");
+            Ok((context.clone(), target, pack, root))
+        },
     )?;
-    if !platform_matches_host(&request.platform, &target.public.host) {
-        return Err(BackendError::new(
-            "IMPORT_V2_BROWSER_SESSION_FAILED",
-            "The connector platform does not match the import target.",
-            false,
-            true,
-        ));
-    }
-    let pack = state
-        .import_capability_runtime
-        .browser_pack()
-        .ok_or_else(|| {
-            BackendError::new(
-                "IMPORT_V2_CAPABILITY_UNAVAILABLE",
-                "The signed browser capability is unavailable.",
-                true,
-                true,
-            )
-        })?;
-    let root = app
-        .path()
-        .app_data_dir()
-        .map_err(|_| {
-            BackendError::new(
-                "IMPORT_V2_BROWSER_SESSION_FAILED",
-                "App data path is unavailable.",
-                true,
-                true,
-            )
-        })?
-        .join("connector-profiles");
-    state.connector_session_service.begin_login(
+    let execution = state.begin_project_external_execution(
+        &context,
+        &format!("connector-login:{}", uuid::Uuid::new_v4()),
+    )?;
+    state.require_current_execution_epoch(&context, &execution)?;
+    let session = state.connector_session_service.begin_login(
         &request.platform,
         &root,
         &pack,
@@ -495,7 +545,9 @@ pub fn begin_import_login_v2(
         &request.project_id,
         &request.session_id,
         &request.item_id,
-    )
+        execution,
+    )?;
+    Ok(session)
 }
 #[tauri::command]
 pub fn revoke_import_login_v2(
@@ -529,123 +581,134 @@ pub fn complete_import_login_v2(
     state: State<'_, AppState>,
     request: CompleteLoginRequest,
 ) -> Result<CompleteLoginResult, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let session = state.import_v2_service.load_session(
-        &context,
-        &state.file_store,
-        &request.import_session_id,
-    )?;
-    let item = session
-        .items
-        .iter()
-        .find(|item| item.item_id == request.item_id)
-        .ok_or_else(|| {
-            BackendError::new(
-                "IMPORT_V2_ITEM_NOT_FOUND",
-                "Import item was not found.",
-                false,
-                true,
-            )
-        })?;
-    let target = state.import_v2_service.resolve_web_target(
-        &item.input.locator,
-        item.input.normalized_locator.as_deref(),
-    )?;
-    let reference = state
-        .connector_session_service
-        .resume(&request.connector_session_id)?;
-    if !platform_matches_host(&reference.platform, &target.public.host) {
-        return Err(BackendError::new(
-            "IMPORT_V2_BROWSER_SESSION_FAILED",
-            "The authenticated connector does not match this item.",
-            false,
-            true,
-        ));
-    }
-    let mut resumed_item_ids = Vec::new();
-    for waiting_item in &session.items {
-        if waiting_item.status != ImportItemStatus::WaitingLogin
-            || waiting_item.input.kind != ImportInputKind::Url
-        {
-            continue;
-        }
-        let waiting_target = state.import_v2_service.resolve_web_target(
-            &waiting_item.input.locator,
-            waiting_item.input.normalized_locator.as_deref(),
-        )?;
-        if platform_matches_host(&reference.platform, &waiting_target.public.host) {
-            resumed_item_ids.push(waiting_item.item_id.clone());
-        }
-    }
-    if resumed_item_ids.is_empty() {
-        return Err(BackendError::new(
-            "IMPORT_V2_BROWSER_SESSION_FAILED",
-            "No waiting import items match the authenticated platform.",
-            false,
-            true,
-        ));
-    }
-    let (reference, profile) = state
-        .connector_session_service
-        .authenticated_profile_bound(
-            &request.connector_session_id,
-            &request.project_id,
-            &request.import_session_id,
-            &request.item_id,
-            target.request_url.as_str(),
-        )?;
-    state.import_v2_service.bind_authenticated_profiles(
+    state.with_current_project_write_access(
         &request.project_id,
-        &request.import_session_id,
-        &resumed_item_ids,
-        &profile,
-    )?;
-    if let Err(error) = state.import_v2_service.mark_authenticated_login_group(
-        &context,
-        &state.file_store,
-        &request.import_session_id,
-        &resumed_item_ids,
-        reference.account_summary.as_deref(),
-    ) {
-        let _ = state.import_v2_service.unbind_authenticated_profiles(
-            &request.project_id,
-            &request.import_session_id,
-            &resumed_item_ids,
-        );
-        return Err(error);
-    }
-    let tasks = match start_import_batch_for_state(
-        app,
-        &state,
-        StartImportBatchV2Request {
-            project_id: request.project_id.clone(),
-            project_root_path: request.project_root_path.clone(),
-            session_id: request.import_session_id.clone(),
-            item_ids: resumed_item_ids.clone(),
-            recovery_action: None,
-        },
-    ) {
-        Ok(task) => vec![task],
-        Err(error) => {
-            let _ = state.import_v2_service.unbind_authenticated_profiles(
+        &request.project_root_path,
+        |permit, context| {
+            let session = state.import_v2_service.load_session(
+                context,
+                &state.file_store,
+                &request.import_session_id,
+            )?;
+            let item = session
+                .items
+                .iter()
+                .find(|item| item.item_id == request.item_id)
+                .ok_or_else(|| {
+                    BackendError::new(
+                        "IMPORT_V2_ITEM_NOT_FOUND",
+                        "Import item was not found.",
+                        false,
+                        true,
+                    )
+                })?;
+            let target = state.import_v2_service.resolve_web_target(
+                &item.input.locator,
+                item.input.normalized_locator.as_deref(),
+            )?;
+            let reference = state
+                .connector_session_service
+                .resume(&request.connector_session_id)?;
+            if !platform_matches_host(&reference.platform, &target.public.host) {
+                return Err(BackendError::new(
+                    "IMPORT_V2_BROWSER_SESSION_FAILED",
+                    "The authenticated connector does not match this item.",
+                    false,
+                    true,
+                ));
+            }
+            let mut resumed_item_ids = Vec::new();
+            for waiting_item in &session.items {
+                if waiting_item.status != ImportItemStatus::WaitingLogin
+                    || waiting_item.input.kind != ImportInputKind::Url
+                {
+                    continue;
+                }
+                let waiting_target = state.import_v2_service.resolve_web_target(
+                    &waiting_item.input.locator,
+                    waiting_item.input.normalized_locator.as_deref(),
+                )?;
+                if platform_matches_host(&reference.platform, &waiting_target.public.host) {
+                    resumed_item_ids.push(waiting_item.item_id.clone());
+                }
+            }
+            if resumed_item_ids.is_empty() {
+                return Err(BackendError::new(
+                    "IMPORT_V2_BROWSER_SESSION_FAILED",
+                    "No waiting import items match the authenticated platform.",
+                    false,
+                    true,
+                ));
+            }
+            let (reference, profile) = state
+                .connector_session_service
+                .authenticated_profile_bound(
+                    &request.connector_session_id,
+                    &request.project_id,
+                    &request.import_session_id,
+                    &request.item_id,
+                    target.request_url.as_str(),
+                )?;
+            state.import_v2_service.bind_authenticated_profiles(
                 &request.project_id,
                 &request.import_session_id,
                 &resumed_item_ids,
-            );
-            let _ = state.import_v2_service.clear_authenticated_login_group(
-                &context,
-                &state.file_store,
-                &request.import_session_id,
-                &resumed_item_ids,
-            );
-            return Err(error);
-        }
-    };
-    Ok(CompleteLoginResult {
-        connector_session: reference,
-        resumed_item_ids,
-        tasks,
-    })
+                &profile,
+            )?;
+            if let Err(error) = state
+                .import_v2_service
+                .mark_authenticated_login_group_authorized(
+                    permit,
+                    &state.file_store,
+                    &request.import_session_id,
+                    &resumed_item_ids,
+                    reference.account_summary.as_deref(),
+                )
+            {
+                let _ = state.import_v2_service.unbind_authenticated_profiles(
+                    &request.project_id,
+                    &request.import_session_id,
+                    &resumed_item_ids,
+                );
+                return Err(error);
+            }
+            let tasks = match start_import_batch_for_state(
+                app,
+                &state,
+                permit,
+                StartImportBatchV2Request {
+                    project_id: request.project_id.clone(),
+                    project_root_path: request.project_root_path.clone(),
+                    session_id: request.import_session_id.clone(),
+                    item_ids: resumed_item_ids.clone(),
+                    recovery_action: None,
+                },
+            ) {
+                Ok(task) => vec![task],
+                Err(error) => {
+                    let _ = state.import_v2_service.unbind_authenticated_profiles(
+                        &request.project_id,
+                        &request.import_session_id,
+                        &resumed_item_ids,
+                    );
+                    let _ = state
+                        .import_v2_service
+                        .clear_authenticated_login_group_authorized(
+                            permit,
+                            &state.file_store,
+                            &request.import_session_id,
+                            &resumed_item_ids,
+                        );
+                    return Err(error);
+                }
+            };
+            Ok(CompleteLoginResult {
+                connector_session: reference,
+                resumed_item_ids,
+                tasks,
+            })
+        },
+    )
 }
 #[tauri::command]
 pub async fn authorize_import_private_target_v2(
@@ -698,6 +761,13 @@ pub async fn authorize_import_private_target_v2(
             true,
         )
     })?;
+    let execution = state.begin_project_external_execution(
+        &context,
+        &format!(
+            "private-target-dns:{}:{}",
+            request.session_id, request.item_id
+        ),
+    )?;
     let ips = tokio::net::lookup_host((target.public.host.as_str(), port))
         .await
         .map_err(|_| {
@@ -705,15 +775,20 @@ pub async fn authorize_import_private_target_v2(
         })?
         .map(|a| a.ip())
         .collect();
+    state.require_current_execution_epoch(&context, &execution)?;
     let grant = PrivateTargetGrant {
-        item_id: request.item_id,
+        item_id: request.item_id.clone(),
         scheme: target.public.scheme,
         host: target.public.host,
         port,
         resolved_ips: ips,
         expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
     };
-    state.import_v2_service.authorize_private_target(grant)
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, _context| state.import_v2_service.authorize_private_target(grant),
+    )
 }
 
 #[tauri::command]
@@ -729,15 +804,22 @@ pub fn authorize_local_ocr_v2(
     state: State<'_, AppState>,
     request: AuthorizeLocalOcrV2Request,
 ) -> Result<(), BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state.import_v2_service.authorize_media_for_session(
-        &context,
-        &state.file_store,
-        &request.session_id,
-        &request.item_id,
-        ImportMediaAuthorizationKind::Ocr,
-        None,
-        None,
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, _context| {
+            state
+                .import_v2_service
+                .authorize_media_for_session_authorized(
+                    permit,
+                    &state.file_store,
+                    &request.session_id,
+                    &request.item_id,
+                    ImportMediaAuthorizationKind::Ocr,
+                    None,
+                    None,
+                )
+        },
     )
 }
 
@@ -753,48 +835,56 @@ fn authorize_local_asr(
     state: &State<'_, AppState>,
     request: AuthorizeLocalAsrV2Request,
 ) -> Result<(), BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let session =
-        state
-            .import_v2_service
-            .load_session(&context, &state.file_store, &request.session_id)?;
-    let item = session
-        .items
-        .iter()
-        .find(|item| item.item_id == request.item_id)
-        .ok_or_else(|| {
-            BackendError::new(
-                "IMPORT_V2_ITEM_NOT_FOUND",
-                "Import item was not found.",
-                false,
-                true,
-            )
-        })?;
-    validate_local_asr_item(item)?;
-    if item.input.kind == ImportInputKind::Url {
-        let target = state.import_v2_service.resolve_web_target(
-            &item.input.locator,
-            item.input.normalized_locator.as_deref(),
-        )?;
-        validate_local_asr_host(&target.public.host)?;
-        state
-            .import_v2_service
-            .authorize_bilibili_asr(BilibiliAsrGrant {
-                project_id: request.project_id.clone(),
-                session_id: request.session_id.clone(),
-                item_id: request.item_id.clone(),
-                target_sha256: asr_target_sha256(target.request_url.as_str()),
-                expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
-            })?;
-    }
-    state.import_v2_service.authorize_media_for_session(
-        &context,
-        &state.file_store,
-        &request.session_id,
-        &request.item_id,
-        ImportMediaAuthorizationKind::Asr,
-        Some(request.profile),
-        request.language,
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, context| {
+            let session = state.import_v2_service.load_session(
+                context,
+                &state.file_store,
+                &request.session_id,
+            )?;
+            let item = session
+                .items
+                .iter()
+                .find(|item| item.item_id == request.item_id)
+                .ok_or_else(|| {
+                    BackendError::new(
+                        "IMPORT_V2_ITEM_NOT_FOUND",
+                        "Import item was not found.",
+                        false,
+                        true,
+                    )
+                })?;
+            validate_local_asr_item(item)?;
+            if item.input.kind == ImportInputKind::Url {
+                let target = state.import_v2_service.resolve_web_target(
+                    &item.input.locator,
+                    item.input.normalized_locator.as_deref(),
+                )?;
+                validate_local_asr_host(&target.public.host)?;
+                state
+                    .import_v2_service
+                    .authorize_bilibili_asr(BilibiliAsrGrant {
+                        project_id: request.project_id.clone(),
+                        session_id: request.session_id.clone(),
+                        item_id: request.item_id.clone(),
+                        target_sha256: asr_target_sha256(target.request_url.as_str()),
+                        expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+                    })?;
+            }
+            state
+                .import_v2_service
+                .authorize_media_for_session_authorized(
+                    permit,
+                    &state.file_store,
+                    &request.session_id,
+                    &request.item_id,
+                    ImportMediaAuthorizationKind::Asr,
+                    Some(request.profile.clone()),
+                    request.language.clone(),
+                )
+        },
     )
 }
 

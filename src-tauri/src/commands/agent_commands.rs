@@ -42,10 +42,15 @@ pub fn set_default_agent(
     state: State<'_, AppState>,
     request: SetDefaultAgentRequest,
 ) -> Result<AgentConfig, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let config = state
-        .settings_service
-        .save_agent_default(&context, request.agent)?;
-    state.agent_service.invalidate_workflow_route_cache();
-    Ok(config)
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+            let config = state
+                .settings_service
+                .save_agent_default(context, request.agent)?;
+            state.agent_service.invalidate_workflow_route_cache();
+            Ok(config)
+        },
+    )
 }

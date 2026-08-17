@@ -155,15 +155,24 @@ pub fn save_wiki_page(
     state: State<'_, AppState>,
     request: SaveWikiPageRequest,
 ) -> Result<SaveWikiPageResponse, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    if request.expected_hash.is_none() {
-        reject_generic_source_create(&request.relative_path, None, Some(&request.contents))?;
-    }
-    state.search_service.save_page(
-        &context,
-        &request.relative_path,
-        &request.contents,
-        request.expected_hash,
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, _context| {
+            if request.expected_hash.is_none() {
+                reject_generic_source_create(
+                    &request.relative_path,
+                    None,
+                    Some(&request.contents),
+                )?;
+            }
+            state.search_service.save_page_authorized(
+                permit,
+                &request.relative_path,
+                &request.contents,
+                request.expected_hash,
+            )
+        },
     )
 }
 
@@ -172,14 +181,20 @@ pub fn toggle_bookmark(
     state: State<'_, AppState>,
     request: ToggleBookmarkRequest,
 ) -> Result<ToggleBookmarkResponse, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let bookmark_paths = state.bookmark_service.wiki_page_paths(&context)?;
-    let page = state
-        .search_service
-        .read_page(&context, &request.relative_path, &bookmark_paths)?;
-    state
-        .bookmark_service
-        .toggle_wiki_page(&context, &page.meta.path, &page.meta.title)
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+            let bookmark_paths = state.bookmark_service.wiki_page_paths(context)?;
+            let page =
+                state
+                    .search_service
+                    .read_page(context, &request.relative_path, &bookmark_paths)?;
+            state
+                .bookmark_service
+                .toggle_wiki_page(context, &page.meta.path, &page.meta.title)
+        },
+    )
 }
 
 /// Create a new wiki page with seeded frontmatter + H1. Non-destructive (no Git
@@ -189,9 +204,20 @@ pub fn create_wiki_page(
     state: State<'_, AppState>,
     request: CreateWikiPageRequest,
 ) -> Result<SaveWikiPageResponse, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    reject_generic_source_create(&request.relative_path, request.page_type.as_deref(), None)?;
-    state.search_service.create_page(&context, &request)
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, _context| {
+            reject_generic_source_create(
+                &request.relative_path,
+                request.page_type.as_deref(),
+                None,
+            )?;
+            state
+                .search_service
+                .create_page_authorized(permit, &request)
+        },
+    )
 }
 
 /// Rename a wiki page and rewrite every `[[old]]` reference across the wiki to
@@ -204,17 +230,24 @@ pub fn rename_wiki_page(
     state: State<'_, AppState>,
     request: RenameWikiPageRequest,
 ) -> Result<RenameWikiPageResponse, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    reject_generic_source_path(&context, &state.file_store, &request.relative_path)?;
-    reject_generic_source_create(&request.new_relative_path, None, None)?;
-    state.git_service.create_checkpoint(
-        &context,
-        CheckpointPurpose::HighRiskOperation,
-        "Before renaming wiki page",
-    )?;
-    state
-        .search_service
-        .rename_page(&context, &request.relative_path, &request.new_relative_path)
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, context| {
+            reject_generic_source_path(context, &state.file_store, &request.relative_path)?;
+            reject_generic_source_create(&request.new_relative_path, None, None)?;
+            state.git_service.create_checkpoint(
+                context,
+                CheckpointPurpose::HighRiskOperation,
+                "Before renaming wiki page",
+            )?;
+            state.search_service.rename_page_authorized(
+                permit,
+                &request.relative_path,
+                &request.new_relative_path,
+            )
+        },
+    )
 }
 
 /// Request deletion of a wiki page. Does not delete immediately: registers a
@@ -227,8 +260,11 @@ pub fn request_delete_wiki_page(
     state: State<'_, AppState>,
     request: DeleteWikiPageRequest,
 ) -> Result<PendingAction, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    reject_generic_source_path(&context, &state.file_store, &request.relative_path)?;
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+    reject_generic_source_path(context, &state.file_store, &request.relative_path)?;
     let absolute = context.resolve_project_path(&request.relative_path)?;
     if absolute.strip_prefix(&context.wiki_dir).is_err() {
         return Err(BackendError::new(
@@ -289,11 +325,13 @@ pub fn request_delete_wiki_page(
     state.confirmation_registry.register_with_execution(
         action.clone(),
         Some(ConfirmationExecution::DeleteWikiPage {
-            project_id: request.project_id,
-            root_path: request.project_root_path,
-            target_path: request.relative_path,
+            project_id: request.project_id.clone(),
+            root_path: request.project_root_path.clone(),
+            target_path: request.relative_path.clone(),
             target_hash,
         }),
     )?;
     Ok(action)
+        },
+    )
 }

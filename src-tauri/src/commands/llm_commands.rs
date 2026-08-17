@@ -52,14 +52,18 @@ pub fn save_llm_provider(
     state: State<'_, AppState>,
     request: SaveProviderRequest,
 ) -> Result<ProviderStatus, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state.require_external_ai_access(&context)?;
-    let (config, _) = crate::services::LlmService::save_provider_with_secret_invalidation(
-        &context,
-        request.config,
-        &state.secret_service,
-    )?;
-    status_with_secret(&context, &state.secret_service, config)
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+            let (config, _) = crate::services::LlmService::save_provider_with_secret_invalidation(
+                context,
+                request.config,
+                &state.secret_service,
+            )?;
+            status_with_secret(context, &state.secret_service, config)
+        },
+    )
 }
 
 #[tauri::command]
@@ -67,32 +71,36 @@ pub fn store_provider_secret(
     state: State<'_, AppState>,
     request: ProviderSecretRequest,
 ) -> Result<ProviderStatus, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state.require_external_ai_access(&context)?;
     let secret = request.secret.as_deref().ok_or_else(|| {
         BackendError::new("SECRET_EMPTY", "Provider secret is required.", true, true)
     })?;
-    crate::services::LlmService::approve_and_store_secret(
-        &context,
-        &state.secret_service,
-        request.provider,
-        &request.config_id,
-        request.binding_revision,
-        &request.expected_canonical_origin,
-        secret,
-    )?;
-    let config = crate::services::LlmService::list_providers(&context)?
-        .into_iter()
-        .find(|config| config.provider == request.provider)
-        .ok_or_else(|| {
-            BackendError::new(
-                "PROVIDER_CREDENTIAL_BINDING_CHANGED",
-                "The provider destination changed; review it and authorize the credential again.",
-                true,
-                true,
-            )
-        })?;
-    status_with_secret(&context, &state.secret_service, config)
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+            crate::services::LlmService::approve_and_store_secret(
+                context,
+                &state.secret_service,
+                request.provider,
+                &request.config_id,
+                request.binding_revision,
+                &request.expected_canonical_origin,
+                secret,
+            )?;
+            let config = crate::services::LlmService::list_providers(context)?
+                .into_iter()
+                .find(|config| config.provider == request.provider)
+                .ok_or_else(|| {
+                    BackendError::new(
+                        "PROVIDER_CREDENTIAL_BINDING_CHANGED",
+                        "The provider destination changed; review it and authorize the credential again.",
+                        true,
+                        true,
+                    )
+                })?;
+            status_with_secret(context, &state.secret_service, config)
+        },
+    )
 }
 
 #[tauri::command]
@@ -100,15 +108,19 @@ pub fn delete_provider_secret(
     state: State<'_, AppState>,
     request: ProviderSecretRequest,
 ) -> Result<(), BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state.require_external_ai_access(&context)?;
-    crate::services::LlmService::delete_bound_secret(
-        &context,
-        &state.secret_service,
-        request.provider,
-        &request.config_id,
-        request.binding_revision,
-        &request.expected_canonical_origin,
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+            crate::services::LlmService::delete_bound_secret(
+                context,
+                &state.secret_service,
+                request.provider,
+                &request.config_id,
+                request.binding_revision,
+                &request.expected_canonical_origin,
+            )
+        },
     )
 }
 
@@ -153,7 +165,12 @@ pub async fn check_ollama_reachable(
             &request.expected_canonical_origin,
         )),
     )?;
+    let execution = state.begin_project_external_execution(
+        &context,
+        &format!("ollama-probe:{}", uuid::Uuid::new_v4()),
+    )?;
     let (base_url, model_count) = state.llm_service.probe_ollama(&config).await?;
+    state.require_current_execution_epoch(&context, &execution)?;
     Ok(OllamaReachability {
         reachable: true,
         base_url,
@@ -198,10 +215,15 @@ pub async fn test_llm_provider(
             &request.expected_canonical_origin,
         )),
     )?;
+    let execution = state.begin_project_external_execution(
+        &context,
+        &format!("provider-probe:{}", uuid::Uuid::new_v4()),
+    )?;
     let response = state
         .llm_service
         .complete(&config, secret.as_deref(), "Reply with OK only.")
         .await;
+    state.require_current_execution_epoch(&context, &execution)?;
     provider_test_result(config.provider, response)
 }
 

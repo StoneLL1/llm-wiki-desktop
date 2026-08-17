@@ -4,6 +4,7 @@ use chrono::Utc;
 use sha2::{Digest, Sha256};
 
 use crate::{
+    app_state::{AppState, ProjectExecutionLease, ProjectWritePermit},
     errors::BackendError,
     models::{
         agent::AgentKind,
@@ -71,12 +72,13 @@ impl<'a> AgentAssistanceService<'a> {
 
     pub fn start_local(
         &self,
-        context: &ProjectContext,
+        permit: &ProjectWritePermit<'_>,
         session_id: &str,
         item_id: &str,
         trigger: AgentAssistanceTrigger,
         agent_kind: AgentKind,
     ) -> Result<BackendTask, BackendError> {
+        let context = permit.context();
         let session = self.imports.load_session(context, self.files, session_id)?;
         let item = session
             .items
@@ -148,7 +150,7 @@ impl<'a> AgentAssistanceService<'a> {
                 true,
             )
             .map_err(|error| assistance_error("IMPORT_AGENT_TASK_FAILED", &error))?;
-        if let Err(error) = self.imports.begin_agent_assistance(
+        if let Err(error) = self.imports.begin_agent_assistance_unchecked(
             context,
             self.files,
             session_id,
@@ -168,6 +170,8 @@ impl<'a> AgentAssistanceService<'a> {
 
     pub fn run_local(
         &self,
+        state: &AppState,
+        execution: &ProjectExecutionLease,
         context: &ProjectContext,
         session_id: &str,
         item_id: &str,
@@ -178,23 +182,27 @@ impl<'a> AgentAssistanceService<'a> {
         let audit_path =
             format!(".app/import-sessions/{session_id}/items/{item_id}/agent-audit/{task_id}.json");
         if self.tasks.is_cancelled(task_id) {
-            let _ = self.imports.finish_agent_assistance_attempt(
-                context,
-                self.files,
-                session_id,
-                item_id,
-                task_id,
-                AttemptOutcome::Cancelled,
-                vec!["Agent assistance was cancelled before process start.".into()],
-            );
+            let _ = self.with_current_write(state, execution, context, |_permit, current| {
+                self.imports.finish_agent_assistance_attempt_unchecked(
+                    current,
+                    self.files,
+                    session_id,
+                    item_id,
+                    task_id,
+                    AttemptOutcome::Cancelled,
+                    vec!["Agent assistance was cancelled before process start.".into()],
+                )
+            });
             return Err(assistance_error(
                 "AGENT_CANCELLED",
                 "Agent assistance was cancelled before process start.",
             ));
         }
-        self.tasks
-            .transition_status(task_id, TaskStatus::Running)
-            .map_err(|error| assistance_error("IMPORT_AGENT_TASK_FAILED", &error))?;
+        self.with_current_write(state, execution, context, |_permit, _current| {
+            self.tasks
+                .transition_status(task_id, TaskStatus::Running)
+                .map_err(|error| assistance_error("IMPORT_AGENT_TASK_FAILED", &error))
+        })?;
         let result = (|| {
             let session = self.imports.load_session(context, self.files, session_id)?;
             let item = session
@@ -211,7 +219,9 @@ impl<'a> AgentAssistanceService<'a> {
                 ));
             }
             let workspace =
-                AgentWorkspaceBuilder.build_for_task(context, &session, item, trigger, task_id)?;
+                self.with_current_write(state, execution, context, |_permit, current| {
+                    AgentWorkspaceBuilder.build_for_task(current, &session, item, trigger, task_id)
+                })?;
             let bundle_bytes = super::agent_workspace::read_isolated_regular_file(
                 &workspace.root,
                 &workspace.task_path,
@@ -262,9 +272,11 @@ impl<'a> AgentAssistanceService<'a> {
                 outcome: "running".into(),
                 warnings: Vec::new(),
             };
-            self.files.write_json_atomic(context, &audit_path, &audit)?;
+            self.with_current_write(state, execution, context, |_permit, current| {
+                self.files.write_json_atomic(current, &audit_path, &audit)
+            })?;
             if self.tasks.is_cancelled(task_id) {
-                let _ = AgentWorkspaceBuilder::cleanup_terminal(&workspace);
+                self.cleanup_terminal_if_current(state, execution, context, &workspace);
                 return Err(assistance_error(
                     "AGENT_CANCELLED",
                     "Agent assistance was cancelled before process start.",
@@ -277,7 +289,7 @@ impl<'a> AgentAssistanceService<'a> {
             ) {
                 Ok(invocation) => invocation,
                 Err(error) => {
-                    let _ = AgentWorkspaceBuilder::cleanup_terminal(&workspace);
+                    self.cleanup_terminal_if_current(state, execution, context, &workspace);
                     return Err(error);
                 }
             };
@@ -287,12 +299,12 @@ impl<'a> AgentAssistanceService<'a> {
             {
                 Ok(output) => output,
                 Err(error) => {
-                    let _ = AgentWorkspaceBuilder::cleanup_terminal(&workspace);
+                    self.cleanup_terminal_if_current(state, execution, context, &workspace);
                     return Err(error);
                 }
             };
             if self.tasks.is_cancelled(task_id) {
-                let _ = AgentWorkspaceBuilder::cleanup_terminal(&workspace);
+                self.cleanup_terminal_if_current(state, execution, context, &workspace);
                 return Err(assistance_error(
                     "AGENT_CANCELLED",
                     "Agent assistance was cancelled before candidate validation.",
@@ -300,76 +312,75 @@ impl<'a> AgentAssistanceService<'a> {
             }
             if output.trim().is_empty() || output.len() > 16 * 1024 * 1024 || output.contains('\0')
             {
-                let _ = AgentWorkspaceBuilder::cleanup_terminal(&workspace);
+                self.cleanup_terminal_if_current(state, execution, context, &workspace);
                 return Err(assistance_error(
                     "IMPORT_AGENT_OUTPUT_INVALID",
                     "Agent output is empty, malformed, or exceeds the candidate limit.",
                 ));
             }
             if let Err(error) = AgentWorkspaceBuilder::validate_output_target(&workspace) {
-                let _ = AgentWorkspaceBuilder::cleanup_terminal(&workspace);
-                return Err(error);
-            }
-            if std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(workspace.output_dir.join("candidate.md"))
-                .and_then(|mut file| {
-                    use std::io::Write;
-                    file.write_all(output.as_bytes())?;
-                    file.sync_all()
-                })
-                .is_err()
-            {
-                let _ = AgentWorkspaceBuilder::cleanup_terminal(&workspace);
-                return Err(assistance_error(
-                    "IMPORT_AGENT_OUTPUT_INVALID",
-                    "Agent output could not be staged for candidate validation.",
-                ));
-            }
-            if let Err(error) = write_candidate_manifest(
-                &workspace.output_dir,
-                "sandboxed-local-agent",
-                &format!("{:x}", Sha256::digest(output.as_bytes())),
-            ) {
-                let _ = AgentWorkspaceBuilder::cleanup_terminal(&workspace);
+                self.cleanup_terminal_if_current(state, execution, context, &workspace);
                 return Err(error);
             }
             audit.output_hashes = vec![format!("{:x}", Sha256::digest(output.as_bytes()))];
             audit.completed_at = Some(Utc::now());
             audit.outcome = "output_staged".into();
-            self.files.write_json_atomic(context, &audit_path, &audit)?;
+            self.with_current_write(state, execution, context, |_permit, current| {
+                if std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(workspace.output_dir.join("candidate.md"))
+                    .and_then(|mut file| {
+                        use std::io::Write;
+                        file.write_all(output.as_bytes())?;
+                        file.sync_all()
+                    })
+                    .is_err()
+                {
+                    return Err(assistance_error(
+                        "IMPORT_AGENT_OUTPUT_INVALID",
+                        "Agent output could not be staged for candidate validation.",
+                    ));
+                }
+                write_candidate_manifest(
+                    &workspace.output_dir,
+                    "sandboxed-local-agent",
+                    &format!("{:x}", Sha256::digest(output.as_bytes())),
+                )?;
+                self.files.write_json_atomic(current, &audit_path, &audit)
+            })?;
             let relative_workspace = audit.workspace_relative_path.clone();
-            if let Err(error) = self.tasks.complete_running_with_result(
-                task_id,
-                TaskResult {
-                    summary: "Agent output is staged for candidate validation.".into(),
-                    affected_paths: vec![format!("{relative_workspace}/output")],
-                    reference: Some(TaskResultReference::ImportPreview {
-                        session_id: session_id.into(),
-                        item_id: item_id.into(),
-                    }),
-                    pending_action: None,
-                },
-            ) {
-                let _ = AgentWorkspaceBuilder::cleanup_terminal(&workspace);
-                return Err(assistance_error("IMPORT_AGENT_TASK_FAILED", &error));
-            }
-            audit.outcome = "succeeded".into();
-            let _ = self.files.write_json_atomic(context, &audit_path, &audit);
-            // The durable task result is the recovery authority. If session
-            // persistence is interrupted here, recover_session reconciles the
-            // unfinished attempt from this Succeeded task without rerunning or
-            // charging the Agent again.
-            let _ = self.imports.finish_agent_assistance_attempt(
-                context,
-                self.files,
-                session_id,
-                item_id,
-                task_id,
-                AttemptOutcome::Succeeded,
-                Vec::new(),
-            );
+            self.with_current_write(state, execution, context, |_permit, current| {
+                self.tasks
+                    .complete_running_with_result(
+                        task_id,
+                        TaskResult {
+                            summary: "Agent output is staged for candidate validation.".into(),
+                            affected_paths: vec![format!("{relative_workspace}/output")],
+                            reference: Some(TaskResultReference::ImportPreview {
+                                session_id: session_id.into(),
+                                item_id: item_id.into(),
+                            }),
+                            pending_action: None,
+                        },
+                    )
+                    .map_err(|error| assistance_error("IMPORT_AGENT_TASK_FAILED", &error))?;
+                audit.outcome = "succeeded".into();
+                self.files.write_json_atomic(current, &audit_path, &audit)?;
+                // The durable task result is the recovery authority. If session
+                // persistence is interrupted here, recover_session reconciles the
+                // unfinished attempt from this Succeeded task without rerunning or
+                // charging the Agent again.
+                self.imports.finish_agent_assistance_attempt_unchecked(
+                    current,
+                    self.files,
+                    session_id,
+                    item_id,
+                    task_id,
+                    AttemptOutcome::Succeeded,
+                    Vec::new(),
+                )
+            })?;
             Ok(())
         })();
 
@@ -377,48 +388,80 @@ impl<'a> AgentAssistanceService<'a> {
             Ok(()) => Ok(()),
             Err(error) => {
                 let cancelled = self.tasks.is_cancelled(task_id) || error.code == "AGENT_CANCELLED";
-                if self.files.exists(context, &audit_path) {
-                    if let Ok(mut audit) = self
-                        .files
-                        .read_json::<AgentAuditRecord>(context, &audit_path)
-                    {
-                        audit.completed_at = Some(Utc::now());
-                        audit.outcome = if cancelled { "cancelled" } else { "failed" }.into();
-                        audit.warnings.push(error.code.clone());
-                        let _ = self.files.write_json_atomic(context, &audit_path, &audit);
+                let _ = self.with_current_write(state, execution, context, |_permit, current| {
+                    if self.files.exists(current, &audit_path) {
+                        if let Ok(mut audit) = self
+                            .files
+                            .read_json::<AgentAuditRecord>(current, &audit_path)
+                        {
+                            audit.completed_at = Some(Utc::now());
+                            audit.outcome = if cancelled { "cancelled" } else { "failed" }.into();
+                            audit.warnings.push(error.code.clone());
+                            let _ = self.files.write_json_atomic(current, &audit_path, &audit);
+                        }
                     }
-                }
-                let outcome = if cancelled {
-                    AttemptOutcome::Cancelled
-                } else {
-                    AttemptOutcome::Failed
-                };
-                let _ = self.imports.finish_agent_assistance_attempt(
-                    context,
-                    self.files,
-                    session_id,
-                    item_id,
-                    task_id,
-                    outcome,
-                    vec!["Agent output was discarded before candidate validation.".into()],
-                );
-                if cancelled {
-                    if self.tasks.get_task(task_id).map(|task| task.status)
-                        == Some(TaskStatus::Cancelling)
-                    {
-                        let _ = self.tasks.transition_status(task_id, TaskStatus::Cancelled);
-                    }
-                } else {
-                    let safe = assistance_error(
-                        &error.code,
-                        "Local Agent assistance failed; no Agent output was accepted.",
+                    let outcome = if cancelled {
+                        AttemptOutcome::Cancelled
+                    } else {
+                        AttemptOutcome::Failed
+                    };
+                    let _ = self.imports.finish_agent_assistance_attempt_unchecked(
+                        current,
+                        self.files,
+                        session_id,
+                        item_id,
+                        task_id,
+                        outcome,
+                        vec!["Agent output was discarded before candidate validation.".into()],
                     );
-                    let _ = self.tasks.set_error(task_id, safe.clone());
-                    let _ = self.tasks.transition_status(task_id, TaskStatus::Failed);
-                }
+                    if cancelled {
+                        if self.tasks.get_task(task_id).map(|task| task.status)
+                            == Some(TaskStatus::Cancelling)
+                        {
+                            let _ = self.tasks.transition_status(task_id, TaskStatus::Cancelled);
+                        }
+                    } else {
+                        let safe = assistance_error(
+                            &error.code,
+                            "Local Agent assistance failed; no Agent output was accepted.",
+                        );
+                        let _ = self.tasks.set_error(task_id, safe.clone());
+                        let _ = self.tasks.transition_status(task_id, TaskStatus::Failed);
+                    }
+                    Ok(())
+                });
                 Err(error)
             }
         }
+    }
+
+    fn with_current_write<T>(
+        &self,
+        state: &AppState,
+        execution: &ProjectExecutionLease,
+        context: &ProjectContext,
+        operation: impl FnOnce(&ProjectWritePermit<'_>, &ProjectContext) -> Result<T, BackendError>,
+    ) -> Result<T, BackendError> {
+        state.with_current_project_write_access(
+            &context.project_id,
+            context.root.to_string_lossy().as_ref(),
+            |permit, current| {
+                state.require_current_execution_permit(permit, execution)?;
+                operation(permit, current)
+            },
+        )
+    }
+
+    fn cleanup_terminal_if_current(
+        &self,
+        state: &AppState,
+        execution: &ProjectExecutionLease,
+        context: &ProjectContext,
+        workspace: &super::agent_workspace::AgentWorkspace,
+    ) {
+        let _ = self.with_current_write(state, execution, context, |_permit, _current| {
+            AgentWorkspaceBuilder::cleanup_terminal(workspace)
+        });
     }
 }
 

@@ -301,14 +301,18 @@ fn project_to_wiki_loop_compiles_searches_and_graphs() {
         "keyword search must find the page"
     );
 
-    // --- Graph: resolve (stale on first build, then cached). ---
+    // --- Graph: public read-only resolution never persists cache state. ---
     let graph = GraphService::default();
-    let first = graph.resolve(&context, &tree.pages).unwrap();
+    let graph_cache_path = context.app_dir.join("graph-cache.json");
+    let graph_cache_before = std::fs::read(&graph_cache_path).ok();
+    let first = graph.resolve_memory_only(&context, &tree.pages).unwrap();
     assert!(!first.cached, "first graph build is not cached");
-    let second = graph.resolve(&context, &tree.pages).unwrap();
-    assert!(second.cached, "second identical build reuses the cache");
-    // Cache file landed inside the project (.app/graph-cache.json).
-    assert!(context.app_dir.join("graph-cache.json").exists());
+    let second = graph.resolve_memory_only(&context, &tree.pages).unwrap();
+    assert!(
+        !second.cached,
+        "memory-only graph reads never publish a cache"
+    );
+    assert_eq!(std::fs::read(&graph_cache_path).ok(), graph_cache_before);
 
     std::fs::remove_dir_all(&root).ok();
 }
@@ -365,14 +369,16 @@ fn sample_wiki_loop_scans_searches_and_caches_graph() {
         );
     }
 
-    // Graph over the real sample data + cache.
+    // Graph over the real sample data without requiring write authority.
     let graph = GraphService::default();
-    let built = graph.resolve(&context, &tree.pages).unwrap();
+    let graph_cache_path = context.app_dir.join("graph-cache.json");
+    let graph_cache_before = std::fs::read(&graph_cache_path).ok();
+    let built = graph.resolve_memory_only(&context, &tree.pages).unwrap();
     assert!(
         !built.data.nodes.is_empty(),
         "graph must contain the sample nodes"
     );
-    assert!(context.app_dir.join("graph-cache.json").exists());
+    assert_eq!(std::fs::read(&graph_cache_path).ok(), graph_cache_before);
 
     std::fs::remove_dir_all(&root).ok();
 }
