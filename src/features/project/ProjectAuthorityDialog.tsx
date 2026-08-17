@@ -1,6 +1,12 @@
 import { GitBranch, RefreshCw, ShieldCheck, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { LazyActionableErrorNotice } from "../../components/app/LazyActionableErrorNotice";
+import {
+  createActionableError,
+  normalizeBackendError,
+  type NormalizedBackendError,
+} from "../../lib/backendError";
 
 import { useModalDialog } from "../../hooks/useModalDialog";
 import { useProjectStore } from "../../stores/projectStore";
@@ -47,7 +53,6 @@ export function ProjectAuthorityDialog({
   const dialogRef = useModalDialog<HTMLDivElement>({ open: true, onClose, initialFocusRef: closeRef });
   const currentProject = useProjectStore((state) => state.currentProject);
   const assessment = useProjectStore((state) => state.assessment);
-  const assessing = useProjectStore((state) => state.assessing);
   const assessmentError = useProjectStore((state) => state.assessmentError);
   const pendingAction = useProjectStore((state) => state.pendingAction);
   const assessCurrentProject = useProjectStore((state) => state.assessCurrentProject);
@@ -64,7 +69,7 @@ export function ProjectAuthorityDialog({
   const [exportRoot, setExportRoot] = useState("");
   const [template] = useState<ProjectTemplate>(currentProject.template);
   const [pendingAuthorityActionId, setPendingAuthorityActionId] = useState<string | null>(null);
-  const [localError, setLocalError] = useState<string | null>(null);
+  const [localError, setLocalError] = useState<NormalizedBackendError | null>(null);
   const initiatingProjectKey = useRef(`${project.projectId}\0${project.rootPath}`);
 
   const isInitiatingProjectCurrent = useCallback(() => {
@@ -88,7 +93,11 @@ export function ProjectAuthorityDialog({
           onClose();
         }
       })
-      .catch((error) => setLocalError(String(error)));
+      .catch((error) => setLocalError(normalizeBackendError(error, {
+        defaultSummaryKey: "backendError.summary.project",
+        defaultActionKind: "retry",
+        defaultRecoverable: true,
+      })));
   }, [
     action,
     assessCurrentProject,
@@ -123,9 +132,17 @@ export function ProjectAuthorityDialog({
           return;
         }
         if (action === "manage") return;
-        setLocalError(t("projectAuthority.confirmationNotApplied"));
+        setLocalError(createActionableError("projectAuthority.confirmationNotApplied", {
+          recoverable: true,
+          userActionRequired: true,
+          actionKind: null,
+        }));
       })
-      .catch((error) => setLocalError(String(error)));
+      .catch((error) => setLocalError(normalizeBackendError(error, {
+        defaultSummaryKey: "backendError.summary.project",
+        defaultActionKind: "retry",
+        defaultRecoverable: true,
+      })));
   }, [action, assessCurrentProject, assessment?.canonicalIdentityKey, isInitiatingProjectCurrent, onClose, onSatisfied, pendingAction?.id, pendingAuthorityActionId, t]);
 
   const requestConfirmation = async (request: () => Promise<void>) => {
@@ -139,7 +156,11 @@ export function ProjectAuthorityDialog({
       const actionId = useProjectStore.getState().pendingAction?.id;
       if (actionId) setPendingAuthorityActionId(actionId);
     } catch (error) {
-      setLocalError(String(error));
+      setLocalError(normalizeBackendError(error, {
+        defaultSummaryKey: "backendError.summary.project",
+        defaultActionKind: "retry",
+        defaultRecoverable: true,
+      }));
     }
   };
 
@@ -156,7 +177,11 @@ export function ProjectAuthorityDialog({
         onClose();
       }
     } catch (error) {
-      setLocalError(String(error));
+      setLocalError(normalizeBackendError(error, {
+        defaultSummaryKey: "backendError.summary.project",
+        defaultActionKind: "retry",
+        defaultRecoverable: true,
+      }));
     }
   };
 
@@ -169,7 +194,11 @@ export function ProjectAuthorityDialog({
       }
       await revokeTrust(assessmentId);
     } catch (error) {
-      setLocalError(String(error));
+      setLocalError(normalizeBackendError(error, {
+        defaultSummaryKey: "backendError.summary.project",
+        defaultActionKind: "retry",
+        defaultRecoverable: true,
+      }));
     }
   };
 
@@ -198,7 +227,7 @@ export function ProjectAuthorityDialog({
           </button>
         </header>
 
-        {assessing && !assessment ? (
+        {!assessment && !localError && !assessmentError ? (
           <div className="px-4 py-8 text-center text-[12px] text-[var(--text-muted)]" role="status">
             {t("projectAssessment.scanning")}
           </div>
@@ -362,11 +391,15 @@ export function ProjectAuthorityDialog({
 
               {action === "open_or_create_project" ? <p className="m-0 text-[12px] text-[var(--text-secondary)]">{t("projectAuthority.openProjectUnavailable")}</p> : null}
               {pendingAuthorityActionId ? <p className="m-0 mt-3 text-[11px] text-[var(--text-muted)]">{t("projectAuthority.awaitingConfirmation")}</p> : null}
-              {localError || assessmentError ? <p className="m-0 mt-3 text-[12px] text-[var(--danger)]" role="alert">{localError ?? assessmentError}</p> : null}
+              {localError || assessmentError ? (
+            <LazyActionableErrorNotice className="mt-3" error={localError ?? assessmentError} />
+              ) : null}
             </div>
           </>
         ) : (
-          <div className="px-4 py-8 text-[12px] text-[var(--danger)]" role="alert">{localError ?? assessmentError}</div>
+          <div className="px-4 py-8">
+          <LazyActionableErrorNotice error={localError ?? assessmentError} />
+          </div>
         )}
       </section>
     </div>

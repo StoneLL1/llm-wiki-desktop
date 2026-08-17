@@ -2,6 +2,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { ActionableErrorNotice } from "../../components/app/ActionableErrorNotice";
+import {
+  normalizeBackendError,
+  type NormalizedBackendError,
+} from "../../lib/backendError";
 interface UpdateSettingsProps {
   checkUpdates: boolean;
   onToggle: (value: boolean) => void;
@@ -20,10 +25,12 @@ export function UpdateSettings({ checkUpdates, onToggle }: UpdateSettingsProps) 
   const [currentVersion, setCurrentVersion] = useState<string>("0.1.0");
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const [updateError, setUpdateError] = useState<NormalizedBackendError | null>(null);
   const [checking, setChecking] = useState(false);
 
   const checkNow = async () => {
     setChecking(true);
+    setUpdateError(null);
     try {
       const summary = hasTauri()
         ? await invoke<AppSummary>("get_app_summary")
@@ -32,8 +39,12 @@ export function UpdateSettings({ checkUpdates, onToggle }: UpdateSettingsProps) 
       setLatestVersion(null);
       setStatus(t("settings.updates.noUpdateSource", { version: summary.version }));
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setStatus(t("settings.updates.error", { message }));
+      setStatus(null);
+      setUpdateError(normalizeBackendError(error, {
+        defaultSummaryKey: "backendError.summary.update",
+        defaultActionKind: "retry",
+        defaultRecoverable: true,
+      }));
     } finally {
       setChecking(false);
     }
@@ -95,6 +106,12 @@ export function UpdateSettings({ checkUpdates, onToggle }: UpdateSettingsProps) 
           </button>
         </div>
         {status ? <div className="text-[12px] text-[var(--text-muted)]">{status}</div> : null}
+        {updateError ? (
+          <ActionableErrorNotice
+            error={updateError}
+            onAction={updateError.actionKind === "retry" ? () => checkNow() : undefined}
+          />
+        ) : null}
       </div>
     </section>
   );

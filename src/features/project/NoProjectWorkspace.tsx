@@ -2,16 +2,16 @@ import { FolderOpen, FolderPlus, ShieldAlert } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { LazyActionableErrorNotice } from "../../components/app/LazyActionableErrorNotice";
+import {
+  normalizeBackendError,
+  type NormalizedBackendError,
+} from "../../lib/backendError";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { pickDirectory } from "../import/nativeFilePicker";
 import { NewProjectDialog, type NewProjectPayload } from "./NewProjectDialog";
 import { ProjectAssessmentPanel } from "./ProjectAssessmentPanel";
-
-function errorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  return String(error);
-}
 
 function canOpenAssessment(assessment: ReturnType<typeof useProjectStore.getState>["assessment"]): boolean {
   return Boolean(
@@ -38,7 +38,7 @@ export function NoProjectWorkspace({ activeView }: { activeView: string }) {
   const setPendingImportPath = useNavigationStore((state) => state.setPendingImportPath);
   const [newDialogOpen, setNewDialogOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [localError, setLocalError] = useState<string | null>(null);
+  const [localError, setLocalError] = useState<NormalizedBackendError | null>(null);
   const [materialsPath, setMaterialsPath] = useState<string | null>(null);
 
   const openExisting = async () => {
@@ -59,7 +59,11 @@ export function NoProjectWorkspace({ activeView }: { activeView: string }) {
         setActiveView("dashboard");
       }
     } catch (error) {
-      setLocalError(errorMessage(error));
+      setLocalError(normalizeBackendError(error, {
+        defaultSummaryKey: "backendError.summary.project",
+        defaultActionKind: "retry",
+        defaultRecoverable: true,
+      }));
     } finally {
       setBusy(false);
     }
@@ -78,7 +82,11 @@ export function NoProjectWorkspace({ activeView }: { activeView: string }) {
       setMaterialsPath(null);
       setActiveView("import");
     } catch (error) {
-      setLocalError(errorMessage(error));
+      setLocalError(normalizeBackendError(error, {
+        defaultSummaryKey: "backendError.summary.project",
+        defaultActionKind: "retry",
+        defaultRecoverable: true,
+      }));
     } finally {
       setBusy(false);
     }
@@ -94,7 +102,11 @@ export function NoProjectWorkspace({ activeView }: { activeView: string }) {
       setMaterialsPath(assessment.canonicalRootPath);
       setNewDialogOpen(true);
     } catch (error) {
-      setLocalError(errorMessage(error));
+      setLocalError(normalizeBackendError(error, {
+        defaultSummaryKey: "backendError.summary.project",
+        defaultActionKind: "retry",
+        defaultRecoverable: true,
+      }));
     }
   };
 
@@ -106,7 +118,11 @@ export function NoProjectWorkspace({ activeView }: { activeView: string }) {
       await resolveAmbiguousAssessedProject(assessment.assessmentId);
       setActiveView("dashboard");
     } catch (error) {
-      setLocalError(errorMessage(error));
+      setLocalError(normalizeBackendError(error, {
+        defaultSummaryKey: "backendError.summary.project",
+        defaultActionKind: "retry",
+        defaultRecoverable: true,
+      }));
     } finally {
       setBusy(false);
     }
@@ -119,7 +135,11 @@ export function NoProjectWorkspace({ activeView }: { activeView: string }) {
     try {
       await clearAmbiguousProjectIntent(assessment.assessmentId);
     } catch (error) {
-      setLocalError(errorMessage(error));
+      setLocalError(normalizeBackendError(error, {
+        defaultSummaryKey: "backendError.summary.project",
+        defaultActionKind: "retry",
+        defaultRecoverable: true,
+      }));
     } finally {
       setBusy(false);
     }
@@ -186,7 +206,9 @@ export function NoProjectWorkspace({ activeView }: { activeView: string }) {
         {assessment.health === "unreadable" ? (
           <p className="no-project-error" role="alert">{t("noProject.unreadable")}</p>
         ) : null}
-        {localError || assessmentError ? <p className="no-project-error" role="alert">{localError ?? assessmentError}</p> : null}
+        {localError || assessmentError ? (
+          <LazyActionableErrorNotice className="no-project-error" error={localError ?? assessmentError} />
+        ) : null}
         {newDialogOpen ? (
           <NewProjectDialog
             busy={busy}
@@ -238,7 +260,9 @@ export function NoProjectWorkspace({ activeView }: { activeView: string }) {
           </div>
         </section>
       )}
-      {localError || assessmentError ? <p className="no-project-error" role="alert">{localError ?? assessmentError}</p> : null}
+      {localError || assessmentError ? (
+          <LazyActionableErrorNotice className="no-project-error" error={localError ?? assessmentError} />
+      ) : null}
       {newDialogOpen ? (
         <NewProjectDialog
           busy={busy}

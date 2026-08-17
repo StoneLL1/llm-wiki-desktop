@@ -10,6 +10,7 @@ import { resetRoutePresentation } from "../../hooks/useRouteScrollRestoration";
 import { useWikiStore } from "../wiki/wikiStore";
 import type { ChatMessage, ChatSession } from "../../types/chat";
 import type { BackendTask } from "../../types/task";
+import { normalizeBackendError } from "../../lib/backendError";
 import { ChatView, StreamingBubble, useTranscriptScroll } from "./ChatView";
 
 function ScrollHarness({ streamRevision }: { streamRevision: number }) {
@@ -265,7 +266,13 @@ describe("ChatView", () => {
     seedActiveSession();
     const reloadActive = vi.fn()
       .mockImplementationOnce(async () => {
-        useChatStore.setState({ error: "offline" });
+        useChatStore.setState({
+          error: normalizeBackendError("offline", {
+            defaultSummaryKey: "backendError.summary.chat",
+            defaultActionKind: "retry",
+            defaultRecoverable: true,
+          }),
+        });
         return false;
       })
       .mockResolvedValueOnce(true);
@@ -292,12 +299,18 @@ describe("ChatView", () => {
     }]);
     render(<ChatView />);
 
-    await waitFor(() => expect(screen.getByText("offline")).toBeInTheDocument());
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "The message could not be sent or saved.",
+      );
+    });
+    expect(screen.getByText("offline")).not.toBeVisible();
     expect(useChatStore.getState().sendTaskId).toBe("task-retry");
     expect(useChatStore.getState().streamingText).toBe("temporary answer");
 
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(useChatStore.getState().sendTaskId).toBeNull());
+    expect(useChatStore.getState().error).toBeNull();
     expect(reloadActive).toHaveBeenCalledTimes(2);
   });
 
@@ -387,7 +400,7 @@ describe("ChatView", () => {
     );
   });
 
-  it("surfaces the backend error when a chat send task fails", async () => {
+  it("keeps a chat send failure technical message behind details", async () => {
     const failedTask: BackendTask = {
       id: "chat-task-1",
       taskType: "llm_request",
@@ -431,8 +444,13 @@ describe("ChatView", () => {
     render(<ChatView />);
 
     await waitFor(() => {
-      expect(screen.getByText("No usable Agent CLI is configured.")).toBeInTheDocument();
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "The message could not be sent or saved.",
+      );
     });
+    expect(screen.getByText(/No usable Agent CLI is configured/)).not.toBeVisible();
+    fireEvent.click(screen.getByText("Technical details"));
+    expect(screen.getByText(/No usable Agent CLI is configured/)).toBeVisible();
   });
 
   it("passes convenienceEnabled when authorized and no edit is pending", () => {

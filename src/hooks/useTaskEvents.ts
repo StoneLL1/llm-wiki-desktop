@@ -26,13 +26,10 @@ import {
   invalidateProjectResources,
   isProjectScopeCurrent,
 } from "../stores/projectScope";
+import { translateBackendError } from "../lib/backendError";
 
 const hasTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 const TASK_EVENT_CHANNELS = [
   "task://updated",
@@ -153,7 +150,9 @@ export function useTaskEvents(): void {
   useEffect(() => {
     if (currentProject.rootPath) {
       recoverTasksForProject(currentProject.projectId, currentProject.rootPath).catch((error) => {
-        pushToast("error", i18next.t("task.recoverError", { message: errorMessage(error) }));
+        pushToast("error", i18next.t("task.recoverError", {
+          message: translateBackendError(error, i18next.t.bind(i18next)),
+        }));
       });
     }
   }, [currentProject.projectId, currentProject.rootPath, pushToast]);

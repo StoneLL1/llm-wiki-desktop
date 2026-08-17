@@ -184,6 +184,64 @@ describe("chatStore", () => {
     expect(useChatStore.getState().pendingStreamDeltas).toEqual({});
   });
 
+  it("does not offer a fake retry when starting a send fails before a task exists", async () => {
+    invokeMock.mockRejectedValueOnce({
+      code: "LLM_RATE_LIMITED",
+      message: "send start failed",
+      details: null,
+      recoverable: true,
+      userActionRequired: false,
+    });
+
+    const taskId = await useChatStore.getState().send(
+      PROJECT.projectId,
+      PROJECT.rootPath,
+      "s1",
+      "Keep this draft",
+      "auto",
+    );
+
+    expect(taskId).toBeNull();
+    expect(useChatStore.getState().sendTaskId).toBeNull();
+    expect(useChatStore.getState().sendSessionId).toBeNull();
+    expect(useChatStore.getState().sendStarting).toBe(false);
+    expect(useChatStore.getState().error).toMatchObject({
+      actionKind: null,
+      summaryKey: "backendError.summary.provider",
+    });
+  });
+
+  it("does not label a completed send failure as retry after its resend context is cleared", () => {
+    useChatStore.setState({
+      sendTaskId: "task-rate-limit",
+      sendSessionId: "s1",
+      pendingUserMessages: {
+        "task-rate-limit": {
+          id: "pending-user-task-rate-limit",
+          role: "user",
+          content: "Original prompt",
+          createdAt: "2026-08-16T00:00:00Z",
+          taskId: "task-rate-limit",
+        },
+      },
+    });
+
+    useChatStore.getState().clearSendTask({
+      code: "LLM_RATE_LIMITED",
+      message: "rate limited",
+      details: null,
+      recoverable: true,
+      userActionRequired: false,
+    });
+
+    expect(useChatStore.getState().sendTaskId).toBeNull();
+    expect(useChatStore.getState().pendingUserMessages).toEqual({});
+    expect(useChatStore.getState().error).toMatchObject({
+      code: "LLM_RATE_LIMITED",
+      actionKind: null,
+    });
+  });
+
   it("publishes one exact active answer for an aggregated 256 KiB stream batch", () => {
     const text = "0123456789abcdef".repeat(16 * 1024);
     useChatStore.setState({ sendTaskId: "task-stream", sendSessionId: "s1" });

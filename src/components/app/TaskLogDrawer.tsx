@@ -25,6 +25,8 @@ import type { BackendTask, LogLine, TaskActivity, TaskStatus } from "../../types
 import { isImportBatchOperationTask, isTerminalStatus } from "../../types/task";
 import { AgentActivityTimeline } from "../agent/AgentActivityTimeline";
 import { IMPORT_PROGRESS_LABEL_KEYS, isMeasuredImportProgress } from "../../features/import/importStatusPresentation";
+import { translateBackendError } from "../../lib/backendError";
+import { LazyActionableErrorNotice } from "./LazyActionableErrorNotice";
 import {
   DEFAULT_TASK_SORT_MODE,
   readTaskSortModePreference,
@@ -125,12 +127,6 @@ function ProgressBar({ task }: { task: BackendTask }) {
       )}
     </div>
   );
-}
-
-function errorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === "string") return error;
-  return "Unknown error";
 }
 
 function computeDurationLabel(startedAt: string, completedAt: string | null): string | null {
@@ -305,13 +301,17 @@ function TaskLogDrawerBody({
 
   const loadLogs = useCallback((taskId: string) => {
     void fetchTaskLogs(taskId).catch((error) => {
-      pushToast("error", translationRef.current("task.logsError", { message: errorMessage(error) }));
+      pushToast("error", translationRef.current("task.logsError", {
+        message: translateBackendError(error, translationRef.current),
+      }));
     });
   }, [pushToast]);
 
   const loadActivities = useCallback((taskId: string) => {
     void fetchTaskActivities(taskId).catch((error) => {
-      pushToast("error", translationRef.current("task.activitiesError", { message: errorMessage(error) }));
+      pushToast("error", translationRef.current("task.activitiesError", {
+        message: translateBackendError(error, translationRef.current),
+      }));
     });
   }, [pushToast]);
 
@@ -379,7 +379,7 @@ function TaskLogDrawerBody({
     try {
       await cancelTaskRequest(taskId);
     } catch (error) {
-      pushToast("error", t("task.cancelError", { message: errorMessage(error) }));
+      pushToast("error", t("task.cancelError", { message: translateBackendError(error, t) }));
     } finally {
       const task = useTaskStore.getState().tasks.find((candidate) => candidate.id === taskId);
       if (task?.status !== "cancelling") {
@@ -420,7 +420,7 @@ function TaskLogDrawerBody({
       setActiveView("workflows");
       closeDrawer();
     } catch (error) {
-      pushToast("error", String(error));
+      pushToast("error", translateBackendError(error, t));
     }
   };
 
@@ -624,12 +624,9 @@ function TaskLogDrawerBody({
                 <ProgressBar task={selectedTask} />
 
                 {/* Error details */}
-                {selectedTask.error && (
-                  <div className="mt-2 p-2 rounded bg-[var(--danger)]/10 border border-[var(--danger)]/20 text-[11px] text-[var(--danger)]">
-                    <span className="font-medium">{selectedTask.error.code}</span>:{" "}
-                    {selectedTask.error.message}
-                  </div>
-                )}
+                {selectedTask.error ? (
+                  <LazyActionableErrorNotice className="mt-2" error={selectedTask.error} role="status" />
+                ) : null}
 
                 {/* Result */}
                 {selectedTask.result && (

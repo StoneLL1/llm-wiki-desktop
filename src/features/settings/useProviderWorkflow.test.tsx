@@ -142,16 +142,18 @@ describe("useProviderWorkflow", () => {
     expect(refresh).toHaveBeenCalledWith(true);
   });
 
-  it("does not refresh or swallow a failed mutation", async () => {
+  it("does not refresh or expose a failed mutation as raw user copy", async () => {
     invokeMock.mockRejectedValue(new Error("credential store unavailable"));
     const { result } = renderHook(() =>
       useProviderWorkflow(project, capabilities),
     );
 
     await act(async () => {
-      await expect(result.current.saveSecret("anthropic", "secret")).rejects.toThrow(
-        "credential store unavailable",
-      );
+      await expect(result.current.saveSecret("anthropic", "secret")).rejects.toMatchObject({
+        summaryKey: "backendError.summary.provider",
+        technicalDetails: expect.stringContaining("credential store unavailable"),
+        recoverable: true,
+      });
     });
 
     expect(refresh).not.toHaveBeenCalled();
@@ -181,6 +183,28 @@ describe("useProviderWorkflow", () => {
     await expect(result.current.testProvider(config)).resolves.toEqual({
       ok: false,
       message: expect.any(String),
+    });
+  });
+
+  it("preserves a structured provider test rejection for code-mapped recovery", async () => {
+    invokeMock.mockRejectedValueOnce({
+      code: "LLM_AUTH_FAILED",
+      message: "Authorization: Bearer provider-secret",
+      details: { api_key: "provider-secret" },
+      recoverable: true,
+      userActionRequired: true,
+    });
+    const { result } = renderHook(() =>
+      useProviderWorkflow(project, capabilities),
+    );
+
+    await act(async () => {
+      await expect(result.current.testProvider(config)).rejects.toMatchObject({
+        code: "LLM_AUTH_FAILED",
+        actionKind: "reauthorize",
+        summaryKey: "backendError.summary.provider",
+        technicalDetails: expect.not.stringContaining("provider-secret"),
+      });
     });
   });
 });

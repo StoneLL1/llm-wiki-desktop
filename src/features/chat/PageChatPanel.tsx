@@ -3,12 +3,15 @@ import { useTranslation } from "react-i18next";
 import { BookOpenText, ChevronDown, Plus } from "lucide-react";
 
 import { latestAssistantMessage, useChatStore } from "../../stores/chatStore";
+import { useNavigationStore } from "../../stores/navigationStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { fetchTaskActivities, useTaskStore } from "../../stores/taskStore";
 import type { ChatMessage } from "../../types/chat";
 import { isTerminalStatus } from "../../types/task";
 import type { WikiPageContent } from "../../types/wiki";
 import { ChatComposer } from "./ChatComposer";
+import { ActionableErrorNotice } from "../../components/app/ActionableErrorNotice";
+import { isAiConfigurationErrorCode, normalizeBackendError } from "../../lib/backendError";
 import {
   ChatOverwritePrompt,
   MessageBubble,
@@ -59,6 +62,7 @@ export function PageChatPanel({
   const saveAnswer = useChatStore((state) => state.saveAnswer);
   const resolveConvenienceEdit = useChatStore((state) => state.resolveConvenienceEdit);
   const reloadActive = useChatStore((state) => state.reloadActive);
+  const openSettings = useNavigationStore((state) => state.openSettings);
 
   const tasks = useTaskStore((state) => state.tasks);
   const activities = useTaskStore((state) => state.activities);
@@ -71,6 +75,16 @@ export function PageChatPanel({
     normalizePagePath(activeSession?.contextPagePath ?? "") === normalizePagePath(page?.meta.path ?? "");
   const pageSession = activeSessionMatchesPage ? activeSession : null;
   const pageSessionId = activeSessionMatchesPage ? activeSessionId : null;
+  const errorPresentation = error ? normalizeBackendError(error, {
+    defaultSummaryKey: "backendError.summary.chat",
+    defaultActionKind: null,
+    defaultRecoverable: true,
+  }) : null;
+  const canHandleErrorAction = (
+    errorPresentation?.actionKind === "retry"
+    && Boolean(sendTask && isTerminalStatus(sendTask.status))
+  ) || errorPresentation?.actionKind === "reauthorize"
+    || errorPresentation?.actionKind === "open_settings";
   const generating =
     sendSessionId === pageSessionId &&
     (sendTask?.status === "running" ||
@@ -112,10 +126,16 @@ export function PageChatPanel({
     let cancelled = false;
     const terminalError =
       sendSessionId === pageSessionId
-        ? (sendTask.error?.message ?? (sendTask.status === "failed" ? sendTask.title : null))
+        ? (sendTask.error ?? (sendTask.status === "failed" ? {
+          code: "CHAT_SEND_FAILED",
+          message: sendTask.title,
+          details: null,
+          recoverable: true,
+          userActionRequired: false,
+        } : null))
         : null;
-    void reloadActive(projectId, rootPath).finally(() => {
-      if (!cancelled) clearSendTask(terminalError);
+    void reloadActive(projectId, rootPath).then((reloaded) => {
+      if (!cancelled && reloaded) clearSendTask(terminalError);
     });
     return () => {
       cancelled = true;
@@ -220,9 +240,24 @@ export function PageChatPanel({
         ) : null}
       </div>
       {error ? (
-        <div className="border-b border-[var(--border-subtle)] bg-[var(--warning-soft)] px-4 py-2 text-[12px] text-[var(--text-primary)]">
-          {error}
-        </div>
+        <ActionableErrorNotice
+          className="rounded-none border-x-0 border-t-0 px-4"
+          error={error}
+          onAction={canHandleErrorAction ? async (kind) => {
+            if (kind === "reauthorize") {
+              openSettings("ai");
+              return;
+            }
+            if (kind === "open_settings") {
+              openSettings(isAiConfigurationErrorCode(errorPresentation?.code ?? null) ? "ai" : "security");
+              return;
+            }
+            if (pageSessionId && sendTask && isTerminalStatus(sendTask.status)) {
+              const reloaded = await reloadActive(projectId, rootPath);
+              if (reloaded) clearSendTask(null);
+            }
+          } : undefined}
+        />
       ) : null}
       <div
         ref={transcriptScroll.ref}

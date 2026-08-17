@@ -2,7 +2,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
 import { registerProjectScopeResetHandler } from "./projectScopeResetRegistry";
 import { createProjectResourceController } from "../lib/projectResourceFreshness";
-import { i18next } from "../i18n";
+import {
+  backendErrorCode,
+  createActionableError,
+  normalizeBackendError,
+  type NormalizedBackendError,
+} from "../lib/backendError";
 
 import type {
   ChatMessage,
@@ -24,11 +29,6 @@ import {
 import { fetchTaskActivities, useTaskStore } from "./taskStore";
 import type { BackendTask } from "../types/task";
 
-interface BackendLikeError {
-  code?: string;
-  message?: string;
-}
-
 interface ErrorDetails {
   path?: string;
   currentHash?: string;
@@ -45,17 +45,31 @@ export interface SendChatOptions {
 const hasTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
-function errorMessage(error: unknown): string {
-  if (typeof error === "object" && error !== null && "message" in error) {
-    const message = (error as { message: unknown }).message;
-    if (typeof message === "string") return message;
-  }
-  return String(error);
+function chatError(error: unknown): NormalizedBackendError {
+  return normalizeBackendError(error, {
+    defaultSummaryKey: "backendError.summary.chat",
+    defaultActionKind: null,
+    defaultRecoverable: true,
+  });
 }
 
-function errorCode(error: unknown): string | undefined {
-  return (error as BackendLikeError | null | undefined)?.code;
+function retryableChatError(error: unknown): NormalizedBackendError {
+  return normalizeBackendError(error, {
+    defaultSummaryKey: "backendError.summary.chat",
+    actionKindOverride: "retry",
+    defaultRecoverable: true,
+  });
 }
+
+function sendErrorWithoutRetry(error: unknown): NormalizedBackendError {
+  const normalized = chatError(error);
+  return normalized.actionKind === "retry"
+    ? { ...normalized, actionKind: null }
+    : normalized;
+}
+
+const errorMessage = chatError;
+const errorCode = backendErrorCode;
 
 function errorDetails(error: unknown): ErrorDetails | undefined {
   const details = (error as { details?: unknown } | null | undefined)?.details;
@@ -85,7 +99,7 @@ interface ChatState {
   /** Serializes keep/rollback decisions for convenience edits. */
   convenienceMutationKey: string | null;
   overwriteRequest: ChatOverwriteRequest | null;
-  error: string | null;
+  error: NormalizedBackendError | string | null;
   loadingSessions: boolean;
   loadingSession: boolean;
   /** Live-streamed assistant text (ephemeral; replaced by the persisted
@@ -154,7 +168,7 @@ interface ChatState {
     options?: SendChatOptions,
   ) => Promise<string | null>;
   cancelTask: (taskId: string) => Promise<void>;
-  clearSendTask: (error?: string | null) => void;
+  clearSendTask: (error: unknown | null) => void;
   /** Reload the active session (used by the view once the send task reaches terminal status). */
   reloadActive: (projectId: string, rootPath: string) => Promise<boolean>;
   /** Reload a known session without allowing a later selection to clobber it. */
@@ -196,7 +210,7 @@ const initial = {
   savedAnswerPaths: {} as ChatState["savedAnswerPaths"],
   convenienceMutationKey: null as string | null,
   overwriteRequest: null as ChatOverwriteRequest | null,
-  error: null as string | null,
+  error: null as NormalizedBackendError | null,
   loadingSessions: false,
   loadingSession: false,
   streamingText: "",
@@ -484,7 +498,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return task.id;
     } catch (error) {
       if (!isProjectScopeCurrent(scope)) return null;
-      set({ error: errorMessage(error) });
+      set({ error: sendErrorWithoutRetry(error) });
       return null;
     } finally {
       // A late response from a previous project must not release the start
@@ -509,8 +523,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  clearSendTask: (error = null) =>
-    set((state) => {
+  clearSendTask: (error) => {
+    const normalizedError = error === null ? null : sendErrorWithoutRetry(error);
+    return set((state) => {
       const pendingStreamDeltas = { ...state.pendingStreamDeltas };
       const pendingUserMessages = { ...state.pendingUserMessages };
       if (state.sendTaskId) delete pendingStreamDeltas[state.sendTaskId];
@@ -524,9 +539,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         streamRevision: state.streamingText ? state.streamRevision + 1 : state.streamRevision,
         pendingStreamDeltas,
         pendingUserMessages,
-        error: error ?? state.error,
+        error: normalizedError,
       };
-    }),
+    });
+  },
 
   reloadActive: async (projectId, rootPath) => {
     // Only reload the session the send targeted; if the user switched away
@@ -558,7 +574,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         get().selectionEpoch !== selectionEpoch ||
         get().activeSessionId !== sessionId
       ) return false;
-      set({ loadingSession: false, error: errorMessage(error) });
+      set({
+        loadingSession: false,
+        error: get().sendSessionId === sessionId ? retryableChatError(error) : errorMessage(error),
+      });
       return false;
     }
   },
@@ -572,8 +591,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // again; both same-message retries and cross-session saves must wait
       // for the visible confirm/cancel decision.
       set({
-        error: i18next.t(
+        error: createActionableError(
           pendingOverwrite ? "chat.errors.overwritePending" : "chat.errors.savePending",
+          {
+            recoverable: true,
+            userActionRequired: true,
+            actionKind: null,
+          },
         ),
       });
       return null;

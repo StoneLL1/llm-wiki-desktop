@@ -16,8 +16,10 @@ import { ChatConveniencePanel } from "./ChatConveniencePanel";
 import { ChatSessionList } from "./ChatSessionList";
 import { MessageContent } from "./MessageContent";
 import { AgentActivityTimeline } from "../../components/agent/AgentActivityTimeline";
+import { ActionableErrorNotice } from "../../components/app/ActionableErrorNotice";
 import { observeProjectResources } from "../../stores/projectScope";
 import { projectResourceKey } from "../../lib/projectResourceFreshness";
+import { isAiConfigurationErrorCode, normalizeBackendError } from "../../lib/backendError";
 import {
   activateRoutePresentationProject,
   readChatRoutePreference,
@@ -95,6 +97,7 @@ export function ChatView() {
   const activities = useTaskStore((state) => state.activities);
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
   const setActiveView = useNavigationStore((state) => state.setActiveView);
+  const openSettings = useNavigationStore((state) => state.openSettings);
   const openWikiPage = useWikiStore((state) => state.openPage);
 
   const { projectId, rootPath } = currentProject;
@@ -103,12 +106,22 @@ export function ChatView() {
     saveChatRoutePreference(route);
     setRoutePreferenceState(route);
   }, []);
+  const errorPresentation = error ? normalizeBackendError(error, {
+    defaultSummaryKey: "backendError.summary.chat",
+    defaultActionKind: null,
+    defaultRecoverable: true,
+  }) : null;
+  const sendTask = sendTaskId ? tasks.find((task) => task.id === sendTaskId) ?? null : null;
+  const canHandleErrorAction = (
+    errorPresentation?.actionKind === "retry"
+    && Boolean(sendTask && isTerminalStatus(sendTask.status))
+  ) || errorPresentation?.actionKind === "reauthorize"
+    || errorPresentation?.actionKind === "open_settings";
 
   useEffect(() => {
     activateRoutePresentationProject(presentationProjectKey);
     setRoutePreferenceState(readChatRoutePreference());
   }, [presentationProjectKey]);
-  const sendTask = sendTaskId ? tasks.find((task) => task.id === sendTaskId) ?? null : null;
   const generating =
     sendSessionId === activeSessionId &&
     (sendTask?.status === "running" ||
@@ -166,7 +179,13 @@ export function ChatView() {
     if (!sendTask || !isTerminalStatus(sendTask.status)) return;
     let cancelled = false;
     const terminalError = sendSessionId === activeSessionId
-      ? (sendTask.error?.message ?? (sendTask.status === "failed" ? sendTask.title : null))
+      ? (sendTask.error ?? (sendTask.status === "failed" ? {
+        code: "CHAT_SEND_FAILED",
+        message: sendTask.title,
+        details: null,
+        recoverable: true,
+        userActionRequired: false,
+      } : null))
       : null;
     void reloadActive(projectId, rootPath).then((reloaded) => {
       if (!cancelled && reloaded) clearSendTask(terminalError);
@@ -248,24 +267,24 @@ export function ChatView() {
 
       <div className="chat-stream-wrap flex min-h-0 min-w-0 flex-col overflow-hidden">
         {error ? (
-          <div className="flex items-center justify-between gap-3 border-b border-[var(--border-subtle)] bg-[var(--warning-soft)] px-4 py-2 text-[12px] text-[var(--text-primary)]">
-            <span>{error}</span>
-            <button
-              type="button"
-              className="btn btn--secondary btn--sm"
-              onClick={() => {
-                if (sendTask && isTerminalStatus(sendTask.status)) {
-                  void reloadActive(projectId, rootPath).then((reloaded) => {
-                    if (reloaded) clearSendTask(null);
-                  });
-                } else {
-                  void ensureSessions(projectId, rootPath);
-                }
-              }}
-            >
-              {t("workflows.action.retry")}
-            </button>
-          </div>
+          <ActionableErrorNotice
+            className="rounded-none border-x-0 border-t-0 px-4"
+            error={error}
+            onAction={canHandleErrorAction ? async (kind) => {
+              if (kind === "reauthorize") {
+                openSettings("ai");
+                return;
+              }
+              if (kind === "open_settings") {
+                openSettings(isAiConfigurationErrorCode(errorPresentation?.code ?? null) ? "ai" : "security");
+                return;
+              }
+              if (sendTask && isTerminalStatus(sendTask.status)) {
+                const reloaded = await reloadActive(projectId, rootPath);
+                if (reloaded) clearSendTask(null);
+              }
+            } : undefined}
+          />
         ) : null}
         {activeSession ? (
           <SessionToolbar

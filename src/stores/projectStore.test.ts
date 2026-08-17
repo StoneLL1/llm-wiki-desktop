@@ -518,7 +518,10 @@ describe("projectStore bootstrap", () => {
 
     expect(invokeMock.mock.calls).toEqual([["list_recent_projects"]]);
     expect(useProjectStore.getState().currentProject).toEqual(defaultProject);
-    expect(useProjectStore.getState().error).toContain(missing.rootPath);
+    expect(useProjectStore.getState().error).toEqual(expect.objectContaining({
+      summaryKey: "backendError.summary.project",
+    }));
+    expect(JSON.stringify(useProjectStore.getState().error)).not.toContain(missing.rootPath);
   });
 
   it("never lets a delayed automatic reopen overwrite an explicit project selection", async () => {

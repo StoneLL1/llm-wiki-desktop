@@ -1,6 +1,7 @@
 import { AlertTriangle, ArrowDown, ArrowLeft, ArrowUp, Ban, FileText, RotateCcw, Square } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { backendErrorCode } from "../../lib/backendError";
 
 import { useWorkflowStore, workflowOperationPending } from "../../stores/workflowStore";
 import { useProjectStore } from "../../stores/projectStore";
@@ -151,9 +152,7 @@ export function WorkflowTaskDetail({
       }
       await controller.openRun(run.taskId);
     } catch (error) {
-      const code = error && typeof error === "object" && "code" in error && typeof error.code === "string"
-        ? error.code
-        : null;
+      const code = backendErrorCode(error);
       setRollbackErrorKey(code === "LINT_REPAIR_ROLLBACK_NOT_CURRENT"
         ? "workflows.result.agent_lint_repair.rollbackStale"
         : "workflows.result.agent_lint_repair.rollbackFailed");
@@ -502,11 +501,6 @@ function LazyWorkflowFileDiff({ path, diff, diffKind, fileId, pendingActionId, r
     {open && error === "retry" ? <button className="btn btn--secondary btn--sm" onClick={() => void loadChunk(nextCursor)} type="button">{t("workflows.action.retry")}</button> : null}
     {open && nextCursor !== null && !loading && !error ? <button className="btn btn--ghost btn--sm" onClick={() => void loadChunk(nextCursor)} type="button">{t("workflows.diff.loadMore")}</button> : null}
   </details>;
-}
-
-function backendErrorCode(error: unknown): string | null {
-  if (!error || typeof error !== "object" || !("code" in error)) return null;
-  return typeof error.code === "string" ? error.code : null;
 }
 
 function renderResultValue(

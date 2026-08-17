@@ -149,6 +149,18 @@ pub struct OllamaReachability {
     pub model_count: usize,
 }
 
+fn provider_test_result(
+    provider: LlmProviderKind,
+    response: Result<String, BackendError>,
+) -> Result<ProviderTestResult, BackendError> {
+    response?;
+    Ok(ProviderTestResult {
+        provider,
+        ok: true,
+        message: "Provider connection succeeded.".into(),
+    })
+}
+
 #[tauri::command]
 pub async fn test_llm_provider(
     state: State<'_, AppState>,
@@ -160,13 +172,7 @@ pub async fn test_llm_provider(
         .llm_service
         .complete(&request.config, secret.as_deref(), "Reply with OK only.")
         .await;
-    Ok(ProviderTestResult {
-        provider: request.config.provider,
-        ok: response.is_ok(),
-        message: response
-            .map(|_| "Provider connection succeeded.".into())
-            .unwrap_or_else(|error| error.message),
-    })
+    provider_test_result(request.config.provider, response)
 }
 
 fn default_config(provider: LlmProviderKind) -> crate::models::llm::LlmProviderConfig {
@@ -176,5 +182,31 @@ fn default_config(provider: LlmProviderKind) -> crate::models::llm::LlmProviderC
         base_url: String::new(),
         context_window: 0,
         enabled: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_test_result;
+    use crate::errors::BackendError;
+    use crate::models::llm::LlmProviderKind;
+
+    #[test]
+    fn provider_test_preserves_structured_backend_errors() {
+        let error = BackendError::new("LLM_AUTH_FAILED", "Authorization failed.", true, true);
+
+        let propagated = provider_test_result(LlmProviderKind::Anthropic, Err(error)).unwrap_err();
+
+        assert_eq!(propagated.code, "LLM_AUTH_FAILED");
+        assert!(propagated.recoverable);
+        assert!(propagated.user_action_required);
+    }
+
+    #[test]
+    fn provider_test_returns_success_only_after_completion() {
+        let result = provider_test_result(LlmProviderKind::OpenAi, Ok("OK".into())).unwrap();
+
+        assert!(result.ok);
+        assert_eq!(result.provider, LlmProviderKind::OpenAi);
     }
 }
