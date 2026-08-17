@@ -68,6 +68,8 @@ static RECENT_PROJECT_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 pub struct ProjectService {
     config_dir: PathBuf,
     trust_store: ProjectTrustStore,
+    #[cfg(test)]
+    forced_read_only_roots: Mutex<HashSet<PathBuf>>,
 }
 
 impl Default for ProjectService {
@@ -76,6 +78,8 @@ impl Default for ProjectService {
         Self {
             trust_store: ProjectTrustStore::new(&config_dir),
             config_dir,
+            #[cfg(test)]
+            forced_read_only_roots: Mutex::new(HashSet::new()),
         }
     }
 }
@@ -85,6 +89,8 @@ impl ProjectService {
         Self {
             trust_store: ProjectTrustStore::new(&config_dir),
             config_dir,
+            #[cfg(test)]
+            forced_read_only_roots: Mutex::new(HashSet::new()),
         }
     }
 
@@ -142,6 +148,14 @@ impl ProjectService {
         if !trusted {
             return ProjectFilesystemAccess::ReadOnly;
         }
+        #[cfg(test)]
+        if self
+            .forced_read_only_roots
+            .lock()
+            .is_ok_and(|roots| roots.contains(&context.root))
+        {
+            return ProjectFilesystemAccess::ReadOnly;
+        }
         let Ok(safe_root) = validate_existing_project_root(&context.root) else {
             return ProjectFilesystemAccess::ReadOnly;
         };
@@ -150,6 +164,15 @@ impl ProjectService {
         } else {
             ProjectFilesystemAccess::ReadOnly
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_read_only_for_test(&self, root: &Path) {
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        self.forced_read_only_roots
+            .lock()
+            .expect("forced read-only roots lock")
+            .insert(root);
     }
 
     pub(crate) fn has_writable_task_state_root(&self, context: &ProjectContext) -> bool {

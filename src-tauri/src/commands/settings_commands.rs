@@ -38,12 +38,17 @@ pub fn save_settings(
     state: State<'_, AppState>,
     request: SaveSettingsRequest,
 ) -> Result<Settings, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let settings = state
-        .settings_service
-        .save_settings(&context, &request.settings)?;
-    state.agent_service.invalidate_workflow_route_cache();
-    Ok(settings)
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+            let settings = state
+                .settings_service
+                .save_settings(context, &request.settings)?;
+            state.agent_service.invalidate_workflow_route_cache();
+            Ok(settings)
+        },
+    )
 }
 
 #[tauri::command]
@@ -108,10 +113,15 @@ pub fn set_chat_convenience_authorization(
     state: State<'_, AppState>,
     request: SetChatConvenienceAuthorizationRequest,
 ) -> Result<ChatConvenienceAuthorization, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state
-        .settings_service
-        .set_chat_convenience_authorization(&context, request.enabled)
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+            state
+                .settings_service
+                .set_chat_convenience_authorization(context, request.enabled)
+        },
+    )
 }
 
 #[tauri::command]

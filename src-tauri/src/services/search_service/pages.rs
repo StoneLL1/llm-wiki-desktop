@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use crate::app_state::ProjectWritePermit;
 use crate::errors::BackendError;
 use crate::models::paths::ProjectContext;
 use crate::models::wiki::{CreateWikiPageRequest, RenameWikiPageResponse, SaveWikiPageResponse};
@@ -10,11 +11,35 @@ use super::catalog::file_read_error;
 use super::SearchService;
 
 impl SearchService {
+    /// Capability-bearing production entry point for wiki-page saves.
+    pub(crate) fn save_page_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        relative_path: &str,
+        contents: &str,
+        expected_hash: Option<String>,
+    ) -> Result<SaveWikiPageResponse, BackendError> {
+        self.save_page_unchecked(permit.context(), relative_path, contents, expected_hash)
+    }
+
+    /// Compatibility surface for integration and service tests. Production
+    /// callers must enter through `save_page_authorized`.
+    #[cfg(debug_assertions)]
+    pub fn save_page(
+        &self,
+        context: &ProjectContext,
+        relative_path: &str,
+        contents: &str,
+        expected_hash: Option<String>,
+    ) -> Result<SaveWikiPageResponse, BackendError> {
+        self.save_page_unchecked(context, relative_path, contents, expected_hash)
+    }
+
     /// Save a page with optimistic-concurrency hash checking. `expected_hash =
     /// None` means create-new (rejected if the file exists); `Some(hash)` only
     /// overwrites when the on-disk hash still matches, so an external edit in
     /// Obsidian surfaces as `FILE_HASH_MISMATCH` for the diff confirmation path.
-    pub fn save_page(
+    fn save_page_unchecked(
         &self,
         context: &ProjectContext,
         relative_path: &str,
@@ -48,7 +73,7 @@ impl SearchService {
     /// chat `save_answer_to_wiki` new-page path. The path must resolve inside
     /// `wiki/` — `resolve_project_path` enforces traversal/absolute/symlink
     /// safety, and this method additionally rejects anything outside `wiki/`.
-    pub fn create_page(
+    fn create_page_unchecked(
         &self,
         context: &ProjectContext,
         request: &CreateWikiPageRequest,
@@ -103,6 +128,26 @@ impl SearchService {
         })
     }
 
+    /// Capability-bearing production entry point for wiki-page creation.
+    pub(crate) fn create_page_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        request: &CreateWikiPageRequest,
+    ) -> Result<SaveWikiPageResponse, BackendError> {
+        self.create_page_unchecked(permit.context(), request)
+    }
+
+    /// Compatibility surface for integration and service tests. Production
+    /// callers must enter through `create_page_authorized`.
+    #[cfg(debug_assertions)]
+    pub fn create_page(
+        &self,
+        context: &ProjectContext,
+        request: &CreateWikiPageRequest,
+    ) -> Result<SaveWikiPageResponse, BackendError> {
+        self.create_page_unchecked(context, request)
+    }
+
     /// Rename a wiki page: move the file, then rewrite every `[[old-stem]]`
     /// reference across the wiki to `[[new-stem]]` (preserving aliases/anchors).
     /// A rename is a file move plus a batch rewrite of references, which the
@@ -110,7 +155,7 @@ impl SearchService {
     /// 检查点"); the caller creates the checkpoint *before* invoking this so the
     /// old page and all reference files are recoverable. Returns the new path
     /// metadata and the list of pages whose references were rewritten.
-    pub fn rename_page(
+    fn rename_page_unchecked(
         &self,
         context: &ProjectContext,
         relative_path: &str,
@@ -242,6 +287,30 @@ impl SearchService {
         })
     }
 
+    /// Capability-bearing production entry point for wiki-page rename and
+    /// reference rewrites. The caller must create the required Git checkpoint
+    /// within the same write critical section before invoking this method.
+    pub(crate) fn rename_page_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        relative_path: &str,
+        new_relative_path: &str,
+    ) -> Result<RenameWikiPageResponse, BackendError> {
+        self.rename_page_unchecked(permit.context(), relative_path, new_relative_path)
+    }
+
+    /// Compatibility surface for integration and service tests. Production
+    /// callers must enter through `rename_page_authorized`.
+    #[cfg(debug_assertions)]
+    pub fn rename_page(
+        &self,
+        context: &ProjectContext,
+        relative_path: &str,
+        new_relative_path: &str,
+    ) -> Result<RenameWikiPageResponse, BackendError> {
+        self.rename_page_unchecked(context, relative_path, new_relative_path)
+    }
+
     /// Find every wiki page that links to `target_stem` (the file stem without
     /// extension). Used by the delete path to warn the user that those links
     /// would become missing after deletion. Matching is case-insensitive on the
@@ -288,7 +357,7 @@ impl SearchService {
     /// recoverable and visible in history. This is the generic Wiki page
     /// two-checkpoint contract; Source packages use their dedicated lifecycle.
     /// Returns whether the pre-delete checkpoint produced a commit hash.
-    pub fn apply_page_delete(
+    fn apply_page_delete_unchecked(
         &self,
         context: &ProjectContext,
         git_service: &crate::services::GitService,
@@ -377,6 +446,27 @@ impl SearchService {
         }
 
         Ok(checkpoint.commit_hash.is_some())
+    }
+
+    pub(crate) fn apply_page_delete_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        git_service: &crate::services::GitService,
+        target_path: &str,
+        target_hash: &str,
+    ) -> Result<bool, BackendError> {
+        self.apply_page_delete_unchecked(permit.context(), git_service, target_path, target_hash)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn apply_page_delete(
+        &self,
+        context: &ProjectContext,
+        git_service: &crate::services::GitService,
+        target_path: &str,
+        target_hash: &str,
+    ) -> Result<bool, BackendError> {
+        self.apply_page_delete_unchecked(context, git_service, target_path, target_hash)
     }
 
     fn invalidate_graph_cache(&self, context: &ProjectContext) -> bool {

@@ -112,17 +112,20 @@ pub fn cancel_task(
         .get_workflow_run(&request.task_id)
         .is_some()
     {
-        let context =
-            state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-        let next = state.with_workflow_access(&context, |_| {
-            crate::commands::workflow_commands::cancel_or_discard_workflow(
-                &state,
-                &context,
-                &request.task_id,
-                false,
-            )
-            .map(|(_, next)| next)
-        })?;
+        let next = state.with_current_project_task_access(
+            &request.project_id,
+            &request.project_root_path,
+            |permit| {
+                crate::commands::workflow_commands::cancel_or_discard_workflow(
+                    &state,
+                    permit.context(),
+                    &request.task_id,
+                    false,
+                    permit.workflow_access().persistence == WorkflowPersistenceMode::Persistent,
+                )
+                .map(|(_, next)| next)
+            },
+        )?;
         if let Some(next) = next {
             state.workflow_service.dispatch_claimed_run_with_settings(
                 &state.task_service,
@@ -140,24 +143,37 @@ pub fn cancel_task(
         .as_ref()
         .filter(|task| is_import_batch_operation_task(task))
     {
-        let context =
-            state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-        return crate::commands::import_v2_commands::cancel_import_operation_for_state(
-            &state, &context, task,
-        )
-        .map_err(|msg| BackendError::new("TASK_CANCEL_FAILED", &msg, true, false));
+        return state.with_current_project_task_access(
+            &request.project_id,
+            &request.project_root_path,
+            |permit| {
+                crate::commands::import_v2_commands::cancel_import_operation_for_state(
+                    &state,
+                    permit,
+                    task,
+                    permit.workflow_access().persistence == WorkflowPersistenceMode::Persistent,
+                )
+                .map_err(|msg| BackendError::new("TASK_CANCEL_FAILED", &msg, true, false))
+            },
+        );
     }
-    let result = if task.is_some_and(|task| {
-        matches!(
-            task.task_type,
-            TaskType::LlmRequest | TaskType::SourceAiOrganize
-        )
-    }) {
-        state.task_service.request_cancel(&request.task_id)
-    } else {
-        state.task_service.cancel_task(&request.task_id)
-    };
-    result.map_err(|msg| BackendError::new("TASK_CANCEL_FAILED", &msg, true, false))
+    state.with_current_project_task_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit| {
+            let result = if task.is_some_and(|task| {
+                matches!(
+                    task.task_type,
+                    TaskType::LlmRequest | TaskType::SourceAiOrganize
+                )
+            }) {
+                state.task_service.request_cancel(&request.task_id)
+            } else {
+                state.task_service.cancel_task(&request.task_id)
+            };
+            result.map_err(|msg| BackendError::new("TASK_CANCEL_FAILED", &msg, true, false))
+        },
+    )
 }
 
 #[tauri::command]
@@ -189,8 +205,15 @@ pub fn remove_completed_tasks(
     state: State<'_, AppState>,
     request: WorkflowProjectRequest,
 ) -> Result<usize, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    Ok(state.task_service.remove_completed_for_root(&context.root))
+    state.with_current_project_task_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit| {
+            Ok(state
+                .task_service
+                .remove_completed_for_root(&permit.context().root))
+        },
+    )
 }
 
 fn require_task_project(state: &AppState, request: &TaskByIdRequest) -> Result<(), BackendError> {
@@ -434,65 +457,70 @@ fn continue_queued_workflows_for_state(
     state: &AppState,
     request: WorkflowProjectRequest,
 ) -> Result<WorkflowRunPage, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let (runs, claimed) = state.with_workflow_access(&context, |access| {
-        let identity = crate::services::project_identity(&context.root).map_err(|message| {
-            BackendError::new("WORKFLOW_IDENTITY_FAILED", &message, true, false)
-        })?;
-        let mut queued = state
-            .task_service
-            .list_workflow_runs()
-            .into_iter()
-            .filter(|run| {
-                run.canonical_identity_key == identity.canonical_identity_key
-                    && run.identity_revision == identity.identity_revision
-                    && run.display_status == crate::models::workflow::WorkflowDisplayStatus::Queued
-            })
-            .collect::<Vec<_>>();
-        queued.sort_by_key(|run| {
-            (
-                run.queue_position.unwrap_or(u32::MAX),
-                run.started_at.clone(),
-            )
-        });
-        let mut persistence_bindings = Vec::with_capacity(queued.len());
-        let mut eligibility_error = None;
-        for queued_run in &queued {
-            let replay = super::workflow_commands::revalidate_workflow_replay_with_access(
-                state,
-                &context,
-                queued_run,
-                access.clone(),
-                super::lint_commands::AgentLintRepairReplayIntent::Continue,
-            )?;
-            if let Err(error) = replay.eligibility {
-                if eligibility_error.is_none() {
-                    eligibility_error = Some(error);
-                }
-            }
-            persistence_bindings.push((
-                queued_run.task_id.clone(),
-                replay.persistence.task_state_root,
-            ));
-        }
-        let (runs, claimed) = state
-            .workflow_service
-            .coordinator
-            .apply_persistence_and_continue_queued(
-                &state.task_service,
-                &identity.canonical_identity_key,
-                &identity.identity_revision,
-                &persistence_bindings,
-                eligibility_error.is_none(),
-            )
-            .map_err(|message| {
-                BackendError::new("WORKFLOW_CONTINUE_FAILED", &message, true, false)
+    let (runs, claimed) = state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, context| {
+            let access = permit.workflow_access();
+            let identity = crate::services::project_identity(&context.root).map_err(|message| {
+                BackendError::new("WORKFLOW_IDENTITY_FAILED", &message, true, false)
             })?;
-        if let Some(error) = eligibility_error {
-            return Err(error);
-        }
-        Ok((runs, claimed))
-    })?;
+            let mut queued = state
+                .task_service
+                .list_workflow_runs()
+                .into_iter()
+                .filter(|run| {
+                    run.canonical_identity_key == identity.canonical_identity_key
+                        && run.identity_revision == identity.identity_revision
+                        && run.display_status
+                            == crate::models::workflow::WorkflowDisplayStatus::Queued
+                })
+                .collect::<Vec<_>>();
+            queued.sort_by_key(|run| {
+                (
+                    run.queue_position.unwrap_or(u32::MAX),
+                    run.started_at.clone(),
+                )
+            });
+            let mut persistence_bindings = Vec::with_capacity(queued.len());
+            let mut eligibility_error = None;
+            for queued_run in &queued {
+                let replay = super::workflow_commands::revalidate_workflow_replay_with_access(
+                    state,
+                    &context,
+                    queued_run,
+                    access.clone(),
+                    super::lint_commands::AgentLintRepairReplayIntent::Continue,
+                )?;
+                if let Err(error) = replay.eligibility {
+                    if eligibility_error.is_none() {
+                        eligibility_error = Some(error);
+                    }
+                }
+                persistence_bindings.push((
+                    queued_run.task_id.clone(),
+                    replay.persistence.task_state_root,
+                ));
+            }
+            let (runs, claimed) = state
+                .workflow_service
+                .coordinator
+                .apply_persistence_and_continue_queued(
+                    &state.task_service,
+                    &identity.canonical_identity_key,
+                    &identity.identity_revision,
+                    &persistence_bindings,
+                    eligibility_error.is_none(),
+                )
+                .map_err(|message| {
+                    BackendError::new("WORKFLOW_CONTINUE_FAILED", &message, true, false)
+                })?;
+            if let Some(error) = eligibility_error {
+                return Err(error);
+            }
+            Ok((runs, claimed))
+        },
+    )?;
     if let Some(run) = claimed {
         state.workflow_service.dispatch_claimed_run_with_settings(
             &state.task_service,

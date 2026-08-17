@@ -13,6 +13,7 @@ use std::sync::{Arc, RwLock};
 #[cfg(test)]
 use std::sync::Mutex;
 
+use crate::app_state::ProjectTaskMutationPermit;
 use crate::errors::BackendError;
 use crate::models::paths::ProjectContext;
 use crate::models::workflow::{
@@ -220,8 +221,7 @@ impl WorkflowService {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn enqueue_with_acknowledgements(
         &self,
-        context: &ProjectContext,
-        access: WorkflowAccessSnapshot,
+        permit: &ProjectTaskMutationPermit<'_>,
         settings_service: &SettingsService,
         secret_service: &SecretService,
         agent_service: &AgentService,
@@ -232,8 +232,8 @@ impl WorkflowService {
         acknowledge_remote_provider: bool,
     ) -> Result<WorkflowStartOutcome, BackendError> {
         self.start_with_acknowledgements_impl(
-            context,
-            access,
+            permit.context(),
+            permit.workflow_access(),
             settings_service,
             secret_service,
             agent_service,

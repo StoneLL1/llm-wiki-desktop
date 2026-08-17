@@ -1,3 +1,4 @@
+use crate::app_state::ProjectWritePermit;
 use crate::errors::BackendError;
 use crate::models::lint::{LintIgnoreEntry, LintIgnoreFile, LintIssueType};
 use crate::models::paths::ProjectContext;
@@ -60,7 +61,7 @@ impl LintService {
 
     /// Record an ignored `(path, rule)`. Dedupes by key (re-adding refreshes
     /// the timestamp) and returns the resulting list.
-    pub fn add_ignore(
+    fn add_ignore_unchecked(
         &self,
         context: &ProjectContext,
         path: &str,
@@ -106,7 +107,7 @@ impl LintService {
     }
 
     /// Remove an ignored `(path, rule)`. Returns the resulting list.
-    pub fn remove_ignore(
+    fn remove_ignore_unchecked(
         &self,
         context: &ProjectContext,
         path: &str,
@@ -134,6 +135,44 @@ impl LintService {
             .retain(|entry| !(entry.path == path && entry.rule == rule));
         self.save_ignores(context, &file)?;
         Ok(file)
+    }
+
+    pub(crate) fn add_ignore_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        path: &str,
+        rule: LintIssueType,
+    ) -> Result<LintIgnoreFile, BackendError> {
+        self.add_ignore_unchecked(permit.context(), path, rule)
+    }
+
+    pub(crate) fn remove_ignore_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        path: &str,
+        rule: LintIssueType,
+    ) -> Result<LintIgnoreFile, BackendError> {
+        self.remove_ignore_unchecked(permit.context(), path, rule)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn add_ignore(
+        &self,
+        context: &ProjectContext,
+        path: &str,
+        rule: LintIssueType,
+    ) -> Result<LintIgnoreFile, BackendError> {
+        self.add_ignore_unchecked(context, path, rule)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn remove_ignore(
+        &self,
+        context: &ProjectContext,
+        path: &str,
+        rule: LintIssueType,
+    ) -> Result<LintIgnoreFile, BackendError> {
+        self.remove_ignore_unchecked(context, path, rule)
     }
 
     /// Return the current ignore list (empty when none persisted).

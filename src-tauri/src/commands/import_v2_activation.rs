@@ -33,15 +33,20 @@ pub fn activate_import_v2(
     state: State<'_, AppState>,
     request: ActivateImportV2Request,
 ) -> Result<ActivationResult, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    ImportV2ActivationService::default().activate(
-        &state.import_v2_service,
-        &state.git_service,
-        &context,
-        &request.report,
-        &request.readiness,
-        &request.release_version,
-        request.confirmation,
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+            ImportV2ActivationService::default().activate(
+                &state.import_v2_service,
+                &state.git_service,
+                context,
+                &request.report,
+                &request.readiness,
+                &request.release_version,
+                request.confirmation,
+            )
+        },
     )
 }
 

@@ -52,6 +52,129 @@ const tauriCommandNames = (root) => {
     .sort();
 };
 
+const rustFunctionBody = (source, functionName) => {
+  const declaration = new RegExp(`\\b(?:pub(?:\\([^)]*\\))?\\s+)?(?:async\\s+)?fn\\s+${functionName}(?:<[^>{}]*>)?\\s*\\(`)
+    .exec(source);
+  if (!declaration) return "";
+  const start = source.indexOf("{", declaration.index);
+  if (start < 0) return "";
+  let depth = 0;
+  let quote = null;
+  let escaped = false;
+  for (let index = start; index < source.length; index += 1) {
+    const character = source[index];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === quote) quote = null;
+      continue;
+    }
+    if (character === '"') {
+      quote = character;
+      continue;
+    }
+    if (character === "{") depth += 1;
+    else if (character === "}" && (depth -= 1) === 0) return source.slice(start, index + 1);
+  }
+  return "";
+};
+
+const rustFunctionSignature = (source, functionName) => {
+  const declaration = new RegExp(`\\b(?:pub(?:\\([^)]*\\))?\\s+)?(?:async\\s+)?fn\\s+${functionName}(?:<[^>{}]*>)?\\s*\\(`)
+    .exec(source);
+  if (!declaration) return "";
+  const start = source.indexOf("{", declaration.index);
+  return start < 0 ? "" : source.slice(declaration.index, start);
+};
+
+const stripRustComments = (source) => source
+  .replace(/\/\*[\s\S]*?\*\//g, "")
+  .replace(/\/\/.*$/gm, "");
+
+const callsAppearInOrder = (source, calls = []) => {
+  let cursor = -1;
+  return calls.every((call) => {
+    cursor = source.indexOf(call, cursor + 1);
+    return cursor >= 0;
+  });
+};
+
+const publicFunctionIsDebugOnly = (source, functionName) => {
+  const declarations = [...source.matchAll(
+    new RegExp(`\\bpub\\s+fn\\s+${functionName}(?:<[^>{}]*>)?\\s*\\(`, "g"),
+  )];
+  return declarations.every((declaration) => source
+    .slice(Math.max(0, declaration.index - 160), declaration.index)
+    .includes("#[cfg(debug_assertions)]"));
+};
+
+const projectWriteAuthorityIsImplemented = (root, entry) => {
+  if (!entry.projectScoped) return true;
+  const hasExplicitAuthorityPaths = Array.isArray(entry.authorityPaths)
+    && entry.authorityPaths.length > 0;
+  if (!entry.classifications.includes("mutation") && !hasExplicitAuthorityPaths) return true;
+  if (typeof entry.source !== "string" || entry.source.length === 0) return false;
+  const source = readText(root, entry.source);
+  const commandBody = stripRustComments(rustFunctionBody(source, entry.name));
+  if (!commandBody) return false;
+  const helpersForAuthority = {
+    ProjectWritePermit: ["with_current_project_write_access"],
+    ProjectAuthorityMutationPermit: ["with_current_project_authority_mutation"],
+    ProjectTaskMutationPermit: ["with_current_project_task_access"],
+    ProjectExecutionLease: ["begin_project_external_task", "begin_project_external_execution"],
+  };
+  const paths = hasExplicitAuthorityPaths
+    ? entry.authorityPaths
+    : [{
+      function: entry.authorityFunction ?? entry.name,
+      authority: entry.writeAuthority,
+      commandDelegate: entry.authorityFunction,
+    }];
+  return paths.every((authorityPath) => {
+    const authority = authorityPath.authority ?? entry.writeAuthority;
+    const allowedHelpers = helpersForAuthority[authority];
+    const helper = authorityPath.helper ?? allowedHelpers?.[0];
+    if (!allowedHelpers?.includes(helper) || typeof authorityPath.function !== "string") return false;
+    if (authorityPath.commandDelegate
+        && authorityPath.function !== entry.name
+        && !new RegExp(`\\b${authorityPath.commandDelegate}\\s*\\(`).test(commandBody)) return false;
+    const pathSource = readText(root, authorityPath.source ?? entry.source);
+    const authorityBody = stripRustComments(rustFunctionBody(pathSource, authorityPath.function));
+    if (!new RegExp(`\\.\\s*${helper}\\s*\\(`).test(authorityBody)) return false;
+    if ((authorityPath.requiredCalls ?? []).some((call) => !authorityBody.includes(call))) return false;
+    if (!callsAppearInOrder(authorityBody, authorityPath.orderedCalls)) return false;
+    return !(authorityPath.forbiddenCalls ?? []).some((call) => authorityBody.includes(call));
+  });
+};
+
+const serviceAuthorityContractIsImplemented = (root, contract) => {
+  if (typeof contract?.source !== "string" || typeof contract?.function !== "string") return false;
+  const source = readText(root, contract.source);
+  if (contract.visibility === "module-internal") {
+    const functions = [contract.function, ...(contract.internalOnlyFunctions ?? [])];
+    return functions.every((functionName) => {
+      const signature = rustFunctionSignature(source, functionName);
+      const visibilityIsModuleInternal = !signature.startsWith("pub ")
+        && (!signature.startsWith("pub(") || /^pub\((?:self|super)\)\s+fn\b/.test(signature));
+      return signature.length > 0 && visibilityIsModuleInternal;
+    }) && (contract.debugOnlyNakedFunctions ?? [])
+      .every((functionName) => publicFunctionIsDebugOnly(source, functionName));
+  }
+  if (typeof contract?.capability !== "string") return false;
+  const capabilityFunctions = [contract.function, ...(contract.capabilityFunctions ?? [])];
+  const capabilityFunctionsValid = capabilityFunctions.every((functionName) => {
+    const signature = rustFunctionSignature(source, functionName);
+    const body = stripRustComments(rustFunctionBody(source, functionName));
+    return signature.includes(contract.capability)
+      && (contract.requiredCalls ?? []).every((call) => body.includes(call))
+      && callsAppearInOrder(body, contract.orderedCalls)
+      && !(contract.forbiddenCalls ?? []).some((call) => body.includes(call));
+  });
+  return capabilityFunctionsValid
+    && (contract.debugOnlyNakedFunctions ?? [])
+      .every((functionName) => publicFunctionIsDebugOnly(source, functionName));
+};
+
 const result = (id, passed, ownerBatch, detail) => ({
   id,
   state: passed ? "green" : "red",
@@ -234,16 +357,27 @@ export function evaluateFinalFourRedlines(root) {
     ]);
 
   const inventoryEntries = Array.isArray(authorityInventory?.commands) ? authorityInventory.commands : [];
+  const serviceAuthorityContracts = Array.isArray(authorityInventory?.serviceAuthorityContracts)
+    ? authorityInventory.serviceAuthorityContracts
+    : [];
   const actualCommands = tauriCommandNames(root);
   const inventoriedCommands = inventoryEntries.map((entry) => entry.name).sort();
   const allowedClasses = new Set(["read", "mutation", "network", "external-process", "secret"]);
+  const invalidAuthorityEntries = inventoryEntries.filter((entry) => !projectWriteAuthorityIsImplemented(root, entry));
+  const invalidServiceAuthorityContracts = serviceAuthorityContracts
+    .filter((contract) => !serviceAuthorityContractIsImplemented(root, contract));
+  if (process.env.FINAL_FOUR_DEBUG === "1") {
+    process.stderr.write(`[final-four:debug] invalid command authority: ${invalidAuthorityEntries.map((entry) => entry.name).join(", ")}\n`);
+    process.stderr.write(`[final-four:debug] invalid service authority: ${invalidServiceAuthorityContracts.map((contract) => contract.function || JSON.stringify(contract)).join(", ")}\n`);
+  }
   const mutationInventoryReady = actualCommands.length > 0
     && JSON.stringify(actualCommands) === JSON.stringify(inventoriedCommands)
     && inventoryEntries.every((entry) => Array.isArray(entry.classifications)
       && entry.classifications.length > 0
       && entry.classifications.every((kind) => allowedClasses.has(kind))
       && (!entry.classifications.includes("mutation") || (typeof entry.writeAuthority === "string" && entry.writeAuthority.length > 0))
-      && (!entry.projectScoped || !entry.classifications.includes("mutation") || entry.writeAuthority === "ProjectWritePermit"))
+      && !invalidAuthorityEntries.includes(entry))
+    && invalidServiceAuthorityContracts.length === 0
     && readText(root, "src-tauri/src/app_state.rs").includes("ProjectWritePermit");
 
   const publishStable = /^ {2}publish-stable:\s*$([\s\S]*?)(?=^ {2}[A-Za-z0-9_-]+:\s*$|(?![\s\S]))/m.exec(releaseWorkflow)?.[1] ?? "";
@@ -266,7 +400,7 @@ export function evaluateFinalFourRedlines(root) {
     result("real-update-offer", updateOfferReady, "4B", "UpdateSettings must consume the global updater offer instead of get_app_summary placeholder state"),
     result("structured-backend-error-presentation", backendErrorReady, "1", "shared normalization must cover serialized, circular, and object-shaped failures without [object Object]"),
     result("provider-secret-origin-binding", providerBindingReady, "2A", "provider credentials must bind to canonical origin and redirects must not carry secrets"),
-    result("mutation-write-authority-inventory", mutationInventoryReady, "2B", "every mutation command must be inventoried and require ProjectWritePermit"),
+    result("mutation-write-authority-inventory", mutationInventoryReady, "2B", "every mutation path must be inventoried and carry an unforgeable project authority capability"),
     result("atomic-stable-release-workflow", atomicReleaseReady, "5", "only one final publisher may release complete desktop, capability, and manifest artifacts"),
   ];
 }

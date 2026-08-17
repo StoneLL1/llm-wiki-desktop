@@ -32,6 +32,7 @@ test("completed owner contracts turn green while later batches remain red", () =
   const completed = new Set([
     "structured-backend-error-presentation",
     "provider-secret-origin-binding",
+    "mutation-write-authority-inventory",
   ]);
   assert.equal(
     actual.every(({ id, state }) => state === (completed.has(id) ? "green" : "red")),
@@ -152,13 +153,32 @@ test("the strict checker can turn every owned contract green", async (context) =
   await write("release/command-authority-inventory.json", JSON.stringify({
     commands: [{
       name: "save",
+      source: "src-tauri/src/commands/file_commands.rs",
       classifications: ["mutation"],
       projectScoped: true,
       writeAuthority: "ProjectWritePermit",
+      authorityPaths: [{
+        function: "save",
+        authority: "ProjectWritePermit",
+        requiredCalls: ["save_authorized(&permit"],
+      }],
+    }],
+    serviceAuthorityContracts: [{
+      source: "src-tauri/src/services/file_service.rs",
+      function: "save_authorized",
+      capability: "ProjectWritePermit",
+      requiredCalls: ["permit.context()"],
     }],
   }));
   await write("src-tauri/src/app_state.rs", "struct ProjectWritePermit;\n");
-  await write("src-tauri/src/commands/file_commands.rs", "#[tauri::command]\npub fn save() {}\n");
+  await write(
+    "src-tauri/src/services/file_service.rs",
+    "fn save_authorized(permit: &ProjectWritePermit) { save_unchecked(permit.context()); }\n",
+  );
+  await write("src-tauri/src/commands/file_commands.rs", [
+    "#[tauri::command]",
+    "pub fn save() { state.with_current_project_write_access(project_id, root, |permit, _context| service.save_authorized(&permit)); }",
+  ].join("\n"));
   await write(".github/workflows/desktop-release.yml", [
     "jobs:",
     "  preflight:",
@@ -246,6 +266,269 @@ test("strict structural contracts reject representative near misses", async (con
   assert.equal(states.get("capability-release-catalog"), "red");
   assert.equal(states.get("mutation-write-authority-inventory"), "red");
   assert.equal(states.get("atomic-stable-release-workflow"), "red");
+});
+
+test("mutation inventory requires a real ProjectWritePermit command path", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "llm-wiki-write-authority-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const write = async (relativePath, contents) => {
+    const target = path.join(root, relativePath);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, contents);
+  };
+  await write("release/command-authority-inventory.json", JSON.stringify({
+    commands: [{
+      name: "save",
+      source: "src-tauri/src/commands/file_commands.rs",
+      classifications: ["mutation"],
+      projectScoped: true,
+      writeAuthority: "ProjectWritePermit",
+      authorityPaths: [{
+        function: "save",
+        authority: "ProjectWritePermit",
+        requiredCalls: ["save_authorized(&permit"],
+      }],
+    }],
+    serviceAuthorityContracts: [{
+      source: "src-tauri/src/services/file_service.rs",
+      function: "save_authorized",
+      capability: "ProjectWritePermit",
+      requiredCalls: ["permit.context()"],
+    }],
+  }));
+  await write("src-tauri/src/app_state.rs", "struct ProjectWritePermit;\n");
+  await write(
+    "src-tauri/src/services/file_service.rs",
+    "fn save_authorized(permit: &ProjectWritePermit) { save_unchecked(permit.context()); }\n",
+  );
+  const authorityState = () => evaluateFinalFourRedlines(root)
+    .find(({ id }) => id === "mutation-write-authority-inventory")?.state;
+
+  await write("src-tauri/src/commands/file_commands.rs", [
+    "#[tauri::command]",
+    "pub fn save() { /* state.with_current_project_write_access(...) */ }",
+  ].join("\n"));
+  assert.equal(authorityState(), "red");
+
+  await write("src-tauri/src/commands/file_commands.rs", [
+    "#[tauri::command]",
+    "pub fn save() { state.with_current_project_write_access(project_id, root, |_permit, _context| Ok(())); }",
+  ].join("\n"));
+  assert.equal(authorityState(), "red");
+
+  await write("src-tauri/src/commands/file_commands.rs", [
+    "#[tauri::command]",
+    "pub fn save() { state.with_current_project_write_access(project_id, root, |permit, _context| service.save_authorized(&permit)); }",
+  ].join("\n"));
+  assert.equal(authorityState(), "green");
+});
+
+test("mutation inventory rejects a permitted launcher with a naked background worker", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "llm-wiki-worker-authority-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const write = async (relativePath, contents) => {
+    const target = path.join(root, relativePath);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, contents);
+  };
+  await write("release/command-authority-inventory.json", JSON.stringify({
+    commands: [{
+      name: "start_import",
+      source: "src-tauri/src/commands/import.rs",
+      classifications: ["mutation"],
+      projectScoped: true,
+      writeAuthority: "ProjectWritePermit",
+      authorityPaths: [
+        { function: "start_import", authority: "ProjectWritePermit" },
+        {
+          function: "run_worker",
+          authority: "ProjectExecutionLease",
+          requiredCalls: ["run_authorized"],
+          forbiddenCalls: ["run_naked"],
+        },
+      ],
+    }],
+    serviceAuthorityContracts: [{
+      source: "src-tauri/src/services/import.rs",
+      function: "run_authorized",
+      capability: "ProjectExecutionLease",
+      requiredCalls: ["task_context"],
+    }],
+  }));
+  await write("src-tauri/src/app_state.rs", "struct ProjectWritePermit; struct ProjectExecutionLease;\n");
+  await write("src-tauri/src/commands/import.rs", [
+    "#[tauri::command]",
+    "pub fn start_import() { state.with_current_project_write_access(id, root, |_permit, _context| Ok(())); }",
+    "fn run_worker() { let lease = state.begin_project_external_task(context, task_id); service.run_naked(context); }",
+  ].join("\n"));
+  await write("src-tauri/src/services/import.rs", "fn run_authorized(context: &ProjectContext) { run(context); }\n");
+  const authorityState = () => evaluateFinalFourRedlines(root)
+    .find(({ id }) => id === "mutation-write-authority-inventory")?.state;
+  assert.equal(authorityState(), "red");
+
+  await write("src-tauri/src/commands/import.rs", [
+    "#[tauri::command]",
+    "pub fn start_import() { state.with_current_project_write_access(id, root, |_permit, _context| Ok(())); }",
+    "fn run_worker() { let lease = state.begin_project_external_task(context, task_id); service.run_authorized(&lease); }",
+  ].join("\n"));
+  await write(
+    "src-tauri/src/services/import.rs",
+    "fn run_authorized(lease: &ProjectExecutionLease) { run(lease.task_context(task_id)); }\n",
+  );
+  assert.equal(authorityState(), "green");
+});
+
+test("service authority contracts reject release-visible naked write siblings", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "llm-wiki-service-authority-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const write = async (relativePath, contents) => {
+    const target = path.join(root, relativePath);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, contents);
+  };
+  await write("release/command-authority-inventory.json", JSON.stringify({
+    commands: [{
+      name: "save",
+      source: "src-tauri/src/commands/save.rs",
+      classifications: ["mutation"],
+      projectScoped: true,
+      writeAuthority: "ProjectWritePermit",
+    }],
+    serviceAuthorityContracts: [{
+      source: "src-tauri/src/services/save.rs",
+      function: "save_authorized",
+      capability: "ProjectWritePermit",
+      requiredCalls: ["permit.context()"],
+      debugOnlyNakedFunctions: ["save"],
+    }],
+  }));
+  await write("src-tauri/src/app_state.rs", "struct ProjectWritePermit;\n");
+  await write(
+    "src-tauri/src/commands/save.rs",
+    "#[tauri::command]\npub fn save() { state.with_current_project_write_access(id, root, |_permit, _context| Ok(())); }\n",
+  );
+  const authorityState = () => evaluateFinalFourRedlines(root)
+    .find(({ id }) => id === "mutation-write-authority-inventory")?.state;
+
+  await write("src-tauri/src/services/save.rs", [
+    "fn save_authorized(permit: &ProjectWritePermit) { save_unchecked(permit.context()); }",
+    "pub fn save(context: &ProjectContext) { save_unchecked(context); }",
+  ].join("\n"));
+  assert.equal(authorityState(), "red");
+
+  await write("src-tauri/src/services/save.rs", [
+    "fn save_authorized(permit: &ProjectWritePermit) { save_unchecked(permit.context()); }",
+    "#[cfg(debug_assertions)]",
+    "pub fn save(context: &ProjectContext) { save_unchecked(context); }",
+  ].join("\n"));
+  assert.equal(authorityState(), "green");
+});
+
+test("service authority contracts validate every capability wrapper and reject crate-visible unchecked APIs", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "llm-wiki-service-capability-set-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const write = async (relativePath, contents) => {
+    const target = path.join(root, relativePath);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, contents);
+  };
+  await write("src-tauri/src/app_state.rs", "struct ProjectWritePermit;\n");
+  await write(
+    "src-tauri/src/commands/import.rs",
+    "#[tauri::command]\npub fn mutate() { state.with_current_project_write_access(id, root, |_permit, _context| Ok(())); }\n",
+  );
+  const inventory = {
+    commands: [{
+      name: "mutate",
+      source: "src-tauri/src/commands/import.rs",
+      classifications: ["mutation"],
+      projectScoped: true,
+      writeAuthority: "ProjectWritePermit",
+    }],
+    serviceAuthorityContracts: [
+      {
+        source: "src-tauri/src/services/import.rs",
+        function: "create_authorized",
+        capability: "ProjectWritePermit",
+        capabilityFunctions: ["finish_authorized"],
+        requiredCalls: ["permit.context()"],
+      },
+      {
+        source: "src-tauri/src/services/import.rs",
+        function: "create_unchecked",
+        visibility: "module-internal",
+        internalOnlyFunctions: ["finish_unchecked"],
+      },
+    ],
+  };
+  await write("release/command-authority-inventory.json", JSON.stringify(inventory));
+  const authorityState = () => evaluateFinalFourRedlines(root)
+    .find(({ id }) => id === "mutation-write-authority-inventory")?.state;
+
+  await write("src-tauri/src/services/import.rs", [
+    "fn create_authorized(permit: &ProjectWritePermit) { create_unchecked(permit.context()); }",
+    "fn finish_authorized(_permit: &ProjectWritePermit) { finish_unchecked(context); }",
+    "pub(crate) fn create_unchecked(context: &ProjectContext) { write(context); }",
+    "fn finish_unchecked(context: &ProjectContext) { write(context); }",
+  ].join("\n"));
+  assert.equal(authorityState(), "red");
+
+  await write("src-tauri/src/services/import.rs", [
+    "fn create_authorized(permit: &ProjectWritePermit) { create_unchecked(permit.context()); }",
+    "fn finish_authorized(permit: &ProjectWritePermit) { finish_unchecked(permit.context()); }",
+    "pub(super) fn create_unchecked(context: &ProjectContext) { write(context); }",
+    "fn finish_unchecked(context: &ProjectContext) { write(context); }",
+  ].join("\n"));
+  assert.equal(authorityState(), "green");
+});
+
+test("execution authority accepts only the two backend epoch helpers", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "llm-wiki-execution-authority-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const write = async (relativePath, contents) => {
+    const target = path.join(root, relativePath);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, contents);
+  };
+  const inventory = (helper) => ({
+    commands: [{
+      name: "probe",
+      source: "src-tauri/src/commands/probe.rs",
+      classifications: ["read", "network"],
+      projectScoped: true,
+      authorityPaths: [{
+        function: "probe",
+        authority: "ProjectExecutionLease",
+        helper,
+        orderedCalls: ["begin_project_external_execution", "publish_result"],
+      }],
+    }],
+  });
+  await write("src-tauri/src/app_state.rs", "struct ProjectWritePermit; struct ProjectExecutionLease;\n");
+  await write("src-tauri/src/commands/probe.rs", [
+    "#[tauri::command]",
+    "pub fn probe() { state.totally_fake(context, id); }",
+  ].join("\n"));
+  await write("release/command-authority-inventory.json", JSON.stringify(inventory("totally_fake")));
+  const authorityState = () => evaluateFinalFourRedlines(root)
+    .find(({ id }) => id === "mutation-write-authority-inventory")?.state;
+  assert.equal(authorityState(), "red");
+
+  await write("src-tauri/src/commands/probe.rs", [
+    "#[tauri::command]",
+    "pub fn probe() { publish_result(); state.begin_project_external_execution(context, id); }",
+  ].join("\n"));
+  await write(
+    "release/command-authority-inventory.json",
+    JSON.stringify(inventory("begin_project_external_execution")),
+  );
+  assert.equal(authorityState(), "red");
+
+  await write("src-tauri/src/commands/probe.rs", [
+    "#[tauri::command]",
+    "pub fn probe() { state.begin_project_external_execution(context, id); publish_result(); }",
+  ].join("\n"));
+  assert.equal(authorityState(), "green");
 });
 
 test("comments and token lists cannot satisfy behavioral redlines", async (context) => {

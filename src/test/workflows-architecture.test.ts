@@ -241,10 +241,10 @@ describe("Workflows architecture", () => {
   it("keeps authority-sensitive start and confirmation inside the project transition lock", () => {
     const source = rustWorkflowCommandSource();
     expect(commandBody(source, "start_workflow", "list_workflow_runs")).toContain(
-      "with_workflow_access",
+      "with_current_project_task_access",
     );
     expect(commandBody(source, "confirm_workflow_action", "discard_workflow_result")).toContain(
-      "with_workflow_access",
+      "with_current_project_write_access",
     );
   });
 

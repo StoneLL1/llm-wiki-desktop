@@ -29,7 +29,7 @@
     {
       "id": "mutation-write-authority-inventory",
       "ownerBatch": "2B",
-      "expected": "red"
+      "expected": "green"
     },
     {
       "id": "atomic-stable-release-workflow",

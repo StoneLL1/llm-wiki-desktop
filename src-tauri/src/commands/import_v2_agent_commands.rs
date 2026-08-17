@@ -19,31 +19,36 @@ pub fn accept_import_agent_candidate_v2(
     state: State<'_, AppState>,
     request: AcceptImportAgentCandidateRequest,
 ) -> Result<AgentCandidateView, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let service = AgentCandidateService::new(
-        &state.import_v2_service,
-        &state.file_store,
-        &state.task_service,
-    );
-    let candidate = service.accept_staged_output(
-        &context,
-        &request.session_id,
-        &request.item_id,
-        &request.task_id,
-    )?;
-    let (_, diff) = service.load_candidate(
-        &context,
-        &request.session_id,
-        &request.item_id,
-        &candidate.candidate_id,
-    )?;
-    Ok(AgentCandidateView {
-        project_id: request.project_id,
-        session_id: request.session_id,
-        item_id: request.item_id,
-        candidate,
-        diff,
-    })
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, context| {
+            let service = AgentCandidateService::new(
+                &state.import_v2_service,
+                &state.file_store,
+                &state.task_service,
+            );
+            let candidate = service.accept_staged_output_authorized(
+                permit,
+                &request.session_id,
+                &request.item_id,
+                &request.task_id,
+            )?;
+            let (_, diff) = service.load_candidate(
+                &context,
+                &request.session_id,
+                &request.item_id,
+                &candidate.candidate_id,
+            )?;
+            Ok(AgentCandidateView {
+                project_id: request.project_id.clone(),
+                session_id: request.session_id.clone(),
+                item_id: request.item_id.clone(),
+                candidate,
+                diff,
+            })
+        },
+    )
 }
 
 #[tauri::command]
@@ -51,32 +56,37 @@ pub fn select_import_agent_candidate_v2(
     state: State<'_, AppState>,
     request: SelectImportAgentCandidateRequest,
 ) -> Result<AgentCandidateActionResult, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let (item, batch) = AgentCandidateService::new(
-        &state.import_v2_service,
-        &state.file_store,
-        &state.task_service,
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, context| {
+            let (item, batch) = AgentCandidateService::new(
+                &state.import_v2_service,
+                &state.file_store,
+                &state.task_service,
+            )
+            .select_candidate_and_finalize_exact_duplicate(
+                permit,
+                &state.git_service,
+                &request.session_id,
+                &request.item_id,
+                &request.candidate_id,
+                request.merged_markdown.as_deref(),
+                request.expected_current_wiki_sha256.as_deref(),
+                state
+                    .file_store
+                    .exists(context, RESTRICTED_CONTENT_ACK_PATH),
+            )?;
+            Ok(AgentCandidateActionResult {
+                project_id: request.project_id.clone(),
+                session_id: request.session_id.clone(),
+                item_id: request.item_id.clone(),
+                candidate_id: request.candidate_id.clone(),
+                item,
+                completion: batch.and_then(|batch| batch.completion),
+            })
+        },
     )
-    .select_candidate_and_finalize_exact_duplicate(
-        &context,
-        &state.git_service,
-        &request.session_id,
-        &request.item_id,
-        &request.candidate_id,
-        request.merged_markdown.as_deref(),
-        request.expected_current_wiki_sha256.as_deref(),
-        state
-            .file_store
-            .exists(&context, RESTRICTED_CONTENT_ACK_PATH),
-    )?;
-    Ok(AgentCandidateActionResult {
-        project_id: request.project_id,
-        session_id: request.session_id,
-        item_id: request.item_id,
-        candidate_id: request.candidate_id,
-        item,
-        completion: batch.and_then(|batch| batch.completion),
-    })
 }
 
 #[tauri::command]
@@ -84,26 +94,31 @@ pub fn discard_import_agent_candidate_v2(
     state: State<'_, AppState>,
     request: DiscardImportAgentCandidateRequest,
 ) -> Result<AgentCandidateActionResult, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let item = AgentCandidateService::new(
-        &state.import_v2_service,
-        &state.file_store,
-        &state.task_service,
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, _context| {
+            let item = AgentCandidateService::new(
+                &state.import_v2_service,
+                &state.file_store,
+                &state.task_service,
+            )
+            .discard_candidate_authorized(
+                permit,
+                &request.session_id,
+                &request.item_id,
+                &request.candidate_id,
+            )?;
+            Ok(AgentCandidateActionResult {
+                project_id: request.project_id.clone(),
+                session_id: request.session_id.clone(),
+                item_id: request.item_id.clone(),
+                candidate_id: request.candidate_id.clone(),
+                item,
+                completion: None,
+            })
+        },
     )
-    .discard_candidate(
-        &context,
-        &request.session_id,
-        &request.item_id,
-        &request.candidate_id,
-    )?;
-    Ok(AgentCandidateActionResult {
-        project_id: request.project_id,
-        session_id: request.session_id,
-        item_id: request.item_id,
-        candidate_id: request.candidate_id,
-        item,
-        completion: None,
-    })
 }
 
 #[tauri::command]
@@ -112,20 +127,25 @@ pub fn start_import_agent_assistance_v2(
     state: State<'_, AppState>,
     request: AgentInvocationRequest,
 ) -> Result<BackendTask, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let service = AgentAssistanceService::new(
-        &state.import_v2_service,
-        &state.file_store,
-        &state.settings_service,
-        &state.agent_service,
-        &state.task_service,
-    );
-    let task = service.start_local(
-        &context,
-        &request.session_id,
-        &request.item_id,
-        request.trigger,
-        request.agent_kind,
+    let task = state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, _context| {
+            AgentAssistanceService::new(
+                &state.import_v2_service,
+                &state.file_store,
+                &state.settings_service,
+                &state.agent_service,
+                &state.task_service,
+            )
+            .start_local(
+                permit,
+                &request.session_id,
+                &request.item_id,
+                request.trigger,
+                request.agent_kind,
+            )
+        },
     )?;
     let task_id = task.id.clone();
     tauri::async_runtime::spawn(async move {
@@ -133,6 +153,7 @@ pub fn start_import_agent_assistance_v2(
         let result = state
             .resolve_project_context(&request.project_id, &request.project_root_path)
             .and_then(|context| {
+                let execution_lease = state.begin_project_external_task(&context, &task_id)?;
                 let run = AgentAssistanceService::new(
                     &state.import_v2_service,
                     &state.file_store,
@@ -141,6 +162,8 @@ pub fn start_import_agent_assistance_v2(
                     &state.task_service,
                 )
                 .run_local(
+                    &state,
+                    &execution_lease,
                     &context,
                     &request.session_id,
                     &request.item_id,
@@ -149,13 +172,25 @@ pub fn start_import_agent_assistance_v2(
                     request.agent_kind,
                 );
                 run.and_then(|()| {
-                    AgentCandidateService::new(
-                        &state.import_v2_service,
-                        &state.file_store,
-                        &state.task_service,
+                    state.require_current_execution_epoch(&context, &execution_lease)?;
+                    state.with_current_project_write_access(
+                        &request.project_id,
+                        &request.project_root_path,
+                        |permit, _current| {
+                            AgentCandidateService::new(
+                                &state.import_v2_service,
+                                &state.file_store,
+                                &state.task_service,
+                            )
+                            .accept_staged_output_authorized(
+                                permit,
+                                &request.session_id,
+                                &request.item_id,
+                                &task_id,
+                            )
+                            .map(|_| ())
+                        },
                     )
-                    .accept_staged_output(&context, &request.session_id, &request.item_id, &task_id)
-                    .map(|_| ())
                 })
             });
         if let Err(error) = result {

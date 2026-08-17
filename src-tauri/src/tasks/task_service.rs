@@ -2359,6 +2359,91 @@ impl TaskService {
         Ok(())
     }
 
+    /// Close every cancellable non-workflow worker owned by one project before
+    /// trust is revoked. Workflow cancellation remains coordinator-owned so its
+    /// queue and confirmation cleanup stay atomic.
+    pub(crate) fn request_cancel_active_project_tasks_for_root(
+        &self,
+        project_root: &Path,
+    ) -> Result<(), String> {
+        let expected = project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.to_path_buf());
+        let roots = self.task_roots.read().expect("lock poisoned");
+        let tasks = self.tasks.read().expect("lock poisoned");
+        let ids = tasks
+            .iter()
+            .filter_map(|(id, entry)| {
+                let belongs = roots
+                    .get(id)
+                    .map(|root| root.canonicalize().unwrap_or_else(|_| root.clone()) == expected)
+                    .unwrap_or(false);
+                (belongs
+                    && entry.task.task_type != TaskType::Workflow
+                    && entry.task.cancellable
+                    && matches!(
+                        entry.task.status,
+                        TaskStatus::Queued | TaskStatus::Running | TaskStatus::Cancelling
+                    ))
+                .then(|| id.clone())
+            })
+            .collect::<Vec<_>>();
+        drop(tasks);
+        drop(roots);
+        for id in ids {
+            self.request_cancel(&id)?;
+        }
+        Ok(())
+    }
+
+    /// Serialize with all task snapshot writers, then make non-workflow tasks
+    /// memory-only. This prevents late cancellation/error bookkeeping from
+    /// recreating `.app/tasks` after trust revocation has returned.
+    pub(crate) fn unbind_non_workflow_persistence_for_root(
+        &self,
+        project_root: &Path,
+    ) -> Result<Vec<String>, String> {
+        let expected = project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.to_path_buf());
+        let roots = self.task_roots.read().expect("lock poisoned");
+        let tasks = self.tasks.read().expect("lock poisoned");
+        let mut ids = tasks
+            .iter()
+            .filter_map(|(id, entry)| {
+                let belongs = roots
+                    .get(id)
+                    .map(|root| root.canonicalize().unwrap_or_else(|_| root.clone()) == expected)
+                    .unwrap_or(false);
+                (belongs && entry.task.task_type != TaskType::Workflow).then(|| id.clone())
+            })
+            .collect::<Vec<_>>();
+        drop(tasks);
+        drop(roots);
+        ids.sort();
+        ids.dedup();
+        let lanes = ids
+            .iter()
+            .map(|id| self.workflow_persistence_lane(id))
+            .collect::<Vec<_>>();
+        let _lane_guards = lanes
+            .iter()
+            .map(|lane| {
+                lane.lock()
+                    .map_err(|_| "Task persistence lane is locked.".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut tasks = self.tasks.write().expect("lock poisoned");
+        let mut persistence = self.task_persistence_dirs.write().expect("lock poisoned");
+        for id in &ids {
+            persistence.remove(id);
+            if let Some(entry) = tasks.get_mut(id) {
+                entry.persisted_path = None;
+            }
+        }
+        Ok(ids)
+    }
+
     pub(crate) fn reset_workflow_cancellation(&self, id: &str) -> Result<(), String> {
         let token = self.cancellation.register(id);
         let mut tasks = self.tasks.write().expect("lock poisoned");
@@ -3264,11 +3349,9 @@ impl TaskService {
     }
 
     fn persist_current_task(&self, id: &str) -> Result<(), String> {
-        let persistence_lane = self.workflow_persistence_lane_if_present(id);
-        let mut lane = persistence_lane
-            .as_ref()
-            .map(|lane| lane.lock().expect("lock poisoned"));
-        self.persist_current_task_with_lane(id, lane.as_deref_mut())
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
+        self.persist_current_task_with_lane(id, Some(&mut lane))
     }
 
     fn persist_current_task_with_lane(

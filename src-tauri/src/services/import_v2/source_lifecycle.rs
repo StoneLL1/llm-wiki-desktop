@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::app_state::ProjectWritePermit;
 use crate::errors::BackendError;
 use crate::models::git::CheckpointPurpose;
 use crate::models::import_v2::{
@@ -184,7 +185,7 @@ impl ImportV2Service {
         Ok(version_summaries(&loaded.manifest, &restorability))
     }
 
-    pub fn reprocess_source(
+    fn reprocess_source_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -432,7 +433,7 @@ impl ImportV2Service {
         })
     }
 
-    pub fn store_source_ai_organize_candidate(
+    fn store_source_ai_organize_candidate_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -508,7 +509,7 @@ impl ImportV2Service {
         Ok(candidate_summary(&candidate))
     }
 
-    pub fn discard_source_ai_organize_candidate(
+    fn discard_source_ai_organize_candidate_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -538,7 +539,7 @@ impl ImportV2Service {
         Ok(())
     }
 
-    pub fn discard_source_candidate(
+    fn discard_source_candidate_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -592,7 +593,7 @@ impl ImportV2Service {
         })
     }
 
-    pub fn apply_source_candidate(
+    fn apply_source_candidate_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -678,7 +679,7 @@ impl ImportV2Service {
         )
     }
 
-    pub fn restore_source_version(
+    fn restore_source_version_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -735,7 +736,7 @@ impl ImportV2Service {
         build_move_preview(context, files, &loaded, &request.new_wiki_path)
     }
 
-    pub fn move_source(
+    fn move_source_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -762,7 +763,7 @@ impl ImportV2Service {
         build_delete_preview(context, files, &loaded)
     }
 
-    pub fn delete_source(
+    fn delete_source_unchecked(
         &self,
         context: &ProjectContext,
         files: &FileStore,
@@ -838,6 +839,238 @@ impl ImportV2Service {
             wiki_path: loaded.manifest.wiki_path,
             checkpoint: checkpoint.commit_hash,
         })
+    }
+
+    pub(crate) fn store_source_ai_organize_candidate_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        input: &SourceAiOrganizeInput,
+        task_id: &str,
+        route: SourceAiOrganizeRoute,
+        engine: String,
+        model: String,
+        engine_version: Option<String>,
+        candidate_markdown: String,
+    ) -> Result<SourceCandidateSummary, BackendError> {
+        self.store_source_ai_organize_candidate_unchecked(
+            permit.context(),
+            files,
+            input,
+            task_id,
+            route,
+            engine,
+            model,
+            engine_version,
+            candidate_markdown,
+        )
+    }
+
+    pub(crate) fn reprocess_source_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        request: &ReprocessSourceRequest,
+        kind: SourceCandidateKind,
+        cancellation: &CancellationToken,
+    ) -> Result<SourceCandidateSummary, BackendError> {
+        self.reprocess_source_unchecked(permit.context(), files, request, kind, cancellation)
+    }
+
+    pub(crate) fn discard_source_ai_organize_candidate_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        source_id: &str,
+        candidate_id: &str,
+        task_id: &str,
+    ) -> Result<(), BackendError> {
+        self.discard_source_ai_organize_candidate_unchecked(
+            permit.context(),
+            files,
+            source_id,
+            candidate_id,
+            task_id,
+        )
+    }
+
+    pub(crate) fn discard_source_candidate_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        source_id: &str,
+        candidate_id: &str,
+    ) -> Result<(), BackendError> {
+        self.discard_source_candidate_unchecked(permit.context(), files, source_id, candidate_id)
+    }
+
+    pub(crate) fn apply_source_candidate_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        git: &GitService,
+        request: &ApplySourceCandidateRequest,
+    ) -> Result<SourceMutationResult, BackendError> {
+        self.apply_source_candidate_unchecked(permit.context(), files, git, request)
+    }
+
+    pub(crate) fn restore_source_version_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        git: &GitService,
+        source_id: &str,
+        version_id: &str,
+        expected_markdown_hash: &str,
+    ) -> Result<SourceMutationResult, BackendError> {
+        self.restore_source_version_unchecked(
+            permit.context(),
+            files,
+            git,
+            source_id,
+            version_id,
+            expected_markdown_hash,
+        )
+    }
+
+    pub(crate) fn move_source_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        git: &GitService,
+        request: &crate::models::source::MoveSourceRequest,
+    ) -> Result<SourceMutationResult, BackendError> {
+        self.move_source_unchecked(permit.context(), files, git, request)
+    }
+
+    pub(crate) fn delete_source_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        git: &GitService,
+        request: &DeleteSourceRequest,
+    ) -> Result<SourceMutationResult, BackendError> {
+        self.delete_source_unchecked(permit.context(), files, git, request)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn reprocess_source(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        request: &ReprocessSourceRequest,
+        kind: SourceCandidateKind,
+        cancellation: &CancellationToken,
+    ) -> Result<SourceCandidateSummary, BackendError> {
+        self.reprocess_source_unchecked(context, files, request, kind, cancellation)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn store_source_ai_organize_candidate(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        input: &SourceAiOrganizeInput,
+        task_id: &str,
+        route: SourceAiOrganizeRoute,
+        engine: String,
+        model: String,
+        engine_version: Option<String>,
+        candidate_markdown: String,
+    ) -> Result<SourceCandidateSummary, BackendError> {
+        self.store_source_ai_organize_candidate_unchecked(
+            context,
+            files,
+            input,
+            task_id,
+            route,
+            engine,
+            model,
+            engine_version,
+            candidate_markdown,
+        )
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn discard_source_ai_organize_candidate(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        source_id: &str,
+        candidate_id: &str,
+        task_id: &str,
+    ) -> Result<(), BackendError> {
+        self.discard_source_ai_organize_candidate_unchecked(
+            context,
+            files,
+            source_id,
+            candidate_id,
+            task_id,
+        )
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn discard_source_candidate(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        source_id: &str,
+        candidate_id: &str,
+    ) -> Result<(), BackendError> {
+        self.discard_source_candidate_unchecked(context, files, source_id, candidate_id)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn apply_source_candidate(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        git: &GitService,
+        request: &ApplySourceCandidateRequest,
+    ) -> Result<SourceMutationResult, BackendError> {
+        self.apply_source_candidate_unchecked(context, files, git, request)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn restore_source_version(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        git: &GitService,
+        source_id: &str,
+        version_id: &str,
+        expected_markdown_hash: &str,
+    ) -> Result<SourceMutationResult, BackendError> {
+        self.restore_source_version_unchecked(
+            context,
+            files,
+            git,
+            source_id,
+            version_id,
+            expected_markdown_hash,
+        )
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn move_source(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        git: &GitService,
+        request: &crate::models::source::MoveSourceRequest,
+    ) -> Result<SourceMutationResult, BackendError> {
+        self.move_source_unchecked(context, files, git, request)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn delete_source(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        git: &GitService,
+        request: &DeleteSourceRequest,
+    ) -> Result<SourceMutationResult, BackendError> {
+        self.delete_source_unchecked(context, files, git, request)
     }
 }
 

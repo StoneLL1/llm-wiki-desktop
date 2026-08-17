@@ -1,6 +1,6 @@
 use tauri::{AppHandle, Manager, State};
 
-use crate::app_state::AppState;
+use crate::app_state::{AppState, ProjectWritePermit};
 use crate::errors::BackendError;
 use crate::models::agent::{AgentDetectionState, AgentKind};
 use crate::models::chat::{
@@ -34,12 +34,16 @@ pub fn create_chat_session(
     state: State<'_, AppState>,
     request: CreateChatSessionRequest,
 ) -> Result<ChatSession, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state.require_project_write_access(&context)?;
-    state.chat_service.create_session(
-        &context,
-        request.title.as_deref(),
-        request.context_page_path.as_deref(),
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+            state.chat_service.create_session(
+                context,
+                request.title.as_deref(),
+                request.context_page_path.as_deref(),
+            )
+        },
     )
 }
 
@@ -58,7 +62,6 @@ pub fn load_chat_session(
     request: LoadChatRequest,
 ) -> Result<ChatSession, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state.require_project_write_access(&context)?;
     state
         .chat_service
         .load_session(&context, &request.session_id)
@@ -69,10 +72,15 @@ pub fn rename_chat_session(
     state: State<'_, AppState>,
     request: RenameChatRequest,
 ) -> Result<ChatSession, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state
-        .chat_service
-        .rename_session(&context, &request.session_id, &request.title)
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+            state
+                .chat_service
+                .rename_session(context, &request.session_id, &request.title)
+        },
+    )
 }
 
 #[tauri::command]
@@ -80,34 +88,33 @@ pub fn delete_chat_session(
     state: State<'_, AppState>,
     request: DeleteChatRequest,
 ) -> Result<(), BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state.require_project_write_access(&context)?;
-    // Sending holds this process-wide guard until its task has finished
-    // persisting the assistant turn (or cleaning up after cancellation).
-    // Reject deletion at the command boundary as well as in the UI so a
-    // second window or an IPC caller cannot remove a session mid-send.
-    let _send_guard = state.chat_service.try_acquire_send()?;
-    // The UI asks for explicit confirmation before invoking this command. A
-    // scoped checkpoint makes that destructive action recoverable without
-    // committing unrelated dirty files in the project.
-    let chat_root = context.layout.chat_state_root.as_deref().ok_or_else(|| {
-        BackendError::new(
-            "PROJECT_LAYOUT_STATE_UNAVAILABLE",
-            "Project chat state is unavailable until compatible features are enabled.",
-            true,
-            true,
-        )
-    })?;
-    let session_path = format!("{chat_root}/{}.json", request.session_id);
-    state.git_service.create_scoped_checkpoint(
-        &context,
-        CheckpointPurpose::HighRiskOperation,
-        "Before deleting Chat session",
-        std::slice::from_ref(&session_path),
-    )?;
-    state
-        .chat_service
-        .delete_session(&context, &request.session_id)
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+            // Sending holds this process-wide guard until its task has finished
+            // persisting the assistant turn (or cleaning up after cancellation).
+            let _send_guard = state.chat_service.try_acquire_send()?;
+            let chat_root = context.layout.chat_state_root.as_deref().ok_or_else(|| {
+                BackendError::new(
+                    "PROJECT_LAYOUT_STATE_UNAVAILABLE",
+                    "Project chat state is unavailable until compatible features are enabled.",
+                    true,
+                    true,
+                )
+            })?;
+            let session_path = format!("{chat_root}/{}.json", request.session_id);
+            state.git_service.create_scoped_checkpoint(
+                context,
+                CheckpointPurpose::HighRiskOperation,
+                "Before deleting Chat session",
+                std::slice::from_ref(&session_path),
+            )?;
+            state
+                .chat_service
+                .delete_session(context, &request.session_id)
+        },
+    )
 }
 
 /// Send a chat message: append the user turn, retrieve local context, resolve
@@ -121,20 +128,24 @@ pub fn send_chat_message(
 ) -> Result<BackendTask, BackendError> {
     let content = validate_chat_content(&request.content)?;
     let request = SendChatMessageRequest { content, ..request };
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state.require_external_ai_access(&context)?;
-    state.require_project_write_access(&context)?;
     let send_guard = state.chat_service.try_acquire_send()?;
-    let task = state
-        .task_service
-        .create_project_task(
-            TaskType::LlmRequest,
-            request.project_id.clone(),
-            context.root.clone(),
-            format!("Chat: {}", truncate_title(&request.content)),
-            true,
-        )
-        .map_err(task_error)?;
+    let (context, task) = state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+            let task = state
+                .task_service
+                .create_project_task(
+                    TaskType::LlmRequest,
+                    request.project_id.clone(),
+                    context.root.clone(),
+                    format!("Chat: {}", truncate_title(&request.content)),
+                    true,
+                )
+                .map_err(task_error)?;
+            Ok((context.clone(), task))
+        },
+    )?;
     let task_id = task.id.clone();
     tauri::async_runtime::spawn(async move {
         let _send_guard = send_guard;
@@ -171,12 +182,16 @@ async fn run_chat_send(
     if state.task_service.is_cancelled(task_id) {
         return Err(chat_cancelled_error());
     }
-    state.require_external_ai_access(context)?;
-    state.require_project_write_access(context)?;
-    state
-        .task_service
-        .transition_status(task_id, TaskStatus::Running)
-        .map_err(task_error)?;
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, _| {
+            state
+                .task_service
+                .transition_status(task_id, TaskStatus::Running)
+                .map_err(task_error)
+        },
+    )?;
     let mut session = state
         .chat_service
         .load_session(context, &request.session_id)?;
@@ -193,9 +208,15 @@ async fn run_chat_send(
         retrieval_diagnostics: None,
         saved_path: None,
     };
-    state
-        .chat_service
-        .append_message(context, &mut session, user_message)?;
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, current| {
+            state
+                .chat_service
+                .append_message(current, &mut session, user_message)
+        },
+    )?;
 
     state
         .task_service
@@ -275,6 +296,7 @@ async fn run_chat_send(
         },
     );
 
+    let execution_lease = state.begin_project_external_task(context, task_id)?;
     let (route, answer, provider) = match resolved {
         ResolvedRoute::Agent(kind) => {
             state
@@ -421,6 +443,7 @@ async fn run_chat_send(
             false,
         ));
     }
+    state.require_current_execution_epoch(context, &execution_lease)?;
 
     let parsed =
         crate::services::ChatService::parse_model_citations(&answer, &retrieval.source_refs);
@@ -444,12 +467,18 @@ async fn run_chat_send(
     let assistant_message_id = assistant_message.id.clone();
     // Check cancellation again while holding the session mutation lock so a
     // cancel that races with another writer cannot persist an abandoned answer.
-    if !state
-        .chat_service
-        .append_message_if(context, &mut session, assistant_message, || {
-            state.task_service.is_cancelled(task_id)
-        })?
-    {
+    let appended = state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, current| {
+            state
+                .chat_service
+                .append_message_if(current, &mut session, assistant_message, || {
+                    state.task_service.is_cancelled(task_id)
+                })
+        },
+    )?;
+    if !appended {
         return Err(chat_cancelled_error());
     }
 
@@ -499,21 +528,32 @@ async fn run_chat_convenience_send(
             true,
         ));
     }
+    // Cover the checkpoint itself as well as the Agent process and result
+    // commit. Revocation must not return while Git can still mutate the tree.
+    let execution_lease = state.begin_project_external_task(context, task_id)?;
 
-    state
-        .task_service
-        .append_log(
-            task_id,
-            LogLevel::Info,
-            "Creating Git checkpoint before Chat convenience edit".into(),
-        )
-        .map_err(task_error)?;
-    let checkpoint = state.git_service.create_checkpoint(
-        context,
-        CheckpointPurpose::HighRiskOperation,
-        "Before Chat convenience edit",
+    let (checkpoint, ignored_baseline) = state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, current| {
+            state.require_current_execution_permit(permit, &execution_lease)?;
+            state
+                .task_service
+                .append_log(
+                    task_id,
+                    LogLevel::Info,
+                    "Creating Git checkpoint before Chat convenience edit".into(),
+                )
+                .map_err(task_error)?;
+            let checkpoint = state.git_service.create_checkpoint(
+                current,
+                CheckpointPurpose::HighRiskOperation,
+                "Before Chat convenience edit",
+            )?;
+            let ignored_baseline = state.git_service.ignored_paths(current)?;
+            Ok((checkpoint, ignored_baseline))
+        },
     )?;
-    let ignored_baseline = state.git_service.ignored_paths(context)?;
 
     let kind = resolve_convenience_agent(state, context, request.agent)?;
     state
@@ -601,7 +641,38 @@ async fn run_chat_convenience_send(
             chat_cancelled_error(),
         ));
     }
+    let checkpoint_hash = checkpoint.commit_hash;
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |permit, _current| {
+            state.require_current_execution_permit(permit, &execution_lease)?;
+            commit_chat_convenience_result(
+                state,
+                permit,
+                task_id,
+                session,
+                retrieval,
+                answer,
+                checkpoint_hash,
+                &ignored_baseline,
+            )
+        },
+    )
+}
 
+#[allow(clippy::too_many_arguments)]
+fn commit_chat_convenience_result(
+    state: &AppState,
+    permit: &ProjectWritePermit<'_>,
+    task_id: &str,
+    session: &mut ChatSession,
+    retrieval: RetrievalContext,
+    answer: String,
+    checkpoint_hash: Option<String>,
+    ignored_baseline: &[String],
+) -> Result<(), BackendError> {
+    let context = permit.context();
     let mut changes = state
         .git_service
         .changed_files_since_head_with_ignored_baseline(context, &ignored_baseline)?;
@@ -674,13 +745,13 @@ async fn run_chat_convenience_send(
         task_id: Some(task_id.to_string()),
         convenience_edit: Some(ChatConvenienceEdit {
             status,
-            checkpoint_hash: checkpoint.commit_hash,
+            checkpoint_hash,
             affected_paths: audit.affected_paths.clone(),
             diff_summary: audit.diff_summary.clone(),
             diff_text: diff_text.filter(|diff| !diff.trim().is_empty()),
             violation_reason,
             rollback_task_id,
-            ignored_baseline_paths: ignored_baseline.clone(),
+            ignored_baseline_paths: ignored_baseline.to_vec(),
             affected_path_hashes,
         }),
         retrieval_diagnostics: Some(diagnostics),
@@ -1016,9 +1087,11 @@ pub fn save_answer_to_wiki(
     // overwrite confirmation so a busy request leaves the confirmation
     // pending and retryable.
     let _send_guard = state.chat_service.try_acquire_send()?;
-    let initial_context =
-        state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state.require_project_write_access(&initial_context)?;
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, _| Ok(()),
+    )?;
     let mut project_id = request.project_id;
     let mut root_path = request.project_root_path;
     let mut session_id = request.session_id;
@@ -1070,116 +1143,116 @@ pub fn save_answer_to_wiki(
         expected_hash = Some(current_hash);
     }
 
-    let context = state.resolve_project_context(&project_id, &root_path)?;
-    state.require_project_write_access(&context)?;
-    let session = state.chat_service.load_session(&context, &session_id)?;
-    let preceding: Vec<&ChatMessage> = session
-        .messages
-        .iter()
-        .take_while(|m| m.id != message_id)
-        .collect();
-    let question = preceding
-        .iter()
-        .rev()
-        .find(|m| m.role == crate::models::chat::ChatRole::User)
-        .map(|m| (*m).clone())
-        .ok_or_else(|| {
-            BackendError::new(
-                "CHAT_QUESTION_NOT_FOUND",
-                "Could not find the question preceding this answer.",
-                true,
-                true,
-            )
-        })?;
-    let answer = session
-        .messages
-        .iter()
-        .find(|m| m.id == message_id)
-        .cloned()
-        .ok_or_else(|| {
-            BackendError::new(
-                "CHAT_MESSAGE_NOT_FOUND",
-                "The selected answer message no longer exists.",
-                true,
-                true,
-            )
-        })?;
-    let (slug, markdown) = state
-        .chat_service
-        .build_answer_markdown(&session, &question, &answer);
-    let result = state.chat_service.save_answer_to_wiki(
-        &context,
-        &state.git_service,
-        target_path.as_deref(),
-        expected_hash.as_deref(),
-        allow_overwrite,
-        &markdown,
-        &slug,
-    );
-    if let Err(error) = &result {
-        if !allow_overwrite && error.code == "FILE_ALREADY_EXISTS" {
-            let path = error
-                .details
-                .as_ref()
-                .and_then(|details| details.get("path"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            let current_hash = error
-                .details
-                .as_ref()
-                .and_then(|details| details.get("currentHash"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            let action = PendingAction {
-                id: uuid::Uuid::new_v4().to_string(),
-                action_type: PendingActionType::OverwriteFile,
-                title: "Overwrite saved chat answer".into(),
-                message: format!("Overwrite {path} under a Git checkpoint."),
-                risk_level: RiskLevel::High,
-                affected_paths: vec![path.clone()],
-                preview: Some(ActionPreview {
-                    summary: "Replace the existing query page with this chat answer.".into(),
-                    before: None,
-                    after: Some(markdown.clone()),
-                    diff: None,
-                }),
-                expires_at: None,
-                // The checkpoint is created only after the user confirms the
-                // overwrite, so there is no hash to surface yet.
-                checkpoint_hash: None,
-            };
-            state.confirmation_registry.register_with_execution(
-                action.clone(),
-                Some(ConfirmationExecution::ChatOverwrite {
-                    project_id,
-                    root_path,
-                    session_id,
-                    message_id,
-                    target_path: path.clone(),
-                    current_hash: current_hash.clone(),
-                }),
-            )?;
-            return Err(BackendError::new(
-                "FILE_ALREADY_EXISTS",
-                "A query page already exists at this path. Confirm to overwrite.",
-                true,
-                true,
-            )
-            .with_details(serde_json::json!({
-                "path": path,
-                "currentHash": current_hash,
-                "actionId": action.id,
-                "pendingAction": action,
-            })));
+    state.with_current_project_write_access(&project_id, &root_path, |_permit, context| {
+        let session = state.chat_service.load_session(context, &session_id)?;
+        let preceding: Vec<&ChatMessage> = session
+            .messages
+            .iter()
+            .take_while(|m| m.id != message_id)
+            .collect();
+        let question = preceding
+            .iter()
+            .rev()
+            .find(|m| m.role == crate::models::chat::ChatRole::User)
+            .map(|m| (*m).clone())
+            .ok_or_else(|| {
+                BackendError::new(
+                    "CHAT_QUESTION_NOT_FOUND",
+                    "Could not find the question preceding this answer.",
+                    true,
+                    true,
+                )
+            })?;
+        let answer = session
+            .messages
+            .iter()
+            .find(|m| m.id == message_id)
+            .cloned()
+            .ok_or_else(|| {
+                BackendError::new(
+                    "CHAT_MESSAGE_NOT_FOUND",
+                    "The selected answer message no longer exists.",
+                    true,
+                    true,
+                )
+            })?;
+        let (slug, markdown) = state
+            .chat_service
+            .build_answer_markdown(&session, &question, &answer);
+        let result = state.chat_service.save_answer_to_wiki(
+            context,
+            &state.git_service,
+            target_path.as_deref(),
+            expected_hash.as_deref(),
+            allow_overwrite,
+            &markdown,
+            &slug,
+        );
+        if let Err(error) = &result {
+            if !allow_overwrite && error.code == "FILE_ALREADY_EXISTS" {
+                let path = error
+                    .details
+                    .as_ref()
+                    .and_then(|details| details.get("path"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let current_hash = error
+                    .details
+                    .as_ref()
+                    .and_then(|details| details.get("currentHash"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let action = PendingAction {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    action_type: PendingActionType::OverwriteFile,
+                    title: "Overwrite saved chat answer".into(),
+                    message: format!("Overwrite {path} under a Git checkpoint."),
+                    risk_level: RiskLevel::High,
+                    affected_paths: vec![path.clone()],
+                    preview: Some(ActionPreview {
+                        summary: "Replace the existing query page with this chat answer.".into(),
+                        before: None,
+                        after: Some(markdown.clone()),
+                        diff: None,
+                    }),
+                    expires_at: None,
+                    // The checkpoint is created only after the user confirms the
+                    // overwrite, so there is no hash to surface yet.
+                    checkpoint_hash: None,
+                };
+                state.confirmation_registry.register_with_execution(
+                    action.clone(),
+                    Some(ConfirmationExecution::ChatOverwrite {
+                        project_id: project_id.clone(),
+                        root_path: root_path.clone(),
+                        session_id: session_id.clone(),
+                        message_id: message_id.clone(),
+                        target_path: path.clone(),
+                        current_hash: current_hash.clone(),
+                    }),
+                )?;
+                return Err(BackendError::new(
+                    "FILE_ALREADY_EXISTS",
+                    "A query page already exists at this path. Confirm to overwrite.",
+                    true,
+                    true,
+                )
+                .with_details(serde_json::json!({
+                    "path": path,
+                    "currentHash": current_hash,
+                    "actionId": action.id,
+                    "pendingAction": action,
+                })));
+            }
         }
-    }
-    let result = result?;
-    state
-        .chat_service
-        .mark_answer_saved(&context, &session_id, &message_id, &result.path)?;
-    Ok(result)
+        let result = result?;
+        state
+            .chat_service
+            .mark_answer_saved(context, &session_id, &message_id, &result.path)?;
+        Ok(result)
+    })
 }
 
 #[tauri::command]
@@ -1188,45 +1261,49 @@ pub fn resolve_chat_convenience_edit(
     request: ResolveChatConvenienceEditRequest,
 ) -> Result<ChatSession, BackendError> {
     let _send_guard = state.chat_service.try_acquire_send()?;
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state.require_project_write_access(&context)?;
-    let mut session = state
-        .chat_service
-        .load_session(&context, &request.session_id)?;
-    let index = session
-        .messages
-        .iter()
-        .position(|message| message.id == request.message_id)
-        .ok_or_else(|| {
-            BackendError::new(
-                "CHAT_MESSAGE_NOT_FOUND",
-                "The selected chat message no longer exists.",
-                true,
-                true,
-            )
-        })?;
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+            let mut session = state
+                .chat_service
+                .load_session(context, &request.session_id)?;
+            let index = session
+                .messages
+                .iter()
+                .position(|message| message.id == request.message_id)
+                .ok_or_else(|| {
+                    BackendError::new(
+                        "CHAT_MESSAGE_NOT_FOUND",
+                        "The selected chat message no longer exists.",
+                        true,
+                        true,
+                    )
+                })?;
 
-    if request.keep {
-        let edit = session.messages[index]
-            .convenience_edit
-            .as_mut()
-            .ok_or_else(convenience_edit_missing)?;
-        if edit.status != ChatConvenienceEditStatus::SoftViolationPending {
-            return Err(BackendError::new(
-                "CHAT_CONVENIENCE_NOT_PENDING",
-                "This convenience edit is not waiting for a keep or rollback decision.",
-                true,
-                true,
-            ));
-        }
-        edit.status = ChatConvenienceEditStatus::KeptAfterSoftViolation;
-        state.chat_service.save_session(&context, &session)?;
-        return Ok(session);
-    }
+            if request.keep {
+                let edit = session.messages[index]
+                    .convenience_edit
+                    .as_mut()
+                    .ok_or_else(convenience_edit_missing)?;
+                if edit.status != ChatConvenienceEditStatus::SoftViolationPending {
+                    return Err(BackendError::new(
+                        "CHAT_CONVENIENCE_NOT_PENDING",
+                        "This convenience edit is not waiting for a keep or rollback decision.",
+                        true,
+                        true,
+                    ));
+                }
+                edit.status = ChatConvenienceEditStatus::KeptAfterSoftViolation;
+                state.chat_service.save_session(context, &session)?;
+                return Ok(session);
+            }
 
-    rollback_convenience_message(&state, &context, &mut session, index)?;
-    state.chat_service.save_session(&context, &session)?;
-    Ok(session)
+            rollback_convenience_message(&state, context, &mut session, index)?;
+            state.chat_service.save_session(context, &session)?;
+            Ok(session)
+        },
+    )
 }
 
 #[tauri::command]
@@ -1235,35 +1312,39 @@ pub fn rollback_last_chat_convenience_edit(
     request: RollbackLastChatConvenienceEditRequest,
 ) -> Result<ChatSession, BackendError> {
     let _send_guard = state.chat_service.try_acquire_send()?;
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state.require_project_write_access(&context)?;
-    let mut session = state
-        .chat_service
-        .load_session(&context, &request.session_id)?;
-    let index = session
-        .messages
-        .iter()
-        .rposition(|message| {
-            message.convenience_edit.as_ref().is_some_and(|edit| {
-                matches!(
-                    edit.status,
-                    ChatConvenienceEditStatus::Applied
-                        | ChatConvenienceEditStatus::SoftViolationPending
-                        | ChatConvenienceEditStatus::KeptAfterSoftViolation
-                )
-            })
-        })
-        .ok_or_else(|| {
-            BackendError::new(
-                "CHAT_CONVENIENCE_EDIT_MISSING",
-                "No rollbackable Chat convenience edit was found in this session.",
-                true,
-                true,
-            )
-        })?;
-    rollback_convenience_message(&state, &context, &mut session, index)?;
-    state.chat_service.save_session(&context, &session)?;
-    Ok(session)
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+            let mut session = state
+                .chat_service
+                .load_session(context, &request.session_id)?;
+            let index = session
+                .messages
+                .iter()
+                .rposition(|message| {
+                    message.convenience_edit.as_ref().is_some_and(|edit| {
+                        matches!(
+                            edit.status,
+                            ChatConvenienceEditStatus::Applied
+                                | ChatConvenienceEditStatus::SoftViolationPending
+                                | ChatConvenienceEditStatus::KeptAfterSoftViolation
+                        )
+                    })
+                })
+                .ok_or_else(|| {
+                    BackendError::new(
+                        "CHAT_CONVENIENCE_EDIT_MISSING",
+                        "No rollbackable Chat convenience edit was found in this session.",
+                        true,
+                        true,
+                    )
+                })?;
+            rollback_convenience_message(&state, context, &mut session, index)?;
+            state.chat_service.save_session(context, &session)?;
+            Ok(session)
+        },
+    )
 }
 
 fn rollback_convenience_message(

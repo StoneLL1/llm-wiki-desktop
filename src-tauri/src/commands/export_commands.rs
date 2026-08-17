@@ -68,7 +68,6 @@ pub fn start_export(
 ) -> Result<BackendTask, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     state.require_external_ai_access(&context)?;
-    state.require_project_write_access(&context)?;
     state.require_project_content_write_root(&context, ProjectWriteRootKind::Export)?;
     require_restricted_export_acknowledgement(
         &state,
@@ -106,7 +105,6 @@ pub fn regenerate_export(
 ) -> Result<BackendTask, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     state.require_external_ai_access(&context)?;
-    state.require_project_write_access(&context)?;
     state.require_project_content_write_root(&context, ProjectWriteRootKind::Export)?;
     require_restricted_export_acknowledgement(
         &state,
@@ -147,16 +145,22 @@ fn run_export_task(
     context: ProjectContext,
 ) -> Result<BackendTask, BackendError> {
     let project_id = directive.project_id.clone();
-    let task = state
-        .task_service
-        .create_project_task(
-            TaskType::Export,
-            project_id.clone(),
-            context.root.clone(),
-            format!("{:?} export", directive.export_type),
-            true,
-        )
-        .map_err(task_error)?;
+    let task = state.with_current_project_write_access(
+        &project_id,
+        context.root.to_string_lossy().as_ref(),
+        |_permit, current| {
+            state
+                .task_service
+                .create_project_task(
+                    TaskType::Export,
+                    project_id.clone(),
+                    current.root.clone(),
+                    format!("{:?} export", directive.export_type),
+                    true,
+                )
+                .map_err(task_error)
+        },
+    )?;
     let task_id = task.id.clone();
     // Capture what a Failed record would need before `directive` moves into
     // the task body. The intended route is derived from the preference: the
@@ -210,7 +214,11 @@ fn run_export_task(
                         failed_route,
                         Some(task_id.clone()),
                     );
-                    let _ = state.export_service.append_record(&context, record);
+                    let _ = state.with_current_project_write_access(
+                        &project_id,
+                        context.root.to_string_lossy().as_ref(),
+                        |_permit, current| state.export_service.append_record(current, record),
+                    );
                 }
             }
         }
@@ -267,12 +275,16 @@ async fn run_export(
     context: &ProjectContext,
     task_id: &str,
 ) -> Result<(), BackendError> {
-    state.require_external_ai_access(context)?;
-    state.require_project_write_access(context)?;
-    state
-        .task_service
-        .transition_status(task_id, TaskStatus::Running)
-        .map_err(task_error)?;
+    state.with_current_project_write_access(
+        &directive.project_id,
+        context.root.to_string_lossy().as_ref(),
+        |_permit, _| {
+            state
+                .task_service
+                .transition_status(task_id, TaskStatus::Running)
+                .map_err(task_error)
+        },
+    )?;
     state
         .task_service
         .append_log(
@@ -296,13 +308,15 @@ async fn run_export(
         &directive.options,
     )?;
 
-    let (route, raw_html) = match resolve_route(
+    let resolved_route = resolve_route(
         state,
         context,
         directive.route,
         directive.agent,
         directive.provider,
-    )? {
+    )?;
+    let execution_lease = state.begin_project_external_task(context, task_id)?;
+    let (route, raw_html) = match resolved_route {
         ResolvedRoute::Agent(kind) => {
             state
                 .task_service
@@ -373,6 +387,7 @@ async fn run_export(
             false,
         ));
     }
+    state.require_current_execution_epoch(context, &execution_lease)?;
 
     let artifact = state.export_service.validate_html_artifact(&raw_html)?;
 
@@ -381,27 +396,33 @@ async fn run_export(
         directive.export_type,
         directive.source_path.as_deref(),
     )?;
-    state.export_service.write_html_checked(
-        context,
-        &output_path,
-        &artifact.html,
-        WriteMode::CreateNew,
+    state.with_current_project_write_access(
+        &directive.project_id,
+        context.root.to_string_lossy().as_ref(),
+        |_permit, current| {
+            state.export_service.write_html_checked(
+                current,
+                &output_path,
+                &artifact.html,
+                WriteMode::CreateNew,
+            )?;
+            let title = title_for(
+                current,
+                directive.export_type,
+                directive.source_path.as_deref(),
+            );
+            let record = ExportService::new_validated_record(
+                directive.export_type,
+                title,
+                directive.source_path.clone(),
+                output_path.clone(),
+                route,
+                Some(task_id.to_string()),
+                artifact.preview,
+            );
+            state.export_service.append_record(current, record)
+        },
     )?;
-    let title = title_for(
-        context,
-        directive.export_type,
-        directive.source_path.as_deref(),
-    );
-    let record = ExportService::new_validated_record(
-        directive.export_type,
-        title,
-        directive.source_path.clone(),
-        output_path.clone(),
-        route,
-        Some(task_id.to_string()),
-        artifact.preview,
-    );
-    state.export_service.append_record(context, record)?;
 
     state
         .task_service
@@ -440,28 +461,33 @@ pub fn toggle_export_bookmark(
     state: State<'_, AppState>,
     request: ToggleExportBookmarkRequest,
 ) -> Result<ToggleExportBookmarkResponse, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let record = state
-        .export_service
-        .list_records(&context)?
-        .into_iter()
-        .find(|record| record.id == request.export_record_id)
-        .ok_or_else(|| {
-            BackendError::new(
-                "EXPORT_RECORD_NOT_FOUND",
-                "Export record does not exist.",
-                true,
-                true,
-            )
-            .with_details(serde_json::json!({ "exportRecordId": request.export_record_id }))
-        })?;
-    let response = state
-        .bookmark_service
-        .toggle_export_html(&context, &record)?;
-    Ok(ToggleExportBookmarkResponse {
-        export_record_id: response.export_record_id,
-        bookmarked: response.bookmarked,
-    })
+    state.with_current_project_write_access(
+        &request.project_id,
+        &request.project_root_path,
+        |_permit, context| {
+            let record = state
+                .export_service
+                .list_records(context)?
+                .into_iter()
+                .find(|record| record.id == request.export_record_id)
+                .ok_or_else(|| {
+                    BackendError::new(
+                        "EXPORT_RECORD_NOT_FOUND",
+                        "Export record does not exist.",
+                        true,
+                        true,
+                    )
+                    .with_details(serde_json::json!({ "exportRecordId": request.export_record_id }))
+                })?;
+            let response = state
+                .bookmark_service
+                .toggle_export_html(context, &record)?;
+            Ok(ToggleExportBookmarkResponse {
+                export_record_id: response.export_record_id,
+                bookmarked: response.bookmarked,
+            })
+        },
+    )
 }
 
 /// Read an exported HTML file for in-app iframe preview. The path is asserted
