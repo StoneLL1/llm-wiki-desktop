@@ -1,5 +1,4 @@
-import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useState } from "react";
 import { Cpu, Link2, RefreshCw } from "lucide-react";
 import type { LlmProviderConfig, LlmProviderKind, ProviderStatus, ProviderTestResult } from "../../types/llm";
 import { useTranslation } from "react-i18next";
@@ -21,14 +20,10 @@ const defaultBaseUrls: Record<LlmProviderKind, string> = {
   custom: "",
 };
 
-const hasTauri = (): boolean =>
-  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-
-interface OllamaReachability {
-  reachable: boolean;
-  baseUrl: string;
-  modelCount: number;
-}
+const providerBaseUrl = (provider: LlmProviderKind, saved?: string): string =>
+  provider === "custom" || provider === "ollama"
+    ? saved ?? defaultBaseUrls[provider]
+    : defaultBaseUrls[provider];
 
 function providerInitial(kind: LlmProviderKind): string {
   switch (kind) {
@@ -57,36 +52,26 @@ export function LlmProviderSettings({
   const [secret, setSecret] = useState("");
   const [saved, setSaved] = useState(false);
   const [testStatus, setTestStatus] = useState<string | null>(null);
-  const [ollama, setOllama] = useState<OllamaReachability | null>(null);
+  const [pendingSecretApproval, setPendingSecretApproval] = useState(false);
 
   const statusFor = (kind: LlmProviderKind): ProviderStatus | undefined =>
     providers.find((item) => item.config.provider === kind);
-
-  useEffect(() => {
-    if (!hasTauri()) return;
-    let cancelled = false;
-    void invoke<OllamaReachability>("check_ollama_reachable", {
-      request: { projectId: "", projectRootPath: "" },
-    })
-      .then((result) => {
-        if (!cancelled) setOllama(result);
-      })
-      .catch(() => {
-        if (!cancelled) setOllama(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [providers]);
+  const selectedStatus = statusFor(active);
+  const selectedBinding = selectedStatus
+    && selectedStatus.config.model === model
+    && providerBaseUrl(active, selectedStatus.config.baseUrl) === baseUrl
+    ? selectedStatus.credentialBinding
+    : null;
 
   const selectProvider = (kind: LlmProviderKind) => {
     const saved = statusFor(kind)?.config;
     setActive(kind);
     setModel(saved?.model ?? "");
-    setBaseUrl(saved?.baseUrl ?? defaultBaseUrls[kind]);
+    setBaseUrl(providerBaseUrl(kind, saved?.baseUrl));
     setSecret("");
     setSaved(false);
     setTestStatus(null);
+    setPendingSecretApproval(false);
   };
 
   const saveProvider = async () => {
@@ -94,10 +79,20 @@ export function LlmProviderSettings({
     setSaved(true);
   };
 
-  const saveKey = async () => {
+  const saveKey = async (originApproved = false) => {
+    const binding = selectedBinding;
+    if (!binding) {
+      setTestStatus(t("provider.binding.saveFirst"));
+      return;
+    }
+    if (active === "custom" && !selectedStatus?.hasSecret && !originApproved) {
+      setPendingSecretApproval(true);
+      return;
+    }
     await onSaveSecret(active, secret);
     setSecret("");
     setSaved(true);
+    setPendingSecretApproval(false);
   };
 
   const testProvider = async () => {
@@ -120,7 +115,8 @@ export function LlmProviderSettings({
     await onDeleteSecret?.(active);
   };
 
-  const ollamaUp = ollama?.reachable === true;
+  const ollamaStatus = statusFor("ollama");
+  const ollamaUp = Boolean(ollamaStatus?.credentialBinding);
 
   return (
     <section className="grid gap-4">
@@ -138,8 +134,8 @@ export function LlmProviderSettings({
           const hint = isOllama
             ? ollamaUp
               ? t("provider.ollamaUp", {
-                  base: ollama?.baseUrl ?? defaultBaseUrls.ollama,
-                  count: ollama?.modelCount ?? 0,
+                  base: ollamaStatus?.config.baseUrl ?? defaultBaseUrls.ollama,
+                  count: 0,
                 })
               : t("provider.ollamaDown")
             : status?.secretMask
@@ -213,7 +209,12 @@ export function LlmProviderSettings({
               className="settings-input"
               value={baseUrl}
               aria-label={t("provider.baseUrl")}
-              onChange={(event) => { setSaved(false); setBaseUrl(event.target.value); }}
+              onChange={(event) => {
+                setSaved(false);
+                setPendingSecretApproval(false);
+                setBaseUrl(event.target.value);
+              }}
+              readOnly={active !== "custom" && active !== "ollama"}
             />
           </label>
         ) : null}
@@ -225,7 +226,7 @@ export function LlmProviderSettings({
             type="button"
             className="settings-button settings-button--secondary"
             onClick={() => void testProvider()}
-            disabled={active === "ollama" && !ollamaUp}
+            disabled={!selectedBinding}
           >
             {active === "ollama" ? <RefreshCw size={12} /> : null}
             {t("provider.test")}
@@ -253,6 +254,23 @@ export function LlmProviderSettings({
           <button type="button" className="settings-button" onClick={() => void saveKey()}>
             {t("provider.saveKey")}
           </button>
+        ) : null}
+        {pendingSecretApproval && selectedBinding ? (
+          <div role="alertdialog" className="grid gap-2 rounded-[var(--radius-md)] border border-[var(--accent-border)] bg-[var(--accent-soft)] p-3 text-[12px]">
+            <strong>{t("provider.binding.reviewTitle")}</strong>
+            <span>{t("provider.binding.reviewDescription")}</span>
+            <code className="break-all font-mono text-[11px]">
+              {selectedBinding.canonicalOrigin}
+            </code>
+            <div className="flex gap-2">
+              <button type="button" className="settings-button" onClick={() => void saveKey(true)}>
+                {t("provider.binding.authorize")}
+              </button>
+              <button type="button" className="settings-button settings-button--secondary" onClick={() => setPendingSecretApproval(false)}>
+                {t("common.cancel")}
+              </button>
+            </div>
+          </div>
         ) : null}
         {saved ? <span className="text-[12px] text-[var(--accent)]">{t("provider.saved")}</span> : null}
         {testStatus ? (

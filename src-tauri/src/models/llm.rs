@@ -32,6 +32,16 @@ impl LlmProviderKind {
     pub fn requires_secret(self) -> bool {
         !matches!(self, Self::Ollama)
     }
+
+    pub fn binding_slug(self) -> &'static str {
+        match self {
+            Self::OpenAi => "openai",
+            Self::Anthropic => "anthropic",
+            Self::Google => "google",
+            Self::Ollama => "ollama",
+            Self::Custom => "custom",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -46,8 +56,20 @@ pub struct LlmProviderConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct ProviderCredentialBinding {
+    pub config_id: String,
+    pub provider_kind: LlmProviderKind,
+    pub canonical_origin: String,
+    pub credential_account_id: String,
+    pub approved_at: Option<String>,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct ProviderStatus {
     pub config: LlmProviderConfig,
+    pub credential_binding: Option<ProviderCredentialBinding>,
     pub has_secret: bool,
     pub secret_mask: Option<String>,
 }
@@ -72,8 +94,24 @@ pub struct SaveProviderRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderSecretRequest {
+    pub project_id: String,
+    pub project_root_path: String,
     pub provider: LlmProviderKind,
+    pub config_id: String,
+    pub binding_revision: u64,
+    pub expected_canonical_origin: String,
     pub secret: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderConnectionRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub provider: LlmProviderKind,
+    pub config_id: String,
+    pub binding_revision: u64,
+    pub expected_canonical_origin: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

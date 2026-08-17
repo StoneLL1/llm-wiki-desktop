@@ -1,26 +1,32 @@
-use std::time::Duration;
-
 use tauri::State;
 
 use crate::app_state::AppState;
 use crate::errors::BackendError;
 use crate::models::llm::{
-    LlmProviderKind, ProviderProjectRequest, ProviderSecretRequest, ProviderStatus,
-    ProviderTestResult, SaveProviderRequest,
+    LlmProviderConfig, LlmProviderKind, ProviderConnectionRequest, ProviderProjectRequest,
+    ProviderSecretRequest, ProviderStatus, ProviderTestResult, SaveProviderRequest,
 };
+use crate::models::paths::ProjectContext;
 
 /// Reflect the live secret state into a ProviderStatus: `has_secret` plus the
 /// last-4-characters mask the design (settings.html:349) shows inline. The mask
 /// never reveals full key material (PRD-SET-002) — `SecretService::mask`
 /// produces `····XXXX`.
 fn status_with_secret(
+    context: &ProjectContext,
     secret_service: &crate::services::SecretService,
-    config: crate::models::llm::LlmProviderConfig,
+    config: LlmProviderConfig,
 ) -> Result<ProviderStatus, BackendError> {
-    let secret = secret_service.get(config.provider)?;
+    let binding = crate::services::LlmService::credential_binding(context, &config)?;
+    let secret_mask = binding
+        .as_ref()
+        .map(|binding| secret_service.mask_bound(context, binding))
+        .transpose()?
+        .flatten();
     Ok(ProviderStatus {
-        has_secret: secret.is_some(),
-        secret_mask: secret_service.mask(config.provider)?,
+        has_secret: secret_mask.is_some(),
+        secret_mask,
+        credential_binding: binding,
         config,
     })
 }
@@ -31,12 +37,13 @@ pub fn list_llm_providers(
     request: ProviderProjectRequest,
 ) -> Result<Vec<ProviderStatus>, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.require_external_ai_access(&context)?;
     // Provider status is a live project-file + credential-store read. Keep
     // force_refresh in the typed contract so future caching cannot ignore it.
     let _force_refresh = request.force_refresh;
     crate::services::LlmService::list_providers(&context)?
         .into_iter()
-        .map(|config| status_with_secret(&state.secret_service, config))
+        .map(|config| status_with_secret(&context, &state.secret_service, config))
         .collect()
 }
 
@@ -46,8 +53,13 @@ pub fn save_llm_provider(
     request: SaveProviderRequest,
 ) -> Result<ProviderStatus, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    crate::services::LlmService::save_provider(&context, request.config.clone())?;
-    status_with_secret(&state.secret_service, request.config)
+    state.require_external_ai_access(&context)?;
+    let (config, _) = crate::services::LlmService::save_provider_with_secret_invalidation(
+        &context,
+        request.config,
+        &state.secret_service,
+    )?;
+    status_with_secret(&context, &state.secret_service, config)
 }
 
 #[tauri::command]
@@ -55,14 +67,32 @@ pub fn store_provider_secret(
     state: State<'_, AppState>,
     request: ProviderSecretRequest,
 ) -> Result<ProviderStatus, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.require_external_ai_access(&context)?;
     let secret = request.secret.as_deref().ok_or_else(|| {
         BackendError::new("SECRET_EMPTY", "Provider secret is required.", true, true)
     })?;
-    state.secret_service.set(request.provider, secret)?;
-    // Return a default config shell with the fresh mask so the UI can render
-    // the row's "已配置" state immediately after saving a key. The full config
-    // (model/baseUrl) is loaded separately via list_llm_providers.
-    status_with_secret(&state.secret_service, default_config(request.provider))
+    crate::services::LlmService::approve_and_store_secret(
+        &context,
+        &state.secret_service,
+        request.provider,
+        &request.config_id,
+        request.binding_revision,
+        &request.expected_canonical_origin,
+        secret,
+    )?;
+    let config = crate::services::LlmService::list_providers(&context)?
+        .into_iter()
+        .find(|config| config.provider == request.provider)
+        .ok_or_else(|| {
+            BackendError::new(
+                "PROVIDER_CREDENTIAL_BINDING_CHANGED",
+                "The provider destination changed; review it and authorize the credential again.",
+                true,
+                true,
+            )
+        })?;
+    status_with_secret(&context, &state.secret_service, config)
 }
 
 #[tauri::command]
@@ -70,7 +100,16 @@ pub fn delete_provider_secret(
     state: State<'_, AppState>,
     request: ProviderSecretRequest,
 ) -> Result<(), BackendError> {
-    state.secret_service.delete(request.provider)
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.require_external_ai_access(&context)?;
+    crate::services::LlmService::delete_bound_secret(
+        &context,
+        &state.secret_service,
+        request.provider,
+        &request.config_id,
+        request.binding_revision,
+        &request.expected_canonical_origin,
+    )
 }
 
 #[tauri::command]
@@ -78,11 +117,20 @@ pub fn provider_secret_status(
     state: State<'_, AppState>,
     request: ProviderSecretRequest,
 ) -> Result<Option<String>, BackendError> {
-    // Kept for backwards compat with older frontends; returns "configured" only.
-    Ok(state
-        .secret_service
-        .get(request.provider)?
-        .map(|_| "configured".to_string()))
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.require_external_ai_access(&context)?;
+    let (config, _, _) = crate::services::LlmService::provider_with_bound_secret(
+        &context,
+        &state.secret_service,
+        request.provider,
+        Some((
+            &request.config_id,
+            request.binding_revision,
+            &request.expected_canonical_origin,
+        )),
+    )?;
+    let status = status_with_secret(&context, &state.secret_service, config)?;
+    Ok(status.has_secret.then(|| "configured".to_string()))
 }
 
 /// Probe whether a local Ollama service is reachable at its configured
@@ -91,49 +139,21 @@ pub fn provider_secret_status(
 #[tauri::command]
 pub async fn check_ollama_reachable(
     state: State<'_, AppState>,
-    request: ProviderProjectRequest,
+    request: ProviderConnectionRequest,
 ) -> Result<OllamaReachability, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let providers = crate::services::LlmService::list_providers(&context)?;
-    let ollama = providers
-        .into_iter()
-        .find(|config| config.provider == LlmProviderKind::Ollama);
-    let base_url = ollama
-        .map(|config| config.base_url)
-        .filter(|url| !url.trim().is_empty())
-        .unwrap_or_else(|| "http://localhost:11434".to_string());
-    let tags_url = format!("{}/api/tags", base_url.trim_end_matches('/'));
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(4))
-        .build()
-        .map_err(|error| {
-            BackendError::new("OLLAMA_CLIENT_FAILED", error.to_string(), true, false)
-        })?;
-    let response =
-        client.get(&tags_url).send().await.map_err(|error| {
-            BackendError::new("OLLAMA_UNREACHABLE", error.to_string(), true, false)
-        })?;
-    if !response.status().is_success() {
-        return Err(BackendError::new(
-            "OLLAMA_UNREACHABLE",
-            format!("Ollama returned HTTP {}.", response.status()),
-            true,
-            false,
-        ));
-    }
-    let value: serde_json::Value = response.json().await.map_err(|_| {
-        BackendError::new(
-            "OLLAMA_RESPONSE_INVALID",
-            "Ollama returned invalid JSON.",
-            true,
-            false,
-        )
-    })?;
-    let model_count = value
-        .get("models")
-        .and_then(|models| models.as_array())
-        .map(|models| models.len())
-        .unwrap_or(0);
+    state.require_external_ai_access(&context)?;
+    let (config, _, _) = crate::services::LlmService::provider_with_bound_secret(
+        &context,
+        &state.secret_service,
+        LlmProviderKind::Ollama,
+        Some((
+            &request.config_id,
+            request.binding_revision,
+            &request.expected_canonical_origin,
+        )),
+    )?;
+    let (base_url, model_count) = state.llm_service.probe_ollama(&config).await?;
     Ok(OllamaReachability {
         reachable: true,
         base_url,
@@ -164,25 +184,25 @@ fn provider_test_result(
 #[tauri::command]
 pub async fn test_llm_provider(
     state: State<'_, AppState>,
-    request: SaveProviderRequest,
+    request: ProviderConnectionRequest,
 ) -> Result<ProviderTestResult, BackendError> {
-    state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let secret = state.secret_service.get(request.config.provider)?;
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.require_external_ai_access(&context)?;
+    let (config, _, secret) = crate::services::LlmService::provider_with_bound_secret(
+        &context,
+        &state.secret_service,
+        request.provider,
+        Some((
+            &request.config_id,
+            request.binding_revision,
+            &request.expected_canonical_origin,
+        )),
+    )?;
     let response = state
         .llm_service
-        .complete(&request.config, secret.as_deref(), "Reply with OK only.")
+        .complete(&config, secret.as_deref(), "Reply with OK only.")
         .await;
-    provider_test_result(request.config.provider, response)
-}
-
-fn default_config(provider: LlmProviderKind) -> crate::models::llm::LlmProviderConfig {
-    crate::models::llm::LlmProviderConfig {
-        provider,
-        model: String::new(),
-        base_url: String::new(),
-        context_window: 0,
-        enabled: false,
-    }
+    provider_test_result(config.provider, response)
 }
 
 #[cfg(test)]

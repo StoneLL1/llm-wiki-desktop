@@ -1395,6 +1395,10 @@
   "provider.name.custom": "Custom（OpenAI 兼容）",
   "provider.editing": "正在编辑 {{provider}}",
   "provider.secretSafety": "Key 永远不会以明文形式写入项目文件 · 显示时仅展示末尾 4 位。",
+  "provider.binding.saveFirst": "请先保存并核对 Provider 目的地，再保存或测试凭据。",
+  "provider.binding.reviewTitle": "授权此凭据目的地",
+  "provider.binding.reviewDescription": "Key 将绑定到下方精确的协议、主机和端口；origin 变化后必须重新授权。",
+  "provider.binding.authorize": "授权并保存 Key",
 
   "graph.colorMode.type": "类型着色",
   "graph.colorMode.community": "社区着色",

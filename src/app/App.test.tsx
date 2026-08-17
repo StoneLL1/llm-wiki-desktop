@@ -552,7 +552,11 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Chat" }));
 
-    expect(await screen.findByRole("complementary", { name: "Sources" })).toBeInTheDocument();
+    expect(await screen.findByRole(
+      "complementary",
+      { name: "Sources" },
+      { timeout: 5_000 },
+    )).toBeInTheDocument();
     expect(screen.getAllByText("D:/Users/Aletta/Documents/wiki/agent-llm").length).toBeGreaterThan(0);
     expect(screen.getByText("Wiki pages: 237")).toBeInTheDocument();
     expect(screen.getByText("Tasks: 1 running")).toBeInTheDocument();

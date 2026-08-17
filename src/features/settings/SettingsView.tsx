@@ -1,4 +1,3 @@
-import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -87,9 +86,6 @@ const NAV_GROUPS: SettingsNavGroup[] = [
 
 const navGroupId = (labelKey: string): string => `settings-nav-group-${labelKey.replace(/\./g, "-")}`;
 
-const hasTauri = (): boolean =>
-  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-
 const providerKinds: readonly LlmProviderKind[] = ["open_ai", "anthropic", "google", "ollama", "custom"];
 
 export function SettingsView({
@@ -107,13 +103,6 @@ export function SettingsView({
 }: SettingsViewProps) {
   const { t } = useTranslation();
   const [activeSection, setActiveSection] = useState<SettingsSectionKey>(initialSection);
-  const [secretStatus, setSecretStatus] = useState<Record<LlmProviderKind, string | null>>({
-    open_ai: null,
-    anthropic: null,
-    google: null,
-    ollama: null,
-    custom: null,
-  });
   const settings = useSettingsStore((state) => state.settings);
   const loading = useSettingsStore((state) => state.loading);
   const saving = useSettingsStore((state) => state.saving);
@@ -147,22 +136,6 @@ export function SettingsView({
     return unobserve;
   }, [project.projectId, project.rootPath, loadSettings, ensureChatConvenienceAuthorization]);
 
-  useEffect(() => {
-    if (!hasTauri()) return;
-    void Promise.all(
-      providerKinds.map(async (provider) => {
-        const mask = await invoke<string | null>("get_provider_secret_status", {
-          request: { provider },
-        });
-        return [provider, mask] as const;
-      }),
-    )
-      .then((entries) => {
-        setSecretStatus(Object.fromEntries(entries) as Record<LlmProviderKind, string | null>);
-      })
-      .catch(() => undefined);
-  }, [providers]);
-
   const savePatch = async (patch: Partial<typeof settings>, refreshCapabilities = false) => {
     await persistPatch(project.projectId, project.rootPath, patch);
     if (refreshCapabilities) {
@@ -175,13 +148,10 @@ export function SettingsView({
     await requestNotificationPermissionFromUser();
   };
 
-  const providerStatuses = providers.map((provider) => ({
-    ...provider,
-    secretMask: secretStatus[provider.config.provider] ?? provider.secretMask,
-  }));
+  const providerStatuses = providers;
   const securityRows: ProviderSecretRow[] = providerKinds.map((provider) => {
     const configured = providerStatuses.find((item) => item.config.provider === provider);
-    const secretMask = secretStatus[provider] ?? configured?.secretMask ?? null;
+    const secretMask = configured?.secretMask ?? null;
     return {
       provider,
       hasSecret: Boolean(secretMask) || Boolean(configured?.hasSecret),

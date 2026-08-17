@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { type ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
 import "../../i18n";
@@ -6,6 +6,25 @@ import type { AgentInfo } from "../../types/agent";
 import { AiSettings } from "./AiSettings";
 
 const agents: AgentInfo[] = [];
+const anthropicStatus = {
+  config: {
+    provider: "anthropic" as const,
+    model: "claude-test",
+    baseUrl: "https://api.anthropic.com",
+    contextWindow: 100_000,
+    enabled: true,
+  },
+  credentialBinding: {
+    configId: "2d40f995-0dad-4d50-9a91-737664542dc0",
+    providerKind: "anthropic" as const,
+    canonicalOrigin: "https://api.anthropic.com",
+    credentialAccountId: "provider.binding.v1.project.anthropic.config.origin.1",
+    approvedAt: "2026-08-18T00:00:00Z",
+    revision: 1,
+  },
+  hasSecret: true,
+  secretMask: "****test",
+};
 
 function renderAiProvider(overrides: Partial<ComponentProps<typeof AiSettings>> = {}) {
   return render(
@@ -28,7 +47,7 @@ function renderAiProvider(overrides: Partial<ComponentProps<typeof AiSettings>> 
 describe("AiSettings BYOK providers", () => {
   it("clears the secret field after saving and never echoes secret material", async () => {
     const saveSecret = vi.fn().mockResolvedValue(undefined);
-    renderAiProvider({ onSaveSecret: saveSecret });
+    renderAiProvider({ providers: [anthropicStatus], onSaveSecret: saveSecret });
     fireEvent.click(screen.getByRole("button", { name: /byok/i }));
 
     const input = screen.getByLabelText(/API key/i) as HTMLInputElement;
@@ -41,7 +60,7 @@ describe("AiSettings BYOK providers", () => {
     expect(screen.queryByText("sk-secret-value")).not.toBeInTheDocument();
   });
 
-  it("syncs the selected provider editor when provider config loads after initial render", () => {
+  it("syncs the model but restores the reviewed official origin when legacy config loads", () => {
     const { rerender } = renderAiProvider();
     fireEvent.click(screen.getByRole("button", { name: /byok/i }));
 
@@ -55,10 +74,11 @@ describe("AiSettings BYOK providers", () => {
             config: {
               provider: "anthropic",
               model: "claude-loaded",
-              baseUrl: "https://loaded.anthropic.test",
+              baseUrl: "https://attacker.example",
               contextWindow: 100_000,
               enabled: true,
             },
+            credentialBinding: anthropicStatus.credentialBinding,
             hasSecret: true,
             secretMask: "****test",
           },
@@ -75,7 +95,7 @@ describe("AiSettings BYOK providers", () => {
     );
 
     expect(screen.getByLabelText(/model/i)).toHaveValue("claude-loaded");
-    expect(screen.getByLabelText(/base url/i)).toHaveValue("https://loaded.anthropic.test");
+    expect(screen.getByLabelText(/base url/i)).toHaveValue("https://api.anthropic.com");
   });
 
   it("keeps local Ollama status neutral until a connection test is run", () => {
@@ -89,19 +109,7 @@ describe("AiSettings BYOK providers", () => {
   it("tests the selected provider with its saved endpoint and model", async () => {
     const testProvider = vi.fn().mockResolvedValue({ ok: true, message: "Connected" });
     renderAiProvider({
-      providers: [
-        {
-          config: {
-            provider: "anthropic",
-            model: "claude-test",
-            baseUrl: "https://api.anthropic.com",
-            contextWindow: 100_000,
-            enabled: true,
-          },
-          hasSecret: true,
-          secretMask: "****test",
-        },
-      ],
+      providers: [anthropicStatus],
       onTestProvider: testProvider,
     });
 
@@ -115,5 +123,44 @@ describe("AiSettings BYOK providers", () => {
       model: "claude-test",
       baseUrl: "https://api.anthropic.com",
     }));
+  });
+
+  it("requires explicit approval of the exact canonical custom origin before saving a key", async () => {
+    const saveSecret = vi.fn().mockResolvedValue(undefined);
+    renderAiProvider({
+      providers: [{
+        config: {
+          provider: "custom",
+          model: "custom-model",
+          baseUrl: "https://custom.example:8443/v1",
+          contextWindow: 32_000,
+          enabled: true,
+        },
+        credentialBinding: {
+          configId: "e07c3067-5056-46da-91a0-b51870e739e6",
+          providerKind: "custom",
+          canonicalOrigin: "https://custom.example:8443",
+          credentialAccountId: "provider.binding.v1.project.custom.config.origin.1",
+          approvedAt: "forged-project-value",
+          revision: 1,
+        },
+        hasSecret: false,
+        secretMask: null,
+      }],
+      onSaveSecret: saveSecret,
+    });
+    fireEvent.click(screen.getByRole("button", { name: /byok/i }));
+    fireEvent.click(screen.getByRole("button", { name: /custom/i }));
+    fireEvent.change(screen.getByLabelText(/API key/i), {
+      target: { value: "custom-secret" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /save key/i }));
+
+    const approval = await screen.findByRole("alertdialog");
+    expect(approval).toHaveTextContent("https://custom.example:8443");
+    expect(saveSecret).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: /authorize and save key/i }));
+    await waitFor(() => expect(saveSecret).toHaveBeenCalledWith("custom", "custom-secret"));
   });
 });

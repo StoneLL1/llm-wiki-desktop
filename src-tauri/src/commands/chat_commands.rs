@@ -361,7 +361,11 @@ async fn run_chat_send(
                     label: Some("Calling BYOK provider".into()),
                 },
             );
-            let secret = state.secret_service.get(provider_kind)?;
+            let secret = crate::services::LlmService::bound_secret_for_config(
+                context,
+                &state.secret_service,
+                &provider,
+            )?;
             // Real streaming: each text delta is forwarded to the task stream
             // channel for live rendering, and cancellation is polled between
             // chunks. The fully assembled text is returned for persistence.
@@ -917,7 +921,12 @@ fn resolve_route(
                 .iter()
                 .any(|info| info.kind == *kind && info.state == AgentDetectionState::Installed)
     });
-    let selected_provider = select_provider(explicit_provider, &providers, &state.secret_service)?;
+    let selected_provider = select_provider(
+        context,
+        explicit_provider,
+        &providers,
+        &state.secret_service,
+    )?;
     decide_route(preference, usable_agent, selected_provider)
 }
 
@@ -960,6 +969,7 @@ fn decide_route(
 }
 
 fn select_provider(
+    context: &ProjectContext,
     explicit: Option<LlmProviderKind>,
     providers: &[LlmProviderConfig],
     secrets: &crate::services::SecretService,
@@ -977,7 +987,7 @@ fn select_provider(
                     true,
                 )
             })?;
-        if provider.provider.requires_secret() && secrets.get(provider.provider)?.is_none() {
+        if !crate::services::LlmService::bound_secret_available(context, secrets, &provider)? {
             return Err(BackendError::new(
                 "LLM_SECRET_MISSING",
                 "The selected provider has no configured secret.",
@@ -988,7 +998,7 @@ fn select_provider(
         return Ok(Some(provider));
     }
     for provider in providers.iter().filter(|p| p.enabled) {
-        if !provider.provider.requires_secret() || secrets.get(provider.provider)?.is_some() {
+        if crate::services::LlmService::bound_secret_available(context, secrets, provider)? {
             return Ok(Some(provider.clone()));
         }
     }

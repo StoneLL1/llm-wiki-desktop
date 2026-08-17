@@ -200,8 +200,12 @@ impl CompileService {
                 .any(|info| info.kind == *agent && info.state == AgentDetectionState::Installed)
         });
         let providers = LlmService::list_providers(context)?;
-        let selected_provider =
-            select_compile_provider(explicit_provider, &providers, services.secret_service)?;
+        let selected_provider = select_compile_provider(
+            context,
+            explicit_provider,
+            &providers,
+            services.secret_service,
+        )?;
         match preference {
             CompileRoutePreference::Agent => usable_agent
                 .map(|agent| ResolvedCompileRoute::Agent { agent, model: None })
@@ -343,18 +347,23 @@ impl CompileService {
             }
             ResolvedCompileRoute::Byok { provider, model } => {
                 let providers = LlmService::list_providers(context)?;
-                let config =
-                    select_compile_provider(Some(*provider), &providers, services.secret_service)?
-                        .filter(|config| config.model == *model)
-                        .ok_or_else(|| {
-                            BackendError::new(
-                                "WORKFLOW_ROUTE_STALE",
-                                "The prepared Provider or model changed before execution.",
-                                true,
-                                true,
-                            )
-                        })?;
-                let secret = services.secret_service.get(*provider)?;
+                let config = select_compile_provider(
+                    context,
+                    Some(*provider),
+                    &providers,
+                    services.secret_service,
+                )?
+                .filter(|config| config.model == *model)
+                .ok_or_else(|| {
+                    BackendError::new(
+                        "WORKFLOW_ROUTE_STALE",
+                        "The prepared Provider or model changed before execution.",
+                        true,
+                        true,
+                    )
+                })?;
+                let secret =
+                    LlmService::bound_secret_for_config(context, services.secret_service, &config)?;
                 services
                     .task_service
                     .append_log(
@@ -2015,6 +2024,7 @@ fn validate_compile_plan(
 }
 
 fn select_compile_provider(
+    context: &ProjectContext,
     explicit: Option<LlmProviderKind>,
     providers: &[LlmProviderConfig],
     secrets: &SecretService,
@@ -2032,7 +2042,7 @@ fn select_compile_provider(
                     true,
                 )
             })?;
-        if provider.provider.requires_secret() && secrets.get(provider.provider)?.is_none() {
+        if !LlmService::bound_secret_available(context, secrets, &provider)? {
             return Err(BackendError::new(
                 "LLM_SECRET_MISSING",
                 "The selected provider has no configured secret.",
@@ -2043,7 +2053,7 @@ fn select_compile_provider(
         return Ok(Some(provider));
     }
     for provider in providers.iter().filter(|provider| provider.enabled) {
-        if !provider.provider.requires_secret() || secrets.get(provider.provider)?.is_some() {
+        if LlmService::bound_secret_available(context, secrets, provider)? {
             return Ok(Some(provider.clone()));
         }
     }

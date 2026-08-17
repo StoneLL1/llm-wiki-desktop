@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::agent::AgentKind;
 use crate::models::import_v2_agent::AgentAssistancePolicy;
-use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
+use crate::models::llm::{LlmProviderConfig, LlmProviderKind, ProviderCredentialBinding};
 use crate::models::project::ProjectTemplate;
 
 fn default_language() -> String {
@@ -391,6 +391,8 @@ pub struct Settings {
     #[serde(default)]
     pub llm_providers: Vec<LlmProviderConfig>,
     #[serde(default)]
+    pub provider_credential_bindings: Vec<ProviderCredentialBinding>,
+    #[serde(default)]
     pub template: ProjectTemplate,
 }
 
@@ -432,6 +434,7 @@ impl Default for Settings {
             agent_default: None,
             import_agent_policy: AgentAssistancePolicy::default(),
             llm_providers: Vec::new(),
+            provider_credential_bindings: Vec::new(),
             template: ProjectTemplate::General,
         }
     }
@@ -579,6 +582,8 @@ pub struct ProjectSettingsFile {
     #[serde(default)]
     pub llm_providers: Vec<LlmProviderConfig>,
     #[serde(default)]
+    pub provider_credential_bindings: Vec<ProviderCredentialBinding>,
+    #[serde(default)]
     pub template: ProjectTemplate,
 }
 
@@ -622,6 +627,7 @@ impl Settings {
         self.agent_default = project.agent_default;
         self.import_agent_policy = project.import_agent_policy;
         self.llm_providers = project.llm_providers;
+        self.provider_credential_bindings = project.provider_credential_bindings;
         self.template = project.template;
     }
 
@@ -670,6 +676,7 @@ impl Settings {
             agent_default: self.agent_default,
             import_agent_policy: self.import_agent_policy.clone(),
             llm_providers: self.llm_providers.clone(),
+            provider_credential_bindings: self.provider_credential_bindings.clone(),
             template: self.template,
         }
     }
@@ -701,7 +708,12 @@ pub struct SetChatConvenienceAuthorizationRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderSecretStatusRequest {
+    pub project_id: String,
+    pub project_root_path: String,
     pub provider: LlmProviderKind,
+    pub config_id: String,
+    pub binding_revision: u64,
+    pub expected_canonical_origin: String,
 }
 
 #[cfg(test)]

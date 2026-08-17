@@ -31,6 +31,14 @@ const config: LlmProviderConfig = {
 };
 const status: ProviderStatus = {
   config,
+  credentialBinding: {
+    configId: "2d40f995-0dad-4d50-9a91-737664542dc0",
+    providerKind: "anthropic",
+    canonicalOrigin: "https://api.anthropic.com",
+    credentialAccountId: "provider.binding.v1.project.anthropic.config.origin.1",
+    approvedAt: "2026-08-18T00:00:00Z",
+    revision: 1,
+  },
   hasSecret: false,
   secretMask: null,
 };
@@ -110,17 +118,33 @@ describe("useProviderWorkflow", () => {
     await act(async () => result.current.deleteSecret("anthropic"));
 
     expect(invokeMock).toHaveBeenNthCalledWith(1, "store_provider_secret", {
-      request: { provider: "anthropic", secret },
+      request: {
+        projectId: project.projectId,
+        projectRootPath: project.rootPath,
+        provider: "anthropic",
+        configId: status.credentialBinding?.configId,
+        bindingRevision: status.credentialBinding?.revision,
+        expectedCanonicalOrigin: status.credentialBinding?.canonicalOrigin,
+        secret,
+      },
     });
     expect(invokeMock).toHaveBeenNthCalledWith(2, "delete_provider_secret", {
-      request: { provider: "anthropic", secret: null },
+      request: {
+        projectId: project.projectId,
+        projectRootPath: project.rootPath,
+        provider: "anthropic",
+        configId: status.credentialBinding?.configId,
+        bindingRevision: status.credentialBinding?.revision,
+        expectedCanonicalOrigin: status.credentialBinding?.canonicalOrigin,
+        secret: null,
+      },
     });
     expect(refresh).toHaveBeenNthCalledWith(1, true);
     expect(refresh).toHaveBeenNthCalledWith(2, true);
     expect(result.current).not.toHaveProperty("secret");
   });
 
-  it("invalidates retained provider facts for every project after a global secret change", async () => {
+  it("invalidates only the owning project's provider facts after a bound secret change", async () => {
     const projectB = { ...project, projectId: "project-b", rootPath: "D:/wiki/project-b" };
     invokeMock.mockResolvedValueOnce([status]).mockResolvedValueOnce([status]);
     await ensureProjectFacts(
@@ -134,11 +158,11 @@ describe("useProviderWorkflow", () => {
     invokeMock.mockResolvedValue(undefined);
     const { result } = renderHook(() => useProviderWorkflow(project, capabilities));
 
-    await act(async () => result.current.saveSecret("anthropic", "global-secret"));
+    await act(async () => result.current.saveSecret("anthropic", "project-secret"));
 
     const entries = useProjectFactsStore.getState().entries;
     expect(entries[projectFactsKey(project)]?.providers.status).toBe("stale");
-    expect(entries[projectFactsKey(projectB)]?.providers.status).toBe("stale");
+    expect(entries[projectFactsKey(projectB)]?.providers.status).toBe("ready");
     expect(refresh).toHaveBeenCalledWith(true);
   });
 
@@ -175,9 +199,15 @@ describe("useProviderWorkflow", () => {
       request: {
         projectId: project.projectId,
         projectRootPath: project.rootPath,
-        config,
+        provider: config.provider,
+        configId: status.credentialBinding?.configId,
+        bindingRevision: status.credentialBinding?.revision,
+        expectedCanonicalOrigin: status.credentialBinding?.canonicalOrigin,
       },
     });
+    const request = invokeMock.mock.calls[0]?.[1]?.request;
+    expect(request).not.toHaveProperty("config");
+    expect(request).not.toHaveProperty("baseUrl");
 
     Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
     await expect(result.current.testProvider(config)).resolves.toEqual({

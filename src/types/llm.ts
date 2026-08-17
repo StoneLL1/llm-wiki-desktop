@@ -8,8 +8,18 @@ export interface LlmProviderConfig {
   enabled: boolean;
 }
 
+export interface ProviderCredentialBinding {
+  configId: string;
+  providerKind: LlmProviderKind;
+  canonicalOrigin: string;
+  credentialAccountId: string;
+  approvedAt: string | null;
+  revision: number;
+}
+
 export interface ProviderStatus {
   config: LlmProviderConfig;
+  credentialBinding?: ProviderCredentialBinding | null;
   hasSecret: boolean;
   secretMask: string | null;
 }

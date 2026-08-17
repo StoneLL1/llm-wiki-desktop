@@ -86,5 +86,10 @@ export interface SaveSettingsRequest extends SettingsProjectRequest {
 }
 
 export interface ProviderSecretStatusRequest {
+  projectId: string;
+  projectRootPath: string;
   provider: LlmProviderKind;
+  configId: string;
+  bindingRevision: number;
+  expectedCanonicalOrigin: string;
 }

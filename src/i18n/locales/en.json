@@ -1392,6 +1392,10 @@
   "provider.name.custom": "Custom (OpenAI-compatible)",
   "provider.editing": "Editing {{provider}}",
   "provider.secretSafety": "Keys are never written to project files in plaintext · only the last 4 characters are shown.",
+  "provider.binding.saveFirst": "Save and review this provider destination before storing or testing its credential.",
+  "provider.binding.reviewTitle": "Authorize this credential destination",
+  "provider.binding.reviewDescription": "The key will be bound to this exact scheme, host, and port. Changing the origin requires authorization again.",
+  "provider.binding.authorize": "Authorize and save key",
 
   "graph.colorMode.type": "Type",
   "graph.colorMode.community": "Community",

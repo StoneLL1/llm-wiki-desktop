@@ -510,10 +510,12 @@ async fn execute_prepared_route(
                         && candidate.model == *model
                 })
                 .ok_or_else(route_unavailable)?;
-            let secret = services.secret_service.get(*provider)?;
-            if provider.requires_secret() && secret.is_none() {
-                return Err(route_unavailable());
-            }
+            let secret = crate::services::LlmService::bound_secret_for_config(
+                context,
+                services.secret_service,
+                &config,
+            )
+            .map_err(|_| route_unavailable())?;
             let completion = services
                 .llm_service
                 .complete(&config, secret.as_deref(), &prompt);
@@ -571,8 +573,12 @@ fn validate_prepared_route(
                 .into_iter()
                 .find(|candidate| candidate.provider == *provider && candidate.model == *model)
                 .ok_or_else(route_unavailable)?;
-            let configured_secret =
-                !provider.requires_secret() || services.secret_service.get(*provider)?.is_some();
+            let binding = crate::services::LlmService::credential_binding(context, &config)?;
+            let configured_secret = crate::services::LlmService::bound_secret_available(
+                context,
+                services.secret_service,
+                &config,
+            )?;
             let available = config.enabled
                 && !config.model.trim().is_empty()
                 && {
@@ -587,6 +593,8 @@ fn validate_prepared_route(
                 config.context_window,
                 config.enabled,
                 configured_secret,
+                binding.as_ref().map(|binding| &binding.config_id),
+                binding.as_ref().map(|binding| binding.revision),
             ))
             .map(|value| hex_sha256(value.as_bytes()))
             .map_err(|_| route_unavailable())?;

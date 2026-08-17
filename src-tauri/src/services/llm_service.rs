@@ -1,9 +1,22 @@
 use std::collections::BTreeMap;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 use crate::errors::BackendError;
-use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
+use crate::models::llm::{LlmProviderConfig, LlmProviderKind, ProviderCredentialBinding};
 use crate::models::paths::ProjectContext;
-use crate::services::SettingsService;
+use crate::services::import_v2::url_policy::{
+    ProviderNetworkClass, ProviderNetworkTarget, UrlPolicy,
+};
+use crate::services::{SecretService, SettingsService};
+use reqwest::redirect::Policy;
+use url::Host;
+
+const OPENAI_ORIGIN: &str = "https://api.openai.com";
+const ANTHROPIC_ORIGIN: &str = "https://api.anthropic.com";
+const GOOGLE_ORIGIN: &str = "https://generativelanguage.googleapis.com";
+static PROVIDER_CREDENTIAL_TRANSACTION: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone)]
 pub struct ProviderHttpRequest {
@@ -25,13 +38,315 @@ impl LlmService {
     pub fn save_provider(
         context: &ProjectContext,
         config: LlmProviderConfig,
-    ) -> Result<(), BackendError> {
-        Self::validate_config(&config)?;
-        SettingsService::default().save_provider(context, config)?;
-        Ok(())
+    ) -> Result<(LlmProviderConfig, ProviderCredentialBinding), BackendError> {
+        let settings_service = SettingsService::default();
+        Self::save_provider_internal(context, config, None, &settings_service)
+    }
+
+    pub fn save_provider_with_secret_invalidation(
+        context: &ProjectContext,
+        config: LlmProviderConfig,
+        secret_service: &SecretService,
+    ) -> Result<(LlmProviderConfig, ProviderCredentialBinding), BackendError> {
+        let settings_service = SettingsService::default();
+        Self::save_provider_internal(context, config, Some(secret_service), &settings_service)
+    }
+
+    fn save_provider_internal(
+        context: &ProjectContext,
+        mut config: LlmProviderConfig,
+        secret_service: Option<&SecretService>,
+        settings_service: &SettingsService,
+    ) -> Result<(LlmProviderConfig, ProviderCredentialBinding), BackendError> {
+        let _transaction = provider_credential_transaction()?;
+        let target = normalize_provider_config(&mut config)?;
+        let canonical_origin = UrlPolicy.canonical_origin(&target);
+        let settings = settings_service.read_settings(context)?;
+        let existing = settings
+            .provider_credential_bindings
+            .into_iter()
+            .find(|binding| binding.provider_kind == config.provider);
+        let reusable = existing.as_ref().is_some_and(|binding| {
+            validate_binding(context, &config, binding).is_ok()
+                && binding.canonical_origin == canonical_origin
+        });
+        if !reusable {
+            if let (Some(secret_service), Some(existing)) = (secret_service, existing.as_ref()) {
+                if SecretService::provider_binding_account_id(
+                    context,
+                    existing.provider_kind,
+                    &existing.config_id,
+                    &existing.canonical_origin,
+                    existing.revision,
+                )
+                .is_ok_and(|expected| expected == existing.credential_account_id)
+                {
+                    secret_service.delete_bound(context, existing)?;
+                }
+            }
+        }
+        let revision = existing.as_ref().map_or(1, |binding| {
+            binding.revision.saturating_add(u64::from(!reusable))
+        });
+        let config_id = if reusable {
+            existing
+                .as_ref()
+                .map(|binding| binding.config_id.clone())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+        } else {
+            uuid::Uuid::new_v4().to_string()
+        };
+        let credential_account_id = SecretService::provider_binding_account_id(
+            context,
+            config.provider,
+            &config_id,
+            &canonical_origin,
+            revision,
+        )?;
+        let binding = ProviderCredentialBinding {
+            config_id,
+            provider_kind: config.provider,
+            canonical_origin,
+            credential_account_id,
+            approved_at: reusable
+                .then(|| existing.and_then(|binding| binding.approved_at))
+                .flatten(),
+            revision,
+        };
+        settings_service.save_provider_with_binding(context, config.clone(), binding.clone())?;
+        Ok((config, binding))
     }
 
     pub fn validate_config(config: &LlmProviderConfig) -> Result<(), BackendError> {
+        let mut config = config.clone();
+        normalize_provider_config(&mut config)?;
+        Ok(())
+    }
+
+    pub fn credential_binding(
+        context: &ProjectContext,
+        config: &LlmProviderConfig,
+    ) -> Result<Option<ProviderCredentialBinding>, BackendError> {
+        let Some(binding) =
+            SettingsService::default().provider_credential_binding(context, config.provider)?
+        else {
+            return Ok(None);
+        };
+        validate_binding(context, config, &binding)?;
+        Ok(Some(binding))
+    }
+
+    pub fn provider_with_bound_secret(
+        context: &ProjectContext,
+        secret_service: &SecretService,
+        provider: LlmProviderKind,
+        expected_binding: Option<(&str, u64, &str)>,
+    ) -> Result<(LlmProviderConfig, ProviderCredentialBinding, Option<String>), BackendError> {
+        let config = Self::list_providers(context)?
+            .into_iter()
+            .find(|config| config.provider == provider)
+            .ok_or_else(provider_binding_required)?;
+        let binding =
+            Self::credential_binding(context, &config)?.ok_or_else(provider_binding_required)?;
+        if expected_binding.is_some_and(|(config_id, revision, canonical_origin)| {
+            binding.config_id != config_id
+                || binding.revision != revision
+                || binding.canonical_origin != canonical_origin
+        }) {
+            return Err(provider_binding_changed());
+        }
+        let secret = if provider.requires_secret() {
+            secret_service.get_bound(context, &binding)?
+        } else {
+            None
+        };
+        if provider.requires_secret() && secret.is_none() {
+            return Err(provider_binding_required());
+        }
+        Ok((config, binding, secret))
+    }
+
+    pub fn bound_secret_for_config(
+        context: &ProjectContext,
+        secret_service: &SecretService,
+        config: &LlmProviderConfig,
+    ) -> Result<Option<String>, BackendError> {
+        let binding =
+            Self::credential_binding(context, config)?.ok_or_else(provider_binding_required)?;
+        let secret = if config.provider.requires_secret() {
+            secret_service.get_bound(context, &binding)?
+        } else {
+            None
+        };
+        if config.provider.requires_secret() && secret.is_none() {
+            return Err(provider_binding_required());
+        }
+        Ok(secret)
+    }
+
+    pub fn bound_secret_available(
+        context: &ProjectContext,
+        secret_service: &SecretService,
+        config: &LlmProviderConfig,
+    ) -> Result<bool, BackendError> {
+        let Some(binding) = Self::credential_binding(context, config)? else {
+            return Ok(false);
+        };
+        Ok(!config.provider.requires_secret()
+            || secret_service.get_bound(context, &binding)?.is_some())
+    }
+
+    pub fn approve_and_store_secret(
+        context: &ProjectContext,
+        secret_service: &SecretService,
+        provider: LlmProviderKind,
+        config_id: &str,
+        binding_revision: u64,
+        expected_canonical_origin: &str,
+        secret: &str,
+    ) -> Result<ProviderCredentialBinding, BackendError> {
+        let settings_service = SettingsService::default();
+        Self::approve_and_store_secret_internal(
+            context,
+            secret_service,
+            provider,
+            config_id,
+            binding_revision,
+            expected_canonical_origin,
+            secret,
+            &settings_service,
+        )
+    }
+
+    fn approve_and_store_secret_internal(
+        context: &ProjectContext,
+        secret_service: &SecretService,
+        provider: LlmProviderKind,
+        config_id: &str,
+        binding_revision: u64,
+        expected_canonical_origin: &str,
+        secret: &str,
+        settings_service: &SettingsService,
+    ) -> Result<ProviderCredentialBinding, BackendError> {
+        let _transaction = provider_credential_transaction()?;
+        let config = settings_service
+            .list_providers(context)?
+            .into_iter()
+            .find(|config| config.provider == provider)
+            .ok_or_else(provider_binding_required)?;
+        let mut binding = settings_service
+            .provider_credential_binding(context, config.provider)?
+            .ok_or_else(provider_binding_required)?;
+        validate_binding(context, &config, &binding)?;
+        if binding.config_id != config_id
+            || binding.revision != binding_revision
+            || binding.canonical_origin != expected_canonical_origin
+        {
+            return Err(provider_binding_changed());
+        }
+        binding.approved_at = Some(chrono::Utc::now().to_rfc3339());
+        secret_service.set_bound(context, &binding, secret)?;
+        if let Err(error) =
+            settings_service.save_provider_with_binding(context, config, binding.clone())
+        {
+            let _ = secret_service.delete_bound(context, &binding);
+            return Err(error);
+        }
+        Ok(binding)
+    }
+
+    pub fn delete_bound_secret(
+        context: &ProjectContext,
+        secret_service: &SecretService,
+        provider: LlmProviderKind,
+        config_id: &str,
+        binding_revision: u64,
+        expected_canonical_origin: &str,
+    ) -> Result<(), BackendError> {
+        let settings_service = SettingsService::default();
+        Self::delete_bound_secret_internal(
+            context,
+            secret_service,
+            provider,
+            config_id,
+            binding_revision,
+            expected_canonical_origin,
+            &settings_service,
+        )
+    }
+
+    fn delete_bound_secret_internal(
+        context: &ProjectContext,
+        secret_service: &SecretService,
+        provider: LlmProviderKind,
+        config_id: &str,
+        binding_revision: u64,
+        expected_canonical_origin: &str,
+        settings_service: &SettingsService,
+    ) -> Result<(), BackendError> {
+        let _transaction = provider_credential_transaction()?;
+        let config = settings_service
+            .list_providers(context)?
+            .into_iter()
+            .find(|config| config.provider == provider)
+            .ok_or_else(provider_binding_required)?;
+        let mut binding = settings_service
+            .provider_credential_binding(context, config.provider)?
+            .ok_or_else(provider_binding_required)?;
+        validate_binding(context, &config, &binding)?;
+        if binding.config_id != config_id
+            || binding.revision != binding_revision
+            || binding.canonical_origin != expected_canonical_origin
+        {
+            return Err(provider_binding_changed());
+        }
+        secret_service.delete_bound(context, &binding)?;
+        binding.approved_at = None;
+        settings_service
+            .save_provider_with_binding(context, config, binding)
+            .map(|_| ())
+    }
+
+    pub async fn probe_ollama(
+        &self,
+        config: &LlmProviderConfig,
+    ) -> Result<(String, usize), BackendError> {
+        if config.provider != LlmProviderKind::Ollama {
+            return Err(provider_binding_changed());
+        }
+        Self::validate_config(config)?;
+        let tags_url = format!("{}/api/tags", config.base_url.trim_end_matches('/'));
+        let (client, url) = validated_provider_client(&tags_url, Duration::from_secs(4)).await?;
+        let response = client
+            .get(url)
+            .send()
+            .await
+            .map_err(provider_request_error)?;
+        reject_redirect(&response)?;
+        if !response.status().is_success() {
+            return Err(BackendError::new(
+                "OLLAMA_UNREACHABLE",
+                format!("Ollama returned HTTP {}.", response.status()),
+                true,
+                false,
+            ));
+        }
+        let value: serde_json::Value = response.json().await.map_err(|_| {
+            BackendError::new(
+                "OLLAMA_RESPONSE_INVALID",
+                "Ollama returned invalid JSON.",
+                true,
+                false,
+            )
+        })?;
+        let model_count = value
+            .get("models")
+            .and_then(|models| models.as_array())
+            .map_or(0, Vec::len);
+        Ok((config.base_url.clone(), model_count))
+    }
+
+    fn validate_config_shape(config: &LlmProviderConfig) -> Result<(), BackendError> {
         if config.model.trim().is_empty() {
             return Err(BackendError::new(
                 "LLM_MODEL_REQUIRED",
@@ -40,21 +355,9 @@ impl LlmService {
                 true,
             ));
         }
-        let url = url::Url::parse(&config.base_url).map_err(|_| {
-            BackendError::new(
-                "LLM_BASE_URL_INVALID",
-                "Provider base URL is invalid.",
-                true,
-                true,
-            )
-        })?;
+        let url = url::Url::parse(&config.base_url).map_err(|_| invalid_provider_url())?;
         if !matches!(url.scheme(), "http" | "https") {
-            return Err(BackendError::new(
-                "LLM_BASE_URL_INVALID",
-                "Provider URL must use HTTP or HTTPS.",
-                true,
-                true,
-            ));
+            return Err(invalid_provider_url());
         }
         let forbidden_query_key = url.query_pairs().any(|(key, _)| {
             matches!(
@@ -62,7 +365,12 @@ impl LlmService {
                 "key" | "api_key" | "apikey" | "token" | "access_token" | "authorization"
             )
         });
-        if !url.username().is_empty() || url.password().is_some() || forbidden_query_key {
+        if !url.username().is_empty()
+            || url.password().is_some()
+            || forbidden_query_key
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
             return Err(BackendError::new(
                 "LLM_BASE_URL_SECRET_FORBIDDEN",
                 "Provider base URL cannot contain credentials or secret query parameters.",
@@ -245,24 +553,14 @@ impl LlmService {
         prompt: &str,
     ) -> Result<String, BackendError> {
         let request = Self::build_request(config, secret, prompt)?;
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .map_err(|error| {
-                BackendError::new("LLM_CLIENT_FAILED", error.to_string(), true, false)
-            })?;
-        let mut builder = client.post(&request.url).json(&request.body);
+        let (client, url) =
+            validated_provider_client(&request.url, Duration::from_secs(120)).await?;
+        let mut builder = client.post(url).json(&request.body);
         for (name, value) in &request.headers {
             builder = builder.header(name, value);
         }
-        let response = builder.send().await.map_err(|error| {
-            let (code, message) = if error.is_timeout() {
-                ("LLM_REQUEST_TIMEOUT", "Provider request timed out.")
-            } else {
-                ("LLM_REQUEST_FAILED", "Provider request failed.")
-            };
-            BackendError::new(code, message, true, false)
-        })?;
+        let response = builder.send().await.map_err(provider_request_error)?;
+        reject_redirect(&response)?;
         let status = response.status();
         if !status.is_success() {
             return Err(BackendError::new(
@@ -382,13 +680,8 @@ impl LlmService {
         } else {
             Self::build_streaming_request(config, secret, prompt)?
         };
-        let client = reqwest::Client::builder()
-            .timeout(timeout)
-            .build()
-            .map_err(|error| {
-                BackendError::new("LLM_CLIENT_FAILED", error.to_string(), true, false)
-            })?;
-        let mut builder = client.post(&request.url).json(&request.body);
+        let (client, url) = validated_provider_client(&request.url, timeout).await?;
+        let mut builder = client.post(url).json(&request.body);
         for (name, value) in &request.headers {
             builder = builder.header(name, value);
         }
@@ -407,14 +700,8 @@ impl LlmService {
                 }
             }
         }
-        .map_err(|error| {
-            let (code, message) = if error.is_timeout() {
-                ("LLM_REQUEST_TIMEOUT", "Provider request timed out.")
-            } else {
-                ("LLM_REQUEST_FAILED", "Provider request failed.")
-            };
-            BackendError::new(code, message, true, false)
-        })?;
+        .map_err(provider_request_error)?;
+        reject_redirect(&response)?;
         let status = response.status();
         if !status.is_success() {
             return Err(BackendError::new(
@@ -500,6 +787,244 @@ impl LlmService {
         }
         Ok(full)
     }
+}
+
+fn normalize_provider_config(
+    config: &mut LlmProviderConfig,
+) -> Result<ProviderNetworkTarget, BackendError> {
+    LlmService::validate_config_shape(config)?;
+    let target = UrlPolicy
+        .normalize_provider_endpoint(&config.base_url)
+        .map_err(provider_target_error)?;
+    let canonical_origin = UrlPolicy.canonical_origin(&target);
+    let path = target.session.request_url.path();
+    match config.provider {
+        LlmProviderKind::OpenAi => {
+            require_official_origin(&target, &canonical_origin, OPENAI_ORIGIN, path)?
+        }
+        LlmProviderKind::Anthropic => {
+            require_official_origin(&target, &canonical_origin, ANTHROPIC_ORIGIN, path)?
+        }
+        LlmProviderKind::Google => {
+            require_official_origin(&target, &canonical_origin, GOOGLE_ORIGIN, path)?
+        }
+        LlmProviderKind::Ollama if target.class != ProviderNetworkClass::LoopbackHttp => {
+            return Err(BackendError::new(
+                "OLLAMA_LOOPBACK_REQUIRED",
+                "Ollama endpoints must use loopback HTTP.",
+                true,
+                true,
+            ));
+        }
+        LlmProviderKind::Ollama | LlmProviderKind::Custom => {}
+    }
+    let mut normalized = target.session.request_url.clone();
+    normalized.set_query(None);
+    normalized.set_fragment(None);
+    config.base_url = normalized.to_string().trim_end_matches('/').to_string();
+    Ok(target)
+}
+
+fn require_official_origin(
+    target: &ProviderNetworkTarget,
+    actual: &str,
+    expected: &str,
+    path: &str,
+) -> Result<(), BackendError> {
+    if target.class != ProviderNetworkClass::PublicHttps
+        || actual != expected
+        || !matches!(path, "" | "/")
+    {
+        return Err(BackendError::new(
+            "LLM_OFFICIAL_ORIGIN_REQUIRED",
+            "Official providers must use their reviewed HTTPS origin.",
+            true,
+            true,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_binding(
+    context: &ProjectContext,
+    config: &LlmProviderConfig,
+    binding: &ProviderCredentialBinding,
+) -> Result<(), BackendError> {
+    let mut normalized = config.clone();
+    let target = normalize_provider_config(&mut normalized)?;
+    let canonical_origin = UrlPolicy.canonical_origin(&target);
+    let expected_account = SecretService::provider_binding_account_id(
+        context,
+        config.provider,
+        &binding.config_id,
+        &canonical_origin,
+        binding.revision,
+    )?;
+    if binding.provider_kind != config.provider
+        || binding.canonical_origin != canonical_origin
+        || binding.credential_account_id != expected_account
+    {
+        return Err(provider_binding_changed());
+    }
+    Ok(())
+}
+
+fn provider_credential_transaction() -> Result<MutexGuard<'static, ()>, BackendError> {
+    PROVIDER_CREDENTIAL_TRANSACTION.lock().map_err(|_| {
+        BackendError::new(
+            "PROVIDER_CREDENTIAL_TRANSACTION_FAILED",
+            "Provider credential state is temporarily unavailable.",
+            true,
+            false,
+        )
+    })
+}
+
+async fn validated_provider_client(
+    request_url: &str,
+    timeout: Duration,
+) -> Result<(reqwest::Client, url::Url), BackendError> {
+    let target = UrlPolicy
+        .normalize_provider_endpoint(request_url)
+        .map_err(provider_target_error)?;
+    let port = target
+        .session
+        .request_url
+        .port_or_known_default()
+        .ok_or_else(invalid_provider_url)?;
+    let (host, resolved) = match target.session.request_url.host() {
+        Some(Host::Domain(domain)) => {
+            let resolved = tokio::time::timeout(
+                Duration::from_secs(5),
+                tokio::net::lookup_host((domain, port)),
+            )
+            .await
+            .map_err(|_| {
+                BackendError::new(
+                    "LLM_DNS_TIMEOUT",
+                    "Provider DNS resolution timed out.",
+                    true,
+                    false,
+                )
+            })?
+            .map_err(|_| {
+                BackendError::new(
+                    "LLM_DNS_FAILED",
+                    "Provider DNS resolution failed.",
+                    true,
+                    false,
+                )
+            })?
+            .map(|address| address.ip())
+            .collect::<Vec<_>>();
+            (domain.to_string(), resolved)
+        }
+        Some(Host::Ipv4(ip)) => (ip.to_string(), vec![IpAddr::V4(ip)]),
+        Some(Host::Ipv6(ip)) => (ip.to_string(), vec![IpAddr::V6(ip)]),
+        None => return Err(invalid_provider_url()),
+    };
+    let connected = *resolved.first().ok_or_else(|| {
+        BackendError::new(
+            "LLM_DNS_FAILED",
+            "Provider DNS returned no addresses.",
+            true,
+            false,
+        )
+    })?;
+    let trusted_public_host = official_origin_for_host(&host).is_some();
+    UrlPolicy
+        .validate_provider_resolution(&target, &resolved, connected, trusted_public_host)
+        .map_err(provider_target_error)?;
+    let client = provider_http_client(&host, &target, connected, port, timeout)?;
+    Ok((client, target.session.request_url))
+}
+
+fn provider_http_client(
+    host: &str,
+    target: &ProviderNetworkTarget,
+    connected: IpAddr,
+    port: u16,
+    timeout: Duration,
+) -> Result<reqwest::Client, BackendError> {
+    let mut builder = reqwest::Client::builder()
+        .redirect(Policy::none())
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(timeout);
+    if matches!(target.session.request_url.host(), Some(Host::Domain(_))) {
+        builder = builder.resolve(&host, SocketAddr::new(connected, port));
+    }
+    let client = builder
+        .build()
+        .map_err(|error| BackendError::new("LLM_CLIENT_FAILED", error.to_string(), true, false))?;
+    Ok(client)
+}
+
+fn official_origin_for_host(host: &str) -> Option<&'static str> {
+    match host {
+        "api.openai.com" => Some(OPENAI_ORIGIN),
+        "api.anthropic.com" => Some(ANTHROPIC_ORIGIN),
+        "generativelanguage.googleapis.com" => Some(GOOGLE_ORIGIN),
+        _ => None,
+    }
+}
+
+fn reject_redirect(response: &reqwest::Response) -> Result<(), BackendError> {
+    if response.status().is_redirection() {
+        return Err(BackendError::new(
+            "LLM_REDIRECT_REJECTED",
+            "Provider redirects are disabled; review and save the destination explicitly.",
+            true,
+            true,
+        ));
+    }
+    Ok(())
+}
+
+fn provider_request_error(error: reqwest::Error) -> BackendError {
+    let (code, message) = if error.is_timeout() {
+        ("LLM_REQUEST_TIMEOUT", "Provider request timed out.")
+    } else {
+        ("LLM_REQUEST_FAILED", "Provider request failed.")
+    };
+    BackendError::new(code, message, true, false)
+}
+
+fn provider_target_error(error: BackendError) -> BackendError {
+    BackendError::new(
+        "LLM_DESTINATION_BLOCKED",
+        "The provider destination was blocked by the network safety policy.",
+        false,
+        true,
+    )
+    .with_details(serde_json::json!({ "reasonCode": error.code }))
+}
+
+fn invalid_provider_url() -> BackendError {
+    BackendError::new(
+        "LLM_BASE_URL_INVALID",
+        "Provider base URL is invalid.",
+        true,
+        true,
+    )
+}
+
+fn provider_binding_required() -> BackendError {
+    BackendError::new(
+        "PROVIDER_CREDENTIAL_REAUTH_REQUIRED",
+        "Save this provider destination and authorize its credential before using it.",
+        true,
+        true,
+    )
+}
+
+fn provider_binding_changed() -> BackendError {
+    BackendError::new(
+        "PROVIDER_CREDENTIAL_BINDING_CHANGED",
+        "The provider destination changed; review it and authorize the credential again.",
+        true,
+        true,
+    )
 }
 
 fn extract_buffered_response(provider: LlmProviderKind, response: &[u8]) -> Option<String> {
@@ -713,6 +1238,209 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(embedded_secret.code, "LLM_BASE_URL_SECRET_FORBIDDEN");
+    }
+
+    #[test]
+    fn origin_change_deletes_old_bound_secret_and_requires_fresh_approval() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("llm-origin-change-{stamp}"));
+        let config_dir = std::env::temp_dir().join(format!("llm-origin-config-{stamp}"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let context = ProjectContext::new("origin-change", root.clone());
+        let settings_service = SettingsService::with_config_dir(config_dir.clone());
+        let secrets = SecretService::memory();
+
+        let (saved, mut first_binding) = LlmService::save_provider_internal(
+            &context,
+            config(LlmProviderKind::Custom, "https://one.example"),
+            Some(&secrets),
+            &settings_service,
+        )
+        .unwrap();
+        first_binding.approved_at = Some("2026-08-18T00:00:00Z".into());
+        secrets
+            .set_bound(&context, &first_binding, "origin-one-secret")
+            .unwrap();
+        settings_service
+            .save_provider_with_binding(&context, saved, first_binding.clone())
+            .unwrap();
+
+        let (_, unchanged) = LlmService::save_provider_internal(
+            &context,
+            config(LlmProviderKind::Custom, "https://one.example/"),
+            Some(&secrets),
+            &settings_service,
+        )
+        .unwrap();
+        assert_eq!(unchanged.config_id, first_binding.config_id);
+        assert_eq!(unchanged.revision, first_binding.revision);
+        assert_eq!(
+            secrets.get_bound(&context, &unchanged).unwrap().as_deref(),
+            Some("origin-one-secret")
+        );
+
+        let (_, changed) = LlmService::save_provider_internal(
+            &context,
+            config(LlmProviderKind::Custom, "https://two.example"),
+            Some(&secrets),
+            &settings_service,
+        )
+        .unwrap();
+        assert_ne!(changed.config_id, first_binding.config_id);
+        assert!(changed.revision > first_binding.revision);
+        assert!(changed.approved_at.is_none());
+        assert_eq!(secrets.get_bound(&context, &first_binding).unwrap(), None);
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn concurrent_stale_secret_store_cannot_survive_origin_change() {
+        use std::sync::{Arc, Barrier};
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".app")).unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let context = ProjectContext::new("provider-race", root.path().to_path_buf());
+        let settings = Arc::new(SettingsService::with_config_dir(
+            config_dir.path().to_path_buf(),
+        ));
+        let secrets = SecretService::memory();
+        let (_, old_binding) = LlmService::save_provider_internal(
+            &context,
+            config(LlmProviderKind::Custom, "https://one.example"),
+            Some(&secrets),
+            &settings,
+        )
+        .unwrap();
+        let barrier = Arc::new(Barrier::new(3));
+
+        let store_context = context.clone();
+        let store_settings = Arc::clone(&settings);
+        let store_secrets = secrets.clone();
+        let store_barrier = Arc::clone(&barrier);
+        let store_binding = old_binding.clone();
+        let store_thread = std::thread::spawn(move || {
+            store_barrier.wait();
+            LlmService::approve_and_store_secret_internal(
+                &store_context,
+                &store_secrets,
+                LlmProviderKind::Custom,
+                &store_binding.config_id,
+                store_binding.revision,
+                &store_binding.canonical_origin,
+                "stale-secret",
+                &store_settings,
+            )
+        });
+
+        let save_context = context.clone();
+        let save_settings = Arc::clone(&settings);
+        let save_secrets = secrets.clone();
+        let save_barrier = Arc::clone(&barrier);
+        let save_thread = std::thread::spawn(move || {
+            save_barrier.wait();
+            LlmService::save_provider_internal(
+                &save_context,
+                config(LlmProviderKind::Custom, "https://two.example"),
+                Some(&save_secrets),
+                &save_settings,
+            )
+        });
+
+        barrier.wait();
+        let store_result = store_thread.join().unwrap();
+        let (_, current_binding) = save_thread.join().unwrap().unwrap();
+
+        assert_eq!(current_binding.canonical_origin, "https://two.example");
+        assert_eq!(
+            settings.list_providers(&context).unwrap()[0].base_url,
+            "https://two.example"
+        );
+        assert_eq!(
+            secrets
+                .get_account(&old_binding.credential_account_id)
+                .unwrap(),
+            None
+        );
+        if let Err(error) = store_result {
+            assert_eq!(error.code, "PROVIDER_CREDENTIAL_BINDING_CHANGED");
+        }
+    }
+
+    #[tokio::test]
+    async fn self_signed_tls_is_rejected_before_any_http_request_or_secret_send() {
+        use base64::Engine as _;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::AsyncReadExt;
+        use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use tokio_rustls::rustls::ServerConfig;
+        use tokio_rustls::TlsAcceptor;
+
+        const CERT_DER: &str = "MIIC1DCCAbygAwIBAgIIG5gyR6DTJ2wwDQYJKoZIhvcNAQELBQAwGjEYMBYGA1UEAxMPc2VsZnNpZ25lZC50ZXN0MB4XDTI2MDgxNjE2NDEyMloXDTI2MDkxNjE2NDEyMlowGjEYMBYGA1UEAxMPc2VsZnNpZ25lZC50ZXN0MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnCqtegFqCRV/XJPp4wSLv6ZoL5PKiC8auMbD147GyDxkIdpC2tBhwnMTeUEq7Rrnhg5T/zA1N0K6AzhuyvYasFO+MKPKivsPTVom47Aasy5ZLzRl0E47hBMfKwKKS7yFRt8MFIJOLkieTa018iSp5r76vyEdpFcZEi0YhtxjxhU9DA6hEf+Zah0nCNFV6XRRrvLMHP6OXdr0wtPemw60TKvQSM3/RWGoI8aeBDjgasuuomP0A3dqfG1WKVCUZ94myEjVQLezQdz44phhiTqyE3Bz9aKshE+kBW4/jk68LJznxnUNBT7qYoPeSL8nyvEUIBvmBD0V9dZ24TcPTKfP9QIDAQABox4wHDAaBgNVHREEEzARgg9zZWxmc2lnbmVkLnRlc3QwDQYJKoZIhvcNAQELBQADggEBADiwzhiQZ6gRWXWuEWe50xhQjcqh7wTQBt1zzTWuIBYhxHQuufvKIlDJ0FCR28Gene+Jc7d6fnXtueT5qmnyrw3ZsCiUCO09DUcNH9blO13+Yh5VqbnzGbDlG+jDnMiNYJcTNR1zciZBhaoPTbJ0gB8Bs7sdv8sTNvbn118hM5wW8Ot5xS47dE9LE+KW8qxhNEPXweVPx/QgQOWOuYjwIiS19qQt1BktGGgT/AWIi9RpJeYoiU0qaCVJaDPLfI8wVPOLVMGIquLFl9hHbTMXLnKstgZeMWvuQ7aEj2KK4YQbtB5x4x53Z99Ws+zIDJ3w54qOY6LNQgFemBKjIFhbkRY=";
+        const KEY_DER: &str = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCcKq16AWoJFX9ck+njBIu/pmgvk8qILxq4xsPXjsbIPGQh2kLa0GHCcxN5QSrtGueGDlP/MDU3QroDOG7K9hqwU74wo8qK+w9NWibjsBqzLlkvNGXQTjuEEx8rAopLvIVG3wwUgk4uSJ5NrTXyJKnmvvq/IR2kVxkSLRiG3GPGFT0MDqER/5lqHScI0VXpdFGu8swc/o5d2vTC096bDrRMq9BIzf9FYagjxp4EOOBqy66iY/QDd2p8bVYpUJRn3ibISNVAt7NB3PjimGGJOrITcHP1oqyET6QFbj+OTrwsnOfGdQ0FPupig95IvyfK8RQgG+YEPRX11nbhNw9Mp8/1AgMBAAECggEAe1mGXqkBTR2K1OAMTIFJtN5GytWskrbKH4r4I6olvwFcghS428begM2OYycjNdcbapqkpBs63WQ6MtL/SBbt67qprhehovc9FfcQYqW14TPJw+xaQxeYEPFdnAZMoBfPGbSSAR0PjaVUTLx0sMde3+CXhCIvHKCjL+Uoy1UHBeyCq3i/7cqGdT7e2m7M8v8zSu9lONUdaBRWKEhINqJiobHtjd8s51PvI5Fkd1/ZDdwdXjPfsCoBe3anhPJNKogMTOSMOuxMWCfHSxYF1eDSdCX/SadhD8LG31/aGupNULQt0yKsXpNfLUdThZs71Eya4F4ccGOwo36KjiKgtfns3QKBgQDNRTWDl4LMq00ye6fJckQBYvpZ6lx1T9HCCkVThX+tj39RZlGNgzNytrnNKIuDT6Z/4Fn8kwGfiHQX8DQxV2lu4e3lFMX9ges6NIC8Y0I5gvM5SGcg6w2ilEomNxIgRHPOFRycAif/ZF0bJ5Jzgct477LGFoBj4NZqnMzt2lNqPwKBgQDCwtcZso52r6mxKJlIpR8A0/novlR2oFPup2nuCuiB7x/ypzdtVvqzJCRXUMYBL9TE1dMLDr/51pofcJWpwUnaLAMmu3Ks64IKT6Xix1n36McTvPXwmTHAd9u3IXVK12cq9Ke74nS4FNLedppmyw+kh/lz+ADPEPa9iaPGejlwywKBgGKNbPD+CD2NrSWkutz78GyeAcazv6pPJU09MyWzfaZts9n3/wWrTUMxOamnYrwrvKu+olWimu/mSp7Ho7dg2Wz0KgyHWbup6a7rUDeijEQie/YvrdvfHo/FFIiefiRh2RvDhRXd7yguHomQCT9NvMwWgUWbvg61/xv2pmk4Hj5vAoGAasyxa7QQj2Dwqudadw2lHK0hI9ILOyncHMjNO+3bZjUczdGIgXrq6wVssDzo94mlIXMn0a5686QMzCTOzVHjD7KG39x2nABhRQo8K0mqOln5oQdDznYTZDnV0GyWhz3roxCaUltyKeexYrCjJq8/mre9wSxENUhWJcWue45WpVUCgYEAt2ZBgRQgKLESM+yRyE93usH1DL2JmDxRBFbhCjkaanOQjRlTcN06hssuTpQLsFtPVX39P6YiKmBTz7hWLmeOg3/wRLeK5cx2WMLdg7LsThAUgDg8kycIPgIgTYO7gfMzVKsxtrkaHUwFiC4dcKtYNfV8Kx1jmDsYWbCgrXAye24=";
+
+        let certificate = CertificateDer::from(
+            base64::engine::general_purpose::STANDARD
+                .decode(CERT_DER)
+                .unwrap(),
+        );
+        let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            base64::engine::general_purpose::STANDARD
+                .decode(KEY_DER)
+                .unwrap(),
+        ));
+        let server_config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate], private_key)
+            .unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(server_config));
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&request_count);
+        let worker = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            if let Ok(mut stream) = acceptor.accept(stream).await {
+                let mut request = [0_u8; 4_096];
+                if stream.read(&mut request).await.unwrap_or(0) > 0 {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+
+        let target = UrlPolicy
+            .normalize_provider_endpoint(&format!(
+                "https://selfsigned.test:{port}/v1/chat/completions"
+            ))
+            .unwrap();
+        let client = provider_http_client(
+            "selfsigned.test",
+            &target,
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            port,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let error = client
+            .post(target.session.request_url)
+            .header("Authorization", "Bearer tls-secret")
+            .send()
+            .await
+            .unwrap_err();
+
+        worker.await.unwrap();
+        assert!(error.is_connect() || error.is_request());
+        assert_eq!(request_count.load(Ordering::SeqCst), 0);
+        assert!(!error.to_string().contains("tls-secret"));
     }
 
     #[test]

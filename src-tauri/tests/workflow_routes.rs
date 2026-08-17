@@ -1,6 +1,8 @@
 use llm_wiki_desktop_lib::errors::BackendError;
 use llm_wiki_desktop_lib::models::agent::AgentKind;
-use llm_wiki_desktop_lib::models::llm::{LlmProviderConfig, LlmProviderKind};
+use llm_wiki_desktop_lib::models::llm::{
+    LlmProviderConfig, LlmProviderKind, ProviderCredentialBinding,
+};
 use llm_wiki_desktop_lib::models::paths::ProjectContext;
 use llm_wiki_desktop_lib::models::project::ProjectTrustKind;
 use llm_wiki_desktop_lib::models::settings::Settings;
@@ -176,7 +178,14 @@ fn provider(kind: LlmProviderKind, model: &str) -> LlmProviderConfig {
     LlmProviderConfig {
         provider: kind,
         model: model.into(),
-        base_url: "http://127.0.0.1:11434".into(),
+        base_url: match kind {
+            LlmProviderKind::OpenAi => "https://api.openai.com",
+            LlmProviderKind::Anthropic => "https://api.anthropic.com",
+            LlmProviderKind::Google => "https://generativelanguage.googleapis.com",
+            LlmProviderKind::Ollama => "http://127.0.0.1:11434",
+            LlmProviderKind::Custom => "https://custom.example",
+        }
+        .into(),
         context_window: 8192,
         enabled: true,
     }
@@ -190,10 +199,59 @@ fn save_routes(
 ) {
     let settings = Settings {
         agent_default: default_agent,
-        llm_providers: providers,
         ..Settings::default()
     };
     settings_service.save_settings(context, &settings).unwrap();
+    for provider in providers {
+        let target = llm_wiki_desktop_lib::services::import_v2::url_policy::UrlPolicy
+            .normalize_provider_endpoint(&provider.base_url)
+            .unwrap();
+        let canonical_origin = llm_wiki_desktop_lib::services::import_v2::url_policy::UrlPolicy
+            .canonical_origin(&target);
+        let config_id = uuid::Uuid::new_v4().to_string();
+        let binding = ProviderCredentialBinding {
+            credential_account_id: SecretService::provider_binding_account_id(
+                context,
+                provider.provider,
+                &config_id,
+                &canonical_origin,
+                1,
+            )
+            .unwrap(),
+            config_id,
+            provider_kind: provider.provider,
+            canonical_origin,
+            approved_at: None,
+            revision: 1,
+        };
+        settings_service
+            .save_provider_with_binding(context, provider, binding)
+            .unwrap();
+    }
+}
+
+fn authorize_provider(
+    context: &ProjectContext,
+    settings: &SettingsService,
+    secrets: &SecretService,
+    provider: LlmProviderKind,
+    secret: &str,
+) {
+    let config = settings
+        .list_providers(context)
+        .unwrap()
+        .into_iter()
+        .find(|config| config.provider == provider)
+        .unwrap();
+    let mut binding = settings
+        .provider_credential_binding(context, provider)
+        .unwrap()
+        .unwrap();
+    binding.approved_at = Some("2026-08-18T00:00:00Z".into());
+    secrets.set_bound(context, &binding, secret).unwrap();
+    settings
+        .save_provider_with_binding(context, config, binding)
+        .unwrap();
 }
 
 fn prepare(
@@ -470,9 +528,6 @@ fn untrusted_project_rejects_installed_agent_health_before_any_invocation() {
 #[test]
 fn ambiguous_providers_require_choice_and_explicit_selection_is_exact() {
     let (_root, context, _config, settings, secrets, agents) = fixture();
-    secrets
-        .set(LlmProviderKind::OpenAi, "sk-route-secret")
-        .unwrap();
     save_routes(
         &context,
         &settings,
@@ -481,6 +536,13 @@ fn ambiguous_providers_require_choice_and_explicit_selection_is_exact() {
             provider(LlmProviderKind::OpenAi, "gpt-route"),
             provider(LlmProviderKind::Ollama, "qwen-route"),
         ],
+    );
+    authorize_provider(
+        &context,
+        &settings,
+        &secrets,
+        LlmProviderKind::OpenAi,
+        "sk-route-secret",
     );
     let service = WorkflowService::default();
     let scope = Some(WorkflowScope::HealthCheck {
@@ -529,12 +591,18 @@ fn ambiguous_providers_require_choice_and_explicit_selection_is_exact() {
 fn route_revision_change_invalidates_start_and_serialization_is_secret_free() {
     let (root, context, _config, settings, secrets, agents) = fixture();
     let marker = "sk-never-serialize-this";
-    secrets.set(LlmProviderKind::OpenAi, marker).unwrap();
     save_routes(
         &context,
         &settings,
         None,
         vec![provider(LlmProviderKind::OpenAi, "gpt-before")],
+    );
+    authorize_provider(
+        &context,
+        &settings,
+        &secrets,
+        LlmProviderKind::OpenAi,
+        marker,
     );
     let service = WorkflowService::default();
     let preparation = prepare(
@@ -688,7 +756,9 @@ fn overview_uses_remembered_health_mode_when_the_route_disappears() {
             &first.preparation_revision,
         )
         .unwrap();
-    save_routes(&context, &settings, None, Vec::new());
+    let mut unavailable = provider(LlmProviderKind::Ollama, "qwen");
+    unavailable.enabled = false;
+    save_routes(&context, &settings, None, vec![unavailable]);
     let overview = service
         .project_overview(&context, trusted(), &settings, &secrets, &agents, &tasks)
         .unwrap();
