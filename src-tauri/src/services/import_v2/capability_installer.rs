@@ -42,9 +42,10 @@ pub struct CapabilityCatalogEntry {
 }
 
 pub fn catalog_entry(capability_id: &str, target_triple: &str) -> Option<CapabilityCatalogEntry> {
-    let catalog: InstallCatalog = serde_json::from_str(include_str!(
-        "../../../../capabilities/install-catalog.json"
-    ))
+    let catalog: InstallCatalog = serde_json::from_str(include_str!(concat!(
+        env!("OUT_DIR"),
+        "/capabilities/install-catalog.json"
+    )))
     .ok()?;
     if catalog.schema_version != 1 {
         return None;
@@ -400,9 +401,11 @@ fn restore_executable_permissions(
 }
 
 fn trusted_keys() -> HashMap<String, Vec<u8>> {
-    let encoded: HashMap<String, String> =
-        serde_json::from_str(include_str!("../../../../capabilities/trusted-keys.json"))
-            .unwrap_or_default();
+    let encoded: HashMap<String, String> = serde_json::from_str(include_str!(concat!(
+        env!("OUT_DIR"),
+        "/capabilities/trusted-keys.json"
+    )))
+    .unwrap_or_default();
     encoded
         .into_iter()
         .filter_map(|(id, value)| decode_hex(&value).map(|key| (id, key)))
@@ -572,17 +575,35 @@ mod tests {
     }
 
     #[test]
-    fn source_catalog_is_valid_and_never_exposes_placeholder_downloads() {
-        let catalog: InstallCatalog = serde_json::from_str(include_str!(
-            "../../../../capabilities/install-catalog.json"
-        ))
+    fn embedded_catalog_matches_its_build_record_and_release_gate() {
+        let record: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("OUT_DIR"),
+            "/capabilities/embed-record.json"
+        )))
         .unwrap();
+        let catalog: InstallCatalog = serde_json::from_str(include_str!(concat!(
+            env!("OUT_DIR"),
+            "/capabilities/install-catalog.json"
+        )))
+        .unwrap();
+        let mode = record["mode"].as_str().unwrap();
+        assert!(matches!(mode, "source" | "release"));
         assert_eq!(catalog.schema_version, 1);
+        assert_eq!(
+            catalog.entries.len() as u64,
+            record["entryCount"].as_u64().unwrap()
+        );
         assert!(catalog.entries.iter().all(valid_catalog_entry));
         assert!(catalog
             .entries
             .iter()
             .all(|entry| !entry.url.contains("placeholder")));
+        if mode == "release" {
+            assert!(
+                !catalog.entries.is_empty(),
+                "release builds cannot embed an empty capability catalog"
+            );
+        }
     }
 
     #[test]

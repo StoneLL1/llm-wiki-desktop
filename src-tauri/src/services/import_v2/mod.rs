@@ -4,6 +4,7 @@ pub mod agent_candidate;
 pub mod agent_tools;
 pub mod agent_workspace;
 pub(crate) mod bilibili;
+pub mod capability_embed;
 pub mod capability_installer;
 pub mod capability_pack;
 pub mod capability_runtime;

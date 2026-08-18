@@ -202,28 +202,15 @@ export function validateWorkflowPermissions({ ciWorkflow, capabilityWorkflow }) 
   if (!/^permissions:\s*\r?\n\s+contents:\s+read\s*$/m.test(capabilityWorkflow)) {
     errors.push("capability workflow must default to contents: read");
   }
-  const publisherMatch = /^ {2}publish-catalog:\s*$([\s\S]*?)(?=^ {2}[A-Za-z0-9_-]+:\s*$|(?![\s\S]))/m.exec(capabilityWorkflow);
-  const publisher = publisherMatch?.[1] ?? "";
-  const publisherStart = publisherMatch?.index ?? -1;
-  const publisherEnd = publisherStart < 0 ? -1 : publisherStart + publisherMatch[0].length;
   const writeGrants = permissionWriteGrants(capabilityWorkflow);
-  const publishesRelease = /gh release (?:create|upload)/i.test(capabilityWorkflow);
-  if (publishesRelease) {
-    if (!/^ {4}permissions:\s*\r?\n\s+contents:\s+write\s*$/m.test(publisher)) {
-      errors.push("only the capability publisher job may elevate to contents: write");
-    }
-    const onlyApprovedWriter = writeGrants.length === 1
-      && writeGrants[0].scope === "contents"
-      && writeGrants[0].index >= publisherStart
-      && writeGrants[0].index < publisherEnd;
-    if (!onlyApprovedWriter) {
-      errors.push("publishing capability workflow must contain exactly one contents: write grant");
-    }
-    if (!/^ {4}environment:\s+capability-release\s*$/m.test(publisher)) {
-      errors.push("capability publisher must use the protected capability-release environment");
-    }
-  } else if (writeGrants.length !== 0) {
-    errors.push("non-publishing capability workflows cannot request contents: write");
+  if (writeGrants.length !== 0) {
+    errors.push("the non-publishing capability workflow cannot request any write permission");
+  }
+  if (/gh release (?:create|upload)/i.test(capabilityWorkflow)) {
+    errors.push("capability workflow must not publish releases; the unified desktop release workflow owns publication");
+  }
+  if (!/^ {2}workflow_call:\s*$/m.test(capabilityWorkflow)) {
+    errors.push("capability workflow must be reusable through workflow_call for the unified desktop release");
   }
   return errors;
 }

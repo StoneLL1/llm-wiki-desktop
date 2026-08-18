@@ -381,9 +381,11 @@ const PACK_SPECS: &[PackSpec] = &[
 ];
 
 fn embedded_trusted_keys() -> HashMap<String, Vec<u8>> {
-    let encoded: HashMap<String, String> =
-        serde_json::from_str(include_str!("../../../../capabilities/trusted-keys.json"))
-            .unwrap_or_default();
+    let encoded: HashMap<String, String> = serde_json::from_str(include_str!(concat!(
+        env!("OUT_DIR"),
+        "/capabilities/trusted-keys.json"
+    )))
+    .unwrap_or_default();
     encoded
         .into_iter()
         .filter_map(|(id, hex)| decode_hex(&hex).map(|key| (id, key)))

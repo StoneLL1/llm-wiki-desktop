@@ -8,7 +8,7 @@ use llm_wiki_desktop_lib::services::import_v2::capability_installer::CapabilityC
 use llm_wiki_desktop_lib::services::import_v2::capability_pack::{
     CapabilityPackFile, CapabilityPackManifest,
 };
-use ring::signature::{Ed25519KeyPair, KeyPair};
+use ring::signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey, ED25519};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -85,10 +85,15 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
         }
         "merge-catalog" => {
             let values = parse_options(tail, &[])?;
-            reject_unknown_options(&values, &["input", "output"])?;
+            reject_unknown_options(
+                &values,
+                &["input", "output", "trusted-keys", "expected-tag"],
+            )?;
             let input = required_path(&values, "input")?;
             let output = required_path(&values, "output")?;
-            merge_catalog(&input, &output)?;
+            let trusted_keys = required_path(&values, "trusted-keys")?;
+            let expected_tag = required(&values, "expected-tag")?;
+            merge_catalog(&input, &output, &trusted_keys, &expected_tag)?;
             println!("catalog={}", output.display());
             Ok(())
         }
@@ -597,7 +602,12 @@ fn verify_archive(
     Ok(())
 }
 
-fn merge_catalog(input: &Path, output: &Path) -> Result<(), String> {
+fn merge_catalog(
+    input: &Path,
+    output: &Path,
+    trusted_keys_path: &Path,
+    expected_tag: &str,
+) -> Result<(), String> {
     let mut fragments = fs::read_dir(input)
         .map_err(|error| format!("cannot enumerate catalog fragments: {error}"))?
         .collect::<Result<Vec<_>, _>>()
@@ -647,6 +657,23 @@ fn merge_catalog(input: &Path, output: &Path) -> Result<(), String> {
             return Err("catalog contains a duplicate capability target version".into());
         }
     }
+    validate_expected_tag(expected_tag)?;
+    let trusted: HashMap<String, String> = serde_json::from_slice(
+        &fs::read(trusted_keys_path)
+            .map_err(|error| format!("cannot read {}: {error}", trusted_keys_path.display()))?,
+    )
+    .map_err(|error| format!("invalid trusted key file: {error}"))?;
+    let mut keys = HashMap::new();
+    for (key_id, value) in trusted {
+        keys.insert(
+            key_id.clone(),
+            decode_hex(&value)
+                .map_err(|error| format!("trusted key {key_id} is invalid: {error}"))?,
+        );
+    }
+    for entry in &entries {
+        verify_release_entry(input, entry, &keys, expected_tag)?;
+    }
     write_json(
         output,
         &CatalogFragment {
@@ -654,6 +681,130 @@ fn merge_catalog(input: &Path, output: &Path) -> Result<(), String> {
             entries,
         },
     )
+}
+
+fn validate_expected_tag(tag: &str) -> Result<(), String> {
+    let version = tag.strip_prefix("app-v");
+    let valid = version.is_some_and(|version| {
+        let (core, prerelease) = version.split_once('-').unwrap_or((version, ""));
+        let core_valid = core.split('.').count() == 3
+            && core.split('.').all(|component| {
+                !component.is_empty()
+                    && component.bytes().all(|value| value.is_ascii_digit())
+                    && (component == "0" || !component.starts_with('0'))
+            });
+        let prerelease_valid = prerelease.is_empty()
+            || prerelease.strip_prefix("rc.").is_some_and(|number| {
+                !number.is_empty()
+                    && number.bytes().all(|value| value.is_ascii_digit())
+                    && !number.starts_with('0')
+            });
+        core_valid && prerelease_valid
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err("expected tag must match the frozen app-v grammar".into())
+    }
+}
+
+fn verify_release_entry(
+    input: &Path,
+    entry: &CapabilityCatalogEntry,
+    keys: &HashMap<String, Vec<u8>>,
+    expected_tag: &str,
+) -> Result<(), String> {
+    let file_name = format!(
+        "{}-{}-{}.zip",
+        entry.capability_id, entry.version, entry.target_triple
+    );
+    let archive_path = input.join(&file_name);
+    if !archive_path.is_file() {
+        return Err(format!(
+            "catalog entry {file_name} is missing its release archive"
+        ));
+    }
+    let expected_url = format!(
+        "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/{expected_tag}/{file_name}"
+    );
+    if entry.url != expected_url {
+        return Err(format!(
+            "catalog entry {file_name} must use the exact immutable url {expected_url}"
+        ));
+    }
+    let archive_sha256 = sha256_file(&archive_path)?;
+    if !archive_sha256.eq_ignore_ascii_case(&entry.archive_sha256) {
+        return Err(format!(
+            "archive {file_name} digest differs from the catalog entry"
+        ));
+    }
+    let compressed_bytes = fs::metadata(&archive_path)
+        .map_err(|error| format!("cannot inspect archive {file_name}: {error}"))?
+        .len();
+    if compressed_bytes != entry.compressed_bytes {
+        return Err(format!(
+            "archive {file_name} compressed size differs from the catalog entry"
+        ));
+    }
+    let file =
+        File::open(&archive_path).map_err(|error| format!("cannot open {file_name}: {error}"))?;
+    let mut archive = ZipArchive::new(file)
+        .map_err(|error| format!("archive {file_name} is invalid: {error}"))?;
+    let mut manifest_bytes = Vec::new();
+    archive
+        .by_name("manifest.json")
+        .map_err(|error| format!("archive {file_name} has no manifest: {error}"))?
+        .read_to_end(&mut manifest_bytes)
+        .map_err(|error| format!("cannot read manifest of {file_name}: {error}"))?;
+    if !encode_hex(&Sha256::digest(&manifest_bytes)).eq_ignore_ascii_case(&entry.manifest_sha256) {
+        return Err(format!(
+            "archive {file_name} manifest digest differs from the catalog entry"
+        ));
+    }
+    let manifest: CapabilityPackManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|error| format!("manifest of {file_name} is invalid: {error}"))?;
+    if manifest.schema_version != 2 {
+        return Err(format!("manifest of {file_name} must use schema v2"));
+    }
+    if manifest.pack_id != entry.capability_id
+        || manifest.version != entry.version
+        || manifest.license_expression != entry.license
+        || !manifest
+            .target_triples
+            .iter()
+            .any(|target| target == &entry.target_triple)
+    {
+        return Err(format!(
+            "manifest of {file_name} does not match the catalog entry identity"
+        ));
+    }
+    if !manifest.archive_sha256.is_empty()
+        || manifest.compressed_bytes != 0
+        || manifest.installed_bytes != 0
+    {
+        return Err(format!(
+            "manifest of {file_name} must not carry self-referential archive measurements"
+        ));
+    }
+    let key = keys.get(&manifest.signing_key_id).ok_or_else(|| {
+        format!(
+            "manifest signing key {} of {file_name} is not a trusted application key",
+            manifest.signing_key_id
+        )
+    })?;
+    let signature = decode_hex(&manifest.signature)
+        .map_err(|error| format!("signature of {file_name} is invalid: {error}"))?;
+    let payload = manifest.signing_payload().map_err(|error| {
+        format!(
+            "cannot rebuild signing payload of {file_name}: {}",
+            error.message
+        )
+    })?;
+    UnparsedPublicKey::new(&ED25519, key)
+        .verify(&payload, &signature)
+        .map_err(|_| format!("manifest signature of {file_name} failed verification"))?;
+    verify_archive(&archive_path, &manifest, &manifest_bytes, entry)?;
+    Ok(())
 }
 
 fn validate_catalog_entry(entry: &CapabilityCatalogEntry) -> Result<(), String> {
@@ -821,7 +972,9 @@ mod tests {
                 entrypoint: "bin/runner".into(),
                 entrypoint_args: vec!["runner/index.mjs".into()],
                 output: self.output.clone(),
-                base_url: "https://downloads.example.test/capabilities".into(),
+                base_url:
+                    "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v1.2.3"
+                        .into(),
                 trusted_keys: self.trusted.clone(),
                 key_id: "release-test".into(),
                 private_key_pkcs8: self.key.clone(),
@@ -902,16 +1055,115 @@ mod tests {
         let fixture = Fixture::new();
         let result = assemble(&fixture.options()).unwrap();
         let merged = fixture.root.join("catalog.json");
-        merge_catalog(&fixture.output, &merged).unwrap();
+        merge_catalog(&fixture.output, &merged, &fixture.trusted, "app-v1.2.3").unwrap();
         let catalog: CatalogFragment = serde_json::from_slice(&fs::read(merged).unwrap()).unwrap();
         assert_eq!(catalog.entries, vec![result.entry]);
 
         let duplicate = fixture.output.join("duplicate.catalog.json");
         fs::copy(result.fragment_path, duplicate).unwrap();
-        assert!(
-            merge_catalog(&fixture.output, &fixture.root.join("invalid.json"))
-                .unwrap_err()
-                .contains("duplicate")
-        );
+        assert!(merge_catalog(
+            &fixture.output,
+            &fixture.root.join("invalid.json"),
+            &fixture.trusted,
+            "app-v1.2.3"
+        )
+        .unwrap_err()
+        .contains("duplicate"));
+    }
+
+    #[test]
+    fn merge_catalog_rejects_tampered_archives_and_manifest_digests() {
+        let fixture = Fixture::new();
+        let result = assemble(&fixture.options()).unwrap();
+
+        let mut tampered = Vec::new();
+        fs::File::open(&result.archive_path)
+            .unwrap()
+            .read_to_end(&mut tampered)
+            .unwrap();
+        tampered.push(0);
+        fs::write(&result.archive_path, &tampered).unwrap();
+        assert!(merge_catalog(
+            &fixture.output,
+            &fixture.root.join("catalog.json"),
+            &fixture.trusted,
+            "app-v1.2.3"
+        )
+        .unwrap_err()
+        .contains("digest differs"));
+
+        let restored = &tampered[..tampered.len() - 1];
+        fs::write(&result.archive_path, restored).unwrap();
+        let mut fragment: serde_json::Value =
+            serde_json::from_slice(&fs::read(&result.fragment_path).unwrap()).unwrap();
+        fragment["entries"][0]["manifestSha256"] = serde_json::json!("f".repeat(64));
+        fs::write(
+            &result.fragment_path,
+            serde_json::to_vec(&fragment).unwrap(),
+        )
+        .unwrap();
+        assert!(merge_catalog(
+            &fixture.output,
+            &fixture.root.join("catalog.json"),
+            &fixture.trusted,
+            "app-v1.2.3"
+        )
+        .unwrap_err()
+        .contains("manifest digest differs"));
+    }
+
+    #[test]
+    fn merge_catalog_rejects_untrusted_keys_wrong_tags_and_missing_archives() {
+        let fixture = Fixture::new();
+        let result = assemble(&fixture.options()).unwrap();
+        let untrusted = fixture.root.join("untrusted-keys.json");
+        fs::write(&untrusted, b"{}").unwrap();
+        assert!(merge_catalog(
+            &fixture.output,
+            &fixture.root.join("catalog.json"),
+            &untrusted,
+            "app-v1.2.3"
+        )
+        .unwrap_err()
+        .contains("not a trusted application key"));
+
+        assert!(merge_catalog(
+            &fixture.output,
+            &fixture.root.join("catalog.json"),
+            &fixture.trusted,
+            "app-v9.9.9"
+        )
+        .unwrap_err()
+        .contains("exact immutable url"));
+
+        fs::remove_file(&result.archive_path).unwrap();
+        assert!(merge_catalog(
+            &fixture.output,
+            &fixture.root.join("catalog.json"),
+            &fixture.trusted,
+            "app-v1.2.3"
+        )
+        .unwrap_err()
+        .contains("missing its release archive"));
+    }
+
+    #[test]
+    fn expected_tag_uses_the_same_frozen_release_grammar_as_catalog_urls() {
+        for tag in ["app-v0.1.0", "app-v1.2.3", "app-v1.2.3-rc.1"] {
+            validate_expected_tag(tag).unwrap();
+        }
+        for tag in [
+            "v1.2.3",
+            "app-v1.2",
+            "app-v01.2.3",
+            "app-v1.2.3-rc.01",
+            "app-v1.2.3-preview.1",
+            "app-v1.2.3_unsafe",
+        ] {
+            assert!(
+                validate_expected_tag(tag).is_err(),
+                "expected {tag} to be rejected"
+            );
+        }
     }
 }

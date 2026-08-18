@@ -11,6 +11,7 @@ name = "llm_wiki_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
+serde_json = "1"
 tauri-build = { version = "2", features = [], optional = true }
 
 [features]

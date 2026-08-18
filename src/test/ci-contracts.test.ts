@@ -107,7 +107,7 @@ describe("CI validation contract", () => {
       "node scripts/check-import-source-media-flow.mjs",
     );
     expect(packageJson.scripts["check:release-config"]).toBe(
-      "node --test --test-isolation=none scripts/check-release-config.node-test.mjs && node scripts/check-release-version.mjs",
+      "node --test --test-isolation=none scripts/check-release-config.node-test.mjs scripts/verify-capability-catalog.node-test.mjs scripts/verify-embedded-capability-catalog.node-test.mjs && node scripts/check-release-version.mjs && node scripts/verify-capability-catalog.mjs --catalog capabilities/install-catalog.json --trusted-keys capabilities/trusted-keys.json --mode source",
     );
     expect(packageJson.scripts["test:final-four-redlines"]).toBe(
       "node --test --test-isolation=none scripts/check-final-four-redlines.node-test.mjs",
@@ -165,8 +165,13 @@ describe("CI validation contract", () => {
     expect(runBlocks.every((block) => !block.includes("${{ inputs."))).toBe(true);
     expect(workflow).toContain("environment: capability-release");
     expect(workflow).toContain("$PSNativeCommandUseErrorActionPreference = $true");
-    expect(workflow).toContain("invalid catalog matrix");
-    expect(workflow).toContain('const packs=["browser-runtime","browser-runtime-lite","media-metadata","asr-sensevoice-small","ocr-cjk-accurate"]');
+    expect(workflow).toContain("merge-catalog \\");
+    expect(workflow).toContain("--trusted-keys capabilities/trusted-keys.json");
+    expect(workflow).toContain("--expected-tag \"$RELEASE_TAG\"");
+    expect(workflow).toContain("scripts/verify-capability-catalog.mjs");
+    expect(workflow).toContain("--emit-provenance capability-dist/application-integration/capabilities/catalog-provenance.json");
+    expect(workflow).not.toMatch(/gh release (?:create|upload)/i);
+    expect(workflow).toMatch(/^ {2}workflow_call:\s*$/m);
     expect(workflow).toContain("sensevoice-capabilities-${{ matrix.target }}");
     expect(workflow).toContain("ocr-capabilities-${{ matrix.target }}");
     expect(workflow).toContain("fetch-rapidocr-sources.mjs");
