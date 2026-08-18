@@ -16,12 +16,14 @@ use llm_wiki_desktop_lib::models::workflow::{
     UpdateWikiMode, WorkflowDisplayStatus, WorkflowExecutionOptions, WorkflowKind, WorkflowRoute,
     WorkflowScope, WorkflowSourceVersionRef, WorkflowStageStatus,
 };
+#[cfg(not(windows))]
+use llm_wiki_desktop_lib::services::confirm_update_wiki_review;
 use llm_wiki_desktop_lib::services::{
-    confirm_update_wiki_review, persist_update_wiki_review, restore_update_wiki_confirmation,
-    run_update_wiki, update_wiki_candidate_is_valid, update_wiki_decision_review,
-    workflow_baseline_for_scope, workflow_stages, AgentInvocation, AgentService, BookmarkService,
-    CompileExecutionServices, CompileService, EnqueueWorkflow, FileStore, GitService, LlmService,
-    ProcessRunner, SearchService, SecretService, SettingsService, UpdateWikiExecutionServices,
+    persist_update_wiki_review, restore_update_wiki_confirmation, run_update_wiki,
+    update_wiki_candidate_is_valid, update_wiki_decision_review, workflow_baseline_for_scope,
+    workflow_stages, AgentInvocation, AgentService, BookmarkService, CompileExecutionServices,
+    CompileService, EnqueueWorkflow, FileStore, GitService, LlmService, ProcessRunner,
+    SearchService, SecretService, SettingsService, UpdateWikiExecutionServices,
     WorkflowCoordinator, WorkflowStageSink,
 };
 use llm_wiki_desktop_lib::tasks::TaskService;
@@ -823,30 +825,52 @@ async fn real_low_risk_runner_completes_all_stages_consumes_source_and_commits()
 
     run_update_wiki(&context, run.clone(), &services).await;
     let completed = tasks.get_workflow_run(&run.task_id).unwrap();
-    assert_eq!(completed.display_status, WorkflowDisplayStatus::Completed);
-    assert_eq!(completed.stages.len(), 9);
-    assert!(completed
-        .stages
-        .iter()
-        .all(|stage| stage.status == WorkflowStageStatus::Completed));
-    assert!(context.wiki_dir.join("concepts/工作流成功.md").is_file());
-    let result = completed.result.unwrap();
-    let llm_wiki_desktop_lib::models::workflow::WorkflowResult::UpdateWiki {
-        created,
-        final_commit,
-        ..
-    } = result
-    else {
-        panic!("expected Update Wiki result");
-    };
-    assert_eq!(created, 1);
-    assert!(final_commit.is_some());
-    assert!(context
-        .app_dir
-        .join("compile")
-        .join(format!("{}.json", run.task_id))
-        .is_file());
-    assert!(!GitService.repository_status(&context).unwrap().has_changes);
+    #[cfg(windows)]
+    {
+        assert_eq!(completed.display_status, WorkflowDisplayStatus::Failed);
+        assert_eq!(
+            completed.error.as_ref().map(|error| error.code.as_str()),
+            Some("AGENT_MUTATION_PROFILE_UNSUPPORTED")
+        );
+        assert!(!context.wiki_dir.join("concepts/工作流成功.md").exists());
+        assert!(!std::env::temp_dir()
+            .join("llm-wiki-desktop")
+            .join(&run.task_id)
+            .exists());
+        assert!(!GitService.repository_status(&context).unwrap().has_changes);
+    }
+    #[cfg(not(windows))]
+    {
+        assert_eq!(
+            completed.display_status,
+            WorkflowDisplayStatus::Completed,
+            "workflow failed: {:?}",
+            completed.error
+        );
+        assert_eq!(completed.stages.len(), 9);
+        assert!(completed
+            .stages
+            .iter()
+            .all(|stage| stage.status == WorkflowStageStatus::Completed));
+        assert!(context.wiki_dir.join("concepts/工作流成功.md").is_file());
+        let result = completed.result.unwrap();
+        let llm_wiki_desktop_lib::models::workflow::WorkflowResult::UpdateWiki {
+            created,
+            final_commit,
+            ..
+        } = result
+        else {
+            panic!("expected Update Wiki result");
+        };
+        assert_eq!(created, 1);
+        assert!(final_commit.is_some());
+        assert!(context
+            .app_dir
+            .join("compile")
+            .join(format!("{}.json", run.task_id))
+            .is_file());
+        assert!(!GitService.repository_status(&context).unwrap().has_changes);
+    }
     fs::remove_dir_all(root).ok();
 }
 
@@ -900,21 +924,40 @@ async fn real_generated_deletion_enters_persisted_waiting_without_mutating_wiki(
 
     run_update_wiki(&context, run.clone(), &services).await;
     let waiting = tasks.get_workflow_run(&run.task_id).unwrap();
-    assert_eq!(
-        waiting.display_status,
-        WorkflowDisplayStatus::WaitingForConfirmation
-    );
-    assert!(context.resolve_project_path(old_path).unwrap().is_file());
-    assert!(!context.wiki_dir.join("concepts/工作流成功.md").exists());
-    assert!(update_wiki_candidate_is_valid(&run.task_id, &context.root));
-    llm_wiki_desktop_lib::services::discard_update_wiki_candidate(&run.task_id).unwrap();
-    let failure = confirm_update_wiki_review(&context, &run.task_id, &services)
-        .expect_err("a removed candidate must fail closed");
-    assert_eq!(failure.error.code, "WORKFLOW_CANDIDATE_STALE");
-    assert_eq!(
-        tasks.get_workflow_run(&run.task_id).unwrap().display_status,
-        WorkflowDisplayStatus::Failed
-    );
+    #[cfg(windows)]
+    {
+        assert_eq!(waiting.display_status, WorkflowDisplayStatus::Failed);
+        assert_eq!(
+            waiting.error.as_ref().map(|error| error.code.as_str()),
+            Some("AGENT_MUTATION_PROFILE_UNSUPPORTED")
+        );
+        assert!(context.resolve_project_path(old_path).unwrap().is_file());
+        assert!(!context.wiki_dir.join("concepts/工作流成功.md").exists());
+        assert!(!std::env::temp_dir()
+            .join("llm-wiki-desktop")
+            .join(&run.task_id)
+            .exists());
+    }
+    #[cfg(not(windows))]
+    {
+        assert_eq!(
+            waiting.display_status,
+            WorkflowDisplayStatus::WaitingForConfirmation,
+            "workflow failed: {:?}",
+            waiting.error
+        );
+        assert!(context.resolve_project_path(old_path).unwrap().is_file());
+        assert!(!context.wiki_dir.join("concepts/工作流成功.md").exists());
+        assert!(update_wiki_candidate_is_valid(&run.task_id, &context.root));
+        llm_wiki_desktop_lib::services::discard_update_wiki_candidate(&run.task_id).unwrap();
+        let failure = confirm_update_wiki_review(&context, &run.task_id, &services)
+            .expect_err("a removed candidate must fail closed");
+        assert_eq!(failure.error.code, "WORKFLOW_CANDIDATE_STALE");
+        assert_eq!(
+            tasks.get_workflow_run(&run.task_id).unwrap().display_status,
+            WorkflowDisplayStatus::Failed
+        );
+    }
     fs::remove_dir_all(root).ok();
 }
 

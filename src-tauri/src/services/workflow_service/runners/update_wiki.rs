@@ -183,11 +183,13 @@ where
     let input_baseline = snapshot_compile_inputs(context, &selected_sources)?;
     let wiki_baseline = CompileService::snapshot_wiki(context)?;
     sink.start(CREATE_CHECKPOINT).map_err(task_error)?;
-    let checkpoint = services.git_service.clean_head_checkpoint(
-        context,
-        CheckpointPurpose::HighRiskOperation,
-        "Before Update Wiki workflow",
-    )?;
+    let checkpoint = with_update_wiki_git_cancellation(services, task_id, || {
+        services.git_service.clean_head_checkpoint(
+            context,
+            CheckpointPurpose::HighRiskOperation,
+            "Before Update Wiki workflow",
+        )
+    })?;
     sink.complete(CREATE_CHECKPOINT).map_err(task_error)?;
 
     let workspace =
@@ -233,7 +235,8 @@ where
         sink.complete(VALIDATE_STRUCTURE).map_err(task_error)?;
         sink.start(REVIEW_RISK).map_err(task_error)?;
         ensure_checkpoint_head(
-            services.git_service,
+            services,
+            task_id,
             context,
             checkpoint.commit_hash.as_deref(),
         )?;
@@ -939,11 +942,12 @@ fn apply_persisted_update_wiki_candidate(
     let sink = WorkflowStageSink::new(services.compile.task_service, services.coordinator, task_id);
     let (mode, _) = update_scope(run)?;
     ensure_checkpoint_head(
-        services.git_service,
+        services,
+        task_id,
         context,
         descriptor.checkpoint_hash.as_deref(),
     )?;
-    ensure_clean_git(services.git_service, context)?;
+    ensure_clean_git(services, task_id, context)?;
     if current_manifest_hashes(context, &descriptor.candidate.manifest, services.file_store)?
         != descriptor.current_hashes
     {
@@ -1005,11 +1009,12 @@ fn apply_persisted_update_wiki_candidate(
         .map_err(task_error)?;
     let preapply_check = (|| {
         ensure_checkpoint_head(
-            services.git_service,
+            services,
+            task_id,
             context,
             descriptor.checkpoint_hash.as_deref(),
         )?;
-        ensure_clean_git(services.git_service, context)?;
+        ensure_clean_git(services, task_id, context)?;
         if current_manifest_hashes(context, &descriptor.candidate.manifest, services.file_store)?
             != descriptor.current_hashes
         {
@@ -1344,12 +1349,14 @@ fn record_compile_result(
     );
     checkpoint_paths.sort();
     checkpoint_paths.dedup();
-    match services.git_service.create_scoped_checkpoint(
-        context,
-        CheckpointPurpose::FinalResult,
-        &format!("Update Wiki {task_id}"),
-        &checkpoint_paths,
-    ) {
+    match with_update_wiki_git_cancellation(services, task_id, || {
+        services.git_service.create_scoped_checkpoint(
+            context,
+            CheckpointPurpose::FinalResult,
+            &format!("Update Wiki {task_id}"),
+            &checkpoint_paths,
+        )
+    }) {
         Ok(checkpoint) => Ok(checkpoint.commit_hash),
         Err(error) => {
             let _ = services
@@ -1366,11 +1373,15 @@ fn record_compile_result(
 }
 
 fn ensure_checkpoint_head(
-    git_service: &GitService,
+    services: &UpdateWikiExecutionServices<'_>,
+    task_id: &str,
     context: &ProjectContext,
     expected: Option<&str>,
 ) -> Result<(), BackendError> {
-    if git_service.repository_status(context)?.head.as_deref() != expected {
+    let status = with_update_wiki_git_cancellation(services, task_id, || {
+        services.git_service.repository_status(context)
+    })?;
+    if status.head.as_deref() != expected {
         return Err(BackendError::new(
             "COMPILE_CHECKPOINT_CHANGED",
             "The project Git HEAD changed during Update Wiki.",
@@ -1382,10 +1393,13 @@ fn ensure_checkpoint_head(
 }
 
 fn ensure_clean_git(
-    git_service: &GitService,
+    services: &UpdateWikiExecutionServices<'_>,
+    task_id: &str,
     context: &ProjectContext,
 ) -> Result<(), BackendError> {
-    let status = git_service.repository_status(context)?;
+    let status = with_update_wiki_git_cancellation(services, task_id, || {
+        services.git_service.repository_status(context)
+    })?;
     if !status.is_repository || status.has_changes {
         return Err(BackendError::new(
             "WORKFLOW_GIT_STATE_CHANGED",
@@ -1602,6 +1616,21 @@ fn finish_error(
 
 fn task_error(message: String) -> BackendError {
     BackendError::new("TASK_OPERATION_FAILED", message, true, false)
+}
+
+fn with_update_wiki_git_cancellation<T>(
+    services: &UpdateWikiExecutionServices<'_>,
+    task_id: &str,
+    operation: impl FnOnce() -> Result<T, BackendError>,
+) -> Result<T, BackendError> {
+    let token = services
+        .compile
+        .task_service
+        .get_cancellation_token(task_id)
+        .ok_or_else(|| task_error(format!("Task cancellation token is unavailable: {task_id}")))?;
+    services
+        .git_service
+        .with_task_cancellation(token, operation)
 }
 
 fn workspace_for_task(task_id: &str) -> std::path::PathBuf {

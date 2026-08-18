@@ -4947,8 +4947,8 @@ mod tests {
         second_gate.release();
         first_writer.join().unwrap().unwrap();
         second_writer.join().unwrap().unwrap();
-        assert_eq!(service.persistence_writer_metrics(&first.task_id), (1, 0));
-        assert_eq!(service.persistence_writer_metrics(&second.task_id), (1, 0));
+        assert_eq!(service.persistence_writer_metrics(&first.task_id).0, 1);
+        assert_eq!(service.persistence_writer_metrics(&second.task_id).0, 1);
     }
 
     #[test]

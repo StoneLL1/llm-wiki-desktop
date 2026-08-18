@@ -16,16 +16,15 @@ use crate::models::confirmation::{
     RiskLevel,
 };
 use crate::models::git::CheckpointPurpose;
-use crate::models::git::GitChangedFile;
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::paths::ProjectContext;
 use crate::models::task::{
     BackendTask, TaskActivity, TaskActivityStatus, TaskResult, TaskStatus, TaskType,
 };
 use crate::services::{
-    AgentService, ChatIntent, ConvenienceAuditStatus, LlmService, RetrievalContext,
+    AgentService, CandidateChange, ChatIntent, ConvenienceAuditStatus, LlmService, RetrievalContext,
 };
-use crate::tasks::task_model::LogLevel;
+use crate::tasks::task_model::{CancellationToken, LogLevel};
 
 const MAX_CHAT_CONTENT_CHARS: usize = 32_000;
 
@@ -307,8 +306,11 @@ async fn run_chat_send(
                     format!("Running {}", kind.command()),
                 )
                 .map_err(task_error)?;
-            let workspace = context.root.clone();
-            let invocation = AgentService::chat_invocation(kind, &workspace, &retrieval.prompt)?;
+            let workspace = state
+                .chat_convenience_service
+                .prepare_read_only_workspace()?;
+            let invocation =
+                AgentService::chat_invocation(kind, workspace.root(), &retrieval.prompt)?;
             // Stream the agent's stdout lines to the task stream channel so the
             // chat UI can render the answer incrementally (uniform with BYOK).
             let task_service = &state.task_service;
@@ -335,13 +337,16 @@ async fn run_chat_send(
                     label: Some(format!("Running {}", kind.command())),
                 },
             );
-            let captured = match state.agent_service.run_task_streaming_with_events(
-                &invocation,
-                &state.task_service,
-                task_id,
-                &on_delta,
-                &on_activity,
-            ) {
+            let captured = match state
+                .agent_service
+                .run_task_streaming_with_events_for_agent(
+                    kind,
+                    &invocation,
+                    &state.task_service,
+                    task_id,
+                    &on_delta,
+                    &on_activity,
+                ) {
                 Ok(captured) => captured,
                 Err(error) => {
                     state.task_service.emit_activity(
@@ -492,17 +497,27 @@ async fn run_chat_send(
         .task_service
         .complete_running_with_result(task_id, result)
     {
-        let _ = state.chat_service.remove_message_if(
+        let removal = state.chat_service.remove_message_if(
             context,
             &session.id,
             &assistant_message_id,
             task_id,
             || true,
         );
-        return if state.task_service.is_cancelled(task_id) {
-            Err(chat_cancelled_error())
+        let original = if state.task_service.is_cancelled(task_id) {
+            chat_cancelled_error()
         } else {
-            Err(task_error(error))
+            task_error(error)
+        };
+        return match removal {
+            Ok(_) => Err(original),
+            Err(cleanup) => Err(chat_receipt_cleanup_error(
+                task_id,
+                &[],
+                original,
+                cleanup,
+                false,
+            )),
         };
     }
     Ok(())
@@ -531,6 +546,10 @@ async fn run_chat_convenience_send(
     // Cover the checkpoint itself as well as the Agent process and result
     // commit. Revocation must not return while Git can still mutate the tree.
     let execution_lease = state.begin_project_external_task(context, task_id)?;
+    let git_cancellation = state
+        .task_service
+        .get_cancellation_token(task_id)
+        .ok_or_else(|| task_error(format!("Task cancellation token is unavailable: {task_id}")))?;
 
     let (checkpoint, ignored_baseline) = state.with_current_project_write_access(
         &request.project_id,
@@ -545,13 +564,17 @@ async fn run_chat_convenience_send(
                     "Creating Git checkpoint before Chat convenience edit".into(),
                 )
                 .map_err(task_error)?;
-            let checkpoint = state.git_service.create_checkpoint(
-                current,
-                CheckpointPurpose::HighRiskOperation,
-                "Before Chat convenience edit",
-            )?;
-            let ignored_baseline = state.git_service.ignored_paths(current)?;
-            Ok((checkpoint, ignored_baseline))
+            state
+                .git_service
+                .with_task_cancellation(git_cancellation.clone(), || {
+                    let checkpoint = state.git_service.create_checkpoint(
+                        current,
+                        CheckpointPurpose::HighRiskOperation,
+                        "Before Chat convenience edit",
+                    )?;
+                    let ignored_baseline = state.git_service.ignored_paths(current)?;
+                    Ok((checkpoint, ignored_baseline))
+                })
         },
     )?;
 
@@ -569,7 +592,14 @@ async fn run_chat_convenience_send(
         retrieval.prompt,
         state.chat_convenience_service.convenience_prompt_suffix()
     );
-    let invocation = AgentService::chat_convenience_invocation(kind, &context.root, &prompt)?;
+    let candidate = state.chat_convenience_service.prepare_candidate_workspace(
+        context,
+        retrieval
+            .source_refs
+            .iter()
+            .map(|source| source.page_path.clone()),
+    )?;
+    let invocation = AgentService::chat_convenience_invocation(kind, candidate.root(), &prompt)?;
     let task_service = &state.task_service;
     let task_id_owned = task_id.to_string();
     let on_delta = move |delta: &str| {
@@ -597,13 +627,16 @@ async fn run_chat_convenience_send(
             )),
         },
     );
-    let answer = match state.agent_service.run_task_streaming_with_events(
-        &invocation,
-        &state.task_service,
-        task_id,
-        &on_delta,
-        &on_activity,
-    ) {
+    let answer = match state
+        .agent_service
+        .run_task_streaming_with_events_for_agent(
+            kind,
+            &invocation,
+            &state.task_service,
+            task_id,
+            &on_delta,
+            &on_activity,
+        ) {
         Ok(answer) => answer.trim().to_string(),
         Err(error) => {
             state.task_service.emit_activity(
@@ -614,13 +647,7 @@ async fn run_chat_convenience_send(
                     label: Some("Agent response failed".into()),
                 },
             );
-            return Err(cleanup_convenience_failure(
-                state,
-                context,
-                task_id,
-                &ignored_baseline,
-                error,
-            ));
+            return Err(error);
         }
     };
     state.task_service.emit_activity(
@@ -633,14 +660,9 @@ async fn run_chat_convenience_send(
     );
 
     if state.task_service.is_cancelled(task_id) {
-        return Err(cleanup_convenience_failure(
-            state,
-            context,
-            task_id,
-            &ignored_baseline,
-            chat_cancelled_error(),
-        ));
+        return Err(chat_cancelled_error());
     }
+    let candidate_changes = candidate.collect_changes()?;
     let checkpoint_hash = checkpoint.commit_hash;
     state.with_current_project_write_access(
         &request.project_id,
@@ -656,6 +678,8 @@ async fn run_chat_convenience_send(
                 answer,
                 checkpoint_hash,
                 &ignored_baseline,
+                candidate_changes,
+                git_cancellation,
             )
         },
     )
@@ -671,14 +695,25 @@ fn commit_chat_convenience_result(
     answer: String,
     checkpoint_hash: Option<String>,
     ignored_baseline: &[String],
+    candidate_changes: Vec<CandidateChange>,
+    git_cancellation: CancellationToken,
 ) -> Result<(), BackendError> {
     let context = permit.context();
-    let mut changes = state
-        .git_service
-        .changed_files_since_head_with_ignored_baseline(context, &ignored_baseline)?;
-    changes.retain(|change| !is_current_task_runtime_path(task_id, change));
-    let audit = state.chat_convenience_service.audit_git_changes(changes);
-    let affected_path_hashes = audit
+    let audit = state.chat_convenience_service.audit_changed_paths(
+        candidate_changes
+            .iter()
+            .map(|change| change.audit.clone())
+            .collect(),
+    );
+    let candidate_applied = !matches!(audit.status, ConvenienceAuditStatus::HardViolation);
+    if candidate_applied {
+        state.chat_convenience_service.apply_candidate_changes(
+            permit,
+            &state.git_service,
+            &candidate_changes,
+        )?;
+    }
+    let affected_path_hashes_result = audit
         .affected_paths
         .iter()
         .map(|path| {
@@ -687,10 +722,25 @@ fn commit_chat_convenience_result(
                 hash: state.chat_service.file_hash_if_exists(context, path)?,
             })
         })
-        .collect::<Result<Vec<_>, BackendError>>()?;
+        .collect::<Result<Vec<_>, BackendError>>();
+    let affected_path_hashes = match affected_path_hashes_result {
+        Ok(hashes) => hashes,
+        Err(error) if candidate_applied => {
+            return Err(cleanup_applied_candidate_failure(
+                state,
+                permit,
+                task_id,
+                &candidate_changes,
+                error,
+            ));
+        }
+        Err(error) => return Err(error),
+    };
     let diff_text = state
         .git_service
-        .diff_since_head(context)
+        .with_task_cancellation(git_cancellation, || {
+            state.git_service.diff_since_head(context)
+        })
         .ok()
         .map(|diff| filter_current_task_diff(task_id, &diff));
     let violation_reason = audit.violation_reason.clone();
@@ -706,25 +756,11 @@ fn commit_chat_convenience_result(
             let reason = violation_reason
                 .clone()
                 .unwrap_or_else(|| "Convenience edit violated project safety rules.".to_string());
-            match state.git_service.rollback_paths_to_head_preserving_ignored(
-                context,
-                &audit.affected_paths,
-                &ignored_baseline,
-            ) {
-                Ok(()) => (
-                    format!("Chat convenience edit was rolled back: {reason}"),
-                    ChatConvenienceEditStatus::RolledBack,
-                    Some(task_id.to_string()),
-                ),
-                Err(error) => {
-                    return Err(convenience_cleanup_error(
-                        task_id,
-                        &audit.affected_paths,
-                        &reason,
-                        error,
-                    ));
-                }
-            }
+            (
+                format!("Chat convenience edit was discarded: {reason}"),
+                ChatConvenienceEditStatus::RolledBack,
+                Some(task_id.to_string()),
+            )
         }
     };
 
@@ -758,19 +794,34 @@ fn commit_chat_convenience_result(
         saved_path: None,
     };
     let assistant_message_id = assistant_message.id.clone();
-    if !state
-        .chat_service
-        .append_message_if(context, session, assistant_message, || {
-            state.task_service.is_cancelled(task_id)
-        })?
-    {
-        return Err(cleanup_convenience_failure(
-            state,
-            context,
-            task_id,
-            &ignored_baseline,
-            chat_cancelled_error(),
-        ));
+    let append_result =
+        state
+            .chat_service
+            .append_message_if(context, session, assistant_message, || {
+                state.task_service.is_cancelled(task_id)
+            });
+    match append_result {
+        Err(error) if candidate_applied => {
+            return Err(cleanup_applied_candidate_failure(
+                state,
+                permit,
+                task_id,
+                &candidate_changes,
+                error,
+            ));
+        }
+        Err(error) => return Err(error),
+        Ok(false) if candidate_applied => {
+            return Err(cleanup_applied_candidate_failure(
+                state,
+                permit,
+                task_id,
+                &candidate_changes,
+                chat_cancelled_error(),
+            ));
+        }
+        Ok(false) => return Err(chat_cancelled_error()),
+        Ok(true) => {}
     }
 
     let mut affected_paths = vec![format!(".app/chats/{}.json", session.id)];
@@ -786,23 +837,37 @@ fn commit_chat_convenience_result(
         .complete_running_with_result(task_id, result)
     {
         let cancelled = state.task_service.is_cancelled(task_id);
-        let _ = state.chat_service.remove_message_if(
+        let removal = state.chat_service.remove_message_if(
             context,
             &session.id,
             &assistant_message_id,
             task_id,
             || true,
         );
-        return if cancelled {
-            Err(cleanup_convenience_failure(
-                state,
-                context,
-                task_id,
-                &ignored_baseline,
-                chat_cancelled_error(),
-            ))
+        let original = if cancelled {
+            chat_cancelled_error()
         } else {
-            Err(task_error(error))
+            task_error(error)
+        };
+        return match removal {
+            Err(cleanup) => Err(chat_receipt_cleanup_error(
+                task_id,
+                &candidate_changes
+                    .iter()
+                    .map(|change| change.audit.path.clone())
+                    .collect::<Vec<_>>(),
+                original,
+                cleanup,
+                candidate_applied,
+            )),
+            Ok(_) if candidate_applied => Err(cleanup_applied_candidate_failure(
+                state,
+                permit,
+                task_id,
+                &candidate_changes,
+                original,
+            )),
+            Ok(_) => Err(original),
         };
     }
     Ok(())
@@ -816,59 +881,32 @@ fn chat_cancelled_error() -> BackendError {
     BackendError::new("CHAT_CANCELLED", "Chat was cancelled.", true, false)
 }
 
-fn cleanup_convenience_failure(
+fn cleanup_applied_candidate_failure(
     state: &AppState,
-    context: &ProjectContext,
+    permit: &ProjectWritePermit<'_>,
     task_id: &str,
-    ignored_baseline: &[String],
+    changes: &[CandidateChange],
     original: BackendError,
 ) -> BackendError {
-    let mut changes = match state
-        .git_service
-        .changed_files_since_head_with_ignored_baseline(context, ignored_baseline)
+    match state
+        .chat_convenience_service
+        .compensate_applied_candidate_changes(permit, &state.git_service, changes)
     {
-        Ok(changes) => changes,
-        Err(error) => {
-            return convenience_cleanup_error(task_id, &[], &original.message, error).with_details(
-                serde_json::json!({
-                    "original": original,
-                    "cleanup": "audit_failed",
-                }),
-            );
-        }
-    };
-    changes.retain(|change| !is_current_task_runtime_path(task_id, change));
-    if changes.is_empty() {
-        return original;
+        Ok(()) => original,
+        Err(cleanup) => convenience_cleanup_error(
+            task_id,
+            &changes
+                .iter()
+                .map(|change| change.audit.path.clone())
+                .collect::<Vec<_>>(),
+            &original.message,
+            cleanup,
+        )
+        .with_details(serde_json::json!({
+            "original": original,
+            "cleanup": "candidate_compensation_failed",
+        })),
     }
-    let paths: Vec<String> = changes.into_iter().map(|change| change.path).collect();
-    // An Agent error/cancellation does not provide a write-set. Any path that
-    // changed while it was running could also have been edited by the user;
-    // never guess ownership and roll it back automatically. Surface the
-    // exact paths so the user can review them against the checkpoint instead.
-    convenience_partial_edit_error(task_id, &paths, original)
-}
-
-fn convenience_partial_edit_error(
-    task_id: &str,
-    paths: &[String],
-    original: BackendError,
-) -> BackendError {
-    BackendError::new(
-        "CHAT_CONVENIENCE_REVIEW_REQUIRED",
-        format!(
-            "Chat convenience stopped, but partial edits remain for review: {}",
-            paths.join(", ")
-        ),
-        true,
-        true,
-    )
-    .with_details(serde_json::json!({
-        "taskId": task_id,
-        "affectedPaths": paths,
-        "original": original,
-        "cleanup": "manual_review_required",
-    }))
 }
 
 fn convenience_cleanup_error(
@@ -893,9 +931,33 @@ fn convenience_cleanup_error(
     }))
 }
 
-fn is_current_task_runtime_path(task_id: &str, change: &GitChangedFile) -> bool {
-    let path = change.path.replace('\\', "/");
-    path == format!(".app/tasks/{task_id}.json") || path == format!(".app/tasks/{task_id}.log")
+fn chat_receipt_cleanup_error(
+    task_id: &str,
+    paths: &[String],
+    original: BackendError,
+    cleanup: BackendError,
+    project_changes_preserved: bool,
+) -> BackendError {
+    let state = if project_changes_preserved {
+        "The applied project changes were preserved because the durable Applied receipt could not be removed."
+    } else {
+        "No project candidate changes were involved, but the durable assistant receipt may remain."
+    };
+    BackendError::new(
+        "CHAT_RECEIPT_CLEANUP_FAILED",
+        format!(
+            "Chat task finalization failed and its durable assistant receipt could not be cleaned up. {state} Review the task and affected paths before retrying."
+        ),
+        true,
+        true,
+    )
+    .with_details(serde_json::json!({
+        "taskId": task_id,
+        "affectedPaths": paths,
+        "projectChangesPreserved": project_changes_preserved,
+        "original": original,
+        "cleanupError": cleanup,
+    }))
 }
 
 fn filter_current_task_diff(task_id: &str, diff: &str) -> String {
@@ -1508,7 +1570,6 @@ fn truncate_title(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::git::{GitChangedFile, GitChangedFileKind};
     use crate::models::llm::LlmProviderConfig;
 
     fn byok(provider: LlmProviderKind) -> LlmProviderConfig {
@@ -1538,6 +1599,24 @@ mod tests {
         );
         let err = validate_chat_content(&"x".repeat(MAX_CHAT_CONTENT_CHARS + 1)).unwrap_err();
         assert_eq!(err.code, "CHAT_CONTENT_TOO_LONG");
+    }
+
+    #[test]
+    fn receipt_cleanup_failure_reports_that_applied_changes_are_preserved() {
+        let error = chat_receipt_cleanup_error(
+            "task-1",
+            &["wiki/page.md".into()],
+            BackendError::new("TASK_FAILED", "task result failed", true, false),
+            BackendError::new("CHAT_SAVE_FAILED", "receipt removal failed", true, true),
+            true,
+        );
+
+        assert_eq!(error.code, "CHAT_RECEIPT_CLEANUP_FAILED");
+        assert!(error.user_action_required);
+        let details = error.details.expect("cleanup details");
+        assert_eq!(details["taskId"], "task-1");
+        assert_eq!(details["affectedPaths"][0], "wiki/page.md");
+        assert_eq!(details["projectChangesPreserved"], true);
     }
 
     #[test]
@@ -1616,31 +1695,6 @@ mod tests {
         assert!(!should_use_convenience_flow(true, ChatIntent::ReadOnly));
         assert!(!should_use_convenience_flow(true, ChatIntent::Ambiguous));
         assert!(should_use_convenience_flow(true, ChatIntent::Write));
-    }
-
-    #[test]
-    fn current_task_runtime_filter_is_scoped_to_current_task_files() {
-        let changed = |path: &str| GitChangedFile {
-            path: path.to_string(),
-            kind: GitChangedFileKind::Modified,
-            changed_chars: 1,
-        };
-        assert!(is_current_task_runtime_path(
-            "task-1",
-            &changed(".app/tasks/task-1.json")
-        ));
-        assert!(is_current_task_runtime_path(
-            "task-1",
-            &changed(".app/tasks/task-1.log")
-        ));
-        assert!(!is_current_task_runtime_path(
-            "task-1",
-            &changed(".app/tasks/task-2.json")
-        ));
-        assert!(!is_current_task_runtime_path(
-            "task-1",
-            &changed(".app/settings.json")
-        ));
     }
 
     #[test]

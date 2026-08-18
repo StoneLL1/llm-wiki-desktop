@@ -293,10 +293,12 @@ impl<'a> AgentAssistanceService<'a> {
                     return Err(error);
                 }
             };
-            let output = match self
-                .agents
-                .run_import_assistance(&invocation, self.tasks, task_id)
-            {
+            let output = match self.agents.run_import_assistance(
+                agent_kind,
+                &invocation,
+                self.tasks,
+                task_id,
+            ) {
                 Ok(output) => output,
                 Err(error) => {
                     self.cleanup_terminal_if_current(state, execution, context, &workspace);

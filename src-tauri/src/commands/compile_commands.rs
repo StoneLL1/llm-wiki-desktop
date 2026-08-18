@@ -154,16 +154,25 @@ async fn run_compile(
         .task_service
         .append_log(task_id, LogLevel::Info, "Creating Git checkpoint".into())
         .map_err(task_error)?;
+    let git_cancellation = state
+        .task_service
+        .get_cancellation_token(task_id)
+        .ok_or_else(|| task_error(format!("Task cancellation token is unavailable: {task_id}")))?;
     let (checkpoint, baseline, workspace, protected_sources) = state
         .with_current_project_write_access(
             &request.project_id,
             &request.project_root_path,
             |_permit, current| {
-                let checkpoint = state.git_service.create_checkpoint(
-                    current,
-                    CheckpointPurpose::HighRiskOperation,
-                    "Before wiki compile",
-                )?;
+                let checkpoint =
+                    state
+                        .git_service
+                        .with_task_cancellation(git_cancellation, || {
+                            state.git_service.create_checkpoint(
+                                current,
+                                CheckpointPurpose::HighRiskOperation,
+                                "Before wiki compile",
+                            )
+                        })?;
                 let baseline = CompileService::snapshot_wiki(current)?;
                 let workspace = CompileService::create_workspace_for_sources(
                     current,
@@ -212,7 +221,7 @@ async fn run_compile(
             &request.project_id,
             &request.project_root_path,
             |_permit, context| {
-        ensure_checkpoint_head(state, context, checkpoint.commit_hash.as_deref())?;
+        ensure_checkpoint_head(state, context, task_id, checkpoint.commit_hash.as_deref())?;
         if state.task_service.is_cancelled(task_id) {
             return Err(BackendError::new("COMPILE_CANCELLED", "Wiki compile was cancelled.", true, false));
         }
@@ -439,12 +448,14 @@ fn finish_compile(
     );
     checkpoint_paths.sort();
     checkpoint_paths.dedup();
-    let result_checkpoint = match state.git_service.create_scoped_checkpoint(
-        context,
-        CheckpointPurpose::FinalResult,
-        "Compile wiki",
-        &checkpoint_paths,
-    ) {
+    let result_checkpoint = match with_compile_git_cancellation(state, task_id, || {
+        state.git_service.create_scoped_checkpoint(
+            context,
+            CheckpointPurpose::FinalResult,
+            "Compile wiki",
+            &checkpoint_paths,
+        )
+    }) {
         Ok(checkpoint) => checkpoint
             .commit_hash
             .or_else(|| initial_checkpoint.clone()),
@@ -648,7 +659,7 @@ pub fn resolve_compile_conflict(
                 true,
             ));
         }
-        ensure_checkpoint_head(&state, context, checkpoint_hash.as_deref())?;
+        ensure_checkpoint_head(&state, context, &task_id, checkpoint_hash.as_deref())?;
         let resolved_manifest = CompileService::resolve_conflict_manifest(
             &manifest,
             &conflict_paths,
@@ -783,7 +794,9 @@ pub fn confirm_compile_action(
                 true,
             ));
         }
-        if let Err(error) = ensure_checkpoint_head(&state, context, checkpoint_hash.as_deref()) {
+        if let Err(error) =
+            ensure_checkpoint_head(&state, context, &task_id, checkpoint_hash.as_deref())
+        {
             let _ = state.task_service.set_error(&task_id, error.clone());
             let _ = state
                 .task_service
@@ -843,15 +856,13 @@ fn task_error(message: String) -> BackendError {
 fn ensure_checkpoint_head(
     state: &AppState,
     context: &ProjectContext,
+    task_id: &str,
     expected: Option<&str>,
 ) -> Result<(), BackendError> {
-    if state
-        .git_service
-        .repository_status(context)?
-        .head
-        .as_deref()
-        != expected
-    {
+    let status = with_compile_git_cancellation(state, task_id, || {
+        state.git_service.repository_status(context)
+    })?;
+    if status.head.as_deref() != expected {
         return Err(BackendError::new(
             "COMPILE_CHECKPOINT_CHANGED",
             "The project Git HEAD changed during compilation.",
@@ -860,6 +871,18 @@ fn ensure_checkpoint_head(
         ));
     }
     Ok(())
+}
+
+fn with_compile_git_cancellation<T>(
+    state: &AppState,
+    task_id: &str,
+    operation: impl FnOnce() -> Result<T, BackendError>,
+) -> Result<T, BackendError> {
+    let token = state
+        .task_service
+        .get_cancellation_token(task_id)
+        .ok_or_else(|| task_error(format!("Task cancellation token is unavailable: {task_id}")))?;
+    state.git_service.with_task_cancellation(token, operation)
 }
 
 fn compile_output_paths(manifest: &CompileManifest) -> Vec<String> {

@@ -472,11 +472,7 @@ async fn run_source_ai_organize(
                 .map_err(source_task_error)?;
             let workspace = source_ai_organize::create_agent_workspace(task_id, &input)?;
             let outcome = (|| {
-                let prompt = if matches!(kind, AgentKind::Openclaw | AgentKind::Hermes) {
-                    source_ai_organize::provider_prompt(&input, &language)?
-                } else {
-                    source_ai_organize::agent_prompt(&language)
-                };
+                let prompt = source_ai_organize::agent_prompt(&input, &language)?;
                 let invocation = AgentService::source_ai_organize_invocation(
                     kind,
                     &workspace,

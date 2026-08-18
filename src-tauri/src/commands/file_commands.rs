@@ -901,20 +901,28 @@ mod tests {
             checkpoint_hash: None,
         };
 
-        let confirmed = execute_claimed_project_authority_action(
-            &state,
-            StoredPendingAction {
-                action,
-                execution: Some(ConfirmationExecution::EnableCompatibleProject {
-                    assessment_id: assessment.assessment_id,
-                    project_id: "project-a".into(),
-                    root_path: root.to_string_lossy().into_owned(),
-                    template: ProjectTemplate::General,
-                    initialize_git: false,
-                }),
-            },
-        )
-        .unwrap();
+        let confirmed = state
+            .with_current_project_authority_mutation(
+                "project-a",
+                root.to_string_lossy().as_ref(),
+                |permit, _context| {
+                    execute_claimed_project_authority_action(
+                        &state,
+                        permit,
+                        StoredPendingAction {
+                            action,
+                            execution: Some(ConfirmationExecution::EnableCompatibleProject {
+                                assessment_id: assessment.assessment_id,
+                                project_id: "project-a".into(),
+                                root_path: root.to_string_lossy().into_owned(),
+                                template: ProjectTemplate::General,
+                                initialize_git: false,
+                            }),
+                        },
+                    )
+                },
+            )
+            .unwrap();
 
         assert_eq!(confirmed.status, ConfirmationStatus::Confirmed);
         assert!(!root.join(".git").exists());
@@ -1001,19 +1009,27 @@ mod tests {
             checkpoint_hash: None,
         };
 
-        let confirmed = execute_claimed_project_authority_action(
-            &state,
-            StoredPendingAction {
-                action,
-                execution: Some(ConfirmationExecution::RepairProject {
-                    assessment_id: assessment.assessment_id,
-                    project_id: summary.project_id,
-                    root_path: root.to_string_lossy().into_owned(),
-                    plan,
-                }),
-            },
-        )
-        .unwrap();
+        let confirmed = state
+            .with_current_project_authority_mutation(
+                &summary.project_id,
+                root.to_string_lossy().as_ref(),
+                |permit, _context| {
+                    execute_claimed_project_authority_action(
+                        &state,
+                        permit,
+                        StoredPendingAction {
+                            action,
+                            execution: Some(ConfirmationExecution::RepairProject {
+                                assessment_id: assessment.assessment_id,
+                                project_id: summary.project_id.clone(),
+                                root_path: root.to_string_lossy().into_owned(),
+                                plan,
+                            }),
+                        },
+                    )
+                },
+            )
+            .unwrap();
 
         assert_eq!(confirmed.status, ConfirmationStatus::Confirmed);
         assert!(confirmed.checkpoint_exists);
