@@ -41,7 +41,7 @@ pub mod source_lifecycle;
 pub mod source_registry;
 mod structured_extract;
 pub mod subtitle;
-mod transaction;
+pub(crate) mod transaction;
 pub mod url_policy;
 pub mod web_fetch;
 pub mod web_target_store;

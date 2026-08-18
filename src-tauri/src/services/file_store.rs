@@ -1,7 +1,6 @@
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -9,6 +8,7 @@ use crate::errors::BackendError;
 use crate::models::layout::is_link_or_reparse;
 use crate::models::paths::ProjectContext;
 use crate::utils::path_utils::normalize_project_path;
+use crate::utils::safe_project_dir::{BoundFileIdentity, BoundProjectMutationRoot};
 
 #[derive(Default)]
 pub struct FileStore;
@@ -36,11 +36,21 @@ impl FileStore {
         relative_path: &str,
     ) -> Result<(), BackendError> {
         let path = context.resolve_project_write_directory(relative_path)?;
-        fs::create_dir_all(&path).map_err(|err| io_error("FILE_DIR_CREATE_FAILED", err, &path))
+        BoundProjectMutationRoot::ensure_and_bind(
+            &context.root,
+            &path.join(".wiki-directory-binding-probe"),
+        )
+        .map(|_| ())
+        .map_err(|error| {
+            BackendError::new("FILE_DIR_CREATE_FAILED", error.to_string(), true, true)
+                .with_details(serde_json::json!({ "path": path.to_string_lossy() }))
+        })
     }
 
-    pub fn ensure_absolute_dir(&self, path: &Path) -> Result<(), BackendError> {
-        fs::create_dir_all(path).map_err(|err| io_error("FILE_DIR_CREATE_FAILED", err, path))
+    pub fn ensure_absolute_dir(&self, root: &Path, path: &Path) -> Result<(), BackendError> {
+        BoundProjectMutationRoot::ensure_and_bind(root, &path.join(".wiki-directory-binding-probe"))
+            .map(|_| ())
+            .map_err(|error| io_error("FILE_DIR_CREATE_FAILED", error, path))
     }
 
     pub fn read_markdown(
@@ -72,7 +82,8 @@ impl FileStore {
         contents: &str,
     ) -> Result<(), BackendError> {
         let path = context.resolve_project_write_path(relative_path)?;
-        write_text(&path, contents)
+        let binding = bind_project_write(context, &path, true)?;
+        write_bound_atomic(&binding, &path, contents.as_bytes(), None)
     }
 
     pub fn write_markdown_checked(
@@ -94,15 +105,18 @@ impl FileStore {
                 )
             })?;
         let path = context.resolve_project_write_path(relative_path)?;
-        self.verify_write_mode(&path, relative_path, mode.clone())?;
-        write_text(&path, contents)?;
+        let ensure_parent = matches!(mode, WriteMode::CreateNew);
+        let binding = bind_project_write(context, &path, ensure_parent)?;
+        let expected_identity =
+            self.verify_write_mode(&binding, &path, relative_path, mode.clone())?;
+        write_bound_atomic(&binding, &path, contents.as_bytes(), expected_identity)?;
         // The hash check and atomic rename cannot form an OS-level compare-and
         // swap for edits made by an external editor. Verify the postcondition
         // immediately so a racing replacement is reported and never enters
         // the Lint verification/rollback path as if our content were present.
         if let WriteMode::OverwriteIfHashMatches(expected_hash) = mode {
             let expected_new_hash = hash_bytes(contents.as_bytes());
-            let actual_hash = hash_file(&path)?;
+            let actual_hash = hash_bound_file(&binding, &path)?;
             if actual_hash != expected_new_hash {
                 return Err(BackendError::new(
                     "FILE_CHANGED_DURING_WRITE",
@@ -139,12 +153,70 @@ impl FileStore {
                 )
             })?;
         let path = context.resolve_project_write_path(relative_path)?;
-        self.verify_write_mode(&path, relative_path, WriteMode::CreateNew)?;
-        write_atomic_create_new(&path, relative_path, contents.as_bytes())
+        let binding = bind_project_write(context, &path, true)?;
+        self.verify_write_mode(&binding, &path, relative_path, WriteMode::CreateNew)?;
+        write_bound_create_new(&binding, &path, relative_path, contents.as_bytes())
     }
 
-    pub fn write_text_absolute(&self, path: &Path, contents: &str) -> Result<(), BackendError> {
-        write_text(path, contents)
+    pub fn write_text_absolute(
+        &self,
+        root: &Path,
+        path: &Path,
+        contents: &str,
+    ) -> Result<(), BackendError> {
+        let binding = bind_absolute_write(root, path)?;
+        write_bound_atomic(&binding, path, contents.as_bytes(), None)
+    }
+
+    pub(crate) fn write_project_bytes_absolute(
+        &self,
+        context: &ProjectContext,
+        path: &Path,
+        bytes: &[u8],
+    ) -> Result<(), BackendError> {
+        let binding = bind_project_write(context, path, true)?;
+        write_bound_atomic(&binding, path, bytes, None)
+    }
+
+    pub(crate) fn write_project_bytes_absolute_if_hash_matches(
+        &self,
+        context: &ProjectContext,
+        path: &Path,
+        bytes: &[u8],
+        expected_hash: &str,
+    ) -> Result<bool, BackendError> {
+        let binding = match BoundProjectMutationRoot::bind(&context.root, path) {
+            Ok(binding) => binding,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(io_error("FILE_READ_FAILED", error, path)),
+        };
+        let (current, identity) = match binding.read_regular_with_identity(path) {
+            Ok(result) => result,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(io_error("FILE_READ_FAILED", error, path)),
+        };
+        if hash_bytes(&current) != expected_hash {
+            return Ok(false);
+        }
+        write_bound_atomic(
+            &binding,
+            path,
+            bytes,
+            Some((identity, expected_hash.to_string())),
+        )?;
+        Ok(true)
+    }
+
+    pub(crate) fn write_bytes_create_new_absolute(
+        &self,
+        root: &Path,
+        path: &Path,
+        bytes: &[u8],
+    ) -> Result<(), BackendError> {
+        let binding = bind_absolute_write(root, path)?;
+        binding
+            .write_atomic_create_new(path, bytes)
+            .map_err(|error| io_error("FILE_WRITE_FAILED", error, path))
     }
 
     pub fn read_json<T: serde::de::DeserializeOwned>(
@@ -192,7 +264,8 @@ impl FileStore {
         let serialized = serde_json::to_string_pretty(value).map_err(|err| {
             BackendError::new("JSON_SERIALIZE_FAILED", err.to_string(), true, false)
         })?;
-        write_atomic(&path, serialized.as_bytes())
+        let binding = bind_project_write(context, &path, true)?;
+        write_bound_atomic(&binding, &path, serialized.as_bytes(), None)
     }
 
     pub fn write_json_atomic_checked<T: serde::Serialize>(
@@ -214,22 +287,26 @@ impl FileStore {
                 )
             })?;
         let path = context.resolve_project_write_path(relative_path)?;
-        self.verify_write_mode(&path, relative_path, mode)?;
+        let ensure_parent = matches!(mode, WriteMode::CreateNew);
+        let binding = bind_project_write(context, &path, ensure_parent)?;
+        let expected_identity = self.verify_write_mode(&binding, &path, relative_path, mode)?;
         let serialized = serde_json::to_string_pretty(value).map_err(|err| {
             BackendError::new("JSON_SERIALIZE_FAILED", err.to_string(), true, false)
         })?;
-        write_atomic(&path, serialized.as_bytes())
+        write_bound_atomic(&binding, &path, serialized.as_bytes(), expected_identity)
     }
 
     pub fn write_json_atomic_absolute<T: serde::Serialize>(
         &self,
+        root: &Path,
         path: &Path,
         value: &T,
     ) -> Result<(), BackendError> {
         let serialized = serde_json::to_string_pretty(value).map_err(|err| {
             BackendError::new("JSON_SERIALIZE_FAILED", err.to_string(), true, false)
         })?;
-        write_atomic(path, serialized.as_bytes())
+        let binding = bind_absolute_write(root, path)?;
+        write_bound_atomic(&binding, path, serialized.as_bytes(), None)
     }
 
     pub fn list_markdown_files(&self, root: &Path) -> Result<Vec<PathBuf>, BackendError> {
@@ -249,7 +326,9 @@ impl FileStore {
         relative_path: &str,
     ) -> Result<String, BackendError> {
         let path = context.resolve_project_path(relative_path)?;
-        hash_file(&path)
+        let binding = BoundProjectMutationRoot::bind_read(&context.root, &path)
+            .map_err(|error| io_error("FILE_READ_FAILED", error, &path))?;
+        hash_bound_file(&binding, &path)
     }
 
     pub fn file_hash_if_exists(
@@ -258,10 +337,42 @@ impl FileStore {
         relative_path: &str,
     ) -> Result<Option<String>, BackendError> {
         let path = context.resolve_project_path(relative_path)?;
-        if !path.exists() {
-            return Ok(None);
+        let binding = match BoundProjectMutationRoot::bind_read(&context.root, &path) {
+            Ok(binding) => binding,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(io_error("FILE_READ_FAILED", error, &path)),
+        };
+        match binding.read_regular(&path) {
+            Ok(bytes) => Ok(Some(hash_bytes(&bytes))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(io_error("FILE_READ_FAILED", error, &path)),
         }
-        hash_file(&path).map(Some)
+    }
+
+    pub(crate) fn remove_if_hash_matches(
+        &self,
+        context: &ProjectContext,
+        relative_path: &str,
+        expected_hash: &str,
+    ) -> Result<bool, BackendError> {
+        let path = context.resolve_project_write_path(relative_path)?;
+        let binding = match BoundProjectMutationRoot::bind(&context.root, &path) {
+            Ok(binding) => binding,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(io_error("FILE_READ_FAILED", error, &path)),
+        };
+        let (bytes, identity) = match binding.read_regular_with_identity(&path) {
+            Ok(result) => result,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(io_error("FILE_READ_FAILED", error, &path)),
+        };
+        if hash_bytes(&bytes) != expected_hash {
+            return Ok(false);
+        }
+        binding
+            .remove_file_if_identity_and_hash(&path, identity, expected_hash)
+            .map_err(|error| io_error("FILE_WRITE_FAILED", error, &path))?;
+        Ok(true)
     }
 
     pub fn assert_unique_project_paths(&self, paths: &[&str]) -> Result<(), BackendError> {
@@ -283,30 +394,38 @@ impl FileStore {
 
     fn verify_write_mode(
         &self,
+        binding: &BoundProjectMutationRoot,
         path: &Path,
         relative_path: &str,
         mode: WriteMode,
-    ) -> Result<(), BackendError> {
+    ) -> Result<Option<(BoundFileIdentity, String)>, BackendError> {
         match mode {
-            WriteMode::CreateNew if path.exists() => Err(BackendError::new(
-                "FILE_ALREADY_EXISTS",
-                "File already exists and cannot be overwritten without an explicit hash match.",
-                true,
-                true,
-            )
-            .with_details(serde_json::json!({ "path": relative_path }))),
-            WriteMode::CreateNew => Ok(()),
+            WriteMode::CreateNew => match binding.file_identity(path) {
+                Ok(_) => Err(BackendError::new(
+                    "FILE_ALREADY_EXISTS",
+                    "File already exists and cannot be overwritten without an explicit hash match.",
+                    true,
+                    true,
+                )
+                .with_details(serde_json::json!({ "path": relative_path }))),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(io_error("FILE_READ_FAILED", error, path)),
+            },
             WriteMode::OverwriteIfHashMatches(expected_hash) => {
-                if !path.exists() {
-                    return Err(BackendError::new(
-                        "FILE_NOT_FOUND",
-                        "Cannot overwrite a missing file.",
-                        true,
-                        true,
-                    )
-                    .with_details(serde_json::json!({ "path": relative_path })));
-                }
-                let current_hash = hash_file(path)?;
+                let (bytes, identity) = match binding.read_regular_with_identity(path) {
+                    Ok(result) => result,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        return Err(BackendError::new(
+                            "FILE_NOT_FOUND",
+                            "Cannot overwrite a missing file.",
+                            true,
+                            true,
+                        )
+                        .with_details(serde_json::json!({ "path": relative_path })))
+                    }
+                    Err(error) => return Err(io_error("FILE_READ_FAILED", error, path)),
+                };
+                let current_hash = hash_bytes(&bytes);
                 if current_hash != expected_hash {
                     // Surface the on-disk baseline text so the frontend can run
                     // a 3-way diff (baseline disk + editor buffer + generated)
@@ -317,9 +436,7 @@ impl FileStore {
                     // baseline when the file is valid UTF-8: from_utf8_lossy
                     // would otherwise produce U+FFFD garbage for binary files,
                     // mislead the diff, and possibly crash the editor.
-                    let baseline_content = fs::read(path)
-                        .ok()
-                        .and_then(|bytes| String::from_utf8(bytes).ok());
+                    let baseline_content = String::from_utf8(bytes).ok();
                     let mut details = serde_json::json!({
                         "path": relative_path,
                         "expectedHash": expected_hash,
@@ -336,14 +453,19 @@ impl FileStore {
                     )
                     .with_details(details));
                 }
-                Ok(())
+                Ok(Some((identity, current_hash)))
             }
         }
     }
 }
 
-fn hash_file(path: &Path) -> Result<String, BackendError> {
-    let bytes = fs::read(path).map_err(|err| io_error("FILE_READ_FAILED", err, path))?;
+fn hash_bound_file(
+    binding: &BoundProjectMutationRoot,
+    path: &Path,
+) -> Result<String, BackendError> {
+    let bytes = binding
+        .read_regular(path)
+        .map_err(|err| io_error("FILE_READ_FAILED", err, path))?;
     Ok(hash_bytes(&bytes))
 }
 
@@ -353,144 +475,72 @@ fn hash_bytes(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn write_text(path: &Path, contents: &str) -> Result<(), BackendError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| io_error("FILE_DIR_CREATE_FAILED", err, parent))?;
-    }
-    write_atomic(path, contents.as_bytes())
+fn bind_project_write(
+    context: &ProjectContext,
+    path: &Path,
+    ensure_parent: bool,
+) -> Result<BoundProjectMutationRoot, BackendError> {
+    let result = if ensure_parent {
+        BoundProjectMutationRoot::ensure_and_bind(&context.root, path).map(|(binding, _)| binding)
+    } else {
+        BoundProjectMutationRoot::bind(&context.root, path)
+    };
+    result.map_err(|error| io_error("FILE_WRITE_FAILED", error, path))
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), BackendError> {
-    let parent = path.parent().ok_or_else(|| {
-        BackendError::new(
-            "PATH_INVALID",
-            "Cannot determine parent directory.",
-            false,
-            true,
-        )
-    })?;
-    fs::create_dir_all(parent).map_err(|err| io_error("FILE_DIR_CREATE_FAILED", err, parent))?;
-
-    let file_name = path.file_name().ok_or_else(|| {
-        BackendError::new("PATH_INVALID", "Cannot determine file name.", false, true)
-    })?;
-    let (tmp_path, mut file) = (0..16)
-        .find_map(|_| {
-            let candidate = parent.join(format!(
-                ".{}.{}.tmp",
-                file_name.to_string_lossy(),
-                uuid::Uuid::new_v4()
-            ));
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&candidate)
-            {
-                Ok(file) => Some(Ok((candidate, file))),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
-                Err(error) => Some(Err(io_error("FILE_WRITE_FAILED", error, &candidate))),
-            }
-        })
-        .unwrap_or_else(|| {
-            Err(BackendError::new(
-                "FILE_WRITE_FAILED",
-                "Could not reserve a unique atomic-write temporary file.",
-                true,
-                false,
-            ))
-        })?;
-
-    // `create_new` atomically rejects every pre-existing filesystem object at
-    // the candidate path, including links/reparse points, before any bytes are
-    // written. The random same-directory name also prevents prediction-based
-    // replacement between project-path validation and this write.
-    let write_result = file
-        .write_all(bytes)
-        .and_then(|_| file.sync_all())
-        .map_err(|err| io_error("FILE_WRITE_FAILED", err, &tmp_path));
-    drop(file);
-    if let Err(error) = write_result {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(error);
-    }
-
-    fs::rename(&tmp_path, path).map_err(|err| {
-        let _ = fs::remove_file(&tmp_path);
-        io_error("FILE_WRITE_FAILED", err, path)
-    })
+fn bind_absolute_write(root: &Path, path: &Path) -> Result<BoundProjectMutationRoot, BackendError> {
+    BoundProjectMutationRoot::ensure_and_bind(root, path)
+        .map(|(binding, _)| binding)
+        .map_err(|error| io_error("FILE_WRITE_FAILED", error, path))
 }
 
-fn write_atomic_create_new(
+fn write_bound_atomic(
+    binding: &BoundProjectMutationRoot,
+    path: &Path,
+    bytes: &[u8],
+    expected: Option<(BoundFileIdentity, String)>,
+) -> Result<(), BackendError> {
+    let result = if let Some((expected_identity, expected_hash)) = expected {
+        let temporary = binding
+            .write_synced_temp(path, bytes)
+            .map_err(|error| io_error("FILE_WRITE_FAILED", error, path))?;
+        let result = binding.replace_existing_if_identity_and_hash(
+            &temporary,
+            path,
+            expected_identity,
+            &expected_hash,
+        );
+        if result.is_err() {
+            let _ = binding.remove_file(&temporary);
+        }
+        result.and_then(|()| binding.sync())
+    } else {
+        binding.write_atomic_replace(path, bytes)
+    };
+    result.map_err(|error| io_error("FILE_WRITE_FAILED", error, path))
+}
+
+fn write_bound_create_new(
+    binding: &BoundProjectMutationRoot,
     path: &Path,
     relative_path: &str,
     bytes: &[u8],
 ) -> Result<(), BackendError> {
-    let parent = path.parent().ok_or_else(|| {
-        BackendError::new(
-            "PATH_INVALID",
-            "Cannot determine parent directory.",
-            false,
-            true,
-        )
-    })?;
-    fs::create_dir_all(parent).map_err(|err| io_error("FILE_DIR_CREATE_FAILED", err, parent))?;
-    let file_name = path.file_name().ok_or_else(|| {
-        BackendError::new("PATH_INVALID", "Cannot determine file name.", false, true)
-    })?;
-    let (tmp_path, mut file) = (0..16)
-        .find_map(|_| {
-            let candidate = parent.join(format!(
-                ".{}.{}.tmp",
-                file_name.to_string_lossy(),
-                uuid::Uuid::new_v4()
-            ));
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&candidate)
-            {
-                Ok(file) => Some(Ok((candidate, file))),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
-                Err(error) => Some(Err(io_error("FILE_WRITE_FAILED", error, &candidate))),
+    binding
+        .write_atomic_create_new(path, bytes)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                BackendError::new(
+                    "FILE_ALREADY_EXISTS",
+                    "File already exists and cannot be overwritten without an explicit hash match.",
+                    true,
+                    true,
+                )
+                .with_details(serde_json::json!({ "path": relative_path }))
+            } else {
+                io_error("FILE_WRITE_FAILED", error, path)
             }
         })
-        .unwrap_or_else(|| {
-            Err(BackendError::new(
-                "FILE_WRITE_FAILED",
-                "Could not reserve a unique atomic-create temporary file.",
-                true,
-                false,
-            ))
-        })?;
-    let write_result = file
-        .write_all(bytes)
-        .and_then(|_| file.sync_all())
-        .map_err(|error| io_error("FILE_WRITE_FAILED", error, &tmp_path));
-    drop(file);
-    if let Err(error) = write_result {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(error);
-    }
-
-    // Linking a complete same-directory temporary file is an OS-level
-    // no-replace publish: every pre-existing target (including a link created
-    // after the initial check) makes hard_link fail instead of being replaced.
-    let publish_result = fs::hard_link(&tmp_path, path).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::AlreadyExists {
-            BackendError::new(
-                "FILE_ALREADY_EXISTS",
-                "File already exists and cannot be overwritten without an explicit hash match.",
-                true,
-                true,
-            )
-            .with_details(serde_json::json!({ "path": relative_path }))
-        } else {
-            io_error("FILE_WRITE_FAILED", error, path)
-        }
-    });
-    let _ = fs::remove_file(&tmp_path);
-    publish_result
 }
 
 fn walk_markdown(current: &Path, results: &mut Vec<PathBuf>) -> std::io::Result<()> {
@@ -774,6 +824,35 @@ mod tests {
         );
         // currentHash must still be present alongside the baseline.
         assert!(details.get("currentHash").is_some());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn checked_cleanup_only_removes_the_expected_complete_file() {
+        let (context, root) = tmp_context("checked-cleanup");
+        let store = FileStore;
+        store
+            .write_markdown(&context, "exports/generated.md", "generated")
+            .unwrap();
+
+        assert!(!store
+            .remove_if_hash_matches(&context, "exports/generated.md", "stale")
+            .unwrap());
+        assert_eq!(
+            store
+                .read_markdown(&context, "exports/generated.md")
+                .unwrap(),
+            "generated"
+        );
+        let expected = store.file_hash(&context, "exports/generated.md").unwrap();
+        assert!(store
+            .remove_if_hash_matches(&context, "exports/generated.md", &expected)
+            .unwrap());
+        assert!(!context
+            .resolve_project_path("exports/generated.md")
+            .unwrap()
+            .exists());
 
         std::fs::remove_dir_all(root).unwrap();
     }

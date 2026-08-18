@@ -1599,15 +1599,7 @@ fn discard_new_artifact_if_unchanged(
     output_path: &str,
     expected_hash: &str,
 ) {
-    let Ok(Some(actual)) = FileStore.file_hash_if_exists(context, output_path) else {
-        return;
-    };
-    if actual != expected_hash {
-        return;
-    }
-    if let Ok(path) = context.resolve_project_write_path(output_path) {
-        let _ = std::fs::remove_file(path);
-    }
+    let _ = FileStore.remove_if_hash_matches(context, output_path, expected_hash);
 }
 
 fn ensure_not_cancelled(tasks: &TaskService, task_id: &str) -> Result<(), BackendError> {

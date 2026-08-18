@@ -15,6 +15,7 @@ use crate::{
         import_v2_agent::{AgentAssistanceTrigger, AgentToolGrant},
         paths::ProjectContext,
     },
+    utils::safe_project_dir::{remove_project_file, BoundProjectMutationRoot},
 };
 
 const WORKSPACE_SCHEMA_VERSION: u32 = 1;
@@ -35,6 +36,7 @@ pub struct AgentTaskBundle {
 
 #[derive(Debug, Clone)]
 pub struct AgentWorkspace {
+    pub project_root: PathBuf,
     pub workspace_id: String,
     pub root: PathBuf,
     pub task_path: PathBuf,
@@ -104,12 +106,8 @@ impl AgentWorkspaceBuilder {
             session.session_id, item.item_id
         );
         let lease_path = context.resolve_project_path(&lease_relative)?;
-        let lease_parent = lease_path
-            .parent()
-            .ok_or_else(|| workspace_error("Agent workspace lease path is invalid."))?;
-        fs::create_dir_all(lease_parent).map_err(workspace_io_error)?;
-        reject_links_between(&context.root, lease_parent)?;
         write_json_atomic_path(
+            &context.root,
             &lease_path,
             &AgentWorkspaceLease {
                 session_id: session.session_id.clone(),
@@ -125,17 +123,20 @@ impl AgentWorkspaceBuilder {
         let logs_dir = root.join("logs");
         let output_dir = root.join("output");
         for dir in [&source_dir, &deterministic_dir, &logs_dir, &output_dir] {
-            if let Err(error) = fs::create_dir_all(dir).map_err(workspace_io_error) {
-                make_tree_writable(&root);
-                let _ = fs::remove_dir_all(&root);
-                let _ = fs::remove_file(&lease_path);
+            if let Err(error) = BoundProjectMutationRoot::ensure_and_bind(
+                &context.root,
+                &dir.join(".wiki-directory-binding-probe"),
+            )
+            .map_err(workspace_io_error)
+            {
+                let _ = remove_workspace_tree(&context.root, &root);
+                let _ = remove_project_file(&context.root, &lease_path);
                 return Err(error);
             }
         }
         if let Err(error) = reject_links_between(&context.root, &root) {
-            make_tree_writable(&root);
-            let _ = fs::remove_dir_all(&root);
-            let _ = fs::remove_file(&lease_path);
+            let _ = remove_workspace_tree(&context.root, &root);
+            let _ = remove_project_file(&context.root, &lease_path);
             return Err(error);
         }
 
@@ -164,7 +165,11 @@ impl AgentWorkspaceBuilder {
                 ];
                 for (index, asset) in preview.assets.iter().enumerate() {
                     let asset_dir = deterministic_dir.join("assets");
-                    fs::create_dir_all(&asset_dir).map_err(workspace_io_error)?;
+                    BoundProjectMutationRoot::ensure_and_bind(
+                        &context.root,
+                        &asset_dir.join(".wiki-directory-binding-probe"),
+                    )
+                    .map_err(workspace_io_error)?;
                     let name = stable_copy_name(&format!("asset-{index}"), &asset.relative_path);
                     copy_verified_item_artifact(
                         context,
@@ -197,9 +202,13 @@ impl AgentWorkspaceBuilder {
                 untrusted_source_material: vec![format!("source/{source_name}")],
             };
             let task_path = root.join("task.json");
-            write_json(&task_path, &task)?;
+            write_json(&context.root, &task_path, &task)?;
             let attempts_path = logs_dir.join("attempts.json");
-            write_json(&attempts_path, &Vec::<serde_json::Value>::new())?;
+            write_json(
+                &context.root,
+                &attempts_path,
+                &Vec::<serde_json::Value>::new(),
+            )?;
 
             set_tree_readonly(&source_dir)?;
             set_tree_readonly(&deterministic_dir)?;
@@ -208,6 +217,7 @@ impl AgentWorkspaceBuilder {
             set_readonly(&output_dir, false)?;
 
             Ok(AgentWorkspace {
+                project_root: context.root.clone(),
                 workspace_id,
                 root: root.clone(),
                 task_path,
@@ -220,9 +230,8 @@ impl AgentWorkspaceBuilder {
         })();
 
         if result.is_err() {
-            make_tree_writable(&root);
-            let _ = fs::remove_dir_all(&root);
-            let _ = fs::remove_file(&lease_path);
+            let _ = remove_workspace_tree(&context.root, &root);
+            let _ = remove_project_file(&context.root, &lease_path);
         }
         result
     }
@@ -232,10 +241,10 @@ impl AgentWorkspaceBuilder {
         if workspace.output_dir.exists() {
             collect_file_hashes(&workspace.output_dir, &mut hashes)?;
         }
-        make_tree_writable(&workspace.root);
-        fs::remove_dir_all(&workspace.root).map_err(workspace_io_error)?;
+        remove_workspace_tree(&workspace.project_root, &workspace.root)?;
         if workspace.lease_path.exists() {
-            fs::remove_file(&workspace.lease_path).map_err(workspace_io_error)?;
+            remove_project_file(&workspace.project_root, &workspace.lease_path)
+                .map_err(workspace_io_error)?;
         }
         hashes.sort();
         Ok(hashes)
@@ -285,15 +294,14 @@ impl AgentWorkspaceBuilder {
                     "Agent workspace storage is not a directory.",
                 ));
             }
-            make_tree_writable(&root);
-            fs::remove_dir_all(root).map_err(workspace_io_error)?;
+            remove_workspace_tree(&context.root, &root)?;
         }
         let lease = context.resolve_project_path(&format!(
             ".app/import-sessions/{session_id}/items/{item_id}/staging/agent-leases/{workspace_id}.json"
         ))?;
         if lease.exists() {
             reject_links_between(&context.root, &lease)?;
-            fs::remove_file(lease).map_err(workspace_io_error)?;
+            remove_project_file(&context.root, &lease).map_err(workspace_io_error)?;
         }
         Ok(())
     }
@@ -331,7 +339,7 @@ impl AgentWorkspaceBuilder {
                         "Agent workspace lease temporary is invalid.",
                     ));
                 }
-                fs::remove_file(path).map_err(workspace_io_error)?;
+                remove_project_file(&context.root, &path).map_err(workspace_io_error)?;
                 continue;
             }
             if !name.ends_with(".json") {
@@ -574,7 +582,12 @@ fn copy_hard_failure_source(
         }
     }
     let source_name = stable_copy_name("source", &source.to_string_lossy());
-    fs::write(destination_dir.join(&source_name), bytes).map_err(workspace_io_error)?;
+    let destination = destination_dir.join(&source_name);
+    let (binding, _) = BoundProjectMutationRoot::ensure_and_bind(&context.root, &destination)
+        .map_err(workspace_io_error)?;
+    binding
+        .write_atomic_replace(&destination, &bytes)
+        .map_err(workspace_io_error)?;
     Ok((source_name, vec![hash]))
 }
 
@@ -606,10 +619,11 @@ fn copy_verified_item_artifact(
             "Artifact changed after deterministic staging.",
         ));
     }
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent).map_err(workspace_io_error)?;
-    }
-    fs::write(destination, bytes).map_err(workspace_io_error)
+    let (binding, _) = BoundProjectMutationRoot::ensure_and_bind(&context.root, destination)
+        .map_err(workspace_io_error)?;
+    binding
+        .write_atomic_replace(destination, &bytes)
+        .map_err(workspace_io_error)
 }
 
 fn reject_links_between(root: &Path, target: &Path) -> Result<(), BackendError> {
@@ -661,7 +675,11 @@ fn stable_copy_name(stem: &str, original: &str) -> String {
     format!("{stem}{extension}")
 }
 
-fn write_json(path: &Path, value: &impl Serialize) -> Result<(), BackendError> {
+fn write_json(
+    project_root: &Path,
+    path: &Path,
+    value: &impl Serialize,
+) -> Result<(), BackendError> {
     let bytes = serde_json::to_vec_pretty(value).map_err(|error| {
         BackendError::new(
             "IMPORT_AGENT_WORKSPACE_INVALID",
@@ -670,33 +688,25 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<(), BackendError> {
             false,
         )
     })?;
-    fs::write(path, bytes).map_err(workspace_io_error)
+    let (binding, _) = BoundProjectMutationRoot::ensure_and_bind(project_root, path)
+        .map_err(workspace_io_error)?;
+    binding
+        .write_atomic_replace(path, &bytes)
+        .map_err(workspace_io_error)
 }
 
-fn write_json_atomic_path(path: &Path, value: &impl Serialize) -> Result<(), BackendError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| workspace_error("Agent workspace lease path is invalid."))?;
-    fs::create_dir_all(parent).map_err(workspace_io_error)?;
-    let temporary = parent.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
+fn write_json_atomic_path(
+    project_root: &Path,
+    path: &Path,
+    value: &impl Serialize,
+) -> Result<(), BackendError> {
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|_| workspace_error("Agent workspace lease is invalid."))?;
-    let result = (|| {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .map_err(workspace_io_error)?;
-        use std::io::Write;
-        file.write_all(&bytes).map_err(workspace_io_error)?;
-        file.sync_all().map_err(workspace_io_error)?;
-        drop(file);
-        fs::rename(&temporary, path).map_err(workspace_io_error)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    let (binding, _) = BoundProjectMutationRoot::ensure_and_bind(project_root, path)
+        .map_err(workspace_io_error)?;
+    binding
+        .write_atomic_replace(path, &bytes)
+        .map_err(workspace_io_error)
 }
 
 fn set_tree_readonly(root: &Path) -> Result<(), BackendError> {
@@ -719,23 +729,15 @@ fn set_readonly(path: &Path, readonly: bool) -> Result<(), BackendError> {
     fs::set_permissions(path, permissions).map_err(workspace_io_error)
 }
 
-fn make_tree_writable(root: &Path) {
-    let Ok(metadata) = fs::symlink_metadata(root) else {
-        return;
+fn remove_workspace_tree(project_root: &Path, root: &Path) -> Result<(), BackendError> {
+    let binding = match BoundProjectMutationRoot::bind(project_root, root) {
+        Ok(binding) => binding,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(workspace_io_error(error)),
     };
-    if metadata.file_type().is_symlink() || is_windows_reparse(&metadata) {
-        return;
-    }
-    {
-        let mut permissions = metadata.permissions();
-        permissions.set_readonly(false);
-        let _ = fs::set_permissions(root, permissions);
-    }
-    if let Ok(entries) = fs::read_dir(root) {
-        for entry in entries.flatten() {
-            make_tree_writable(&entry.path());
-        }
-    }
+    binding
+        .remove_directory_tree(root)
+        .map_err(workspace_io_error)
 }
 
 fn collect_file_hashes(root: &Path, hashes: &mut Vec<String>) -> Result<(), BackendError> {

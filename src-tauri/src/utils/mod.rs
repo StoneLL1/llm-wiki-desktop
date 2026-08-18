@@ -4,5 +4,6 @@ pub mod path_safety;
 pub mod path_utils;
 pub(crate) mod private_directory;
 pub(crate) mod process_lifetime;
+pub(crate) mod safe_project_dir;
 pub mod time_utils;
 pub mod url_utils;

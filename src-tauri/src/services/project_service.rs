@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
-use std::io::{ErrorKind, Write};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -25,6 +25,7 @@ use crate::utils::path_safety::{
     ensure_project_directory_with_created, validate_existing_project_directory,
     validate_existing_project_file, validate_existing_project_root,
 };
+use crate::utils::safe_project_dir::{remove_project_file, BoundProjectMutationRoot};
 
 pub(crate) mod assessment;
 mod decision_store;
@@ -307,72 +308,23 @@ impl ProjectService {
                         message,
                     )
                 })?;
-                let temporary = compat_dir.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()));
-                let write_result = (|| {
-                    let mut file = fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&temporary)
-                        .map_err(|error| {
-                            BackendError::new(
-                                "PROJECT_COMPAT_GUIDANCE_WRITE_FAILED",
-                                "Compatibility guidance could not be written.",
-                                true,
-                                true,
-                            )
-                            .with_details(serde_json::json!({ "error": error.to_string() }))
-                        })?;
-                    validate_existing_project_file(&root, &temporary).map_err(|message| {
-                        compatibility_path_unsafe_error(
-                            "Compatibility guidance temporary file became unsafe before writing.",
-                            message,
-                        )
-                    })?;
-                    file.write_all(contents.as_bytes()).map_err(|error| {
-                        BackendError::new(
-                            "PROJECT_COMPAT_GUIDANCE_WRITE_FAILED",
-                            "Compatibility guidance could not be written.",
-                            true,
-                            true,
-                        )
-                        .with_details(serde_json::json!({ "error": error.to_string() }))
-                    })?;
-                    file.sync_all().map_err(|error| {
-                        BackendError::new(
-                            "PROJECT_COMPAT_GUIDANCE_WRITE_FAILED",
-                            "Compatibility guidance could not be synchronized.",
-                            true,
-                            true,
-                        )
-                        .with_details(serde_json::json!({ "error": error.to_string() }))
-                    })?;
-                    validate_existing_project_directory(&root, &compat_dir).map_err(|message| {
-                        compatibility_path_unsafe_error(
-                            "Compatibility guidance directory changed before commit.",
-                            message,
-                        )
-                    })?;
-                    fs::rename(&temporary, &target).map_err(|error| {
+                let binding = BoundProjectMutationRoot::bind(&root, &target).map_err(|error| {
+                    compatibility_path_unsafe_error(
+                        "Compatibility guidance directory could not be bound safely.",
+                        error.to_string(),
+                    )
+                })?;
+                binding
+                    .write_atomic_create_new(&target, contents.as_bytes())
+                    .map_err(|error| {
                         BackendError::new(
                             "PROJECT_COMPAT_GUIDANCE_COMMIT_FAILED",
-                            "Compatibility guidance could not be committed.",
+                            "Compatibility guidance could not be committed safely.",
                             true,
                             true,
                         )
                         .with_details(serde_json::json!({ "error": error.to_string() }))
                     })?;
-                    validate_existing_project_file(&root, &target).map_err(|message| {
-                        compatibility_path_unsafe_error(
-                            "Compatibility guidance target became unsafe after commit.",
-                            message,
-                        )
-                    })?;
-                    Ok::<(), BackendError>(())
-                })();
-                if write_result.is_err() {
-                    remove_compatible_file_if_safe(&root, &temporary);
-                }
-                write_result?;
                 created_files.push(target);
             }
             Ok::<(), BackendError>(())
@@ -1226,6 +1178,7 @@ impl ProjectService {
         projects.truncate(MAX_RECENT_PROJECTS);
 
         store.write_json_atomic_absolute(
+            self.config_dir.parent().unwrap_or(&self.config_dir),
             &self.recent_projects_path(),
             &RecentProjectsFile {
                 projects: projects.clone(),
@@ -1259,7 +1212,11 @@ impl ProjectService {
                 || normalize_root_key(&entry.root_path) != normalized_root
         });
         if file.projects.len() != entry_count {
-            store.write_json_atomic_absolute(&path, &file)?;
+            store.write_json_atomic_absolute(
+                self.config_dir.parent().unwrap_or(&self.config_dir),
+                &path,
+                &file,
+            )?;
         }
         Ok(file.projects)
     }
@@ -1407,7 +1364,11 @@ impl ProjectService {
         }
         file.projects.remove(previous_index);
         file.projects.insert(0, relocated);
-        store.write_json_atomic_absolute(&path, &file)?;
+        store.write_json_atomic_absolute(
+            self.config_dir.parent().unwrap_or(&self.config_dir),
+            &path,
+            &file,
+        )?;
         Ok(file.projects)
     }
 
@@ -1483,7 +1444,7 @@ fn compatibility_path_unsafe_error(message: &str, error: String) -> BackendError
 /// file through a redirected path.
 fn remove_compatible_file_if_safe(root: &Path, file: &Path) {
     if validate_existing_project_file(root, file).is_ok() {
-        let _ = fs::remove_file(file);
+        let _ = remove_project_file(root, file);
     }
 }
 
@@ -1727,40 +1688,26 @@ fn write_repair_backup(root: &Path, backup: &Path, bytes: &[u8]) -> Result<(), B
     validate_existing_project_directory(root, parent).map_err(|message| {
         repair_path_unsafe_error("Repair backup directory became unsafe.", message)
     })?;
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(backup)
+    let binding = BoundProjectMutationRoot::bind(root, backup).map_err(|error| {
+        BackendError::new(
+            "PROJECT_REPAIR_BACKUP_WRITE_FAILED",
+            "The corrupt graph cache backup directory could not be bound safely.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({ "error": error.to_string() }))
+    })?;
+    binding
+        .write_atomic_create_new(backup, bytes)
         .map_err(|error| {
             BackendError::new(
                 "PROJECT_REPAIR_BACKUP_WRITE_FAILED",
-                "The corrupt graph cache could not be backed up.",
+                "The corrupt graph cache could not be backed up safely.",
                 true,
                 true,
             )
             .with_details(serde_json::json!({ "error": error.to_string() }))
-        })?;
-    validate_existing_project_file(root, backup).map_err(|message| {
-        repair_path_unsafe_error("Repair backup path became unsafe before writing.", message)
-    })?;
-    file.write_all(bytes).map_err(|error| {
-        BackendError::new(
-            "PROJECT_REPAIR_BACKUP_WRITE_FAILED",
-            "The corrupt graph cache backup could not be written.",
-            true,
-            true,
-        )
-        .with_details(serde_json::json!({ "error": error.to_string() }))
-    })?;
-    file.sync_all().map_err(|error| {
-        BackendError::new(
-            "PROJECT_REPAIR_BACKUP_WRITE_FAILED",
-            "The corrupt graph cache backup could not be synchronized.",
-            true,
-            true,
-        )
-        .with_details(serde_json::json!({ "error": error.to_string() }))
-    })
+        })
 }
 
 fn replace_graph_cache_atomically(
@@ -1782,49 +1729,15 @@ fn replace_graph_cache_atomically(
             message,
         )
     })?;
-    let temporary = parent.join(format!(".graph-cache.{}.repair.tmp", uuid::Uuid::new_v4()));
-    let write_result = (|| {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .map_err(|error| {
-                BackendError::new(
-                    "PROJECT_REPAIR_WRITE_FAILED",
-                    "The regenerated graph cache could not be prepared.",
-                    true,
-                    true,
-                )
-                .with_details(serde_json::json!({ "error": error.to_string() }))
-            })?;
-        validate_existing_project_file(root, &temporary).map_err(|message| {
-            repair_path_unsafe_error("Graph cache temporary path became unsafe.", message)
-        })?;
-        file.write_all(replacement).map_err(|error| {
-            BackendError::new(
-                "PROJECT_REPAIR_WRITE_FAILED",
-                "The regenerated graph cache could not be written.",
-                true,
-                true,
-            )
-            .with_details(serde_json::json!({ "error": error.to_string() }))
-        })?;
-        file.sync_all().map_err(|error| {
-            BackendError::new(
-                "PROJECT_REPAIR_WRITE_FAILED",
-                "The regenerated graph cache could not be synchronized.",
-                true,
-                true,
-            )
-            .with_details(serde_json::json!({ "error": error.to_string() }))
-        })?;
-        validate_existing_project_directory(root, parent).map_err(|message| {
-            repair_path_unsafe_error(
-                "Graph cache directory changed before repair commit.",
-                message,
-            )
-        })?;
-        fs::rename(&temporary, target).map_err(|error| {
+    let binding = BoundProjectMutationRoot::bind(root, target).map_err(|error| {
+        repair_path_unsafe_error(
+            "Graph cache directory became unsafe before repair commit.",
+            error.to_string(),
+        )
+    })?;
+    binding
+        .write_atomic_replace(target, replacement)
+        .map_err(|error| {
             BackendError::new(
                 "PROJECT_REPAIR_COMMIT_FAILED",
                 "The regenerated graph cache could not replace the corrupt cache.",
@@ -1832,16 +1745,7 @@ fn replace_graph_cache_atomically(
                 true,
             )
             .with_details(serde_json::json!({ "error": error.to_string() }))
-        })?;
-        validate_existing_project_file(root, target).map_err(|message| {
-            repair_path_unsafe_error("Graph cache target became unsafe after repair.", message)
-        })?;
-        Ok::<(), BackendError>(())
-    })();
-    if write_result.is_err() {
-        remove_compatible_file_if_safe(root, &temporary);
-    }
-    write_result
+        })
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -1861,7 +1765,7 @@ fn probe_writable_directory(directory: &Path) -> bool {
         ".llm-wiki-writability-{}.tmp",
         uuid::Uuid::new_v4()
     ));
-    probe_writable_path(&probe_path)
+    probe_writable_path(&canonical_directory, &probe_path)
 }
 
 fn probe_writable_project_directory(project_root: &Path, directory: &Path) -> bool {
@@ -1890,38 +1794,21 @@ fn probe_writable_project_directory(project_root: &Path, directory: &Path) -> bo
         ".llm-wiki-writability-{}.tmp",
         uuid::Uuid::new_v4()
     ));
-    probe_writable_path(&probe_path)
+    probe_writable_path(project_root, &probe_path)
 }
 
-fn probe_writable_path(probe_path: &Path) -> bool {
-    let mut probe = match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&probe_path)
-    {
-        Ok(probe) => probe,
+fn probe_writable_path(root: &Path, probe_path: &Path) -> bool {
+    let binding = match BoundProjectMutationRoot::bind(root, probe_path) {
+        Ok(binding) => binding,
         Err(_) => return false,
     };
-    // Arm cleanup only after create_new proves this process created the file.
-    let cleanup = ProbeCleanup(probe_path.to_path_buf());
-    let write_succeeded = probe
-        .write_all(b"llm-wiki-writability-probe")
-        .and_then(|_| probe.sync_all())
-        .is_ok();
-    drop(probe);
-    let cleanup_succeeded = fs::remove_file(&probe_path).is_ok();
-    drop(cleanup);
-    write_succeeded && cleanup_succeeded
-}
-
-struct ProbeCleanup(PathBuf);
-
-impl Drop for ProbeCleanup {
-    fn drop(&mut self) {
-        if self.0.exists() {
-            let _ = fs::remove_file(&self.0);
-        }
+    if binding
+        .write_atomic_create_new(probe_path, b"llm-wiki-writability-probe")
+        .is_err()
+    {
+        return false;
     }
+    binding.remove_file(probe_path).is_ok()
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1992,9 +1879,16 @@ fn create_project_staging_root(root: &Path) -> Result<PathBuf, BackendError> {
             "{PROJECT_CREATION_STAGING_PREFIX}{}",
             uuid::Uuid::new_v4()
         ));
-        match fs::create_dir(&staging) {
-            Ok(()) => return Ok(staging),
-            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+        match BoundProjectMutationRoot::ensure_and_bind(
+            parent,
+            &staging.join(".wiki-project-staging-binding-probe"),
+        ) {
+            Ok((_binding, created))
+                if created.iter().any(|directory| directory.path() == staging) =>
+            {
+                return Ok(staging);
+            }
+            Ok((_binding, _created)) => continue,
             Err(error) => {
                 return Err(BackendError::new(
                     "PROJECT_CREATION_STAGE_FAILED",
@@ -2048,48 +1942,66 @@ fn install_staged_project(
     staging: &Path,
     root_existed: bool,
 ) -> Result<(), BackendError> {
-    if !root_existed {
-        if root.exists() {
-            return Err(BackendError::new(
-                "PROJECT_DIR_APPEARED",
-                "The selected project directory appeared while the project was being created.",
-                true,
-                true,
-            ));
-        }
-        return fs::rename(staging, root).map_err(|error| {
-            BackendError::new(
-                "PROJECT_CREATION_INSTALL_FAILED",
-                "The prepared knowledge base could not be installed at the selected location.",
-                true,
-                true,
-            )
-            .with_details(serde_json::json!({
-                "rootPath": root.to_string_lossy(),
-                "stagingPath": staging.to_string_lossy(),
-                "error": error.to_string(),
-            }))
-        });
-    }
-
-    let backup = create_project_backup_path(root)?;
-    fs::rename(root, &backup).map_err(|error| {
+    let parent = root.parent().ok_or_else(|| {
         BackendError::new(
-            "PROJECT_CREATION_TARGET_CLAIM_FAILED",
-            "The selected empty directory could not be reserved for project creation.",
+            "PROJECT_PATH_INVALID",
+            "A new knowledge base must have a parent directory.",
+            true,
+            true,
+        )
+    })?;
+    let parent_binding = BoundProjectMutationRoot::bind(parent, root).map_err(|error| {
+        BackendError::new(
+            "PROJECT_CREATION_INSTALL_FAILED",
+            "The selected project parent could not be bound safely.",
             true,
             true,
         )
         .with_details(serde_json::json!({
             "rootPath": root.to_string_lossy(),
-            "backupPath": backup.to_string_lossy(),
             "error": error.to_string(),
         }))
     })?;
+    if !root_existed {
+        return parent_binding
+            .rename_directory_no_replace(staging, root)
+            .map_err(|error| {
+                BackendError::new(
+                    "PROJECT_CREATION_INSTALL_FAILED",
+                    "The prepared knowledge base could not be installed at the selected location.",
+                    true,
+                    true,
+                )
+                .with_details(serde_json::json!({
+                    "rootPath": root.to_string_lossy(),
+                    "stagingPath": staging.to_string_lossy(),
+                    "error": error.to_string(),
+                }))
+            });
+    }
+
+    let backup = create_project_backup_path(root)?;
+    parent_binding
+        .rename_directory_no_replace(root, &backup)
+        .map_err(|error| {
+            BackendError::new(
+                "PROJECT_CREATION_TARGET_CLAIM_FAILED",
+                "The selected empty directory could not be reserved for project creation.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({
+                "rootPath": root.to_string_lossy(),
+                "backupPath": backup.to_string_lossy(),
+                "error": error.to_string(),
+            }))
+        })?;
 
     let still_empty = normal_empty_directory(&backup).unwrap_or(false);
     if !still_empty {
-        let restored = fs::rename(&backup, root).is_ok();
+        let restored = parent_binding
+            .rename_directory_no_replace(&backup, root)
+            .is_ok();
         return Err(BackendError::new(
             "PROJECT_DIR_CHANGED_DURING_CREATION",
             "The selected directory changed while the knowledge base was being prepared.",
@@ -2104,8 +2016,10 @@ fn install_staged_project(
         })));
     }
 
-    if let Err(error) = fs::rename(staging, root) {
-        let restored = fs::rename(&backup, root).is_ok();
+    if let Err(error) = parent_binding.rename_directory_no_replace(staging, root) {
+        let restored = parent_binding
+            .rename_directory_no_replace(&backup, root)
+            .is_ok();
         return Err(BackendError::new(
             "PROJECT_CREATION_INSTALL_FAILED",
             "The prepared knowledge base could not be installed at the selected location.",
@@ -2124,7 +2038,7 @@ fn install_staged_project(
     // The original target was verified empty immediately after its atomic
     // move. Use non-recursive removal only; if another process wrote there,
     // preserve that data rather than deleting it.
-    let _ = fs::remove_dir(&backup);
+    let _ = parent_binding.remove_empty_directory(&backup);
     Ok(())
 }
 
@@ -2895,7 +2809,7 @@ mod tests {
         let occupied = root.join("occupied.tmp");
         fs::write(&occupied, "owned by someone else").unwrap();
 
-        assert!(!super::probe_writable_path(&occupied));
+        assert!(!super::probe_writable_path(&root, &occupied));
         assert_eq!(
             fs::read_to_string(&occupied).unwrap(),
             "owned by someone else"

@@ -1,11 +1,11 @@
-use std::path::Path;
-
 use crate::app_state::ProjectWritePermit;
 use crate::errors::BackendError;
 use crate::models::paths::ProjectContext;
 use crate::models::wiki::{CreateWikiPageRequest, RenameWikiPageResponse, SaveWikiPageResponse};
+use crate::services::import_v2::transaction::FileTransaction;
 use crate::services::WriteMode;
 use crate::utils::markdown_utils::{extract_wikilinks, rewrite_wikilinks, split_frontmatter};
+use crate::utils::safe_project_dir::remove_project_file;
 
 use super::catalog::file_read_error;
 use super::SearchService;
@@ -198,18 +198,14 @@ impl SearchService {
         // stem should point to the new stem).
         let contents = std::fs::read_to_string(&old_absolute)
             .map_err(|err| file_read_error(err, &old_absolute))?;
+        let source_hash = self.file_store.content_hash(contents.as_bytes());
         let split = split_frontmatter(&contents);
 
-        // Snapshot every file we will mutate so a mid-rename failure can
-        // restore the working tree to its pre-rename state. The caller's Git
-        // checkpoint protects the before-state for manual recovery, but an
-        // automatic rollback keeps the wiki consistent without forcing the
-        // user to dig through git (the shared high-risk backup/restore invariant).
+        // One retained-capability transaction owns every rewrite, the new page,
+        // and source deletion. A failure rolls back only files whose installed
+        // identity/hash still belongs to this operation.
+        let mut transaction = FileTransaction::new_for_project(&context.root);
         let files = self.file_store.list_markdown_files(&context.wiki_dir)?;
-        // (project-relative path, original bytes) for each file we touch,
-        // starting with the source page itself.
-        let mut snapshots: Vec<(String, Vec<u8>)> =
-            vec![(relative_path.to_string(), contents.clone().into_bytes())];
         let mut updated_references: Vec<String> = Vec::new();
         for file_absolute in &files {
             // The renamed page itself is handled separately below; rewriting it
@@ -227,9 +223,11 @@ impl SearchService {
                 .map_err(|err| file_read_error(err, &writable_path))?;
             let (rewritten, n) = rewrite_wikilinks(&body, &old_stem, &new_stem);
             if n > 0 {
-                snapshots.push((project_relative.clone(), body.into_bytes()));
-                std::fs::write(&writable_path, rewritten.as_bytes())
-                    .map_err(|err| io_write_error(err, &writable_path))?;
+                transaction.write_if_hash_matches(
+                    &writable_path,
+                    rewritten.as_bytes(),
+                    &self.file_store.content_hash(body.as_bytes()),
+                )?;
                 updated_references.push(project_relative);
             }
         }
@@ -247,31 +245,9 @@ impl SearchService {
                 None => rewritten_body,
             }
         };
-        let rename_result = (|| {
-            if let Some(parent) = new_absolute.parent() {
-                std::fs::create_dir_all(parent).map_err(|err| io_write_error(err, parent))?;
-            }
-            std::fs::write(&new_absolute, final_contents.as_bytes())
-                .map_err(|err| io_write_error(err, &new_absolute))?;
-            std::fs::remove_file(&old_absolute)
-                .map_err(|err| io_write_error(err, &old_absolute))?;
-            Ok::<(), BackendError>(())
-        })();
-        if let Err(error) = rename_result {
-            // Roll back: restore every touched file from its snapshot, then
-            // drop the half-written new file. Git checkpoint from the caller
-            // remains the long-term safety net.
-            for (rel, bytes) in &snapshots {
-                if let Ok(abs) = context.resolve_project_write_path(rel) {
-                    if let Some(parent) = abs.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    let _ = std::fs::write(&abs, bytes);
-                }
-            }
-            let _ = std::fs::remove_file(&new_absolute);
-            return Err(error);
-        }
+        transaction.write_new(&new_absolute, final_contents.as_bytes())?;
+        transaction.delete_if_hash_matches(&old_absolute, &source_hash)?;
+        transaction.commit()?;
 
         let hash = self.file_store.file_hash(context, new_relative_path)?;
         let graph_cache_invalidated = self.invalidate_graph_cache(context);
@@ -413,19 +389,13 @@ impl SearchService {
             &[target_path.to_string()],
         )?;
 
-        // Snapshot the file bytes so a mid-operation failure can restore the
-        // working tree. `unstage_paths` alone only resets the index, not the
-        // working tree, so a successful remove_file followed by a failed
-        // post-delete checkpoint would otherwise leave the page gone on disk
-        // (the shared high-risk backup/restore invariant).
-        let snapshot = std::fs::read(&absolute).map_err(|err| file_read_error(err, &absolute))?;
-
+        let mut transaction = FileTransaction::new_for_project(&context.root);
         let result = (|| {
-            std::fs::remove_file(&absolute).map_err(|err| io_write_error(err, &absolute))?;
+            transaction.delete_if_hash_matches(&absolute, target_hash)?;
             // Drop the deleted page from the graph cache so a stale node
             // doesn't linger; scan will rebuild it. Best-effort.
             if let Ok(graph_cache) = context.resolve_project_write_path(".app/graph-cache.json") {
-                let _ = std::fs::remove_file(&graph_cache);
+                let _ = remove_project_file(&context.root, &graph_cache);
             }
             // Commit the deletion itself so the change lands in history and is
             // recoverable (PRD-GIT-003: 成功操作后提交最终结果).
@@ -438,12 +408,10 @@ impl SearchService {
             Ok::<(), BackendError>(())
         })();
         if let Err(error) = result {
-            // Restore the page on disk and unstage so the working tree returns
-            // to its pre-delete state.
-            let _ = std::fs::write(&absolute, &snapshot);
             let _ = git_service.unstage_paths(context, &[target_path.to_string()]);
             return Err(error);
         }
+        transaction.commit()?;
 
         Ok(checkpoint.commit_hash.is_some())
     }
@@ -474,7 +442,7 @@ impl SearchService {
             return false;
         };
         if path.exists() {
-            std::fs::remove_file(&path).is_ok()
+            remove_project_file(&context.root, &path).is_ok()
         } else {
             false
         }
@@ -494,11 +462,6 @@ impl SearchService {
             let _ = file.write_all(line.as_bytes());
         }
     }
-}
-
-fn io_write_error(err: std::io::Error, path: &Path) -> BackendError {
-    BackendError::new("FILE_WRITE_FAILED", err.to_string(), true, false)
-        .with_details(serde_json::json!({ "path": path.to_string_lossy() }))
 }
 
 /// Quote a scalar for our hand-rolled frontmatter parser, matching

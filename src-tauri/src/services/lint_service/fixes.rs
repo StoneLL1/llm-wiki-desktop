@@ -15,6 +15,7 @@ use crate::services::{GitService, WriteMode};
 use crate::utils::markdown_utils::{
     extract_title, parse_frontmatter, split_frontmatter, Frontmatter,
 };
+use crate::utils::safe_project_dir::remove_project_file;
 
 use super::rules::file_stem;
 use super::LintService;
@@ -1583,7 +1584,7 @@ fn target_exists(context: &ProjectContext, target: &str) -> Result<bool, Backend
 fn invalidate_graph_cache(context: &ProjectContext) -> Result<(), BackendError> {
     let path = context.resolve_project_write_path(".app/graph-cache.json")?;
     if path.exists() {
-        std::fs::remove_file(&path).map_err(|err| {
+        remove_project_file(&context.root, &path).map_err(|err| {
             BackendError::new(
                 "LINT_GRAPH_CACHE_INVALIDATE_FAILED",
                 format!("Could not invalidate graph cache: {err}"),

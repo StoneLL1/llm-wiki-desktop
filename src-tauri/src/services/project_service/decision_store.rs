@@ -39,6 +39,7 @@ impl Default for ProjectOpenDecisionFile {
 }
 
 pub(crate) struct ProjectOpenDecisionStore {
+    root: PathBuf,
     path: PathBuf,
     lock: RwLock<()>,
 }
@@ -46,6 +47,7 @@ pub(crate) struct ProjectOpenDecisionStore {
 impl ProjectOpenDecisionStore {
     pub(crate) fn new(config_dir: &Path) -> Self {
         Self {
+            root: config_dir.parent().unwrap_or(config_dir).to_path_buf(),
             path: config_dir.join(PROJECT_OPEN_DECISION_FILE),
             lock: RwLock::new(()),
         }
@@ -86,7 +88,7 @@ impl ProjectOpenDecisionStore {
             intent,
             decided_at: Utc::now().to_rfc3339(),
         });
-        FileStore.write_json_atomic_absolute(&self.path, &file)
+        FileStore.write_json_atomic_absolute(&self.root, &self.path, &file)
     }
 
     /// Removes the decision bound to this exact folder identity and revision.
@@ -107,7 +109,7 @@ impl ProjectOpenDecisionStore {
         if file.entries.len() == entry_count {
             return Ok(());
         }
-        FileStore.write_json_atomic_absolute(&self.path, &file)
+        FileStore.write_json_atomic_absolute(&self.root, &self.path, &file)
     }
 
     fn read_file(&self) -> Result<ProjectOpenDecisionFile, BackendError> {

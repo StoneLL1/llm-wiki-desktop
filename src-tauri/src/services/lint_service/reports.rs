@@ -10,6 +10,7 @@ use crate::models::workflow::{
     WorkflowDisplayStatus, WorkflowKind, WorkflowOperation, WorkflowPersistenceMode,
     WorkflowResult, WorkflowRoute, WorkflowRun,
 };
+use crate::utils::safe_project_dir::remove_project_file;
 use sha2::{Digest, Sha256};
 
 use super::{LintService, LINT_REPORTS_DIR};
@@ -355,7 +356,7 @@ impl LintService {
         let path =
             context.resolve_project_write_path(&format!("{LINT_REPORTS_DIR}/{report_id}.json"))?;
         if path.is_file() {
-            std::fs::remove_file(&path).map_err(|error| {
+            remove_project_file(&context.root, &path).map_err(|error| {
                 BackendError::new(
                     "LINT_REPORT_ROLLBACK_FAILED",
                     format!("Could not remove stale Health Check report: {error}"),
@@ -445,7 +446,7 @@ impl LintService {
             let path =
                 context.resolve_project_write_path(&format!("{LINT_REPORTS_DIR}/{id}.json"))?;
             if path.exists() {
-                std::fs::remove_file(&path).map_err(|err| {
+                remove_project_file(&context.root, &path).map_err(|err| {
                     BackendError::new(
                         "LINT_HISTORY_PRUNE_FAILED",
                         format!("Could not remove stale lint report {id}: {err}"),

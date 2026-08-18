@@ -24,6 +24,7 @@ use crate::utils::path_safety::{
 use crate::utils::process_lifetime::{
     run_bounded_process, BoundedProcessError, CapturedProcessOutput,
 };
+use crate::utils::safe_project_dir::remove_project_file;
 
 thread_local! {
     static GIT_TASK_CANCELLATION: RefCell<Vec<CancellationToken>> = const { RefCell::new(Vec::new()) };
@@ -1723,7 +1724,7 @@ fn remove_project_path(context: &ProjectContext, path: &str) -> Result<(), Backe
     if metadata.is_dir() {
         fs::remove_dir_all(&target)
     } else {
-        fs::remove_file(&target)
+        remove_project_file(&context.root, &target)
     }
     .map_err(|err| BackendError::new("GIT_ROLLBACK_FAILED", err.to_string(), true, false))
 }
