@@ -502,21 +502,21 @@ where
     sink.start(CREATE_CHECKPOINT).map_err(task_error)?;
     let _authority = authorize_boundary()?;
     let allowed_task_state = task_state_noise_paths(&run.task_id);
-    let checkpoint = services
-        .git_service
-        .clean_head_checkpoint_allowing_paths(
+    let checkpoint = with_agent_lint_git_cancellation(services, &run.task_id, || {
+        services.git_service.clean_head_checkpoint_allowing_paths(
             context,
             CheckpointPurpose::HighRiskOperation,
             &format!("Before Agent lint repair {}", run.task_id),
             &allowed_task_state,
         )
-        .map_err(|error| {
-            repair_error(
-                &error.code,
-                error.message,
-                WorkflowProjectMutationState::NotModified,
-            )
-        })?;
+    })
+    .map_err(|error| {
+        repair_error(
+            &error.code,
+            error.message,
+            WorkflowProjectMutationState::NotModified,
+        )
+    })?;
     let checkpoint_hash = checkpoint.commit_hash.ok_or_else(|| {
         repair_error(
             "LINT_REPAIR_CHECKPOINT_REQUIRED",
@@ -1779,7 +1779,9 @@ fn ensure_repair_head_and_paths(
     descriptor: &PersistedAgentLintRepairCandidate,
     services: &AgentLintRepairExecutionServices<'_>,
 ) -> Result<(), BackendError> {
-    let status = services.git_service.repository_status(context)?;
+    let status = with_agent_lint_git_cancellation(services, &run.task_id, || {
+        services.git_service.repository_status(context)
+    })?;
     if status.head.as_deref() != Some(descriptor.checkpoint_hash.as_str()) {
         return Err(repair_error(
             "LINT_REPAIR_CHECKPOINT_STALE",
@@ -1809,7 +1811,9 @@ fn ensure_repair_head_and_paths(
     }
     let mut allowed = task_state_noise_paths(&run.task_id);
     allowed.extend(descriptor.affected_paths.iter().cloned());
-    let changed = services.git_service.changed_paths(context)?;
+    let changed = with_agent_lint_git_cancellation(services, &run.task_id, || {
+        services.git_service.changed_paths(context)
+    })?;
     if changed.iter().any(|path| !allowed.contains(path)) {
         return Err(repair_error(
             "LINT_REPAIR_GIT_STATE_CHANGED",
@@ -1912,12 +1916,14 @@ where
             ));
         }
     }
-    let final_checkpoint = match services.git_service.create_scoped_checkpoint(
-        context,
-        CheckpointPurpose::FinalResult,
-        &format!("Agent lint repair {}", run.task_id),
-        &commit_paths,
-    ) {
+    let final_checkpoint = match with_agent_lint_git_cancellation(services, &run.task_id, || {
+        services.git_service.create_scoped_checkpoint(
+            context,
+            CheckpointPurpose::FinalResult,
+            &format!("Agent lint repair {}", run.task_id),
+            &commit_paths,
+        )
+    }) {
         Ok(checkpoint) => checkpoint,
         Err(error) => {
             let graph_rollback = services
@@ -2910,4 +2916,18 @@ fn task_error(message: String) -> BackendError {
         message,
         WorkflowProjectMutationState::Unknown,
     )
+}
+
+fn with_agent_lint_git_cancellation<T>(
+    services: &AgentLintRepairExecutionServices<'_>,
+    task_id: &str,
+    operation: impl FnOnce() -> Result<T, BackendError>,
+) -> Result<T, BackendError> {
+    let token = services
+        .task_service
+        .get_cancellation_token(task_id)
+        .ok_or_else(|| task_error(format!("Task cancellation token is unavailable: {task_id}")))?;
+    services
+        .git_service
+        .with_task_cancellation(token, operation)
 }

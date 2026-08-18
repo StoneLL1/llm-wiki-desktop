@@ -19,6 +19,7 @@ use crate::services::{
 use crate::tasks::task_model::LogLevel;
 use crate::tasks::TaskService;
 use crate::utils::markdown_utils::{parse_frontmatter, split_frontmatter};
+use crate::utils::private_directory::{create_private_directory, ensure_private_directory};
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -305,7 +306,8 @@ impl CompileService {
                     workspace,
                     &Self::compile_prompt_with_policy(workspace, &language, policy),
                 )?;
-                services.agent_service.run_task_streaming(
+                services.agent_service.run_task_streaming_for_agent(
+                    *agent,
                     &invocation,
                     services.task_service,
                     task_id,
@@ -738,15 +740,14 @@ impl CompileService {
 
     pub fn create_workspace_for_sources(
         context: &ProjectContext,
-        task_id: &str,
+        _task_id: &str,
         sources: &[ResolvedCompileSource],
     ) -> Result<std::path::PathBuf, BackendError> {
-        let workspace = std::env::temp_dir().join("llm-wiki-desktop").join(task_id);
-        if workspace.exists() {
-            std::fs::remove_dir_all(&workspace)
-                .map_err(|error| io_error("COMPILE_WORKSPACE_FAILED", error, &workspace))?;
-        }
-        std::fs::create_dir_all(&workspace)
+        let candidate_root = std::env::temp_dir().join("llm-wiki-desktop");
+        ensure_private_directory(&candidate_root)
+            .map_err(|error| io_error("COMPILE_WORKSPACE_FAILED", error, &candidate_root))?;
+        let workspace = candidate_root.join(format!("compile-{}", uuid::Uuid::new_v4()));
+        create_private_directory(&workspace)
             .map_err(|error| io_error("COMPILE_WORKSPACE_FAILED", error, &workspace))?;
         let result = Self::populate_workspace_for_sources(context, &workspace, sources);
         if let Err(error) = result {
@@ -3344,6 +3345,19 @@ mod tests {
         let workspace =
             CompileService::create_workspace_for_sources(&context, "explicit-test", &resolved)
                 .unwrap();
+        assert!(workspace
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("compile-") && name != "explicit-test"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                fs::metadata(&workspace).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
         assert!(workspace.join("wiki/sources/local/资料甲.md").is_file());
         assert!(!workspace.join("wiki/sources/local/other.md").exists());
         assert!(workspace.join("wiki/related.md").is_file());

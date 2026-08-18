@@ -2,5 +2,7 @@ pub mod i18n;
 pub mod markdown_utils;
 pub mod path_safety;
 pub mod path_utils;
+pub(crate) mod private_directory;
+pub(crate) mod process_lifetime;
 pub mod time_utils;
 pub mod url_utils;

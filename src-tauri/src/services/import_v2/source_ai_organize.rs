@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
@@ -8,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::BackendError;
 use crate::services::import_v2::source_finalization::{parse_final_source, render_source_markdown};
+use crate::utils::private_directory::{create_private_directory, ensure_private_directory};
 
 pub const MAX_SOURCE_AI_MARKDOWN_BYTES: usize = 384 * 1024;
 pub const MAX_SOURCE_AI_EVIDENCE_BYTES: usize = 128 * 1024;
@@ -82,23 +84,20 @@ pub fn validate_custom_instructions(
 }
 
 pub fn create_agent_workspace(
-    task_id: &str,
+    _task_id: &str,
     input: &SourceAiOrganizeInput,
 ) -> Result<PathBuf, BackendError> {
     let candidate_root = std::env::temp_dir().join("llm-wiki-desktop");
+    ensure_private_directory(&candidate_root)
+        .map_err(|error| workspace_error("protect", &candidate_root, error))?;
     cleanup_stale_agent_workspaces(
         &candidate_root,
         STALE_AGENT_WORKSPACE_AGE,
         SystemTime::now(),
     );
-    let workspace = candidate_root.join(format!("source-ai-{task_id}"));
-    if workspace.exists() {
-        fs::remove_dir_all(&workspace)
-            .map_err(|error| workspace_error("remove", &workspace, error))?;
-    }
-    fs::create_dir_all(&workspace).map_err(|error| workspace_error("create", &workspace, error))?;
-    restrict_permissions(&workspace, true)
-        .map_err(|error| workspace_error("protect", &workspace, error))?;
+    let workspace = candidate_root.join(format!("source-ai-{}", uuid::Uuid::new_v4()));
+    create_private_directory(&workspace)
+        .map_err(|error| workspace_error("create", &workspace, error))?;
     let bytes = serde_json::to_vec_pretty(input).map_err(|error| {
         ai_error(
             "SOURCE_AI_INPUT_INVALID",
@@ -213,16 +212,11 @@ fn restrict_permissions(_path: &Path, _directory: bool) -> std::io::Result<()> {
     Ok(())
 }
 
-pub fn agent_prompt(language: &str) -> String {
-    format!(
-        r#"Follow the shared source-rewrite contract below.
-
-<source-rewrite-contract>
-{SOURCE_REWRITE_CONTRACT}
-</source-rewrite-contract>
-
-Read only input.json in this isolated workspace. Return the required UTF-8 JSON as the final response. Do not write any file. UI language: {language}."#
-    )
+pub fn agent_prompt(input: &SourceAiOrganizeInput, language: &str) -> Result<String, BackendError> {
+    let prompt = provider_prompt(input, language)?;
+    Ok(format!(
+        "All bounded Source input is embedded below. Filesystem and shell tools are unavailable; never attempt to read any local file.\n\n{prompt}"
+    ))
 }
 
 pub fn provider_prompt(
@@ -253,21 +247,47 @@ Return only the required UTF-8 JSON. UI language: {language}."#
 
 pub fn read_agent_result(workspace: &Path, captured: &str) -> Result<String, BackendError> {
     let output = workspace.join("candidate.json");
-    if output.exists() {
-        let metadata = fs::symlink_metadata(&output)
-            .map_err(|error| workspace_error("inspect", workspace, error))?;
-        if !metadata.is_file()
-            || metadata.file_type().is_symlink()
-            || metadata.len() as usize > MAX_SOURCE_AI_OUTPUT_BYTES
-        {
+    match open_candidate_output(&output) {
+        Ok(file) => {
+            let metadata = file
+                .metadata()
+                .map_err(|error| workspace_error("inspect", workspace, error))?;
+            if !metadata.is_file() || output_metadata_is_link_or_reparse(&metadata) {
+                return Err(ai_error(
+                    "SOURCE_AI_OUTPUT_INVALID",
+                    "Agent candidate output is not a safe bounded regular file.",
+                    true,
+                ));
+            }
+            let mut bytes = Vec::with_capacity(
+                (metadata.len() as usize).min(MAX_SOURCE_AI_OUTPUT_BYTES.saturating_add(1)),
+            );
+            file.take((MAX_SOURCE_AI_OUTPUT_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)
+                .map_err(|error| workspace_error("read", workspace, error))?;
+            if bytes.len() > MAX_SOURCE_AI_OUTPUT_BYTES {
+                return Err(ai_error(
+                    "SOURCE_AI_OUTPUT_INVALID",
+                    "Agent candidate output is not a safe bounded regular file.",
+                    true,
+                ));
+            }
+            return String::from_utf8(bytes).map_err(|_| {
+                ai_error(
+                    "SOURCE_AI_OUTPUT_INVALID",
+                    "Agent candidate output must be valid UTF-8 JSON.",
+                    true,
+                )
+            });
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
             return Err(ai_error(
                 "SOURCE_AI_OUTPUT_INVALID",
-                "Agent candidate output is not a safe bounded regular file.",
+                &format!("Agent candidate output could not be opened safely: {error}"),
                 true,
             ));
         }
-        return fs::read_to_string(output)
-            .map_err(|error| workspace_error("read", workspace, error));
     }
     if captured.len() > MAX_SOURCE_AI_OUTPUT_BYTES {
         return Err(ai_error(
@@ -277,6 +297,39 @@ pub fn read_agent_result(workspace: &Path, captured: &str) -> Result<String, Bac
         ));
     }
     Ok(captured.to_string())
+}
+
+#[cfg(unix)]
+fn open_candidate_output(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn open_candidate_output(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn output_metadata_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    metadata.file_type().is_symlink() || metadata.file_attributes() & 0x400 != 0
+}
+
+#[cfg(not(windows))]
+fn output_metadata_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
 }
 
 pub fn build_candidate_markdown(
@@ -636,7 +689,7 @@ mod tests {
             custom_instructions: Some("Correct 42 to 43 using the retained evidence.".into()),
         };
         let provider = provider_prompt(&input, "zh-CN").unwrap();
-        let agent = agent_prompt("zh-CN");
+        let agent = agent_prompt(&input, "zh-CN").unwrap();
         for prompt in [&provider, &agent] {
             assert!(prompt.contains(SOURCE_REWRITE_CONTRACT));
             assert!(prompt.contains("complete candidate as a Diff"));
@@ -660,6 +713,33 @@ mod tests {
             SOURCE_AI_OUTPUT_SCHEMA
         );
         cleanup_agent_workspace(&workspace).unwrap();
+    }
+
+    #[test]
+    fn agent_result_reads_actual_bytes_from_one_bounded_handle() {
+        let workspace = tempfile::tempdir().unwrap();
+        fs::write(
+            workspace.path().join("candidate.json"),
+            vec![b'x'; MAX_SOURCE_AI_OUTPUT_BYTES + 1],
+        )
+        .unwrap();
+
+        let error = read_agent_result(workspace.path(), "fallback").unwrap_err();
+        assert_eq!(error.code, "SOURCE_AI_OUTPUT_INVALID");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_result_rejects_symlink_without_following_it() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        fs::write(outside.path(), "outside sentinel").unwrap();
+        symlink(outside.path(), workspace.path().join("candidate.json")).unwrap();
+
+        let error = read_agent_result(workspace.path(), "fallback").unwrap_err();
+        assert_eq!(error.code, "SOURCE_AI_OUTPUT_INVALID");
     }
 
     #[test]

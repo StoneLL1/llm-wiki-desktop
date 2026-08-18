@@ -1,13 +1,13 @@
 #[derive(Default)]
 pub struct GitService;
 
-use std::collections::BTreeSet;
+use std::cell::RefCell;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
-use std::io::Read;
-use std::path::Path;
-use std::process::{Command, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use crate::errors::BackendError;
@@ -16,12 +16,53 @@ use crate::models::git::{
     GitRepositoryStatus,
 };
 use crate::models::paths::ProjectContext;
+use crate::tasks::task_model::CancellationToken;
 use crate::utils::path_safety::{
     validate_existing_project_directory, validate_existing_project_file,
     validate_existing_project_root,
 };
+use crate::utils::process_lifetime::{
+    run_bounded_process, BoundedProcessError, CapturedProcessOutput,
+};
+
+thread_local! {
+    static GIT_TASK_CANCELLATION: RefCell<Vec<CancellationToken>> = const { RefCell::new(Vec::new()) };
+}
+
+struct GitTaskCancellationScope;
+
+impl Drop for GitTaskCancellationScope {
+    fn drop(&mut self) {
+        GIT_TASK_CANCELLATION.with(|tokens| {
+            if let Ok(mut tokens) = tokens.try_borrow_mut() {
+                tokens.pop();
+            }
+        });
+    }
+}
+
+fn git_task_cancelled() -> bool {
+    GIT_TASK_CANCELLATION.with(|tokens| {
+        tokens.try_borrow().map_or(true, |tokens| {
+            tokens.iter().any(CancellationToken::is_cancelled)
+        })
+    })
+}
 
 impl GitService {
+    /// Bind nested app-owned Git calls to the current task cancellation token.
+    /// The scope is thread-local because the synchronous Git transaction must
+    /// stay on the permit-owning thread, and nested scopes compose fail-closed.
+    pub(crate) fn with_task_cancellation<T>(
+        &self,
+        token: CancellationToken,
+        operation: impl FnOnce() -> Result<T, BackendError>,
+    ) -> Result<T, BackendError> {
+        GIT_TASK_CANCELLATION.with(|tokens| tokens.borrow_mut().push(token));
+        let _scope = GitTaskCancellationScope;
+        operation()
+    }
+
     pub fn initial_commit_paths(
         &self,
         context: &ProjectContext,
@@ -328,15 +369,23 @@ impl GitService {
                     .to_path_buf(),
             );
         }
-        let output = Command::new("git")
-            .current_dir(&context.root)
-            .args(["diff", "--no-index", "--no-ext-diff", "--"])
+        let lane = git_project_lane(&root)?;
+        let started = Instant::now();
+        let _lane = lock_git_lane(&lane, DEFAULT_GIT_TIMEOUT, git_task_cancelled)
+            .map_err(|error| git_process_error(error, &["diff", "--no-index"]))?;
+        let mut command = hardened_git_command(context);
+        command
+            .args(["diff", "--no-index", "--no-ext-diff", "--no-textconv", "--"])
             .arg(&relative[0])
-            .arg(&relative[1])
-            .output()
-            .map_err(|error| {
-                BackendError::new("GIT_DIFF_FAILED", error.to_string(), true, false)
-            })?;
+            .arg(&relative[1]);
+        let output = run_bounded_process(
+            &mut command,
+            None,
+            DEFAULT_GIT_TIMEOUT.saturating_sub(started.elapsed()),
+            MAX_GIT_OUTPUT_BYTES,
+            git_task_cancelled,
+        )
+        .map_err(|error| git_process_error(error, &["diff", "--no-index"]))?;
         if !matches!(output.status.code(), Some(0 | 1)) {
             return Err(BackendError::new(
                 "GIT_DIFF_FAILED",
@@ -371,13 +420,7 @@ impl GitService {
     ) -> Result<GitRepositoryStatus, BackendError> {
         let root = validate_existing_project_root(&context.root).map_err(git_path_unsafe)?;
         let has_git_marker = validate_git_marker(&root)?;
-        let version = Command::new("git")
-            .arg("--version")
-            .output()
-            .map_err(|error| {
-                BackendError::new("GIT_COMMAND_FAILED", error.to_string(), true, false)
-            })?;
-        if !version.status.success() {
+        if run_git(context, &["--version"]).is_err() {
             return Err(BackendError::new(
                 "GIT_COMMAND_FAILED",
                 "Git is unavailable.",
@@ -630,7 +673,8 @@ impl GitService {
         }
 
         let affected_paths = status_paths(context)?;
-        let tracked_diff = run_git(context, &["diff", "--no-ext-diff", "--"]).unwrap_or_default();
+        let tracked_diff =
+            run_git(context, &["diff", "--no-ext-diff", "--no-textconv", "--"]).unwrap_or_default();
         let untracked: Vec<String> = affected_paths
             .iter()
             .filter(|path| run_git(context, &["ls-files", "--error-unmatch", path]).is_err())
@@ -727,7 +771,10 @@ impl GitService {
             ));
         }
 
-        let mut diff = run_git(context, &["diff", "--no-ext-diff", "HEAD", "--"])?;
+        let mut diff = run_git(
+            context,
+            &["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--"],
+        )?;
         let untracked_diff = untracked_file_diff(context)?;
         if !untracked_diff.is_empty() {
             if !diff.is_empty() && !diff.ends_with('\n') {
@@ -1087,8 +1134,24 @@ fn git_path_unsafe(message: String) -> BackendError {
     .with_details(serde_json::json!({ "error": message }))
 }
 
-const MAX_ASSESSMENT_GIT_OUTPUT_BYTES: u64 = 64 * 1024;
-const ASSESSMENT_READER_GRACE: Duration = Duration::from_millis(100);
+const MAX_ASSESSMENT_GIT_OUTPUT_BYTES: usize = 64 * 1024;
+const MAX_GIT_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_GIT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const GIT_ENV_ALLOWLIST: &[&str] = &[
+    "PATH",
+    "SystemRoot",
+    "WINDIR",
+    "COMSPEC",
+    "HOME",
+    "USERPROFILE",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+];
+
+static GIT_PROJECT_LANES: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
 
 struct BoundedGitOutput {
     success: bool,
@@ -1114,59 +1177,28 @@ fn run_git_bounded(
         return Err(git_assessment_timeout());
     }
 
-    let mut child = Command::new("git")
-        .arg("--no-optional-locks")
-        .args([
-            "-c",
-            "core.quotepath=false",
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            assessment_disabled_hooks_config(),
-        ])
-        .args(args)
-        .current_dir(&context.root)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_PAGER", "cat")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| BackendError::new("GIT_COMMAND_FAILED", error.to_string(), true, false))?;
-    let stdout = child.stdout.take().expect("piped Git stdout");
-    let stderr = child.stderr.take().expect("piped Git stderr");
-    let stdout_reader = spawn_bounded_reader(stdout);
-    let stderr_reader = spawn_bounded_reader(stderr);
-
-    let status = loop {
-        if cancelled.load(Ordering::SeqCst) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(BackendError::new(
-                "PROJECT_ASSESSMENT_CANCELLED",
-                "Project assessment was cancelled.",
-                true,
-                true,
-            ));
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(git_assessment_timeout());
-        }
-        match child.try_wait().map_err(|error| {
-            BackendError::new("GIT_COMMAND_FAILED", error.to_string(), true, false)
-        })? {
-            Some(status) => break status,
-            None => std::thread::sleep(Duration::from_millis(5)),
-        }
-    };
-
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let output = run_git_process(
+        context,
+        args,
+        remaining,
+        MAX_ASSESSMENT_GIT_OUTPUT_BYTES,
+        || cancelled.load(Ordering::SeqCst),
+    )
+    .map_err(|error| match error {
+        BoundedProcessError::Cancelled => BackendError::new(
+            "PROJECT_ASSESSMENT_CANCELLED",
+            "Project assessment was cancelled.",
+            true,
+            true,
+        ),
+        BoundedProcessError::Timeout => git_assessment_timeout(),
+        other => git_process_error(other, args),
+    })?;
     Ok(BoundedGitOutput {
-        success: status.success(),
-        stdout: receive_bounded_reader(stdout_reader),
-        stderr: receive_bounded_reader(stderr_reader),
+        success: output.status.success(),
+        stdout: output.stdout,
+        stderr: output.stderr,
     })
 }
 
@@ -1178,28 +1210,6 @@ fn assessment_disabled_hooks_config() -> &'static str {
 #[cfg(not(windows))]
 fn assessment_disabled_hooks_config() -> &'static str {
     "core.hooksPath=/dev/null"
-}
-
-fn spawn_bounded_reader(reader: impl Read + Send + 'static) -> Receiver<Vec<u8>> {
-    let (sender, receiver) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = sender.send(read_bounded(reader));
-    });
-    receiver
-}
-
-fn receive_bounded_reader(receiver: Receiver<Vec<u8>>) -> Vec<u8> {
-    receiver
-        .recv_timeout(ASSESSMENT_READER_GRACE)
-        .unwrap_or_default()
-}
-
-fn read_bounded(reader: impl Read) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    let _ = reader
-        .take(MAX_ASSESSMENT_GIT_OUTPUT_BYTES + 1)
-        .read_to_end(&mut bytes);
-    bytes
 }
 
 fn bounded_optional_git_value(
@@ -1247,12 +1257,14 @@ fn run_git(context: &ProjectContext, args: &[&str]) -> Result<String, BackendErr
 }
 
 fn run_git_bytes(context: &ProjectContext, args: &[&str]) -> Result<Vec<u8>, BackendError> {
-    let output = Command::new("git")
-        .args(["-c", "core.quotepath=false"])
-        .args(args)
-        .current_dir(&context.root)
-        .output()
-        .map_err(|err| BackendError::new("GIT_COMMAND_FAILED", err.to_string(), true, false))?;
+    let output = run_git_process(
+        context,
+        args,
+        DEFAULT_GIT_TIMEOUT,
+        MAX_GIT_OUTPUT_BYTES,
+        || false,
+    )
+    .map_err(|error| git_process_error(error, args))?;
 
     if output.status.success() {
         Ok(output.stdout)
@@ -1270,6 +1282,213 @@ fn run_git_bytes(context: &ProjectContext, args: &[&str]) -> Result<Vec<u8>, Bac
         )
         .with_details(serde_json::json!({ "args": args })))
     }
+}
+
+fn run_git_process(
+    context: &ProjectContext,
+    args: &[&str],
+    timeout: Duration,
+    max_stream_bytes: usize,
+    cancelled: impl Fn() -> bool,
+) -> Result<CapturedProcessOutput, BoundedProcessError> {
+    let effective_cancelled = || cancelled() || git_task_cancelled();
+    if effective_cancelled() {
+        return Err(BoundedProcessError::Cancelled);
+    }
+    let lane = git_project_lane(&context.root)
+        .map_err(|error| BoundedProcessError::Wait(std::io::Error::other(error.message)))?;
+    let started = Instant::now();
+    let _lane = lock_git_lane(&lane, timeout, &effective_cancelled)?;
+    reject_local_git_filters(
+        context,
+        timeout.saturating_sub(started.elapsed()),
+        &effective_cancelled,
+    )?;
+    let mut command = hardened_git_command(context);
+    command.args(args);
+    run_bounded_process(
+        &mut command,
+        None,
+        timeout.saturating_sub(started.elapsed()),
+        max_stream_bytes,
+        effective_cancelled,
+    )
+}
+
+fn reject_local_git_filters(
+    context: &ProjectContext,
+    timeout: Duration,
+    cancelled: &impl Fn() -> bool,
+) -> Result<(), BoundedProcessError> {
+    if !context.root.join(".git").exists() {
+        return Ok(());
+    }
+    let mut command = hardened_git_command(context);
+    command.args([
+        "config",
+        "--local",
+        "--includes",
+        "--name-only",
+        "--get-regexp",
+        r"^filter\.",
+    ]);
+    let output = run_bounded_process(&mut command, None, timeout, 64 * 1024, cancelled)?;
+    if output.status.success() && !output.stdout.is_empty() {
+        return Err(BoundedProcessError::Wait(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "repository-defined Git clean/smudge/process filters are not allowed",
+        )));
+    }
+    if output.status.success() || output.status.code() == Some(1) {
+        Ok(())
+    } else {
+        Err(BoundedProcessError::Wait(std::io::Error::other(
+            "repository Git filter policy could not be verified",
+        )))
+    }
+}
+
+fn lock_git_lane<'lane>(
+    lane: &'lane Mutex<()>,
+    timeout: Duration,
+    cancelled: impl Fn() -> bool,
+) -> Result<std::sync::MutexGuard<'lane, ()>, BoundedProcessError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match lane.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(BoundedProcessError::Wait(std::io::Error::other(
+                    "Git project lane is unavailable",
+                )))
+            }
+            Err(std::sync::TryLockError::WouldBlock) if cancelled() => {
+                return Err(BoundedProcessError::Cancelled)
+            }
+            Err(std::sync::TryLockError::WouldBlock) if Instant::now() >= deadline => {
+                return Err(BoundedProcessError::Timeout)
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+}
+
+fn hardened_git_command(context: &ProjectContext) -> Command {
+    let mut command = Command::new("git");
+    command
+        .arg("--no-optional-locks")
+        .args([
+            "-c",
+            "core.quotepath=false",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            assessment_disabled_hooks_config(),
+            "-c",
+            disabled_attributes_config(),
+            "-c",
+            "core.pager=cat",
+            "-c",
+            "credential.helper=",
+            "-c",
+            "credential.interactive=never",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "tag.gpgsign=false",
+            "-c",
+            "diff.external=",
+        ])
+        .current_dir(&context.root)
+        .env_clear();
+    for name in GIT_ENV_ALLOWLIST {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    command
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", git_null_device())
+        .env("GIT_CONFIG_SYSTEM", git_null_device())
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "Never")
+        .env("GIT_PAGER", "cat")
+        .env("PAGER", "cat")
+        .env("NO_COLOR", "1");
+    command
+}
+
+#[cfg(windows)]
+fn disabled_attributes_config() -> &'static str {
+    "core.attributesFile=NUL"
+}
+
+#[cfg(not(windows))]
+fn disabled_attributes_config() -> &'static str {
+    "core.attributesFile=/dev/null"
+}
+
+#[cfg(windows)]
+fn git_null_device() -> &'static str {
+    "NUL"
+}
+
+#[cfg(not(windows))]
+fn git_null_device() -> &'static str {
+    "/dev/null"
+}
+
+fn git_project_lane(root: &Path) -> Result<Arc<Mutex<()>>, BackendError> {
+    let key = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let lanes = GIT_PROJECT_LANES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut lanes = lanes.lock().map_err(|_| git_lane_error())?;
+    lanes.retain(|_, lane| lane.strong_count() > 0);
+    if let Some(lane) = lanes.get(&key).and_then(Weak::upgrade) {
+        return Ok(lane);
+    }
+    let lane = Arc::new(Mutex::new(()));
+    lanes.insert(key, Arc::downgrade(&lane));
+    Ok(lane)
+}
+
+fn git_lane_error() -> BackendError {
+    BackendError::new(
+        "GIT_PROCESS_LANE_UNAVAILABLE",
+        "The project Git process lane is unavailable.",
+        true,
+        true,
+    )
+}
+
+fn git_process_error(error: BoundedProcessError, args: &[&str]) -> BackendError {
+    let (code, message, action) = match error {
+        BoundedProcessError::Timeout => (
+            "GIT_COMMAND_TIMEOUT",
+            "Git command exceeded the execution deadline.".to_string(),
+            true,
+        ),
+        BoundedProcessError::Cancelled => (
+            "GIT_COMMAND_CANCELLED",
+            "Git command was cancelled.".to_string(),
+            false,
+        ),
+        BoundedProcessError::OutputTooLarge => (
+            "GIT_COMMAND_OUTPUT_TOO_LARGE",
+            "Git command output exceeded the raw byte limit.".to_string(),
+            true,
+        ),
+        BoundedProcessError::Isolation(error) => {
+            ("GIT_PROCESS_ISOLATION_FAILED", error.to_string(), true)
+        }
+        BoundedProcessError::Spawn(error)
+        | BoundedProcessError::Stdin(error)
+        | BoundedProcessError::Read(error)
+        | BoundedProcessError::Wait(error) => ("GIT_COMMAND_FAILED", error.to_string(), false),
+    };
+    BackendError::new(code, message, true, action).with_details(serde_json::json!({ "args": args }))
 }
 
 fn commit_with_message(
@@ -1581,9 +1800,10 @@ fn normalize_git_path(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_git, GitService};
+    use super::{git_project_lane, run_git, GitService};
     use crate::models::git::{CheckpointPurpose, GitChangedFileKind};
     use crate::models::paths::ProjectContext;
+    use crate::tasks::task_model::CancellationToken;
     use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1614,6 +1834,22 @@ mod tests {
             args,
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn write_marker_script(path: &Path, marker: &Path) {
+        let marker = marker.to_string_lossy().replace('\\', "/");
+        fs::write(
+            path,
+            format!(
+                "#!/bin/sh\nprintf 'invoked\\n' >> '{marker}'\nif [ -f \"$1\" ]; then cat \"$1\"; fi\n"
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
     }
 
     #[test]
@@ -1668,6 +1904,208 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(timeout_error.code, "GIT_ASSESSMENT_TIMEOUT");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn app_owned_git_disables_hooks_fsmonitor_and_textconv() {
+        let root = unique_temp_dir("hardened-config");
+        fs::create_dir_all(root.join("wiki")).unwrap();
+        fs::write(root.join("wiki/page.md"), "baseline\n").unwrap();
+        fs::write(root.join(".gitattributes"), "*.md diff=batch2c\n").unwrap();
+        run_git_in(&root, &["init"]);
+        run_git_in(&root, &["config", "user.email", "tests@example.com"]);
+        run_git_in(&root, &["config", "user.name", "Tests"]);
+        run_git_in(&root, &["add", "--all"]);
+        run_git_in(&root, &["commit", "-m", "baseline"]);
+
+        let marker = root.join("unsafe-process-marker.txt");
+        let hooks = root.join("unsafe-hooks");
+        fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("post-commit");
+        let helper = root.join("unsafe-helper.sh");
+        write_marker_script(&hook, &marker);
+        write_marker_script(&helper, &marker);
+        let hooks_config = hooks.to_string_lossy().replace('\\', "/");
+        let helper_config = helper.to_string_lossy().replace('\\', "/");
+        run_git_in(&root, &["config", "core.hooksPath", &hooks_config]);
+        run_git_in(&root, &["config", "core.fsmonitor", &helper_config]);
+        run_git_in(&root, &["config", "diff.external", &helper_config]);
+        run_git_in(&root, &["config", "diff.batch2c.textconv", &helper_config]);
+
+        let context = ProjectContext::new("project-1", root.clone());
+        fs::write(root.join("wiki/page.md"), "checkpoint\n").unwrap();
+        GitService
+            .create_checkpoint(
+                &context,
+                CheckpointPurpose::HighRiskOperation,
+                "hardened checkpoint",
+            )
+            .unwrap();
+        assert!(
+            !marker.exists(),
+            "app-owned status/commit executed a repository fsmonitor or hook"
+        );
+
+        fs::write(root.join("wiki/page.md"), "diff\n").unwrap();
+        let diff = GitService.diff_since_head(&context).unwrap();
+        assert!(diff.contains("checkpoint"));
+        assert!(diff.contains("diff"));
+        assert!(
+            !marker.exists(),
+            "app-owned diff executed a repository textconv helper"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn app_owned_git_rejects_repository_clean_and_process_filters() {
+        let root = unique_temp_dir("hardened-filter");
+        fs::create_dir_all(root.join("wiki")).unwrap();
+        fs::write(root.join("wiki/page.md"), "baseline\n").unwrap();
+        run_git_in(&root, &["init"]);
+        run_git_in(&root, &["config", "user.email", "tests@example.com"]);
+        run_git_in(&root, &["config", "user.name", "Tests"]);
+        run_git_in(&root, &["add", "--all"]);
+        run_git_in(&root, &["commit", "-m", "baseline"]);
+
+        let marker = root.join("unsafe-filter-marker.txt");
+        let helper = root.join("unsafe-filter.sh");
+        write_marker_script(&helper, &marker);
+        let helper_config = helper.to_string_lossy().replace('\\', "/");
+        fs::write(root.join(".gitattributes"), "*.md filter=batch2c\n").unwrap();
+        run_git_in(&root, &["config", "filter.batch2c.clean", &helper_config]);
+        run_git_in(&root, &["config", "filter.batch2c.process", &helper_config]);
+        fs::write(root.join("wiki/page.md"), "candidate\n").unwrap();
+
+        let context = ProjectContext::new("project-1", root.clone());
+        let error = GitService
+            .create_checkpoint(
+                &context,
+                CheckpointPurpose::HighRiskOperation,
+                "must reject filters",
+            )
+            .expect_err("repository-defined filters must fail closed");
+        assert_eq!(error.code, "GIT_COMMAND_FAILED");
+        assert!(
+            !marker.exists(),
+            "Git filter executed before policy rejection"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn app_owned_git_rejects_filters_loaded_from_local_includes() {
+        for conditional in [false, true] {
+            let root = unique_temp_dir(if conditional {
+                "hardened-filter-include-if"
+            } else {
+                "hardened-filter-include"
+            });
+            fs::create_dir_all(root.join("wiki")).unwrap();
+            fs::write(root.join("wiki/page.md"), "baseline\n").unwrap();
+            run_git_in(&root, &["init"]);
+            run_git_in(&root, &["config", "user.email", "tests@example.com"]);
+            run_git_in(&root, &["config", "user.name", "Tests"]);
+            run_git_in(&root, &["add", "--all"]);
+            run_git_in(&root, &["commit", "-m", "baseline"]);
+
+            let marker = root.join("unsafe-included-filter-marker.txt");
+            let helper = root.join("unsafe-included-filter.sh");
+            write_marker_script(&helper, &marker);
+            let helper_config = helper.to_string_lossy().replace('\\', "/");
+            let included = root.join("included-filter.config");
+            fs::write(
+                &included,
+                format!("[filter \"batch2c\"]\n\tclean = {helper_config}\n"),
+            )
+            .unwrap();
+            let included_config = included.to_string_lossy().replace('\\', "/");
+            if conditional {
+                let git_dir = root.to_string_lossy().replace('\\', "/");
+                run_git_in(
+                    &root,
+                    &[
+                        "config",
+                        &format!("includeIf.gitdir:{git_dir}/.path"),
+                        &included_config,
+                    ],
+                );
+            } else {
+                run_git_in(&root, &["config", "include.path", &included_config]);
+            }
+            fs::write(root.join(".gitattributes"), "*.md filter=batch2c\n").unwrap();
+            fs::write(root.join("wiki/page.md"), "candidate\n").unwrap();
+
+            let context = ProjectContext::new("project-1", root.clone());
+            let error = GitService
+                .create_checkpoint(
+                    &context,
+                    CheckpointPurpose::HighRiskOperation,
+                    "must reject included filters",
+                )
+                .expect_err("included repository filters must fail closed");
+            assert_eq!(error.code, "GIT_COMMAND_FAILED");
+            assert!(
+                !marker.exists(),
+                "included Git filter executed before policy rejection"
+            );
+            fs::remove_dir_all(root).ok();
+        }
+    }
+
+    #[test]
+    fn blocked_project_git_lane_does_not_block_another_project() {
+        let root_a = unique_temp_dir("lane-a");
+        let root_b = unique_temp_dir("lane-b");
+        for root in [&root_a, &root_b] {
+            fs::create_dir_all(root).unwrap();
+            run_git_in(root, &["init"]);
+        }
+        let lane_a = git_project_lane(&root_a).unwrap();
+        let _blocked = lane_a.lock().unwrap();
+        let context_b = ProjectContext::new("project-b", root_b.clone());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(run_git(&context_b, &["status", "--porcelain"]));
+        });
+
+        let result = receiver
+            .recv_timeout(Duration::from_secs(15))
+            .expect("project B Git should not wait on project A's lane");
+        assert!(result.is_ok());
+        fs::remove_dir_all(root_a).ok();
+        fs::remove_dir_all(root_b).ok();
+    }
+
+    #[test]
+    fn task_cancellation_interrupts_a_git_lane_wait() {
+        let root = unique_temp_dir("lane-cancel");
+        fs::create_dir_all(&root).unwrap();
+        run_git_in(&root, &["init"]);
+        let lane = git_project_lane(&root).unwrap();
+        let _blocked = lane.lock().unwrap();
+        let context = ProjectContext::new("project-a", root.clone());
+        let cancellation = CancellationToken::new();
+        let worker_cancellation = cancellation.clone();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            entered_tx.send(()).unwrap();
+            let result = GitService.with_task_cancellation(worker_cancellation, || {
+                run_git(&context, &["status", "--porcelain"])
+            });
+            result_tx.send(result).unwrap();
+        });
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        cancellation.cancel();
+
+        let error = result_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("task cancellation must interrupt the Git lane wait")
+            .expect_err("cancelled Git must fail closed");
+        assert_eq!(error.code, "GIT_COMMAND_CANCELLED");
+        worker.join().unwrap();
         fs::remove_dir_all(root).ok();
     }
 

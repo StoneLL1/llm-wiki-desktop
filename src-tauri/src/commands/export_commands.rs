@@ -19,6 +19,7 @@ use crate::models::paths::ProjectContext;
 use crate::models::task::{BackendTask, TaskResult, TaskStatus, TaskType};
 use crate::services::{AgentService, ExportService, LlmService, WriteMode};
 use crate::tasks::task_model::LogLevel;
+use crate::utils::private_directory::{create_private_directory, ensure_private_directory};
 
 /// Derive a human title for the record from the source page (or the export
 /// type when project-wide). Kept tiny so the record stays meaningful in the UI
@@ -333,7 +334,8 @@ async fn run_export(
             let workspace = create_export_workspace(task_id)?;
             let _guard = WorkspaceGuard(workspace.clone());
             let invocation = AgentService::html_export_invocation(kind, &workspace, &prompt)?;
-            let captured = state.agent_service.run_task_streaming(
+            let captured = state.agent_service.run_export_streaming(
+                kind,
                 &invocation,
                 &state.task_service,
                 task_id,
@@ -601,11 +603,12 @@ fn resolve_route(
     let providers = LlmService::list_providers(context)?;
     let selected_agent = explicit_agent.or(agent_config.default_agent);
     let usable_agent = selected_agent.filter(|kind| {
-        state
-            .agent_service
-            .detect_agents(Some(*kind))
-            .iter()
-            .any(|info| info.kind == *kind && info.state == AgentDetectionState::Installed)
+        AgentService::supports_html_export_agent(*kind)
+            && state
+                .agent_service
+                .detect_agents(Some(*kind))
+                .iter()
+                .any(|info| info.kind == *kind && info.state == AgentDetectionState::Installed)
     });
     let selected_provider = select_provider(
         context,
@@ -677,16 +680,13 @@ fn select_provider(
     Ok(None)
 }
 
-fn create_export_workspace(task_id: &str) -> Result<PathBuf, BackendError> {
-    let workspace = std::env::temp_dir()
-        .join("llm-wiki-desktop")
-        .join(format!("export-{task_id}"));
-    if workspace.exists() {
-        std::fs::remove_dir_all(&workspace).map_err(|err| {
-            BackendError::new("EXPORT_WORKSPACE_FAILED", err.to_string(), true, false)
-        })?;
-    }
-    std::fs::create_dir_all(&workspace).map_err(|err| {
+fn create_export_workspace(_task_id: &str) -> Result<PathBuf, BackendError> {
+    let candidate_root = std::env::temp_dir().join("llm-wiki-desktop");
+    ensure_private_directory(&candidate_root).map_err(|err| {
+        BackendError::new("EXPORT_WORKSPACE_FAILED", err.to_string(), true, false)
+    })?;
+    let workspace = candidate_root.join(format!("export-{}", uuid::Uuid::new_v4()));
+    create_private_directory(&workspace).map_err(|err| {
         BackendError::new("EXPORT_WORKSPACE_FAILED", err.to_string(), true, false)
     })?;
     Ok(workspace)

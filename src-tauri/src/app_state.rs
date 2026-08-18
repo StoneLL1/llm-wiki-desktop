@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 
 use crate::errors::{BackendError, PATH_INVALID, PROJECT_CONTEXT_MISMATCH};
 use crate::models::confirmation::ConfirmationRegistry;
@@ -108,6 +108,31 @@ pub struct ProjectExecutionLease {
     _publication: crate::services::WorkflowLaunchPublication,
 }
 
+/// Project authority transitions must serialize with writes for the same
+/// canonical root, but an unrelated knowledge base must remain independent.
+/// Weak entries keep the registry bounded once no operation owns a lane.
+#[derive(Default)]
+pub(crate) struct ProjectTrustTransitionLanes {
+    lanes: Mutex<HashMap<String, Weak<Mutex<()>>>>,
+}
+
+impl ProjectTrustTransitionLanes {
+    fn lane(&self, root: &Path) -> Result<Arc<Mutex<()>>, BackendError> {
+        let identity = crate::services::project_identity(root).map_err(project_identity_error)?;
+        let mut lanes = self.lanes.lock().map_err(|_| trust_transition_locked())?;
+        lanes.retain(|_, lane| lane.strong_count() > 0);
+        if let Some(lane) = lanes
+            .get(&identity.canonical_identity_key)
+            .and_then(Weak::upgrade)
+        {
+            return Ok(lane);
+        }
+        let lane = Arc::new(Mutex::new(()));
+        lanes.insert(identity.canonical_identity_key, Arc::downgrade(&lane));
+        Ok(lane)
+    }
+}
+
 impl ProjectExecutionLease {
     pub(crate) fn validates(&self, context: &ProjectContext) -> bool {
         self.context.project_id == context.project_id && self.context.root == context.root
@@ -168,7 +193,7 @@ pub struct AppState {
     pub workflow_launch_registry: crate::services::WorkflowLaunchRegistry,
     pub project_execution_registry: crate::services::WorkflowLaunchRegistry,
     pub confirmation_registry: ConfirmationRegistry,
-    pub(crate) project_trust_transition: Mutex<()>,
+    pub(crate) project_trust_transition: ProjectTrustTransitionLanes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -790,8 +815,10 @@ impl AppState {
         asserted_root: &str,
         operation: impl FnOnce(&ProjectWritePermit<'_>, &ProjectContext) -> Result<T, BackendError>,
     ) -> Result<T, BackendError> {
-        let transition = self
+        let transition_lane = self
             .project_trust_transition
+            .lane(Path::new(asserted_root))?;
+        let transition = transition_lane
             .lock()
             .map_err(|_| trust_transition_locked())?;
         let context = self
@@ -821,8 +848,10 @@ impl AppState {
             &ProjectContext,
         ) -> Result<T, BackendError>,
     ) -> Result<T, BackendError> {
-        let transition = self
+        let transition_lane = self
             .project_trust_transition
+            .lane(Path::new(asserted_root))?;
+        let transition = transition_lane
             .lock()
             .map_err(|_| trust_transition_locked())?;
         let context = self
@@ -852,8 +881,10 @@ impl AppState {
         asserted_root: &str,
         operation: impl FnOnce(&ProjectTaskMutationPermit<'_>) -> Result<T, BackendError>,
     ) -> Result<T, BackendError> {
-        let transition = self
+        let transition_lane = self
             .project_trust_transition
+            .lane(Path::new(asserted_root))?;
+        let transition = transition_lane
             .lock()
             .map_err(|_| trust_transition_locked())?;
         let context = self
@@ -915,8 +946,8 @@ impl AppState {
         execution_id: &str,
         require_task: bool,
     ) -> Result<ProjectExecutionLease, BackendError> {
-        let transition = self
-            .project_trust_transition
+        let transition_lane = self.project_trust_transition.lane(&context.root)?;
+        let transition = transition_lane
             .lock()
             .map_err(|_| trust_transition_locked())?;
         let access = self.resolve_workflow_access_locked(context)?;
@@ -1101,8 +1132,8 @@ impl AppState {
         context: &ProjectContext,
         operation: impl FnOnce(crate::services::WorkflowAccessSnapshot) -> Result<T, BackendError>,
     ) -> Result<T, BackendError> {
-        let _transition = self
-            .project_trust_transition
+        let transition_lane = self.project_trust_transition.lane(&context.root)?;
+        let _transition = transition_lane
             .lock()
             .map_err(|_| trust_transition_locked())?;
         let access = self.resolve_workflow_access_locked(context)?;
@@ -1190,8 +1221,8 @@ impl AppState {
         project_id: impl Into<String>,
         root: &Path,
     ) -> Result<ProjectContext, BackendError> {
-        let _transition = self
-            .project_trust_transition
+        let transition_lane = self.project_trust_transition.lane(root)?;
+        let _transition = transition_lane
             .lock()
             .map_err(|_| trust_transition_locked())?;
         let project_id = project_id.into();
@@ -1233,8 +1264,8 @@ impl AppState {
         project_id: &str,
         root: &Path,
     ) -> Result<ProjectContext, BackendError> {
-        let _transition = self
-            .project_trust_transition
+        let transition_lane = self.project_trust_transition.lane(root)?;
+        let _transition = transition_lane
             .lock()
             .map_err(|_| trust_transition_locked())?;
         if !ProjectRegistry::is_strict_native_layout(root) {
@@ -1281,8 +1312,8 @@ impl AppState {
         project_id: &str,
         root: &Path,
     ) -> Result<ProjectContext, BackendError> {
-        let _transition = self
-            .project_trust_transition
+        let transition_lane = self.project_trust_transition.lane(root)?;
+        let _transition = transition_lane
             .lock()
             .map_err(|_| trust_transition_locked())?;
         self.project_registry.resolve(project_id, root)?;
@@ -1344,8 +1375,8 @@ impl AppState {
     }
 
     pub fn revoke_project_trust(&self, project_id: &str, root: &Path) -> Result<(), BackendError> {
-        let transition_guard = self
-            .project_trust_transition
+        let transition_lane = self.project_trust_transition.lane(root)?;
+        let transition_guard = transition_lane
             .lock()
             .map_err(|_| trust_transition_locked())?;
         let project_execution_barrier = self
@@ -2982,6 +3013,62 @@ mod project_registry_tests {
             .unwrap_err();
         assert_eq!(revoked_error.code, "PROJECT_WRITE_REQUIRES_TRUST");
         cleanup_paths(&[&restricted_project, &restricted_config, &project, &config]);
+    }
+
+    #[test]
+    fn project_write_critical_sections_do_not_block_unrelated_roots() {
+        let (state, config) = state_with_temp_config("project-write-lanes-config");
+        let state = Arc::new(state);
+        let project_a = strict_native_project("project-write-lane-a");
+        let project_b = strict_native_project("project-write-lane-b");
+        state
+            .project_registry
+            .register_trusted_native("project-a", &project_a)
+            .unwrap();
+        state
+            .project_registry
+            .register_trusted_native("project-b", &project_b)
+            .unwrap();
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let state_a = Arc::clone(&state);
+        let root_a = project_a.clone();
+        let worker_a = std::thread::spawn(move || {
+            state_a
+                .with_current_project_write_access(
+                    "project-a",
+                    root_a.to_string_lossy().as_ref(),
+                    |_, _| {
+                        entered_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        Ok(())
+                    },
+                )
+                .unwrap();
+        });
+        entered_rx.recv_timeout(Duration::from_secs(15)).unwrap();
+
+        let (completed_tx, completed_rx) = mpsc::channel();
+        let state_b = Arc::clone(&state);
+        let root_b = project_b.clone();
+        let worker_b = std::thread::spawn(move || {
+            let result = state_b.with_current_project_write_access(
+                "project-b",
+                root_b.to_string_lossy().as_ref(),
+                |_, _| Ok(()),
+            );
+            completed_tx.send(result).unwrap();
+        });
+        let project_b_result = completed_rx.recv_timeout(Duration::from_secs(15));
+        release_tx.send(()).unwrap();
+        worker_a.join().unwrap();
+        worker_b.join().unwrap();
+
+        project_b_result
+            .expect("project B must not wait for project A's write lane")
+            .unwrap();
+        cleanup_paths(&[&project_a, &project_b, &config]);
     }
 
     #[test]
