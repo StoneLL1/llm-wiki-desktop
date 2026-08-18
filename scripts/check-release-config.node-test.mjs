@@ -105,9 +105,9 @@ test("unknown human signing and approval owners remain explicit pending states",
   assert.equal(state({ contract: ambiguous }).errors.some((error) => error.includes("updater signing ownership")), true);
 });
 
-test("workflow permissions stay read-only except for the final publisher", () => {
+test("capability workflow permissions stay read-only, reusable, and non-publishing", () => {
   const ciWorkflow = "permissions:\n  contents: read\n";
-  const capabilityWorkflow = "permissions:\n  contents: read\n\njobs:\n  publish-catalog:\n    environment: capability-release\n    permissions:\n      contents: write\n    steps:\n      - run: gh release create app-v0.1.0\n";
+  const capabilityWorkflow = "on:\n  workflow_call:\npermissions:\n  contents: read\n\njobs:\n  merge-catalog:\n    steps: []\n";
   assert.deepEqual(validateWorkflowPermissions({ ciWorkflow, capabilityWorkflow }), []);
   assert.deepEqual(validateWorkflowPermissions({
     ciWorkflow: "jobs: {}\n",
@@ -115,42 +115,38 @@ test("workflow permissions stay read-only except for the final publisher", () =>
   }), [
     "CI must declare top-level contents: read",
     "capability workflow must default to contents: read",
-    "non-publishing capability workflows cannot request contents: write",
+    "the non-publishing capability workflow cannot request any write permission",
+    "capability workflow must be reusable through workflow_call for the unified desktop release",
   ]);
 
   assert.deepEqual(validateWorkflowPermissions({
     ciWorkflow,
-    capabilityWorkflow: capabilityWorkflow.replace(
-      "  publish-catalog:\n",
-      "  build:\n    permissions:\n      contents: write\n  publish-catalog:\n",
-    ),
-  }), ["publishing capability workflow must contain exactly one contents: write grant"]);
+    capabilityWorkflow: capabilityWorkflow.replace("  merge-catalog:\n", "  build:\n    permissions:\n      contents: write\n  merge-catalog:\n"),
+  }), ["the non-publishing capability workflow cannot request any write permission"]);
 
   assert.equal(validateWorkflowPermissions({
     ciWorkflow,
-    capabilityWorkflow: capabilityWorkflow.replace(
-      "  publish-catalog:\n",
-      "  build:\n    permissions:\n      id-token: write\n  publish-catalog:\n",
-    ),
-  }).some((error) => error.includes("exactly one contents: write")), true);
+    capabilityWorkflow: capabilityWorkflow.replace("  merge-catalog:\n", "  build:\n    permissions:\n      id-token: write\n  merge-catalog:\n"),
+  }).some((error) => error.includes("cannot request any write permission")), true);
 
   assert.equal(validateWorkflowPermissions({
     ciWorkflow,
-    capabilityWorkflow: capabilityWorkflow.replace(
-      "  publish-catalog:\n",
-      "  build:\n    permissions: { packages: write }\n  publish-catalog:\n",
-    ),
-  }).some((error) => error.includes("exactly one contents: write")), true);
+    capabilityWorkflow: capabilityWorkflow.replace("    steps: []\n", "    steps:\n      - run: gh release upload app-v0.1.0\n"),
+  }).some((error) => error.includes("must not publish releases")), true);
 
-  assert.deepEqual(validateWorkflowPermissions({
+  assert.equal(validateWorkflowPermissions({
     ciWorkflow,
-    capabilityWorkflow: capabilityWorkflow.replace("    environment: capability-release\n", ""),
-  }), ["capability publisher must use the protected capability-release environment"]);
+    capabilityWorkflow: capabilityWorkflow.replace("  workflow_call:\n", "  workflow_dispatch:\n"),
+  }).some((error) => error.includes("workflow_call")), true);
+});
 
-  assert.deepEqual(validateWorkflowPermissions({
-    ciWorkflow,
-    capabilityWorkflow: "permissions:\n  contents: read\n\njobs:\n  build:\n    steps: []\n",
-  }), []);
+test("the committed capability workflow is reusable and never publishes", () => {
+  const ciWorkflow = fs.readFileSync(path.join(repositoryRoot, ".github/workflows/ci.yml"), "utf8");
+  const capabilityWorkflow = fs.readFileSync(
+    path.join(repositoryRoot, ".github/workflows/capability-release.yml"),
+    "utf8",
+  );
+  assert.deepEqual(validateWorkflowPermissions({ ciWorkflow, capabilityWorkflow }), []);
 });
 
 test("local Git validation normalizes .git while rejecting the wrong origin or missing default branch", () => {

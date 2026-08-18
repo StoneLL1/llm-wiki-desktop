@@ -30,16 +30,22 @@ Add only the resulting 32-byte public key hex under a stable key ID in `trusted-
 
 ## Node/browser packs
 
-The manual `Capability release` workflow builds `browser-runtime`, `browser-runtime-lite`, and `media-metadata` for Windows x64, macOS arm64, macOS x64, and Linux x64. It:
+The reusable `Capability release` workflow builds `browser-runtime`, `browser-runtime-lite`, and `media-metadata` for Windows x64, macOS arm64, macOS x64, and Linux x64. It:
 
 - downloads the official pinned Node distribution and verifies its committed SHA-256;
 - installs locked npm dependencies and the Playwright-pinned Chromium;
 - runs browser policy, platform extraction, and real Chromium launch smoke tests on each target;
 - stages Node, signed SBOM/NOTICE/license evidence, runners, dependencies, and Chromium without relying on a system Node installation;
 - compiles the Rust release tool with locked dependencies before the signing secret enters the environment, so dependency build scripts cannot read the private key;
-- signs schema v2 manifests, verifies the finished ZIP member-by-member, merges catalog fragments, and publishes the artifacts.
+- signs schema v2 manifests, verifies the finished ZIP member-by-member, and merges catalog fragments while re-verifying every archive digest, manifest digest, Ed25519 signature, trusted key, and exact immutable tag URL.
 
-The workflow emits a `capability-install-catalog` application-integration artifact with the exact `capabilities/install-catalog.json` and `capabilities/trusted-keys.json` paths. Those two files must be reviewed and committed together, then the desktop application must be rebuilt so its binary embeds the new trust inputs. Publishing artifacts without rebuilding the application does not make them trusted or discoverable.
+The workflow never creates or uploads a GitHub release. It is callable through `workflow_call` from the unified desktop release orchestration, and publication happens only in that final pipeline after desktop installers, the updater manifest, and packaged smoke evidence are complete.
+
+-The workflow emits a `capability-install-catalog` application-integration artifact with the exact `capabilities/install-catalog.json`, `capabilities/trusted-keys.json`, and `capabilities/catalog-provenance.json` paths. `catalog-provenance.json` records the immutable release tag, commit SHA, and workflow run that produced the catalog, so a desktop build can reject catalog artifacts from another run, tag, or commit.
+
+Desktop release builds consume that artifact through an auditable staging input instead of overwriting source files: the release job downloads the artifact from the same workflow run, verifies the catalog contract and provenance with `scripts/verify-capability-catalog.mjs`, stages it, and builds with `LLM_WIKI_CAPABILITY_CATALOG_MODE=release` plus `LLM_WIKI_CAPABILITY_STAGING_DIR`. The Rust build script fails closed on an empty release catalog or a missing trusted key, copies the exact staged bytes into the binary, and writes an embed record that in-tree tests cross-check. After the build, `scripts/verify-embedded-capability-catalog.mjs` reverse-verifies that the finished binary embeds the exact staged catalog bytes.
+
+Development builds keep the explicit source fallback (`LLM_WIKI_CAPABILITY_CATALOG_MODE=source` or unset) and may embed the empty placeholder catalog. The source-tree `capabilities/install-catalog.json` and `capabilities/trusted-keys.json` remain the reviewed fallback: after a release catalog is generated and reviewed, those files must still be committed together and the application rebuilt so source builds embed the new trust inputs. Publishing artifacts without rebuilding the application does not make them trusted or discoverable.
 
 On Linux, Node and Chromium application bytes are bundled, but desktop shared libraries are intentionally supplied by the host OS. `BUILD-PROVENANCE.json` contains the exact shared-library support contract. The release workflow qualifies on Ubuntu 24.04 after Playwright installs that dependency baseline; the runtime reports launch failures as missing-host-dependency errors rather than claiming a fully static Linux bundle.
 

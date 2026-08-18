@@ -11,6 +11,16 @@ on:
         description: Public key ID already committed to capabilities/trusted-keys.json
         required: true
         type: string
+  workflow_call:
+    inputs:
+      release_tag:
+        description: GitHub release tag used by catalog URLs
+        required: true
+        type: string
+      signing_key_id:
+        description: Public key ID already committed to capabilities/trusted-keys.json
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -470,16 +480,18 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  publish-catalog:
-    name: Publish qualified capability release
+  merge-catalog:
+    name: Merge and verify install catalog
     needs: [node-packs, sensevoice-packs, ocr-packs]
     runs-on: ubuntu-24.04
-    environment: capability-release
-    permissions:
-      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.17.0
 
       - name: Setup Rust
         run: |
@@ -497,15 +509,32 @@ jobs:
           path: capability-dist
           merge-multiple: true
 
-      - name: Merge deterministic install catalog
-        run: src-tauri/target/release/capability_release merge-catalog --input capability-dist --output capability-dist/install-catalog.generated.json
-
-      - name: Require the complete immutable release matrix
+      - name: Merge and verify deterministic install catalog
         env:
-          CATALOG_PATH: capability-dist/install-catalog.generated.json
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
-          node -e 'const fs=require("fs");const c=JSON.parse(fs.readFileSync(process.env.CATALOG_PATH,"utf8"));const packs=["browser-runtime","browser-runtime-lite","media-metadata","asr-sensevoice-small","ocr-cjk-accurate"];const targets=["x86_64-pc-windows-msvc","aarch64-apple-darwin","x86_64-apple-darwin","x86_64-unknown-linux-gnu"];const expected=new Set(packs.flatMap(p=>targets.map(t=>`${p}|${t}`)));const actual=new Set(c.entries.map(e=>`${e.capabilityId}|${e.targetTriple}`));const missing=[...expected].filter(k=>!actual.has(k));const unexpected=[...actual].filter(k=>!expected.has(k));if(c.entries.length!==20||actual.size!==20||missing.length||unexpected.length)throw new Error(`invalid catalog matrix: entries=${c.entries.length}, unique=${actual.size}, missing=${missing.join(",")}, unexpected=${unexpected.join(",")}`);'
+          src-tauri/target/release/capability_release merge-catalog \
+            --input capability-dist \
+            --output capability-dist/install-catalog.generated.json \
+            --trusted-keys capabilities/trusted-keys.json \
+            --expected-tag "$RELEASE_TAG"
+
+      - name: Verify the release catalog contract and record provenance
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          COMMIT_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          node scripts/verify-capability-catalog.mjs \
+            --catalog capability-dist/install-catalog.generated.json \
+            --trusted-keys capabilities/trusted-keys.json \
+            --mode release \
+            --tag "$RELEASE_TAG" \
+            --emit-provenance capability-dist/application-integration/capabilities/catalog-provenance.json \
+            --commit-sha "$COMMIT_SHA" \
+            --run-id "$RUN_ID"
 
       - name: Stage exact application trust inputs
         env:
@@ -525,19 +554,3 @@ jobs:
           path: capability-dist/application-integration/capabilities/*
           if-no-files-found: error
           retention-days: 30
-
-      - name: Create or update GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-        run: |
-          set -euo pipefail
-          [[ "$RELEASE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || { echo 'release_tag contains unsupported characters.' >&2; exit 2; }
-          is_draft="$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft 2>/dev/null || true)"
-          if [[ -z "$is_draft" ]]; then
-            gh release create "$RELEASE_TAG" --verify-tag --draft --title "$RELEASE_TAG" --notes 'Qualified LLM Wiki Desktop capability packs.'
-          elif [[ "$is_draft" != 'true' ]]; then
-            echo 'Capability assets may only be uploaded to a draft release.' >&2
-            exit 1
-          fi
-          find capability-dist -maxdepth 1 -type f \( -name '*.zip' -o -name 'install-catalog.json' \) -print0 | xargs -0 gh release upload "$RELEASE_TAG"

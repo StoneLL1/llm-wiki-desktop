@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "check:bundle": "node --test --test-isolation=none scripts/check-initial-bundle.node-test.mjs && node scripts/check-initial-bundle.mjs",
-    "check:release-config": "node --test --test-isolation=none scripts/check-release-config.node-test.mjs && node scripts/check-release-version.mjs",
+    "check:release-config": "node --test --test-isolation=none scripts/check-release-config.node-test.mjs scripts/verify-capability-catalog.node-test.mjs scripts/verify-embedded-capability-catalog.node-test.mjs && node scripts/check-release-version.mjs && node scripts/verify-capability-catalog.mjs --catalog capabilities/install-catalog.json --trusted-keys capabilities/trusted-keys.json --mode source",
     "check:release-config:local": "node scripts/check-release-version.mjs --check-git",
     "test:final-four-redlines": "node --test --test-isolation=none scripts/check-final-four-redlines.node-test.mjs",
     "check:final-four-redlines": "node scripts/check-final-four-redlines.mjs",

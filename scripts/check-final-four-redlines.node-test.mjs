@@ -77,6 +77,16 @@ test("the strict checker can turn every owned contract green", async (context) =
     }))),
   }));
   await write("capabilities/trusted-keys.json", JSON.stringify({ release: "c".repeat(64) }));
+  await write("src-tauri/build.rs", [
+    "const CATALOG_MODE_ENV: &str = \"LLM_WIKI_CAPABILITY_CATALOG_MODE\";",
+    "const STAGING_DIR_ENV: &str = \"LLM_WIKI_CAPABILITY_STAGING_DIR\";",
+  ].join("\n"));
+  await write(
+    "src-tauri/src/services/import_v2/capability_embed.rs",
+    "// release builds cannot embed an empty capability catalog\n",
+  );
+  await write("scripts/verify-capability-catalog.mjs", "export function verifyCapabilityCatalog() {}\n");
+  await write("scripts/verify-embedded-capability-catalog.mjs", "export function verifyEmbeddedCapabilityCatalog() {}\n");
   await write("src-tauri/Cargo.toml", "tauri-plugin-updater = \"2\"\n");
   await write("src-tauri/tauri.conf.json", JSON.stringify({
     bundle: { createUpdaterArtifacts: true },
@@ -193,7 +203,7 @@ test("the strict checker can turn every owned contract green", async (context) =
     "    permissions:",
     "      contents: write",
   ].join("\n"));
-  await write(".github/workflows/capability-release.yml", "permissions:\n  contents: read\n");
+  await write(".github/workflows/capability-release.yml", "on:\n  workflow_call:\npermissions:\n  contents: read\n");
   await write("scripts/verify-release-assets.mjs", "export const verifyReleaseAssets = true;\n");
   await write("scripts/verify-latest-json.mjs", "export const verifyLatestJson = true;\n");
 

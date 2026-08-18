@@ -256,6 +256,10 @@ export function evaluateFinalFourRedlines(root) {
   const catalogPacks = new Set(catalogEntries.map((entry) => entry.capabilityId));
   const catalogPairs = new Set(catalogEntries.map((entry) => `${entry.capabilityId}\0${entry.targetTriple}`));
   const catalogTags = new Set();
+  const capabilityBuildScript = readText(root, "src-tauri/build.rs");
+  const capabilityEmbedModule = readText(root, "src-tauri/src/services/import_v2/capability_embed.rs");
+  const catalogVerifier = readText(root, "scripts/verify-capability-catalog.mjs");
+  const embeddedCatalogVerifier = readText(root, "scripts/verify-embedded-capability-catalog.mjs");
   const catalogEntriesValid = catalogEntries.every((entry) => {
     const match = /^https:\/\/github\.com\/StoneLL1\/llm-wiki-desktop\/releases\/download\/(app-v[^/]+)\/[^?#]+$/.exec(entry.url ?? "");
     if (match) catalogTags.add(match[1]);
@@ -269,6 +273,14 @@ export function evaluateFinalFourRedlines(root) {
       && typeof entry.license === "string" && entry.license.trim().length > 0;
   });
   const trustedKeyValues = Object.values(trustedKeys ?? {});
+  const catalogPipelineReady = capabilityBuildScript.includes("LLM_WIKI_CAPABILITY_CATALOG_MODE")
+    && capabilityBuildScript.includes("LLM_WIKI_CAPABILITY_STAGING_DIR")
+    && (capabilityBuildScript + capabilityEmbedModule)
+      .includes("release builds cannot embed an empty capability catalog")
+    && catalogVerifier.includes("export function verifyCapabilityCatalog")
+    && embeddedCatalogVerifier.includes("export function verifyEmbeddedCapabilityCatalog")
+    && /^ {2}workflow_call:\s*$/m.test(capabilityWorkflow)
+    && !/gh release (?:create|upload)/i.test(capabilityWorkflow);
   const catalogReady = catalog?.schemaVersion === 1
     && catalogEntries.length === 20
     && catalogPairs.size === 20
@@ -277,7 +289,8 @@ export function evaluateFinalFourRedlines(root) {
     && catalogTags.size === 1
     && catalogEntriesValid
     && trustedKeyValues.length > 0
-    && trustedKeyValues.every((key) => /^[0-9a-f]{64}$/.test(key) && !/^0+$/.test(key));
+    && trustedKeyValues.every((key) => /^[0-9a-f]{64}$/.test(key) && !/^0+$/.test(key))
+    && catalogPipelineReady;
 
   const updaterConfig = tauri?.plugins?.updater ?? {};
   const updaterReady = cargo.includes("tauri-plugin-updater")
