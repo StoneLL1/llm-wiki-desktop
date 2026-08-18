@@ -50,6 +50,7 @@ impl Default for ProjectTrustFile {
 }
 
 pub(crate) struct ProjectTrustStore {
+    root: PathBuf,
     path: PathBuf,
     lock: RwLock<()>,
 }
@@ -57,6 +58,7 @@ pub(crate) struct ProjectTrustStore {
 impl ProjectTrustStore {
     pub(crate) fn new(config_dir: &Path) -> Self {
         Self {
+            root: config_dir.parent().unwrap_or(config_dir).to_path_buf(),
             path: config_dir.join(PROJECT_TRUST_FILE),
             lock: RwLock::new(()),
         }
@@ -255,7 +257,7 @@ impl ProjectTrustStore {
     }
 
     fn write_file(&self, file: &ProjectTrustFile) -> Result<(), BackendError> {
-        FileStore.write_json_atomic_absolute(&self.path, file)
+        FileStore.write_json_atomic_absolute(&self.root, &self.path, file)
     }
 }
 

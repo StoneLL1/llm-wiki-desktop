@@ -3,6 +3,7 @@ use crate::errors::BackendError;
 use crate::models::chat::{ChatMessage, ChatSession, ChatSessionSummary};
 use crate::models::paths::ProjectContext;
 use crate::services::WriteMode;
+use crate::utils::safe_project_dir::remove_project_file;
 use crate::utils::time_utils::now_rfc3339;
 use std::sync::{Arc, Mutex};
 
@@ -152,7 +153,7 @@ impl ChatService {
         let _guard = lock.lock().map_err(|_| session_lock_error())?;
         let path = context.resolve_project_write_path(&session_path(context, session_id)?)?;
         if path.exists() {
-            std::fs::remove_file(&path).map_err(|err| {
+            remove_project_file(&context.root, &path).map_err(|err| {
                 BackendError::new("CHAT_DELETE_FAILED", err.to_string(), true, false)
                     .with_details(serde_json::json!({ "path": path.to_string_lossy() }))
             })?;

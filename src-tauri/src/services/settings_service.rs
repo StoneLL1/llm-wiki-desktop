@@ -73,7 +73,7 @@ impl SettingsService {
         allow_provider_binding_update: bool,
     ) -> Result<Settings, BackendError> {
         let store = FileStore;
-        store.ensure_absolute_dir(&self.config_dir)?;
+        store.ensure_absolute_dir(self.config_write_root(), &self.config_dir)?;
         let _guard = self.lock_global_settings()?;
         let mut global = settings.to_global_file();
         let existing_global = self.read_global_settings()?;
@@ -81,7 +81,11 @@ impl SettingsService {
         global.agent_lint_repair_attestations = existing_global.agent_lint_repair_attestations;
         global.remote_provider_disclosure_revision =
             existing_global.remote_provider_disclosure_revision;
-        store.write_json_atomic_absolute(&self.global_settings_path(), &global)?;
+        store.write_json_atomic_absolute(
+            self.config_write_root(),
+            &self.global_settings_path(),
+            &global,
+        )?;
         let settings_path =
             project_state_path(context, context.layout.settings_path.as_deref(), "settings")?;
         let agent_config_path = project_state_path(
@@ -263,8 +267,12 @@ impl SettingsService {
         settings.language = preferences.language;
         settings.theme = preferences.theme;
         let store = FileStore;
-        store.ensure_absolute_dir(&self.config_dir)?;
-        store.write_json_atomic_absolute(&self.global_settings_path(), &settings)?;
+        store.ensure_absolute_dir(self.config_write_root(), &self.config_dir)?;
+        store.write_json_atomic_absolute(
+            self.config_write_root(),
+            &self.global_settings_path(),
+            &settings,
+        )?;
         Ok(GlobalUiPreferences {
             language: settings.language,
             theme: settings.theme,
@@ -290,8 +298,12 @@ impl SettingsService {
         let mut settings = self.read_global_settings()?;
         settings.remote_provider_disclosure_revision = Some(revision.to_string());
         let store = FileStore;
-        store.ensure_absolute_dir(&self.config_dir)?;
-        store.write_json_atomic_absolute(&self.global_settings_path(), &settings)
+        store.ensure_absolute_dir(self.config_write_root(), &self.config_dir)?;
+        store.write_json_atomic_absolute(
+            self.config_write_root(),
+            &self.global_settings_path(),
+            &settings,
+        )
     }
 
     /// Read the user's UI/content language preference from global settings.
@@ -363,8 +375,12 @@ impl SettingsService {
         }
 
         let store = FileStore;
-        store.ensure_absolute_dir(&self.config_dir)?;
-        store.write_json_atomic_absolute(&self.global_settings_path(), &settings)?;
+        store.ensure_absolute_dir(self.config_write_root(), &self.config_dir)?;
+        store.write_json_atomic_absolute(
+            self.config_write_root(),
+            &self.global_settings_path(),
+            &settings,
+        )?;
 
         Ok(authorization)
     }
@@ -374,8 +390,12 @@ impl SettingsService {
         let mut settings = self.read_global_settings()?;
         settings.chat_convenience_authorizations.clear();
         let store = FileStore;
-        store.ensure_absolute_dir(&self.config_dir)?;
-        store.write_json_atomic_absolute(&self.global_settings_path(), &settings)
+        store.ensure_absolute_dir(self.config_write_root(), &self.config_dir)?;
+        store.write_json_atomic_absolute(
+            self.config_write_root(),
+            &self.global_settings_path(),
+            &settings,
+        )
     }
 
     pub fn record_agent_lint_repair_attestation(
@@ -427,8 +447,12 @@ impl SettingsService {
             task_id,
         )?;
         let store = FileStore;
-        store.ensure_absolute_dir(&self.config_dir)?;
-        store.write_json_atomic_absolute(&self.global_settings_path(), &settings)?;
+        store.ensure_absolute_dir(self.config_write_root(), &self.config_dir)?;
+        store.write_json_atomic_absolute(
+            self.config_write_root(),
+            &self.global_settings_path(),
+            &settings,
+        )?;
         Ok(attestation)
     }
 
@@ -495,8 +519,12 @@ impl SettingsService {
             )?;
         }
         let store = FileStore;
-        store.ensure_absolute_dir(&self.config_dir)?;
-        store.write_json_atomic_absolute(&self.global_settings_path(), &settings)
+        store.ensure_absolute_dir(self.config_write_root(), &self.config_dir)?;
+        store.write_json_atomic_absolute(
+            self.config_write_root(),
+            &self.global_settings_path(),
+            &settings,
+        )
     }
 
     pub fn has_agent_lint_repair_attestation(
@@ -559,8 +587,12 @@ impl SettingsService {
         }
         item.lifecycle = to;
         let store = FileStore;
-        store.ensure_absolute_dir(&self.config_dir)?;
-        store.write_json_atomic_absolute(&self.global_settings_path(), &settings)
+        store.ensure_absolute_dir(self.config_write_root(), &self.config_dir)?;
+        store.write_json_atomic_absolute(
+            self.config_write_root(),
+            &self.global_settings_path(),
+            &settings,
+        )
     }
 
     pub fn get_agent_lint_repair_attestation(
@@ -939,8 +971,12 @@ impl SettingsService {
         update(item)?;
         let updated = item.clone();
         let store = FileStore;
-        store.ensure_absolute_dir(&self.config_dir)?;
-        store.write_json_atomic_absolute(&self.global_settings_path(), &settings)?;
+        store.ensure_absolute_dir(self.config_write_root(), &self.config_dir)?;
+        store.write_json_atomic_absolute(
+            self.config_write_root(),
+            &self.global_settings_path(),
+            &settings,
+        )?;
         Ok(updated)
     }
 
@@ -962,12 +998,20 @@ impl SettingsService {
             return Ok(());
         }
         let store = FileStore;
-        store.ensure_absolute_dir(&self.config_dir)?;
-        store.write_json_atomic_absolute(&self.global_settings_path(), &settings)
+        store.ensure_absolute_dir(self.config_write_root(), &self.config_dir)?;
+        store.write_json_atomic_absolute(
+            self.config_write_root(),
+            &self.global_settings_path(),
+            &settings,
+        )
     }
 
     fn global_settings_path(&self) -> PathBuf {
         self.config_dir.join("settings.json")
+    }
+
+    fn config_write_root(&self) -> &Path {
+        self.config_dir.parent().unwrap_or(&self.config_dir)
     }
 
     fn lock_global_settings(&self) -> Result<std::sync::MutexGuard<'_, ()>, BackendError> {
@@ -1328,9 +1372,12 @@ mod tests {
         let (_context, _root, config_dir) = tmp_paths("close-behavior");
         let service = SettingsService::with_config_dir(config_dir.clone());
         let store = FileStore;
-        store.ensure_absolute_dir(&config_dir).unwrap();
+        store
+            .ensure_absolute_dir(config_dir.parent().unwrap(), &config_dir)
+            .unwrap();
         store
             .write_json_atomic_absolute(
+                config_dir.parent().unwrap(),
                 &config_dir.join("settings.json"),
                 &GlobalSettingsFile {
                     close_behavior: CloseBehavior::Quit,
@@ -1351,9 +1398,12 @@ mod tests {
         let (_context, _root, config_dir) = tmp_paths("language");
         let service = SettingsService::with_config_dir(config_dir.clone());
         let store = FileStore;
-        store.ensure_absolute_dir(&config_dir).unwrap();
+        store
+            .ensure_absolute_dir(config_dir.parent().unwrap(), &config_dir)
+            .unwrap();
         store
             .write_json_atomic_absolute(
+                config_dir.parent().unwrap(),
                 &config_dir.join("settings.json"),
                 &GlobalSettingsFile {
                     language: "zh-CN".into(),
@@ -2107,7 +2157,11 @@ mod tests {
             );
         }
         FileStore
-            .write_json_atomic_absolute(&service.global_settings_path(), &settings)
+            .write_json_atomic_absolute(
+                service.config_write_root(),
+                &service.global_settings_path(),
+                &settings,
+            )
             .unwrap();
 
         assert_eq!(
@@ -2143,7 +2197,11 @@ mod tests {
                 .to_rfc3339();
             });
         FileStore
-            .write_json_atomic_absolute(&service.global_settings_path(), &settings)
+            .write_json_atomic_absolute(
+                service.config_write_root(),
+                &service.global_settings_path(),
+                &settings,
+            )
             .unwrap();
         service
             .record_agent_lint_repair_attestation(

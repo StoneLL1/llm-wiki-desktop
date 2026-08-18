@@ -14,9 +14,7 @@ use crate::services::import_v2::engine::{
 use crate::services::import_v2::markdown_normalizer::{
     decode_text, html_to_markdown, normalize_markdown,
 };
-use crate::services::import_v2::media_router::{
-    link_or_copy, move_staged_file, TemporaryMediaWorkspace,
-};
+use crate::services::import_v2::media_router::{link_or_copy, TemporaryMediaWorkspace};
 use crate::services::import_v2::platform_network_policy::{
     trusted_platform_page_host_suffixes, upgrade_trusted_platform_page_to_https,
 };
@@ -31,6 +29,7 @@ use crate::services::import_v2::web_fetch::{
 };
 use crate::services::import_v2::web_target_store::WebTargetStore;
 use crate::tasks::task_model::CancellationToken;
+use crate::utils::safe_project_dir::{remove_project_file, BoundProjectMutationRoot};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -372,22 +371,23 @@ impl ImportEngine for GenericWebEngine {
                 "The web response did not contain readable text.",
             ));
         }
-        let staging = resolve_inside(Path::new(&request.project_root), &request.staging_root)?;
-        std::fs::create_dir_all(&staging)
+        let project_root = Path::new(&request.project_root);
+        let staging = resolve_inside(project_root, &request.staging_root)?;
+        ensure_bound_directory(project_root, &staging)
             .map_err(|_| unavailable("The web item staging directory could not be created."))?;
         let mut asset_paths = Vec::new();
         if let Some(document) = platform_document.as_ref() {
             let relative = format!("source-evidence/{}-provider.json", document.platform);
             let target = staging.join(&relative);
-            if let Some(parent) = target.parent() {
-                std::fs::create_dir_all(parent).map_err(|_| {
-                    unavailable("The platform provider evidence directory could not be created.")
-                })?;
-            }
             let serialized = serde_json::to_string_pretty(document).map_err(|_| {
                 unavailable("The platform provider evidence could not be serialized.")
             })?;
-            std::fs::write(&target, redact_sensitive_text(&serialized)).map_err(|_| {
+            write_bound_bytes(
+                project_root,
+                &target,
+                redact_sensitive_text(&serialized).as_bytes(),
+            )
+            .map_err(|_| {
                 unavailable("The platform provider evidence snapshot could not be written.")
             })?;
             asset_paths.push(relative);
@@ -396,12 +396,12 @@ impl ImportEngine for GenericWebEngine {
             if let Some(api) = bilibili_api.as_ref() {
                 let relative = "source-evidence/bilibili-api.json";
                 let target = staging.join(relative);
-                if let Some(parent) = target.parent() {
-                    std::fs::create_dir_all(parent).map_err(|_| {
-                        unavailable("The Bilibili API evidence directory could not be created.")
-                    })?;
-                }
-                std::fs::write(&target, redact_sensitive_text(&api.source_body)).map_err(|_| {
+                write_bound_bytes(
+                    project_root,
+                    &target,
+                    redact_sensitive_text(&api.source_body).as_bytes(),
+                )
+                .map_err(|_| {
                     unavailable("The Bilibili API evidence snapshot could not be written.")
                 })?;
                 asset_paths.push(relative.into());
@@ -473,6 +473,7 @@ impl ImportEngine for GenericWebEngine {
                     let extension = image_extension(&image.content_type);
                     if image_ocr_enabled {
                         temporary_ocr_inputs.push(stage_temporary_ocr_input(
+                            project_root,
                             &staging,
                             index,
                             extension,
@@ -480,8 +481,8 @@ impl ImportEngine for GenericWebEngine {
                         )?);
                     }
                     let relative = format!("assets/images/{:03}.{extension}", index + 1);
-                    if std::fs::create_dir_all(staging.join("assets/images")).is_err()
-                        || std::fs::write(staging.join(&relative), &image.bytes).is_err()
+                    if write_bound_bytes(project_root, &staging.join(&relative), &image.bytes)
+                        .is_err()
                     {
                         markdown = replace_markdown_asset_reference(
                             &markdown,
@@ -585,13 +586,14 @@ impl ImportEngine for GenericWebEngine {
                         ) {
                             let relative =
                                 format!("subtitles/platform-subtitle-{subtitle_index}.{extension}");
-                            std::fs::create_dir_all(staging.join("subtitles")).map_err(|_| {
-                                unavailable("The platform subtitle directory could not be created.")
+                            write_bound_bytes(
+                                project_root,
+                                &staging.join(&relative),
+                                &subtitle_artifact.bytes,
+                            )
+                            .map_err(|_| {
+                                unavailable("The platform subtitle could not be staged.")
                             })?;
-                            std::fs::write(staging.join(&relative), &subtitle_artifact.bytes)
-                                .map_err(|_| {
-                                    unavailable("The platform subtitle could not be staged.")
-                                })?;
                             asset_paths.push(relative);
                             let segments_relative = format!(
                                 "subtitles/platform-subtitle-{subtitle_index}.segments.json"
@@ -602,13 +604,14 @@ impl ImportEngine for GenericWebEngine {
                                         "The normalized subtitle segments could not be serialized.",
                                     )
                                 })?;
-                            std::fs::write(staging.join(&segments_relative), serialized).map_err(
-                                |_| {
-                                    unavailable(
-                                        "The normalized subtitle segments could not be staged.",
-                                    )
-                                },
-                            )?;
+                            write_bound_bytes(
+                                project_root,
+                                &staging.join(&segments_relative),
+                                &serialized,
+                            )
+                            .map_err(|_| {
+                                unavailable("The normalized subtitle segments could not be staged.")
+                            })?;
                             asset_paths.push(segments_relative);
                             if !transcription_ready && subtitle.kind.is_reliable_source() {
                                 transcript_source = Some(
@@ -815,6 +818,7 @@ impl ImportEngine for GenericWebEngine {
                     }
                     let downloaded_path = if let Some(download) = download {
                         let path = store_completed_media_download(
+                            Path::new(&request.project_root),
                             &staging,
                             &download.path().join("response.bin"),
                             &media,
@@ -829,9 +833,7 @@ impl ImportEngine for GenericWebEngine {
                     {
                         let relative = format!("assets/original-media.{extension}");
                         let durable_path = staging.join(&relative);
-                        if std::fs::create_dir_all(staging.join("assets")).is_err()
-                            || link_or_copy(&downloaded_path, &durable_path).is_err()
-                        {
+                        if copy_bound_file(project_root, &downloaded_path, &durable_path).is_err() {
                             markdown = replace_markdown_asset_reference(
                                 &markdown,
                                 &media_url,
@@ -944,15 +946,28 @@ impl ImportEngine for GenericWebEngine {
         } else {
             (!markdown.trim().is_empty()) as u8 as f64
         };
-        let written = std::fs::write(staging.join("source.bin"), redact_sensitive_text(&body))
-            .and_then(|_| std::fs::write(staging.join("document.md"), markdown.as_bytes()))
-            .and_then(|_| {
-                serde_json::to_vec_pretty(&metadata)
-                    .map_err(std::io::Error::other)
-                    .and_then(|bytes| std::fs::write(staging.join("metadata.json"), bytes))
-            });
+        let metadata_bytes = serde_json::to_vec_pretty(&metadata)
+            .map_err(|_| unavailable("The web engine metadata could not be serialized."))?;
+        let written = write_bound_bytes(
+            project_root,
+            &staging.join("source.bin"),
+            redact_sensitive_text(&body).as_bytes(),
+        )
+        .and_then(|_| {
+            write_bound_bytes(
+                project_root,
+                &staging.join("document.md"),
+                markdown.as_bytes(),
+            )
+        })
+        .and_then(|_| {
+            write_bound_bytes(
+                project_root,
+                &staging.join("metadata.json"),
+                &metadata_bytes,
+            )
+        });
         if written.is_err() {
-            let _ = std::fs::remove_dir_all(&staging);
             return Err(unavailable("The web engine could not write item staging."));
         }
         Ok(EngineResult {
@@ -1008,6 +1023,26 @@ fn select_primary_web_artifact(
         (Ok(artifact), None) => Ok((artifact, false)),
         (Err(error), None) => Err(error),
     }
+}
+
+fn ensure_bound_directory(root: &Path, directory: &Path) -> std::io::Result<()> {
+    BoundProjectMutationRoot::ensure_and_bind(
+        root,
+        &directory.join(".wiki-directory-binding-probe"),
+    )
+    .map(|_| ())
+}
+
+fn write_bound_bytes(root: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let (binding, _) = BoundProjectMutationRoot::ensure_and_bind(root, path)?;
+    binding.write_atomic_replace(path, bytes)
+}
+
+fn copy_bound_file(root: &Path, source: &Path, target: &Path) -> std::io::Result<()> {
+    let (binding, _) = BoundProjectMutationRoot::ensure_and_bind(root, target)?;
+    let mut source = std::fs::File::open(source)?;
+    let temporary = binding.copy_synced_temp(target, &mut source)?;
+    binding.install_prepared(&temporary, target)
 }
 
 fn resolve_inside(root: &Path, locator: &str) -> Result<PathBuf, BackendError> {
@@ -1198,8 +1233,9 @@ fn direct_media_result(
     cancellation: &CancellationToken,
     artifact: &crate::services::import_v2::web_fetch::WebFetchArtifact,
 ) -> Result<EngineResult, BackendError> {
-    let staging = resolve_inside(Path::new(&request.project_root), &request.staging_root)?;
-    std::fs::create_dir_all(&staging)
+    let project_root = Path::new(&request.project_root);
+    let staging = resolve_inside(project_root, &request.staging_root)?;
+    ensure_bound_directory(project_root, &staging)
         .map_err(|_| unavailable("The media staging directory could not be created."))?;
     let extension = media_extension(&artifact.content_type, &artifact.final_public_url);
     let lower_url = artifact.final_public_url.to_ascii_lowercase();
@@ -1224,9 +1260,7 @@ fn direct_media_result(
     let mut warnings = Vec::new();
     if request.media_save_mode == MediaSaveMode::PreserveOriginal {
         let relative = format!("assets/original-media.{extension}");
-        if std::fs::create_dir_all(staging.join("assets")).is_ok()
-            && std::fs::write(staging.join(&relative), &artifact.bytes).is_ok()
-        {
+        if write_bound_bytes(project_root, &staging.join(&relative), &artifact.bytes).is_ok() {
             markdown.push_str(&format!("\n[Download original media]({relative})\n"));
             asset_paths.push(relative);
         } else {
@@ -1238,7 +1272,7 @@ fn direct_media_result(
     let continuation = if request.local_asr_authorized {
         let temporary = TemporaryMediaWorkspace::create_unique(&staging, ".asr-input")?;
         let temporary_path = temporary.path().join(format!("input.{extension}"));
-        std::fs::write(&temporary_path, &artifact.bytes)
+        write_bound_bytes(project_root, &temporary_path, &artifact.bytes)
             .map_err(|_| unavailable("The temporary media could not be staged."))?;
         let temporary_relative = temporary_path
             .strip_prefix(&staging)
@@ -1284,12 +1318,22 @@ fn direct_media_result(
         media_size_bytes: Some(artifact.byte_len),
         restricted_content: false,
     };
-    std::fs::write(staging.join("source.bin"), &artifact.bytes)
-        .and_then(|_| std::fs::write(staging.join("document.md"), markdown.as_bytes()))
+    let metadata_bytes = serde_json::to_vec_pretty(&metadata)
+        .map_err(|_| unavailable("The direct media metadata could not be serialized."))?;
+    write_bound_bytes(project_root, &staging.join("source.bin"), &artifact.bytes)
         .and_then(|_| {
-            serde_json::to_vec_pretty(&metadata)
-                .map_err(std::io::Error::other)
-                .and_then(|bytes| std::fs::write(staging.join("metadata.json"), bytes))
+            write_bound_bytes(
+                project_root,
+                &staging.join("document.md"),
+                markdown.as_bytes(),
+            )
+        })
+        .and_then(|_| {
+            write_bound_bytes(
+                project_root,
+                &staging.join("metadata.json"),
+                &metadata_bytes,
+            )
         })
         .map_err(|_| unavailable("The direct media evidence could not be staged."))?;
     if cancellation.is_cancelled() {
@@ -1318,8 +1362,9 @@ fn direct_image_result(
     cancellation: &CancellationToken,
     artifact: &crate::services::import_v2::web_fetch::WebFetchArtifact,
 ) -> Result<EngineResult, BackendError> {
-    let staging = resolve_inside(Path::new(&request.project_root), &request.staging_root)?;
-    std::fs::create_dir_all(&staging)
+    let project_root = Path::new(&request.project_root);
+    let staging = resolve_inside(project_root, &request.staging_root)?;
+    ensure_bound_directory(project_root, &staging)
         .map_err(|_| unavailable("The image staging directory could not be created."))?;
     if !request.local_ocr_authorized {
         return Err(ocr_unavailable(
@@ -1333,9 +1378,7 @@ fn direct_image_result(
     let mut warnings = Vec::new();
     if request.media_save_mode == MediaSaveMode::PreserveOriginal {
         let relative = format!("assets/original-image.{extension}");
-        if std::fs::create_dir_all(staging.join("assets")).is_ok()
-            && std::fs::write(staging.join(&relative), &artifact.bytes).is_ok()
-        {
+        if write_bound_bytes(project_root, &staging.join(&relative), &artifact.bytes).is_ok() {
             markdown.push_str(&format!("![Original image]({relative})\n"));
             asset_paths.push(relative);
         } else {
@@ -1346,7 +1389,8 @@ fn direct_image_result(
     } else {
         markdown.push_str("(original image not retained after local OCR)\n");
     }
-    let temporary_input = stage_temporary_ocr_input(&staging, 0, extension, &artifact.bytes)?;
+    let temporary_input =
+        stage_temporary_ocr_input(project_root, &staging, 0, extension, &artifact.bytes)?;
     let metadata = WebMetadata {
         engine_id: "builtin.web-http",
         engine_version: env!("CARGO_PKG_VERSION"),
@@ -1369,12 +1413,22 @@ fn direct_image_result(
         media_size_bytes: None,
         restricted_content: false,
     };
-    std::fs::write(staging.join("source.bin"), &artifact.bytes)
-        .and_then(|_| std::fs::write(staging.join("document.md"), markdown.as_bytes()))
+    let metadata_bytes = serde_json::to_vec_pretty(&metadata)
+        .map_err(|_| unavailable("The direct image metadata could not be serialized."))?;
+    write_bound_bytes(project_root, &staging.join("source.bin"), &artifact.bytes)
         .and_then(|_| {
-            serde_json::to_vec_pretty(&metadata)
-                .map_err(std::io::Error::other)
-                .and_then(|bytes| std::fs::write(staging.join("metadata.json"), bytes))
+            write_bound_bytes(
+                project_root,
+                &staging.join("document.md"),
+                markdown.as_bytes(),
+            )
+        })
+        .and_then(|_| {
+            write_bound_bytes(
+                project_root,
+                &staging.join("metadata.json"),
+                &metadata_bytes,
+            )
         })
         .map_err(|_| unavailable("The direct image evidence could not be staged."))?;
     if cancellation.is_cancelled() {
@@ -1403,6 +1457,7 @@ fn direct_image_result(
 }
 
 fn stage_temporary_ocr_input(
+    project_root: &Path,
     staging: &Path,
     index: usize,
     extension: &str,
@@ -1412,7 +1467,7 @@ fn stage_temporary_ocr_input(
     let temporary_path = temporary
         .path()
         .join(format!("image-{:03}.{extension}", index + 1));
-    std::fs::write(&temporary_path, bytes)
+    write_bound_bytes(project_root, &temporary_path, bytes)
         .map_err(|_| unavailable("A temporary OCR image could not be staged."))?;
     let relative = temporary_path
         .strip_prefix(staging)
@@ -1759,23 +1814,28 @@ fn load_completed_media_download(
 }
 
 fn store_completed_media_download(
+    project_root: &Path,
     staging: &Path,
     downloaded_path: &Path,
     artifact: &WebFetchArtifact,
 ) -> Result<PathBuf, BackendError> {
     let root = staging.join("media-download");
-    std::fs::create_dir_all(&root)
+    let payload = root.join("payload.bin");
+    let manifest_path = root.join("complete.json");
+    let (binding, _) = BoundProjectMutationRoot::ensure_and_bind(project_root, &payload)
         .map_err(|_| unavailable("The completed media cache could not be created."))?;
-    let nonce = uuid::Uuid::new_v4();
-    let pending_payload = root.join(format!(".pending-payload-{nonce}"));
-    let pending_manifest = root.join(format!(".pending-manifest-{nonce}"));
-    move_staged_file(downloaded_path, &pending_payload)
+    let mut downloaded = std::fs::File::open(downloaded_path)
         .map_err(|_| unavailable("The completed media payload could not be staged."))?;
-    let byte_len = std::fs::metadata(&pending_payload)
+    let pending_payload = binding
+        .copy_synced_temp(&payload, &mut downloaded)
+        .map_err(|_| unavailable("The completed media payload could not be staged."))?;
+    let byte_len = binding
+        .open_regular(&pending_payload)
+        .and_then(|file| file.metadata())
         .map_err(|_| unavailable("The completed media payload could not be measured."))?
         .len();
     if byte_len == 0 || byte_len != artifact.byte_len {
-        let _ = std::fs::remove_file(&pending_payload);
+        let _ = binding.remove_file(&pending_payload);
         return Err(unavailable("The completed media payload length changed."));
     }
     let manifest = CompletedMediaDownload {
@@ -1783,33 +1843,41 @@ fn store_completed_media_download(
         complete: true,
         content_type: artifact.content_type.clone(),
         byte_len,
-        sha256: hash_media_file(&pending_payload)?,
+        sha256: hash_media_bound_file(&binding, &pending_payload)?,
     };
-    std::fs::write(
-        &pending_manifest,
-        serde_json::to_vec_pretty(&manifest)
-            .map_err(|_| unavailable("The completed media cache manifest is invalid."))?,
-    )
-    .map_err(|_| unavailable("The completed media cache manifest could not be staged."))?;
-    let payload = root.join("payload.bin");
-    let manifest_path = root.join("complete.json");
-    for path in [&payload, &manifest_path] {
-        if path.exists() {
-            std::fs::remove_file(path).map_err(|_| {
-                unavailable("The previous completed media cache could not be replaced.")
-            })?;
-        }
-    }
-    std::fs::rename(&pending_payload, &payload)
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+        .map_err(|_| unavailable("The completed media cache manifest is invalid."))?;
+    let pending_manifest = binding
+        .write_synced_temp(&manifest_path, &manifest_bytes)
+        .map_err(|_| unavailable("The completed media cache manifest could not be staged."))?;
+    binding
+        .install_prepared(&pending_payload, &payload)
         .map_err(|_| unavailable("The completed media payload could not be finalized."))?;
-    std::fs::rename(&pending_manifest, &manifest_path)
+    binding
+        .install_prepared(&pending_manifest, &manifest_path)
         .map_err(|_| unavailable("The completed media cache manifest could not be finalized."))?;
+    drop(downloaded);
+    let _ = remove_project_file(project_root, downloaded_path);
     Ok(payload)
+}
+
+fn hash_media_bound_file(
+    binding: &BoundProjectMutationRoot,
+    path: &Path,
+) -> Result<String, BackendError> {
+    let mut file = binding
+        .open_regular(path)
+        .map_err(|_| unavailable("The completed media payload could not be verified."))?;
+    hash_media_reader(&mut file)
 }
 
 fn hash_media_file(path: &Path) -> Result<String, BackendError> {
     let mut file = std::fs::File::open(path)
         .map_err(|_| unavailable("The completed media payload could not be verified."))?;
+    hash_media_reader(&mut file)
+}
+
+fn hash_media_reader(file: &mut std::fs::File) -> Result<String, BackendError> {
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 1024 * 1024];
     loop {
@@ -2154,7 +2222,8 @@ mod tests {
             elapsed_ms: 5,
         };
 
-        let payload = store_completed_media_download(&staging, &downloaded, &artifact).unwrap();
+        let payload =
+            store_completed_media_download(root.path(), &staging, &downloaded, &artifact).unwrap();
         assert!(!downloaded.exists());
         assert_eq!(std::fs::read(&payload).unwrap(), b"downloaded-media");
         let reused = load_completed_media_download(&staging, url)

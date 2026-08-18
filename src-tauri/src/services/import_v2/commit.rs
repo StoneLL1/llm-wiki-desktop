@@ -35,6 +35,7 @@ use crate::services::import_v2::transaction::FileTransaction;
 use crate::services::import_v2::ImportV2Service;
 use crate::services::{FileStore, GitService};
 use crate::utils::markdown_utils::{parse_frontmatter, split_frontmatter};
+use crate::utils::safe_project_dir::remove_project_file;
 
 #[derive(Clone, PartialEq)]
 pub(crate) struct ExactDuplicateFinalizationFingerprint {
@@ -2076,7 +2077,7 @@ fn remove_committed_clipboard_input(
         return;
     }
     if let Ok(path) = context.resolve_project_path(&input.locator) {
-        let _ = std::fs::remove_file(path);
+        let _ = remove_project_file(&context.root, &path);
     }
 }
 

@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::Write;
 use std::sync::Arc;
 
 use crate::errors::BackendError;
@@ -592,15 +591,6 @@ fn persist_candidate_state(
         ));
     }
     let final_path = workspace.join("workflow-candidate.json");
-    let temp_path = workspace.join("workflow-candidate.json.tmp");
-    if final_path.exists() || temp_path.exists() {
-        return Err(BackendError::new(
-            "WORKFLOW_CANDIDATE_PERSIST_FAILED",
-            "The task candidate descriptor already exists.",
-            false,
-            true,
-        ));
-    }
     let identity =
         super::super::persistence::project_identity(&context.root).map_err(task_error)?;
     let descriptor = PersistedUpdateWikiCandidate {
@@ -631,33 +621,27 @@ fn persist_candidate_state(
             false,
         )
     })?;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp_path)
+    FileStore
+        .write_bytes_create_new_absolute(
+            workspace.parent().ok_or_else(|| {
+                BackendError::new(
+                    "WORKFLOW_CANDIDATE_PERSIST_FAILED",
+                    "The task candidate workspace root is unavailable.",
+                    false,
+                    true,
+                )
+            })?,
+            &final_path,
+            &bytes,
+        )
         .map_err(|error| {
             BackendError::new(
                 "WORKFLOW_CANDIDATE_PERSIST_FAILED",
-                error.to_string(),
-                true,
-                false,
+                error.message,
+                error.recoverable,
+                error.user_action_required,
             )
         })?;
-    let written = (|| -> std::io::Result<()> {
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&temp_path, &final_path)
-    })();
-    if let Err(error) = written {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(BackendError::new(
-            "WORKFLOW_CANDIDATE_PERSIST_FAILED",
-            error.to_string(),
-            true,
-            false,
-        ));
-    }
     Ok(candidate_hash)
 }
 
@@ -701,7 +685,21 @@ fn persist_reconciliation_result(
         ));
     }
     descriptor.reconciliation_result = Some(result.clone());
-    FileStore.write_json_atomic_absolute(&descriptor_path, &descriptor)
+    FileStore.write_json_atomic_absolute(
+        descriptor_path
+            .parent()
+            .and_then(|parent| parent.parent())
+            .ok_or_else(|| {
+                BackendError::new(
+                    "WORKFLOW_RECONCILIATION_PERSIST_FAILED",
+                    "The workflow workspace root is unavailable.",
+                    false,
+                    true,
+                )
+            })?,
+        &descriptor_path,
+        &descriptor,
+    )
 }
 
 pub fn persist_update_wiki_review(
@@ -997,7 +995,7 @@ fn apply_persisted_update_wiki_candidate(
             .filter(|reference| !reference.source_id.starts_with("legacy-"))
             .map(|reference| format!(".app/sources/{}.json", reference.source_id)),
     );
-    let backup = CompileService::backup_workflow_outputs(
+    let mut backup = CompileService::backup_workflow_outputs(
         context,
         &descriptor.candidate.manifest,
         &metadata_paths,
@@ -1078,7 +1076,7 @@ fn apply_persisted_update_wiki_candidate(
     };
     let mut rollback_paths = affected_paths.clone();
     rollback_paths.push(".app/graph-cache.json".into());
-    rollback_paths.extend(metadata_paths);
+    rollback_paths.extend(metadata_paths.iter().cloned());
     let reversible_finalize = (|| {
         sink.progress(
             APPLY_CHANGES,
@@ -1090,6 +1088,11 @@ fn apply_persisted_update_wiki_candidate(
         sink.complete(APPLY_CHANGES).map_err(task_error)?;
         sink.start(REFRESH_INDEXES).map_err(task_error)?;
         refresh_indexes(context, task_id, services)?;
+        CompileService::capture_workflow_installed_values(
+            context,
+            &mut backup,
+            &[workflow_graph_cache_relative_path(context)],
+        )?;
         sink.complete(REFRESH_INDEXES).map_err(task_error)?;
         sink.start(RECORD_RESULT).map_err(task_error)?;
         Ok::<_, BackendError>(())
@@ -1135,6 +1138,8 @@ fn apply_persisted_update_wiki_candidate(
         &affected_paths,
         descriptor.checkpoint_hash.clone(),
         &descriptor.source_versions,
+        &mut backup,
+        &metadata_paths,
         services,
     ) {
         Ok(commit) => commit,
@@ -1322,6 +1327,8 @@ fn record_compile_result(
     affected_paths: &[String],
     checkpoint_hash: Option<String>,
     source_versions: &[SourceVersionRef],
+    backup: &mut crate::services::compile_service::CompileBackup,
+    metadata_paths: &[String],
     services: &UpdateWikiExecutionServices<'_>,
 ) -> Result<Option<String>, BackendError> {
     SourceRegistry::record_compile_consumption(
@@ -1337,6 +1344,7 @@ fn record_compile_result(
             checkpoint: checkpoint_hash.clone(),
         },
     )?;
+    CompileService::capture_workflow_installed_values(context, backup, metadata_paths)?;
     let compile_record_path = format!(".app/compile/{task_id}.json");
     let mut checkpoint_paths = affected_paths.to_vec();
     checkpoint_paths.push(".app/graph-cache.json".into());

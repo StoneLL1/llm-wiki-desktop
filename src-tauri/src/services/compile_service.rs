@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
 use std::path::{Component, Path};
 
 use crate::errors::BackendError;
@@ -20,6 +19,9 @@ use crate::tasks::task_model::LogLevel;
 use crate::tasks::TaskService;
 use crate::utils::markdown_utils::{parse_frontmatter, split_frontmatter};
 use crate::utils::private_directory::{create_private_directory, ensure_private_directory};
+use crate::utils::safe_project_dir::{
+    remove_project_file, rename_project_file, BoundProjectMutationRoot,
+};
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,7 +31,16 @@ pub struct CompileApplyOutcome {
 }
 
 pub struct CompileBackup {
-    entries: Vec<(String, Option<Vec<u8>>)>,
+    entries: Vec<CompileBackupEntry>,
+}
+
+struct CompileBackupEntry {
+    relative: String,
+    baseline: Option<Vec<u8>>,
+    /// Exact value installed by the reversible finalization phase. `None`
+    /// means the path was observed absent; the outer option distinguishes an
+    /// owned absence from a path that this operation never claimed.
+    installed: Option<Option<Vec<u8>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1779,7 +1790,7 @@ impl CompileService {
                 ));
             };
             let staged = parent.join(format!(".llm-wiki-delete-{}.tmp", uuid::Uuid::new_v4()));
-            if let Err(error) = std::fs::rename(&target, &staged) {
+            if let Err(error) = rename_project_file(&context.root, &target, &staged, false) {
                 return Err(Self::apply_error_with_journal(
                     BackendError::new(
                         "CONFIRMATION_STATE_MISMATCH",
@@ -1790,11 +1801,14 @@ impl CompileService {
                     &affected,
                 ));
             }
-            let staged_hash = std::fs::read(&staged)
+            let staged_binding = BoundProjectMutationRoot::bind(&context.root, &staged)
+                .map_err(|error| io_error("FILE_READ_FAILED", error, &staged))?;
+            let staged_hash = staged_binding
+                .read_regular(&staged)
                 .map(|bytes| hash_bytes(&bytes))
                 .map_err(|error| io_error("FILE_READ_FAILED", error, &staged));
             if staged_hash.as_deref() != Ok(expected.as_str()) {
-                let restored = !target.exists() && std::fs::rename(&staged, &target).is_ok();
+                let restored = rename_project_file(&context.root, &staged, &target, false).is_ok();
                 let error = if restored {
                     BackendError::new(
                         "CONFIRMATION_STATE_MISMATCH",
@@ -1816,8 +1830,8 @@ impl CompileService {
                 };
                 return Err(Self::apply_error_with_journal(error, &affected));
             }
-            if let Err(error) = std::fs::remove_file(&staged) {
-                if !target.exists() && std::fs::rename(&staged, &target).is_ok() {
+            if let Err(error) = remove_project_file(&context.root, &staged) {
+                if rename_project_file(&context.root, &staged, &target, false).is_ok() {
                     return Err(Self::apply_error_with_journal(
                         BackendError::new("FILE_DELETE_FAILED", error.to_string(), true, false),
                         &affected,
@@ -1882,6 +1896,16 @@ impl CompileService {
         manifest: &CompileManifest,
         extra_paths: &[String],
     ) -> Result<CompileBackup, BackendError> {
+        let generated = manifest
+            .files
+            .iter()
+            .map(|file| (file.path.as_str(), file.content.as_bytes()))
+            .collect::<HashMap<_, _>>();
+        let deletions = manifest
+            .deletions
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
         let mut paths: Vec<String> = manifest
             .files
             .iter()
@@ -1895,40 +1919,52 @@ impl CompileService {
         let mut entries = Vec::with_capacity(paths.len());
         for relative in paths {
             let absolute = resolve_compile_mutation_path(context, &relative)?;
-            let bytes = if absolute.exists() {
-                Some(
-                    std::fs::read(&absolute)
-                        .map_err(|error| io_error("COMPILE_BACKUP_FAILED", error, &absolute))?,
-                )
-            } else {
-                None
-            };
-            entries.push((relative, bytes));
+            let baseline = read_bound_optional(context, &absolute, "COMPILE_BACKUP_FAILED")?;
+            entries.push(CompileBackupEntry {
+                installed: generated
+                    .get(relative.as_str())
+                    .map(|bytes| Some(bytes.to_vec()))
+                    .or_else(|| deletions.contains(relative.as_str()).then_some(None)),
+                relative,
+                baseline,
+            });
         }
         Ok(CompileBackup { entries })
+    }
+
+    /// Claim the exact post-write values that a later workflow rollback may
+    /// restore. Capture is deliberately explicit: paths not claimed here are
+    /// never rolled back as workflow-owned metadata.
+    pub fn capture_workflow_installed_values(
+        context: &ProjectContext,
+        backup: &mut CompileBackup,
+        paths: &[String],
+    ) -> Result<(), BackendError> {
+        let paths = paths.iter().map(String::as_str).collect::<HashSet<_>>();
+        for entry in &mut backup.entries {
+            if !paths.contains(entry.relative.as_str()) {
+                continue;
+            }
+            let absolute = resolve_compile_mutation_path(context, &entry.relative)?;
+            entry.installed = Some(read_bound_optional(
+                context,
+                &absolute,
+                "COMPILE_BACKUP_FAILED",
+            )?);
+        }
+        Ok(())
     }
 
     pub fn restore_outputs(
         context: &ProjectContext,
         backup: &CompileBackup,
     ) -> Result<(), BackendError> {
-        for (relative, bytes) in &backup.entries {
-            let absolute = resolve_compile_mutation_path(context, relative)?;
-            match bytes {
-                Some(bytes) => {
-                    if let Some(parent) = absolute.parent() {
-                        std::fs::create_dir_all(parent)
-                            .map_err(|error| io_error("COMPILE_ROLLBACK_FAILED", error, parent))?;
-                    }
-                    std::fs::write(&absolute, bytes)
-                        .map_err(|error| io_error("COMPILE_ROLLBACK_FAILED", error, &absolute))?;
-                }
-                None if absolute.exists() => {
-                    std::fs::remove_file(&absolute)
-                        .map_err(|error| io_error("COMPILE_ROLLBACK_FAILED", error, &absolute))?;
-                }
-                None => {}
+        for entry in &backup.entries {
+            if entry.installed.is_none() {
+                continue;
             }
+            let absolute = resolve_compile_mutation_path(context, &entry.relative)?;
+            rollback_owned_path(context, entry, &absolute)?;
         }
         Ok(())
     }
@@ -1953,21 +1989,27 @@ impl CompileService {
             .iter()
             .map(String::as_str)
             .collect::<HashSet<_>>();
-        for (relative, baseline) in &backup.entries {
-            if !applied.contains(relative.as_str()) {
+        for entry in &backup.entries {
+            if !applied.contains(entry.relative.as_str()) {
                 continue;
             }
-            let absolute = resolve_compile_mutation_path(context, relative)?;
-            if relative.starts_with(".app/") {
-                restore_backup_path(&absolute, baseline.as_deref())?;
+            let absolute = resolve_compile_mutation_path(context, &entry.relative)?;
+            if entry.relative.starts_with(".app/") {
+                rollback_owned_path(context, entry, &absolute)?;
                 continue;
             }
-            let workflow_value = if deletions.contains(relative.as_str()) {
+            let workflow_value = if deletions.contains(entry.relative.as_str()) {
                 None
             } else {
-                generated.get(relative.as_str()).copied()
+                generated.get(entry.relative.as_str()).copied()
             };
-            rollback_wiki_path(relative, &absolute, baseline.as_deref(), workflow_value)?;
+            rollback_wiki_path(
+                context,
+                &entry.relative,
+                &absolute,
+                entry.baseline.as_deref(),
+                workflow_value,
+            )?;
         }
         Ok(())
     }
@@ -2288,23 +2330,73 @@ fn source_ref_error(path: &str, source: &str) -> BackendError {
     .with_details(serde_json::json!({ "path": path, "source": source }))
 }
 
-fn restore_backup_path(path: &Path, baseline: Option<&[u8]>) -> Result<(), BackendError> {
-    match baseline {
-        Some(bytes) => {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|error| io_error("COMPILE_ROLLBACK_FAILED", error, parent))?;
+fn read_bound_optional(
+    context: &ProjectContext,
+    path: &Path,
+    code: &str,
+) -> Result<Option<Vec<u8>>, BackendError> {
+    let binding = match BoundProjectMutationRoot::bind_read(&context.root, path) {
+        Ok(binding) => binding,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_error(code, error, path)),
+    };
+    match binding.read_regular(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io_error(code, error, path)),
+    }
+}
+
+fn rollback_owned_path(
+    context: &ProjectContext,
+    entry: &CompileBackupEntry,
+    path: &Path,
+) -> Result<(), BackendError> {
+    let conflict = || {
+        BackendError::new(
+            "WORKFLOW_ROLLBACK_CONFLICT",
+            "A project file changed again while compile output was rolling back; the newer value was preserved.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({ "path": entry.relative }))
+    };
+    let current = read_bound_optional(context, path, "COMPILE_ROLLBACK_FAILED")?;
+    if current.as_deref() == entry.baseline.as_deref() {
+        return Ok(());
+    }
+    let installed = entry.installed.as_ref().ok_or_else(conflict)?;
+    match installed {
+        Some(expected) => {
+            let expected_hash = format!("{:x}", Sha256::digest(expected));
+            match &entry.baseline {
+                Some(baseline) => FileStore
+                    .write_project_bytes_absolute_if_hash_matches(
+                        context,
+                        path,
+                        baseline,
+                        &expected_hash,
+                    )
+                    .and_then(|restored| restored.then_some(()).ok_or_else(conflict)),
+                None => FileStore
+                    .remove_if_hash_matches(context, &entry.relative, &expected_hash)
+                    .and_then(|removed| removed.then_some(()).ok_or_else(conflict)),
             }
-            std::fs::write(path, bytes)
-                .map_err(|error| io_error("COMPILE_ROLLBACK_FAILED", error, path))
         }
-        None if path.exists() => std::fs::remove_file(path)
-            .map_err(|error| io_error("COMPILE_ROLLBACK_FAILED", error, path)),
-        None => Ok(()),
+        None => {
+            if read_bound_optional(context, path, "COMPILE_ROLLBACK_FAILED")?.is_some() {
+                return Err(conflict());
+            }
+            match &entry.baseline {
+                Some(baseline) => write_create_new(context, path, baseline).map_err(|_| conflict()),
+                None => Ok(()),
+            }
+        }
     }
 }
 
 fn rollback_wiki_path(
+    context: &ProjectContext,
     relative: &str,
     target: &Path,
     baseline: Option<&[u8]>,
@@ -2329,7 +2421,7 @@ fn rollback_wiki_path(
             return Err(conflict(None));
         }
         return match baseline {
-            Some(bytes) => write_create_new(target, bytes).map_err(|_| conflict(None)),
+            Some(bytes) => write_create_new(context, target, bytes).map_err(|_| conflict(None)),
             None => Ok(()),
         };
     };
@@ -2338,26 +2430,29 @@ fn rollback_wiki_path(
     }
     let parent = target.parent().ok_or_else(|| conflict(None))?;
     let staged = parent.join(format!(".llm-wiki-rollback-{}.tmp", uuid::Uuid::new_v4()));
-    std::fs::rename(target, &staged).map_err(|_| conflict(None))?;
-    let staged_matches = std::fs::read(&staged)
+    rename_project_file(&context.root, target, &staged, false).map_err(|_| conflict(None))?;
+    let staged_binding = BoundProjectMutationRoot::bind(&context.root, &staged)
+        .map_err(|_| conflict(Some(&staged)))?;
+    let staged_matches = staged_binding
+        .read_regular(&staged)
         .map(|bytes| bytes == expected)
         .unwrap_or(false);
     if !staged_matches {
-        if !target.exists() && std::fs::rename(&staged, target).is_ok() {
+        if rename_project_file(&context.root, &staged, target, false).is_ok() {
             return Err(conflict(None));
         }
         return Err(conflict(Some(&staged)));
     }
 
     if let Some(bytes) = baseline {
-        if write_create_new(target, bytes).is_err() {
-            if !target.exists() && std::fs::rename(&staged, target).is_ok() {
+        if write_create_new(context, target, bytes).is_err() {
+            if rename_project_file(&context.root, &staged, target, false).is_ok() {
                 return Err(conflict(None));
             }
             return Err(conflict(Some(&staged)));
         }
     }
-    if let Err(error) = std::fs::remove_file(&staged) {
+    if let Err(error) = remove_project_file(&context.root, &staged) {
         return Err(BackendError::new(
             "WORKFLOW_APPLY_ROLLBACK_FAILED",
             format!("Rollback restored the formal Wiki path but could not remove staging: {error}"),
@@ -2372,16 +2467,13 @@ fn rollback_wiki_path(
     Ok(())
 }
 
-fn write_create_new(path: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()
+fn write_create_new(
+    context: &ProjectContext,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(), std::io::Error> {
+    let (binding, _) = BoundProjectMutationRoot::ensure_and_bind(&context.root, path)?;
+    binding.write_atomic_create_new(path, bytes)
 }
 
 fn hash_bytes(bytes: &[u8]) -> String {
@@ -2742,6 +2834,76 @@ mod tests {
             fs::read_to_string(root.join("wiki/concepts/old.md")).unwrap(),
             "# Old\n"
         );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn workflow_metadata_rollback_preserves_a_newer_external_value() {
+        let root = std::env::temp_dir().join(format!(
+            "compile-metadata-rollback-conflict-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(root.join(".app")).unwrap();
+        fs::write(root.join(".app/graph-cache.json"), b"baseline").unwrap();
+        let context = ProjectContext::new("project", root.clone());
+        let manifest = CompileManifest {
+            files: Vec::new(),
+            deletions: Vec::new(),
+            summary: "metadata".into(),
+        };
+        let mut backup = CompileService::backup_outputs(&context, &manifest).unwrap();
+        fs::write(root.join(".app/graph-cache.json"), b"workflow").unwrap();
+        CompileService::capture_workflow_installed_values(
+            &context,
+            &mut backup,
+            &[".app/graph-cache.json".into()],
+        )
+        .unwrap();
+
+        fs::write(root.join(".app/graph-cache.json"), b"external").unwrap();
+        let error = CompileService::restore_workflow_outputs_if_unchanged(
+            &context,
+            &backup,
+            &manifest,
+            &[".app/graph-cache.json".into()],
+        )
+        .expect_err("rollback must not clobber metadata changed after finalization");
+
+        assert_eq!(error.code, "WORKFLOW_ROLLBACK_CONFLICT");
+        assert_eq!(
+            fs::read(root.join(".app/graph-cache.json")).unwrap(),
+            b"external"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn legacy_compile_rollback_preserves_a_newer_external_value() {
+        let root = std::env::temp_dir().join(format!(
+            "compile-rollback-conflict-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(root.join("wiki/concepts")).unwrap();
+        let target = root.join("wiki/concepts/topic.md");
+        fs::write(&target, b"baseline").unwrap();
+        let context = ProjectContext::new("project", root.clone());
+        let manifest = CompileManifest {
+            files: vec![CompileFile {
+                path: "wiki/concepts/topic.md".into(),
+                content: "workflow".into(),
+            }],
+            deletions: Vec::new(),
+            summary: "rollback ownership".into(),
+        };
+        let backup = CompileService::backup_outputs(&context, &manifest).unwrap();
+        fs::write(&target, b"workflow").unwrap();
+        fs::write(&target, b"external").unwrap();
+
+        let error = CompileService::restore_outputs(&context, &backup)
+            .expect_err("rollback must preserve a newer external value");
+
+        assert_eq!(error.code, "WORKFLOW_ROLLBACK_CONFLICT");
+        assert_eq!(fs::read(&target).unwrap(), b"external");
         fs::remove_dir_all(root).ok();
     }
 

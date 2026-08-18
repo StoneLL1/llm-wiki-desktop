@@ -6,6 +6,7 @@ use crate::models::chat::{ChatMessage, ChatSession, SaveAnswerResult};
 use crate::models::paths::ProjectContext;
 use crate::services::{GitService, WriteMode};
 use crate::utils::markdown_utils::slugify_query;
+use crate::utils::safe_project_dir::remove_project_file;
 
 impl ChatService {
     /// Render an assistant message as a `wiki/queries/` Markdown page. Sources
@@ -211,7 +212,7 @@ fn invalidate_graph_cache(context: &ProjectContext) {
         return;
     };
     if path.exists() {
-        let _ = std::fs::remove_file(&path);
+        let _ = remove_project_file(&context.root, &path);
     }
 }
 

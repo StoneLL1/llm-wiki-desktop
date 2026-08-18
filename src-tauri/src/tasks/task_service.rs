@@ -32,6 +32,7 @@ use crate::utils::path_safety::{
     ensure_project_directory, validate_existing_project_directory, validate_existing_project_file,
     validate_project_directory,
 };
+use crate::utils::safe_project_dir::remove_project_file;
 
 const PERSISTED_TASK_SCHEMA_VERSION: u32 = 2;
 const WORKFLOW_PROGRESS_PERSISTENCE_WINDOW: Duration = Duration::from_millis(250);
@@ -3135,7 +3136,7 @@ impl TaskService {
         // parent directories open with no-follow semantics. Revalidating the
         // directory and exact regular file immediately before remove narrows
         // the remaining replacement window and fails closed on observed drift.
-        std::fs::remove_file(&path).map_err(|error| {
+        remove_project_file(&project_root, &path).map_err(|error| {
             format!(
                 "Failed to remove persisted task {}: {error}",
                 path.display()
@@ -3671,7 +3672,7 @@ fn write_persisted_task(
     #[cfg(test)]
     let persistence_started = std::time::Instant::now();
     FileStore
-        .write_json_atomic_absolute(&path, persisted)
+        .write_json_atomic_absolute(project_root, &path, persisted)
         .map_err(|error| format!("Failed to write task file: {}", error.message))?;
     #[cfg(test)]
     {
@@ -3711,7 +3712,7 @@ fn remove_persisted_task_snapshot(
             path.display()
         ));
     }
-    std::fs::remove_file(&path).map_err(|error| {
+    remove_project_file(project_root, &path).map_err(|error| {
         format!(
             "Failed to remove rolled-back task {}: {error}",
             path.display()

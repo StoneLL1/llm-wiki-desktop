@@ -46,6 +46,7 @@ use crate::services::FileStore;
 use crate::services::SecretService;
 use crate::tasks::task_model::LogLevel;
 use crate::tasks::TaskService;
+use crate::utils::safe_project_dir::{remove_project_file, BoundProjectMutationRoot};
 use sha2::{Digest, Sha256};
 
 pub(crate) fn import_batch_operation_session_id(task: &BackendTask) -> Option<&str> {
@@ -3478,7 +3479,7 @@ impl ImportV2Service {
         {
             Ok(engine) => engine,
             Err(_) if companion_fallback.is_file() => {
-                return apply_companion_transcript_fallback(&staging, web_result)
+                return apply_companion_transcript_fallback(context, files, &staging, web_result)
             }
             Err(error) => return Err(error),
         };
@@ -3509,17 +3510,23 @@ impl ImportV2Service {
                 let mut base =
                     std::fs::read_to_string(&base_path).map_err(|_| asr_unavailable())?;
                 let transcript_root = staging.join("transcripts");
-                std::fs::create_dir_all(&transcript_root).map_err(|_| asr_unavailable())?;
-                std::fs::write(
-                    transcript_root.join("local-asr.md"),
-                    cached.transcript.as_bytes(),
-                )
-                .map_err(|_| asr_unavailable())?;
+                files
+                    .write_project_bytes_absolute(
+                        context,
+                        &transcript_root.join("local-asr.md"),
+                        cached.transcript.as_bytes(),
+                    )
+                    .map_err(|_| asr_unavailable())?;
                 web_result
                     .asset_paths
                     .push("transcripts/local-asr.md".into());
                 if let Some(metadata) = cached.metadata {
-                    std::fs::write(transcript_root.join("local-asr.metadata.json"), metadata)
+                    files
+                        .write_project_bytes_absolute(
+                            context,
+                            &transcript_root.join("local-asr.metadata.json"),
+                            &metadata,
+                        )
                         .map_err(|_| asr_unavailable())?;
                     web_result
                         .asset_paths
@@ -3531,7 +3538,9 @@ impl ImportV2Service {
                     "\n\n## Local ASR Transcript\n\n"
                 });
                 base.push_str(&cached.transcript);
-                std::fs::write(&base_path, base).map_err(|_| asr_unavailable())?;
+                files
+                    .write_project_bytes_absolute(context, &base_path, base.as_bytes())
+                    .map_err(|_| asr_unavailable())?;
                 web_result.warnings.push(format!(
                     "local_asr:{}:{}",
                     descriptor.engine_id, descriptor.engine_version
@@ -3571,11 +3580,12 @@ impl ImportV2Service {
                     Ok(result) => (result, false),
                     Err(error) if error.code == "IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE" => {
                         if companion_fallback.is_file() {
-                            return apply_companion_transcript_fallback(&staging, web_result).map(
-                                |result| {
-                                    (result, vec!["IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE".into()])
-                                },
-                            );
+                            return apply_companion_transcript_fallback(
+                                context, files, &staging, web_result,
+                            )
+                            .map(|result| {
+                                (result, vec!["IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE".into()])
+                            });
                         }
                         if !request.local_asr_authorized {
                             return Err(asr_unavailable());
@@ -3647,6 +3657,7 @@ impl ImportV2Service {
                 None
             };
             store_completed_asr_shard(
+                &context.root,
                 &shard_root,
                 &shard_key,
                 &descriptor,
@@ -3657,15 +3668,20 @@ impl ImportV2Service {
                 authorization_required,
             )?;
             let transcript_root = staging.join("transcripts");
-            std::fs::create_dir_all(&transcript_root).map_err(|_| asr_unavailable())?;
             let durable_transcript = transcript_root.join("local-asr.md");
-            std::fs::write(&durable_transcript, transcript.as_bytes())
+            files
+                .write_project_bytes_absolute(context, &durable_transcript, transcript.as_bytes())
                 .map_err(|_| asr_unavailable())?;
             web_result
                 .asset_paths
                 .push("transcripts/local-asr.md".into());
             if let Some(metadata) = transcript_metadata {
-                std::fs::write(transcript_root.join("local-asr.metadata.json"), metadata)
+                files
+                    .write_project_bytes_absolute(
+                        context,
+                        &transcript_root.join("local-asr.metadata.json"),
+                        &metadata,
+                    )
                     .map_err(|_| asr_unavailable())?;
                 web_result
                     .asset_paths
@@ -3677,13 +3693,16 @@ impl ImportV2Service {
                 "\n\n## Local ASR Transcript\n\n"
             });
             base.push_str(&transcript);
-            std::fs::write(&base_path, base).map_err(|_| asr_unavailable())?;
+            files
+                .write_project_bytes_absolute(context, &base_path, base.as_bytes())
+                .map_err(|_| asr_unavailable())?;
             for relative in std::iter::once(&asr_result.markdown_path)
                 .chain(std::iter::once(&asr_result.source_snapshot_path))
                 .chain(asr_result.metadata_path.iter())
                 .chain(asr_result.asset_paths.iter())
             {
-                let _ = std::fs::remove_file(staging.join(relative));
+                let path = staging.join(relative);
+                let _ = remove_project_file(&context.root, &path);
             }
             web_result.warnings.push(format!(
                 "local_asr:{}:{}",
@@ -3743,7 +3762,11 @@ impl ImportV2Service {
         let base_path = staging.join(&web_result.markdown_path);
         let mut base = std::fs::read_to_string(&base_path).map_err(|_| ocr_unavailable())?;
         let durable_root = staging.join("ocr");
-        std::fs::create_dir_all(&durable_root).map_err(|_| ocr_unavailable())?;
+        BoundProjectMutationRoot::ensure_and_bind(
+            &context.root,
+            &durable_root.join(".wiki-ocr-directory-binding-probe"),
+        )
+        .map_err(|_| ocr_unavailable())?;
 
         let image_total = temporary_input_paths.len() as u64;
         let mut successful_ocr = 0usize;
@@ -3823,16 +3846,27 @@ impl ImportV2Service {
                 if let Some((markdown, metadata)) =
                     load_completed_ocr_shard(&shard_root, &shard_key, &descriptor)?
                 {
-                    std::fs::write(workspace.join("reused-candidate.md"), markdown.as_bytes())
+                    files
+                        .write_project_bytes_absolute(
+                            context,
+                            &workspace.join("reused-candidate.md"),
+                            markdown.as_bytes(),
+                        )
                         .and_then(|_| {
-                            std::fs::write(
-                                workspace.join("reused-source.json"),
+                            files.write_project_bytes_absolute(
+                                context,
+                                &workspace.join("reused-source.json"),
                                 br#"{"provenance":"reused-complete-ocr-shard"}"#,
                             )
                         })
                         .map_err(|_| ocr_unavailable())?;
                     let metadata_path = if let Some(ref metadata) = metadata {
-                        std::fs::write(workspace.join("reused-metadata.json"), metadata)
+                        files
+                            .write_project_bytes_absolute(
+                                context,
+                                &workspace.join("reused-metadata.json"),
+                                metadata,
+                            )
                             .map_err(|_| ocr_unavailable())?;
                         Some("reused-metadata.json".into())
                     } else {
@@ -3904,6 +3938,7 @@ impl ImportV2Service {
                     result.warnings.extend(confidence_warnings);
                 }
                 store_completed_ocr_shard(
+                    &context.root,
                     &shard_root,
                     &shard_key,
                     &descriptor,
@@ -3949,14 +3984,24 @@ impl ImportV2Service {
             };
             successful_ocr += 1;
             let durable_markdown = format!("ocr/image-{source_image_number:03}.md");
-            std::fs::write(staging.join(&durable_markdown), ocr_markdown.as_bytes())
+            files
+                .write_project_bytes_absolute(
+                    context,
+                    &staging.join(&durable_markdown),
+                    ocr_markdown.as_bytes(),
+                )
                 .map_err(|_| ocr_unavailable())?;
             web_result.asset_paths.push(durable_markdown);
             if let Some(metadata_path) = &ocr_result.metadata_path {
                 let metadata =
                     std::fs::read(workspace.join(metadata_path)).map_err(|_| ocr_unavailable())?;
                 let durable_metadata = format!("ocr/image-{source_image_number:03}.metadata.json");
-                std::fs::write(staging.join(&durable_metadata), metadata)
+                files
+                    .write_project_bytes_absolute(
+                        context,
+                        &staging.join(&durable_metadata),
+                        &metadata,
+                    )
                     .map_err(|_| ocr_unavailable())?;
                 web_result.asset_paths.push(durable_metadata);
             }
@@ -3995,7 +4040,9 @@ impl ImportV2Service {
         if successful_ocr != temporary_input_paths.len() || base.contains("<!-- OCR_PAGE_") {
             return Err(first_ocr_error.unwrap_or_else(ocr_unavailable));
         }
-        std::fs::write(base_path, base).map_err(|_| ocr_unavailable())?;
+        files
+            .write_project_bytes_absolute(context, &base_path, base.as_bytes())
+            .map_err(|_| ocr_unavailable())?;
         web_result.text_coverage = Some(1.0);
         Ok(web_result)
     }
@@ -4214,7 +4261,7 @@ impl ImportV2Service {
         let staging = context
             .resolve_project_path(&item_staging_relative_path(context, session_id, item_id)?)?;
         let batch_operation = is_batch_operation_task(tasks, task_id);
-        if let Err(error) = cleanup_terminal_item_staging(&staging) {
+        if let Err(error) = cleanup_terminal_item_staging(&context.root, &staging) {
             if batch_operation {
                 // The operation-level summary is published by the worker
                 // cohort; item cleanup warnings remain durable item facts.
@@ -4327,7 +4374,7 @@ impl ImportV2Service {
         let staging = context
             .resolve_project_path(&item_staging_relative_path(context, session_id, item_id)?)?;
         let batch_operation = is_batch_operation_task(tasks, task_id);
-        if let Err(cleanup_error) = cleanup_terminal_item_staging(&staging) {
+        if let Err(cleanup_error) = cleanup_terminal_item_staging(&context.root, &staging) {
             if !batch_operation {
                 task_call(tasks.append_log(
                     task_id,
@@ -4937,22 +4984,32 @@ fn asr_unavailable() -> BackendError {
     )
 }
 
-fn cleanup_terminal_item_staging(staging: &Path) -> Result<(), BackendError> {
-    crate::services::import_v2::media_router::recover_item_staging_temporary_workspaces(staging)?;
-    if staging.exists() {
-        std::fs::remove_dir_all(staging).map_err(|_| {
-            BackendError::new(
+fn cleanup_terminal_item_staging(project_root: &Path, staging: &Path) -> Result<(), BackendError> {
+    let binding = match BoundProjectMutationRoot::bind(project_root, staging) {
+        Ok(binding) => binding,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(BackendError::new(
                 "IMPORT_MEDIA_CLEANUP_FAILED",
-                "Temporary import media could not be fully removed.",
+                error.to_string(),
                 true,
                 false,
-            )
-        })?;
-    }
-    Ok(())
+            ))
+        }
+    };
+    binding.remove_directory_tree(staging).map_err(|_| {
+        BackendError::new(
+            "IMPORT_MEDIA_CLEANUP_FAILED",
+            "Temporary import media could not be fully removed.",
+            true,
+            false,
+        )
+    })
 }
 
 fn apply_companion_transcript_fallback(
+    context: &ProjectContext,
+    files: &FileStore,
     staging: &Path,
     mut result: EngineResult,
 ) -> Result<EngineResult, BackendError> {
@@ -4967,7 +5024,9 @@ fn apply_companion_transcript_fallback(
     base.push_str("\n\n## Companion transcript\n\n");
     base.push_str(transcript.trim());
     base.push('\n');
-    std::fs::write(base_path, base).map_err(|_| asr_unavailable())?;
+    files
+        .write_project_bytes_absolute(context, &base_path, base.as_bytes())
+        .map_err(|_| asr_unavailable())?;
     if !result.asset_paths.iter().any(|path| path == relative) {
         result.asset_paths.push(relative.into());
     }
@@ -5214,6 +5273,7 @@ fn load_completed_asr_shard(
 
 #[allow(clippy::too_many_arguments)]
 fn store_completed_asr_shard(
+    project_root: &Path,
     root: &Path,
     key: &str,
     descriptor: &crate::services::import_v2::engine::EngineDescriptor,
@@ -5223,14 +5283,16 @@ fn store_completed_asr_shard(
     continuation: Option<&EngineContinuation>,
     authorization_required: bool,
 ) -> Result<(), BackendError> {
-    std::fs::create_dir_all(root).map_err(|_| asr_unavailable())?;
-    let nonce = uuid::Uuid::new_v4();
-    let transcript_temporary = root.join(format!(".{key}.{nonce}.md.tmp"));
-    let metadata_temporary = root.join(format!(".{key}.{nonce}.metadata.tmp"));
-    let marker_temporary = root.join(format!(".{key}.{nonce}.complete.tmp"));
-    std::fs::write(&transcript_temporary, transcript.as_bytes()).map_err(|_| asr_unavailable())?;
+    let transcript_path = root.join(format!("{key}.md"));
+    let (binding, _) = BoundProjectMutationRoot::ensure_and_bind(project_root, &transcript_path)
+        .map_err(|_| asr_unavailable())?;
+    binding
+        .write_atomic_replace(&transcript_path, transcript.as_bytes())
+        .map_err(|_| asr_unavailable())?;
     if let Some(metadata) = metadata {
-        std::fs::write(&metadata_temporary, metadata).map_err(|_| asr_unavailable())?;
+        binding
+            .write_atomic_replace(&root.join(format!("{key}.metadata.json")), metadata)
+            .map_err(|_| asr_unavailable())?;
     }
     let marker = CompletedAsrShard {
         schema_version: 1,
@@ -5243,29 +5305,10 @@ fn store_completed_asr_shard(
         continuation: continuation.cloned(),
         authorization_required,
     };
-    std::fs::write(
-        &marker_temporary,
-        serde_json::to_vec(&marker).map_err(|_| asr_unavailable())?,
-    )
-    .map_err(|_| asr_unavailable())?;
-    replace_asr_shard_file(&transcript_temporary, &root.join(format!("{key}.md")))?;
-    if metadata.is_some() {
-        replace_asr_shard_file(
-            &metadata_temporary,
-            &root.join(format!("{key}.metadata.json")),
-        )?;
-    }
-    replace_asr_shard_file(
-        &marker_temporary,
-        &root.join(format!("{key}.complete.json")),
-    )
-}
-
-fn replace_asr_shard_file(source: &Path, destination: &Path) -> Result<(), BackendError> {
-    if destination.exists() {
-        std::fs::remove_file(destination).map_err(|_| asr_unavailable())?;
-    }
-    std::fs::rename(source, destination).map_err(|_| asr_unavailable())
+    let marker = serde_json::to_vec(&marker).map_err(|_| asr_unavailable())?;
+    binding
+        .write_atomic_replace(&root.join(format!("{key}.complete.json")), &marker)
+        .map_err(|_| asr_unavailable())
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -5339,20 +5382,23 @@ fn load_completed_ocr_shard(
 }
 
 fn store_completed_ocr_shard(
+    project_root: &Path,
     root: &Path,
     key: &str,
     descriptor: &crate::services::import_v2::engine::EngineDescriptor,
     markdown: &str,
     metadata: Option<&[u8]>,
 ) -> Result<(), BackendError> {
-    std::fs::create_dir_all(root).map_err(|_| ocr_unavailable())?;
-    let nonce = uuid::Uuid::new_v4();
-    let markdown_temporary = root.join(format!(".{key}.{nonce}.md.tmp"));
-    let metadata_temporary = root.join(format!(".{key}.{nonce}.metadata.tmp"));
-    let marker_temporary = root.join(format!(".{key}.{nonce}.complete.tmp"));
-    std::fs::write(&markdown_temporary, markdown.as_bytes()).map_err(|_| ocr_unavailable())?;
+    let markdown_path = root.join(format!("{key}.md"));
+    let (binding, _) = BoundProjectMutationRoot::ensure_and_bind(project_root, &markdown_path)
+        .map_err(|_| ocr_unavailable())?;
+    binding
+        .write_atomic_replace(&markdown_path, markdown.as_bytes())
+        .map_err(|_| ocr_unavailable())?;
     if let Some(metadata) = metadata {
-        std::fs::write(&metadata_temporary, metadata).map_err(|_| ocr_unavailable())?;
+        binding
+            .write_atomic_replace(&root.join(format!("{key}.metadata.json")), metadata)
+            .map_err(|_| ocr_unavailable())?;
     }
     let marker = CompletedOcrShard {
         schema_version: 1,
@@ -5362,29 +5408,10 @@ fn store_completed_ocr_shard(
         markdown_sha256: format!("{:x}", Sha256::digest(markdown.as_bytes())),
         metadata_sha256: metadata.map(|bytes| format!("{:x}", Sha256::digest(bytes))),
     };
-    std::fs::write(
-        &marker_temporary,
-        serde_json::to_vec(&marker).map_err(|_| ocr_unavailable())?,
-    )
-    .map_err(|_| ocr_unavailable())?;
-    replace_shard_file(&markdown_temporary, &root.join(format!("{key}.md")))?;
-    if metadata.is_some() {
-        replace_shard_file(
-            &metadata_temporary,
-            &root.join(format!("{key}.metadata.json")),
-        )?;
-    }
-    replace_shard_file(
-        &marker_temporary,
-        &root.join(format!("{key}.complete.json")),
-    )
-}
-
-fn replace_shard_file(source: &Path, destination: &Path) -> Result<(), BackendError> {
-    if destination.exists() {
-        std::fs::remove_file(destination).map_err(|_| ocr_unavailable())?;
-    }
-    std::fs::rename(source, destination).map_err(|_| ocr_unavailable())
+    let marker = serde_json::to_vec(&marker).map_err(|_| ocr_unavailable())?;
+    binding
+        .write_atomic_replace(&root.join(format!("{key}.complete.json")), &marker)
+        .map_err(|_| ocr_unavailable())
 }
 
 fn is_capability_route(route: &str) -> bool {
@@ -5559,13 +5586,31 @@ fn reset_authorized_directory(
                 true,
             ));
         }
-        std::fs::remove_dir_all(authorized_root).map_err(|error| {
-            BackendError::new("IMPORT_FILE_STAGE_FAILED", error.to_string(), true, false)
-        })?;
+        BoundProjectMutationRoot::bind(project_root, authorized_root)
+            .and_then(|binding| binding.remove_directory_tree(authorized_root))
+            .map_err(|error| {
+                BackendError::new("IMPORT_FILE_STAGE_FAILED", error.to_string(), true, false)
+            })?;
     }
-    std::fs::create_dir_all(authorized_root).map_err(|error| {
+    let (_binding, created) = BoundProjectMutationRoot::ensure_and_bind(
+        project_root,
+        &authorized_root.join(".wiki-authorized-directory-binding-probe"),
+    )
+    .map_err(|error| {
         BackendError::new("IMPORT_FILE_STAGE_FAILED", error.to_string(), true, false)
-    })
+    })?;
+    if !created
+        .iter()
+        .any(|directory| directory.path() == authorized_root)
+    {
+        return Err(BackendError::new(
+            "IMPORT_FILE_STAGE_FAILED",
+            "The authorized staging directory changed while it was being reset.",
+            true,
+            true,
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -5911,7 +5956,7 @@ fn remove_clipboard_session_input(context: &ProjectContext, session_id: &str, in
         return;
     }
     if let Ok(path) = context.resolve_project_path(&input.locator) {
-        let _ = std::fs::remove_file(path);
+        let _ = remove_project_file(&context.root, &path);
     }
 }
 
@@ -8764,6 +8809,7 @@ mod tests {
             route: "ocr.basic".into(),
         };
         store_completed_ocr_shard(
+            root.path(),
             root.path(),
             "fixture-key",
             &descriptor,

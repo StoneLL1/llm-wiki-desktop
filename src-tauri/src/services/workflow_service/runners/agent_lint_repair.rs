@@ -841,7 +841,11 @@ fn persist_descriptor(descriptor: &PersistedAgentLintRepairCandidate) -> Result<
             WorkflowProjectMutationState::NotModified,
         ));
     }
-    FileStore.write_json_atomic_absolute(&descriptor_path(&descriptor.task_id), descriptor)
+    FileStore.write_json_atomic_absolute(
+        workspace.parent().ok_or_else(stale_candidate_error)?,
+        &descriptor_path(&descriptor.task_id),
+        descriptor,
+    )
 }
 
 fn load_descriptor(
