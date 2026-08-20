@@ -540,6 +540,28 @@ impl TaskService {
         )
     }
 
+    pub fn create_project_import_commit_task(
+        &self,
+        project_id: String,
+        project_root: PathBuf,
+        title: String,
+        session_id: String,
+    ) -> Result<BackendTask, String> {
+        let persistence_dir = project_root.join(".app/tasks");
+        self.create_task_internal(
+            TaskType::Import,
+            Some(project_id),
+            Some(project_root),
+            title,
+            true,
+            None,
+            Some(TaskOperation::ImportCommit { session_id }),
+            true,
+            None,
+            Some(persistence_dir),
+        )
+    }
+
     /// A project-scoped read-only operation that must never create `.app`
     /// state. Used for restricted compatible-vault inventory work.
     pub fn create_memory_project_task(

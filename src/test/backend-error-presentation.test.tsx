@@ -379,9 +379,9 @@ describe("BackendError presentation", () => {
       recoverable: true,
       userActionRequired: false,
     });
-    render(<UpdateSettings checkUpdates onToggle={vi.fn()} />);
+    render(<UpdateSettings />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Check now" }));
+    fireEvent.click(screen.getByRole("button", { name: "Check for updates" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("The update check or download could not complete");
     expect(document.body.textContent).not.toContain("updater-secret");
@@ -397,13 +397,13 @@ describe("BackendError presentation", () => {
       recoverable: false,
       userActionRequired: true,
     });
-    render(<UpdateSettings checkUpdates onToggle={vi.fn()} />);
+    render(<UpdateSettings />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Check now" }));
+    fireEvent.click(screen.getByRole("button", { name: "Check for updates" }));
 
     expect(await screen.findByRole("alert")).toBeVisible();
     expect(screen.queryByRole("button", { name: "Restart" })).not.toBeInTheDocument();
-    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(invokeMock).toHaveBeenCalledWith("check_app_update");
     Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
   });
 

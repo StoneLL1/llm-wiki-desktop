@@ -1,9 +1,101 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::errors::BackendError;
 use crate::models::project::ProjectSummary;
+
+#[derive(Debug, Default)]
+struct UpdateInstallBarrierState {
+    install_or_restart_reserved: bool,
+    active_project_mutations: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct UpdateInstallBarrier {
+    state: Arc<Mutex<UpdateInstallBarrierState>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct UpdateMutationLease {
+    barrier: UpdateInstallBarrier,
+}
+
+#[derive(Debug)]
+pub(crate) struct UpdateInstallLease {
+    barrier: UpdateInstallBarrier,
+}
+
+impl UpdateInstallBarrier {
+    pub(crate) fn enter_project_mutation(&self) -> Result<UpdateMutationLease, BackendError> {
+        let mut state = self.state.lock().map_err(|_| update_barrier_locked())?;
+        if state.install_or_restart_reserved {
+            return Err(BackendError::new(
+                "UPDATE_INSTALL_IN_PROGRESS",
+                "A project change cannot start while an application update is installing or restarting.",
+                true,
+                true,
+            ));
+        }
+        state.active_project_mutations = state.active_project_mutations.saturating_add(1);
+        Ok(UpdateMutationLease {
+            barrier: self.clone(),
+        })
+    }
+
+    pub(crate) fn reserve_install_or_restart(
+        &self,
+        validate: impl FnOnce() -> Result<(), BackendError>,
+    ) -> Result<UpdateInstallLease, BackendError> {
+        let mut state = self.state.lock().map_err(|_| update_barrier_locked())?;
+        if state.install_or_restart_reserved {
+            return Err(BackendError::new(
+                "UPDATE_INSTALL_IN_PROGRESS",
+                "The application is already installing an update or restarting.",
+                true,
+                true,
+            ));
+        }
+        if state.active_project_mutations > 0 {
+            return Err(BackendError::new(
+                "UPDATE_INSTALL_GUARD_BLOCKED",
+                "Wait for the current project change to finish before installing the update.",
+                true,
+                true,
+            ));
+        }
+        validate()?;
+        state.install_or_restart_reserved = true;
+        Ok(UpdateInstallLease {
+            barrier: self.clone(),
+        })
+    }
+}
+
+impl Drop for UpdateMutationLease {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.barrier.state.lock() {
+            state.active_project_mutations = state.active_project_mutations.saturating_sub(1);
+        }
+    }
+}
+
+impl Drop for UpdateInstallLease {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.barrier.state.lock() {
+            state.install_or_restart_reserved = false;
+        }
+    }
+}
+
+fn update_barrier_locked() -> BackendError {
+    BackendError::new(
+        "UPDATE_INSTALL_GUARD_UNAVAILABLE",
+        "The application update safety guard is unavailable.",
+        true,
+        true,
+    )
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -69,6 +161,7 @@ pub struct ConfirmationRegistry {
     actions: Mutex<HashMap<String, StoredPendingAction>>,
     executing: Mutex<HashSet<String>>,
     cancel_requested: Mutex<HashSet<String>>,
+    update_install_barrier: UpdateInstallBarrier,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -249,6 +342,19 @@ pub struct AgentLintRepairReviewBinding {
 }
 
 impl ConfirmationRegistry {
+    pub(crate) fn update_install_barrier(&self) -> &UpdateInstallBarrier {
+        &self.update_install_barrier
+    }
+
+    pub fn has_pending_or_executing(&self) -> Result<bool, BackendError> {
+        let actions = self.actions.lock().map_err(|_| registry_locked())?;
+        if !actions.is_empty() {
+            return Ok(true);
+        }
+        let executing = self.executing.lock().map_err(|_| registry_locked())?;
+        Ok(!executing.is_empty())
+    }
+
     pub fn register(&self, action: PendingAction) -> Result<(), BackendError> {
         self.register_with_execution(action, None)
     }
@@ -258,6 +364,7 @@ impl ConfirmationRegistry {
         action: PendingAction,
         execution: Option<ConfirmationExecution>,
     ) -> Result<(), BackendError> {
+        let _admission_lease = self.update_install_barrier.enter_project_mutation()?;
         validate_execution_action_binding(&action, execution.as_ref())?;
         let mut actions = self.actions.lock().map_err(|_| {
             BackendError::new(
@@ -288,6 +395,7 @@ impl ConfirmationRegistry {
         action: PendingAction,
         execution: ConfirmationExecution,
     ) -> Result<ConfirmationRegistration, BackendError> {
+        let _admission_lease = self.update_install_barrier.enter_project_mutation()?;
         validate_execution_action_binding(&action, Some(&execution))?;
         let mut actions = self.actions.lock().map_err(|_| registry_locked())?;
         let stored = StoredPendingAction {
@@ -315,6 +423,7 @@ impl ConfirmationRegistry {
         execution: ConfirmationExecution,
         expires_at: String,
     ) -> Result<ExpiringConfirmationRegistration, BackendError> {
+        let _admission_lease = self.update_install_barrier.enter_project_mutation()?;
         action.expires_at = Some(expires_at);
         reject_if_expired(&action)?;
         validate_execution_action_binding(&action, Some(&execution))?;
@@ -361,6 +470,7 @@ impl ConfirmationRegistry {
         action: PendingAction,
         execution: ConfirmationExecution,
     ) -> Result<(), BackendError> {
+        let _admission_lease = self.update_install_barrier.enter_project_mutation()?;
         validate_execution_action_binding(&action, Some(&execution))?;
         let mut actions = self.actions.lock().map_err(|_| registry_locked())?;
         let executing = self.executing.lock().map_err(|_| registry_locked())?;
@@ -499,6 +609,10 @@ impl ConfirmationRegistry {
         action_id: &str,
         expected: Option<&ConfirmationExecution>,
     ) -> Result<StoredPendingAction, BackendError> {
+        // The claim is the admission point for a confirmed mutation. Keep it
+        // atomic with update installation reservation so there is never a gap
+        // between the pending action disappearing and its executing marker.
+        let _admission_lease = self.update_install_barrier.enter_project_mutation()?;
         let mut actions = self.actions.lock().map_err(|_| registry_locked())?;
         let stored = actions.get(action_id).cloned().ok_or_else(|| {
             BackendError::new(
@@ -2132,5 +2246,41 @@ mod tests {
             .unwrap());
         registry.finish_claim(&action.id, false).unwrap();
         assert_eq!(registry.peek(&action.id).unwrap().execution, Some(binding));
+    }
+
+    #[test]
+    fn update_install_reservation_blocks_confirmation_registration_and_claim_admission() {
+        let registry = ConfirmationRegistry::default();
+        let install = registry
+            .update_install_barrier()
+            .reserve_install_or_restart(|| Ok(()))
+            .unwrap();
+        let blocked = registry.register(workflow_action("blocked")).unwrap_err();
+        assert_eq!(blocked.code, "UPDATE_INSTALL_IN_PROGRESS");
+        drop(install);
+
+        let root = tempfile::tempdir().unwrap();
+        let action = workflow_action("claim");
+        registry
+            .register_with_execution(
+                action.clone(),
+                Some(with_action(
+                    update_binding(
+                        "runtime-a",
+                        root.path().to_string_lossy().into_owned(),
+                        "task-claim",
+                    ),
+                    "claim",
+                )),
+            )
+            .unwrap();
+        let install = registry
+            .update_install_barrier()
+            .reserve_install_or_restart(|| Ok(()))
+            .unwrap();
+        let blocked = registry.claim(&action.id).unwrap_err();
+        assert_eq!(blocked.code, "UPDATE_INSTALL_IN_PROGRESS");
+        drop(install);
+        assert!(registry.claim(&action.id).is_ok());
     }
 }

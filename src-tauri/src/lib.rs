@@ -94,6 +94,14 @@ pub fn run() {
             let handle = app.handle().clone();
             let state = app.state::<app_state::AppState>();
 
+            match state
+                .settings_service
+                .reconcile_update_install_receipt(&app.package_info().version.to_string())
+            {
+                Ok(Some(error)) | Err(error) => state.update_service.restore_startup_error(error),
+                Ok(None) => {}
+            }
+
             state
                 .task_service
                 .set_event_bus(EventBus::new_tauri(handle.clone()));
@@ -616,7 +624,8 @@ pub fn run() {
             commands::update_commands::check_app_update,
             commands::update_commands::download_app_update,
             commands::update_commands::cancel_app_update_download,
-            // Batch 4B registers install_app_update after backend dirty/task guards exist.
+            commands::update_commands::install_app_update,
+            commands::update_commands::restart_app_after_update,
             commands::update_commands::dismiss_app_update,
             commands::agent_commands::get_agent_config,
             commands::agent_commands::set_default_agent,

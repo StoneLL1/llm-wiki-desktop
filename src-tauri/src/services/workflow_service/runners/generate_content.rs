@@ -394,6 +394,10 @@ where
     if current_target_hash.is_some() {
         return Err(target_changed());
     }
+    let _update_mutation_lease = services
+        .confirmation_registry
+        .update_install_barrier()
+        .enter_project_mutation()?;
     services
         .task_service
         .set_task_cancellable(task_id, false)

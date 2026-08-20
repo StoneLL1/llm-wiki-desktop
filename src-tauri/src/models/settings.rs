@@ -6,6 +6,7 @@ use crate::models::agent::AgentKind;
 use crate::models::import_v2_agent::AgentAssistancePolicy;
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind, ProviderCredentialBinding};
 use crate::models::project::ProjectTemplate;
+use crate::models::update::UpdateInstallReceipt;
 
 fn default_language() -> String {
     "en".into()
@@ -481,6 +482,8 @@ pub struct GlobalSettingsFile {
     pub dismissed_update_offer_id: Option<String>,
     #[serde(default)]
     pub dismissed_update_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_install_receipt: Option<UpdateInstallReceipt>,
     #[serde(default)]
     pub startup_behavior: StartupBehavior,
     #[serde(default)]
@@ -547,6 +550,7 @@ impl Default for GlobalSettingsFile {
             last_update_checked_at: None,
             dismissed_update_offer_id: None,
             dismissed_update_version: None,
+            update_install_receipt: None,
             startup_behavior: settings.startup_behavior,
             default_project_location: settings.default_project_location,
             external_editor: settings.external_editor,
@@ -661,6 +665,7 @@ impl Settings {
             last_update_checked_at: None,
             dismissed_update_offer_id: None,
             dismissed_update_version: None,
+            update_install_receipt: None,
             startup_behavior: self.startup_behavior,
             default_project_location: self.default_project_location.clone(),
             external_editor: self.external_editor.clone(),

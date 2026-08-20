@@ -984,6 +984,13 @@ fn apply_persisted_update_wiki_candidate(
         &descriptor.baseline_hashes,
         mode == UpdateWikiMode::FullRecompile,
     )?;
+    // Admission to the non-interruptible apply phase must be atomic with the
+    // updater's final guard validation. Holding this lease prevents Windows
+    // updater handoff from terminating the process during project writes.
+    let _update_mutation_lease = services
+        .confirmation_registry
+        .update_install_barrier()
+        .enter_project_mutation()?;
     sink.complete(REVIEW_RISK).map_err(task_error)?;
     sink.start(APPLY_CHANGES).map_err(task_error)?;
 

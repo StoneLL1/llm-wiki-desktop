@@ -1,69 +1,27 @@
-import { invoke } from "@tauri-apps/api/core";
-import { useState } from "react";
+import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ActionableErrorNotice } from "../../components/app/ActionableErrorNotice";
-import {
-  normalizeBackendError,
-  type NormalizedBackendError,
-} from "../../lib/backendError";
-interface UpdateSettingsProps {
-  checkUpdates: boolean;
-  onToggle: (value: boolean) => void;
-}
+import { useUpdateStore } from "../../stores/updateStore";
+import type { SaveGlobalUpdatePreferences, UpdateFrequency } from "../../types/update";
 
-interface AppSummary {
-  name: string;
-  version: string;
-}
-
-const hasTauri = (): boolean =>
-  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-
-export function UpdateSettings({ checkUpdates, onToggle }: UpdateSettingsProps) {
+export function UpdateSettings() {
   const { t } = useTranslation();
-  const [currentVersion, setCurrentVersion] = useState<string>("0.1.0");
-  const [latestVersion, setLatestVersion] = useState<string | null>(null);
-  const [status, setStatus] = useState<string | null>(null);
-  const [updateError, setUpdateError] = useState<NormalizedBackendError | null>(null);
-  const [checking, setChecking] = useState(false);
+  const store = useUpdateStore();
 
-  const checkNow = async () => {
-    setChecking(true);
-    setUpdateError(null);
-    try {
-      const summary = hasTauri()
-        ? await invoke<AppSummary>("get_app_summary")
-        : { name: "LLM Wiki Desktop", version: "0.1.0" };
-      setCurrentVersion(summary.version);
-      setLatestVersion(null);
-      setStatus(t("settings.updates.noUpdateSource", { version: summary.version }));
-    } catch (error) {
-      setStatus(null);
-      setUpdateError(normalizeBackendError(error, {
-        defaultSummaryKey: "backendError.summary.update",
-        defaultActionKind: "retry",
-        defaultRecoverable: true,
-      }));
-    } finally {
-      setChecking(false);
-    }
-  };
+  useEffect(() => {
+    void store.initialize();
+  }, [store.initialize]);
 
-  const confirmDownload = () => {
-    if (!latestVersion) {
-      setStatus(t("settings.updates.downloadUnavailable"));
-      return;
-    }
-
-    const approved = typeof window === "undefined"
-      ? false
-      : window.confirm(t("settings.updates.confirmDownloadPrompt", { version: latestVersion }));
-    setStatus(
-      approved
-        ? t("settings.updates.downloadQueued", { version: latestVersion })
-        : t("settings.updates.downloadCancelled"),
-    );
+  const save = (patch: Partial<SaveGlobalUpdatePreferences>) => {
+    const current = store.preferences;
+    void store.savePreferences({
+      checkUpdates: current.checkUpdates,
+      updateFrequency: current.updateFrequency,
+      autoDownloadUpdates: current.autoDownloadUpdates,
+      promptChangelogBeforeInstall: current.promptChangelogBeforeInstall,
+      ...patch,
+    }).catch(() => undefined);
   };
 
   return (
@@ -78,38 +36,102 @@ export function UpdateSettings({ checkUpdates, onToggle }: UpdateSettingsProps) 
           <div className="settings-row-card__title">{t("settings.updates.autoCheck")}</div>
           <div className="settings-row-card__meta">{t("settings.updates.autoCheckHelp")}</div>
         </div>
-        <input type="checkbox" checked={checkUpdates} onChange={(event) => onToggle(event.target.checked)} />
+        <input
+          checked={store.preferences.checkUpdates}
+          disabled={store.preferencesSaving}
+          onChange={(event) => save({ checkUpdates: event.target.checked })}
+          type="checkbox"
+        />
+      </label>
+
+      <label className="settings-row-card">
+        <div>
+          <div className="settings-row-card__title">{t("settings.updates.frequency")}</div>
+          <div className="settings-row-card__meta">{t("settings.updates.frequencyHelp")}</div>
+        </div>
+        <select
+          aria-label={t("settings.updates.frequency")}
+          className="select h-[30px] w-[140px]"
+          disabled={store.preferencesSaving || !store.preferences.checkUpdates}
+          onChange={(event) => save({ updateFrequency: event.target.value as UpdateFrequency })}
+          value={store.preferences.updateFrequency}
+        >
+          <option value="daily">{t("settings.updates.frequency.daily")}</option>
+          <option value="weekly">{t("settings.updates.frequency.weekly")}</option>
+          <option value="never">{t("settings.updates.frequency.never")}</option>
+        </select>
+      </label>
+
+      <label className="settings-row-card">
+        <div>
+          <div className="settings-row-card__title">{t("settings.updates.autoDownload")}</div>
+          <div className="settings-row-card__meta">{t("settings.updates.autoDownloadHelp")}</div>
+        </div>
+        <input
+          checked={store.preferences.autoDownloadUpdates}
+          disabled={store.preferencesSaving}
+          onChange={(event) => save({ autoDownloadUpdates: event.target.checked })}
+          type="checkbox"
+        />
+      </label>
+
+      <label className="settings-row-card">
+        <div>
+          <div className="settings-row-card__title">{t("settings.updates.showChangelog")}</div>
+          <div className="settings-row-card__meta">{t("settings.updates.showChangelogHelp")}</div>
+        </div>
+        <input
+          checked={store.preferences.promptChangelogBeforeInstall}
+          disabled={store.preferencesSaving}
+          onChange={(event) => save({ promptChangelogBeforeInstall: event.target.checked })}
+          type="checkbox"
+        />
       </label>
 
       <div className="settings-detail-card">
         <div className="settings-detail-card__metrics">
           <div>
             <div className="text-[12px] text-[var(--text-muted)]">{t("settings.updates.currentVersion")}</div>
-            <div className="font-mono text-[13px]">{currentVersion}</div>
+            <div className="font-mono text-[13px]">{store.currentVersion}</div>
           </div>
           <div>
             <div className="text-[12px] text-[var(--text-muted)]">{t("settings.updates.latestVersion")}</div>
-            <div className="font-mono text-[13px]">{latestVersion ?? t("settings.updates.notChecked")}</div>
+            <div className="font-mono text-[13px]">
+              {store.backendState.offer?.version
+                ?? (store.uiStatus === "up_to_date" ? store.currentVersion : t("settings.updates.notChecked"))}
+            </div>
+          </div>
+          <div>
+            <div className="text-[12px] text-[var(--text-muted)]">{t("settings.updates.lastChecked")}</div>
+            <div className="font-mono text-[11px]">
+              {store.preferences.lastCheckedAt
+                ? new Date(store.preferences.lastCheckedAt).toLocaleString()
+                : t("settings.updates.notChecked")}
+            </div>
           </div>
         </div>
         <div className="settings-detail-card__actions">
-          <button type="button" className="settings-button" disabled={checking} onClick={() => void checkNow()}>
-            {checking ? t("settings.updates.checking") : t("settings.updates.checkNow")}
-          </button>
           <button
+            className="settings-button"
+            disabled={store.uiStatus === "checking"}
+            onClick={() => void store.checkNow().catch(() => undefined)}
             type="button"
-            className="settings-button settings-button--secondary"
-            disabled={!latestVersion}
-            onClick={confirmDownload}
           >
-            {t("settings.updates.confirmDownload")}
+            {store.uiStatus === "checking" ? t("settings.updates.checking") : t("settings.updates.checkNow")}
+          </button>
+          <button className="settings-button settings-button--secondary" onClick={() => store.openDialog(false)} type="button">
+            {t("settings.updates.openDetails")}
           </button>
         </div>
-        {status ? <div className="text-[12px] text-[var(--text-muted)]">{status}</div> : null}
-        {updateError ? (
+        <div className="text-[12px] text-[var(--text-muted)]" role="status">
+          {t(`settings.updates.status.${store.uiStatus}`)}
+        </div>
+        {store.error ? (
           <ActionableErrorNotice
-            error={updateError}
-            onAction={updateError.actionKind === "retry" ? () => checkNow() : undefined}
+            error={store.error}
+            onAction={store.error.actionKind === "retry"
+              ? () => store.retry()
+              : undefined}
           />
         ) : null}
       </div>

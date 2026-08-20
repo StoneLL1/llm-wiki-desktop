@@ -116,4 +116,18 @@ describe("useModalDialog Escape cascade", () => {
     expect(innerClose).toHaveBeenCalledTimes(1);
     expect(outerClose).not.toHaveBeenCalled();
   });
+
+  it("lets the topmost nested modal own the focus trap", () => {
+    render(
+      <>
+        <OverflowModal open={true} onClose={() => {}} />
+        <OverflowModal open={true} onClose={() => {}} />
+      </>,
+    );
+
+    const [outerButton, innerButton] = screen.getAllByRole("button", { name: "close" });
+    outerButton.focus();
+
+    expect(innerButton).toHaveFocus();
+  });
 });

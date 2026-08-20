@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 
 use crate::errors::{BackendError, PATH_INVALID, PROJECT_CONTEXT_MISMATCH};
-use crate::models::confirmation::ConfirmationRegistry;
+use crate::models::confirmation::{ConfirmationRegistry, UpdateMutationLease};
 use crate::models::layout::{
     inspect_native_layout, resolve_layout, NativeLayoutState, ProjectLayoutConfidence,
 };
@@ -39,6 +39,7 @@ pub(crate) enum ProjectWriteRootKind {
 pub struct ProjectWritePermit<'permit> {
     context: ProjectContext,
     workflow_access: crate::services::WorkflowAccessSnapshot,
+    _update_mutation_lease: UpdateMutationLease,
     _transition_guard: &'permit MutexGuard<'permit, ()>,
 }
 
@@ -49,6 +50,7 @@ pub struct ProjectWritePermit<'permit> {
 /// authority transition lock and prove that the registered root is writable.
 pub(crate) struct ProjectAuthorityMutationPermit<'permit> {
     context: ProjectContext,
+    _update_mutation_lease: UpdateMutationLease,
     _transition_guard: &'permit MutexGuard<'permit, ()>,
 }
 
@@ -818,6 +820,10 @@ impl AppState {
         asserted_root: &str,
         operation: impl FnOnce(&ProjectWritePermit<'_>, &ProjectContext) -> Result<T, BackendError>,
     ) -> Result<T, BackendError> {
+        let update_mutation_lease = self
+            .confirmation_registry
+            .update_install_barrier()
+            .enter_project_mutation()?;
         let transition_lane = self
             .project_trust_transition
             .lane(Path::new(asserted_root))?;
@@ -833,6 +839,7 @@ impl AppState {
         let permit = ProjectWritePermit {
             context: context.clone(),
             workflow_access: access,
+            _update_mutation_lease: update_mutation_lease,
             _transition_guard: &transition,
         };
         operation(&permit, &context)
@@ -851,6 +858,10 @@ impl AppState {
             &ProjectContext,
         ) -> Result<T, BackendError>,
     ) -> Result<T, BackendError> {
+        let update_mutation_lease = self
+            .confirmation_registry
+            .update_install_barrier()
+            .enter_project_mutation()?;
         let transition_lane = self
             .project_trust_transition
             .lane(Path::new(asserted_root))?;
@@ -873,6 +884,7 @@ impl AppState {
         }
         let permit = ProjectAuthorityMutationPermit {
             context: context.clone(),
+            _update_mutation_lease: update_mutation_lease,
             _transition_guard: &transition,
         };
         operation(&permit, &context)
@@ -1573,7 +1585,7 @@ mod project_registry_tests {
     use super::{AppState, ProjectRegistry, ProjectTrustAuthority, ProjectWriteRootKind};
     use crate::errors::{BackendError, PROJECT_CONTEXT_MISMATCH};
     use crate::models::confirmation::{
-        ConfirmationExecution, PendingAction, PendingActionType, RiskLevel,
+        ConfirmationExecution, PendingAction, PendingActionType, RiskLevel, UpdateInstallBarrier,
     };
     use crate::models::project::{ProjectTemplate, ProjectTrustKind};
     use crate::models::task::{TaskStatus, TaskType};
@@ -1590,6 +1602,21 @@ mod project_registry_tests {
 
     #[derive(Default)]
     struct CountingWorkflowRunner(AtomicUsize);
+
+    #[test]
+    fn update_install_barrier_serializes_project_mutation_admission() {
+        let barrier = UpdateInstallBarrier::default();
+        let mutation = barrier.enter_project_mutation().unwrap();
+        let blocked = barrier.reserve_install_or_restart(|| Ok(())).unwrap_err();
+        assert_eq!(blocked.code, "UPDATE_INSTALL_GUARD_BLOCKED");
+        drop(mutation);
+
+        let install = barrier.reserve_install_or_restart(|| Ok(())).unwrap();
+        let blocked = barrier.enter_project_mutation().unwrap_err();
+        assert_eq!(blocked.code, "UPDATE_INSTALL_IN_PROGRESS");
+        drop(install);
+        assert!(barrier.enter_project_mutation().is_ok());
+    }
 
     impl WorkflowRunner for CountingWorkflowRunner {
         fn kind(&self) -> WorkflowKind {

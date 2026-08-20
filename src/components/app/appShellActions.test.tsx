@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { i18next } from "../../i18n";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { defaultProject, useProjectStore } from "../../stores/projectStore";
+import { useUpdateStore } from "../../stores/updateStore";
 import {
   resetProjectFactsStoreForTests,
 } from "../../stores/projectFactsStore";
@@ -49,6 +50,7 @@ beforeEach(async () => {
   });
   useProjectStore.getState().setPendingAction(undefined);
   invokeMock.mockReset();
+  useUpdateStore.getState().resetForTests();
   resetProjectFactsStoreForTests();
 });
 
@@ -68,6 +70,44 @@ function workspaceHeader() {
 }
 
 describe("AppShell workspace header", () => {
+  it("runs a real manual update check without an open project", async () => {
+    useProjectStore.getState().setCurrentProject(defaultProject);
+    useUpdateStore.setState({
+      initialized: true,
+      uiStatus: "idle",
+    });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "check_app_update") {
+        return Promise.resolve({
+          phase: "idle",
+          offer: null,
+          downloadedBytes: 0,
+          totalBytes: null,
+          error: null,
+        });
+      }
+      if (command === "get_global_update_preferences") {
+        return Promise.resolve({
+          checkUpdates: true,
+          updateFrequency: "daily",
+          autoDownloadUpdates: false,
+          promptChangelogBeforeInstall: true,
+          lastCheckedAt: "2026-08-21T00:00:00Z",
+          dismissedOfferId: null,
+          dismissedVersion: null,
+        });
+      }
+      return Promise.resolve([]);
+    });
+
+    render(<AppShell />);
+    fireEvent.click(screen.getByRole("button", { name: "Check for updates" }));
+
+    expect(screen.getByRole("dialog", { name: "Updates" })).toBeVisible();
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("check_app_update"));
+    expect(useUpdateStore.getState().uiStatus).toBe("up_to_date");
+  });
+
   it("keeps only the view title and context control in shared chrome", async () => {
     render(<AppShell />);
 
