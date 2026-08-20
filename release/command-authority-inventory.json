@@ -2,6 +2,79 @@
   "schemaVersion": 1,
   "commands": [
     {
+      "name": "cancel_app_update_download",
+      "source": "src-tauri/src/commands/update_commands.rs",
+      "classifications": [
+        "mutation"
+      ],
+      "projectScoped": false,
+      "writeAuthority": "EphemeralUpdateOffer"
+    },
+    {
+      "name": "check_app_update",
+      "source": "src-tauri/src/commands/update_commands.rs",
+      "classifications": [
+        "mutation",
+        "network"
+      ],
+      "projectScoped": false,
+      "writeAuthority": "AppGlobalSettingsAuthority"
+    },
+    {
+      "name": "dismiss_app_update",
+      "source": "src-tauri/src/commands/update_commands.rs",
+      "classifications": [
+        "mutation"
+      ],
+      "projectScoped": false,
+      "writeAuthority": "EphemeralUpdateOffer"
+    },
+    {
+      "name": "download_app_update",
+      "source": "src-tauri/src/commands/update_commands.rs",
+      "classifications": [
+        "mutation",
+        "network"
+      ],
+      "projectScoped": false,
+      "writeAuthority": "EphemeralUpdateOffer"
+    },
+    {
+      "name": "get_global_update_preferences",
+      "source": "src-tauri/src/commands/update_commands.rs",
+      "classifications": [
+        "read"
+      ],
+      "projectScoped": false
+    },
+    {
+      "name": "get_update_state",
+      "source": "src-tauri/src/commands/update_commands.rs",
+      "classifications": [
+        "read"
+      ],
+      "projectScoped": false
+    },
+    {
+      "name": "install_app_update",
+      "source": "src-tauri/src/commands/update_commands.rs",
+      "classifications": [
+        "mutation",
+        "external-process"
+      ],
+      "projectScoped": false,
+      "writeAuthority": "EphemeralUpdateOffer"
+    },
+    {
+      "name": "save_global_update_preferences",
+      "source": "src-tauri/src/commands/update_commands.rs",
+      "classifications": [
+        "mutation"
+      ],
+      "projectScoped": false,
+      "writeAuthority": "AppGlobalSettingsAuthority"
+    },
+    {
       "name": "accept_import_agent_candidate_v2",
       "source": "src-tauri/src/commands/import_v2_agent_commands.rs",
       "classifications": [

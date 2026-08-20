@@ -5,6 +5,8 @@ mod chat_service;
 mod compile_instructions;
 mod compile_legacy_adapter;
 mod compile_service;
+#[cfg(feature = "gui")]
+mod desktop_update_runtime;
 mod export_service;
 mod file_store;
 mod git_service;
@@ -16,6 +18,7 @@ pub(crate) mod project_service;
 mod search_service;
 mod secret_service;
 mod settings_service;
+mod update_service;
 mod wiki_index;
 mod workflow_service;
 
@@ -40,6 +43,8 @@ pub use compile_service::{
     CompileExecutionServices, CompileGenerationObserver, CompileGenerationPolicy, CompileService,
     CompileSourceRegistry, NoopCompileGenerationObserver, ResolvedCompileSource,
 };
+#[cfg(feature = "gui")]
+pub use desktop_update_runtime::DesktopUpdateRuntime;
 pub use export_service::{ExportService, ValidatedExportArtifact};
 pub use file_store::{FileStore, WriteMode};
 pub use git_service::GitService;
@@ -55,6 +60,7 @@ pub use project_service::{assess_project_folder, ProjectAssessmentService, Proje
 pub use search_service::SearchService;
 pub use secret_service::SecretService;
 pub use settings_service::SettingsService;
+pub use update_service::{verify_signed_update_artifact, UpdateDownloadPermit, UpdateService};
 pub use wiki_index::{IndexEntry, WikiIndex};
 pub(crate) use workflow_service::recover_workflow;
 pub use workflow_service::{

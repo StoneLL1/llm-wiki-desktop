@@ -9,6 +9,7 @@ export default tseslint.config(
       "node_modules/**",
       "src-tauri/target/**",
       "src-tauri/target-*/**",
+      "src-tauri/vendor/**",
       "UI-Frontend-design/**",
       ".worktrees/**",
       "worktrees/**",

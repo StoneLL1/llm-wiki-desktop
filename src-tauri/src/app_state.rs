@@ -187,6 +187,9 @@ pub struct AppState {
     pub lint_service: LintService,
     pub export_service: ExportService,
     pub settings_service: SettingsService,
+    pub update_service: crate::services::UpdateService,
+    #[cfg(feature = "gui")]
+    pub update_runtime: crate::services::DesktopUpdateRuntime,
     pub secret_service: SecretService,
     pub task_service: TaskService,
     pub workflow_service: WorkflowService,
