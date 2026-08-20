@@ -21,6 +21,7 @@ const requirement: ImportCapabilityRequirement = {
   modelBytes: null,
   license: "Apache-2.0",
   fallback: "Install the signed pack from a release, then retry.",
+  requirementRevision: "ab".repeat(32),
 };
 
 beforeEach(async () => {

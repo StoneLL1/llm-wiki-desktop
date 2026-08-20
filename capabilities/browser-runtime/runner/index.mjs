@@ -23,6 +23,16 @@ const { chromium } = await import("playwright");
 
 const line = await new Promise((resolve) => { let data = ""; process.stdin.setEncoding("utf8"); process.stdin.on("data", (chunk) => { data += chunk; }); process.stdin.on("end", () => resolve(data.trim())); });
 const rpc = JSON.parse(line);
+if (rpc?.method === "capability.health") {
+  const route = rpc?.params?.route;
+  const allowedRoutes = new Set(["web.generic.browser", "web.wechat.article"]);
+  if (rpc?.params?.protocolVersion !== "2" || rpc?.params?.capabilityId !== "browser-runtime" || !allowedRoutes.has(route)) throw new Error("invalid health request");
+  const executable = chromium.executablePath();
+  if (!(await fs.stat(executable).catch(() => null))?.isFile()) throw new Error("browser runtime is unavailable");
+  assertLinuxBrowserDependencies(executable);
+  process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { healthy: true, protocolVersion: "2", capabilityId: "browser-runtime", route }, error: null })}\n`);
+  process.exit(0);
+}
 const params = rpc.params;
 const privateTargetAuthority = (() => {
   try {

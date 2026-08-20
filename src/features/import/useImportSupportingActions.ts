@@ -284,7 +284,12 @@ export function useImportSupportingActions({
     }
   }, [isScopeCurrent, projectId, projectKey, rootPath, showError]);
 
-  const installCapability = useCallback(async (itemId: string, capabilityId: string) => {
+  const installCapability = useCallback(async (
+    itemId: string,
+    capabilityId: string,
+    requirementRevision: string,
+    asrOptions?: import("./importWorkflow").AsrAuthorizationOptions,
+  ) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey
       || !current.session.items.some((item) => item.itemId === itemId)) return null;
@@ -296,7 +301,10 @@ export function useImportSupportingActions({
         sessionId: current.session.sessionId,
         itemId,
         capabilityId,
+        requirementRevision,
         acknowledgeInstall: true,
+        asrProfile: asrOptions?.profile,
+        recognitionLanguage: asrOptions?.language,
       });
       trackCapabilityTask(task, { projectKey, epoch });
       return isScopeCurrent(projectKey, epoch) ? task : null;

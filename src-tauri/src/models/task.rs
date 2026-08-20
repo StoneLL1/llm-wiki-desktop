@@ -39,6 +39,7 @@ impl BackendTask {
         }
         match self.operation.as_ref() {
             Some(TaskOperation::ImportBatch { session_id, .. }) => Some(session_id.as_str()),
+            Some(TaskOperation::CapabilityInstall { .. }) => None,
             None => self
                 .batch_id
                 .as_deref()
@@ -92,6 +93,12 @@ pub enum TaskOperation {
         item_count: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_label: Option<String>,
+    },
+    CapabilityInstall {
+        session_id: String,
+        item_id: String,
+        capability_id: String,
+        requirement_revision: String,
     },
 }
 
@@ -380,6 +387,21 @@ mod tests {
         assert_eq!(value["sessionId"], json!("session-1"));
         assert_eq!(value["itemCount"], json!(1));
         assert_eq!(value["sourceLabel"], json!("https://example.com/article"));
+    }
+
+    #[test]
+    fn serializes_capability_install_operation_binding() {
+        let operation = TaskOperation::CapabilityInstall {
+            session_id: "session-1".into(),
+            item_id: "item-1".into(),
+            capability_id: "browser-runtime".into(),
+            requirement_revision: "ab".repeat(32),
+        };
+        let value = serde_json::to_value(&operation).unwrap();
+        assert_eq!(value["kind"], json!("capability_install"));
+        assert_eq!(value["sessionId"], json!("session-1"));
+        assert_eq!(value["itemId"], json!("item-1"));
+        assert_eq!(value["capabilityId"], json!("browser-runtime"));
     }
 
     #[test]

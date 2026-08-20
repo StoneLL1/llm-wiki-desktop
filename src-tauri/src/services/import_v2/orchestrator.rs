@@ -115,6 +115,7 @@ impl ImportV2Service {
         kind: ImportMediaAuthorizationKind,
         asr_profile: Option<ImportAsrProfile>,
         language: Option<String>,
+        expected_item: Option<&ImportItem>,
     ) -> Result<(), BackendError> {
         let language = language
             .map(|value| value.trim().to_string())
@@ -140,6 +141,14 @@ impl ImportV2Service {
             .iter()
             .find(|item| item.item_id == item_id)
             .ok_or_else(item_not_found)?;
+        if expected_item.is_some_and(|expected| item != expected) {
+            return Err(BackendError::new(
+                "IMPORT_V2_CAPABILITY_REQUIREMENT_STALE",
+                "The import item changed before media authorization could be committed.",
+                true,
+                false,
+            ));
+        }
         if !matches!(
             item.status,
             ImportItemStatus::WaitingAuthorization
@@ -1610,6 +1619,30 @@ impl ImportV2Service {
             kind,
             asr_profile,
             language,
+            None,
+        )
+    }
+
+    pub(crate) fn authorize_media_for_session_if_unchanged_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        kind: ImportMediaAuthorizationKind,
+        asr_profile: Option<ImportAsrProfile>,
+        language: Option<String>,
+        expected_item: &ImportItem,
+    ) -> Result<(), BackendError> {
+        self.authorize_media_for_session_unchecked(
+            permit.context(),
+            files,
+            session_id,
+            item_id,
+            kind,
+            asr_profile,
+            language,
+            Some(expected_item),
         )
     }
 
@@ -1818,6 +1851,55 @@ impl ImportV2Service {
         self.bind_item_task_ids_unchecked(permit.context(), files, session_id, bindings)
     }
 
+    pub(crate) fn bind_item_task_ids_if_unchanged_authorized<F>(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        session_id: &str,
+        bindings: &[(String, String)],
+        expected_items: &[ImportItem],
+        mut should_cancel: F,
+    ) -> Result<(), BackendError>
+    where
+        F: FnMut() -> bool,
+    {
+        let _guard = self.lock()?;
+        self.preflight_locked(permit.context())?;
+        let mut session = self.sessions.load(permit.context(), files, session_id)?;
+        if should_cancel() {
+            return Err(cancelled_error());
+        }
+        for expected in expected_items {
+            if !session
+                .items
+                .iter()
+                .any(|current| current.item_id == expected.item_id && current == expected)
+            {
+                return Err(BackendError::new(
+                    "IMPORT_V2_CAPABILITY_REQUIREMENT_STALE",
+                    "The import item changed before continuation could be committed.",
+                    true,
+                    false,
+                ));
+            }
+        }
+        let index = session
+            .items
+            .iter()
+            .enumerate()
+            .map(|(position, item)| (item.item_id.clone(), position))
+            .collect::<HashMap<_, _>>();
+        self.bind_item_task_ids_from_snapshot_with_cancel(
+            permit.context(),
+            files,
+            session_id,
+            &mut session,
+            &index,
+            bindings,
+            should_cancel,
+        )
+    }
+
     pub(crate) fn recover_session_authorized(
         &self,
         permit: &ProjectWritePermit<'_>,
@@ -1875,6 +1957,7 @@ impl ImportV2Service {
             kind,
             asr_profile,
             language,
+            None,
         )
     }
 

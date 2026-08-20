@@ -13,6 +13,13 @@ const inputLine = await new Promise((resolve) => {
   process.stdin.on("end", () => resolve(data.trim()));
 });
 const rpc = JSON.parse(inputLine);
+if (rpc?.method === "capability.health") {
+  const route = rpc?.params?.route;
+  const allowedRoutes = new Set(["web.generic.readability", "web.wechat.article", "web.zhihu.content"]);
+  if (rpc?.params?.protocolVersion !== "2" || rpc?.params?.capabilityId !== "browser-runtime-lite" || !allowedRoutes.has(route)) throw new Error("invalid health request");
+  process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { healthy: true, protocolVersion: "2", capabilityId: "browser-runtime-lite", route }, error: null })}\n`);
+  process.exit(0);
+}
 const params = rpc.params;
 const stagingRoot = path.resolve(params.projectRoot, params.stagingRoot);
 const inputPath = path.resolve(stagingRoot, params.chainedInput || "fetched.html");

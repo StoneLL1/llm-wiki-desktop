@@ -1,5 +1,5 @@
 import { Check, Download, LoaderCircle, Package, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ActionableErrorNotice } from "../../components/app/ActionableErrorNotice";
@@ -9,12 +9,17 @@ import {
   type NormalizedBackendError,
 } from "../../lib/backendError";
 import type { ImportCapabilityRequirement } from "../../types/importV2Presentation";
+import type { BackendTask } from "../../types/task";
+import { cancelTaskRequest, useTaskStore } from "../../stores/taskStore";
+import { capabilityInstallState } from "./capabilityInstallState";
 import { capabilityDisplayName, capabilityPurpose } from "./importCapabilityPresentation";
 
 export interface ImportCapabilityDialogProps {
   open: boolean;
   requirement: ImportCapabilityRequirement | null;
-  onInstall: (capabilityId: string) => Promise<void> | void;
+  sessionId?: string | null;
+  itemId?: string | null;
+  onInstall: (capabilityId: string) => Promise<BackendTask | null | void> | BackendTask | null | void;
   onCancel: () => void;
 }
 
@@ -25,25 +30,48 @@ function bytes(value: number | null): string {
   return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
-export function ImportCapabilityDialog({ open, requirement, onInstall, onCancel }: ImportCapabilityDialogProps) {
+export function ImportCapabilityDialog({ open, requirement, sessionId, itemId, onInstall, onCancel }: ImportCapabilityDialogProps) {
   const { t } = useTranslation();
   const dialogRef = useModalDialog({ open, onClose: onCancel });
   const [acknowledged, setAcknowledged] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const [startedTaskId, setStartedTaskId] = useState<string | null>(null);
+  const tasks = useTaskStore((state) => state.tasks);
+  const capabilityTasks = useMemo(() => tasks.filter((task) => {
+    const operation = task.operation;
+    return operation?.kind === "capability_install"
+      && operation.sessionId === sessionId
+      && operation.itemId === itemId
+      && operation.capabilityId === requirement?.requirement.capabilityId
+      && operation.requirementRevision === requirement?.requirementRevision;
+  }), [itemId, requirement?.requirement.capabilityId, requirement?.requirementRevision, sessionId, tasks]);
   const [installError, setInstallError] = useState<NormalizedBackendError | null>(null);
   useEffect(() => {
     setAcknowledged(false);
-    setBusy(false);
+    setStarting(false);
+    setStartedTaskId(null);
     setInstallError(null);
-  }, [open, requirement?.requirement.capabilityId, requirement?.requirement.minimumVersion]);
+  }, [open, requirement?.requirementRevision]);
   if (!open || !requirement) return null;
-  const canInstall = !requirement.available && requirement.installable && acknowledged && !busy;
+  const task = capabilityTasks.find((candidate) => candidate.id === startedTaskId)
+    ?? capabilityTasks.toSorted((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]
+    ?? null;
+  const state = capabilityInstallState(task, requirement.installable, requirement.available);
+  const taskError = task?.error ? normalizeBackendError(task.error, {
+    defaultSummaryKey: "backendError.summary.importCapabilityUnavailable",
+    defaultActionKind: "retry",
+    defaultRecoverable: true,
+  }) : null;
+  const busy = starting || (task !== null && ["queued", "running", "cancelling"].includes(task.status));
+  const canInstall = ["not_installed", "paused", "health_check_failed"].includes(state.kind)
+    && requirement.installable && acknowledged && !busy;
   async function install() {
     if (!canInstall) return;
-    setBusy(true);
+    setStarting(true);
     setInstallError(null);
     try {
-      await onInstall(requirement!.requirement.capabilityId);
+      const started = await onInstall(requirement!.requirement.capabilityId);
+      if (started) setStartedTaskId(started.id);
     } catch (error) {
       setInstallError(normalizeBackendError(error, {
         defaultSummaryKey: "backendError.summary.importCapabilityUnavailable",
@@ -51,8 +79,12 @@ export function ImportCapabilityDialog({ open, requirement, onInstall, onCancel 
         defaultRecoverable: true,
       }));
     } finally {
-      setBusy(false);
+      setStarting(false);
     }
+  }
+  async function cancelInstall() {
+    if (!task || !busy) return;
+    await cancelTaskRequest(task.id);
   }
   return (
     <div ref={dialogRef} tabIndex={-1} className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 px-4" role="dialog" aria-modal="true" aria-labelledby="import-capability-title">
@@ -82,16 +114,25 @@ export function ImportCapabilityDialog({ open, requirement, onInstall, onCancel 
             </dl>
           </details>
           {requirement.fallback ? <p className="mt-3 rounded-[var(--radius-md)] border border-[var(--border-subtle)] px-3 py-2 text-[11px] text-[var(--text-muted)]"><strong>{t("importV2.capability.fallback")}:</strong> {requirement.fallback}</p> : null}
-          {requirement.available ? <p className="mt-3 flex items-center gap-1.5 text-[var(--success-text)]" role="status"><Check size={14} aria-hidden="true" />{t("importV2.capability.installedState")}</p> : null}
+          {state.kind === "installed" ? <p className="mt-3 flex items-center gap-1.5 text-[var(--success-text)]" role="status"><Check size={14} aria-hidden="true" />{t("importV2.capability.installedState")}</p> : null}
           {!requirement.installable ? <p className="mt-3 text-[11px] text-[var(--warning-text)]" role="alert">{t("importV2.capability.unavailable")}</p> : null}
-          {!requirement.available && requirement.installable ? <label className="mt-3 flex items-start gap-2 rounded-[var(--radius-md)] border border-[var(--border-subtle)] px-3 py-2"><input type="checkbox" aria-label={t("importV2.capability.installAck")} checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} disabled={busy} /><span>{t("importV2.capability.installAck")}</span></label> : null}
-          {installError ? (
-            <ActionableErrorNotice className="mt-3" error={installError} onAction={() => install()} />
+          {!["installed", "signed_release_unavailable"].includes(state.kind) ? <label className="mt-3 flex items-start gap-2 rounded-[var(--radius-md)] border border-[var(--border-subtle)] px-3 py-2"><input type="checkbox" aria-label={t("importV2.capability.installAck")} checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} disabled={busy} /><span>{t("importV2.capability.installAck")}</span></label> : null}
+          {!["not_installed", "signed_release_unavailable", "installed"].includes(state.kind) ? (
+            <div className="mt-3" role="status">
+              <div className="flex items-center justify-between gap-3 text-[11px]">
+                <span>{t(`importV2.capability.state.${state.kind}`)}</span>
+                {state.totalBytes ? <span className="font-mono text-[var(--text-muted)]">{bytes(state.downloadedBytes)} / {bytes(state.totalBytes)}</span> : null}
+              </div>
+              {state.totalBytes ? <progress className="mt-1 w-full" max={state.totalBytes} value={state.downloadedBytes ?? 0} /> : null}
+            </div>
+          ) : null}
+          {installError ?? taskError ? (
+            <ActionableErrorNotice className="mt-3" error={(installError ?? taskError)!} onAction={() => install()} />
           ) : null}
         </div>
         <footer className="flex items-center justify-end gap-2 border-t border-[var(--border)] px-4 py-3">
-          <button type="button" className="btn btn--sm" onClick={onCancel} disabled={busy}>{t("importV2.capability.cancel")}</button>
-          {!requirement.available ? <button type="button" className="btn btn--sm btn--primary" onClick={() => void install()} disabled={!canInstall} title={!requirement.installable ? t("importV2.capability.unavailable") : undefined}><Download size={13} className="mr-1 inline" aria-hidden="true" />{busy ? <LoaderCircle size={13} className="animate-spin" aria-label={t("importV2.common.loading")} /> : t("importV2.capability.install")}</button> : null}
+          {busy ? <button type="button" className="btn btn--sm" onClick={() => void cancelInstall()}>{t("importV2.capability.cancelDownload")}</button> : <button type="button" className="btn btn--sm" onClick={onCancel}>{t("importV2.capability.close")}</button>}
+          {state.kind !== "installed" ? <button type="button" className="btn btn--sm btn--primary" onClick={() => void install()} disabled={!canInstall} title={!requirement.installable ? t("importV2.capability.unavailable") : undefined}><Download size={13} className="mr-1 inline" aria-hidden="true" />{busy ? <LoaderCircle size={13} className="animate-spin" aria-label={t("importV2.common.loading")} /> : state.kind === "paused" ? t("importV2.capability.resume") : state.kind === "health_check_failed" ? t("importV2.capability.reinstall") : t("importV2.capability.install")}</button> : null}
         </footer>
       </section>
     </div>

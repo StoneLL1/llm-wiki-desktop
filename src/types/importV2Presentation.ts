@@ -172,6 +172,7 @@ export interface ImportCapabilityRequirement {
   modelBytes: number | null;
   license: string | null;
   fallback: string | null;
+  requirementRevision: string;
 }
 
 export interface GetImportCapabilityRequirementV2Request {
@@ -187,7 +188,10 @@ export interface InstallImportCapabilityV2Request {
   sessionId: string;
   itemId: string;
   capabilityId: string;
+  requirementRevision: string;
   acknowledgeInstall: boolean;
+  asrProfile?: import("./importV2").ImportAsrProfile | null;
+  recognitionLanguage?: string | null;
 }
 
 export interface GetImportAsrEnablementPlanV2Request {
@@ -225,6 +229,7 @@ export interface ImportAsrProfilePlan {
 }
 
 export interface ImportAsrEnablementPlan {
+  requirementRevision: string;
   recommendedProfile: import("./importV2").ImportAsrProfile;
   availableMemoryBytes: number | null;
   availableDiskBytes: number | null;

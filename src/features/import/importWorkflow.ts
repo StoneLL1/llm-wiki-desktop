@@ -143,7 +143,12 @@ export interface ImportWorkflow {
   authorizePrivateTarget: (itemId: string, url: string) => Promise<string | null>;
   getCapabilityRequirement: (itemId: string) => Promise<ImportCapabilityRequirement | null>;
   getAsrEnablementPlan: (itemId: string) => Promise<ImportAsrEnablementPlan | null>;
-  installCapability: (itemId: string, capabilityId: string) => Promise<BackendTask | null>;
+  installCapability: (
+    itemId: string,
+    capabilityId: string,
+    requirementRevision: string,
+    asrOptions?: AsrAuthorizationOptions,
+  ) => Promise<BackendTask | null>;
   scanMigration: () => Promise<LegacyInventory | null>;
   planMigration: (inventory: LegacyInventory) => Promise<MigrationPreparation | null>;
   applyMigration: (plan: MigrationPlan, confirmation: MigrationConfirmation) => Promise<BackendTask | null>;

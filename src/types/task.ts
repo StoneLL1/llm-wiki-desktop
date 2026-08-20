@@ -50,6 +50,12 @@ export type TaskOperation = {
   sessionId: string;
   itemCount: number;
   sourceLabel?: string | null;
+} | {
+  kind: "capability_install";
+  sessionId: string;
+  itemId: string;
+  capabilityId: string;
+  requirementRevision: string;
 };
 
 export interface TaskResult {

@@ -541,7 +541,7 @@ pub fn start_import_items_v2(
     let project_id = request.project_id.clone();
     let project_root_path = request.project_root_path.clone();
     state.with_current_project_write_access(&project_id, &project_root_path, |permit, _context| {
-        start_import_items_for_state(app, &state, permit, request)
+        start_import_items_for_state(app, &state, permit, request, None, None)
     })
 }
 
@@ -550,6 +550,8 @@ pub(crate) fn start_import_items_for_state(
     state: &AppState,
     permit: &ProjectWritePermit<'_>,
     request: StartImportItemsV2Request,
+    expected_items: Option<&[ImportItem]>,
+    cancellation: Option<&crate::tasks::task_model::CancellationToken>,
 ) -> Result<Vec<BackendTask>, BackendError> {
     let context = permit.context();
     if request.item_ids.len() > 200 {
@@ -620,12 +622,26 @@ pub(crate) fn start_import_items_for_state(
         .iter()
         .map(|(item_id, task)| (item_id.clone(), task.id.clone()))
         .collect::<Vec<_>>();
-    if let Err(error) = state.import_v2_service.bind_item_task_ids_authorized(
-        permit,
-        &state.file_store,
-        &request.session_id,
-        &bindings,
-    ) {
+    let bind_result = if let Some(expected_items) = expected_items {
+        state
+            .import_v2_service
+            .bind_item_task_ids_if_unchanged_authorized(
+                permit,
+                &state.file_store,
+                &request.session_id,
+                &bindings,
+                expected_items,
+                || cancellation.is_some_and(|token| token.is_cancelled()),
+            )
+    } else {
+        state.import_v2_service.bind_item_task_ids_authorized(
+            permit,
+            &state.file_store,
+            &request.session_id,
+            &bindings,
+        )
+    };
+    if let Err(error) = bind_result {
         for (_, task) in &prepared {
             let _ = state
                 .task_service
