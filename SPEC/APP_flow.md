@@ -76,7 +76,7 @@ Raw Sources
 
 项目切换只抑制过期的 UI commit、抽屉自动打开和 toast，不丢弃后台任务。项目应用状态可写时，其他项目的任务继续持久化在各自布局定义的任务根目录（原生映射为 `.app/tasks/`）；受限或只读项目允许的本地只读任务仅保存在运行内存。当前项目的界面不得跨项目展示或操作其他项目任务；用户切换到对应项目后才可查看、确认或取消仍可恢复的任务。
 
-截至 2026-07-30，无项目态仍由独立 `ProjectStartView` 分支承接，项目打开仍使用二元识别并保留普通文件夹原地初始化 continuation。这些只是真实实现差距，不是目标流程；迁移后必须由持续挂载的 shell、typed assessment、access policy、全局 trust 和 repair plan 取代。
+截至 Batch 6，无项目态已经迁入持续挂载的 `AppShell` 工作台；项目打开由 typed quick/deep assessment、独立 format/health/access policy、全局 trust 与 repair plan 编排。普通资料目录只提供“新建知识库并导入”，不会原地初始化或重排；legacy `ProjectStartView` 文件不再是生产入口。
 
 ## 4. 启动与知识库选择流程
 
@@ -529,6 +529,24 @@ Agent CLI、BYOK、模型、Provider、默认执行路径和安装引导保留�
 
 API Key 必须存系统钥匙串或凭据管理器，不能明文写入项目文件。
 
+### 15.1 Provider 与 authority
+
+- 保存或测试 Provider 时，后端把 credential account 绑定到 project/config/canonical origin；前端不能用任意 base URL 借用另一 origin 或项目的 key。
+- 官方 Provider 只接受 reviewed HTTPS origin；Custom 首次使用显示精确 host/scheme 并需要后端授权；带 secret 的请求不跨 origin redirect。Ollama 默认只允许精确 loopback，private/link-local/metadata/mixed DNS/rebinding 被阻止。
+- trusted project 不是全能力授权。mutation 需要当前 write permit，Agent/BYOK/Workflow 外发需要当前 execution epoch lease；revoke 返回前必须关闭新 lease、取消并 drain 既有执行，并阻止过期结果写回。
+
+### 15.2 应用更新
+
+1. `UpdateController` 在 shell interactive 后按 app-global preference 异步检查，不等待项目 bootstrap，也不阻塞 Wiki/Search/Edit。
+2. 后端只读取编译时固定的 HTTPS `latest.json` 和 committed updater public key；前端不能提交 endpoint、artifact URL、signature 或 release channel。
+3. 无更新进入明确的 up-to-date；网络/timeout/manifest/platform/signature 失败进入可本地化、可重试的 update-only error，不关闭本地工作台。
+4. 有更新时展示 current/target version、notes、published time 和已验证来源；用户可忽略版本、稍后提醒、下载或取消。
+5. 下载发布进度并可重试；成功后后端保留 generation/identity/TTL 绑定的 offer 与 exact signed bytes，安装前再次验证。
+6. 安装/重启需要显式 consent；确认临界区重新采集未保存编辑与 Import commit 等 UI presentation facts，并在 handoff 期间锁定编辑器；后端 barrier 原子复查其拥有的等待确认、关键任务和 Workflow apply facts。任一 blocker 出现时保持当前版本运行并给出下一步。
+7. 安装 handoff 前写 app-global receipt；Shell/installer 启动失败返回 error 并保留旧版本，成功 handoff 后由重启恢复 reconciliation 解释最终状态。更新不得写用户项目。
+
+真实发布流程仍是 draft → 四平台 signed packaged smoke/upgrade/recovery → protected approval → stable → anonymous exact-tag reverse verification。当前 Batch 6 为 Public beta No-Go，证据见 `docs/release/batch-6-acceptance-evidence.md`。
+
 ## 16. 后台任务与通知
 
 长任务必须进入后台任务系统，不能阻塞 UI。
@@ -540,6 +558,7 @@ API Key 必须存系统钥匙串或凭据管理器，不能明文写入项目文
 - 图谱首次构建。
 - 健康检查。
 - 生成内容。
+- capability 下载/安装与应用更新下载；二者使用 app/task 可观察进度，但应用更新状态与偏好保持 project-independent。
 
 关闭主窗口时默认最小化到系统托盘，任务继续运行。用户可以在设置中改为关闭时询问或终止任务。
 

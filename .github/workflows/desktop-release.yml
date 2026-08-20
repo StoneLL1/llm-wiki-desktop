@@ -15,7 +15,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: desktop-release-${{ inputs.release_tag || github.ref_name }}
+  group: desktop-release-stable-channel
   cancel-in-progress: false
 
 env:
@@ -54,13 +54,35 @@ jobs:
       - name: Validate canonical repository, stable tag, exact commit, version, and identifiers
         id: coordinate
         env:
+          GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = "StoneLL1/llm-wiki-desktop"
           [[ "$RELEASE_TAG" =~ ^app-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$GITHUB_SHA"
-          node scripts/check-release-version.mjs --tag "$RELEASE_TAG"
+          latest_response="$(mktemp)"
+          trap 'rm -f "$latest_response"' EXIT
+          latest_status="$(curl --silent --show-error --location --output "$latest_response" --write-out '%{http_code}' \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/latest")"
+          case "$latest_status" in
+            200)
+              current_stable_tag="$(node -e 'const fs=require("node:fs"); const value=JSON.parse(fs.readFileSync(process.argv[1], "utf8")); if (typeof value.tag_name !== "string") process.exit(1); process.stdout.write(value.tag_name);' "$latest_response")"
+              node scripts/check-release-version.mjs --tag "$RELEASE_TAG" --current-stable-tag "$current_stable_tag"
+              ;;
+            404)
+              node scripts/check-release-version.mjs --tag "$RELEASE_TAG"
+              ;;
+            *)
+              echo "cannot establish the current stable release (GitHub API HTTP $latest_status)" >&2
+              exit 1
+              ;;
+          esac
+          rm -f "$latest_response"
+          trap - EXIT
           version="${RELEASE_TAG#app-v}"
           echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -644,13 +666,30 @@ jobs:
           actual="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets | length')"
           test "$actual" = "$expected"
 
-      - name: Reverse-download and verify the private draft before stable publication
+      - name: Verify the draft, publish, and verify anonymous stable assets atomically
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
         run: |
           set -euo pipefail
-          trap 'gh release edit "$RELEASE_TAG" --draft=true >/dev/null 2>&1 || true' ERR
+          published=0
+          verified=0
+          rollback_if_unverified() {
+            status=$?
+            trap - EXIT INT TERM
+            if [ "$published" -eq 1 ] && [ "$verified" -ne 1 ]; then
+              if ! gh release edit "$RELEASE_TAG" --draft=true >/dev/null 2>&1; then
+                echo "::warning::Published release could not return to draft; deleting it as the immutable-release fallback. This tag must be retired if repository release immutability is enabled."
+                if ! gh release delete "$RELEASE_TAG" --yes; then
+                  echo "::error::CRITICAL: unverified stable release rollback failed; release-owner incident response is required immediately."
+                fi
+              fi
+            fi
+            exit "$status"
+          }
+          trap 'rollback_if_unverified' EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
           mkdir remote-draft
           gh release download "$RELEASE_TAG" --dir remote-draft
           find candidate -type f ! -name release-entry.json -printf '%f\n' | sort > expected-asset-names.txt
@@ -660,15 +699,8 @@ jobs:
           cmp candidate/latest.json remote-draft/latest.json
           node scripts/generate-release-checksums.mjs --root remote-draft --verify remote-draft/CHECKSUMS.sha256
           node scripts/verify-updater-signatures.mjs --root remote-draft --manifest remote-draft/latest.json --updaterConfig src-tauri/tauri.conf.json
+          published=1
           gh release edit "$RELEASE_TAG" --draft=false --latest
-
-      - name: Verify the anonymous stable endpoint and every exact-tag URL
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
-        run: |
-          set -euo pipefail
-          trap 'gh release edit "$RELEASE_TAG" --draft=true >/dev/null 2>&1 || true' ERR
           manifest_url="https://github.com/StoneLL1/llm-wiki-desktop/releases/latest/download/latest.json"
           mkdir published-assets
           gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | while IFS= read -r name; do
@@ -688,3 +720,5 @@ jobs:
             esac
             curl --fail --location --silent --show-error "$url" -o /dev/null
           done
+          verified=1
+          trap - EXIT INT TERM

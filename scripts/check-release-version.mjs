@@ -54,6 +54,26 @@ export function parseReleaseTag(tag, contract) {
   throw new Error(`release tag ${JSON.stringify(tag)} does not match the frozen app-v SemVer policy`);
 }
 
+export function validateStableReleaseAdvance(candidateTag, currentStableTag, contract) {
+  if (!currentStableTag) return [];
+  try {
+    const candidate = parseReleaseTag(candidateTag, contract);
+    const current = parseReleaseTag(currentStableTag, contract);
+    if (candidate.channel !== "stable" || current.channel !== "stable") {
+      return ["the stable release channel can only advance between stable app-v tags"];
+    }
+    const candidateParts = candidate.baseVersion.split(".").map(Number);
+    const currentParts = current.baseVersion.split(".").map(Number);
+    const comparison = candidateParts.findIndex((part, index) => part !== currentParts[index]);
+    if (comparison < 0 || candidateParts[comparison] < currentParts[comparison]) {
+      return [`candidate stable tag ${candidateTag} must be newer than current stable tag ${currentStableTag}`];
+    }
+    return [];
+  } catch (error) {
+    return [`cannot compare the stable release channel: ${error.message}`];
+  }
+}
+
 export function validateReleaseState({
   contract,
   packageJson,
@@ -271,11 +291,27 @@ export function validateDesktopReleaseWorkflow({ desktopWorkflow, capabilityWork
   if (!/gh release create[^\r\n]*--draft(?:\s|$)/.test(desktopWorkflow)) {
     errors.push("publish-stable must create the GitHub Release as a draft");
   }
-  if (!/trap\s+'gh release edit "\$RELEASE_TAG" --draft=true/.test(desktopWorkflow)) {
-    errors.push("publish-stable must restore draft visibility on reverse-verification failure");
+  if (!/rollback_if_unverified\(\)\s*\{[\s\S]*trap - EXIT INT TERM[\s\S]*"\$published" -eq 1[\s\S]*"\$verified" -ne 1[\s\S]*gh release edit "\$RELEASE_TAG" --draft=true/.test(desktopWorkflow)
+    || !/trap\s+'rollback_if_unverified'\s+EXIT/.test(desktopWorkflow)
+    || !/trap\s+'exit 130'\s+INT/.test(desktopWorkflow)
+    || !/trap\s+'exit 143'\s+TERM/.test(desktopWorkflow)) {
+    errors.push("publish-stable must restore draft visibility on error, cancellation, and termination until anonymous verification completes");
   }
-  if (!/gh release edit "\$RELEASE_TAG" --draft=false --latest/.test(desktopWorkflow)) {
+  if (!/if ! gh release edit "\$RELEASE_TAG" --draft=true[\s\S]*gh release delete "\$RELEASE_TAG" --yes[\s\S]*CRITICAL: unverified stable release rollback failed/.test(desktopWorkflow)) {
+    errors.push("publish-stable rollback must delete an immutable release when restoring draft visibility fails");
+  }
+  const stablePublishOffset = desktopWorkflow.indexOf('gh release edit "$RELEASE_TAG" --draft=false --latest');
+  const publishedGuardOffset = desktopWorkflow.lastIndexOf("published=1", stablePublishOffset);
+  const anonymousVerificationOffset = desktopWorkflow.indexOf("generate-release-checksums.mjs --root published-assets --verify", stablePublishOffset);
+  const verifiedGuardOffset = desktopWorkflow.indexOf("verified=1", anonymousVerificationOffset);
+  const disarmRollbackOffset = desktopWorkflow.indexOf("trap - EXIT INT TERM", verifiedGuardOffset);
+  if (stablePublishOffset < 0) {
     errors.push("publish-stable must make the verified draft stable exactly once");
+  } else if (publishedGuardOffset < 0
+    || anonymousVerificationOffset < stablePublishOffset
+    || verifiedGuardOffset < anonymousVerificationOffset
+    || disarmRollbackOffset < verifiedGuardOffset) {
+    errors.push("publish-stable must guard one publish-through-anonymous-verification critical section");
   }
   const assembleOffset = desktopWorkflow.search(/^ {2}assemble-release:\s*$/m);
   const sealedJobs = assembleOffset >= 0 && publishOffset > assembleOffset
@@ -288,8 +324,15 @@ export function validateDesktopReleaseWorkflow({ desktopWorkflow, capabilityWork
   for (const platform of ["windows-x86_64", "darwin-aarch64", "darwin-x86_64", "linux-x86_64"]) {
     if (!desktopWorkflow.includes(platform)) errors.push(`desktop release matrix is missing ${platform}`);
   }
-  if (!/group:\s*desktop-release-\$\{\{/.test(desktopWorkflow) || !/cancel-in-progress:\s*false/.test(desktopWorkflow)) {
-    errors.push("desktop release concurrency must serialize one exact tag without cancellation");
+  if (!/group:\s*desktop-release-stable-channel(?:\s|$)/.test(desktopWorkflow)
+    || !/cancel-in-progress:\s*false/.test(desktopWorkflow)) {
+    errors.push("desktop release concurrency must globally serialize the stable channel without cancellation");
+  }
+  if (!/releases\/latest/.test(desktopWorkflow)
+    || !/--current-stable-tag\s+"\$current_stable_tag"/.test(desktopWorkflow)
+    || !/^\s*404\)\s*$/m.test(desktopWorkflow)
+    || !/cannot establish the current stable release/.test(desktopWorkflow)) {
+    errors.push("desktop release preflight must fail closed unless the candidate advances the current stable tag or no release exists");
   }
   for (const match of desktopWorkflow.matchAll(/^\s*(?:-\s+)?uses:\s*([^\s#]+)(?:\s+#.*)?$/gm)) {
     const reference = match[1];
@@ -373,11 +416,12 @@ function defaultRunGit(root, arguments_) {
 }
 
 function parseArguments(arguments_) {
-  const result = { checkGit: false, tag: null };
+  const result = { checkGit: false, tag: null, currentStableTag: null };
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index];
     if (argument === "--check-git") result.checkGit = true;
     else if (argument === "--tag") result.tag = arguments_[index += 1] ?? null;
+    else if (argument === "--current-stable-tag") result.currentStableTag = arguments_[index += 1] ?? null;
     else throw new Error(`unknown argument: ${argument}`);
   }
   return result;
@@ -408,6 +452,9 @@ export function checkRepository(root, options = {}) {
   ];
   if (options.checkGit) errors.push(...validateLocalGit(root, contract));
   if (tag) errors.push(...validateReleaseCommitTrace(root, contract, tag));
+  if (tag && options.currentStableTag) {
+    errors.push(...validateStableReleaseAdvance(tag, options.currentStableTag, contract));
+  }
   return { ...state, errors, tag };
 }
 

@@ -1986,7 +1986,11 @@ describe("useImportWorkflow", () => {
     await act(async () => result.current.revokeLogin("connector-1"));
     await act(async () => result.current.authorizePrivateTarget("gated-url", "https://private.example.com/article"));
     await act(async () => result.current.getCapabilityRequirement("gated-url"));
-    await act(async () => result.current.installCapability("gated-url", "browser-runtime"));
+    await act(async () => result.current.installCapability(
+      "gated-url",
+      "browser-runtime",
+      "fixture-requirement-revision",
+    ));
 
     expect(api.beginLogin).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "session-project-a", itemId: "gated-url", platform: "wechat" }));
     expect(api.completeLogin).toHaveBeenCalledWith(expect.objectContaining({ importSessionId: "session-project-a", connectorSessionId: "connector-1" }));

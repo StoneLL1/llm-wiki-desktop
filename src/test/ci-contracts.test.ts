@@ -107,7 +107,7 @@ describe("CI validation contract", () => {
       "node scripts/check-import-source-media-flow.mjs",
     );
     expect(packageJson.scripts["check:release-config"]).toBe(
-      "node --test --test-isolation=none scripts/check-release-config.node-test.mjs scripts/verify-capability-catalog.node-test.mjs scripts/verify-embedded-capability-catalog.node-test.mjs && node scripts/check-release-version.mjs && node scripts/verify-capability-catalog.mjs --catalog capabilities/install-catalog.json --trusted-keys capabilities/trusted-keys.json --mode source",
+      "node --test --test-isolation=none scripts/check-release-config.node-test.mjs scripts/release-assets.node-test.mjs scripts/verify-capability-catalog.node-test.mjs scripts/verify-embedded-capability-catalog.node-test.mjs && npm run test:updater-signature && node scripts/check-release-version.mjs && node scripts/verify-capability-catalog.mjs --catalog capabilities/install-catalog.json --trusted-keys capabilities/trusted-keys.json --mode source",
     );
     expect(packageJson.scripts["test:final-four-redlines"]).toBe(
       "node --test --test-isolation=none scripts/check-final-four-redlines.node-test.mjs",

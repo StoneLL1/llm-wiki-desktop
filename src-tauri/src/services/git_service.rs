@@ -24,7 +24,7 @@ use crate::utils::path_safety::{
 use crate::utils::process_lifetime::{
     run_bounded_process, BoundedProcessError, CapturedProcessOutput,
 };
-use crate::utils::safe_project_dir::remove_project_file;
+use crate::utils::safe_project_dir::BoundProjectMutationRoot;
 
 thread_local! {
     static GIT_TASK_CANCELLATION: RefCell<Vec<CancellationToken>> = const { RefCell::new(Vec::new()) };
@@ -1703,28 +1703,16 @@ fn remove_new_ignored_paths(
 }
 
 fn remove_project_path(context: &ProjectContext, path: &str) -> Result<(), BackendError> {
-    let root = context
-        .root
-        .canonicalize()
-        .map_err(|err| BackendError::new("GIT_ROLLBACK_FAILED", err.to_string(), true, false))?;
+    validate_relative_git_path(path)?;
     let target = context.root.join(path);
-    let target_abs = target
-        .canonicalize()
+    let binding = BoundProjectMutationRoot::bind(&context.root, &target)
         .map_err(|err| BackendError::new("GIT_ROLLBACK_FAILED", err.to_string(), true, false))?;
-    if target_abs == root || !target_abs.starts_with(&root) {
-        return Err(BackendError::new(
-            "GIT_ROLLBACK_FAILED",
-            format!("Refusing to remove path outside the project root: {path}"),
-            true,
-            false,
-        ));
-    }
     let metadata = fs::symlink_metadata(&target)
         .map_err(|err| BackendError::new("GIT_ROLLBACK_FAILED", err.to_string(), true, false))?;
     if metadata.is_dir() {
-        fs::remove_dir_all(&target)
+        binding.remove_directory_tree(&target)
     } else {
-        remove_project_file(&context.root, &target)
+        binding.remove_file(&target)
     }
     .map_err(|err| BackendError::new("GIT_ROLLBACK_FAILED", err.to_string(), true, false))
 }
@@ -1750,7 +1738,7 @@ fn validate_relative_git_path(path: &str) -> Result<(), BackendError> {
 fn untracked_file_diff(context: &ProjectContext) -> Result<String, BackendError> {
     let mut diff = String::new();
     for path in untracked_paths(context)? {
-        let bytes = fs::read(context.root.join(&path)).unwrap_or_default();
+        let bytes = read_worktree_regular(context, &path)?;
         if !diff.is_empty() && !diff.ends_with('\n') {
             diff.push('\n');
         }
@@ -1780,7 +1768,7 @@ fn render_added_file_diff(path: &str, bytes: &[u8]) -> String {
 
 fn estimate_changed_bytes(context: &ProjectContext, change: &GitChangedFile) -> usize {
     let head_len = head_file_bytes(context, &change.path).map_or(0, |bytes| bytes.len());
-    let worktree_len = fs::read(context.root.join(&change.path)).map_or(0, |bytes| bytes.len());
+    let worktree_len = read_worktree_regular(context, &change.path).map_or(0, |bytes| bytes.len());
     match change.kind {
         GitChangedFileKind::Added => worktree_len.max(head_len),
         GitChangedFileKind::Deleted => head_len,
@@ -1788,6 +1776,21 @@ fn estimate_changed_bytes(context: &ProjectContext, change: &GitChangedFile) -> 
             head_len.saturating_add(worktree_len)
         }
     }
+}
+
+fn read_worktree_regular(context: &ProjectContext, path: &str) -> Result<Vec<u8>, BackendError> {
+    validate_relative_git_path(path)?;
+    let target = context.root.join(path);
+    BoundProjectMutationRoot::bind_read(&context.root, &target)
+        .and_then(|binding| binding.read_regular(&target))
+        .map_err(|error| {
+            BackendError::new(
+                "GIT_DIFF_FAILED",
+                format!("Cannot read worktree file through its project binding: {error}"),
+                true,
+                false,
+            )
+        })
 }
 
 fn head_file_bytes(context: &ProjectContext, path: &str) -> Result<Vec<u8>, BackendError> {
@@ -1801,7 +1804,7 @@ fn normalize_git_path(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{git_project_lane, run_git, GitService};
+    use super::{git_project_lane, remove_project_path, run_git, untracked_file_diff, GitService};
     use crate::models::git::{CheckpointPurpose, GitChangedFileKind};
     use crate::models::paths::ProjectContext;
     use crate::tasks::task_model::CancellationToken;
@@ -2439,6 +2442,49 @@ mod tests {
         assert!(page.changed_chars > 2_000);
 
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn rollback_removes_new_directory_through_a_bound_tree() {
+        let root = unique_temp_dir("bound-rollback-tree");
+        let context = ProjectContext::new("project-1", root.clone());
+        fs::create_dir_all(root.join("scratch/nested")).unwrap();
+        fs::write(root.join("scratch/nested/page.md"), "temporary\n").unwrap();
+
+        remove_project_path(&context, "scratch").unwrap();
+
+        assert!(!root.join("scratch").exists());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn untracked_diff_rejects_a_symlink_instead_of_reading_its_target() {
+        let root = unique_temp_dir("untracked-symlink");
+        let outside = unique_temp_dir("untracked-symlink-outside");
+        let context = ProjectContext::new("project-1", root.clone());
+        fs::write(root.join("tracked.md"), "tracked\n").unwrap();
+        GitService
+            .initialize_repository(&context, "Initial project")
+            .unwrap();
+        fs::write(outside.join("secret.md"), "outside-secret\n").unwrap();
+        let link = root.join("leak.md");
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(outside.join("secret.md"), &link).is_ok();
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_file(outside.join("secret.md"), &link).is_ok();
+        if !linked {
+            fs::remove_dir_all(root).ok();
+            fs::remove_dir_all(outside).ok();
+            return;
+        }
+
+        let error =
+            untracked_file_diff(&context).expect_err("symlinked worktree file must fail closed");
+        assert_eq!(error.code, "GIT_DIFF_FAILED");
+
+        fs::remove_file(link).ok();
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(outside).ok();
     }
 
     #[test]

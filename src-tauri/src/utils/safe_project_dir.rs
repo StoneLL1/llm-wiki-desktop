@@ -2171,8 +2171,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_junction_swap_race_never_changes_outside_sentinel() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
+        use std::sync::mpsc;
 
         const ROUNDS: usize = 4;
         let root = tempfile::tempdir().unwrap();
@@ -2197,18 +2196,16 @@ mod tests {
         assert!(status.success(), "junction test setup failed");
         std::fs::remove_dir(&probe).unwrap();
 
-        let phase = Arc::new(AtomicUsize::new(9));
-        let swaps = Arc::new(AtomicUsize::new(0));
-        let attacker_phase = Arc::clone(&phase);
-        let attacker_swaps = Arc::clone(&swaps);
+        let (request_swap, await_swap) = mpsc::sync_channel::<()>(0);
+        let (swapped, swap_complete) = mpsc::sync_channel::<()>(0);
+        let (request_restore, await_restore) = mpsc::sync_channel::<()>(0);
+        let (restored, restore_complete) = mpsc::sync_channel::<()>(0);
         let live_for_attacker = live.clone();
         let parked_for_attacker = parked.clone();
         let outside_for_attacker = outside.path().to_path_buf();
         let attacker = std::thread::spawn(move || {
             for _ in 0..ROUNDS {
-                while attacker_phase.load(Ordering::Acquire) != 0 {
-                    std::thread::yield_now();
-                }
+                await_swap.recv().unwrap();
                 std::fs::rename(&live_for_attacker, &parked_for_attacker).unwrap();
                 let status = std::process::Command::new("cmd")
                     .args([
@@ -2221,18 +2218,13 @@ mod tests {
                     .status()
                     .unwrap();
                 assert!(status.success(), "junction swap setup failed");
-                attacker_swaps.fetch_add(1, Ordering::AcqRel);
-                attacker_phase.store(1, Ordering::Release);
-                while attacker_phase.load(Ordering::Acquire) != 2 {
-                    std::thread::yield_now();
-                }
+                swapped.send(()).unwrap();
+                await_restore.recv().unwrap();
                 std::fs::remove_dir(&live_for_attacker).unwrap();
                 std::fs::rename(&parked_for_attacker, &live_for_attacker).unwrap();
-                attacker_phase.store(3, Ordering::Release);
-                while attacker_phase.load(Ordering::Acquire) != 4 {
-                    std::thread::yield_now();
-                }
+                restored.send(()).unwrap();
             }
+            ROUNDS
         });
 
         let mut mutations = 0;
@@ -2240,15 +2232,10 @@ mod tests {
             let target = live.join(format!("inside-{round}.md"));
             let renamed = live.join(format!("inside-{round}-renamed.md"));
             let binding = BoundProjectMutationRoot::bind(root.path(), &target).unwrap();
-            phase.store(0, Ordering::Release);
-            let swap_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-            while phase.load(Ordering::Acquire) != 1 {
-                assert!(
-                    std::time::Instant::now() < swap_deadline,
-                    "junction swap timed out in round {round}"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
+            request_swap.send(()).unwrap();
+            swap_complete
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .unwrap_or_else(|error| panic!("junction swap failed in round {round}: {error}"));
             assert!(
                 BoundProjectMutationRoot::bind(root.path(), &live.join("sentinel.md")).is_err()
             );
@@ -2258,20 +2245,15 @@ mod tests {
             binding.remove_file(&renamed).unwrap();
             mutations += 1;
             assert_eq!(std::fs::read(&sentinel).unwrap(), b"outside");
-            phase.store(2, Ordering::Release);
-            let restore_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-            while phase.load(Ordering::Acquire) != 3 {
-                assert!(
-                    std::time::Instant::now() < restore_deadline,
-                    "junction restore timed out in round {round}"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
+            request_restore.send(()).unwrap();
+            restore_complete
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .unwrap_or_else(|error| {
+                    panic!("junction restore failed in round {round}: {error}")
+                });
             assert_eq!(std::fs::read(&sentinel).unwrap(), b"outside");
-            phase.store(4, Ordering::Release);
         }
-        attacker.join().unwrap();
-        assert_eq!(swaps.load(Ordering::Acquire), ROUNDS);
+        assert_eq!(attacker.join().unwrap(), ROUNDS);
         assert_eq!(mutations, ROUNDS);
         assert_eq!(std::fs::read(&sentinel).unwrap(), b"outside");
     }

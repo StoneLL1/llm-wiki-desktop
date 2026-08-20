@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { i18next } from "../../i18n";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { defaultProject, useProjectStore } from "../../stores/projectStore";
+import { useTaskStore } from "../../stores/taskStore";
 import { useUpdateStore } from "../../stores/updateStore";
 import {
   resetProjectFactsStoreForTests,
@@ -50,6 +51,15 @@ beforeEach(async () => {
   });
   useProjectStore.getState().setPendingAction(undefined);
   invokeMock.mockReset();
+  useTaskStore.setState({
+    tasks: [],
+    logs: {},
+    activities: {},
+    taskOutputs: {},
+    drawerOpen: false,
+    selectedTaskId: null,
+    runningCount: 0,
+  });
   useUpdateStore.getState().resetForTests();
   resetProjectFactsStoreForTests();
 });
@@ -103,10 +113,29 @@ describe("AppShell workspace header", () => {
     render(<AppShell />);
     fireEvent.click(screen.getByRole("button", { name: "Check for updates" }));
 
-    expect(screen.getByRole("dialog", { name: "Updates" })).toBeVisible();
+    expect(await screen.findByRole("dialog", { name: "Updates" })).toBeVisible();
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("check_app_update"));
     expect(useUpdateStore.getState().uiStatus).toBe("up_to_date");
   });
+
+  it("restores task drawer focus through the lazy AppShell integration", async () => {
+    render(<AppShell />);
+
+    const opener = screen.getByRole("button", { name: "Tasks and notifications" });
+    opener.focus();
+    fireEvent.click(opener);
+
+    const closeButton = await screen.findByRole(
+      "button",
+      { name: "Close task drawer" },
+      { timeout: 15_000 },
+    );
+    await waitFor(() => expect(closeButton).toHaveFocus(), { timeout: 15_000 });
+    fireEvent.click(closeButton);
+
+    await waitFor(() => expect(opener).toHaveFocus(), { timeout: 15_000 });
+    expect(screen.queryByRole("dialog", { name: "Tasks" })).not.toBeInTheDocument();
+  }, 20_000);
 
   it("keeps only the view title and context control in shared chrome", async () => {
     render(<AppShell />);

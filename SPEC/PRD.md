@@ -386,7 +386,9 @@ PRD 仅列出当前不纳入 MVP 的内容，后续可重新评估：
 | PRD-SET-002 | API Key 存系统钥匙串或凭据管理器 | P0 | 项目文件中不明文保存 API Key |
 | PRD-SET-003 | 支持中英双语 | P1 | 用户可切换中文/English |
 | PRD-SET-004 | 支持亮色/暗色主题 | P1 | 设置后 UI 主题切换生效 |
-| PRD-SET-005 | 支持检查更新 | P1 | 下载和安装必须由用户确认 |
+| PRD-SET-005 | 支持签名应用更新 | P1 | 无项目也可异步检查固定 HTTPS endpoint；展示版本、notes、签名来源与进度；下载可取消/重试，安装与重启必须显式确认并在未保存编辑、Import commit、确认或关键任务存在时阻止 |
+| PRD-SET-006 | 支持签名 capability 安装与原任务继续 | P0 | release build 注入同一 tag/run 的 4×5 catalog；缺能力时可续传/安全重下、验证、health rollback，并继续同一个 Import session/item |
+| PRD-SET-007 | Provider secret 绑定精确目的地 | P0 | credential 绑定 project/config/canonical origin；官方 origin、Custom 授权、loopback/private/DNS/redirect 策略在后端 fail closed |
 
 ## 10. 信息架构
 
@@ -516,9 +518,11 @@ PRD 仅列出当前不纳入 MVP 的内容，后续可重新评估：
 
 - 中英双语。
 - 亮色/暗色主题。
-- 更新检查。
-- 多平台打包验证。
+- project-independent 的签名更新检查、下载、取消、安装保护与重启恢复。
+- Windows x64、macOS arm64/x64、Linux x64 的同 tag/commit installer、updater、capability catalog、签名、SBOM、provenance 和真实 packaged install/upgrade/uninstall 验证。
 - 小资料包与真实 `wiki/` 样本验收。
+
+当前 Batch 6 只完成本地源码/集成/release fixture 验收，public beta 仍为 No-Go：canonical repository、draft workflow、production signing/custody/reviewer、四平台签名安装升级与匿名 endpoint 尚无真实证据。不得用本地 fixture、jsdom、`cargo check` 或 unsigned build 替代，详见 `docs/release/batch-6-acceptance-evidence.md`。
 
 ## 14. 风险与对策
 

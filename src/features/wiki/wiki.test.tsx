@@ -27,6 +27,7 @@ import { defaultProject, useProjectStore } from "../../stores/projectStore";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useExportStore } from "../../stores/exportStore";
 import { useTaskStore } from "../../stores/taskStore";
+import { useUpdateStore } from "../../stores/updateStore";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 const emptyAiCapabilities = { agents: [], providers: [] };
@@ -99,6 +100,7 @@ beforeEach(() => {
   invokeMock.mockReset();
   useWikiStore.getState().reset();
   useExportStore.getState().reset();
+  useUpdateStore.getState().resetForTests();
   useTaskStore.setState({
     activeProjectId: null,
     activeProjectRootPath: null,
@@ -2330,6 +2332,36 @@ describe("RelatedPagesPanel P1 details", () => {
 });
 
 describe("WikiEditor (Milkdown)", () => {
+  it("locks the live editor while update installation owns the restart barrier", async () => {
+    const tree: WikiTree = {
+      root: { name: "wiki", kind: "folder", path: "wiki", starred: false, bookmarked: false, fileCount: 1, children: [] },
+      pages: [pageMeta()],
+      totalPages: 1,
+    };
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "scan_wiki") return Promise.resolve(tree);
+      if (command === "read_wiki_page") return Promise.resolve(pageContent());
+      if (command === "list_exports") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    useProjectStore.setState({
+      currentProject: {
+        ...defaultProject,
+        projectId: "proj-1",
+        rootPath: "D:/wiki",
+        name: "Wiki",
+      },
+    });
+
+    render(<WikiView capabilities={emptyAiCapabilities} />);
+    await waitFor(() => expect(useWikiStore.getState().page).not.toBeNull());
+    act(() => useWikiStore.getState().startEdit());
+    act(() => useUpdateStore.setState({ uiStatus: "installing" }));
+
+    expect(await screen.findByRole("button", { name: "Save" })).toBeDisabled();
+    expect(screen.getByTestId("wiki-editor-scroll")).toHaveAttribute("aria-disabled", "true");
+  });
+
   it("renders the complete Milkdown formatting toolbar", () => {
     render(
       <WikiEditor

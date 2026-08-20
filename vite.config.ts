@@ -25,6 +25,11 @@ export default defineConfig({
               test: /node_modules[\\/]lucide-react/,
               tags: ["$initial"],
             },
+            {
+              name: "app-initial",
+              test: /[\\/]src[\\/]/,
+              tags: ["$initial"],
+            },
           ],
         },
       },

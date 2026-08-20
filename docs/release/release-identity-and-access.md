@@ -1,6 +1,6 @@
 # Release identity, repository access, and signing ownership
 
-Status: Batch 5 atomic desktop publisher implemented locally; external signing, reviewer, public-access, and remote-rehearsal blockers remain
+Status: Batch 6 local automated acceptance complete; Public beta No-Go because external signing, reviewer, public-access, authorized Actions access, and remote-rehearsal blockers remain
 Last verified: 2026-08-21
 
 ## Frozen public release coordinate
@@ -87,7 +87,7 @@ Current custody record: primary owner `pending-human-input`; backup custodian `p
 - The sealed candidate remains a workflow artifact through build, manifest, packaged-smoke, attestation, and full asset rehearsal. The protected publisher creates one draft only after those gates, uploads the complete bundle, then publishes and performs anonymous post-publish verification.
 - The repository owner must configure required reviewers for both `capability-release` and `desktop-release`. Remote configuration remains unverified because anonymous repository access fails.
 
-No remote workflow rehearsal is claimed for Batch 5: the canonical repository is not anonymously reachable, and no draft tag or release asset exists. This is a release blocker, not a local test failure.
+No remote workflow rehearsal is claimed for Batch 5 or Batch 6: the 2026-08-21 no-credential rerun still could not read the repository, the Releases page and stable `latest.json` returned 404, local GitHub authorization was invalid, and no draft tag or release asset exists. This is a release blocker, not a local test failure. The complete Batch 6 decision and platform matrix are in [`batch-6-acceptance-evidence.md`](batch-6-acceptance-evidence.md).
 
 ## Local and CI checks
 

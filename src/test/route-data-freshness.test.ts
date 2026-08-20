@@ -152,7 +152,10 @@ describe("freshness-aware route data reuse", () => {
     const mounted = render(createElement(WorkspaceRouter, { activeView: "wiki", ...props }));
     await waitFor(
       () => expect(invokeMock).toHaveBeenCalledWith("scan_wiki", expect.anything()),
-      { timeout: 5_000 },
+      // The full release gate intentionally runs the Rust and frontend lanes
+      // together. Give the real lazy route enough time to load under that
+      // contention while keeping the test's existing 20-second hard ceiling.
+      { timeout: 15_000 },
     );
 
     for (let remount = 0; remount < 20; remount += 1) {

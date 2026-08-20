@@ -105,7 +105,7 @@ export function ImportAsrDialog({
       && operation.requirementRevision === plan?.requirementRevision;
   }), [itemId, plan?.requirementRevision, selected?.capabilityId, sessionId, tasks]);
   const task = capabilityTasks.find((candidate) => candidate.id === startedTaskId)
-    ?? capabilityTasks.toSorted((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]
+    ?? [...capabilityTasks].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]
     ?? null;
   const installState = capabilityInstallState(
     task,

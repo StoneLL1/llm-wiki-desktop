@@ -1,4 +1,4 @@
-import { type CSSProperties, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, type CSSProperties, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 
@@ -15,17 +15,23 @@ import {
   pruneProjectFacts,
 } from "../../stores/projectFactsStore";
 import { useProjectStore } from "../../stores/projectStore";
+import { useTaskStore } from "../../stores/taskStore";
 import { BottomStatusBar } from "./BottomStatusBar";
 import { LeftSidebar } from "./LeftSidebar";
 import { ProjectConfirmationController } from "./ProjectConfirmationController";
 import { ResizableSplitter } from "./ResizableSplitter";
 import { RightContextPanel } from "./RightContextPanel";
 import { RightPanelModalContext } from "./RightPanelHeader";
-import { TaskLogDrawer } from "./TaskLogDrawer";
 import { Toaster } from "./Toaster";
 import { TopBar } from "./TopBar";
 import { UpdateController } from "./UpdateController";
+import { ViewErrorBoundary } from "./ViewErrorBoundary";
 import { WorkspaceController } from "./WorkspaceController";
+
+const TaskLogDrawer = lazy(async () => {
+  const module = await import("./TaskLogDrawer");
+  return { default: module.TaskLogDrawer };
+});
 
 function useNarrowDesktop() {
   const [narrow, setNarrow] = useState(() =>
@@ -70,6 +76,8 @@ export function AppShell() {
   const resetPaneSize = useNavigationStore((state) => state.resetPaneSize);
   const toggleSettings = useNavigationStore((state) => state.toggleSettings);
   const currentProject = useProjectStore((state) => state.currentProject);
+  const taskDrawerOpen = useTaskStore((state) => state.drawerOpen);
+  const [taskDrawerLoaded, setTaskDrawerLoaded] = useState(taskDrawerOpen);
   const authority = useProjectStore((state) => state.authority);
   const sidebarCollapsed = sidebarWidth <= SIDEBAR_COLLAPSE_THRESHOLD;
   const shellRef = useRef<HTMLDivElement>(null);
@@ -89,6 +97,10 @@ export function AppShell() {
   useEffect(() => {
     if (narrowDesktop) setRightPanelOpen(false);
   }, [narrowDesktop, setRightPanelOpen]);
+
+  useEffect(() => {
+    if (taskDrawerOpen) setTaskDrawerLoaded(true);
+  }, [taskDrawerOpen]);
 
   useEffect(() => {
     if (!currentProject.projectId || !currentProject.rootPath) {
@@ -223,7 +235,13 @@ export function AppShell() {
       <BottomStatusBar />
       <Toaster />
       <ProjectConfirmationController />
-      <TaskLogDrawer />
+      {taskDrawerLoaded ? (
+        <ViewErrorBoundary>
+          <Suspense fallback={null}>
+            <TaskLogDrawer />
+          </Suspense>
+        </ViewErrorBoundary>
+      ) : null}
       <UpdateController />
       {showRightPanelDialog
         ? createPortal(

@@ -54,7 +54,7 @@ export function ImportCapabilityDialog({ open, requirement, sessionId, itemId, o
   }, [open, requirement?.requirementRevision]);
   if (!open || !requirement) return null;
   const task = capabilityTasks.find((candidate) => candidate.id === startedTaskId)
-    ?? capabilityTasks.toSorted((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]
+    ?? [...capabilityTasks].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]
     ?? null;
   const state = capabilityInstallState(task, requirement.installable, requirement.available);
   const taskError = task?.error ? normalizeBackendError(task.error, {

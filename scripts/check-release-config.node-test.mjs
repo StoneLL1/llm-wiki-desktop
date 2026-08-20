@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   parseReleaseTag,
   repositoryRoot,
+  validateStableReleaseAdvance,
   validateLocalGit,
   validateReleaseCommitTrace,
   validateReleaseState,
@@ -83,6 +84,22 @@ test("stable and prerelease tags use the frozen app-v SemVer grammar", () => {
     tag: "app-v0.1.0-rc.2",
   });
   assert.deepEqual(rcResult.errors, []);
+});
+
+test("stable publication advances monotonically across the global latest channel", () => {
+  assert.deepEqual(validateStableReleaseAdvance("app-v0.2.0", "app-v0.1.9", contract), []);
+  assert.match(
+    validateStableReleaseAdvance("app-v0.1.9", "app-v0.1.9", contract)[0],
+    /must be newer/,
+  );
+  assert.match(
+    validateStableReleaseAdvance("app-v0.1.8", "app-v0.1.9", contract)[0],
+    /must be newer/,
+  );
+  assert.match(
+    validateStableReleaseAdvance("app-v0.2.0", "not-a-release-tag", contract)[0],
+    /cannot compare/,
+  );
 });
 
 test("canonical endpoints cannot drift to a different repository", () => {
@@ -179,6 +196,46 @@ test("the committed desktop workflow is the only atomic publisher and pins every
   const publicFirst = desktopWorkflow.replace(" --notes-file candidate/release-notes.md --draft", " --notes-file candidate/release-notes.md");
   assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: publicFirst, capabilityWorkflow })
     .some((error) => error.includes("as a draft")), true);
+
+  const tagScopedConcurrency = desktopWorkflow.replace(
+    "group: desktop-release-stable-channel",
+    "group: desktop-release-${{ inputs.release_tag || github.ref_name }}",
+  );
+  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: tagScopedConcurrency, capabilityWorkflow })
+    .some((error) => error.includes("globally serialize")), true);
+
+  const noStableAdvanceCheck = desktopWorkflow.replace(
+    '--current-stable-tag "$current_stable_tag"',
+    '--tag "$current_stable_tag"',
+  );
+  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: noStableAdvanceCheck, capabilityWorkflow })
+    .some((error) => error.includes("candidate advances")), true);
+
+  const errOnlyRollback = desktopWorkflow
+    .replace("trap 'rollback_if_unverified' EXIT", "trap 'rollback_if_unverified' ERR")
+    .replace("trap 'exit 130' INT", ":")
+    .replace("trap 'exit 143' TERM", ":");
+  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: errOnlyRollback, capabilityWorkflow })
+    .some((error) => error.includes("cancellation, and termination")), true);
+
+  const noImmutableReleaseFallback = desktopWorkflow.replace(
+    'gh release delete "$RELEASE_TAG" --yes',
+    ': # immutable release fallback removed',
+  );
+  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: noImmutableReleaseFallback, capabilityWorkflow })
+    .some((error) => error.includes("delete an immutable release")), true);
+
+  const unguardedPublication = desktopWorkflow.replace("published=1", "published=0");
+  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: unguardedPublication, capabilityWorkflow })
+    .some((error) => error.includes("publish-through-anonymous-verification")), true);
+
+  const prematurelyVerified = desktopWorkflow.replace(
+    / {10}verified=1\r?\n {10}trap - EXIT INT TERM/,
+    "          trap - EXIT INT TERM\n          verified=1",
+  );
+  assert.notEqual(prematurelyVerified, desktopWorkflow);
+  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: prematurelyVerified, capabilityWorkflow })
+    .some((error) => error.includes("publish-through-anonymous-verification")), true);
 
   const noReverseDownload = desktopWorkflow.replaceAll("gh release download", "gh draft download");
   assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: noReverseDownload, capabilityWorkflow })
