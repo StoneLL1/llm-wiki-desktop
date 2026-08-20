@@ -2,18 +2,28 @@ import { Cpu, HardDriveDownload, LoaderCircle, Mic2, ShieldCheck, X } from "luci
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { ActionableErrorNotice } from "../../components/app/ActionableErrorNotice";
 import { useModalDialog } from "../../hooks/useModalDialog";
+import {
+  normalizeBackendError,
+  type NormalizedBackendError,
+} from "../../lib/backendError";
+import { cancelTaskRequest, useTaskStore } from "../../stores/taskStore";
 import type { ImportAsrProfile } from "../../types/importV2";
 import type { ImportAsrEnablementPlan, ImportAsrProfilePlan } from "../../types/importV2Presentation";
+import type { BackendTask } from "../../types/task";
 import type { AsrAuthorizationOptions } from "./importWorkflow";
 import { readAsrPreference, writeAsrPreference } from "./asrPreferences";
+import { capabilityInstallState } from "./capabilityInstallState";
 
 export interface ImportAsrDialogProps {
   open: boolean;
   plan: ImportAsrEnablementPlan | null;
   loading: boolean;
+  sessionId?: string | null;
+  itemId?: string | null;
   onConfirm: (options: AsrAuthorizationOptions) => Promise<void> | void;
-  onInstall: (capabilityId: string) => Promise<void> | void;
+  onInstall: (capabilityId: string, options: AsrAuthorizationOptions) => Promise<BackendTask | null | void> | BackendTask | null | void;
   onCancel: () => void;
 }
 
@@ -54,6 +64,8 @@ export function ImportAsrDialog({
   open,
   plan,
   loading,
+  sessionId,
+  itemId,
   onConfirm,
   onInstall,
   onCancel,
@@ -65,6 +77,9 @@ export function ImportAsrDialog({
   const [language, setLanguage] = useState("auto");
   const [remember, setRemember] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [startedTaskId, setStartedTaskId] = useState<string | null>(null);
+  const [installError, setInstallError] = useState<NormalizedBackendError | null>(null);
+  const tasks = useTaskStore((state) => state.tasks);
 
   useEffect(() => {
     if (!open) return;
@@ -73,26 +88,59 @@ export function ImportAsrDialog({
     setLanguage(stored?.language ?? "auto");
     setRemember(Boolean(stored));
     setBusy(false);
+    setStartedTaskId(null);
+    setInstallError(null);
   }, [open, plan]);
 
   const selected = useMemo(
     () => plan?.profiles.find((entry) => entry.profile === profile) ?? null,
     [plan, profile],
   );
+  const capabilityTasks = useMemo(() => tasks.filter((task) => {
+    const operation = task.operation;
+    return operation?.kind === "capability_install"
+      && operation.sessionId === sessionId
+      && operation.itemId === itemId
+      && operation.capabilityId === selected?.capabilityId
+      && operation.requirementRevision === plan?.requirementRevision;
+  }), [itemId, plan?.requirementRevision, selected?.capabilityId, sessionId, tasks]);
+  const task = capabilityTasks.find((candidate) => candidate.id === startedTaskId)
+    ?? capabilityTasks.toSorted((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]
+    ?? null;
+  const installState = capabilityInstallState(
+    task,
+    selected?.installable ?? false,
+    selected?.available ?? false,
+  );
+  const taskBusy = task !== null && ["queued", "running", "cancelling"].includes(task.status);
+  const blocked = busy || taskBusy;
+  const taskError = task?.error ? normalizeBackendError(task.error, {
+    defaultSummaryKey: "backendError.summary.importCapabilityUnavailable",
+    defaultActionKind: "retry",
+    defaultRecoverable: true,
+  }) : null;
 
   if (!open) return null;
 
   async function submit() {
-    if (busy || !selected || !canChoose(selected)) return;
+    if (blocked || !selected || !canChoose(selected)) return;
     setBusy(true);
+    setInstallError(null);
     const options = { profile, language: language === "auto" ? null : language };
     try {
       writeAsrPreference(remember ? options : null);
       if (!selected.available && selected.installable) {
-        await onInstall(selected.capabilityId);
+        const started = await onInstall(selected.capabilityId, options);
+        if (started) setStartedTaskId(started.id);
       } else {
         await onConfirm(options);
       }
+    } catch (error) {
+      setInstallError(normalizeBackendError(error, {
+        defaultSummaryKey: "backendError.summary.importCapabilityUnavailable",
+        actionKindOverride: "retry",
+        defaultRecoverable: true,
+      }));
     } finally {
       setBusy(false);
     }
@@ -111,7 +159,7 @@ export function ImportAsrDialog({
         <header className="flex min-h-[52px] items-center gap-3 border-b border-[var(--border)] px-4">
           <Mic2 size={17} className="text-[var(--accent)]" aria-hidden="true" />
           <h2 id="import-asr-title" className="m-0 flex-1 text-[15px] font-semibold">{t("importV2.asr.title")}</h2>
-          <button type="button" className="icon-button" aria-label={t("importV2.asr.cancel")} title={t("importV2.asr.cancel")} onClick={onCancel} disabled={busy}><X size={16} aria-hidden="true" /></button>
+          <button type="button" className="icon-button" aria-label={t("importV2.asr.cancel")} title={t("importV2.asr.cancel")} onClick={onCancel}><X size={16} aria-hidden="true" /></button>
         </header>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 text-[12px]">
@@ -123,7 +171,7 @@ export function ImportAsrDialog({
             </p>
           ) : null}
 
-          <fieldset className="mt-4 border-0 p-0" disabled={loading || busy}>
+          <fieldset className="mt-4 border-0 p-0" disabled={loading || blocked}>
             <legend className="mb-2 text-[12px] font-semibold">{t("importV2.asr.profile")}</legend>
             <div className="grid gap-2">
               {(plan?.profiles ?? []).map((entry, index) => (
@@ -154,7 +202,7 @@ export function ImportAsrDialog({
 
           <label className="mt-4 block">
             <span className="mb-1.5 block text-[12px] font-semibold">{t("importV2.asr.language")}</span>
-            <select className="h-[30px] w-full rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--surface)] px-2 text-[12px]" value={language} onChange={(event) => setLanguage(event.target.value)} disabled={busy || loading}>
+            <select className="h-[30px] w-full rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--surface)] px-2 text-[12px]" value={language} onChange={(event) => setLanguage(event.target.value)} disabled={blocked || loading}>
               <option value="auto">{t("importV2.asr.language.auto")}</option>
               <option value="zh">{t("importV2.asr.language.zh")}</option>
               <option value="en">{t("importV2.asr.language.en")}</option>
@@ -210,15 +258,27 @@ export function ImportAsrDialog({
             {t("importV2.asr.localOnly")}
           </p>
           <label className="mt-3 flex items-center gap-2">
-            <input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} disabled={busy || loading} />
+            <input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} disabled={blocked || loading} />
             <span>{t("importV2.asr.remember")}</span>
           </label>
+          {!selected?.available && !["not_installed", "signed_release_unavailable"].includes(installState.kind) ? (
+            <div className="mt-3" role="status">
+              <div className="flex items-center justify-between gap-3 text-[11px]">
+                <span>{t(`importV2.capability.state.${installState.kind}`)}</span>
+                {installState.totalBytes ? <span className="font-mono text-[var(--text-muted)]">{formatBytes(installState.downloadedBytes, i18n.language, unknown)} / {formatBytes(installState.totalBytes, i18n.language, unknown)}</span> : null}
+              </div>
+              {installState.totalBytes ? <progress className="mt-1 w-full" max={installState.totalBytes} value={installState.downloadedBytes ?? 0} /> : null}
+            </div>
+          ) : null}
+          {installError ?? taskError ? (
+            <ActionableErrorNotice className="mt-3" error={(installError ?? taskError)!} onAction={() => submit()} />
+          ) : null}
         </div>
 
         <footer className="flex items-center justify-end gap-2 border-t border-[var(--border)] px-4 py-3">
-          <button type="button" className="btn btn--sm" onClick={onCancel} disabled={busy}>{t("importV2.asr.cancel")}</button>
-          <button type="button" className="btn btn--sm btn--primary" onClick={() => void submit()} disabled={busy || loading || !selected || !canChoose(selected)}>
-            {busy ? <LoaderCircle size={13} className="mr-1 inline animate-spin" aria-label={t("importV2.common.loading")} /> : null}
+          {taskBusy && task ? <button type="button" className="btn btn--sm" onClick={() => void cancelTaskRequest(task.id)}>{t("importV2.capability.cancelDownload")}</button> : <button type="button" className="btn btn--sm" onClick={onCancel}>{t("importV2.asr.cancel")}</button>}
+          <button type="button" className="btn btn--sm btn--primary" onClick={() => void submit()} disabled={blocked || loading || !selected || !canChoose(selected)}>
+            {blocked ? <LoaderCircle size={13} className="mr-1 inline animate-spin" aria-label={t("importV2.common.loading")} /> : null}
             {t(ctaKey)}
           </button>
         </footer>

@@ -7,6 +7,7 @@ use std::{
 
 use serde::Serialize;
 
+use crate::tasks::task_model::CancellationToken;
 use crate::{errors::BackendError, models::import_v2_file::CapabilityRequirement};
 
 use super::{
@@ -47,19 +48,22 @@ impl ImportCapabilityRuntime {
         service: &ImportV2Service,
     ) -> Result<bool, BackendError> {
         run_startup_loader(move || {
+            super::capability_installer::recover_install_root(install_root)?;
             self.load_installed(install_root, service);
             #[cfg(debug_assertions)]
             {
-                return development.is_some_and(|(development_root, public_key_path)| {
-                    self.load_development(development_root, public_key_path, service)
-                });
+                return Ok(
+                    development.is_some_and(|(development_root, public_key_path)| {
+                        self.load_development(development_root, public_key_path, service)
+                    }),
+                );
             }
             #[cfg(not(debug_assertions))]
             {
                 let _ = development;
-                false
+                Ok(false)
             }
-        })
+        })?
     }
 
     pub fn load_installed(&self, install_root: &Path, service: &ImportV2Service) {
@@ -184,6 +188,95 @@ impl ImportCapabilityRuntime {
 
     pub fn statuses(&self) -> Vec<CapabilityRuntimeStatus> {
         self.statuses.read().map(|v| v.clone()).unwrap_or_default()
+    }
+
+    /// Probe the exact newly installed version through its real pack process
+    /// protocol, then switch only the requested route. Existing routes keep
+    /// their previous healthy engine until this succeeds.
+    pub fn probe_version(
+        &self,
+        install_root: &Path,
+        capability_id: &str,
+        version: &str,
+        route: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<ResolvedCapabilityPack, BackendError> {
+        let spec = PACK_SPECS
+            .iter()
+            .find(|spec| spec.id == capability_id && spec.route == route)
+            .ok_or_else(|| {
+                BackendError::new(
+                    "IMPORT_V2_CAPABILITY_HEALTH_CHECK_FAILED",
+                    "The installed capability does not provide the required route.",
+                    true,
+                    false,
+                )
+            })?;
+        let requirement = CapabilityRequirement {
+            capability_id: capability_id.into(),
+            minimum_version: Some(version.into()),
+            protocol_version: "2".into(),
+            target_triple: target_triple(),
+            accepted_license_expressions: spec
+                .licenses
+                .iter()
+                .map(|value| (*value).into())
+                .collect(),
+        };
+        let manager =
+            CapabilityPackManager::new(install_root.to_path_buf(), embedded_trusted_keys());
+        let pack = manager.resolve_version(&requirement, version)?;
+        super::pack_engine::probe_capability_pack(&pack, capability_id, route, cancellation)?;
+        Ok(pack)
+    }
+
+    pub fn activate_probed_version(
+        &self,
+        pack: ResolvedCapabilityPack,
+        capability_id: &str,
+        route: &str,
+        service: &ImportV2Service,
+    ) -> Result<(), BackendError> {
+        let spec = PACK_SPECS
+            .iter()
+            .find(|spec| spec.id == capability_id && spec.route == route)
+            .ok_or_else(|| {
+                BackendError::new(
+                    "IMPORT_V2_CAPABILITY_HEALTH_CHECK_FAILED",
+                    "The installed capability does not provide the required route.",
+                    true,
+                    false,
+                )
+            })?;
+        service.replace_capability_pack(
+            pack.clone(),
+            route.into(),
+            spec.extensions
+                .iter()
+                .map(|value| (*value).into())
+                .collect(),
+            Duration::from_secs(spec.timeout_seconds),
+        )?;
+        if capability_id == "browser-runtime" {
+            *self.browser_pack.write().map_err(|_| {
+                BackendError::new(
+                    "IMPORT_V2_CAPABILITY_LOCKED",
+                    "Capability runtime is unavailable.",
+                    true,
+                    false,
+                )
+            })? = Some(pack);
+        }
+        if let Ok(mut statuses) = self.statuses.write() {
+            if let Some(status) = statuses
+                .iter_mut()
+                .find(|status| status.capability_id == capability_id && status.route == route)
+            {
+                status.available = true;
+                status.reason = None;
+            }
+        }
+        Ok(())
     }
     pub fn browser_pack(&self) -> Option<ResolvedCapabilityPack> {
         self.browser_pack

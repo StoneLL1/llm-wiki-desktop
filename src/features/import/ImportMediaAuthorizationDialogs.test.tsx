@@ -108,6 +108,30 @@ describe("Import media authorization dialogs", () => {
     expect(onConfirm).not.toHaveBeenCalled();
   });
 
+  it("keeps the ASR dialog open and presents an actionable install failure", async () => {
+    const onInstall = vi.fn().mockRejectedValue({
+      code: "IMPORT_V2_CAPABILITY_UNAVAILABLE",
+      message: "The signed archive could not be downloaded.",
+      recoverable: true,
+    });
+    render(
+      <ImportAsrDialog
+        open
+        plan={asrPlan}
+        loading={false}
+        onConfirm={vi.fn()}
+        onInstall={onInstall}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Download and enable/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/required import capability is unavailable/i);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Retry/i })).toBeInTheDocument();
+  });
+
   it("requires an explicit choice when multiple CJK companion subtitles match", async () => {
     const onConfirm = vi.fn().mockResolvedValue(undefined);
     render(

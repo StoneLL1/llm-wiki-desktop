@@ -93,6 +93,37 @@ completed = False
 try:
     rpc = read_rpc()
     params = rpc.get("params")
+    if rpc.get("method") == "capability.health":
+        route = params.get("route") if isinstance(params, dict) else None
+        if (
+            not isinstance(params, dict)
+            or params.get("protocolVersion") != "2"
+            or params.get("capabilityId") != "ocr-cjk-accurate"
+            or route != "ocr.cjk-accurate"
+        ):
+            raise OcrPolicyError("IMPORT_OCR_INVALID_REQUEST")
+        with (PACK_ROOT / "manifest.json").open("r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        if manifest.get("packId") != "ocr-cjk-accurate" or manifest.get("protocolVersion") != "2":
+            raise OcrPolicyError("IMPORT_OCR_ENGINE_INTEGRITY_FAILED")
+        for relative in MODEL_DECLARATIONS:
+            verify_signed_file(PACK_ROOT, manifest, relative)
+        verify_signed_file(PACK_ROOT, manifest, "models/ppocrv5_dict.txt")
+        import rapidocr  # noqa: F401
+        from PIL import Image  # noqa: F401
+        write_response({
+            "jsonrpc": "2.0",
+            "id": rpc.get("id"),
+            "result": {
+                "healthy": True,
+                "protocolVersion": "2",
+                "capabilityId": "ocr-cjk-accurate",
+                "route": route,
+            },
+            "error": None,
+        })
+        completed = True
+        raise SystemExit(0)
     if (
         rpc.get("jsonrpc") != "2.0"
         or not isinstance(params, dict)

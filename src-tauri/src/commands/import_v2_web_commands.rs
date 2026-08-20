@@ -796,7 +796,7 @@ pub fn authorize_local_asr_v2(
     state: State<'_, AppState>,
     request: AuthorizeLocalAsrV2Request,
 ) -> Result<(), BackendError> {
-    authorize_local_asr(&state, request)
+    authorize_local_asr(&state, request, None)
 }
 
 #[tauri::command]
@@ -828,12 +828,13 @@ pub fn authorize_bilibili_asr_v2(
     state: State<'_, AppState>,
     request: AuthorizeBilibiliAsrV2Request,
 ) -> Result<(), BackendError> {
-    authorize_local_asr(&state, request)
+    authorize_local_asr(&state, request, None)
 }
 
-fn authorize_local_asr(
+pub(crate) fn authorize_local_asr(
     state: &State<'_, AppState>,
     request: AuthorizeLocalAsrV2Request,
+    expected_item: Option<&ImportItem>,
 ) -> Result<(), BackendError> {
     state.with_current_project_write_access(
         &request.project_id,
@@ -857,33 +858,52 @@ fn authorize_local_asr(
                     )
                 })?;
             validate_local_asr_item(item)?;
-            if item.input.kind == ImportInputKind::Url {
+            let asr_grant = if item.input.kind == ImportInputKind::Url {
                 let target = state.import_v2_service.resolve_web_target(
                     &item.input.locator,
                     item.input.normalized_locator.as_deref(),
                 )?;
                 validate_local_asr_host(&target.public.host)?;
+                Some(BilibiliAsrGrant {
+                    project_id: request.project_id.clone(),
+                    session_id: request.session_id.clone(),
+                    item_id: request.item_id.clone(),
+                    target_sha256: asr_target_sha256(target.request_url.as_str()),
+                    expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+                })
+            } else {
+                None
+            };
+            if let Some(expected_item) = expected_item {
                 state
                     .import_v2_service
-                    .authorize_bilibili_asr(BilibiliAsrGrant {
-                        project_id: request.project_id.clone(),
-                        session_id: request.session_id.clone(),
-                        item_id: request.item_id.clone(),
-                        target_sha256: asr_target_sha256(target.request_url.as_str()),
-                        expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
-                    })?;
+                    .authorize_media_for_session_if_unchanged_authorized(
+                        permit,
+                        &state.file_store,
+                        &request.session_id,
+                        &request.item_id,
+                        ImportMediaAuthorizationKind::Asr,
+                        Some(request.profile.clone()),
+                        request.language.clone(),
+                        expected_item,
+                    )?;
+            } else {
+                state
+                    .import_v2_service
+                    .authorize_media_for_session_authorized(
+                        permit,
+                        &state.file_store,
+                        &request.session_id,
+                        &request.item_id,
+                        ImportMediaAuthorizationKind::Asr,
+                        Some(request.profile.clone()),
+                        request.language.clone(),
+                    )?;
             }
-            state
-                .import_v2_service
-                .authorize_media_for_session_authorized(
-                    permit,
-                    &state.file_store,
-                    &request.session_id,
-                    &request.item_id,
-                    ImportMediaAuthorizationKind::Asr,
-                    Some(request.profile.clone()),
-                    request.language.clone(),
-                )
+            if let Some(grant) = asr_grant {
+                state.import_v2_service.authorize_bilibili_asr(grant)?;
+            }
+            Ok(())
         },
     )
 }

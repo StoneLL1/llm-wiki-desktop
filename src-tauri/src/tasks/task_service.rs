@@ -635,6 +635,36 @@ impl TaskService {
         )
     }
 
+    pub fn create_project_capability_install_task(
+        &self,
+        project_id: String,
+        project_root: PathBuf,
+        task_state_root: PathBuf,
+        title: String,
+        session_id: String,
+        item_id: String,
+        capability_id: String,
+        requirement_revision: String,
+    ) -> Result<BackendTask, String> {
+        self.create_task_internal(
+            TaskType::Import,
+            Some(project_id),
+            Some(project_root),
+            title,
+            true,
+            None,
+            Some(TaskOperation::CapabilityInstall {
+                session_id,
+                item_id,
+                capability_id,
+                requirement_revision,
+            }),
+            true,
+            None,
+            Some(task_state_root),
+        )
+    }
+
     pub fn create_workflow_task(
         &self,
         project_id: String,
@@ -3502,14 +3532,25 @@ impl TaskService {
                                 ) || (task.status == TaskStatus::WaitingForConfirmation
                                     && !task.is_import_operation())
                                 {
-                                    task.status = TaskStatus::Failed;
+                                    let capability_install = matches!(
+                                        task.operation.as_ref(),
+                                        Some(
+                                            crate::models::task::TaskOperation::CapabilityInstall { .. }
+                                        )
+                                    );
+                                    task.status = if capability_install {
+                                        TaskStatus::Interrupted
+                                    } else {
+                                        TaskStatus::Failed
+                                    };
                                     task.error = Some(crate::errors::BackendError::new(
                                         "TASK_RECOVERY",
                                         "Task was interrupted by application restart",
                                         true,
                                         false,
                                     ));
-                                    task.completed_at = Some(Utc::now().to_rfc3339());
+                                    task.completed_at =
+                                        (!capability_install).then(|| Utc::now().to_rfc3339());
                                     task.updated_at = Utc::now().to_rfc3339();
                                 }
 

@@ -38,6 +38,8 @@ const MAX_STDOUT_LINES: usize = 256;
 const MAX_REMOTE_ASSETS: usize = 128;
 const MAX_STDERR_BYTES: u64 = 1024 * 1024;
 const PROCESS_OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+const CAPABILITY_HEALTH_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_HEALTH_RESPONSE_BYTES: u64 = 64 * 1024;
 
 pub struct PackProcessEngine {
     pack: ResolvedCapabilityPack,
@@ -73,6 +75,158 @@ impl PackProcessEngine {
             connector_profiles_root,
         }
     }
+}
+
+pub(crate) fn probe_capability_pack(
+    pack: &ResolvedCapabilityPack,
+    capability_id: &str,
+    route: &str,
+    cancellation: &CancellationToken,
+) -> Result<(), BackendError> {
+    validate_entrypoint_unchanged(pack)?;
+    let request_id = format!("health-{}", uuid::Uuid::new_v4());
+    let mut command = Command::new(&pack.entrypoint);
+    command
+        .args(&pack.manifest.entrypoint_args)
+        .current_dir(&pack.root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .env_clear();
+    for key in ["SystemRoot", "WINDIR"] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+        unsafe {
+            command.pre_exec(|| {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0000_0200);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|_| health_error("The capability health process could not be started."))?;
+    let platform_job = match attach_platform_job(&child) {
+        Ok(job) => job,
+        Err(error) => {
+            terminate_tree(&mut child);
+            return Err(error);
+        }
+    };
+    let mut child = ProcessGuard(child, None, None, platform_job);
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "capability.health",
+        "params": {
+            "protocolVersion": "2",
+            "capabilityId": capability_id,
+            "route": route,
+        },
+    });
+    let mut stdin = child
+        .0
+        .stdin
+        .take()
+        .ok_or_else(|| health_error("The capability health process stdin is unavailable."))?;
+    serde_json::to_writer(&mut stdin, &request)
+        .map_err(|_| health_error("The capability health request could not be encoded."))?;
+    stdin
+        .write_all(b"\n")
+        .map_err(|_| health_error("The capability health request could not be sent."))?;
+    drop(stdin);
+    let stdout = child
+        .0
+        .stdout
+        .take()
+        .ok_or_else(|| health_error("The capability health process stdout is unavailable."))?;
+    let (sender, receiver) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout
+            .take(MAX_HEALTH_RESPONSE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes);
+        let _ = sender.send(result);
+    });
+    child.1 = Some(reader);
+    let started = Instant::now();
+    let bytes = loop {
+        if cancellation.is_cancelled() {
+            terminate_tree(&mut child.0);
+            return Err(cancelled());
+        }
+        if started.elapsed() >= CAPABILITY_HEALTH_TIMEOUT {
+            terminate_tree(&mut child.0);
+            return Err(health_error("The capability health process timed out."));
+        }
+        match receiver.recv_timeout(Duration::from_millis(100)) {
+            Ok(Ok(bytes)) => break bytes,
+            Ok(Err(_)) => {
+                return Err(health_error(
+                    "The capability health response could not be read.",
+                ))
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(health_error(
+                    "The capability health response reader stopped unexpectedly.",
+                ))
+            }
+        }
+    };
+    if bytes.is_empty() || bytes.len() as u64 > MAX_HEALTH_RESPONSE_BYTES {
+        return Err(health_error("The capability health response is invalid."));
+    }
+    let response: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|_| health_error("The capability health response is invalid."))?;
+    let healthy = response.get("jsonrpc").and_then(|value| value.as_str()) == Some("2.0")
+        && response.get("id").and_then(|value| value.as_str()) == Some(request_id.as_str())
+        && response
+            .pointer("/result/healthy")
+            .and_then(|value| value.as_bool())
+            == Some(true)
+        && response
+            .pointer("/result/protocolVersion")
+            .and_then(|value| value.as_str())
+            == Some("2")
+        && response
+            .pointer("/result/capabilityId")
+            .and_then(|value| value.as_str())
+            == Some(capability_id)
+        && response
+            .pointer("/result/route")
+            .and_then(|value| value.as_str())
+            == Some(route)
+        && response.get("error").is_none_or(serde_json::Value::is_null);
+    if !healthy {
+        return Err(health_error(
+            "The capability health response did not confirm readiness.",
+        ));
+    }
+    Ok(())
+}
+
+fn health_error(message: &str) -> BackendError {
+    BackendError::new(
+        "IMPORT_V2_CAPABILITY_HEALTH_CHECK_FAILED",
+        message,
+        true,
+        false,
+    )
 }
 
 impl ImportEngine for PackProcessEngine {

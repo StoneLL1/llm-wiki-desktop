@@ -167,6 +167,20 @@ let temporaryRoot;
 let completed = false;
 try {
   rpc = await readRpc();
+  if (rpc?.method === "capability.health") {
+    const route = rpc?.params?.route;
+    if (rpc?.params?.protocolVersion !== "2" || rpc?.params?.capabilityId !== "asr-sensevoice-small" || route !== "media.asr") throw new Error("IMPORT_ASR_INVALID_REQUEST");
+    const manifest = JSON.parse(await fs.readFile(path.join(packRoot, "manifest.json"), "utf8"));
+    if (manifest.packId !== "asr-sensevoice-small" || manifest.protocolVersion !== "2") throw new Error("IMPORT_ASR_ENGINE_INTEGRITY_FAILED");
+    await Promise.all([
+      verifySignedFile(packRoot, manifest, ffmpegRelativePath()),
+      verifySignedFile(packRoot, manifest, sherpaRelativePath()),
+      verifySignedFile(packRoot, manifest, "models/model.int8.onnx"),
+      verifySignedFile(packRoot, manifest, "models/tokens.txt"),
+    ]);
+    process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { healthy: true, protocolVersion: "2", capabilityId: "asr-sensevoice-small", route }, error: null })}\n`);
+    process.exit(0);
+  }
   const params = rpc?.params;
   if (rpc?.jsonrpc !== "2.0" || !params || params.operation !== "extract" ||
       params.input?.kind !== "file" ||

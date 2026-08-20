@@ -129,10 +129,16 @@ export function ImportV2Dialogs({ workflow, privateItem, asrItem, asrItemIds = [
       <ImportCapabilityDialog
         open={Boolean(capabilityItemId && capability)}
         requirement={capability}
+        sessionId={session?.sessionId ?? null}
+        itemId={capabilityItem?.itemId ?? null}
         onCancel={closeCapability}
         onInstall={async (capabilityId) => {
-          if (capabilityItem) await workflow.installCapability(capabilityItem.itemId, capabilityId);
-          closeCapability();
+          if (capabilityItem) return workflow.installCapability(
+            capabilityItem.itemId,
+            capabilityId,
+            capability.requirementRevision,
+          );
+          return null;
         }}
       />
       <ImportAsrDialog
@@ -152,10 +158,16 @@ export function ImportV2Dialogs({ workflow, privateItem, asrItem, asrItemIds = [
           }
           onCloseAsr();
         }}
-        onInstall={async (capabilityId) => {
+        sessionId={session?.sessionId ?? null}
+        itemId={asrItem?.itemId ?? null}
+        onInstall={async (capabilityId, options) => {
           if (!asrItem) return;
-          await workflow.installCapability(asrItem.itemId, capabilityId);
-          onCloseAsr();
+          return workflow.installCapability(
+            asrItem.itemId,
+            capabilityId,
+            asrPlan!.requirementRevision,
+            options,
+          );
         }}
       />
       <ImportSubtitleDialog

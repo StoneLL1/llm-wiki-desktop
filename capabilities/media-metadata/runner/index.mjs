@@ -35,6 +35,12 @@ function containedRoot(projectRoot, stagingRoot) {
 let rpc;
 try {
   rpc = await readRpc();
+  if (rpc?.method === "capability.health") {
+    const route = rpc?.params?.route;
+    if (rpc?.params?.protocolVersion !== "2" || rpc?.params?.capabilityId !== "media-metadata" || route !== "web.bilibili.metadata") throw new Error("IMPORT_WEB_INVALID_REQUEST");
+    process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { healthy: true, protocolVersion: "2", capabilityId: "media-metadata", route }, error: null })}\n`);
+    process.exit(0);
+  }
   const params = rpc?.params;
   if (rpc?.jsonrpc !== "2.0" || !params || params.input?.kind !== "url") throw new Error("IMPORT_WEB_INVALID_REQUEST");
   const requestedUrl = validateBilibiliUrl(params.input.normalizedLocator || params.input.locator);

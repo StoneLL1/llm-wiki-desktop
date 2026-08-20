@@ -249,6 +249,7 @@ pub struct ImportCapabilityRequirement {
     pub model_bytes: Option<u64>,
     pub license: Option<String>,
     pub fallback: Option<String>,
+    pub requirement_revision: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -259,7 +260,12 @@ pub struct InstallImportCapabilityV2Request {
     pub session_id: String,
     pub item_id: String,
     pub capability_id: String,
+    pub requirement_revision: String,
     pub acknowledge_install: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asr_profile: Option<ImportAsrProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recognition_language: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -312,6 +318,7 @@ pub struct ImportAsrProfilePlan {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportAsrEnablementPlan {
+    pub requirement_revision: String,
     pub recommended_profile: ImportAsrProfile,
     pub available_memory_bytes: Option<u64>,
     pub available_disk_bytes: Option<u64>,

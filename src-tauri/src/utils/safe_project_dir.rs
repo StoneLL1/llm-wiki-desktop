@@ -213,6 +213,42 @@ impl BoundProjectMutationRoot {
         Ok(file)
     }
 
+    /// Open an app-owned regular file for streaming mutation without resolving
+    /// the final name through the ambient filesystem namespace.
+    pub(crate) fn open_regular_mutate_or_create(
+        &self,
+        path: &Path,
+        truncate: bool,
+    ) -> io::Result<File> {
+        let name = self.entry_name(path)?;
+        let file = match open_existing_relative(&self.anchor, name, OpenPurpose::Mutate) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                create_new_relative(&self.anchor, name)?
+            }
+            Err(error) => return Err(error),
+        };
+        require_regular(&file)?;
+        if truncate {
+            file.set_len(0)?;
+        }
+        Ok(file)
+    }
+
+    pub(crate) fn create_regular_new(&self, path: &Path) -> io::Result<File> {
+        let name = self.entry_name(path)?;
+        let file = create_new_relative(&self.anchor, name)?;
+        require_regular(&file)?;
+        Ok(file)
+    }
+
+    pub(crate) fn create_directory(&self, path: &Path) -> io::Result<()> {
+        let name = self.entry_name(path)?;
+        let directory = create_directory_relative(&self.anchor, name)?;
+        require_directory(&directory)?;
+        self.sync()
+    }
+
     pub(crate) fn file_identity(&self, path: &Path) -> io::Result<BoundFileIdentity> {
         let name = self.entry_name(path)?;
         let file = open_existing_relative(&self.anchor, name, OpenPurpose::ReadIdentity)?;
@@ -516,22 +552,31 @@ impl BoundProjectMutationRoot {
         source: &Path,
         target: &Path,
     ) -> io::Result<()> {
+        self.rename_directory_to_no_replace(source, self, target)
+    }
+
+    pub(crate) fn rename_directory_to_no_replace(
+        &self,
+        source: &Path,
+        destination: &Self,
+        target: &Path,
+    ) -> io::Result<()> {
         let source_name = self.entry_name(source)?;
-        let target_name = self.entry_name(target)?;
+        let target_name = destination.entry_name(target)?;
         let directory = open_directory_relative_mutate(&self.anchor, source_name)?;
         require_directory(&directory)?;
         rename_open_file(
             &self.anchor,
             &directory,
             source_name,
-            &self.anchor,
+            &destination.anchor,
             target_name,
             false,
         )?;
-        let renamed = open_directory_relative_mutate(&self.anchor, target_name)?;
+        let renamed = open_directory_relative_mutate(&destination.anchor, target_name)?;
         if identity_from_file(&renamed)? != identity_from_file(&directory)? {
             let _ = rename_open_file(
-                &self.anchor,
+                &destination.anchor,
                 &renamed,
                 target_name,
                 &self.anchor,
@@ -540,7 +585,11 @@ impl BoundProjectMutationRoot {
             );
             return Err(conflict("directory changed during rename"));
         }
-        self.sync()
+        self.sync()?;
+        if self.parent != destination.parent {
+            destination.sync()?;
+        }
+        Ok(())
     }
 
     pub(crate) fn remove_empty_directory(&self, path: &Path) -> io::Result<()> {
@@ -1322,7 +1371,7 @@ mod platform {
                 FILE_SHARE_READ,
             ),
             OpenPurpose::Mutate => (
-                FILE_READ_DATA | FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE,
+                FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE,
                 FILE_SHARE_READ,
             ),
         };
@@ -1850,6 +1899,47 @@ mod tests {
     }
 
     #[test]
+    fn directory_rename_across_retained_parents_is_no_replace() {
+        let root = tempfile::tempdir().unwrap();
+        let source_parent = root.path().join("staging");
+        let destination_parent = root.path().join("installed");
+        let source = source_parent.join("v1");
+        let destination = destination_parent.join("v1");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&destination_parent).unwrap();
+        std::fs::write(source.join("manifest.json"), b"signed").unwrap();
+        let source_binding = BoundProjectMutationRoot::bind(root.path(), &source).unwrap();
+        let destination_binding =
+            BoundProjectMutationRoot::bind(root.path(), &destination).unwrap();
+
+        source_binding
+            .rename_directory_to_no_replace(&source, &destination_binding, &destination)
+            .unwrap();
+        assert!(!source.exists());
+        assert_eq!(
+            std::fs::read(destination.join("manifest.json")).unwrap(),
+            b"signed"
+        );
+
+        let replacement = source_parent.join("v2");
+        std::fs::create_dir_all(&replacement).unwrap();
+        std::fs::write(replacement.join("manifest.json"), b"replacement").unwrap();
+        let replacement_binding =
+            BoundProjectMutationRoot::bind(root.path(), &replacement).unwrap();
+        assert!(replacement_binding
+            .rename_directory_to_no_replace(&replacement, &destination_binding, &destination)
+            .is_err());
+        assert_eq!(
+            std::fs::read(destination.join("manifest.json")).unwrap(),
+            b"signed"
+        );
+        assert_eq!(
+            std::fs::read(replacement.join("manifest.json")).unwrap(),
+            b"replacement"
+        );
+    }
+
+    #[test]
     fn retained_parent_blocks_or_survives_parent_replacement() {
         let root = tempfile::tempdir().unwrap();
         let parent = root.path().join("wiki");
@@ -2151,8 +2241,7 @@ mod tests {
             let renamed = live.join(format!("inside-{round}-renamed.md"));
             let binding = BoundProjectMutationRoot::bind(root.path(), &target).unwrap();
             phase.store(0, Ordering::Release);
-            let swap_deadline =
-                std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let swap_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
             while phase.load(Ordering::Acquire) != 1 {
                 assert!(
                     std::time::Instant::now() < swap_deadline,
@@ -2170,8 +2259,7 @@ mod tests {
             mutations += 1;
             assert_eq!(std::fs::read(&sentinel).unwrap(), b"outside");
             phase.store(2, Ordering::Release);
-            let restore_deadline =
-                std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let restore_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
             while phase.load(Ordering::Acquire) != 3 {
                 assert!(
                     std::time::Instant::now() < restore_deadline,
