@@ -35,6 +35,7 @@ test("completed owner contracts turn green while later batches remain red", () =
     "mutation-write-authority-inventory",
     "signed-updater-foundation",
     "real-update-offer",
+    "atomic-stable-release-workflow",
   ]);
   assert.equal(
     actual.every(({ id, state }) => state === (completed.has(id) ? "green" : "red")),

@@ -34,7 +34,7 @@
     {
       "id": "atomic-stable-release-workflow",
       "ownerBatch": "5",
-      "expected": "red"
+      "expected": "green"
     }
   ]
 }
