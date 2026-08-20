@@ -1,7 +1,7 @@
 # Release identity, repository access, and signing ownership
 
-Status: Batch 0 frozen contract with external blockers recorded
-Last verified: 2026-08-20
+Status: Batch 5 atomic desktop publisher implemented locally; external signing, reviewer, public-access, and remote-rehearsal blockers remain
+Last verified: 2026-08-21
 
 ## Frozen public release coordinate
 
@@ -61,7 +61,7 @@ The exact publisher subject, Team ID, capability public-key ID, named updater ow
 
 The committed updater trust anchor is minisign public key ID `0D274EE88AB90656`. Its Base64-encoded public-key document is frozen in `release/release-contract.json` and `src-tauri/tauri.conf.json`; those values must remain byte-for-byte equal.
 
-Only the protected `desktop-release` GitHub Environment may expose the corresponding private material to a publishing job:
+Only jobs in the protected `desktop-release` GitHub Environment may expose the corresponding private material during the atomic build/sign/publish transaction:
 
 - `TAURI_SIGNING_PRIVATE_KEY`
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
@@ -82,12 +82,12 @@ Current custody record: primary owner `pending-human-input`; backup custodian `p
 
 - Ordinary CI declares `contents: read` and has no publishing permission.
 - Capability build/sign jobs inherit `contents: read`.
-- Only the final `publish-catalog` job currently elevates to `contents: write`, and it remains behind the `capability-release` environment.
-- Manual capability publication now accepts only the frozen application tag grammar at the configured version, requires that the existing tag resolve to the selected default-branch commit, derives the canonical exact-tag asset base internally, and may upload only to a draft release.
-- Batch 5 must replace independent capability publication with one atomic desktop publisher; only that final publisher may receive `contents: write`.
-- The repository owner must configure required reviewers for `capability-release` and the future `desktop-release` environment. Remote configuration is currently unverified because anonymous repository access fails.
+- The reusable capability workflow has `contents: read`, accepts the unified release tag, and uploads only same-run workflow artifacts. It cannot create or upload to a GitHub Release.
+- `.github/workflows/desktop-release.yml` owns the atomic capability + four-platform desktop transaction. Only its final `publish-stable` job receives `contents: write`, and that job is protected by the `desktop-release` environment.
+- The sealed candidate remains a workflow artifact through build, manifest, packaged-smoke, attestation, and full asset rehearsal. The protected publisher creates one draft only after those gates, uploads the complete bundle, then publishes and performs anonymous post-publish verification.
+- The repository owner must configure required reviewers for both `capability-release` and `desktop-release`. Remote configuration remains unverified because anonymous repository access fails.
 
-No workflow rehearsal is claimed for Batch 0: the canonical repository is not anonymously reachable, and no draft tag or release asset exists. This is a release blocker, not a local test failure.
+No remote workflow rehearsal is claimed for Batch 5: the canonical repository is not anonymously reachable, and no draft tag or release asset exists. This is a release blocker, not a local test failure.
 
 ## Local and CI checks
 

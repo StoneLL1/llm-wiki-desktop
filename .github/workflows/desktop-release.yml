@@ -1,0 +1,690 @@
+name: Atomic desktop release
+
+on:
+  push:
+    tags:
+      - "app-v*.*.*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing stable app-v tag selected at the current commit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release-${{ inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: 22.17.0
+  RUST_VERSION: 1.92.0
+
+jobs:
+  preflight:
+    name: Freeze tag, commit, tools, policy, and secrets
+    runs-on: ubuntu-24.04
+    environment: desktop-release
+    outputs:
+      release_tag: ${{ steps.coordinate.outputs.release_tag }}
+      version: ${{ steps.coordinate.outputs.version }}
+      commit_sha: ${{ steps.coordinate.outputs.commit_sha }}
+      published_at: ${{ steps.coordinate.outputs.published_at }}
+    steps:
+      - name: Checkout the exact release tag with full history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.release_tag || github.ref_name }}
+          fetch-depth: 0
+
+      - name: Setup pinned Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Setup pinned Rust
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update
+          rustup default "$RUST_VERSION"
+
+      - name: Validate canonical repository, stable tag, exact commit, version, and identifiers
+        id: coordinate
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "StoneLL1/llm-wiki-desktop"
+          [[ "$RELEASE_TAG" =~ ^app-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$GITHUB_SHA"
+          node scripts/check-release-version.mjs --tag "$RELEASE_TAG"
+          version="${RELEASE_TAG#app-v}"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "published_at=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" >> "$GITHUB_OUTPUT"
+
+      - name: Require protected release inputs without printing values
+        env:
+          CAPABILITY_KEY_ID: ${{ vars.CAPABILITY_SIGNING_KEY_ID }}
+          UPDATER_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          UPDATER_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_PUBLISHER_SUBJECT: ${{ vars.WINDOWS_PUBLISHER_SUBJECT }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in CAPABILITY_KEY_ID UPDATER_PRIVATE_KEY UPDATER_PRIVATE_KEY_PASSWORD WINDOWS_CERTIFICATE WINDOWS_CERTIFICATE_PASSWORD WINDOWS_PUBLISHER_SUBJECT APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID KEYCHAIN_PASSWORD; do
+            test -n "${!name:-}" || { echo "required protected release input is missing: $name" >&2; exit 1; }
+          done
+
+      - name: Install exact locked dependencies
+        run: npm ci
+
+      - name: Require the committed Rust lock without resolving updates
+        run: cargo metadata --locked --no-deps --manifest-path src-tauri/Cargo.toml --format-version 1 >/dev/null
+
+      - name: Run the complete repository gate
+        run: npm run check
+
+  capability-build:
+    name: Build signed capability matrix without publishing
+    needs: preflight
+    uses: ./.github/workflows/capability-release.yml
+    with:
+      release_tag: ${{ needs.preflight.outputs.release_tag }}
+      signing_key_id: ${{ vars.CAPABILITY_SIGNING_KEY_ID }}
+    secrets: inherit
+
+  desktop-build:
+    name: Build and sign ${{ matrix.platform }}
+    needs: [preflight, capability-build]
+    runs-on: ${{ matrix.os }}
+    environment: desktop-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x86_64
+            os: windows-2025
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+          - platform: darwin-aarch64
+            os: macos-15
+            target: aarch64-apple-darwin
+            bundles: dmg
+          - platform: darwin-x86_64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            bundles: dmg
+          - platform: linux-x86_64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            bundles: appimage
+    steps:
+      - name: Checkout exact release commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.preflight.outputs.commit_sha }}
+
+      - name: Setup pinned Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Setup pinned Rust
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          rustup toolchain install $env:RUST_VERSION --profile minimal --no-self-update
+          rustup default $env:RUST_VERSION
+          rustup target add '${{ matrix.target }}'
+
+      - name: Install Linux bundler prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xvfb
+
+      - name: Install exact locked dependencies
+        run: npm ci
+
+      - name: Stage capability catalog from this workflow run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: capability-install-catalog
+          path: release-input/capabilities
+
+      - name: Verify and stage release catalog for compile-time embedding
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          COMMIT_SHA: ${{ needs.preflight.outputs.commit_sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          node scripts/verify-capability-catalog.mjs `
+            --catalog release-input/capabilities/install-catalog.json `
+            --trusted-keys release-input/capabilities/trusted-keys.json `
+            --mode release --tag $env:RELEASE_TAG `
+            --provenance release-input/capabilities/catalog-provenance.json `
+            --expected-commit $env:COMMIT_SHA --expected-run-id $env:RUN_ID
+          "LLM_WIKI_CAPABILITY_CATALOG_MODE=release" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "LLM_WIKI_CAPABILITY_STAGING_DIR=$((Resolve-Path release-input/capabilities).Path)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Import Windows Authenticode certificate and create signing overlay
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'desktop-release.pfx'
+          [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $certificatePath -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          Remove-Item -LiteralPath $certificatePath -Force
+          $overlay = @{ bundle = @{ windows = @{ certificateThumbprint = $certificate.Thumbprint; digestAlgorithm = 'sha256'; timestampUrl = 'http://timestamp.digicert.com' } } }
+          $overlayPath = Join-Path $env:RUNNER_TEMP 'tauri.windows.release.json'
+          $overlay | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $overlayPath -Encoding utf8
+          "TAURI_RELEASE_CONFIG=$overlayPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Import Apple Developer ID certificate into an ephemeral keychain
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          certificate="$RUNNER_TEMP/desktop-release.p12"
+          keychain="$RUNNER_TEMP/desktop-release.keychain-db"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          security import "$certificate" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security list-keychain -d user -s "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$keychain"
+          case "$APPLE_TEAM_ID" in ''|*[!A-Z0-9]*) echo 'APPLE_TEAM_ID must be uppercase alphanumeric.' >&2; exit 1;; esac
+          identities="$(security find-identity -v -p codesigning "$keychain")"
+          count="$(printf '%s\n' "$identities" | grep -c '"Developer ID Application:' || true)"
+          test "$count" = 1
+          identity="$(printf '%s\n' "$identities" | sed -n 's/.*"\(Developer ID Application:.*\)".*/\1/p')"
+          case "$identity" in *" ($APPLE_TEAM_ID)") ;; *) echo 'Developer ID identity does not match APPLE_TEAM_ID.' >&2; exit 1;; esac
+          printf 'APPLE_SIGNING_IDENTITY=%s\n' "$identity" >> "$GITHUB_ENV"
+          rm -f "$certificate"
+
+      - name: Build signed Windows installer and updater
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri -- build --target '${{ matrix.target }}' --bundles '${{ matrix.bundles }}' --config "$env:TAURI_RELEASE_CONFIG" -- --locked
+
+      - name: Build signed, notarized, and stapled Apple installer and updater
+        if: runner.os == 'macOS'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: npm run tauri -- build --target '${{ matrix.target }}' --bundles '${{ matrix.bundles }}' -- --locked
+
+      - name: Build Linux installer and signed updater
+        if: runner.os == 'Linux'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri -- build --target '${{ matrix.target }}' --bundles '${{ matrix.bundles }}' -- --locked
+
+      - name: Verify Windows Authenticode independently from the updater signature
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          EXPECTED_SUBJECT: ${{ vars.WINDOWS_PUBLISHER_SUBJECT }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = 'src-tauri/target/${{ matrix.target }}/release'
+          $application = Get-Item -LiteralPath (Join-Path $release 'llm-wiki-desktop.exe')
+          $installers = @(Get-ChildItem -LiteralPath (Join-Path $release 'bundle') -Recurse -File -Filter '*-setup.exe')
+          if ($installers.Count -ne 1) { throw "Expected exactly one NSIS installer, found $($installers.Count)." }
+          $executables = @($application, $installers[0])
+          $signatures = @($executables | ForEach-Object { Get-AuthenticodeSignature -LiteralPath $_.FullName })
+          if (@($signatures | Where-Object { $_.Status -ne 'Valid' -or $_.SignerCertificate.Subject -ne $env:EXPECTED_SUBJECT }).Count -ne 0) {
+            throw 'Authenticode status or publisher subject did not match the protected release contract.'
+          }
+          @{ kind = 'windows-authenticode'; verified = $true; subject = $env:EXPECTED_SUBJECT; files = $executables.Count } | ConvertTo-Json | Set-Content "$env:RUNNER_TEMP/signing-evidence.json" -Encoding utf8
+
+      - name: Verify Apple Developer ID, Gatekeeper, notarization, and staple
+        if: runner.os == 'macOS'
+        env:
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          bundle="src-tauri/target/${{ matrix.target }}/release/bundle"
+          app="$(find "$bundle" -type d -name '*.app' -print -quit)"
+          dmg="$(find "$bundle" -type f -name '*.dmg' -print -quit)"
+          test -n "$app" && test -n "$dmg"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          signing_details="$(codesign -dv --verbose=4 "$app" 2>&1)"
+          team_id="$(printf '%s\n' "$signing_details" | sed -n 's/^TeamIdentifier=//p')"
+          authority="$(printf '%s\n' "$signing_details" | sed -n 's/^Authority=//p' | head -n 1)"
+          test "$team_id" = "$APPLE_TEAM_ID"
+          case "$authority" in 'Developer ID Application:'*) ;; *) echo 'Unexpected Apple signing authority.' >&2; exit 1;; esac
+          spctl --assess --type execute --verbose=2 "$app"
+          xcrun stapler validate "$app"
+          xcrun stapler validate "$dmg"
+          printf '%s\n' "{\"kind\":\"apple-developer-id-notarized\",\"verified\":true,\"gatekeeper\":true,\"stapled\":true,\"teamId\":\"$team_id\"}" > "$RUNNER_TEMP/signing-evidence.json"
+
+      - name: Verify Linux updater signature and executable installer
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          bundle="src-tauri/target/${{ matrix.target }}/release/bundle"
+          appimage="$(find "$bundle" -type f -name '*.AppImage' -print -quit)"
+          test -x "$appimage" && test -s "$appimage.sig"
+          sha256sum "$appimage"
+          printf '%s\n' '{"kind":"linux-updater-signature","verified":true,"installerExecutable":true}' > "$RUNNER_TEMP/signing-evidence.json"
+
+      - name: Stage uniquely named desktop release assets
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          COMMIT_SHA: ${{ needs.preflight.outputs.commit_sha }}
+        run: |
+          node scripts/stage-desktop-release.mjs `
+            --source 'src-tauri/target/${{ matrix.target }}/release/bundle' `
+            --output 'desktop-dist/${{ matrix.platform }}' `
+            --platform '${{ matrix.platform }}' --tag $env:RELEASE_TAG `
+            --version $env:VERSION --commit $env:COMMIT_SHA `
+            --signingEvidence "$env:RUNNER_TEMP/signing-evidence.json"
+
+      - name: Cryptographically verify the staged updater against the committed public key
+        shell: pwsh
+        run: node scripts/verify-updater-signatures.mjs --descriptor 'desktop-dist/${{ matrix.platform }}/release-entry.json' --updaterConfig src-tauri/tauri.conf.json
+
+      - name: Verify release binary embeds the exact non-empty catalog
+        shell: pwsh
+        run: |
+          $binaryName = if ($IsWindows) { 'llm-wiki-desktop.exe' } else { 'llm-wiki-desktop' }
+          node scripts/verify-embedded-capability-catalog.mjs `
+            --binary "src-tauri/target/${{ matrix.target }}/release/$binaryName" `
+            --catalog release-input/capabilities/install-catalog.json --mode release
+
+      - name: Upload signed desktop transaction fragment
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-${{ matrix.platform }}
+          path: desktop-dist/${{ matrix.platform }}/*
+          if-no-files-found: error
+          retention-days: 14
+
+  manifest-and-provenance:
+    name: Assemble exact-tag manifest, SBOM, and transaction provenance
+    needs: [preflight, desktop-build]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout exact release commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.preflight.outputs.commit_sha }}
+
+      - name: Setup pinned Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Download Windows desktop fragment
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with: { name: desktop-windows-x86_64, path: candidate/desktop/windows-x86_64 }
+      - name: Download Apple arm64 desktop fragment
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with: { name: desktop-darwin-aarch64, path: candidate/desktop/darwin-aarch64 }
+      - name: Download Apple x64 desktop fragment
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with: { name: desktop-darwin-x86_64, path: candidate/desktop/darwin-x86_64 }
+      - name: Download Linux desktop fragment
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with: { name: desktop-linux-x86_64, path: candidate/desktop/linux-x86_64 }
+
+      - name: Download all capability archives from this workflow run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: "*-capabilities-*"
+          path: candidate/capabilities
+          merge-multiple: true
+
+      - name: Download capability catalog provenance from this workflow run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: capability-install-catalog
+          path: candidate/capabilities
+
+      - name: Generate exact latest.json, locked SBOMs, and release provenance
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          COMMIT_SHA: ${{ needs.preflight.outputs.commit_sha }}
+          PUBLISHED_AT: ${{ needs.preflight.outputs.published_at }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          find candidate/capabilities -type f -name '*.catalog.json' -delete
+          cp docs/release/release-notes.md candidate/release-notes.md
+          cp docs/release/known-limitations.md candidate/known-limitations.md
+          node scripts/verify-latest-json.mjs --generate true --root candidate --manifest candidate/latest.json --tag "$RELEASE_TAG" --version "$VERSION" --notes candidate/release-notes.md --pubDate "$PUBLISHED_AT"
+          node scripts/generate-release-sbom.mjs --packageLock package-lock.json --cargoLock src-tauri/Cargo.lock --output candidate/sbom
+          mkdir -p candidate/provenance
+          node -e 'const fs=require("fs"); const value={schemaVersion:1,repository:process.env.GITHUB_REPOSITORY,releaseTag:process.env.RELEASE_TAG,commitSha:process.env.COMMIT_SHA,workflowRunId:process.env.RUN_ID,capabilityWorkflowRunId:process.env.RUN_ID}; fs.writeFileSync("candidate/provenance/release-provenance.json",JSON.stringify(value,null,2)+"\n")'
+
+      - name: Upload immutable pre-smoke candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-candidate-base
+          path: candidate/**
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload controlled updater fixture manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: updater-fixture-manifest
+          path: candidate/latest.json
+          if-no-files-found: error
+          retention-days: 14
+
+  packaged-smoke:
+    name: Install and launch ${{ matrix.platform }} candidate
+    needs: [preflight, manifest-and-provenance]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x86_64
+            os: windows-2025
+          - platform: darwin-aarch64
+            os: macos-15
+          - platform: darwin-x86_64
+            os: macos-15-intel
+          - platform: linux-x86_64
+            os: ubuntu-24.04
+    steps:
+      - name: Checkout exact release commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.preflight.outputs.commit_sha }}
+
+      - name: Setup pinned Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Download the matching signed desktop fragment
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-${{ matrix.platform }}
+          path: smoke-input
+
+      - name: Download and verify the controlled updater fixture without production access
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: updater-fixture-manifest
+          path: updater-fixture
+
+      - name: Verify the exact-tag updater fixture contract
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: node scripts/verify-latest-json.mjs --manifest updater-fixture/latest.json --tag $env:RELEASE_TAG --version $env:VERSION
+
+      - name: Install and launch Windows candidate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Get-ChildItem smoke-input -File -Filter '*-setup.exe' | Select-Object -First 1
+          $installRoot = Join-Path $env:RUNNER_TEMP 'LLM Wiki Desktop'
+          $process = Start-Process -FilePath $installer.FullName -ArgumentList '/S', "/D=$installRoot" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "NSIS install failed with $($process.ExitCode)" }
+          $app = Get-ChildItem -LiteralPath $installRoot -Recurse -File -Filter 'llm-wiki-desktop.exe' | Select-Object -First 1
+          $running = Start-Process -FilePath $app.FullName -PassThru
+          Start-Sleep -Seconds 10
+          if ($running.HasExited) { throw 'Packaged app exited before the shell smoke window.' }
+          Stop-Process -Id $running.Id -Force
+
+      - name: Install and launch Apple candidate
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          dmg="$(find smoke-input -type f -name '*.dmg' -print -quit)"
+          mount="$RUNNER_TEMP/desktop-release-mount"
+          mkdir -p "$mount" "$RUNNER_TEMP/Applications"
+          hdiutil attach "$dmg" -nobrowse -mountpoint "$mount"
+          cp -R "$(find "$mount" -maxdepth 1 -type d -name '*.app' -print -quit)" "$RUNNER_TEMP/Applications/"
+          hdiutil detach "$mount"
+          executable="$(find "$RUNNER_TEMP/Applications" -path '*/Contents/MacOS/*' -type f -perm -111 -print -quit)"
+          "$executable" >/dev/null 2>&1 & pid=$!
+          sleep 10
+          kill -0 "$pid"
+          kill "$pid"
+
+      - name: Install and launch Linux AppImage candidate
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y xvfb libwebkit2gtk-4.1-0
+          appimage="$(find smoke-input -type f -name '*.AppImage' -print -quit)"
+          chmod +x "$appimage"
+          xvfb-run -a "$appimage" --appimage-extract-and-run >/dev/null 2>&1 & pid=$!
+          sleep 10
+          kill -0 "$pid"
+          kill "$pid"
+
+      - name: Record isolated packaged smoke evidence
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force smoke-fragment | Out-Null
+          @{ platform = '${{ matrix.platform }}'; status = 'passed'; journeys = @('install-launch','packaged-process-alive','updater-fixture-manifest-verified'); productionEndpointAccessed = $false } | ConvertTo-Json | Set-Content 'smoke-fragment/${{ matrix.platform }}.json' -Encoding utf8
+
+      - name: Upload packaged smoke fragment
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: packaged-smoke-${{ matrix.platform }}
+          path: smoke-fragment/*.json
+          if-no-files-found: error
+          retention-days: 14
+
+  assemble-release:
+    name: Seal the draft release bundle and attest provenance
+    needs: [preflight, packaged-smoke]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout exact release commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.preflight.outputs.commit_sha }}
+
+      - name: Setup pinned Node.js for release sealing
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Setup pinned Rust for updater verification
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update
+          rustup default "$RUST_VERSION"
+
+      - name: Download immutable pre-smoke candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with: { name: release-candidate-base, path: candidate }
+
+      - name: Download all packaged smoke fragments
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: packaged-smoke-*
+          path: smoke-fragments
+          merge-multiple: true
+
+      - name: Assemble smoke summary
+        run: |
+          set -euo pipefail
+          mkdir -p candidate/smoke
+          node -e 'const fs=require("fs"),path=require("path"); const platforms=fs.readdirSync("smoke-fragments").sort().map(name=>JSON.parse(fs.readFileSync(path.join("smoke-fragments",name)))); if(platforms.some(x=>x.productionEndpointAccessed!==false)) process.exit(1); fs.writeFileSync("candidate/smoke/packaged-smoke-summary.json",JSON.stringify({schemaVersion:1,fixtureEndpointProductionUntouched:true,platforms},null,2)+"\n")'
+
+      - name: Generate GitHub artifact attestation for the complete candidate payload
+        id: attest
+        uses: actions/attest-build-provenance@00014ed6ed5efc5b1ab7f7f34a39eb55d41aa4f8 # v3.1.0
+        with:
+          subject-path: candidate/**
+
+      - name: Export attestation, generate checksums, and rehearse the complete release contract
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          COMMIT_SHA: ${{ needs.preflight.outputs.commit_sha }}
+          RUN_ID: ${{ github.run_id }}
+          ATTESTATION_BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          test -s "$ATTESTATION_BUNDLE"
+          cp "$ATTESTATION_BUNDLE" candidate/provenance/github-attestation.jsonl
+          node scripts/generate-release-checksums.mjs --root candidate --output candidate/CHECKSUMS.sha256
+          node scripts/verify-updater-signatures.mjs --root candidate --updaterConfig src-tauri/tauri.conf.json
+          node scripts/verify-release-assets.mjs --root candidate --tag "$RELEASE_TAG" --version "$VERSION" --commit "$COMMIT_SHA" --runId "$RUN_ID"
+
+      - name: Upload sealed draft release bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: draft-release-bundle
+          path: candidate/**
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-stable:
+    name: Human-approved atomic stable publisher
+    needs: [preflight, capability-build, desktop-build, manifest-and-provenance, packaged-smoke, assemble-release]
+    runs-on: ubuntu-24.04
+    environment: desktop-release
+    permissions:
+      contents: write
+      attestations: read
+    steps:
+      - name: Checkout exact release commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.preflight.outputs.commit_sha }}
+
+      - name: Setup pinned Node.js for protected publication
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Setup pinned Rust for protected verification
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update
+          rustup default "$RUST_VERSION"
+
+      - name: Download sealed draft release bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with: { name: draft-release-bundle, path: candidate }
+
+      - name: Reverify assets and GitHub attestations before publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          COMMIT_SHA: ${{ needs.preflight.outputs.commit_sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          node scripts/verify-updater-signatures.mjs --root candidate --updaterConfig src-tauri/tauri.conf.json
+          node scripts/verify-release-assets.mjs --root candidate --tag "$RELEASE_TAG" --version "$VERSION" --commit "$COMMIT_SHA" --runId "$RUN_ID"
+          find candidate/desktop candidate/capabilities -type f \( -name '*.zip' -o -name '*.gz' -o -name '*.AppImage' -o -name '*.dmg' -o -name '*.exe' \) -print0 | while IFS= read -r -d '' artifact; do
+            gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY"
+          done
+
+      - name: Create one draft and upload the complete atomic asset set
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ needs.preflight.outputs.commit_sha }}"
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 && { echo "release already exists: $RELEASE_TAG" >&2; exit 1; }
+          gh release create "$RELEASE_TAG" --target "${{ needs.preflight.outputs.commit_sha }}" --title "LLM Wiki Desktop ${RELEASE_TAG#app-v}" --notes-file candidate/release-notes.md --draft
+          mapfile -d '' assets < <(find candidate -type f ! -name release-entry.json -print0)
+          gh release upload "$RELEASE_TAG" "${assets[@]}"
+          expected="$(find candidate -type f ! -name release-entry.json | wc -l | tr -d ' ')"
+          actual="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets | length')"
+          test "$actual" = "$expected"
+
+      - name: Reverse-download and verify the private draft before stable publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          trap 'gh release edit "$RELEASE_TAG" --draft=true >/dev/null 2>&1 || true' ERR
+          mkdir remote-draft
+          gh release download "$RELEASE_TAG" --dir remote-draft
+          find candidate -type f ! -name release-entry.json -printf '%f\n' | sort > expected-asset-names.txt
+          find remote-draft -type f -printf '%f\n' | sort > remote-asset-names.txt
+          cmp expected-asset-names.txt remote-asset-names.txt
+          cmp candidate/CHECKSUMS.sha256 remote-draft/CHECKSUMS.sha256
+          cmp candidate/latest.json remote-draft/latest.json
+          node scripts/generate-release-checksums.mjs --root remote-draft --verify remote-draft/CHECKSUMS.sha256
+          node scripts/verify-updater-signatures.mjs --root remote-draft --manifest remote-draft/latest.json --updaterConfig src-tauri/tauri.conf.json
+          gh release edit "$RELEASE_TAG" --draft=false --latest
+
+      - name: Verify the anonymous stable endpoint and every exact-tag URL
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          trap 'gh release edit "$RELEASE_TAG" --draft=true >/dev/null 2>&1 || true' ERR
+          manifest_url="https://github.com/StoneLL1/llm-wiki-desktop/releases/latest/download/latest.json"
+          mkdir published-assets
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | while IFS= read -r name; do
+            encoded="$(node -p 'encodeURIComponent(process.argv[1])' "$name")"
+            curl --fail --location --silent --show-error "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/$RELEASE_TAG/$encoded" -o "published-assets/$name"
+          done
+          curl --fail --location --silent --show-error "$manifest_url" -o published-latest.json
+          cmp candidate/latest.json published-latest.json
+          cmp candidate/latest.json published-assets/latest.json
+          cmp candidate/CHECKSUMS.sha256 published-assets/CHECKSUMS.sha256
+          node scripts/generate-release-checksums.mjs --root published-assets --verify published-assets/CHECKSUMS.sha256
+          node scripts/verify-updater-signatures.mjs --root published-assets --manifest published-assets/latest.json --updaterConfig src-tauri/tauri.conf.json
+          node -e 'const m=require("./published-latest.json"); for(const entry of Object.values(m.platforms)) console.log(entry.url)' | while IFS= read -r url; do
+            case "$url" in
+              "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/$RELEASE_TAG/"*) ;;
+              *) echo "non-exact updater URL: $url" >&2; exit 1 ;;
+            esac
+            curl --fail --location --silent --show-error "$url" -o /dev/null
+          done

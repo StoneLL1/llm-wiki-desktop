@@ -215,6 +215,96 @@ export function validateWorkflowPermissions({ ciWorkflow, capabilityWorkflow }) 
   return errors;
 }
 
+export function validateDesktopReleaseWorkflow({ desktopWorkflow, capabilityWorkflow }) {
+  const errors = [];
+  if (!/^permissions:\s*\r?\n\s+contents:\s+read\s*$/m.test(desktopWorkflow)) {
+    errors.push("desktop release workflow must default to contents: read");
+  }
+  const publishOffset = desktopWorkflow.search(/^ {2}publish-stable:\s*$/m);
+  if (publishOffset < 0) {
+    errors.push("desktop release workflow must have one final publish-stable job");
+  } else {
+    const beforePublish = desktopWorkflow.slice(0, publishOffset);
+    const publisher = desktopWorkflow.slice(publishOffset);
+    if (/\bcontents:\s*write\b/.test(beforePublish)) {
+      errors.push("only publish-stable may request contents: write");
+    }
+    if ((publisher.match(/\bcontents:\s*write\b/g) ?? []).length !== 1) {
+      errors.push("publish-stable must request contents: write exactly once");
+    }
+    if (!/^ {4}environment:\s*desktop-release\s*$/m.test(publisher)) {
+      errors.push("publish-stable must use the protected desktop-release environment");
+    }
+    if (/\bgh release (?:create|upload|edit)\b/i.test(beforePublish)) {
+      errors.push("no job before publish-stable may create, upload, or publish a GitHub release");
+    }
+  }
+  const requiredJobs = [
+    "preflight",
+    "capability-build",
+    "desktop-build",
+    "manifest-and-provenance",
+    "packaged-smoke",
+    "assemble-release",
+    "publish-stable",
+  ];
+  for (const job of requiredJobs) {
+    if (!new RegExp(`^ {2}${job}:\\s*$`, "m").test(desktopWorkflow)) errors.push(`desktop release workflow is missing ${job}`);
+  }
+  for (const marker of [
+    "npm ci",
+    "npm run check",
+    "cargo metadata --locked",
+    "capability-release.yml",
+    "draft-release-bundle",
+    "actions/attest-build-provenance@",
+    "gh attestation verify",
+    "gh release download",
+    "verify-updater-signatures.mjs",
+    "generate-release-checksums.mjs --root remote-draft --verify",
+    "generate-release-checksums.mjs --root published-assets --verify",
+    "packaged-process-alive",
+    "APPLE_TEAM_ID",
+  ]) {
+    if (!desktopWorkflow.includes(marker)) errors.push(`desktop release workflow is missing required marker: ${marker}`);
+  }
+  if (!/gh release create[^\r\n]*--draft(?:\s|$)/.test(desktopWorkflow)) {
+    errors.push("publish-stable must create the GitHub Release as a draft");
+  }
+  if (!/trap\s+'gh release edit "\$RELEASE_TAG" --draft=true/.test(desktopWorkflow)) {
+    errors.push("publish-stable must restore draft visibility on reverse-verification failure");
+  }
+  if (!/gh release edit "\$RELEASE_TAG" --draft=false --latest/.test(desktopWorkflow)) {
+    errors.push("publish-stable must make the verified draft stable exactly once");
+  }
+  const assembleOffset = desktopWorkflow.search(/^ {2}assemble-release:\s*$/m);
+  const sealedJobs = assembleOffset >= 0 && publishOffset > assembleOffset
+    ? desktopWorkflow.slice(assembleOffset)
+    : "";
+  if ((sealedJobs.match(/actions\/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020/g) ?? []).length < 2
+    || (sealedJobs.match(/rustup default "\$RUST_VERSION"/g) ?? []).length < 2) {
+    errors.push("assemble-release and publish-stable must install the pinned Node and Rust toolchains");
+  }
+  for (const platform of ["windows-x86_64", "darwin-aarch64", "darwin-x86_64", "linux-x86_64"]) {
+    if (!desktopWorkflow.includes(platform)) errors.push(`desktop release matrix is missing ${platform}`);
+  }
+  if (!/group:\s*desktop-release-\$\{\{/.test(desktopWorkflow) || !/cancel-in-progress:\s*false/.test(desktopWorkflow)) {
+    errors.push("desktop release concurrency must serialize one exact tag without cancellation");
+  }
+  for (const match of desktopWorkflow.matchAll(/^\s*(?:-\s+)?uses:\s*([^\s#]+)(?:\s+#.*)?$/gm)) {
+    const reference = match[1];
+    if (reference.startsWith("./")) continue;
+    if (!/@[0-9a-f]{40}$/.test(reference)) errors.push(`GitHub Action is not pinned to a full commit SHA: ${reference}`);
+  }
+  if (!/^ {4}uses:\s*\.\/\.github\/workflows\/capability-release\.yml\s*$/m.test(desktopWorkflow)) {
+    errors.push("desktop release must call the reusable capability workflow");
+  }
+  if (/\bgh release (?:create|upload|edit)\b/i.test(capabilityWorkflow)) {
+    errors.push("capability workflow cannot publish independently after desktop orchestration exists");
+  }
+  return errors;
+}
+
 const normalizeOrigin = (value) => value.trim().replace(/\/$/, "").replace(/\.git$/, "").toLowerCase();
 
 const resolveGitDirectory = (root) => {
@@ -309,6 +399,10 @@ export function checkRepository(root, options = {}) {
     ...state.errors,
     ...validateWorkflowPermissions({
       ciWorkflow: fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8"),
+      capabilityWorkflow: fs.readFileSync(path.join(root, ".github/workflows/capability-release.yml"), "utf8"),
+    }),
+    ...validateDesktopReleaseWorkflow({
+      desktopWorkflow: fs.readFileSync(path.join(root, ".github/workflows/desktop-release.yml"), "utf8"),
       capabilityWorkflow: fs.readFileSync(path.join(root, ".github/workflows/capability-release.yml"), "utf8"),
     }),
   ];

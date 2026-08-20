@@ -9,6 +9,7 @@ import {
   validateLocalGit,
   validateReleaseCommitTrace,
   validateReleaseState,
+  validateDesktopReleaseWorkflow,
   validateWorkflowPermissions,
 } from "./check-release-version.mjs";
 
@@ -147,6 +148,52 @@ test("the committed capability workflow is reusable and never publishes", () => 
     "utf8",
   );
   assert.deepEqual(validateWorkflowPermissions({ ciWorkflow, capabilityWorkflow }), []);
+});
+
+test("the committed desktop workflow is the only atomic publisher and pins every action", () => {
+  const desktopWorkflow = fs.readFileSync(path.join(repositoryRoot, ".github/workflows/desktop-release.yml"), "utf8");
+  const capabilityWorkflow = fs.readFileSync(path.join(repositoryRoot, ".github/workflows/capability-release.yml"), "utf8");
+  assert.deepEqual(validateDesktopReleaseWorkflow({ desktopWorkflow, capabilityWorkflow }), []);
+
+  const unpinned = desktopWorkflow.replace(
+    /actions\/checkout@[0-9a-f]{40}/,
+    "actions/checkout@v4",
+  );
+  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: unpinned, capabilityWorkflow })
+    .some((error) => error.includes("not pinned")), true);
+
+  const earlyPublisher = desktopWorkflow.replace(
+    /^ {2}manifest-and-provenance:/m,
+    "  early-release:\n    steps:\n      - run: gh release create app-v0.1.0\n  manifest-and-provenance:",
+  );
+  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: earlyPublisher, capabilityWorkflow })
+    .some((error) => error.includes("before publish-stable")), true);
+
+  const earlyWrite = desktopWorkflow.replace(
+    /^ {2}desktop-build:/m,
+    "  desktop-build:\n    permissions:\n      contents: write",
+  );
+  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: earlyWrite, capabilityWorkflow })
+    .some((error) => error.includes("only publish-stable")), true);
+
+  const publicFirst = desktopWorkflow.replace(" --notes-file candidate/release-notes.md --draft", " --notes-file candidate/release-notes.md");
+  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: publicFirst, capabilityWorkflow })
+    .some((error) => error.includes("as a draft")), true);
+
+  const noReverseDownload = desktopWorkflow.replaceAll("gh release download", "gh draft download");
+  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: noReverseDownload, capabilityWorkflow })
+    .some((error) => error.includes("gh release download")), true);
+
+  const noCryptoVerification = desktopWorkflow.replaceAll("verify-updater-signatures.mjs", "inspect-updater-signatures.mjs");
+  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: noCryptoVerification, capabilityWorkflow })
+    .some((error) => error.includes("verify-updater-signatures.mjs")), true);
+
+  const mutableSealingToolchain = desktopWorkflow.replaceAll(
+    "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+    `actions/setup-node@${"a".repeat(40)}`,
+  );
+  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: mutableSealingToolchain, capabilityWorkflow })
+    .some((error) => error.includes("pinned Node and Rust toolchains")), true);
 });
 
 test("local Git validation normalizes .git while rejecting the wrong origin or missing default branch", () => {
