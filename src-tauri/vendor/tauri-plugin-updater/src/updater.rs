@@ -732,11 +732,6 @@ impl Update {
             }
         };
 
-        if let Some(on_before_exit) = self.on_before_exit.as_ref() {
-            log::debug!("running on_before_exit hook");
-            on_before_exit();
-        }
-
         let file = match &updater_type {
             WindowsUpdaterType::Nsis { path, .. } => path.as_os_str().to_os_string(),
             WindowsUpdaterType::Msi { .. } => std::env::var("SYSTEMROOT").as_ref().map_or_else(
@@ -749,7 +744,7 @@ impl Update {
         let parameters = installer_args.join(OsStr::new(" "));
         let parameters = encode_wide(parameters);
 
-        unsafe {
+        let shell_result = unsafe {
             ShellExecuteW(
                 std::ptr::null_mut(),
                 w!("open"),
@@ -759,6 +754,12 @@ impl Update {
                 SW_SHOW,
             )
         };
+        validate_shell_execute_result(shell_result as isize)?;
+
+        if let Some(on_before_exit) = self.on_before_exit.as_ref() {
+            log::debug!("running on_before_exit hook");
+            on_before_exit();
+        }
 
         std::process::exit(0);
     }
@@ -1470,11 +1471,30 @@ async fn read_manifest_response(
     }
 }
 
+#[cfg(target_os = "windows")]
+fn validate_shell_execute_result(result: isize) -> Result<()> {
+    if result <= 32 {
+        return Err(Error::Io(std::io::Error::other(format!(
+            "failed to launch the update installer (ShellExecuteW code {result})"
+        ))));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{read_manifest_response, Error};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn shell_execute_must_report_a_launched_installer_before_exit() {
+        for code in [0, 2, 31, 32] {
+            assert!(super::validate_shell_execute_result(code).is_err());
+        }
+        assert!(super::validate_shell_execute_result(33).is_ok());
+    }
 
     #[tokio::test]
     async fn chunked_manifest_is_rejected_before_unbounded_json_parsing() {

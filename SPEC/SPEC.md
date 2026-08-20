@@ -722,11 +722,32 @@ npm install @milkdown/core @milkdown/react @milkdown/plugin-math
 - 根目录 `progress.txt` 与 `gotchas.txt` 是项目级协作账本。重要里程碑和易踩坑必须继续记录，并保持历史可追溯。
 - 样本 `wiki/wiki/` 仍是验证数据，不是应用源码；但其中 `.app/graph-cache.json` 等应用状态可作为测试真实项目行为的样本数据，提交前必须确认不含密钥或私人内容。
 
-### 16.7 首次使用与项目打开的当前差距
+### 16.7 首次使用与项目打开的当前实现
 
-- 截至 2026-07-30，当前 `App.tsx` 仍在无项目时分支到独立 `ProjectStartView`，当前项目服务也仍保留二元“是否项目 / 普通文件夹初始化”路径；这是实现现状，不是目标产品合同。
-- 目标实现必须保留完整 shell，并以 typed assessment 替换二元判断，覆盖目录分类、格式、健康、权限、Git、信任、修复和建议动作。
-- 在上述迁移真正落地并通过验收前，文档不得把首屏双卡、受限模式、全局信任或自动修复确认描述为已实现能力。
+- `App.tsx` 始终渲染完整 `AppShell`；无当前项目时由 `WorkspaceRouter` 在中心工作面渲染 `NoProjectWorkspace`，不会切换到独立 launch/marketing 页面。
+- 无项目工作台只有“新建知识库”和“打开已有知识库”两个主动作。打开路径先进入 backend typed assessment，区分 native、compatible、ambiguous Markdown、ordinary materials、格式、健康、文件系统访问、Git、信任、限制与建议动作。
+- 普通资料目录与选择“从资料创建”时都在用户选择的新目录创建原生知识库，再把原资料交给 Import；不得在普通资料目录原地初始化、重排或写入 app state。
+- native/compatible 知识库按 assessment 进入 trusted、restricted、read-only、recovery、compatibility enablement 或 repair confirmation；外部执行和 mutation 仍分别要求当前 execution authority 与 write permit，注册路径本身不等于信任。
+
+### 16.8 发布安全 authority 的当前实现
+
+- Provider secret account 绑定 project/config/canonical HTTPS origin；官方 provider 只接受 reviewed canonical origin，Custom 需要显式 origin authorization，带 secret 的请求不跨 origin redirect。Ollama 默认只允许精确 loopback，private/link-local/metadata/mixed DNS/rebinding fail closed。
+- mutation command 通过后端签发的 `ProjectWritePermit`、authority/task permit 和允许的逻辑 write root；read-only/restricted/untrusted/recovery 与 revoke-race 不得通过普通 `ProjectContext` 写入。
+- Agent/BYOK/Workflow 外部执行绑定 project identity revision 与 execution epoch；revoke 关闭新 lease、取消并 drain 已有执行，并在外发/进程启动和写回前再次验证。Git/Agent runner 禁 hooks、fsmonitor、external diff、credential helper、prompt/pager，使用环境白名单、bounded output/deadline/cancel/process-tree cleanup。
+- 高风险项目 mutation 使用 retained safe-directory binding；Windows reparse/junction 和 Unix symlink 边界不允许退回 pathname-only mutation。
+
+### 16.9 Capability 与应用更新的当前实现
+
+- source checkout 中的 `capabilities/install-catalog.json` 只是明确的 development fallback；release build 必须注入同一 tag/run 产生的 4 target × 5 signed catalog 与 trusted key，验证 binary embed、hash/signature/provenance 后才可打包。空 catalog 的 source build 不得被描述为可安装 capability release。
+- capability 下载使用 release-scoped partial identity、Range resume 或明确安全重下、启动 reaper、最终全量 hash/signature、事务安装、health rollback，并把成功安装绑定回原 Import session/item 的继续动作。主动取消与 crash pause 是不同终态。
+- 应用更新是 project-independent 的全局 controller/store。后端只使用编译时固定 HTTPS endpoint 和 committed public key，限制 manifest 大小，生成有 TTL 与 identity 的 ephemeral offer；前端不能传 endpoint、artifact URL 或 signature。
+- 下载可取消/重试并发布进度；安装前重新验证 exact artifact。确认临界区重新采集未保存编辑与 Import commit 等 presentation facts并锁定编辑器，后端 barrier 原子复查其拥有的等待确认、关键任务与 Workflow apply facts；任一 blocker 都 fail closed。安装 handoff/失败 receipt 持久化在 app-global state，不写用户项目。
+
+### 16.10 Release 状态与公开发布门
+
+- `.github/workflows/desktop-release.yml` 是唯一 stable publisher：同一 tag/commit/run 组合 capability catalog、四 target desktop artifact、updater/OS signing evidence、完整 `latest.json`、checksums、SBOM、provenance/attestation、packaged smoke 与 draft reverse verification；只有 protected final publisher 可获得 `contents: write`。
+- 本地 fixture、源码测试、`cargo check` 或 unsigned build 都不能替代真实签名安装、旧版升级、卸载、恢复、匿名 endpoint 与平台证据。Batch 6 当前结论为 Public beta No-Go；权威 Pending 矩阵见 `docs/release/batch-6-acceptance-evidence.md`。
+- production private key、证书、密码、PAT 不进入 workspace、日志或 artifact metadata；缺 owner、backup、reviewer、签名、公证或公开 endpoint 任一项即停止发布，不得临时生成 production key 或禁用验证。
 
 ## 17. 参考方向
 

@@ -3,7 +3,7 @@
 > Import V2 的产品与跨层技术不变量见 [`../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md)。本文描述技术边界；任何实现建议不得恢复“导入后自动编译”、URL 不写 Source 或 OCR / ASR 后移到编译阶段的旧行为。
 > 全量门禁先运行只读 `check:import-source-media`，验证证据 ID、可执行测试声明、被测试实际消费的真实夹具、禁止项和设置专属迁移入口，再运行前后端测试、构建与静态检查。
 > Workflows 的产品行为与跨层契约见 [`../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md`](../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md)。Agent CLI、BYOK 和本地规则继续作为后端执行能力，但不得再把配置型 Agent 页面作为目标信息架构。
-> 无项目工作台、新建知识库、typed 项目打开评估、受限 / 信任 / 只读、兼容启用、修复和深度扫描的跨层合同见 [`../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md`](../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md)。当前独立 `ProjectStartView`、二元目录识别、打开即 Git 初始化和普通目录原地初始化都是待迁移实现，不是目标合同。
+> 无项目工作台、新建知识库、typed 项目打开评估、受限 / 信任 / 只读、兼容启用、修复和深度扫描的跨层合同见 [`../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md`](../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md)。该管线已迁入持续挂载的 `AppShell`；普通资料目录只允许“新建知识库并导入”，不会原地初始化、重排或隐式初始化 Git。
 
 ## 1. 文档目的
 
@@ -61,7 +61,7 @@ React shell/layout
 
 Dashboard 保持首屏同步加载，Wiki、Chat、Graph、Lint、Exports、Import、Agent 等 feature view 使用 `React.lazy` 按需加载，并统一经过 `Suspense` 和 `ViewErrorBoundary`。这是当前实现事实，不是目标导航命名，也不是对 React Router 的推荐；Agent 主视图迁移后应以 Workflows 对用户呈现。
 
-截至 2026-07-30，`App.tsx` 在无项目时仍绕过 `AppShell` 渲染独立 `ProjectStartView`，后端仍以二元 `is_wiki_project` 决定打开或原地初始化，并可能在打开外部目录时初始化 Git。这些是必须被新项目打开管线替换的 legacy gap；本节描述现状不等于授权延续。
+截至 Batch 6，`App.tsx` 始终挂载 `AppShell`，无项目态由 `NoProjectWorkspace` 承接；后端以 typed assessment 将 format、health、filesystem access、trust 与 Git 能力分开建模。打开评估保持零写入，普通资料目录不原地初始化，Git 只在明确的新建/确认写入流程中创建。
 
 跨层仍保持硬边界：React 不直接执行文件系统、Git、Agent 进程或系统凭据操作；typed Tauri invoke 进入显式注册的薄 command，再由 `AppState` 中的稳定 facade、`TaskService` 和 `ConfirmationRegistry` 编排本地能力。
 
@@ -135,7 +135,8 @@ IPC 层负责把前端意图转成后端服务调用。
 - Graph commands：获取 / 构建图谱，以及保存前端计算的布局。
 - Lint commands：本地 / 深度检查、报告与历史、single / batch fix 和 ignore 管理。
 - Export commands：启动 / 重新生成、列表、书签、预览，以及在浏览器或文件夹中打开导出。
-- Settings commands：读取 / 保存设置、Provider 密钥状态和 Chat 便捷写入授权；当前没有更新检查 command。
+- Settings commands：读取 / 保存项目设置、Provider 密钥状态、Chat 便捷写入授权，以及 project-independent 的全局更新偏好与安装 receipt。
+- Update commands：读取全局状态、检查固定 endpoint、下载 / 取消、安装、重启与忽略 offer；输入 DTO 只携带 opaque offer id、用户 consent 和 presentation facts，不能携带 endpoint、artifact URL、signature 或 channel。
 - Task commands：创建、列表、详情、取消、日志、清理完成项和活动项目绑定。
 
 IPC 输入输出使用结构化 DTO，不用临时拼接字符串承载复杂状态。所有 GUI command 在 `src-tauri/src/lib.rs` 的 `tauri::generate_handler!` 中显式注册；新增或删除 command 时必须同步该注册表。
@@ -162,6 +163,8 @@ Rust 后端是本地能力核心，负责文件系统、Git、Agent 进程、密
 - `LintService`
 - `ExportService`
 - `SettingsService`
+- `UpdateService`
+- `DesktopUpdateRuntime`
 - `SecretService`
 - `TaskService`
 - `ProjectRegistry`
@@ -170,6 +173,10 @@ Rust 后端是本地能力核心，负责文件系统、Git、Agent 进程、密
 commands 和 `AppState` 只依赖稳定 facade 类型；聚焦用例可以拆到 facade 子模块，但不把私有子模块暴露为跨 crate 依赖。模块间通过清晰数据结构通信，不让一个服务吞掉所有职责。
 
 Import V2 可以在稳定 facade 后组合 `ImportSessionService`、`CapabilityResolver`、`LoginSessionService`、`SourceCandidateService`、`SourceCommitService` 和 `SourceVersionService`。`CompileService` 保持独立，不进入导入提交事务。
+
+`UpdateService` 是 project-independent 的状态机，持有 generation/TTL/identity 绑定的 offer、下载与安装阶段；`DesktopUpdateRuntime` 只保存当前进程中经过 Tauri updater 校验的 runtime handle/bytes。`SettingsService` 持久化 app-global preference 与 phase-aware install receipt。安装确认临界区重新采集 editor/import presentation facts 并锁定编辑器，`ConfirmationRegistry` barrier 原子复查后端拥有的 confirmation、critical task 和 Workflow apply facts；Windows vendor updater 必须检查 `ShellExecuteW > 32` 后才可退出当前进程。
+
+安全 authority 是后端类型边界而不是前端约定：Provider credential 绑定 project/config/canonical origin；mutation 消费 `ProjectWritePermit` 与允许的逻辑 root；Agent/BYOK/Workflow 消费 identity-revision/execution-epoch lease；Git/Agent runner 统一清理环境并禁 hooks/fsmonitor/external diff/credential helper/prompt，bounded timeout/cancel 回收进程树；高风险 filesystem mutation 消费 retained safe-directory binding。
 
 ## 9. ProjectService
 
@@ -563,6 +570,12 @@ Agent 生成内容时，应根据用户语言偏好输出对应语言。
 仓库已经初始化；前端依赖以根目录 `package.json` 和锁文件为事实来源，Rust / Tauri 依赖以 `src-tauri/Cargo.toml` 和锁文件为事实来源。本文只固定技术方向和跨层边界，不再保存一次性脚手架或安装命令。
 
 新增或替换依赖属于实现决策，必须说明它解决的当前问题，并验证 Tauri v2、React 19、Tailwind CSS v4、Windows / macOS / Linux 打包和 CJK 路径兼容性。尚未验证的 PDF / Office 解析库，以及替换现有系统凭据或跨平台进程实现的方案，只能标记为推荐，不能写成当前事实。
+
+应用更新使用 pinned `tauri-plugin-updater` v2.9.0 vendor patch：除 upstream API 外，当前 patch 强制 transport-level manifest size limit，并在 Windows 检查 `ShellExecuteW` launch result。升级 vendor 时必须证明两个边界等价并保留 root integration contracts。
+
+发布技术合同由 `.github/workflows/desktop-release.yml` 和 `release/release-contract.json` 固定：精确 Node/Rust、`npm ci`、Cargo `--locked`、actions SHA pin、同 tag/commit/run 的 4×5 capability catalog 与四 target desktop artifacts、updater 与 OS signing evidence、checksums、SBOM、provenance/attestation、packaged smoke、draft reverse verification，以及 protected final publisher。只有最终 job 可请求 `contents: write`；publish-through-anonymous-verification 使用 guarded `EXIT/INT/TERM` rollback，硬 runner/GitHub control-plane loss仍需 release owner incident response。
+
+本地 fixture、jsdom、`cargo check` 或 unsigned artifact 不代表真实签名安装、升级、公证或匿名 endpoint。当前 Batch 6 Public beta No-Go 与外部 Pending 见 `docs/release/batch-6-acceptance-evidence.md`。
 
 ## 26. 当前架构演进规则
 

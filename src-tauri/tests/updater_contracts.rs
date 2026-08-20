@@ -268,6 +268,26 @@ fn updater_commands_keep_the_endpoint_and_signature_out_of_ipc_inputs() {
 }
 
 #[test]
+fn windows_installer_launch_failure_returns_before_process_exit() {
+    let vendor = include_str!("../vendor/tauri-plugin-updater/src/updater.rs");
+    let launch_check = vendor
+        .find("validate_shell_execute_result(shell_result as isize)?;")
+        .expect("the pinned Windows updater must validate ShellExecuteW");
+    let cleanup = vendor[launch_check..]
+        .find("if let Some(on_before_exit) = self.on_before_exit.as_ref()")
+        .map(|index| launch_check + index)
+        .expect("Tauri cleanup must remain after a successful Windows handoff");
+    let process_exit = vendor[cleanup..]
+        .find("std::process::exit(0);")
+        .map(|index| cleanup + index)
+        .expect("the successful Windows handoff may exit after validation");
+
+    assert!(launch_check < cleanup);
+    assert!(cleanup < process_exit);
+    assert!(vendor.contains("if result <= 32"));
+}
+
+#[test]
 fn updater_configuration_uses_the_frozen_public_trust_anchor() {
     let tauri: serde_json::Value =
         serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();

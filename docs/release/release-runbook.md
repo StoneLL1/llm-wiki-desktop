@@ -1,6 +1,6 @@
 # Atomic desktop release runbook
 
-Status: Batch 5 workflow and local rehearsal contract implemented. The first remote draft rehearsal remains blocked until the repository owner supplies and configures the production signing identities, protected-environment reviewers, and public repository access listed below.
+Status: Batch 6 local automated acceptance complete with a Public beta No-Go decision. The first remote draft rehearsal remains blocked until the repository owner supplies and configures the production signing identities, protected-environment reviewers, valid GitHub authorization, and public repository access listed below. See [`batch-6-acceptance-evidence.md`](batch-6-acceptance-evidence.md).
 
 ## Transaction and authority
 
@@ -14,9 +14,9 @@ The transaction is ordered as follows:
 4. `manifest-and-provenance` creates exact-tag `latest.json`, deterministic CycloneDX inventories from `package-lock.json` and `Cargo.lock`, and same-run provenance.
 5. `packaged-smoke` installs and launches each packaged target and verifies the candidate fixture manifest without contacting the production endpoint. The real old-version-to-draft update path and the broader upgrade, recovery, security, and user-journey matrix remain Batch 6 acceptance work; Batch 5 evidence must not be described as that later acceptance.
 6. `assemble-release` merges smoke evidence, creates GitHub artifact attestations, generates flat checksums for the exact public asset names, cryptographically verifies every updater against the committed Tauri public key, runs the full local release-bundle rehearsal, and uploads the sealed `draft-release-bundle` workflow artifact.
-7. `publish-stable` is the only job with `contents: write`. A required reviewer in the `desktop-release` environment approves it. The job reverifies assets and attestations, creates one GitHub draft, uploads the complete bundle, reverse-downloads the draft into a clean directory, verifies names, bytes, checksums, and updater signatures, then publishes stable. It downloads every asset again over anonymous exact-tag URLs and repeats the checksum/signature checks; failure returns the release to draft visibility.
+7. `publish-stable` is the only job with `contents: write`. A required reviewer in the `desktop-release` environment approves it. The job reverifies assets and attestations, creates one GitHub draft, uploads the complete bundle, reverse-downloads the draft into a clean directory, verifies names, bytes, checksums, and updater signatures, then enters one publish-through-anonymous-verification shell critical section. `EXIT`, cancellation, and termination first restore draft visibility until every anonymous exact-tag checksum/signature check completes. If GitHub release immutability prevents that edit, rollback deletes the unverified release and the tag is retired; if both actions fail, the job emits a critical incident marker. An unrecoverable runner or GitHub control-plane loss can still defeat process-local rollback, so the release approver must monitor the protected job and apply the incident rollback immediately; this residual risk is not described as an absolute transaction guarantee.
 
-No capability job, matrix build, manifest job, smoke job, or attestation job may create or upload to a GitHub Release. The tag-scoped concurrency group does not cancel an in-progress publisher.
+No capability job, matrix build, manifest job, smoke job, or attestation job may create or upload to a GitHub Release. One global stable-channel concurrency group serializes every tag without cancellation. Before work fans out, preflight reads GitHub's current latest release and fails closed unless the candidate stable SemVer is strictly newer; only a real 404 is accepted as the first-release case.
 
 ## Required repository configuration
 
@@ -46,6 +46,12 @@ The fixture rehearsal covers four desktop descriptors, exact tag/commit/run iden
 
 A real remote rehearsal must use a disposable stable-format tag at the current candidate commit, keep the GitHub Release as a draft until the protected publisher step, install every workflow artifact, and save the workflow URL plus artifact digests. Do not describe local fixture tests as a successful platform signing, notarization, installation, upgrade, or anonymous-network rehearsal.
 
+## Batch 6 release decision
+
+The 2026-08-21 local acceptance gates are recorded in [`batch-6-acceptance-evidence.md`](batch-6-acceptance-evidence.md). The canonical repository and Releases page were not anonymously reachable, the stable `latest.json` endpoint returned 404, local GitHub authorization was invalid, and named production signing/custody/reviewer inputs remain unavailable. Therefore no draft tag or workflow run was created and no platform was marked installed, upgraded, signed, notarized, uninstalled, or anonymously reverse-downloaded.
+
+This is a release No-Go, not permission to weaken the workflow. Resume only after the owner has made the repository public, restored authorized Actions access, filled every pending identity/custody field, configured both protected environments, and supplied the production secrets without copying them into the workspace. Start with a draft candidate; do not expose the stable updater channel until the full four-platform Batch 6 matrix passes.
+
 ## Approval checklist
 
 The `desktop-release` reviewer confirms all of the following before approving `publish-stable`:
@@ -64,7 +70,7 @@ The `desktop-release` reviewer confirms all of the following before approving `p
 
 ### Bad manifest or artifact
 
-Owner: release approver. Immediately unpublish or mark the bad release as a draft, stop further approvals, preserve the workflow evidence, and identify whether the manifest, signature, or asset changed. Never point `latest.json` to an older SemVer as a forced downgrade. Publish a higher, fully signed hotfix after the complete transaction passes.
+Owner: release approver. Immediately mark the bad release as a draft. If release immutability rejects that transition, delete the whole release, permanently retire that tag, and record the incident; never try to reuse the immutable tag name. Stop further approvals, preserve the workflow evidence, and identify whether the manifest, signature, or asset changed. Never point `latest.json` to an older SemVer as a forced downgrade. Publish a higher, fully signed hotfix after the complete transaction passes.
 
 ### Updater key loss or compromise
 

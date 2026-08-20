@@ -62,29 +62,19 @@ impl LlmService {
         let target = normalize_provider_config(&mut config)?;
         let canonical_origin = UrlPolicy.canonical_origin(&target);
         let settings = settings_service.read_settings(context)?;
+        let previous_config = settings
+            .llm_providers
+            .iter()
+            .find(|item| item.provider == config.provider)
+            .cloned();
         let existing = settings
             .provider_credential_bindings
-            .into_iter()
+            .iter()
             .find(|binding| binding.provider_kind == config.provider);
         let reusable = existing.as_ref().is_some_and(|binding| {
             validate_binding(context, &config, binding).is_ok()
                 && binding.canonical_origin == canonical_origin
         });
-        if !reusable {
-            if let (Some(secret_service), Some(existing)) = (secret_service, existing.as_ref()) {
-                if SecretService::provider_binding_account_id(
-                    context,
-                    existing.provider_kind,
-                    &existing.config_id,
-                    &existing.canonical_origin,
-                    existing.revision,
-                )
-                .is_ok_and(|expected| expected == existing.credential_account_id)
-                {
-                    secret_service.delete_bound(context, existing)?;
-                }
-            }
-        }
         let revision = existing.as_ref().map_or(1, |binding| {
             binding.revision.saturating_add(u64::from(!reusable))
         });
@@ -109,11 +99,70 @@ impl LlmService {
             canonical_origin,
             credential_account_id,
             approved_at: reusable
-                .then(|| existing.and_then(|binding| binding.approved_at))
+                .then(|| {
+                    existing
+                        .as_ref()
+                        .and_then(|binding| binding.approved_at.clone())
+                })
                 .flatten(),
             revision,
         };
-        settings_service.save_provider_with_binding(context, config.clone(), binding.clone())?;
+        let existing = existing.cloned();
+        let retirement_required = !reusable
+            && secret_service.is_some()
+            && existing.as_ref().is_some_and(|binding| {
+                SecretService::provider_binding_account_id(
+                    context,
+                    binding.provider_kind,
+                    &binding.config_id,
+                    &binding.canonical_origin,
+                    binding.revision,
+                )
+                .is_ok_and(|expected| expected == binding.credential_account_id)
+            });
+        if retirement_required && previous_config.is_none() {
+            return Err(provider_binding_changed());
+        }
+        commit_provider_binding_rotation(
+            || {
+                settings_service
+                    .save_provider_with_binding(context, config.clone(), binding.clone())
+                    .map(|_| ())
+            },
+            || {
+                if retirement_required {
+                    if let (Some(secret_service), Some(existing)) =
+                        (secret_service, existing.as_ref())
+                    {
+                        if SecretService::provider_binding_account_id(
+                            context,
+                            existing.provider_kind,
+                            &existing.config_id,
+                            &existing.canonical_origin,
+                            existing.revision,
+                        )
+                        .is_ok_and(|expected| expected == existing.credential_account_id)
+                        {
+                            secret_service.delete_bound(context, existing)?;
+                        }
+                    }
+                }
+                Ok(())
+            },
+            || {
+                if retirement_required {
+                    let (Some(previous_config), Some(existing)) =
+                        (previous_config.clone(), existing.clone())
+                    else {
+                        return Err(provider_binding_changed());
+                    };
+                    settings_service
+                        .save_provider_with_binding(context, previous_config, existing)
+                        .map(|_| ())?;
+                }
+                Ok(())
+            },
+        )?;
         Ok((config, binding))
     }
 
@@ -789,6 +838,33 @@ impl LlmService {
     }
 }
 
+fn commit_provider_binding_rotation(
+    persist_binding: impl FnOnce() -> Result<(), BackendError>,
+    retire_previous_secret: impl FnOnce() -> Result<(), BackendError>,
+    restore_previous_binding: impl FnOnce() -> Result<(), BackendError>,
+) -> Result<(), BackendError> {
+    // Advance the durable binding before retiring the old credential. If
+    // settings persistence fails, the previously working binding and its
+    // secret remain intact instead of being destroyed mid-rotation.
+    persist_binding()?;
+    if let Err(retirement_error) = retire_previous_secret() {
+        return match restore_previous_binding() {
+            Ok(()) => Err(retirement_error),
+            Err(restore_error) => Err(BackendError::new(
+                "PROVIDER_CREDENTIAL_ROTATION_INDETERMINATE",
+                "The previous credential could not be retired and its binding could not be restored. Re-open provider settings and re-authenticate before sending data.",
+                false,
+                true,
+            )
+            .with_details(serde_json::json!({
+                "retirementErrorCode": retirement_error.code,
+                "restoreErrorCode": restore_error.code,
+            }))),
+        };
+    }
+    Ok(())
+}
+
 fn normalize_provider_config(
     config: &mut LlmProviderConfig,
 ) -> Result<ProviderNetworkTarget, BackendError> {
@@ -1297,6 +1373,84 @@ mod tests {
 
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn failed_provider_binding_persistence_never_retires_the_previous_secret() {
+        let retired = std::cell::Cell::new(false);
+        let error = commit_provider_binding_rotation(
+            || {
+                Err(BackendError::new(
+                    "SETTINGS_WRITE_FAILED",
+                    "fixture persistence failure",
+                    true,
+                    false,
+                ))
+            },
+            || {
+                retired.set(true);
+                Ok(())
+            },
+            || Ok(()),
+        )
+        .expect_err("failed settings persistence must abort credential retirement");
+
+        assert_eq!(error.code, "SETTINGS_WRITE_FAILED");
+        assert!(!retired.get());
+    }
+
+    #[test]
+    fn failed_previous_secret_retirement_restores_the_previous_binding() {
+        let restored = std::cell::Cell::new(false);
+        let error = commit_provider_binding_rotation(
+            || Ok(()),
+            || {
+                Err(BackendError::new(
+                    "CREDENTIAL_DELETE_FAILED",
+                    "fixture retirement failure",
+                    true,
+                    true,
+                ))
+            },
+            || {
+                restored.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("failed retirement must not leave the new binding committed");
+
+        assert_eq!(error.code, "CREDENTIAL_DELETE_FAILED");
+        assert!(restored.get());
+    }
+
+    #[test]
+    fn failed_provider_rotation_compensation_reports_an_indeterminate_terminal() {
+        let error = commit_provider_binding_rotation(
+            || Ok(()),
+            || {
+                Err(BackendError::new(
+                    "CREDENTIAL_DELETE_FAILED",
+                    "fixture retirement failure",
+                    true,
+                    true,
+                ))
+            },
+            || {
+                Err(BackendError::new(
+                    "SETTINGS_WRITE_FAILED",
+                    "fixture compensation failure",
+                    true,
+                    false,
+                ))
+            },
+        )
+        .expect_err("double failure must expose an explicit terminal");
+
+        assert_eq!(error.code, "PROVIDER_CREDENTIAL_ROTATION_INDETERMINATE");
+        assert_eq!(
+            error.details.unwrap()["retirementErrorCode"],
+            "CREDENTIAL_DELETE_FAILED"
+        );
     }
 
     #[test]

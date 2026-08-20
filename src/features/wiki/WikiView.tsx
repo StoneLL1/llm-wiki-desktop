@@ -24,6 +24,7 @@ import { useExportStore } from "../../stores/exportStore";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { fetchTaskById, useTaskStore } from "../../stores/taskStore";
+import { useUpdateStore } from "../../stores/updateStore";
 import { ConfirmationDialog } from "../../components/app/ConfirmationDialog";
 import type { PendingAction } from "../../types/backend";
 import {
@@ -145,6 +146,7 @@ export function WikiView({ capabilities }: WikiViewProps) {
   const mode = useWikiStore((state) => state.mode);
   const draft = useWikiStore((state) => state.draft);
   const saveState = useWikiStore((state) => state.saveState);
+  const updateInstallInProgress = useUpdateStore((state) => state.uiStatus === "installing");
   const conflict = useWikiStore((state) => state.conflict);
   const loadingPage = useWikiStore((state) => state.loadingPage);
   const wikiError = useWikiStore((state) => state.error);
@@ -1015,7 +1017,10 @@ export function WikiView({ capabilities }: WikiViewProps) {
                     onCancel={cancelEdit}
                     onReload={() => void reload(projectId, rootPath)}
                     onReviewConflict={() => setConflictDialogOpen(true)}
-                    disabled={sourceMutating && page.meta.pageType === "source"}
+                    disabled={
+                      updateInstallInProgress
+                      || (sourceMutating && page.meta.pageType === "source")
+                    }
                     scrollRef={editorScrollRef}
                   />
                 </Suspense>

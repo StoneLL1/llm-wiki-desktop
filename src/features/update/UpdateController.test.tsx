@@ -80,13 +80,13 @@ describe("UpdateController", () => {
     expect(api.checkAppUpdate).toHaveBeenCalledTimes(1);
   });
 
-  it("shows an available offer", () => {
+  it("shows an available offer", async () => {
     useUpdateStore.setState({ backendState: available, uiStatus: "available", dialogOpen: true, initialized: true });
     render(<UpdateController />);
-    expect(screen.getByText("0.2.0")).toBeVisible();
+    expect(await screen.findByText("0.2.0")).toBeVisible();
   });
 
-  it("shows downloading progress", () => {
+  it("shows downloading progress", async () => {
     useUpdateStore.setState({
       backendState: { ...available, phase: "downloading", downloadedBytes: 25, totalBytes: 100 },
       uiStatus: "downloading",
@@ -94,7 +94,7 @@ describe("UpdateController", () => {
       initialized: true,
     });
     render(<UpdateController />);
-    expect(screen.getByRole("progressbar", { name: "Download progress" })).toHaveValue(25);
+    expect(await screen.findByRole("progressbar", { name: "Download progress" })).toHaveValue(25);
   });
 
   it("cancels a download into the paused state", async () => {
@@ -107,12 +107,12 @@ describe("UpdateController", () => {
     });
     render(<UpdateController />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Cancel download" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel download" }));
     await act(async () => { await Promise.resolve(); });
     expect(useUpdateStore.getState().uiStatus).toBe("paused_or_cancelled");
   });
 
-  it("offers installation when ready to install", () => {
+  it("offers installation when ready to install", async () => {
     useUpdateStore.setState({
       backendState: { ...available, phase: "downloaded" },
       uiStatus: "ready_to_install",
@@ -120,10 +120,10 @@ describe("UpdateController", () => {
       initialized: true,
     });
     render(<UpdateController />);
-    expect(screen.getByRole("button", { name: "Review installation" })).toBeEnabled();
+    expect(await screen.findByRole("button", { name: "Review installation" })).toBeEnabled();
   });
 
-  it("renders the installing state", () => {
+  it("renders the installing state", async () => {
     useUpdateStore.setState({
       backendState: { ...available, phase: "installing" },
       uiStatus: "installing",
@@ -131,6 +131,6 @@ describe("UpdateController", () => {
       initialized: true,
     });
     render(<UpdateController />);
-    expect(screen.getByText("Installing the verified update…")).toBeVisible();
+    expect(await screen.findByText("Installing the verified update…")).toBeVisible();
   });
 });

@@ -6,6 +6,7 @@ import { ImportAsrDialog } from "./ImportAsrDialog";
 import { ImportSubtitleDialog } from "./ImportSubtitleDialog";
 
 const asrPlan = {
+  requirementRevision: "fixture-asr-revision",
   recommendedProfile: "accurate" as const,
   availableMemoryBytes: 16 * 1024 ** 3,
   availableDiskBytes: 120 * 1024 ** 3,

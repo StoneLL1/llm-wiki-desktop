@@ -133,7 +133,7 @@ export function ImportV2Dialogs({ workflow, privateItem, asrItem, asrItemIds = [
         itemId={capabilityItem?.itemId ?? null}
         onCancel={closeCapability}
         onInstall={async (capabilityId) => {
-          if (capabilityItem) return workflow.installCapability(
+          if (capabilityItem && capability) return workflow.installCapability(
             capabilityItem.itemId,
             capabilityId,
             capability.requirementRevision,

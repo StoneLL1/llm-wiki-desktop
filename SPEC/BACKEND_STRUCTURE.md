@@ -3,7 +3,7 @@
 > Import V2、来源版本、媒体处理、登录态、OCR / ASR 和独立编译的目标后端边界，以 [`../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md) 为准。本文中的 legacy `ImportService` 模块说明仅描述现状，不得覆盖新规范。
 > Batch 9 收口后，旧 `list_imported_sources` / `request_delete_source` / `request_replace_source` 不再注册为生产命令；Source 生命周期只经 typed `source_commands` 与 Import V2 服务。旧 compile index adapter 与 legacy asset fallback 仅为只读兼容边界，并有“不改写 legacy 文件”的独立测试。
 > Workflows 的项目隔离队列、状态、结构化阶段、确认、重试与恢复合同，以 [`../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md`](../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md) 为准。本文区分当前任务 DTO 与待迁移目标，不能把现有 Agent 页面行为当成目标后端合同。
-> 无项目工作台、新建知识库、typed 打开评估、受限 / 信任 / 只读、兼容启用、修复和深度扫描的目标合同，以 [`../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md`](../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md) 为准。当前二元识别、打开即 Git 初始化和普通目录原地初始化仅是待迁移实现。
+> 无项目工作台、新建知识库、typed 打开评估、受限 / 信任 / 只读、兼容启用、修复和深度扫描的目标合同，以 [`../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md`](../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md) 为准。该 typed assessment/access/trust/repair 管线已落地；普通资料目录只允许新建知识库后导入，不会原地初始化或隐式初始化 Git。
 
 ## 1. 文档目的
 
@@ -1193,6 +1193,17 @@ pub struct BackendEvent<T> {
 - 高风险操作前必须检查点。
 - 检查点失败则阻止操作。
 - 冲突不能静默覆盖。
+- rollback 删除与 untracked diff 读取必须通过 `BoundProjectMutationRoot` 的 retained-directory handle；不得在 canonicalize 后再用 ambient pathname 递归删除或跟随 worktree symlink 读取内容。
+
+### 26.5 Batch 6 authority、凭据与更新边界
+
+- `ProjectRegistry` 只解析当前 canonical identity/access；外部 AI、Agent、Skill 与 Workflow 必须携带后端签发的 authority revision/permit，并在执行点重新验证 trust、writable access、Git policy 与 revoke epoch。
+- provider credential binding 绑定 project identity、provider kind、canonical origin、config id 与 revision。origin 轮换先持久化新 binding，再退休旧凭据；持久化失败不得删除仍工作的旧 secret。
+- `UpdateService` 作为 project-independent coordinator 绑定 offer generation、TTL 和 candidate identity；`DesktopUpdateRuntime` 只保留同一进程内由 Tauri updater 校验过的 handle/bytes。IPC 不接受 endpoint、artifact URL、signature、channel 或 public key。
+- install/restart 的前端确认临界区会重新采集 editor/import presentation facts，并在 handoff 期间锁定编辑器；后端 `UpdateInstallBarrier` 原子复查其拥有的 confirmation、critical task 与 Workflow apply facts。两侧任一 blocker 出现都 fail closed。
+- Windows vendored updater 除 manifest transport size limit 外，必须验证 `ShellExecuteW > 32` 才能退出旧进程；launch 失败保留当前版本并返回结构化错误。
+- stable 发布只允许 protected final publisher。draft reverse verification、stable publish 与 anonymous asset verification 在同一 guarded step 内执行；未完成验证的正常退出、错误或终止信号回退 draft。runner/control-plane 硬丢失仍属于 release-owner incident response，不能表述为完全原子。
+- Public beta 还需要同 tag/commit 的四目标真实签名包、旧签名版本升级、uninstall 项目保留、capability continuation 与匿名 endpoint 证据；source contract 通过不能替代这些证据。
 
 ## 27. Crate 选择原则
 
