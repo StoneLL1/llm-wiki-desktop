@@ -9,7 +9,7 @@
     {
       "id": "signed-updater-foundation",
       "ownerBatch": "4A",
-      "expected": "red"
+      "expected": "green"
     },
     {
       "id": "real-update-offer",

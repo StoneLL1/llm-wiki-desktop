@@ -23,5 +23,6 @@ pub mod settings;
 pub mod source;
 pub mod source_package;
 pub mod task;
+pub mod update;
 pub mod wiki;
 pub mod workflow;

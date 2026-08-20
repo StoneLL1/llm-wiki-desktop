@@ -476,6 +476,12 @@ pub struct GlobalSettingsFile {
     #[serde(default = "default_prompt_changelog_before_install")]
     pub prompt_changelog_before_install: bool,
     #[serde(default)]
+    pub last_update_checked_at: Option<String>,
+    #[serde(default)]
+    pub dismissed_update_offer_id: Option<String>,
+    #[serde(default)]
+    pub dismissed_update_version: Option<String>,
+    #[serde(default)]
     pub startup_behavior: StartupBehavior,
     #[serde(default)]
     pub default_project_location: String,
@@ -538,6 +544,9 @@ impl Default for GlobalSettingsFile {
             update_frequency: settings.update_frequency,
             auto_download_updates: settings.auto_download_updates,
             prompt_changelog_before_install: settings.prompt_changelog_before_install,
+            last_update_checked_at: None,
+            dismissed_update_offer_id: None,
+            dismissed_update_version: None,
             startup_behavior: settings.startup_behavior,
             default_project_location: settings.default_project_location,
             external_editor: settings.external_editor,
@@ -649,6 +658,9 @@ impl Settings {
             update_frequency: self.update_frequency,
             auto_download_updates: self.auto_download_updates,
             prompt_changelog_before_install: self.prompt_changelog_before_install,
+            last_update_checked_at: None,
+            dismissed_update_offer_id: None,
+            dismissed_update_version: None,
             startup_behavior: self.startup_behavior,
             default_project_location: self.default_project_location.clone(),
             external_editor: self.external_editor.clone(),

@@ -16,7 +16,7 @@ tauri-build = { version = "2", features = [], optional = true }
 
 [features]
 default = ["gui"]
-gui = ["dep:tauri", "dep:tauri-plugin-dialog", "dep:tauri-plugin-notification", "dep:tauri-build"]
+gui = ["dep:tauri", "dep:tauri-plugin-dialog", "dep:tauri-plugin-notification", "dep:tauri-plugin-updater", "dep:tauri-build"]
 
 [dependencies]
 base64 = "0.22"
@@ -32,6 +32,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 sha2 = "0.10"
 md-5 = "0.10"
+minisign-verify = "0.2"
 ring = "0.17"
 semver = "1"
 same-file = "1.0"
@@ -51,6 +52,9 @@ unicode-normalization = "0.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-updater = { version = "=2.9.0", path = "vendor/tauri-plugin-updater", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_SystemInformation", "Win32_System_Threading"] }

@@ -12,6 +12,7 @@ use crate::models::settings::{
     AgentLintRepairMutationJournal, AgentLintRepairMutationPhase, ChatConvenienceAuthorization,
     CloseBehavior, GlobalSettingsFile, GlobalUiPreferences, ProjectSettingsFile, Settings,
 };
+use crate::models::update::{GlobalUpdatePreferences, SaveGlobalUpdatePreferences};
 use crate::services::FileStore;
 
 pub struct SettingsService {
@@ -77,6 +78,13 @@ impl SettingsService {
         let _guard = self.lock_global_settings()?;
         let mut global = settings.to_global_file();
         let existing_global = self.read_global_settings()?;
+        global.check_updates = existing_global.check_updates;
+        global.update_frequency = existing_global.update_frequency;
+        global.auto_download_updates = existing_global.auto_download_updates;
+        global.prompt_changelog_before_install = existing_global.prompt_changelog_before_install;
+        global.last_update_checked_at = existing_global.last_update_checked_at;
+        global.dismissed_update_offer_id = existing_global.dismissed_update_offer_id;
+        global.dismissed_update_version = existing_global.dismissed_update_version;
         global.chat_convenience_authorizations = existing_global.chat_convenience_authorizations;
         global.agent_lint_repair_attestations = existing_global.agent_lint_repair_attestations;
         global.remote_provider_disclosure_revision =
@@ -277,6 +285,65 @@ impl SettingsService {
             language: settings.language,
             theme: settings.theme,
         })
+    }
+
+    pub fn read_global_update_preferences(&self) -> Result<GlobalUpdatePreferences, BackendError> {
+        let settings = self.read_global_settings()?;
+        Ok(GlobalUpdatePreferences {
+            check_updates: settings.check_updates,
+            update_frequency: settings.update_frequency,
+            auto_download_updates: settings.auto_download_updates,
+            prompt_changelog_before_install: settings.prompt_changelog_before_install,
+            last_checked_at: settings.last_update_checked_at,
+            dismissed_offer_id: settings.dismissed_update_offer_id,
+            dismissed_version: settings.dismissed_update_version,
+        })
+    }
+
+    pub fn save_global_update_preferences(
+        &self,
+        preferences: SaveGlobalUpdatePreferences,
+    ) -> Result<GlobalUpdatePreferences, BackendError> {
+        self.mutate_global_settings(|settings| {
+            settings.check_updates = preferences.check_updates;
+            settings.update_frequency = preferences.update_frequency;
+            settings.auto_download_updates = preferences.auto_download_updates;
+            settings.prompt_changelog_before_install = preferences.prompt_changelog_before_install;
+        })?;
+        self.read_global_update_preferences()
+    }
+
+    pub fn record_update_check(&self, checked_at: String) -> Result<(), BackendError> {
+        self.mutate_global_settings(|settings| {
+            settings.last_update_checked_at = Some(checked_at);
+        })
+    }
+
+    pub fn dismiss_update_offer(
+        &self,
+        offer_id: String,
+        version: String,
+    ) -> Result<(), BackendError> {
+        self.mutate_global_settings(|settings| {
+            settings.dismissed_update_offer_id = Some(offer_id);
+            settings.dismissed_update_version = Some(version);
+        })
+    }
+
+    fn mutate_global_settings(
+        &self,
+        mutate: impl FnOnce(&mut GlobalSettingsFile),
+    ) -> Result<(), BackendError> {
+        let _guard = self.lock_global_settings()?;
+        let mut settings = self.read_global_settings()?;
+        mutate(&mut settings);
+        let store = FileStore;
+        store.ensure_absolute_dir(self.config_write_root(), &self.config_dir)?;
+        store.write_json_atomic_absolute(
+            self.config_write_root(),
+            &self.global_settings_path(),
+            &settings,
+        )
     }
 
     pub fn is_remote_provider_disclosure_acknowledged(
@@ -1184,7 +1251,9 @@ mod tests {
     };
     use crate::models::settings::{
         CloseBehavior, GlobalSettingsFile, GlobalUiPreferences, Settings, ThemePreference,
+        UpdateFrequency,
     };
+    use crate::models::update::SaveGlobalUpdatePreferences;
     use crate::services::{AgentService, FileStore, SecretService};
 
     fn tmp_paths(suffix: &str) -> (ProjectContext, PathBuf, PathBuf) {
@@ -1224,10 +1293,21 @@ mod tests {
         secrets
             .set(LlmProviderKind::OpenAi, "sk-secret-1234")
             .unwrap();
+        service
+            .save_global_update_preferences(SaveGlobalUpdatePreferences {
+                check_updates: false,
+                update_frequency: UpdateFrequency::Weekly,
+                auto_download_updates: true,
+                prompt_changelog_before_install: false,
+            })
+            .unwrap();
 
         let mut settings = service.read_settings(&context).unwrap();
         settings.language = "zh-CN".into();
-        settings.check_updates = false;
+        settings.check_updates = true;
+        settings.update_frequency = UpdateFrequency::Daily;
+        settings.auto_download_updates = false;
+        settings.prompt_changelog_before_install = true;
         settings.agent_default = Some(AgentKind::Codex);
         let provider = LlmProviderConfig {
             provider: LlmProviderKind::OpenAi,
@@ -1270,10 +1350,60 @@ mod tests {
         assert!(project_value.get("agentDefault").is_some());
         assert!(project_value.get("language").is_none());
         assert!(project_value.get("theme").is_none());
+        assert!(project_value.get("checkUpdates").is_none());
+        assert!(project_value.get("updateFrequency").is_none());
+        assert!(project_value.get("autoDownloadUpdates").is_none());
+        assert!(project_value.get("promptChangelogBeforeInstall").is_none());
         assert!(project_value.to_string().contains("gpt-4.1"));
         assert!(!project_value.to_string().contains("sk-secret-1234"));
         assert_eq!(global_value["language"], "zh-CN");
         assert_eq!(global_value["checkUpdates"], false);
+        assert_eq!(global_value["updateFrequency"], "weekly");
+        assert_eq!(global_value["autoDownloadUpdates"], true);
+        assert_eq!(global_value["promptChangelogBeforeInstall"], false);
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn update_preferences_and_dismissal_metadata_are_app_global() {
+        let (_context, root, config_dir) = tmp_paths("global-update-preferences");
+        let service = SettingsService::with_config_dir(config_dir.clone());
+
+        let defaults = service.read_global_update_preferences().unwrap();
+        assert!(defaults.check_updates);
+        assert_eq!(defaults.update_frequency, UpdateFrequency::Daily);
+        assert!(!defaults.auto_download_updates);
+        assert!(defaults.prompt_changelog_before_install);
+        assert!(defaults.last_checked_at.is_none());
+
+        service
+            .save_global_update_preferences(SaveGlobalUpdatePreferences {
+                check_updates: false,
+                update_frequency: UpdateFrequency::Never,
+                auto_download_updates: true,
+                prompt_changelog_before_install: false,
+            })
+            .unwrap();
+        service
+            .record_update_check("2026-08-20T12:00:00Z".into())
+            .unwrap();
+        service
+            .dismiss_update_offer("offer-1".into(), "0.2.0".into())
+            .unwrap();
+
+        let saved = service.read_global_update_preferences().unwrap();
+        assert!(!saved.check_updates);
+        assert_eq!(saved.update_frequency, UpdateFrequency::Never);
+        assert!(saved.auto_download_updates);
+        assert!(!saved.prompt_changelog_before_install);
+        assert_eq!(
+            saved.last_checked_at.as_deref(),
+            Some("2026-08-20T12:00:00Z")
+        );
+        assert_eq!(saved.dismissed_offer_id.as_deref(), Some("offer-1"));
+        assert_eq!(saved.dismissed_version.as_deref(), Some("0.2.0"));
 
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(config_dir).unwrap();

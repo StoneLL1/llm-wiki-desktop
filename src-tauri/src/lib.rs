@@ -88,6 +88,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(app_state::AppState::default())
         .setup(|app| {
             let handle = app.handle().clone();
@@ -609,6 +610,14 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::agent_commands::detect_agents,
+            commands::update_commands::get_update_state,
+            commands::update_commands::get_global_update_preferences,
+            commands::update_commands::save_global_update_preferences,
+            commands::update_commands::check_app_update,
+            commands::update_commands::download_app_update,
+            commands::update_commands::cancel_app_update_download,
+            // Batch 4B registers install_app_update after backend dirty/task guards exist.
+            commands::update_commands::dismiss_app_update,
             commands::agent_commands::get_agent_config,
             commands::agent_commands::set_default_agent,
             commands::llm_commands::list_llm_providers,

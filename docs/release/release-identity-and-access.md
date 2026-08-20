@@ -1,7 +1,7 @@
 # Release identity, repository access, and signing ownership
 
 Status: Batch 0 frozen contract with external blockers recorded
-Last verified: 2026-08-16
+Last verified: 2026-08-20
 
 ## Frozen public release coordinate
 
@@ -50,12 +50,33 @@ The release page must be reachable without credentials. `latest.json` and instal
 | Tauri identifier / Apple bundle identifier | `com.llmwiki.desktop` | Frozen |
 | Windows publisher subject | Not supplied | Release blocker; human owner input required |
 | Apple Team ID | Not supplied | Release blocker; human owner input required |
-| Updater signing public key | Not supplied | Batch 4A blocker; human owner input required |
+| Updater signing public key | minisign key `0D274EE88AB90656` | Public key supplied and committed for Batch 4A; owner, backup custodian, and recovery evidence remain release blockers |
 | Capability signing public key ID | Not supplied; `capabilities/trusted-keys.json` is empty | Batch 3A blocker; human owner input required |
 
-The intended signing-custodian and approval-owner role is the `StoneLL1` repository owner, but this is an unverified placeholder rather than a named human assignment. No backup custodian, protected-environment reviewer configuration, or recovery evidence is currently available. Production signing material must be placed only in protected GitHub Environment secrets with a separately verified offline backup. The updater key, capability key, Windows code-signing identity, and Apple Developer ID/Team identity are distinct contracts. No private key, certificate password, PAT, or production secret may be committed to the repository.
+The intended signing-custodian and approval-owner role is the `StoneLL1` repository owner, but this is an unverified placeholder rather than a named human assignment. The updater public key was supplied on 2026-08-20 and is safe to commit; its private half and password were not requested, read, logged, or written to the workspace. No named backup custodian, protected-environment reviewer configuration, or recovery evidence is currently available. Production signing material must be placed only in protected GitHub Environment secrets with a separately verified offline backup. The updater key, capability key, Windows code-signing identity, and Apple Developer ID/Team identity are distinct contracts. No private key, certificate password, PAT, or production secret may be committed to the repository.
 
-The exact publisher subject, Team ID, updater public key, capability public-key ID, named backup custodian, and recovery evidence must replace the explicit `pending-human-input` fields before the first public stable release. A missing or lost key stops release; it never permits unsigned artifacts or signature verification bypass.
+The exact publisher subject, Team ID, capability public-key ID, named updater owner, named backup custodian, and recovery evidence must replace the explicit `pending-human-input` fields before the first public stable release. A missing or lost key stops release; it never permits unsigned artifacts or signature verification bypass.
+
+## Updater signing key operations
+
+The committed updater trust anchor is minisign public key ID `0D274EE88AB90656`. Its Base64-encoded public-key document is frozen in `release/release-contract.json` and `src-tauri/tauri.conf.json`; those values must remain byte-for-byte equal.
+
+Only the protected `desktop-release` GitHub Environment may expose the corresponding private material to a publishing job:
+
+- `TAURI_SIGNING_PRIVATE_KEY`
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+
+The updater private key must not be reused as a capability-catalog key, OS code-signing key, developer credential, or local project secret. Before the first public stable release, a named primary owner and a different named backup custodian must each confirm the public key ID, verify that an encrypted offline backup can be recovered, and record the evidence location without recording secret material in Git.
+
+Recovery and rotation are fail-closed. The current static `releases/latest` channel has one trust anchor and no version-aware routing or dual-key verification, so it cannot guarantee a lossless key rotation for clients that miss a bridge release:
+
+1. Stop publication if the protected secret, password, owner approval, or offline recovery evidence is unavailable.
+2. Restore the exact existing key only through approved protected-environment secret administration, then produce a signed release candidate and verify an upgrade from the previous signed installer.
+3. A planned rotation requires a separately approved migration design before changing this repository's committed key. It must keep an old-key-signed bridge manifest and artifact reachable for older clients while a new channel serves clients that already trust the new key, or add an audited dual-trust/version-aware mechanism. Shipping one bridge build through `releases/latest` and then replacing it is not sufficient.
+4. If the project deliberately switches the single static channel after a bridge period, clients that missed the bridge require an explicit manually downloaded, OS-signed reinstall. Record that continuity loss in the release approval; never describe it as transparent rotation.
+5. If the old private key is lost before a compatible migration reaches existing clients, in-place updater continuity is lost. Do not publish unsigned artifacts or disable verification; use the manual reinstall and incident process.
+
+Current custody record: primary owner `pending-human-input`; backup custodian `pending-human-input`; offline restore evidence `pending-human-input`. These are release blockers, although they do not prevent compiling or testing the Batch 4A backend with the public key.
 
 ## Workflow permissions and approvals
 

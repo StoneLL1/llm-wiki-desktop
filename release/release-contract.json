@@ -33,10 +33,15 @@
   "signing": {
     "privateKeyPolicy": "protected-environment-secrets-and-offline-backup-only",
     "updater": {
-      "publicKey": null,
+      "publicKey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDBEMjc0RUU4OEFCOTA2NTYKUldSV0JybUs2RTRuRGN2UlZENGdNY1FxUE1aZ2F1Y2NBSnpiZ25qTmRtdURURzYrMitUdms4SUEK",
+      "publicKeyId": "0D274EE88AB90656",
+      "publicKeyStatus": "supplied-2026-08-20",
       "owner": null,
       "ownerRole": "StoneLL1 repository owner",
-      "status": "pending-human-input"
+      "status": "pending-human-input",
+      "backupCustodian": null,
+      "backupStatus": "pending-human-input",
+      "rotationProcedure": "docs/release/release-identity-and-access.md#updater-signing-key-operations"
     },
     "capability": {
       "publicKeyId": null,
