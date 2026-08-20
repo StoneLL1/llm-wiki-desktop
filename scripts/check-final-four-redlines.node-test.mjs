@@ -34,6 +34,7 @@ test("completed owner contracts turn green while later batches remain red", () =
     "provider-secret-origin-binding",
     "mutation-write-authority-inventory",
     "signed-updater-foundation",
+    "real-update-offer",
   ]);
   assert.equal(
     actual.every(({ id, state }) => state === (completed.has(id) ? "green" : "red")),
@@ -99,9 +100,10 @@ test("the strict checker can turn every owned contract green", async (context) =
     },
   }));
   await write("src-tauri/src/lib.rs", "tauri_plugin_updater::Builder::new();\n");
-  await write("src/features/settings/UpdateSettings.tsx", "ActionableErrorNotice normalizeBackendError invoke(\"check_app_update\");\n");
-  await write("src/stores/updateStore.ts", "export const latestVersion = 'available';\n");
-  await write("src/features/update/useUpdateController.ts", "invoke('check_app_update');\n");
+  await write("src/features/settings/UpdateSettings.tsx", "ActionableErrorNotice useUpdateStore;\n");
+  await write("src/services/updateApi.ts", "invoke<AppUpdateState>(\"check_app_update\");\n");
+  await write("src/stores/updateStore.ts", "checkAppUpdate latestVersion available\n");
+  await write("src/features/update/useUpdateController.ts", "useUpdateStore checkNow\n");
   await write("src/features/update/UpdateController.test.tsx", [
     "test('no project still checks globally', () => {});",
     "test('available offer is visible', () => {});",

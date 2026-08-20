@@ -72,6 +72,8 @@ export function useModalDialog<T extends HTMLElement = HTMLDivElement>({
     };
 
     const keepFocusInside = (event: FocusEvent) => {
+      const modals = document.querySelectorAll("[aria-modal='true']");
+      if (modals.length > 0 && modals[modals.length - 1] !== dialog) return;
       if (!dialog || dialog.contains(event.target as Node)) return;
       (initialFocusRef?.current ?? focusable()[0] ?? dialog).focus();
     };

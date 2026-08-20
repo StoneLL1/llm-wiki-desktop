@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronDown, FolderOpen, FolderSearch, LayoutDashboard, RotateCcw, Search, Settings, Trash2 } from "lucide-react";
+import { ChevronDown, Download, FolderOpen, FolderSearch, LayoutDashboard, RotateCcw, Search, Settings, Trash2 } from "lucide-react";
 import { type KeyboardEvent as ReactKeyboardEvent, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { activateLocale, LANGUAGE_STORAGE_KEY } from "../../i18n";
@@ -7,6 +7,7 @@ import { compactPath } from "../../lib/pathDisplay";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useSettingsStore } from "../../stores/settingsStore";
+import { useUpdateStore } from "../../stores/updateStore";
 import { useToastStore } from "../../stores/toastStore";
 import { useWikiStore } from "../../features/wiki/wikiStore";
 import { pickDirectory } from "../../features/import/nativeFilePicker";
@@ -47,6 +48,8 @@ export function TopBar() {
   const removeRecentProject = useProjectStore((state) => state.removeRecentProject);
   const persistPatch = useSettingsStore((state) => state.persistPatch);
   const pushToast = useToastStore((state) => state.pushToast);
+  const openUpdateDialog = useUpdateStore((state) => state.openDialog);
+  const updateStatus = useUpdateStore((state) => state.uiStatus);
   const openPage = useWikiStore((state) => state.openPage);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
@@ -491,6 +494,19 @@ export function TopBar() {
 
       <div className="app-topbar__actions">
         <TaskActivityButton />
+        <button
+          aria-label={t("settings.updates.checkNow")}
+          className="icon-button relative"
+          data-update-trigger="true"
+          onClick={() => openUpdateDialog(["idle", "up_to_date", "error"].includes(updateStatus))}
+          title={t("settings.updates.checkNow")}
+          type="button"
+        >
+          <Download aria-hidden="true" size={16} />
+          {["available", "downloading", "ready_to_install", "restart_required"].includes(updateStatus) ? (
+            <span aria-hidden="true" className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
+          ) : null}
+        </button>
         <div className="app-topbar__language">
           <button
             aria-pressed={activeLanguage === "zh-CN"}

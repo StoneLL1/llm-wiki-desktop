@@ -66,6 +66,16 @@
       "writeAuthority": "EphemeralUpdateOffer"
     },
     {
+      "name": "restart_app_after_update",
+      "source": "src-tauri/src/commands/update_commands.rs",
+      "classifications": [
+        "mutation",
+        "external-process"
+      ],
+      "projectScoped": false,
+      "writeAuthority": "EphemeralUpdateOffer"
+    },
+    {
       "name": "save_global_update_preferences",
       "source": "src-tauri/src/commands/update_commands.rs",
       "classifications": [

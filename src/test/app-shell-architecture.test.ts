@@ -24,6 +24,8 @@ describe("AppShell architecture", () => {
     expect(shell).not.toContain("save_llm_provider");
     expect(shell).not.toContain("start_deep_lint");
     expect(shell).not.toContain("start_export");
+    expect(shell).toContain("<UpdateController />");
+    expect(shell).not.toContain("useUpdateStore");
   });
 
   it("keeps the active Import V2 surface off legacy mutation commands and direct IPC", () => {

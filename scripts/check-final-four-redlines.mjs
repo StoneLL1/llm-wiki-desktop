@@ -190,6 +190,7 @@ export function evaluateFinalFourRedlines(root) {
   const lib = readText(root, "src-tauri/src/lib.rs");
   const updateSettings = readText(root, "src/features/settings/UpdateSettings.tsx");
   const updateStore = readText(root, "src/stores/updateStore.ts");
+  const updateApi = readText(root, "src/services/updateApi.ts");
   const updateController = readText(root, "src/features/update/useUpdateController.ts")
     + readText(root, "src/components/app/UpdateController.tsx");
   const updaterContractTests = readText(root, "src-tauri/tests/updater_contracts.rs");
@@ -210,7 +211,7 @@ export function evaluateFinalFourRedlines(root) {
     ["src/features/project/NoProjectWorkspace.tsx", ["ActionableErrorNotice", "normalizeBackendError"]],
     ["src/stores/projectStore.ts", ["normalizeBackendError"]],
     ["src/features/import/ImportCapabilityDialog.tsx", ["ActionableErrorNotice", "normalizeBackendError"]],
-    ["src/features/settings/UpdateSettings.tsx", ["ActionableErrorNotice", "normalizeBackendError"]],
+    ["src/features/settings/UpdateSettings.tsx", ["ActionableErrorNotice", "useUpdateStore"]],
     ["src/features/settings/useProviderWorkflow.ts", ["normalizeBackendError"]],
     ["src/features/chat/ChatView.tsx", ["ActionableErrorNotice", "normalizeBackendError"]],
     ["src/features/chat/PageChatPanel.tsx", ["ActionableErrorNotice", "normalizeBackendError"]],
@@ -309,11 +310,14 @@ export function evaluateFinalFourRedlines(root) {
       /downgrade/i,
     ]);
 
-  const updateOfferReady = updateSettings.includes("check_app_update")
+  const updateOfferReady = updateSettings.includes("useUpdateStore")
     && !updateSettings.includes("get_app_summary")
     && !updateSettings.includes("window.confirm")
+    && updateApi.includes('invoke<AppUpdateState>("check_app_update")')
+    && /checkAppUpdate/.test(updateStore)
     && /latestVersion|available/i.test(updateStore)
-    && /check_app_update/.test(updateController)
+    && /useUpdateStore/.test(updateController)
+    && /checkNow/.test(updateController)
     && testNamesCover(updateOfferTestNames, [
       /no.project/i,
       /available/i,

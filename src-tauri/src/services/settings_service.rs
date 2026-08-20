@@ -12,7 +12,10 @@ use crate::models::settings::{
     AgentLintRepairMutationJournal, AgentLintRepairMutationPhase, ChatConvenienceAuthorization,
     CloseBehavior, GlobalSettingsFile, GlobalUiPreferences, ProjectSettingsFile, Settings,
 };
-use crate::models::update::{GlobalUpdatePreferences, SaveGlobalUpdatePreferences};
+use crate::models::update::{
+    update_error, GlobalUpdatePreferences, SaveGlobalUpdatePreferences, UpdateInstallReceipt,
+    UpdateInstallReceiptPhase, UpdateOffer,
+};
 use crate::services::FileStore;
 
 pub struct SettingsService {
@@ -85,6 +88,7 @@ impl SettingsService {
         global.last_update_checked_at = existing_global.last_update_checked_at;
         global.dismissed_update_offer_id = existing_global.dismissed_update_offer_id;
         global.dismissed_update_version = existing_global.dismissed_update_version;
+        global.update_install_receipt = existing_global.update_install_receipt;
         global.chat_convenience_authorizations = existing_global.chat_convenience_authorizations;
         global.agent_lint_repair_attestations = existing_global.agent_lint_repair_attestations;
         global.remote_provider_disclosure_revision =
@@ -330,20 +334,128 @@ impl SettingsService {
         })
     }
 
+    pub fn record_update_install_handoff(&self, offer: &UpdateOffer) -> Result<(), BackendError> {
+        self.mutate_global_settings(|settings| {
+            settings.update_install_receipt = Some(UpdateInstallReceipt {
+                offer_id: offer.offer_id.clone(),
+                from_version: offer.current_version.clone(),
+                target_version: offer.version.clone(),
+                phase: UpdateInstallReceiptPhase::HandoffReady,
+                recorded_at: chrono::Utc::now().to_rfc3339(),
+                error_code: None,
+            });
+        })
+    }
+
+    pub fn finish_update_install_receipt(
+        &self,
+        offer_id: &str,
+        result: Result<(), &str>,
+    ) -> Result<(), BackendError> {
+        self.try_mutate_global_settings(|settings| {
+            let receipt = settings.update_install_receipt.as_mut().ok_or_else(|| {
+                update_error(
+                    "UPDATE_INSTALL_RECEIPT_MISSING",
+                    "The durable update install receipt is missing.",
+                    false,
+                )
+            })?;
+            if receipt.offer_id != offer_id {
+                return Err(update_error(
+                    "UPDATE_INSTALL_RECEIPT_MISMATCH",
+                    "The durable update install receipt belongs to another update offer.",
+                    false,
+                ));
+            }
+            match result {
+                Ok(()) => {
+                    receipt.phase = UpdateInstallReceiptPhase::InstalledAwaitingRestart;
+                    receipt.error_code = None;
+                }
+                Err(code) => {
+                    receipt.phase = UpdateInstallReceiptPhase::Failed;
+                    receipt.error_code = Some(code.to_string());
+                }
+            }
+            receipt.recorded_at = chrono::Utc::now().to_rfc3339();
+            Ok(())
+        })
+    }
+
+    /// Reconcile the durable pre-install handoff on process startup. Windows
+    /// exits from inside the updater after launching the installer, so code
+    /// after `install()` is not guaranteed to execute there.
+    pub fn reconcile_update_install_receipt(
+        &self,
+        current_version: &str,
+    ) -> Result<Option<BackendError>, BackendError> {
+        let settings = self.read_global_settings()?;
+        let Some(receipt) = settings.update_install_receipt else {
+            return Ok(None);
+        };
+        let current = semver::Version::parse(current_version).map_err(|_| {
+            update_error(
+                "UPDATE_CURRENT_VERSION_INVALID",
+                "The installed application version is invalid.",
+                false,
+            )
+        })?;
+        let target = match semver::Version::parse(&receipt.target_version) {
+            Ok(target) => target,
+            Err(_) => {
+                self.mutate_global_settings(|settings| settings.update_install_receipt = None)?;
+                return Ok(Some(update_error(
+                    "UPDATE_RECEIPT_INVALID",
+                    "The persisted update receipt is invalid.",
+                    false,
+                )));
+            }
+        };
+        if current >= target {
+            self.mutate_global_settings(|settings| settings.update_install_receipt = None)?;
+            return Ok(None);
+        }
+        if receipt.phase == UpdateInstallReceiptPhase::Failed {
+            // Failed is already a terminal receipt written and surfaced by the
+            // prior runtime (or by an earlier startup reconciliation). Retire
+            // it so the same failure is not replayed on every launch.
+            self.mutate_global_settings(|settings| settings.update_install_receipt = None)?;
+            return Ok(None);
+        }
+        let error = update_error(
+            "UPDATE_INSTALL_INTERRUPTED",
+            "The previous update did not replace the current version. The existing version remains available; check for updates and try again.",
+            true,
+        );
+        self.finish_update_install_receipt(&receipt.offer_id, Err(&error.code))?;
+        Ok(Some(error))
+    }
+
     fn mutate_global_settings(
         &self,
         mutate: impl FnOnce(&mut GlobalSettingsFile),
     ) -> Result<(), BackendError> {
+        self.try_mutate_global_settings(|settings| {
+            mutate(settings);
+            Ok(())
+        })
+    }
+
+    fn try_mutate_global_settings<T>(
+        &self,
+        mutate: impl FnOnce(&mut GlobalSettingsFile) -> Result<T, BackendError>,
+    ) -> Result<T, BackendError> {
         let _guard = self.lock_global_settings()?;
         let mut settings = self.read_global_settings()?;
-        mutate(&mut settings);
+        let result = mutate(&mut settings)?;
         let store = FileStore;
         store.ensure_absolute_dir(self.config_write_root(), &self.config_dir)?;
         store.write_json_atomic_absolute(
             self.config_write_root(),
             &self.global_settings_path(),
             &settings,
-        )
+        )?;
+        Ok(result)
     }
 
     pub fn is_remote_provider_disclosure_acknowledged(
@@ -1253,7 +1365,9 @@ mod tests {
         CloseBehavior, GlobalSettingsFile, GlobalUiPreferences, Settings, ThemePreference,
         UpdateFrequency,
     };
-    use crate::models::update::SaveGlobalUpdatePreferences;
+    use crate::models::update::{
+        SaveGlobalUpdatePreferences, UpdateInstallReceiptPhase, UpdateOffer,
+    };
     use crate::services::{AgentService, FileStore, SecretService};
 
     fn tmp_paths(suffix: &str) -> (ProjectContext, PathBuf, PathBuf) {
@@ -1404,6 +1518,108 @@ mod tests {
         );
         assert_eq!(saved.dismissed_offer_id.as_deref(), Some("offer-1"));
         assert_eq!(saved.dismissed_version.as_deref(), Some("0.2.0"));
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn update_install_handoff_is_durable_and_reconciled_on_startup() {
+        let (_context, root, config_dir) = tmp_paths("update-install-receipt");
+        let service = SettingsService::with_config_dir(config_dir.clone());
+        let offer = UpdateOffer {
+            offer_id: "offer-1".into(),
+            current_version: "0.1.0".into(),
+            version: "0.2.0".into(),
+            target: "windows".into(),
+            arch: "x86_64".into(),
+            notes: None,
+            published_at: None,
+            created_at_unix_seconds: 1,
+            expires_at_unix_seconds: 2,
+        };
+
+        service.record_update_install_handoff(&offer).unwrap();
+        let mismatch = service
+            .finish_update_install_receipt("another-offer", Ok(()))
+            .unwrap_err();
+        assert_eq!(mismatch.code, "UPDATE_INSTALL_RECEIPT_MISMATCH");
+        let persisted = service.read_global_settings().unwrap();
+        assert_eq!(
+            persisted.update_install_receipt.unwrap().phase,
+            UpdateInstallReceiptPhase::HandoffReady
+        );
+
+        let recovery = service
+            .reconcile_update_install_receipt("0.1.0")
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovery.code, "UPDATE_INSTALL_INTERRUPTED");
+        assert_eq!(
+            service
+                .read_global_settings()
+                .unwrap()
+                .update_install_receipt
+                .unwrap()
+                .phase,
+            UpdateInstallReceiptPhase::Failed
+        );
+        assert!(service
+            .reconcile_update_install_receipt("0.1.0")
+            .unwrap()
+            .is_none());
+        assert!(service
+            .read_global_settings()
+            .unwrap()
+            .update_install_receipt
+            .is_none());
+
+        let missing = service
+            .finish_update_install_receipt("offer-1", Ok(()))
+            .unwrap_err();
+        assert_eq!(missing.code, "UPDATE_INSTALL_RECEIPT_MISSING");
+
+        service.record_update_install_handoff(&offer).unwrap();
+        service
+            .finish_update_install_receipt("offer-1", Ok(()))
+            .unwrap();
+        let recovery = service
+            .reconcile_update_install_receipt("0.1.0")
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovery.code, "UPDATE_INSTALL_INTERRUPTED");
+
+        service.record_update_install_handoff(&offer).unwrap();
+        assert!(service
+            .reconcile_update_install_receipt("0.2.0")
+            .unwrap()
+            .is_none());
+        assert!(service
+            .read_global_settings()
+            .unwrap()
+            .update_install_receipt
+            .is_none());
+
+        service.record_update_install_handoff(&offer).unwrap();
+        service
+            .mutate_global_settings(|settings| {
+                settings
+                    .update_install_receipt
+                    .as_mut()
+                    .unwrap()
+                    .target_version = "not-semver".into();
+            })
+            .unwrap();
+        let invalid = service
+            .reconcile_update_install_receipt("0.1.0")
+            .unwrap()
+            .unwrap();
+        assert_eq!(invalid.code, "UPDATE_RECEIPT_INVALID");
+        assert!(service
+            .read_global_settings()
+            .unwrap()
+            .update_install_receipt
+            .is_none());
 
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(config_dir).unwrap();

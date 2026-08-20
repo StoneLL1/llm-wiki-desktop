@@ -9,11 +9,13 @@ use tauri_plugin_updater::{Update, UpdaterExt};
 
 use crate::app_state::AppState;
 use crate::errors::BackendError;
+use crate::models::task::TaskStatus;
 use crate::models::update::{
-    update_error, AppUpdateState, GlobalUpdatePreferences, SaveGlobalUpdatePreferences,
-    StaticUpdateManifest, UpdateCheckCandidate, UpdateOfferRequest, UpdateProgressEvent,
-    MAX_UPDATE_MANIFEST_BYTES,
+    update_error, validate_update_install_guard, AppUpdateState, GlobalUpdatePreferences,
+    InstallGuardFacts, SaveGlobalUpdatePreferences, StaticUpdateManifest, UpdateCheckCandidate,
+    UpdateInstallRequest, UpdateOfferRequest, UpdateProgressEvent, MAX_UPDATE_MANIFEST_BYTES,
 };
+use crate::models::workflow::WorkflowDisplayStatus;
 use crate::services::verify_signed_update_artifact;
 
 const STABLE_UPDATE_ENDPOINT: &str =
@@ -259,8 +261,12 @@ pub fn cancel_app_update_download(
 #[tauri::command]
 pub async fn install_app_update(
     state: State<'_, AppState>,
-    request: UpdateOfferRequest,
+    request: UpdateInstallRequest,
 ) -> Result<AppUpdateState, BackendError> {
+    let _install_lease = state
+        .confirmation_registry
+        .update_install_barrier()
+        .reserve_install_or_restart(|| validate_install_guard(&state, &request))?;
     let now = now_unix_seconds();
     let identity = state
         .update_service
@@ -280,6 +286,21 @@ pub async fn install_app_update(
             return Err(error);
         }
     };
+    let offer = state
+        .update_service
+        .state()
+        .offer
+        .filter(|offer| offer.offer_id == request.offer_id)
+        .ok_or_else(offer_changed)?;
+    if let Err(error) = state.settings_service.record_update_install_handoff(&offer) {
+        state
+            .update_runtime
+            .restore_download(&request.offer_id, &identity, bytes);
+        state
+            .update_service
+            .fail_install(&request.offer_id, error.clone())?;
+        return Err(error);
+    }
 
     let install_task = tauri::async_runtime::spawn_blocking(move || {
         let result = verify_artifact_again(&update, &bytes)
@@ -297,6 +318,7 @@ pub async fn install_app_update(
     let (install_result, bytes) = match install_task {
         Ok(result) => result,
         Err(error) => {
+            let error = persist_update_install_failure(&state, &request.offer_id, error);
             state
                 .update_service
                 .fail_install(&request.offer_id, error.clone())?;
@@ -304,6 +326,7 @@ pub async fn install_app_update(
         }
     };
     if let Err(error) = install_result {
+        let error = persist_update_install_failure(&state, &request.offer_id, error);
         state
             .update_runtime
             .restore_download(&request.offer_id, &identity, bytes);
@@ -313,8 +336,93 @@ pub async fn install_app_update(
         return Err(error);
     }
 
+    if let Err(error) = state
+        .settings_service
+        .finish_update_install_receipt(&request.offer_id, Ok(()))
+    {
+        state
+            .update_service
+            .fail_install(&request.offer_id, error.clone())?;
+        return Err(error);
+    }
     state.update_runtime.clear(&request.offer_id);
     state.update_service.finish_install(&request.offer_id)
+}
+
+fn persist_update_install_failure(
+    state: &AppState,
+    offer_id: &str,
+    mut primary: BackendError,
+) -> BackendError {
+    let primary_code = primary.code.clone();
+    if let Err(receipt_error) = state
+        .settings_service
+        .finish_update_install_receipt(offer_id, Err(&primary_code))
+    {
+        primary.details = Some(serde_json::json!({
+            "primaryDetails": primary.details.take(),
+            "receiptPersistenceError": receipt_error,
+        }));
+        primary.message = format!(
+            "{} The durable update receipt could not record this failure.",
+            primary.message
+        );
+        primary.recoverable = false;
+        primary.user_action_required = true;
+    }
+    primary
+}
+
+#[tauri::command]
+pub fn restart_app_after_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: UpdateInstallRequest,
+) -> Result<(), BackendError> {
+    let _restart_lease = state
+        .confirmation_registry
+        .update_install_barrier()
+        .reserve_install_or_restart(|| validate_install_guard(&state, &request))?;
+    let update_state = state.update_service.state();
+    if update_state.phase != crate::models::update::UpdatePhase::Installed
+        || update_state
+            .offer
+            .as_ref()
+            .map(|offer| offer.offer_id.as_str())
+            != Some(request.offer_id.as_str())
+    {
+        return Err(update_error(
+            "UPDATE_RESTART_NOT_READY",
+            "The update is not ready for restart.",
+            true,
+        ));
+    }
+    app.restart()
+}
+
+fn validate_install_guard(
+    state: &AppState,
+    request: &UpdateInstallRequest,
+) -> Result<(), BackendError> {
+    let tasks = state.task_service.list_tasks(None);
+    let workflows = state.task_service.list_workflow_runs();
+    let confirmation_active = state.confirmation_registry.has_pending_or_executing()?;
+    validate_update_install_guard(
+        request,
+        InstallGuardFacts {
+            pending_task_confirmation: confirmation_active
+                || tasks
+                    .iter()
+                    .any(|task| task.status == TaskStatus::WaitingForConfirmation),
+            critical_task_active: tasks.iter().any(|task| task.blocks_update_install()),
+            workflow_apply_active: workflows.iter().any(|run| {
+                run.display_status == WorkflowDisplayStatus::Running
+                    && run.current_stage_id.as_deref().is_some_and(|stage| {
+                        stage == "apply_changes" || stage.starts_with("apply_changes_")
+                    })
+            }),
+        },
+    )
 }
 
 #[tauri::command]

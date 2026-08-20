@@ -241,6 +241,94 @@ pub struct UpdateOfferRequest {
     pub offer_id: String,
 }
 
+/// Frontend-only presentation facts are carried explicitly, while task and
+/// workflow facts are revalidated from AppState by the install command.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateInstallRequest {
+    pub offer_id: String,
+    pub restart_consent: bool,
+    pub unsaved_editor: bool,
+    pub import_commit_active: bool,
+    pub pending_user_confirmation: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateInstallReceiptPhase {
+    HandoffReady,
+    InstalledAwaitingRestart,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateInstallReceipt {
+    pub offer_id: String,
+    pub from_version: String,
+    pub target_version: String,
+    pub phase: UpdateInstallReceiptPhase,
+    pub recorded_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+}
+
+#[derive(Default)]
+pub(crate) struct InstallGuardFacts {
+    pub(crate) pending_task_confirmation: bool,
+    pub(crate) critical_task_active: bool,
+    pub(crate) workflow_apply_active: bool,
+}
+
+pub(crate) fn validate_update_install_guard(
+    request: &UpdateInstallRequest,
+    facts: InstallGuardFacts,
+) -> Result<(), BackendError> {
+    if !request.restart_consent {
+        return Err(update_error(
+            "UPDATE_RESTART_CONSENT_REQUIRED",
+            "Installing an update requires explicit restart consent.",
+            true,
+        ));
+    }
+    if request.unsaved_editor {
+        return Err(update_error(
+            "UPDATE_UNSAVED_EDITOR",
+            "Save or discard the current editor draft before installing the update.",
+            true,
+        ));
+    }
+    if request.import_commit_active {
+        return Err(update_error(
+            "UPDATE_IMPORT_COMMIT_ACTIVE",
+            "Wait for the active Import commit to finish before installing the update.",
+            true,
+        ));
+    }
+    if request.pending_user_confirmation || facts.pending_task_confirmation {
+        return Err(update_error(
+            "UPDATE_CONFIRMATION_PENDING",
+            "Resolve the pending confirmation before installing the update.",
+            true,
+        ));
+    }
+    if facts.critical_task_active {
+        return Err(update_error(
+            "UPDATE_CRITICAL_TASK_ACTIVE",
+            "Wait for the non-interruptible task to finish before installing the update.",
+            true,
+        ));
+    }
+    if facts.workflow_apply_active {
+        return Err(update_error(
+            "UPDATE_WORKFLOW_APPLY_ACTIVE",
+            "Wait for the workflow apply stage to finish before installing the update.",
+            true,
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateProgressEvent {
@@ -304,4 +392,90 @@ fn validate_signature(signature: &str) -> Result<(), BackendError> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod install_guard_tests {
+    use super::{validate_update_install_guard, InstallGuardFacts, UpdateInstallRequest};
+
+    fn request() -> UpdateInstallRequest {
+        UpdateInstallRequest {
+            offer_id: "offer-1".into(),
+            restart_consent: true,
+            unsaved_editor: false,
+            import_commit_active: false,
+            pending_user_confirmation: false,
+        }
+    }
+
+    #[test]
+    fn explicit_restart_consent_is_required() {
+        let mut request = request();
+        request.restart_consent = false;
+        assert_eq!(
+            validate_update_install_guard(&request, InstallGuardFacts::default())
+                .unwrap_err()
+                .code,
+            "UPDATE_RESTART_CONSENT_REQUIRED"
+        );
+    }
+
+    #[test]
+    fn unsaved_editor_and_import_commit_are_blocked() {
+        let mut request = request();
+        request.unsaved_editor = true;
+        assert_eq!(
+            validate_update_install_guard(&request, InstallGuardFacts::default())
+                .unwrap_err()
+                .code,
+            "UPDATE_UNSAVED_EDITOR"
+        );
+        request.unsaved_editor = false;
+        request.import_commit_active = true;
+        assert_eq!(
+            validate_update_install_guard(&request, InstallGuardFacts::default())
+                .unwrap_err()
+                .code,
+            "UPDATE_IMPORT_COMMIT_ACTIVE"
+        );
+    }
+
+    #[test]
+    fn backend_critical_facts_are_revalidated() {
+        for (facts, code) in [
+            (
+                InstallGuardFacts {
+                    pending_task_confirmation: true,
+                    ..InstallGuardFacts::default()
+                },
+                "UPDATE_CONFIRMATION_PENDING",
+            ),
+            (
+                InstallGuardFacts {
+                    critical_task_active: true,
+                    ..InstallGuardFacts::default()
+                },
+                "UPDATE_CRITICAL_TASK_ACTIVE",
+            ),
+            (
+                InstallGuardFacts {
+                    workflow_apply_active: true,
+                    ..InstallGuardFacts::default()
+                },
+                "UPDATE_WORKFLOW_APPLY_ACTIVE",
+            ),
+        ] {
+            assert_eq!(
+                validate_update_install_guard(&request(), facts)
+                    .unwrap_err()
+                    .code,
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn safe_idle_state_allows_install() {
+        validate_update_install_guard(&request(), InstallGuardFacts::default()).unwrap();
+    }
 }

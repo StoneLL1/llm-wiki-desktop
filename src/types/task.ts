@@ -56,6 +56,9 @@ export type TaskOperation = {
   itemId: string;
   capabilityId: string;
   requirementRevision: string;
+} | {
+  kind: "import_commit";
+  sessionId: string;
 };
 
 export interface TaskResult {

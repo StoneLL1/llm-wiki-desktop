@@ -39,7 +39,9 @@ impl BackendTask {
         }
         match self.operation.as_ref() {
             Some(TaskOperation::ImportBatch { session_id, .. }) => Some(session_id.as_str()),
-            Some(TaskOperation::CapabilityInstall { .. }) => None,
+            Some(TaskOperation::CapabilityInstall { .. } | TaskOperation::ImportCommit { .. }) => {
+                None
+            }
             None => self
                 .batch_id
                 .as_deref()
@@ -49,6 +51,17 @@ impl BackendTask {
 
     pub(crate) fn is_import_operation(&self) -> bool {
         self.import_operation_session_id().is_some()
+    }
+
+    pub(crate) fn is_import_commit(&self) -> bool {
+        matches!(self.operation, Some(TaskOperation::ImportCommit { .. }))
+    }
+
+    pub(crate) fn blocks_update_install(&self) -> bool {
+        matches!(
+            self.status,
+            TaskStatus::Queued | TaskStatus::Running | TaskStatus::Cancelling
+        ) && (!self.cancellable || self.is_import_commit())
     }
 }
 
@@ -99,6 +112,9 @@ pub enum TaskOperation {
         item_id: String,
         capability_id: String,
         requirement_revision: String,
+    },
+    ImportCommit {
+        session_id: String,
     },
 }
 
@@ -402,6 +418,31 @@ mod tests {
         assert_eq!(value["sessionId"], json!("session-1"));
         assert_eq!(value["itemId"], json!("item-1"));
         assert_eq!(value["capabilityId"], json!("browser-runtime"));
+    }
+
+    #[test]
+    fn queued_import_commit_blocks_update_even_when_cancellable() {
+        let mut task: BackendTask = serde_json::from_value(serde_json::json!({
+            "id": "commit-1",
+            "taskType": "import",
+            "projectId": "project-a",
+            "operation": { "kind": "import_commit", "sessionId": "session-a" },
+            "title": "Confirm import session",
+            "status": "queued",
+            "progress": null,
+            "startedAt": "2026-08-21T00:00:00Z",
+            "updatedAt": "2026-08-21T00:00:00Z",
+            "completedAt": null,
+            "cancellable": true,
+            "logPath": null,
+            "result": null,
+            "error": null
+        }))
+        .unwrap();
+
+        assert!(task.blocks_update_install());
+        task.status = TaskStatus::Cancelled;
+        assert!(!task.blocks_update_install());
     }
 
     #[test]

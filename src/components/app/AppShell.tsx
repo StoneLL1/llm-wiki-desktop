@@ -24,6 +24,7 @@ import { RightPanelModalContext } from "./RightPanelHeader";
 import { TaskLogDrawer } from "./TaskLogDrawer";
 import { Toaster } from "./Toaster";
 import { TopBar } from "./TopBar";
+import { UpdateController } from "./UpdateController";
 import { WorkspaceController } from "./WorkspaceController";
 
 function useNarrowDesktop() {
@@ -223,6 +224,7 @@ export function AppShell() {
       <Toaster />
       <ProjectConfirmationController />
       <TaskLogDrawer />
+      <UpdateController />
       {showRightPanelDialog
         ? createPortal(
             <div

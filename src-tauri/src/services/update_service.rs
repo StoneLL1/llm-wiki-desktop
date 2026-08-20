@@ -45,6 +45,16 @@ pub struct UpdateService {
 }
 
 impl UpdateService {
+    pub fn restore_startup_error(&self, error: BackendError) {
+        if let Ok(mut state) = self.coordinator.lock() {
+            state.presentation = AppUpdateState {
+                phase: UpdatePhase::Error,
+                error: Some(error),
+                ..AppUpdateState::default()
+            };
+        }
+    }
+
     pub fn state(&self) -> AppUpdateState {
         self.coordinator
             .lock()

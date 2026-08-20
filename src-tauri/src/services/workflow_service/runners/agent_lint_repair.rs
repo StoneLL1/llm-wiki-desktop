@@ -1527,6 +1527,10 @@ where
         )
     })?;
     let sink = WorkflowStageSink::new(services.task_service, services.coordinator, &run.task_id);
+    let _update_mutation_lease = services
+        .confirmation_registry
+        .update_install_barrier()
+        .enter_project_mutation()?;
     sink.start(apply_stage).map_err(task_error)?;
     let _authority = authorize_boundary()?;
     ensure_repair_head_and_paths(context, run, descriptor, services)?;

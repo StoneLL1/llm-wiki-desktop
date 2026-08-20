@@ -1430,12 +1430,11 @@ pub fn confirm_import_session_v2(
             }
             let task = state
                 .task_service
-                .create_project_task(
-                    TaskType::Import,
+                .create_project_import_commit_task(
                     request.project_id.clone(),
                     context.root.clone(),
                     "Confirm import session".into(),
-                    true,
+                    request.session_id.clone(),
                 )
                 .map_err(|error| task_error(&error))?;
             Ok((task, preview_task_ids))

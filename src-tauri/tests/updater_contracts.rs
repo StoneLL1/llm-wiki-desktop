@@ -250,14 +250,13 @@ fn updater_commands_keep_the_endpoint_and_signature_out_of_ipc_inputs() {
         "check_app_update",
         "download_app_update",
         "cancel_app_update_download",
+        "install_app_update",
+        "restart_app_after_update",
         "dismiss_app_update",
     ] {
         assert!(source.contains(&format!("fn {command}")));
         assert!(registration.contains(&format!("update_commands::{command}")));
     }
-    assert!(source.contains("fn install_app_update"));
-    assert!(!registration.contains("update_commands::install_app_update"));
-    assert!(registration.contains("Batch 4B registers install_app_update"));
     assert!(!source.contains("endpoint:"));
     assert!(!source.contains("download_url:"));
     assert!(!source.contains("signature:"));
@@ -286,8 +285,7 @@ fn updater_configuration_uses_the_frozen_public_trust_anchor() {
         release["endpoints"]["stableUpdaterManifest"]
     );
     let command_source = include_str!("../src/commands/update_commands.rs");
-    let pinned_updater_source =
-        include_str!("../vendor/tauri-plugin-updater/src/updater.rs");
+    let pinned_updater_source = include_str!("../vendor/tauri-plugin-updater/src/updater.rs");
     assert!(command_source.contains(updater["pubkey"].as_str().unwrap()));
     assert!(command_source.contains(updater["endpoints"][0].as_str().unwrap()));
     assert!(command_source.contains(".max_manifest_bytes(MAX_UPDATE_MANIFEST_BYTES)"));

@@ -329,7 +329,7 @@ export function SettingsView({
           ) : null}
 
           {activeSection === "updates" ? (
-            <UpdateSettings checkUpdates={settings.checkUpdates} onToggle={(checkUpdates) => { void savePatch({ checkUpdates }); }} />
+            <UpdateSettings />
           ) : null}
         </div>
       </div>

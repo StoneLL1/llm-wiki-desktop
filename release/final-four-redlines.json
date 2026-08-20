@@ -14,7 +14,7 @@
     {
       "id": "real-update-offer",
       "ownerBatch": "4B",
-      "expected": "red"
+      "expected": "green"
     },
     {
       "id": "structured-backend-error-presentation",
