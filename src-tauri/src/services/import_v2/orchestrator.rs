@@ -9154,7 +9154,7 @@ mod tests {
         fixture: &OrchestratorFixture,
         empty_second: bool,
         low_confidence_second: bool,
-    ) -> Result<EngineResult, BackendError> {
+    ) -> Result<(EngineResult, PathBuf), BackendError> {
         fixture
             .service
             .register_engine(Arc::new(MultiOcrFixtureEngine {
@@ -9221,7 +9221,7 @@ mod tests {
             warnings: vec![],
         };
         let token = fixture.tasks.get_cancellation_token(&task.id).unwrap();
-        fixture.service.execute_local_ocr_continuation(
+        let result = fixture.service.execute_local_ocr_continuation(
             &fixture.context,
             &fixture.files,
             &session.session_id,
@@ -9233,30 +9233,14 @@ mod tests {
             &fixture.tasks,
             &task.id,
             &Cell::new(0),
-        )
+        )?;
+        Ok((result, staging))
     }
 
     #[test]
     fn multi_image_ocr_keeps_shared_workspace_until_every_input_completes() {
         let fixture = OrchestratorFixture::new("ocr-shared-workspace");
-        let result = execute_two_image_ocr(&fixture, false, false).unwrap();
-        let staging = fixture
-            .root
-            .join(".app/import-sessions")
-            .read_dir()
-            .unwrap()
-            .flatten()
-            .next()
-            .unwrap()
-            .path()
-            .join("items")
-            .read_dir()
-            .unwrap()
-            .flatten()
-            .next()
-            .unwrap()
-            .path()
-            .join("staging");
+        let (result, staging) = execute_two_image_ocr(&fixture, false, false).unwrap();
         let markdown = std::fs::read_to_string(staging.join("candidate.md")).unwrap();
         let first_boundary = markdown
             .find("## 图片文字 / OCR — 第 1 张")

@@ -609,7 +609,10 @@ fn system_runner_redacts_stdout_stderr_and_stops_a_cancelled_process() {
     let worker = std::thread::spawn(move || {
         SystemProcessRunner.run_import_assistance(&invocation, &tasks_for_worker, &task_id)
     });
-    for _ in 0..40 {
+    // A cold PowerShell startup on a hosted Windows runner can exceed two
+    // seconds. Keep the production cancellation timeout unchanged while
+    // allowing the fixture process enough time to publish its child PID.
+    for _ in 0..200 {
         if grandchild_pid.is_file() {
             break;
         }
