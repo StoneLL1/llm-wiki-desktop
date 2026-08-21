@@ -4,12 +4,11 @@ use crate::{
     services::import_v2::{
         capability_pack::ResolvedCapabilityPack,
         media_router::TemporaryMediaWorkspace,
-        pack_engine::{
-            attach_platform_job, terminate_tree, validate_entrypoint_unchanged, PlatformJob,
-        },
+        pack_engine::{terminate_tree, validate_entrypoint_unchanged},
         url_policy::PrivateTargetGrant,
     },
     services::SecretService,
+    utils::process_lifetime::{configure_isolated_process, ProcessLifetimeGuard},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -35,7 +34,7 @@ pub struct ConnectorSessionRef {
 }
 struct ManagedChild {
     child: Child,
-    _job: Option<PlatformJob>,
+    _lifetime: Option<ProcessLifetimeGuard>,
     _runtime_temp: TemporaryMediaWorkspace,
 }
 
@@ -89,7 +88,7 @@ impl Drop for ConnectorSessionService {
             if let Some(child) = entry.child {
                 if let Ok(mut child) = child.lock() {
                     terminate_tree(&mut child.child);
-                    child._job.take();
+                    child._lifetime.take();
                 }
             }
             if let Some(reader) = entry.reader {
@@ -243,34 +242,12 @@ impl ConnectorSessionService {
         command
             .env("TEMP", runtime_temp.path())
             .env("TMP", runtime_temp.path());
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            command.process_group(0);
-            unsafe {
-                command.pre_exec(|| {
-                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x0000_0200);
-        }
+        configure_isolated_process(&mut command);
         let mut child = command
             .spawn()
             .map_err(|_| e("The browser login capability could not be started."))?;
-        let job = match attach_platform_job(&child) {
-            Ok(job) => job,
-            Err(error) => {
-                terminate_tree(&mut child);
-                return Err(error);
-            }
-        };
+        let lifetime = ProcessLifetimeGuard::attach_capability(&mut child)
+            .map_err(|_| e("The browser login capability could not be isolated."))?;
         let rpc = serde_json::json!({"jsonrpc":"2.0","id":uuid::Uuid::new_v4().to_string(),"method":"browser.login","params":{"platform":platform,"profilePath":profile,"url":url,"timeoutMs":600000,"cookieBackup":cookie_backup}});
         let mut stdin = child
             .stdin
@@ -288,7 +265,7 @@ impl ConnectorSessionService {
             .ok_or_else(|| e("Browser login stdout is unavailable."))?;
         let child = Arc::new(Mutex::new(ManagedChild {
             child,
-            _job: job,
+            _lifetime: Some(lifetime),
             _runtime_temp: runtime_temp,
         }));
         let child_registered = {
@@ -307,7 +284,7 @@ impl ConnectorSessionService {
         if !child_registered {
             if let Ok(mut child) = child.lock() {
                 terminate_tree(&mut child.child);
-                child._job.take();
+                child._lifetime.take();
             }
             return Err(e("Project authority changed before browser login started."));
         }
@@ -444,7 +421,7 @@ impl ConnectorSessionService {
             if let Some(child) = entry.child {
                 if let Ok(mut child) = child.lock() {
                     terminate_tree(&mut child.child);
-                    child._job.take();
+                    child._lifetime.take();
                 }
             }
             if let Some(reader) = entry.reader {
@@ -489,7 +466,7 @@ impl ConnectorSessionService {
             if let Some(child) = child {
                 if let Ok(mut child) = child.lock() {
                     terminate_tree(&mut child.child);
-                    child._job.take();
+                    child._lifetime.take();
                 }
             }
         }
@@ -530,7 +507,7 @@ impl ConnectorSessionService {
             if let Some(child) = entry.child {
                 if let Ok(mut child) = child.lock() {
                     terminate_tree(&mut child.child);
-                    child._job.take();
+                    child._lifetime.take();
                 }
             }
             if let Some(reader) = entry.reader {
@@ -904,7 +881,7 @@ mod binding_tests {
         let mut stdout = process.stdout.take().unwrap();
         let child = Arc::new(Mutex::new(ManagedChild {
             child: process,
-            _job: None,
+            _lifetime: None,
             _runtime_temp: TemporaryMediaWorkspace::create_unique(root.path(), ".reader-test")
                 .unwrap(),
         }));
@@ -975,7 +952,7 @@ mod binding_tests {
         let mut stdout = process.stdout.take().unwrap();
         let child = Arc::new(Mutex::new(ManagedChild {
             child: process,
-            _job: None,
+            _lifetime: None,
             _runtime_temp: TemporaryMediaWorkspace::create_unique(
                 root.path(),
                 ".reader-first-test",
