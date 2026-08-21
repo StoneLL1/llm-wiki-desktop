@@ -5802,18 +5802,32 @@ mod tests {
     fn agent_probe_and_formal_capture_do_not_inherit_sensitive_environment() {
         const NAME: &str = "LLM_WIKI_BATCH2C_FAKE_CLOUD_TOKEN";
         const SECRET: &str = "must-not-reach-agent-probe";
+
+        struct RemoveEnvOnDrop(&'static str);
+
+        impl Drop for RemoveEnvOnDrop {
+            fn drop(&mut self) {
+                std::env::remove_var(self.0);
+            }
+        }
+
         std::env::set_var(NAME, SECRET);
+        let _remove_env = RemoveEnvOnDrop(NAME);
 
         #[cfg(windows)]
         let (target, args) = (
             SpawnTarget {
-                program: r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe".into(),
+                program: std::env::var_os("ComSpec")
+                    .unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows\System32\cmd.exe"))
+                    .to_string_lossy()
+                    .into_owned(),
                 leading_args: Vec::new(),
             },
             vec![
-                "-NoProfile".to_string(),
-                "-Command".to_string(),
-                format!("Write-Output $env:{NAME}"),
+                "/D".to_string(),
+                "/S".to_string(),
+                "/C".to_string(),
+                format!("echo %{NAME}%"),
             ],
         );
         #[cfg(unix)]
@@ -5836,7 +5850,6 @@ mod tests {
                 cwd: workspace.path().to_path_buf(),
             })
             .expect("formal capture should complete");
-        std::env::remove_var(NAME);
 
         assert!(
             !output.contains(SECRET),
