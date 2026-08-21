@@ -81,4 +81,7 @@ jobs:
         run: npm run check:rust:gui
 
       - name: Run Rust service tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
+        # The suite launches real Git and child-process fixtures. Capping the
+        # harness reduces concurrent process pressure and scheduler starvation
+        # that can turn bounded production timeouts into hosted-runner flakes.
+        run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features -- --test-threads=2

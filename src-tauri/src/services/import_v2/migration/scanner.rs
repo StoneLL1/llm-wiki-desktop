@@ -214,7 +214,11 @@ impl<'a> ScanState<'a> {
         let path = self
             .root
             .join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
-        let metadata = match safe_metadata(&path) {
+        // Inspect the entry itself so links can be classified distinctly.
+        // `safe_metadata` intentionally converts links into PermissionDenied,
+        // which would collapse this security signal into a generic unreadable
+        // directory warning before the no-follow branch below can run.
+        let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == ErrorKind::NotFound => return,
             Err(_) => {

@@ -159,7 +159,7 @@ describe("CI validation contract", () => {
       "npm run build",
       "npm run check:console",
       "npm run check:rust:gui",
-      "cargo test --manifest-path src-tauri/Cargo.toml --no-default-features",
+      "cargo test --manifest-path src-tauri/Cargo.toml --no-default-features -- --test-threads=2",
     ]);
   });
 
