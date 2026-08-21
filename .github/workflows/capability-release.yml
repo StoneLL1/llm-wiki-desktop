@@ -39,6 +39,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.23.1
+
       - name: Require the canonical repository, existing tag, version, and exact commit
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
@@ -92,7 +97,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22.17.0
+          node-version: 22.23.1
           cache: npm
           cache-dependency-path: |
             capabilities/browser-runtime/package-lock.json
@@ -170,15 +175,15 @@ jobs:
           $browserNode = Join-Path $browserStage '${{ matrix.entrypoint }}'
           $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $browserStage 'runtime/ms-playwright'
           & $browserNode (Join-Path $browserStage 'runner/policy.smoke.mjs')
-          & $browserNode --test --test-isolation=none (Join-Path $browserStage 'runner/platform-extract.node-test.mjs')
-          & $browserNode --test --test-isolation=none (Join-Path $browserStage 'runner/linux-deps.node-test.mjs')
+          & $browserNode --test (Join-Path $browserStage 'runner/platform-extract.node-test.mjs')
+          & $browserNode --test (Join-Path $browserStage 'runner/linux-deps.node-test.mjs')
           & $browserNode (Join-Path $browserStage 'runner/browser.smoke.mjs')
           $liteStage = Join-Path $stageRoot 'browser-runtime-lite'
           $liteNode = Join-Path $liteStage '${{ matrix.entrypoint }}'
-          & $liteNode --test --test-isolation=none (Join-Path $liteStage 'runner/index.node-test.mjs')
+          & $liteNode --test (Join-Path $liteStage 'runner/index.node-test.mjs')
           $mediaStage = Join-Path $stageRoot 'media-metadata'
           $mediaNode = Join-Path $mediaStage '${{ matrix.entrypoint }}'
-          & $mediaNode --test --test-isolation=none (Join-Path $mediaStage 'runner/core.node-test.mjs')
+          & $mediaNode --test (Join-Path $mediaStage 'runner/core.node-test.mjs')
 
       - name: Sign and assemble deterministic packs
         shell: pwsh
@@ -268,7 +273,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22.17.0
+          node-version: 22.23.1
 
       - name: Setup Rust
         shell: pwsh
@@ -305,7 +310,7 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           $stageRoot = Join-Path $env:RUNNER_TEMP 'sensevoice-stage'
           $node = Join-Path $stageRoot '${{ matrix.entrypoint }}'
-          & $node --test --test-isolation=none (Join-Path $stageRoot 'runner/core.node-test.mjs')
+          & $node --test (Join-Path $stageRoot 'runner/core.node-test.mjs')
           & $node (Join-Path $stageRoot 'runner/qualification.mjs')
 
       - name: Sign and assemble deterministic SenseVoice pack
@@ -396,7 +401,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22.17.0
+          node-version: 22.23.1
 
       - name: Setup uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -494,7 +499,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22.17.0
+          node-version: 22.23.1
 
       - name: Setup Rust
         run: |
