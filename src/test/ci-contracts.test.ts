@@ -101,16 +101,16 @@ describe("CI validation contract", () => {
       "node scripts/check-console-log.mjs",
     );
     expect(packageJson.scripts["check:bundle"]).toBe(
-      "node --test --test-isolation=none scripts/check-initial-bundle.node-test.mjs && node scripts/check-initial-bundle.mjs",
+      "node --test --experimental-test-isolation=none scripts/check-initial-bundle.node-test.mjs && node scripts/check-initial-bundle.mjs",
     );
     expect(packageJson.scripts["check:import-source-media"]).toBe(
       "node scripts/check-import-source-media-flow.mjs",
     );
     expect(packageJson.scripts["check:release-config"]).toBe(
-      "node --test --test-isolation=none scripts/check-release-config.node-test.mjs scripts/release-assets.node-test.mjs scripts/verify-capability-catalog.node-test.mjs scripts/verify-embedded-capability-catalog.node-test.mjs && npm run test:updater-signature && node scripts/check-release-version.mjs && node scripts/verify-capability-catalog.mjs --catalog capabilities/install-catalog.json --trusted-keys capabilities/trusted-keys.json --mode source",
+      "node --test --experimental-test-isolation=none scripts/check-release-config.node-test.mjs scripts/release-assets.node-test.mjs scripts/verify-capability-catalog.node-test.mjs scripts/verify-embedded-capability-catalog.node-test.mjs && npm run test:updater-signature && node scripts/check-release-version.mjs && node scripts/verify-capability-catalog.mjs --catalog capabilities/install-catalog.json --trusted-keys capabilities/trusted-keys.json --mode source",
     );
     expect(packageJson.scripts["test:final-four-redlines"]).toBe(
-      "node --test --test-isolation=none scripts/check-final-four-redlines.node-test.mjs",
+      "node --test --experimental-test-isolation=none scripts/check-final-four-redlines.node-test.mjs",
     );
     expect(packageJson.scripts["check:rust:gui"]).toBe(
       "cargo check --manifest-path src-tauri/Cargo.toml",
@@ -140,8 +140,8 @@ describe("CI validation contract", () => {
 
     expect(workflow).toContain("pull_request:");
     expect(workflow).toContain("push:");
-    expect(workflow).toContain("node-version: 22.17.0");
-    expect(packageJson.packageManager).toBe("npm@10.9.2");
+    expect(workflow).toContain("node-version: 22.23.1");
+    expect(packageJson.packageManager).toBe("npm@10.9.8");
     expect(matrixPlatforms).toEqual([
       "windows-latest",
       "macos-latest",
@@ -161,6 +161,47 @@ describe("CI validation contract", () => {
       "npm run check:rust:gui",
       "cargo test --manifest-path src-tauri/Cargo.toml --no-default-features",
     ]);
+  });
+
+  it("keeps build tooling compatible without drifting the embedded capability runtime", () => {
+    const capabilityWorkflow = readRootFile(".github/workflows/capability-release.yml");
+    const desktopWorkflow = readRootFile(".github/workflows/desktop-release.yml");
+    const releaseSources = JSON.parse(
+      readRootFile("capabilities/release-sources.json"),
+    ) as {
+      node: {
+        version: string;
+        source: string;
+        distributions: Record<string, { file: string; root: string }>;
+      };
+    };
+
+    expect(desktopWorkflow).toContain("NODE_VERSION: 22.23.1");
+    expect(capabilityWorkflow.match(/node-version: 22\.23\.1/g)).toHaveLength(5);
+    expect(capabilityWorkflow.match(/--node-version 22\.17\.0/g)).toHaveLength(4);
+    expect(capabilityWorkflow).not.toMatch(
+      /& \$(?:browserNode|liteNode|mediaNode|node) --test --(?:experimental-)?test-isolation=none/,
+    );
+    expect(releaseSources.node.version).toBe("22.17.0");
+    expect(releaseSources.node.source).toBe("https://nodejs.org/dist/v22.17.0/");
+    expect(releaseSources.node.distributions).toMatchObject({
+      "x86_64-pc-windows-msvc": {
+        file: "node-v22.17.0-win-x64.zip",
+        root: "node-v22.17.0-win-x64",
+      },
+      "aarch64-apple-darwin": {
+        file: "node-v22.17.0-darwin-arm64.tar.xz",
+        root: "node-v22.17.0-darwin-arm64",
+      },
+      "x86_64-apple-darwin": {
+        file: "node-v22.17.0-darwin-x64.tar.xz",
+        root: "node-v22.17.0-darwin-x64",
+      },
+      "x86_64-unknown-linux-gnu": {
+        file: "node-v22.17.0-linux-x64.tar.xz",
+        root: "node-v22.17.0-linux-x64",
+      },
+    });
   });
 
   it("keeps capability release inputs out of executable scripts", () => {
