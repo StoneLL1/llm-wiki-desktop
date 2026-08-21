@@ -221,7 +221,7 @@ impl BoundProjectMutationRoot {
         truncate: bool,
     ) -> io::Result<File> {
         let name = self.entry_name(path)?;
-        let file = match open_existing_relative(&self.anchor, name, OpenPurpose::Mutate) {
+        let file = match open_existing_relative(&self.anchor, name, OpenPurpose::ContentWrite) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 create_new_relative(&self.anchor, name)?
@@ -820,6 +820,7 @@ enum OpenPurpose {
     Read,
     ReadIdentity,
     Pin,
+    ContentWrite,
     Mutate,
 }
 
@@ -882,16 +883,21 @@ mod platform {
     pub(super) fn open_existing_relative(
         parent: &File,
         name: &OsStr,
-        _purpose: OpenPurpose,
+        purpose: OpenPurpose,
     ) -> io::Result<File> {
         let name = std::ffi::CString::new(name.as_bytes())?;
+        let access = if matches!(purpose, OpenPurpose::ContentWrite) {
+            libc::O_RDWR
+        } else {
+            libc::O_RDONLY
+        };
         // SAFETY: parent and the single-component C string remain valid; the
         // returned descriptor is transferred exactly once.
         let descriptor = unsafe {
             libc::openat(
                 parent.as_raw_fd(),
                 name.as_ptr(),
-                libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                access | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC,
                 0,
             )
         };
@@ -1368,6 +1374,10 @@ mod platform {
             ),
             OpenPurpose::Pin => (
                 FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                FILE_SHARE_READ,
+            ),
+            OpenPurpose::ContentWrite => (
+                FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE,
                 FILE_SHARE_READ,
             ),
             OpenPurpose::Mutate => (
@@ -2039,6 +2049,52 @@ mod tests {
         }));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn unix_namespace_mutations_do_not_require_content_write_permission() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("wiki");
+        std::fs::create_dir(&parent).unwrap();
+        let target = parent.join("readonly.md");
+        let renamed = parent.join("renamed.md");
+        std::fs::write(&target, b"original").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let binding = BoundProjectMutationRoot::bind(root.path(), &target).unwrap();
+
+        binding
+            .write_atomic_replace(&target, b"replacement")
+            .unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o444)).unwrap();
+        binding.rename(&target, &renamed, false).unwrap();
+        binding.remove_file(&renamed).unwrap();
+
+        assert!(!target.exists());
+        assert!(!renamed.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_content_write_handle_can_truncate_and_replace_existing_bytes() {
+        use std::io::{Seek, SeekFrom, Write};
+
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("download.partial");
+        std::fs::write(&target, b"old-prefix").unwrap();
+        let binding = BoundProjectMutationRoot::bind(root.path(), &target).unwrap();
+
+        let mut file = binding
+            .open_regular_mutate_or_create(&target, true)
+            .unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(b"replacement").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"replacement");
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_locked_target_fails_without_losing_original_bytes() {
@@ -2088,8 +2144,7 @@ mod tests {
     #[test]
     fn unix_symlink_swap_race_never_changes_outside_sentinel() {
         use std::os::unix::fs::symlink;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
+        use std::sync::mpsc;
 
         const ROUNDS: usize = 16;
         let root = tempfile::tempdir().unwrap();
@@ -2099,32 +2154,25 @@ mod tests {
         std::fs::create_dir(&live).unwrap();
         let sentinel = outside.path().join("sentinel.md");
         std::fs::write(&sentinel, b"outside").unwrap();
-        let phase = Arc::new(AtomicUsize::new(9));
-        let swaps = Arc::new(AtomicUsize::new(0));
-        let attacker_phase = Arc::clone(&phase);
-        let attacker_swaps = Arc::clone(&swaps);
+        let (swap_request_tx, swap_request_rx) = mpsc::sync_channel::<()>(0);
+        let (swapped_tx, swapped_rx) = mpsc::sync_channel::<()>(0);
+        let (restore_request_tx, restore_request_rx) = mpsc::sync_channel::<()>(0);
+        let (restored_tx, restored_rx) = mpsc::sync_channel::<()>(0);
         let live_for_attacker = live.clone();
         let parked_for_attacker = parked.clone();
         let outside_for_attacker = outside.path().to_path_buf();
         let attacker = std::thread::spawn(move || {
             for _ in 0..ROUNDS {
-                while attacker_phase.load(Ordering::Acquire) != 0 {
-                    std::thread::yield_now();
-                }
+                swap_request_rx.recv().unwrap();
                 std::fs::rename(&live_for_attacker, &parked_for_attacker).unwrap();
                 symlink(&outside_for_attacker, &live_for_attacker).unwrap();
-                attacker_swaps.fetch_add(1, Ordering::AcqRel);
-                attacker_phase.store(1, Ordering::Release);
-                while attacker_phase.load(Ordering::Acquire) != 2 {
-                    std::thread::yield_now();
-                }
+                swapped_tx.send(()).unwrap();
+                restore_request_rx.recv().unwrap();
                 std::fs::remove_file(&live_for_attacker).unwrap();
                 std::fs::rename(&parked_for_attacker, &live_for_attacker).unwrap();
-                attacker_phase.store(3, Ordering::Release);
-                while attacker_phase.load(Ordering::Acquire) != 4 {
-                    std::thread::yield_now();
-                }
+                restored_tx.send(()).unwrap();
             }
+            ROUNDS
         });
 
         let mut mutations = 0;
@@ -2132,15 +2180,10 @@ mod tests {
             let target = live.join(format!("inside-{round}.md"));
             let renamed = live.join(format!("inside-{round}-renamed.md"));
             let binding = BoundProjectMutationRoot::bind(root.path(), &target).unwrap();
-            phase.store(0, Ordering::Release);
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while phase.load(Ordering::Acquire) != 1 {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "symlink swap timed out"
-                );
-                std::thread::yield_now();
-            }
+            swap_request_tx.send(()).unwrap();
+            swapped_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("symlink swap timed out");
             assert!(
                 BoundProjectMutationRoot::bind(root.path(), &live.join("sentinel.md")).is_err()
             );
@@ -2150,20 +2193,13 @@ mod tests {
             binding.remove_file(&renamed).unwrap();
             mutations += 1;
             assert_eq!(std::fs::read(&sentinel).unwrap(), b"outside");
-            phase.store(2, Ordering::Release);
-
-            while phase.load(Ordering::Acquire) != 3 {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "symlink restore timed out"
-                );
-                std::thread::yield_now();
-            }
+            restore_request_tx.send(()).unwrap();
+            restored_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("symlink restore timed out");
             assert_eq!(std::fs::read(&sentinel).unwrap(), b"outside");
-            phase.store(4, Ordering::Release);
         }
-        attacker.join().unwrap();
-        assert_eq!(swaps.load(Ordering::Acquire), ROUNDS);
+        assert_eq!(attacker.join().unwrap(), ROUNDS);
         assert_eq!(mutations, ROUNDS);
         assert_eq!(std::fs::read(&sentinel).unwrap(), b"outside");
     }
