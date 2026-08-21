@@ -1325,22 +1325,23 @@ fn reject_local_git_filters(
         return Ok(());
     }
     let mut command = hardened_git_command(context);
-    command.args([
-        "config",
-        "--local",
-        "--includes",
-        "--name-only",
-        "--get-regexp",
-        r"^filter\.",
-    ]);
+    // Inspect every scope still visible to the hardened command. In
+    // particular, `--local` omits `.git/config.worktree` when a repository
+    // enables `extensions.worktreeConfig`, even though later Git commands
+    // load filters from that worktree scope.
+    command.args(["config", "--no-includes", "--name-only", "--list"]);
     let output = run_bounded_process(&mut command, None, timeout, 64 * 1024, cancelled)?;
-    if output.status.success() && !output.stdout.is_empty() {
+    let has_unsafe_execution_config = output.stdout.split(|byte| *byte == b'\n').any(|line| {
+        let key = String::from_utf8_lossy(line).trim().to_ascii_lowercase();
+        key.starts_with("filter.") || key.starts_with("include.") || key.starts_with("includeif.")
+    });
+    if output.status.success() && has_unsafe_execution_config {
         return Err(BoundedProcessError::Wait(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
-            "repository-defined Git clean/smudge/process filters are not allowed",
+            "repository-defined Git filters or config includes are not allowed",
         )));
     }
-    if output.status.success() || output.status.code() == Some(1) {
+    if output.status.success() {
         Ok(())
     } else {
         Err(BoundedProcessError::Wait(std::io::Error::other(
@@ -2056,6 +2057,50 @@ mod tests {
             );
             fs::remove_dir_all(root).ok();
         }
+    }
+
+    #[test]
+    fn app_owned_git_rejects_filters_from_worktree_config() {
+        let root = unique_temp_dir("hardened-worktree-filter");
+        fs::create_dir_all(root.join("wiki")).unwrap();
+        fs::write(root.join("wiki/page.md"), "baseline\n").unwrap();
+        run_git_in(&root, &["init"]);
+        run_git_in(&root, &["config", "user.email", "tests@example.com"]);
+        run_git_in(&root, &["config", "user.name", "Tests"]);
+        run_git_in(&root, &["add", "--all"]);
+        run_git_in(&root, &["commit", "-m", "baseline"]);
+
+        let marker = root.join("unsafe-worktree-filter-marker.txt");
+        let helper = root.join("unsafe-worktree-filter.sh");
+        write_marker_script(&helper, &marker);
+        let helper_config = helper.to_string_lossy().replace('\\', "/");
+        run_git_in(&root, &["config", "extensions.worktreeConfig", "true"]);
+        run_git_in(
+            &root,
+            &[
+                "config",
+                "--worktree",
+                "filter.batch2c.clean",
+                &helper_config,
+            ],
+        );
+        fs::write(root.join(".gitattributes"), "*.md filter=batch2c\n").unwrap();
+        fs::write(root.join("wiki/page.md"), "candidate\n").unwrap();
+
+        let context = ProjectContext::new("project-1", root.clone());
+        let error = GitService
+            .create_checkpoint(
+                &context,
+                CheckpointPurpose::HighRiskOperation,
+                "must reject worktree filters",
+            )
+            .expect_err("worktree-scoped repository filters must fail closed");
+        assert_eq!(error.code, "GIT_COMMAND_FAILED");
+        assert!(
+            !marker.exists(),
+            "worktree-scoped Git filter executed before policy rejection"
+        );
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
