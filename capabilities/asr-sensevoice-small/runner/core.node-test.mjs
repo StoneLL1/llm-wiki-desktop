@@ -48,7 +48,7 @@ test("accepts the staging-relative chained media handoff and rejects escaping in
   await fs.writeFile(media, "media");
   const source = await fs.readFile(path.join(import.meta.dirname, "index.mjs"), "utf8");
   assert.match(source, /const mediaLocator = params\.chainedInput \|\| params\.input\.locator;/u);
-  assert.equal((await resolveStagingMedia(root, "staging", relativeMedia)).mediaPath, media);
+  assert.equal((await resolveStagingMedia(root, "staging", relativeMedia)).mediaPath, await fs.realpath(media));
   if (process.platform === "win32") {
     await assert.rejects(
       resolveStagingMedia(root, "staging", path.toNamespacedPath(media)),
