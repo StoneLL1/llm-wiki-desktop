@@ -166,7 +166,9 @@ fn expected_red_evidence_is_unique_valid_json_and_keeps_green_targets_visible() 
         let witness = &witnesses[index];
         assert_eq!(witness["file"], *expected_file);
         assert_eq!(witness["test"], *expected_test);
-        let source = std::fs::read_to_string(manifest.join("tests").join(expected_file)).unwrap();
+        let source = std::fs::read_to_string(manifest.join("tests").join(expected_file))
+            .unwrap()
+            .replace("\r\n", "\n");
         let declaration = if *is_rust {
             format!("#[test]\nfn {expected_test}")
         } else {

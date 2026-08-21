@@ -128,6 +128,9 @@ describe("CI validation contract", () => {
 
   it("runs the required GitHub Actions checks on every supported desktop platform", () => {
     const workflowPath = rootPath(".github/workflows/ci.yml");
+    const packageJson = JSON.parse(readRootFile("package.json")) as {
+      packageManager?: string;
+    };
 
     expect(existsSync(workflowPath)).toBe(true);
 
@@ -137,6 +140,8 @@ describe("CI validation contract", () => {
 
     expect(workflow).toContain("pull_request:");
     expect(workflow).toContain("push:");
+    expect(workflow).toContain("node-version: 22.17.0");
+    expect(packageJson.packageManager).toBe("npm@10.9.2");
     expect(matrixPlatforms).toEqual([
       "windows-latest",
       "macos-latest",

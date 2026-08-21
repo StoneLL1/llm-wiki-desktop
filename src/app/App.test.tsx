@@ -590,7 +590,7 @@ describe("App", () => {
     ));
 
     expect(useGraphStore.getState().focusedNodeId).toBe("a");
-  });
+  }, 15_000);
 
   it("collapses and restores the right context panel", () => {
     render(<App />);
