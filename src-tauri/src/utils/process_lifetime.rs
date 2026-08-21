@@ -179,20 +179,18 @@ pub(crate) fn configure_isolated_process(command: &mut Command) {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
+        let expected_parent = unsafe { libc::getpid() };
         command.process_group(0);
         unsafe {
-            command.pre_exec(|| {
+            command.pre_exec(move || {
                 #[cfg(any(target_os = "linux", target_os = "android"))]
                 {
                     if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
                         return Err(io::Error::last_os_error());
                     }
                 }
-                if libc::getppid() == 1 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Interrupted,
-                        "parent exited before process launch completed",
-                    ));
+                if libc::getppid() != expected_parent {
+                    return Err(io::Error::from_raw_os_error(libc::ECHILD));
                 }
                 Ok(())
             });
@@ -229,13 +227,25 @@ pub(crate) struct ProcessLifetimeGuard {
 impl ProcessLifetimeGuard {
     pub(crate) fn attach(child: &mut Child) -> io::Result<Self> {
         let mut pipe = [-1; 2];
-        if unsafe { libc::pipe(pipe.as_mut_ptr()) } != 0 {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let pipe_result = unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) };
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let pipe_result = unsafe { libc::pipe(pipe.as_mut_ptr()) };
+        if pipe_result != 0 {
             terminate_process_tree(child);
             return Err(io::Error::last_os_error());
         }
+
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         for fd in pipe {
-            unsafe {
-                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
+                let error = io::Error::last_os_error();
+                unsafe {
+                    libc::close(pipe[0]);
+                    libc::close(pipe[1]);
+                }
+                terminate_process_tree(child);
+                return Err(error);
             }
         }
         let process_group = child.id() as libc::pid_t;
@@ -264,6 +274,10 @@ impl ProcessLifetimeGuard {
             watchdog_write: pipe[1],
             watchdog_pid,
         })
+    }
+
+    pub(crate) fn attach_capability(child: &mut Child) -> io::Result<Self> {
+        Self::attach(child)
     }
 
     pub(crate) fn terminate(&self, child: &mut Child) {
@@ -310,6 +324,47 @@ mod tests {
         assert!(matches!(error, BoundedProcessError::OutputTooLarge));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn configured_windows_child_runs_after_lifetime_attachment() {
+        let mut command =
+            Command::new(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe");
+        command.args([
+            "-NoProfile",
+            "-Command",
+            "[Console]::Out.Write('lifetime-ready')",
+        ]);
+
+        let output =
+            run_bounded_process(&mut command, None, Duration::from_secs(5), 1024, || false)
+                .expect("the Job Object attachment must resume the suspended child");
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"lifetime-ready");
+        assert!(output.stderr.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn capability_jobs_disable_unhandled_exception_dialogs() {
+        use windows_sys::Win32::System::JobObjects::{
+            JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        let default_flags = windows_job_limit_flags(false);
+        let capability_flags = windows_job_limit_flags(true);
+
+        assert_eq!(
+            default_flags & JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION,
+            0
+        );
+        assert_ne!(
+            capability_flags & JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION,
+            0
+        );
+        assert_ne!(capability_flags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, 0);
+    }
+
     #[cfg(unix)]
     #[test]
     fn timeout_reaps_the_direct_child_and_its_process_group() {
@@ -338,7 +393,7 @@ mod tests {
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            let alive = unsafe { libc::kill(child_pid, 0) } == 0;
+            let alive = unsafe { libc::kill(-child_pid, 0) } == 0;
             if !alive {
                 break;
             }
@@ -349,6 +404,65 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watchdog_reaps_process_group_after_abrupt_owner_exit() {
+        let root = std::env::temp_dir().join(format!(
+            "llm-wiki-process-watchdog-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let child_pid_path = root.join("child.pid");
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "utils::process_lifetime::tests::unix_watchdog_abrupt_exit_helper",
+                "--nocapture",
+            ])
+            .env("LLM_WIKI_WATCHDOG_HELPER_PID_PATH", &child_pid_path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let child_pid = std::fs::read_to_string(&child_pid_path)
+            .unwrap()
+            .trim()
+            .parse::<libc::pid_t>()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let alive = unsafe { libc::kill(child_pid, 0) } == 0;
+            if !alive {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "watchdog-owned process group survived owner exit: {child_pid}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_watchdog_abrupt_exit_helper() {
+        let Some(child_pid_path) = std::env::var_os("LLM_WIKI_WATCHDOG_HELPER_PID_PATH") else {
+            return;
+        };
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 30 & wait"]);
+        configure_isolated_process(&mut command);
+        let mut child = command.spawn().unwrap();
+        let _lifetime = ProcessLifetimeGuard::attach(&mut child).unwrap();
+        std::fs::write(child_pid_path, child.id().to_string()).unwrap();
+        thread::sleep(Duration::from_millis(50));
+
+        // Simulate an abrupt application exit: destructors do not run, but the
+        // OS closes the guard pipe and the watchdog must kill the process group.
+        std::process::exit(0);
     }
 }
 
@@ -361,6 +475,10 @@ impl ProcessLifetimeGuard {
         Ok(Self)
     }
 
+    pub(crate) fn attach_capability(child: &mut Child) -> io::Result<Self> {
+        Self::attach(child)
+    }
+
     pub(crate) fn terminate(&self, child: &mut Child) {
         terminate_process_tree(child);
     }
@@ -370,15 +488,30 @@ impl ProcessLifetimeGuard {
 pub(crate) struct ProcessLifetimeGuard(windows_sys::Win32::Foundation::HANDLE);
 
 #[cfg(windows)]
+// SAFETY: the guard owns a Job Object handle. Windows handles may be moved
+// between threads, and all access remains synchronized by the owning value.
+unsafe impl Send for ProcessLifetimeGuard {}
+
+#[cfg(windows)]
 impl ProcessLifetimeGuard {
     pub(crate) fn attach(child: &mut Child) -> io::Result<Self> {
+        Self::attach_with_unhandled_exception_policy(child, false)
+    }
+
+    pub(crate) fn attach_capability(child: &mut Child) -> io::Result<Self> {
+        Self::attach_with_unhandled_exception_policy(child, true)
+    }
+
+    fn attach_with_unhandled_exception_policy(
+        child: &mut Child,
+        terminate_on_unhandled_exception: bool,
+    ) -> io::Result<Self> {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::{
             Foundation::{CloseHandle, HANDLE},
             System::JobObjects::{
                 AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
                 SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             },
         };
         let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
@@ -387,7 +520,8 @@ impl ProcessLifetimeGuard {
             return Err(io::Error::last_os_error());
         }
         let mut information: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-        information.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        information.BasicLimitInformation.LimitFlags =
+            windows_job_limit_flags(terminate_on_unhandled_exception);
         let configured = unsafe {
             SetInformationJobObject(
                 job,
@@ -418,6 +552,19 @@ impl ProcessLifetimeGuard {
         let _ = child.kill();
         let _ = child.wait();
     }
+}
+
+#[cfg(windows)]
+fn windows_job_limit_flags(terminate_on_unhandled_exception: bool) -> u32 {
+    use windows_sys::Win32::System::JobObjects::{
+        JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    let mut flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if terminate_on_unhandled_exception {
+        flags |= JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
+    }
+    flags
 }
 
 #[cfg(windows)]

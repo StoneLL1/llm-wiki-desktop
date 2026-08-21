@@ -32,6 +32,7 @@ use crate::services::import_v2::web_fetch::{
 };
 use crate::services::import_v2::web_target_store::WebTargetStore;
 use crate::tasks::task_model::CancellationToken;
+use crate::utils::process_lifetime::{configure_isolated_process, ProcessLifetimeGuard};
 
 const MAX_STDOUT_LINE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_STDOUT_LINES: usize = 256;
@@ -98,35 +99,13 @@ pub(crate) fn probe_capability_pack(
             command.env(key, value);
         }
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-        unsafe {
-            command.pre_exec(|| {
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0000_0200);
-    }
+    configure_isolated_process(&mut command);
     let mut child = command
         .spawn()
         .map_err(|_| health_error("The capability health process could not be started."))?;
-    let platform_job = match attach_platform_job(&child) {
-        Ok(job) => job,
-        Err(error) => {
-            terminate_tree(&mut child);
-            return Err(error);
-        }
-    };
-    let mut child = ProcessGuard(child, None, None, platform_job);
+    let lifetime = ProcessLifetimeGuard::attach_capability(&mut child)
+        .map_err(|_| health_error("The capability health process could not be isolated."))?;
+    let mut child = ProcessGuard(child, None, None, Some(lifetime));
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": request_id,
@@ -384,35 +363,13 @@ impl ImportEngine for PackProcessEngine {
                 );
             }
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            command.process_group(0);
-            unsafe {
-                command.pre_exec(|| {
-                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x0000_0200); // CREATE_NEW_PROCESS_GROUP
-        }
+        configure_isolated_process(&mut command);
         let mut child = command
             .spawn()
             .map_err(|_| engine_error("The capability process could not be started."))?;
-        let platform_job = match attach_platform_job(&child) {
-            Ok(job) => job,
-            Err(error) => {
-                terminate_tree(&mut child);
-                return Err(error);
-            }
-        };
-        let mut child = ProcessGuard(child, None, None, platform_job);
+        let lifetime = ProcessLifetimeGuard::attach_capability(&mut child)
+            .map_err(|_| engine_error("The capability process could not be isolated."))?;
+        let mut child = ProcessGuard(child, None, None, Some(lifetime));
         let rpc = JsonRpcRequest {
             jsonrpc: "2.0".into(),
             id: request.request_id.clone(),
@@ -1670,7 +1627,7 @@ struct ProcessGuard(
     Child,
     Option<std::thread::JoinHandle<()>>,
     Option<std::thread::JoinHandle<()>>,
-    Option<PlatformJob>,
+    Option<ProcessLifetimeGuard>,
 );
 
 impl ProcessGuard {
@@ -1720,54 +1677,6 @@ pub(super) fn terminate_tree(child: &mut Child) {
     let _ = child.wait();
 }
 
-#[cfg(windows)]
-pub(super) struct PlatformJob(windows_sys::Win32::Foundation::HANDLE);
-#[cfg(windows)]
-unsafe impl Send for PlatformJob {}
-#[cfg(windows)]
-impl Drop for PlatformJob {
-    fn drop(&mut self) {
-        unsafe {
-            windows_sys::Win32::Foundation::CloseHandle(self.0);
-        }
-    }
-}
-#[cfg(windows)]
-pub(super) fn attach_platform_job(child: &Child) -> Result<Option<PlatformJob>, BackendError> {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::System::JobObjects::*;
-    unsafe {
-        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-        if job.is_null() {
-            return Err(engine_error(
-                "A kill-on-close Job Object could not be created.",
-            ));
-        }
-        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-        info.BasicLimitInformation.LimitFlags =
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
-        if SetInformationJobObject(
-            job,
-            JobObjectExtendedLimitInformation,
-            &info as *const _ as _,
-            std::mem::size_of_val(&info) as u32,
-        ) == 0
-            || AssignProcessToJobObject(job, child.as_raw_handle() as _) == 0
-        {
-            windows_sys::Win32::Foundation::CloseHandle(job);
-            return Err(engine_error(
-                "The capability process could not be assigned to its Job Object.",
-            ));
-        }
-        Ok(Some(PlatformJob(job)))
-    }
-}
-#[cfg(not(windows))]
-pub(super) struct PlatformJob;
-#[cfg(not(windows))]
-pub(super) fn attach_platform_job(_: &Child) -> Result<Option<PlatformJob>, BackendError> {
-    Ok(None)
-}
 fn cancelled() -> BackendError {
     BackendError::new(
         IMPORT_V2_CANCELLED,
@@ -2190,18 +2099,25 @@ mod tests {
     #[test]
     fn process_guard_joins_reader_after_termination() {
         #[cfg(windows)]
-        let child = Command::new(r"C:\Windows\System32\cmd.exe")
-            .args(["/C", "ping -n 30 127.0.0.1 >NUL"])
-            .spawn()
-            .unwrap();
+        let mut command = {
+            let mut command = Command::new(r"C:\Windows\System32\cmd.exe");
+            command.args(["/C", "ping -n 30 127.0.0.1 >NUL"]);
+            command
+        };
         #[cfg(unix)]
-        let child = Command::new("sh").args(["-c", "sleep 30"]).spawn().unwrap();
+        let mut command = {
+            let mut command = Command::new("sh");
+            command.args(["-c", "sleep 30"]);
+            command
+        };
+        configure_isolated_process(&mut command);
+        let mut child = command.spawn().unwrap();
+        let lifetime = ProcessLifetimeGuard::attach_capability(&mut child).unwrap();
         let joined = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let signal = joined.clone();
         let reader =
             std::thread::spawn(move || signal.store(true, std::sync::atomic::Ordering::SeqCst));
-        let job = attach_platform_job(&child).unwrap();
-        drop(ProcessGuard(child, Some(reader), None, job));
+        drop(ProcessGuard(child, Some(reader), None, Some(lifetime)));
         for _ in 0..100 {
             if joined.load(std::sync::atomic::Ordering::SeqCst) {
                 break;
