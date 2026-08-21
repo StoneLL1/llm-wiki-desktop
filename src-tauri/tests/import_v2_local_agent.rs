@@ -609,8 +609,8 @@ fn system_runner_redacts_stdout_stderr_and_stops_a_cancelled_process() {
     let worker = std::thread::spawn(move || {
         SystemProcessRunner.run_import_assistance(&invocation, &tasks_for_worker, &task_id)
     });
-    // A cold PowerShell startup on a hosted Windows runner can exceed two
-    // seconds. Keep the production cancellation timeout unchanged while
+    // Hosted Windows runners can delay starting even a lightweight helper
+    // under load. Keep the production cancellation timeout unchanged while
     // allowing the fixture process enough time to publish its child PID.
     for _ in 0..200 {
         if grandchild_pid.is_file() {
@@ -640,18 +640,40 @@ fn system_runner_redacts_stdout_stderr_and_stops_a_cancelled_process() {
 
 fn process_tree_invocation(cwd: &std::path::Path, pid_file: &std::path::Path) -> AgentInvocation {
     if cfg!(windows) {
-        let path = pid_file.to_string_lossy().replace('\'', "''");
-        test_process_invocation(
-            cwd,
-            &format!(
-                "$p = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 30'; Set-Content -LiteralPath '{path}' -Value $p.Id; Start-Sleep -Seconds 30"
-            ),
-            "",
-        )
+        std::fs::write(cwd.join(".process-tree-helper"), b"enabled").unwrap();
+        AgentInvocation {
+            program: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            args: vec![
+                "--exact".into(),
+                "process_tree_helper".into(),
+                "--nocapture".into(),
+            ],
+            stdin: None,
+            cwd: cwd.to_path_buf(),
+        }
     } else {
         let path = pid_file.to_string_lossy().replace('\'', "'\\''");
         test_process_invocation(cwd, "", &format!("sleep 30 & echo $! > '{path}'; sleep 30"))
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn process_tree_helper() {
+    if !std::path::Path::new(".process-tree-helper").is_file() {
+        return;
+    }
+    let mut child = std::process::Command::new("ping.exe")
+        .args(["-n", "31", "127.0.0.1"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::fs::write("grandchild.pid", child.id().to_string()).unwrap();
+    child.wait().unwrap();
 }
 
 fn process_is_alive(pid: u32) -> bool {

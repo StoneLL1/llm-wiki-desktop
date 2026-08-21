@@ -1,6 +1,8 @@
 #[derive(Default)]
 pub struct GitService;
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
@@ -28,6 +30,11 @@ use crate::utils::safe_project_dir::BoundProjectMutationRoot;
 
 thread_local! {
     static GIT_TASK_CANCELLATION: RefCell<Vec<CancellationToken>> = const { RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_GIT_PROCESS_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
 }
 
 struct GitTaskCancellationScope;
@@ -421,6 +428,18 @@ impl GitService {
     ) -> Result<GitRepositoryStatus, BackendError> {
         let root = validate_existing_project_root(&context.root).map_err(git_path_unsafe)?;
         let has_git_marker = validate_git_marker(&root)?;
+        // A project-local repository must own a real `.git` directory or
+        // worktree marker. Avoid spawning Git for ordinary projects: a
+        // missing executable (or transient process pressure) must still map
+        // to the stable Unavailable state when no repository exists.
+        if !has_git_marker {
+            return Ok(GitRepositoryStatus {
+                is_repository: false,
+                branch: None,
+                head: None,
+                has_changes: false,
+            });
+        }
         if run_git(context, &["--version"]).is_err() {
             return Err(BackendError::new(
                 "GIT_COMMAND_FAILED",
@@ -1292,6 +1311,8 @@ fn run_git_process(
     max_stream_bytes: usize,
     cancelled: impl Fn() -> bool,
 ) -> Result<CapturedProcessOutput, BoundedProcessError> {
+    #[cfg(test)]
+    TEST_GIT_PROCESS_ATTEMPTS.with(|count| count.set(count.get() + 1));
     let effective_cancelled = || cancelled() || git_task_cancelled();
     if effective_cancelled() {
         return Err(BoundedProcessError::Cancelled);
@@ -1805,7 +1826,10 @@ fn normalize_git_path(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{git_project_lane, remove_project_path, run_git, untracked_file_diff, GitService};
+    use super::{
+        git_project_lane, remove_project_path, run_git, untracked_file_diff, GitService,
+        TEST_GIT_PROCESS_ATTEMPTS,
+    };
     use crate::models::git::{CheckpointPurpose, GitChangedFileKind};
     use crate::models::paths::ProjectContext;
     use crate::tasks::task_model::CancellationToken;
@@ -1909,6 +1933,43 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(timeout_error.code, "GIT_ASSESSMENT_TIMEOUT");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn markerless_repository_status_does_not_spawn_git() {
+        let root = unique_temp_dir("markerless-status");
+        let context = ProjectContext::new("project-1", root.clone());
+        let before = TEST_GIT_PROCESS_ATTEMPTS.with(|count| count.get());
+
+        let status = GitService.repository_status(&context).unwrap();
+
+        assert!(!status.is_repository);
+        assert_eq!(status.branch, None);
+        assert_eq!(status.head, None);
+        assert!(!status.has_changes);
+        assert_eq!(
+            TEST_GIT_PROCESS_ATTEMPTS.with(|count| count.get()),
+            before,
+            "markerless repository status must not depend on an external Git process"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn invalid_git_marker_is_not_downgraded_to_unavailable() {
+        let root = unique_temp_dir("invalid-marker-status");
+        fs::create_dir(root.join(".git")).unwrap();
+        let context = ProjectContext::new("project-1", root.clone());
+        let before = TEST_GIT_PROCESS_ATTEMPTS.with(|count| count.get());
+
+        let error = GitService.repository_status(&context).unwrap_err();
+
+        assert_eq!(error.code, "GIT_REPOSITORY_INVALID");
+        assert!(
+            TEST_GIT_PROCESS_ATTEMPTS.with(|count| count.get()) > before,
+            "a project-local Git marker must keep repository validation fail-closed"
+        );
         fs::remove_dir_all(root).ok();
     }
 
