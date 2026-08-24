@@ -609,7 +609,6 @@ fn delete_overwrite_broad_rewrite_and_conflict_review_is_persisted_as_waiting() 
     let candidate_workspace = std::env::temp_dir()
         .join("llm-wiki-desktop")
         .join(&run.task_id);
-    fs::create_dir_all(&candidate_workspace).unwrap();
     let waiting = persist_update_wiki_review(
         &context,
         &run,
