@@ -5969,6 +5969,22 @@ mod tests {
                 cwd: workspace.to_path_buf(),
             }
         }
+        fn raw_file_invocation(workspace: &Path, file_name: &str) -> AgentInvocation {
+            let program = std::env::var_os("COMSPEC")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
+            AgentInvocation {
+                program: program.to_string_lossy().into_owned(),
+                args: vec![
+                    "/D".into(),
+                    "/S".into(),
+                    "/C".into(),
+                    format!("type {file_name}"),
+                ],
+                stdin: None,
+                cwd: workspace.to_path_buf(),
+            }
+        }
         fn run_with_limits(
             invocation: &AgentInvocation,
             tasks: &TaskService,
@@ -6043,10 +6059,13 @@ mod tests {
             "malformed fixture".into(),
             true,
         );
-        let valid_then_invalid = powershell_invocation(
-            workspace.path(),
-            "$stream=[Console]::OpenStandardOutput(); $bytes=[Text.Encoding]::UTF8.GetBytes('{\"type\":\"result\",\"result\":\"ok\"}`n'); $stream.Write($bytes,0,$bytes.Length); $stream.WriteByte(255); $stream.Flush()".into(),
-        );
+        // Exercise the decoder through a real lightweight child process.
+        // Depending on a cold Windows PowerShell startup made the old byte
+        // fixture race the product timeout on hosted runners before it emitted
+        // output. `cmd.exe type` copies these prepared bytes without transcoding.
+        let invalid_output = workspace.path().join("invalid-agent-output.bin");
+        std::fs::write(&invalid_output, b"valid output\n\xff").unwrap();
+        let valid_then_invalid = raw_file_invocation(workspace.path(), "invalid-agent-output.bin");
         assert_eq!(
             run_with_limits(
                 &valid_then_invalid,
