@@ -67,10 +67,31 @@ impl ProcessRunner for FakeRunner {
     fn run_with_timeout(
         &self,
         _command: &str,
-        _args: &[&str],
+        args: &[&str],
         _timeout: Duration,
     ) -> Result<String, BackendError> {
-        Ok(String::new())
+        Ok(match args {
+            ["--version"] => "Claude Code test-version".into(),
+            ["--help"] => [
+                "--print",
+                "--output-format",
+                "--verbose",
+                "--permission-mode",
+                "--settings",
+                "--bare",
+                "--safe-mode",
+                "--disable-slash-commands",
+                "--no-session-persistence",
+                "--no-chrome",
+                "--prompt-suggestions",
+                "--strict-mcp-config",
+                "--tools",
+                "--allowedTools",
+                "--json-schema",
+            ]
+            .join(" "),
+            _ => String::new(),
+        })
     }
 
     fn run_capture(&self, invocation: &AgentInvocation) -> Result<(String, String), BackendError> {
