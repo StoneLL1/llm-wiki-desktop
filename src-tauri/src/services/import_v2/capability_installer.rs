@@ -1548,8 +1548,26 @@ impl Drop for ReleaseInstallLock {
     fn drop(&mut self) {
         // Keep the stable lock inode. Unlinking after unlock lets a waiter lock
         // the old inode while a third installer creates and locks a new one.
-        drop(self.file.take());
+        if let Some(file) = self.file.take() {
+            release_lock_file(file);
+        }
     }
+}
+
+#[cfg(unix)]
+fn release_lock_file(file: std::fs::File) {
+    use std::os::fd::AsRawFd;
+
+    // A concurrent fork can briefly inherit this open-file description before
+    // CLOEXEC closes it. Explicitly unlock before closing so that inherited
+    // duplicates cannot extend the single-flight lease past this guard.
+    let _ = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+    drop(file);
+}
+
+#[cfg(not(unix))]
+fn release_lock_file(file: std::fs::File) {
+    drop(file);
 }
 
 struct InstallCleanup {
@@ -1906,6 +1924,23 @@ mod tests {
         drop(lock);
         recover_install_root(&install_root).unwrap();
         assert!(!staging.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn release_lock_unlocks_before_an_inherited_descriptor_closes() {
+        let fixture = SignedFixture::new(b"runtime", "release-a");
+        let install_root = fixture.install_root();
+        std::fs::create_dir_all(&install_root).unwrap();
+        let identity = release_identity(&fixture.entry);
+
+        let lock = acquire_release_lock(&install_root, &identity, "task-a").unwrap();
+        let inherited = lock.file.as_ref().unwrap().try_clone().unwrap();
+        drop(lock);
+
+        let reacquired = acquire_release_lock(&install_root, &identity, "task-b").unwrap();
+        drop(reacquired);
+        drop(inherited);
     }
 
     #[test]
