@@ -667,14 +667,23 @@ impl FileTransaction {
             }
         });
         if let Err(error) = install_candidate(&parent_binding, &temporary, path) {
-            let cleanup = self.cleanup_artifact(&temporary);
-            return match cleanup {
-                Ok(()) => Err(io_error(error, path)),
-                Err(cleanup) => Err(rollback_failure(
-                    "New-file install failed and temporary cleanup failed.",
-                    vec!["candidate install failed".to_string(), cleanup.message],
-                )),
-            };
+            let mut cleanup_failures = Vec::new();
+            for artifact in [Some(temporary.as_path()), candidate_pin.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                if let Err(cleanup) = self.cleanup_artifact(artifact) {
+                    cleanup_failures.push(cleanup.message);
+                }
+            }
+            if cleanup_failures.is_empty() {
+                return Err(io_error(error, path));
+            }
+            cleanup_failures.insert(0, "candidate install failed".to_string());
+            return Err(rollback_failure(
+                "New-file install failed and recovery artifact cleanup failed.",
+                cleanup_failures,
+            ));
         }
         self.backups.push(LiveBackup {
             binding: parent_binding
@@ -895,6 +904,9 @@ impl FileTransaction {
         if FAIL_NEXT_CANDIDATE_INSTALL.with(|flag| flag.replace(false)) {
             let _ = self.cleanup_artifact(&temporary);
             let _ = self.cleanup_artifact(&guard);
+            if let Some(pin) = candidate_pin.as_deref() {
+                let _ = self.cleanup_artifact(pin);
+            }
             return Err(io_error(
                 std::io::Error::other("injected candidate install failure"),
                 path,
@@ -908,6 +920,9 @@ impl FileTransaction {
         ) {
             let _ = self.cleanup_artifact(&temporary);
             let _ = self.cleanup_artifact(&guard);
+            if let Some(pin) = candidate_pin.as_deref() {
+                let _ = self.cleanup_artifact(pin);
+            }
             return Err(io_error(error, path));
         }
         self.backups.push(LiveBackup {
@@ -1791,7 +1806,11 @@ fn validate_journal_recovery_artifacts(root: &Path, journal: &Journal) -> Result
                 }
             });
         if !matches_entry {
-            return Err(staging_safe_io_error());
+            // The journal still owns a structurally valid artifact name, but
+            // the namespace object no longer proves the recorded transaction
+            // identity. Treat that as external drift and stop fail-closed;
+            // malformed or unassociated artifact names are rejected above.
+            return Err(conflict_error());
         }
     }
     Ok(())
