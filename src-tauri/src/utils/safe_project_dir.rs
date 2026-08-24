@@ -181,6 +181,10 @@ impl BoundProjectMutationRoot {
         &self.requested_parent
     }
 
+    pub(crate) fn has_same_directory_identity(&self, other: &Self) -> io::Result<bool> {
+        Ok(identity_from_file(&self.anchor)? == identity_from_file(&other.anchor)?)
+    }
+
     /// Enumerate the child namespace represented by the retained directory
     /// capability. The returned names are diagnostics/input for subsequent
     /// handle-relative operations; the ambient path is never the authority.

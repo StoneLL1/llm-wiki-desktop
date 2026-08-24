@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -258,7 +259,7 @@ struct Journal {
 /// Keeping this small record lets large import cohorts write one complete
 /// recovery journal instead of repeatedly serializing a growing JSON array.
 struct PendingCheckedReplacement {
-    parent_binding: RecoveryParentBinding,
+    parent_binding: Arc<RecoveryParentBinding>,
     path: PathBuf,
     temporary: PathBuf,
     guard: PathBuf,
@@ -269,13 +270,13 @@ struct PendingCheckedReplacement {
 }
 
 struct LiveBackup {
-    binding: RecoveryParentBinding,
+    binding: Arc<RecoveryParentBinding>,
     path: PathBuf,
     previous: Option<Vec<u8>>,
 }
 
 struct LiveRecoveryArtifact {
-    binding: RecoveryParentBinding,
+    binding: Arc<RecoveryParentBinding>,
     path: PathBuf,
 }
 
@@ -283,6 +284,7 @@ pub struct FileTransaction {
     backups: Vec<LiveBackup>,
     created_dirs: Vec<BoundCreatedProjectDirectory>,
     recovery_artifacts: Vec<LiveRecoveryArtifact>,
+    retained_mutation_parents: std::collections::HashMap<PathBuf, Arc<RecoveryParentBinding>>,
     installed_ownership: std::collections::HashMap<PathBuf, InstalledOwnership>,
     unverified_installs: std::collections::HashSet<PathBuf>,
     guard_by_destination: std::collections::HashMap<PathBuf, PathBuf>,
@@ -318,6 +320,7 @@ impl FileTransaction {
         self.backups.clear();
         self.created_dirs.clear();
         self.recovery_artifacts.clear();
+        self.retained_mutation_parents.clear();
         std::mem::forget(self);
     }
     pub fn new() -> Self {
@@ -325,6 +328,7 @@ impl FileTransaction {
             backups: Vec::new(),
             created_dirs: Vec::new(),
             recovery_artifacts: Vec::new(),
+            retained_mutation_parents: std::collections::HashMap::new(),
             installed_ownership: std::collections::HashMap::new(),
             unverified_installs: std::collections::HashSet::new(),
             guard_by_destination: std::collections::HashMap::new(),
@@ -686,9 +690,7 @@ impl FileTransaction {
             ));
         }
         self.backups.push(LiveBackup {
-            binding: parent_binding
-                .try_clone()
-                .map_err(|error| io_error(error, path))?,
+            binding: Arc::clone(&parent_binding),
             path: path.to_path_buf(),
             previous: None,
         });
@@ -710,7 +712,11 @@ impl FileTransaction {
     fn ensure_and_bind_mutation_parent(
         &mut self,
         path: &Path,
-    ) -> Result<RecoveryParentBinding, BackendError> {
+    ) -> Result<Arc<RecoveryParentBinding>, BackendError> {
+        let parent = path.parent().ok_or_else(staging_safe_io_error)?;
+        if self.retained_mutation_parents.contains_key(parent) {
+            return self.bind_mutation_parent(path);
+        }
         let fallback_root;
         let root = if let Some(root) = self.project_root.as_deref() {
             root
@@ -725,15 +731,41 @@ impl FileTransaction {
         let (binding, created) = RecoveryParentBinding::ensure_and_bind(root, path)
             .map_err(|error| io_error(error, path))?;
         self.created_dirs.extend(created);
-        Ok(binding)
+        self.retain_mutation_parent(path, binding)
     }
 
-    fn bind_mutation_parent(&self, path: &Path) -> Result<RecoveryParentBinding, BackendError> {
-        if let Some(root) = self.project_root.as_deref() {
-            return bind_recovery_parent(root, path);
-        }
+    fn bind_mutation_parent(
+        &mut self,
+        path: &Path,
+    ) -> Result<Arc<RecoveryParentBinding>, BackendError> {
         let parent = path.parent().ok_or_else(staging_safe_io_error)?;
-        RecoveryParentBinding::bind(parent, path).map_err(|error| io_error(error, path))
+        let binding = if let Some(root) = self.project_root.as_deref() {
+            bind_recovery_parent(root, path)?
+        } else {
+            RecoveryParentBinding::bind(parent, path).map_err(|error| io_error(error, path))?
+        };
+        self.retain_mutation_parent(path, binding)
+    }
+
+    fn retain_mutation_parent(
+        &mut self,
+        path: &Path,
+        binding: RecoveryParentBinding,
+    ) -> Result<Arc<RecoveryParentBinding>, BackendError> {
+        let key = binding.parent().to_path_buf();
+        if let Some(retained) = self.retained_mutation_parents.get(&key) {
+            if !retained
+                .has_same_directory_identity(&binding)
+                .map_err(|error| io_error(error, path))?
+            {
+                return Err(staging_safe_io_error());
+            }
+            return Ok(Arc::clone(retained));
+        }
+        let binding = Arc::new(binding);
+        self.retained_mutation_parents
+            .insert(key, Arc::clone(&binding));
+        Ok(binding)
     }
 
     fn cleanup_artifact(&mut self, path: &Path) -> Result<(), BackendError> {
@@ -762,10 +794,7 @@ impl FileTransaction {
             .iter()
             .find(|artifact| artifact.path == path)
         {
-            artifact
-                .binding
-                .try_clone()
-                .map_err(|error| io_error(error, path))?
+            Arc::clone(&artifact.binding)
         } else {
             self.bind_mutation_parent(path)?
         };
@@ -781,11 +810,11 @@ impl FileTransaction {
 
     fn track_artifact(
         &mut self,
-        binding: &RecoveryParentBinding,
+        binding: &Arc<RecoveryParentBinding>,
         path: &Path,
     ) -> Result<(), BackendError> {
         self.recovery_artifacts.push(LiveRecoveryArtifact {
-            binding: binding.try_clone().map_err(|error| io_error(error, path))?,
+            binding: Arc::clone(binding),
             path: path.to_path_buf(),
         });
         Ok(())
@@ -793,7 +822,7 @@ impl FileTransaction {
 
     fn pin_candidate_identity(
         &mut self,
-        binding: &RecoveryParentBinding,
+        binding: &Arc<RecoveryParentBinding>,
         temporary: &Path,
     ) -> Result<Option<PathBuf>, BackendError> {
         #[cfg(unix)]
@@ -926,9 +955,7 @@ impl FileTransaction {
             return Err(io_error(error, path));
         }
         self.backups.push(LiveBackup {
-            binding: parent_binding
-                .try_clone()
-                .map_err(|error| io_error(error, path))?,
+            binding: Arc::clone(&parent_binding),
             path: path.to_path_buf(),
             previous: Some(previous_before.clone()),
         });
@@ -1064,10 +1091,7 @@ impl FileTransaction {
                 )
                 .map_err(|error| io_error(error, &replacement.path))?;
             self.backups.push(LiveBackup {
-                binding: replacement
-                    .parent_binding
-                    .try_clone()
-                    .map_err(|error| io_error(error, &replacement.path))?,
+                binding: Arc::clone(&replacement.parent_binding),
                 path: replacement.path.clone(),
                 previous: Some(replacement.previous),
             });
@@ -1099,6 +1123,19 @@ impl FileTransaction {
     #[cfg(test)]
     fn cohort_pin_parent_sync_count(&self) -> usize {
         self.cohort_pin_parent_syncs
+    }
+
+    #[cfg(test)]
+    fn retained_mutation_parent_count(&self) -> usize {
+        self.retained_mutation_parents.len()
+    }
+
+    #[cfg(test)]
+    fn retained_installed_anchor_count(&self) -> usize {
+        self.installed_ownership
+            .values()
+            .filter(|ownership| ownership._anchor.is_some())
+            .count()
     }
 
     pub fn delete_if_hash_matches(
@@ -1145,9 +1182,7 @@ impl FileTransaction {
             .remove_file_if_identity_and_hash(path, before_identity, expected_hash)
             .map_err(|error| io_error(error, path))?;
         self.backups.push(LiveBackup {
-            binding: parent_binding
-                .try_clone()
-                .map_err(|error| io_error(error, path))?,
+            binding: Arc::clone(&parent_binding),
             path: path.to_path_buf(),
             previous: Some(previous),
         });
@@ -1278,16 +1313,22 @@ impl FileTransaction {
 
     fn capture_cohort_install(
         &mut self,
-        binding: &RecoveryParentBinding,
+        binding: &Arc<RecoveryParentBinding>,
         path: &Path,
         bytes: &[u8],
         expected_identity: FileIdentity,
     ) -> Result<(), BackendError> {
         self.unverified_installs.insert(path.to_path_buf());
-        let anchor = binding
-            .open_regular_pinned(path)
-            .map_err(|error| io_error(error, path))?;
-        let identity = file_identity_from_file(&anchor, path)?;
+        #[cfg(unix)]
+        let (identity, anchor) = (bound_file_identity(binding, path)?, None);
+        #[cfg(not(unix))]
+        let (identity, anchor) = {
+            let anchor = binding
+                .open_regular_pinned(path)
+                .map_err(|error| io_error(error, path))?;
+            let identity = file_identity_from_file(&anchor, path)?;
+            (identity, Some(anchor))
+        };
         if identity != expected_identity {
             return Err(conflict_error());
         }
@@ -1296,7 +1337,7 @@ impl FileTransaction {
             InstalledOwnership {
                 identity,
                 hash: digest_bytes(bytes),
-                binding: binding.try_clone().map_err(|error| io_error(error, path))?,
+                binding: Arc::clone(binding),
                 _anchor: anchor,
             },
         );
@@ -1306,7 +1347,7 @@ impl FileTransaction {
 
     fn capture_installed_expected(
         &mut self,
-        binding: &RecoveryParentBinding,
+        binding: &Arc<RecoveryParentBinding>,
         path: &Path,
         bytes: &[u8],
         expected_identity: FileIdentity,
@@ -1319,10 +1360,16 @@ impl FileTransaction {
                 path,
             ));
         }
-        let anchor = binding
-            .open_regular_pinned(path)
-            .map_err(|error| io_error(error, path))?;
-        let identity = file_identity_from_file(&anchor, path)?;
+        #[cfg(unix)]
+        let (identity, anchor) = (bound_file_identity(binding, path)?, None);
+        #[cfg(not(unix))]
+        let (identity, anchor) = {
+            let anchor = binding
+                .open_regular_pinned(path)
+                .map_err(|error| io_error(error, path))?;
+            let identity = file_identity_from_file(&anchor, path)?;
+            (identity, Some(anchor))
+        };
         if identity != expected_identity {
             return Err(conflict_error());
         }
@@ -1331,7 +1378,7 @@ impl FileTransaction {
             InstalledOwnership {
                 identity,
                 hash: digest_bytes(bytes),
-                binding: binding.try_clone().map_err(|error| io_error(error, path))?,
+                binding: Arc::clone(binding),
                 _anchor: anchor,
             },
         );
@@ -1513,6 +1560,11 @@ impl FileTransaction {
         // can safely rebind those recorded names.
         self.backups.clear();
         self.recovery_artifacts.clear();
+        // Shared parent capabilities deliberately outlive every individual
+        // mutation, but Windows keeps their directory handles open. Release
+        // them before removing transaction-created directories so an otherwise
+        // complete rollback is not mislabeled as incomplete.
+        self.retained_mutation_parents.clear();
         if failures.is_empty() {
             while let Some(directory) = self.created_dirs.pop() {
                 if let Err(error) = directory.remove_if_empty() {
@@ -2199,8 +2251,8 @@ fn journal_candidate_pin_matches(
 struct InstalledOwnership {
     identity: FileIdentity,
     hash: String,
-    binding: RecoveryParentBinding,
-    _anchor: std::fs::File,
+    binding: Arc<RecoveryParentBinding>,
+    _anchor: Option<std::fs::File>,
 }
 
 #[cfg(unix)]
@@ -2576,7 +2628,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_cohort_syncs_candidate_pin_parent_once_not_once_per_item() {
+    fn checked_cohort_reuses_one_retained_parent_capability_and_syncs_once() {
         let root = std::env::temp_dir().join(format!("import-v2-cohort-{}", uuid::Uuid::new_v4()));
         let items = root.join(".app/import-sessions/s/items");
         std::fs::create_dir_all(&items).unwrap();
@@ -2589,6 +2641,11 @@ mod tests {
             .collect::<Vec<_>>();
         let mut transaction = FileTransaction::new_for_project(&root);
         transaction.write_many_if_hash_matches(&writes).unwrap();
+        assert_eq!(transaction.retained_mutation_parent_count(), 1);
+        assert_eq!(
+            transaction.retained_installed_anchor_count(),
+            if cfg!(unix) { 0 } else { writes.len() }
+        );
         assert_eq!(
             transaction.cohort_pin_parent_sync_count(),
             usize::from(cfg!(unix))
@@ -2597,6 +2654,44 @@ mod tests {
         assert!(writes
             .iter()
             .all(|(path, _, _)| std::fs::read(path).unwrap() == b"after"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_cohort_rejects_a_parent_directory_swap_before_reusing_its_capability() {
+        let root = std::env::temp_dir().join(format!(
+            "import-v2-cohort-parent-swap-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let items = root.join(".app/import-sessions/s/items");
+        let parked = root.join("parked-items");
+        std::fs::create_dir_all(&items).unwrap();
+        let writes = ["one.json", "two.json"]
+            .into_iter()
+            .map(|name| {
+                let path = items.join(name);
+                std::fs::write(&path, b"before").unwrap();
+                (path, b"after".to_vec(), digest_bytes(b"before"))
+            })
+            .collect::<Vec<_>>();
+        let live_for_hook = items.clone();
+        let parked_for_hook = parked.clone();
+        set_before_checked_displace_hook(move |_| {
+            std::fs::rename(&live_for_hook, &parked_for_hook).unwrap();
+            std::fs::create_dir_all(&live_for_hook).unwrap();
+            true
+        });
+
+        let error = {
+            let mut transaction = FileTransaction::new_for_project(&root);
+            transaction.write_many_if_hash_matches(&writes).unwrap_err()
+        };
+
+        assert_eq!(error.code, IMPORT_V2_COMMIT_FAILED);
+        assert_eq!(std::fs::read(parked.join("one.json")).unwrap(), b"before");
+        assert_eq!(std::fs::read(parked.join("two.json")).unwrap(), b"before");
+        assert!(std::fs::read_dir(&items).unwrap().next().is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 
