@@ -40,6 +40,11 @@ const preferences: GlobalUpdatePreferences = {
   dismissedVersion: null,
 };
 
+const renderOnlyPreferences: GlobalUpdatePreferences = {
+  ...preferences,
+  checkUpdates: false,
+};
+
 const available: AppUpdateState = {
   phase: "available",
   offer: {
@@ -81,7 +86,13 @@ describe("UpdateController", () => {
   });
 
   it("shows an available offer", async () => {
-    useUpdateStore.setState({ backendState: available, uiStatus: "available", dialogOpen: true, initialized: true });
+    useUpdateStore.setState({
+      backendState: available,
+      preferences: renderOnlyPreferences,
+      uiStatus: "available",
+      dialogOpen: true,
+      initialized: true,
+    });
     render(<UpdateController />);
     expect(await screen.findByText("0.2.0")).toBeVisible();
   });
@@ -89,6 +100,7 @@ describe("UpdateController", () => {
   it("shows downloading progress", async () => {
     useUpdateStore.setState({
       backendState: { ...available, phase: "downloading", downloadedBytes: 25, totalBytes: 100 },
+      preferences: renderOnlyPreferences,
       uiStatus: "downloading",
       dialogOpen: true,
       initialized: true,
@@ -101,6 +113,7 @@ describe("UpdateController", () => {
     api.cancelAppUpdateDownload.mockResolvedValue({ ...available, phase: "cancelled" });
     useUpdateStore.setState({
       backendState: { ...available, phase: "downloading" },
+      preferences: renderOnlyPreferences,
       uiStatus: "downloading",
       dialogOpen: true,
       initialized: true,
@@ -115,6 +128,7 @@ describe("UpdateController", () => {
   it("offers installation when ready to install", async () => {
     useUpdateStore.setState({
       backendState: { ...available, phase: "downloaded" },
+      preferences: renderOnlyPreferences,
       uiStatus: "ready_to_install",
       dialogOpen: true,
       initialized: true,
@@ -126,6 +140,7 @@ describe("UpdateController", () => {
   it("renders the installing state", async () => {
     useUpdateStore.setState({
       backendState: { ...available, phase: "installing" },
+      preferences: renderOnlyPreferences,
       uiStatus: "installing",
       dialogOpen: true,
       initialized: true,
