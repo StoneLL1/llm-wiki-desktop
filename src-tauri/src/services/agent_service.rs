@@ -5958,6 +5958,17 @@ mod tests {
                 cwd: workspace.to_path_buf(),
             }
         }
+        fn immediate_nonzero_invocation(workspace: &Path) -> AgentInvocation {
+            let program = std::env::var_os("COMSPEC")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
+            AgentInvocation {
+                program: program.to_string_lossy().into_owned(),
+                args: vec!["/D".into(), "/S".into(), "/C".into(), "exit /B 7".into()],
+                stdin: None,
+                cwd: workspace.to_path_buf(),
+            }
+        }
         fn run_with_limits(
             invocation: &AgentInvocation,
             tasks: &TaskService,
@@ -6015,7 +6026,10 @@ mod tests {
             "nonzero fixture".into(),
             true,
         );
-        let exit = powershell_invocation(workspace.path(), "exit 7".into());
+        // This branch verifies exit-code mapping, not shell startup. Hosted
+        // Windows runners can spend the entire process deadline starting cold
+        // Windows PowerShell, turning an immediate exit into a false timeout.
+        let exit = immediate_nonzero_invocation(workspace.path());
         assert_eq!(
             run_with_limits(&exit, &tasks, &nonzero.id, 1024, Duration::from_secs(5),)
                 .unwrap_err()
@@ -6052,12 +6066,14 @@ mod tests {
             "limit fixture".into(),
             true,
         );
-        let marker = workspace.path().join("must-not-exist.txt");
-        let marker_arg = marker.to_string_lossy().replace(char::from(39), "''");
+        let lifetime_lock = workspace.path().join("output-limit-process.lock");
+        let lock_arg = lifetime_lock
+            .to_string_lossy()
+            .replace(char::from(39), "''");
         let output_then_mutate = powershell_invocation(
             workspace.path(),
             format!(
-                "$value='x' * 512; [Console]::Out.WriteLine($value); Start-Sleep -Milliseconds 700; Set-Content -LiteralPath '{marker_arg}' -Value 'alive'"
+                "$lock=[IO.File]::Open('{lock_arg}',[IO.FileMode]::Create,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None); try {{ $value='x' * 512; [Console]::Out.WriteLine($value); Start-Sleep -Seconds 30 }} finally {{ $lock.Dispose() }}"
             ),
         );
         assert_eq!(
@@ -6072,11 +6088,23 @@ mod tests {
             .code,
             "IMPORT_AGENT_OUTPUT_TOO_LARGE"
         );
-        std::thread::sleep(Duration::from_millis(900));
-        assert!(
-            !marker.exists(),
-            "output-limit failure left its child alive"
-        );
+        // The fixture opens this file with FileShare::None before writing the
+        // oversized output. Successful deletion therefore proves the exact
+        // process has terminated and closed its handles; it cannot false-pass
+        // merely because a delayed marker has not run yet.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match std::fs::remove_file(&lifetime_lock) {
+                Ok(()) => break,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::PermissionDenied
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::yield_now();
+                }
+                Err(error) => panic!("output-limit failure left its child handle alive: {error}"),
+            }
+        }
     }
 
     #[test]

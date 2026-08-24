@@ -219,13 +219,15 @@ pub(crate) fn terminate_process_tree(child: &mut Child) {
 
 #[cfg(unix)]
 pub(crate) struct ProcessLifetimeGuard {
-    watchdog_write: std::os::fd::RawFd,
-    watchdog_pid: libc::pid_t,
+    watchdog_write: Option<std::fs::File>,
+    watchdog: Child,
 }
 
 #[cfg(unix)]
 impl ProcessLifetimeGuard {
     pub(crate) fn attach(child: &mut Child) -> io::Result<Self> {
+        use std::os::fd::FromRawFd;
+
         let mut pipe = [-1; 2];
         #[cfg(any(target_os = "linux", target_os = "android"))]
         let pipe_result = unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) };
@@ -249,30 +251,38 @@ impl ProcessLifetimeGuard {
             }
         }
         let process_group = child.id() as libc::pid_t;
-        let watchdog_pid = unsafe { libc::fork() };
-        if watchdog_pid == 0 {
-            unsafe {
-                libc::close(pipe[1]);
-                let mut byte = 0_u8;
-                loop {
-                    let read = libc::read(pipe[0], (&mut byte as *mut u8).cast(), 1);
-                    if read <= 0 {
-                        break;
-                    }
-                }
-                libc::kill(-process_group, libc::SIGKILL);
-                libc::_exit(0);
+        // SAFETY: both descriptors are uniquely owned after a successful
+        // `pipe`/`pipe2` call and are transferred into their File values once.
+        let watchdog_read = unsafe { std::fs::File::from_raw_fd(pipe[0]) };
+        let watchdog_write = unsafe { std::fs::File::from_raw_fd(pipe[1]) };
+        // Use exec rather than fork-only watchdog logic. A fork-only child
+        // inherits every other in-flight guard pipe in this multithreaded
+        // process, so later watchdogs can keep earlier guards alive and turn
+        // independent short Git calls into a deadline-sized wait chain. Exec
+        // closes those unrelated CLOEXEC descriptors while stdin retains only
+        // this guard's read end.
+        let watchdog = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "while IFS= read -r _; do :; done; kill -KILL \"-$1\" 2>/dev/null || :",
+                "llm-wiki-process-watchdog",
+                &process_group.to_string(),
+            ])
+            .stdin(Stdio::from(watchdog_read))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        let watchdog = match watchdog {
+            Ok(watchdog) => watchdog,
+            Err(error) => {
+                drop(watchdog_write);
+                terminate_process_tree(child);
+                return Err(error);
             }
-        }
-        unsafe { libc::close(pipe[0]) };
-        if watchdog_pid < 0 {
-            unsafe { libc::close(pipe[1]) };
-            terminate_process_tree(child);
-            return Err(io::Error::last_os_error());
-        }
+        };
         Ok(Self {
-            watchdog_write: pipe[1],
-            watchdog_pid,
+            watchdog_write: Some(watchdog_write),
+            watchdog,
         })
     }
 
@@ -288,10 +298,12 @@ impl ProcessLifetimeGuard {
 #[cfg(unix)]
 impl Drop for ProcessLifetimeGuard {
     fn drop(&mut self) {
-        unsafe {
-            libc::close(self.watchdog_write);
-            libc::waitpid(self.watchdog_pid, std::ptr::null_mut(), 0);
-        }
+        // Closing the owner pipe is terminal for this process tree even when
+        // the direct child exited successfully: it may have left descendants
+        // with redirected stdio behind. The exec'd watchdog owns the final
+        // group cleanup without retaining unrelated guards' CLOEXEC pipes.
+        drop(self.watchdog_write.take());
+        let _ = self.watchdog.wait();
     }
 }
 
@@ -444,6 +456,114 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_successful_processes_do_not_retain_each_others_watchdogs() {
+        let root = std::env::temp_dir().join(format!(
+            "llm-wiki-process-watchdog-overlap-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let ready_a = root.join("ready-a");
+        let ready_b = root.join("ready-b");
+        let release_a = root.join("release-a");
+        let release_b = root.join("release-b");
+
+        let spawn_guarded = |ready: std::path::PathBuf, release: std::path::PathBuf| {
+            let (result_tx, result_rx) = mpsc::channel();
+            let worker = thread::spawn(move || {
+                let script = format!(
+                    "touch \"{}\"; while [ ! -e \"{}\" ]; do sleep 0.01; done",
+                    ready.display(),
+                    release.display()
+                );
+                let mut command = Command::new("/bin/sh");
+                command.args(["-c", &script]);
+                // Keep the guarded child deadline well beyond the assertion
+                // window. If watchdog descriptors leak across exec, process A
+                // must still be blocked while B is live instead of coinciding
+                // with B's own timeout.
+                let result =
+                    run_bounded_process(&mut command, None, Duration::from_secs(15), 1024, || {
+                        false
+                    });
+                let _ = result_tx.send(result);
+            });
+            (worker, result_rx)
+        };
+
+        let (worker_a, result_a) = spawn_guarded(ready_a.clone(), release_a.clone());
+        wait_for_path(&ready_a);
+        let (worker_b, result_b) = spawn_guarded(ready_b.clone(), release_b.clone());
+        wait_for_path(&ready_b);
+
+        std::fs::write(&release_a, b"release").unwrap();
+        let a_finished_while_b_was_live = result_a.recv_timeout(Duration::from_secs(5));
+        std::fs::write(&release_b, b"release").unwrap();
+        let b_result = result_b.recv_timeout(Duration::from_secs(5)).unwrap();
+        worker_a.join().unwrap();
+        worker_b.join().unwrap();
+
+        assert!(a_finished_while_b_was_live
+            .expect("process A retained process B's watchdog descriptors")
+            .is_ok());
+        assert!(b_result.is_ok());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn successful_leader_cannot_leave_a_background_descendant_running() {
+        let root = std::env::temp_dir().join(format!(
+            "llm-wiki-process-watchdog-background-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let pid_path = root.join("background.pid");
+        let script = format!(
+            "(/bin/sh -c 'exec </dev/null >/dev/null 2>&1; while :; do sleep 30; done') & echo $! > \"{}\"; exit 0",
+            pid_path.display()
+        );
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", &script]);
+
+        let result =
+            run_bounded_process(&mut command, None, Duration::from_secs(2), 1024, || false)
+                .unwrap();
+        assert!(result.status.success());
+        let background_pid = std::fs::read_to_string(&pid_path)
+            .unwrap()
+            .trim()
+            .parse::<libc::pid_t>()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let alive = unsafe { libc::kill(background_pid, 0) } == 0;
+            if !alive {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "successful leader left background descendant alive: {background_pid}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    fn wait_for_path(path: &std::path::Path) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !path.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "guarded child did not publish readiness: {}",
+                path.display()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[cfg(unix)]
