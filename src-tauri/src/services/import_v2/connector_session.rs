@@ -725,6 +725,14 @@ fn e(m: &str) -> BackendError {
 mod binding_tests {
     use super::*;
 
+    fn service_with_memory_secrets() -> ConnectorSessionService {
+        ConnectorSessionService {
+            sessions: Arc::default(),
+            grants: Mutex::default(),
+            secrets: SecretService::memory(),
+        }
+    }
+
     #[test]
     fn authenticated_profile_is_exactly_bound_and_reusable() {
         let service = ConnectorSessionService::default();
@@ -770,7 +778,7 @@ mod binding_tests {
 
     #[test]
     fn media_connector_uses_one_persistent_profile_per_platform() {
-        let service = ConnectorSessionService::default();
+        let service = service_with_memory_secrets();
         let root = tempfile::tempdir().unwrap();
         let first = service.create("douyin", root.path()).unwrap();
         let first_path = service
@@ -807,7 +815,7 @@ mod binding_tests {
 
     #[test]
     fn platform_revoke_removes_a_profile_without_a_live_session() {
-        let service = ConnectorSessionService::default();
+        let service = service_with_memory_secrets();
         let root = tempfile::tempdir().unwrap();
         let profiles = root.path().join("profiles");
         std::fs::create_dir(&profiles).unwrap();
