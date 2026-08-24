@@ -2161,7 +2161,7 @@ fn journal_candidate_pin_matches(
                 continue;
             }
             let binding = bind_recovery_parent(root, &artifact)?;
-            match bound_file_identity(&binding, &artifact) {
+            match binding.file_identity(&artifact) {
                 Ok(actual) if actual == expected => return Ok(true),
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
