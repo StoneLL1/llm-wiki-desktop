@@ -181,6 +181,13 @@ impl BoundProjectMutationRoot {
         &self.requested_parent
     }
 
+    /// Enumerate the child namespace represented by the retained directory
+    /// capability. The returned names are diagnostics/input for subsequent
+    /// handle-relative operations; the ambient path is never the authority.
+    pub(crate) fn read_entry_names(&self) -> io::Result<Vec<OsString>> {
+        read_directory_names(&self.anchor, &self.requested_parent)
+    }
+
     pub(crate) fn read_regular(&self, path: &Path) -> io::Result<Vec<u8>> {
         self.read_regular_with_identity(path)
             .map(|(bytes, _)| bytes)
@@ -827,8 +834,8 @@ enum OpenPurpose {
 #[cfg(unix)]
 mod platform {
     use super::*;
-    use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::ffi::OsStrExt;
+    use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
     pub(super) fn open_directory_anchor(path: &Path) -> io::Result<File> {
@@ -840,6 +847,71 @@ mod platform {
 
     pub(super) fn open_directory_anchor_read(path: &Path) -> io::Result<File> {
         open_directory_anchor(path)
+    }
+
+    pub(super) fn read_directory_names(
+        directory: &File,
+        _requested_path: &Path,
+    ) -> io::Result<Vec<OsString>> {
+        let descriptor = directory.try_clone()?.into_raw_fd();
+        // SAFETY: `descriptor` is an owned duplicate. `fdopendir` takes
+        // ownership on success; on failure we close it exactly once below.
+        let stream = unsafe { libc::fdopendir(descriptor) };
+        if stream.is_null() {
+            let error = io::Error::last_os_error();
+            // SAFETY: fdopendir failed and did not take ownership.
+            unsafe { libc::close(descriptor) };
+            return Err(error);
+        }
+
+        let result = (|| {
+            let mut names = Vec::new();
+            loop {
+                // SAFETY: the errno pointer is thread-local for the supported
+                // Unix targets and remains valid for this immediate access.
+                unsafe { *errno_location() = 0 };
+                // SAFETY: `stream` remains open until the loop completes.
+                let entry = unsafe { libc::readdir(stream) };
+                if entry.is_null() {
+                    // SAFETY: see the errno reset immediately above.
+                    let errno = unsafe { *errno_location() };
+                    if errno != 0 {
+                        return Err(io::Error::from_raw_os_error(errno));
+                    }
+                    break;
+                }
+                // SAFETY: readdir returned a live dirent with a NUL-terminated
+                // d_name valid until the next readdir call.
+                let bytes = unsafe {
+                    std::ffi::CStr::from_ptr((*entry).d_name.as_ptr())
+                        .to_bytes()
+                        .to_vec()
+                };
+                if bytes != b"." && bytes != b".." {
+                    names.push(OsString::from_vec(bytes));
+                }
+            }
+            Ok(names)
+        })();
+        // SAFETY: fdopendir succeeded, so closedir owns and closes the
+        // duplicate descriptor exactly once.
+        let close_result = unsafe { libc::closedir(stream) };
+        if close_result != 0 && result.is_ok() {
+            return Err(io::Error::last_os_error());
+        }
+        result
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    unsafe fn errno_location() -> *mut libc::c_int {
+        // SAFETY: caller observes the platform's thread-local errno slot.
+        unsafe { libc::__errno_location() }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    unsafe fn errno_location() -> *mut libc::c_int {
+        // SAFETY: caller observes the platform's thread-local errno slot.
+        unsafe { libc::__error() }
     }
 
     pub(super) fn open_directory_relative(parent: &File, name: &OsStr) -> io::Result<File> {
@@ -1315,6 +1387,27 @@ mod platform {
             .open(path)
     }
 
+    pub(super) fn read_directory_names(
+        directory: &File,
+        requested_path: &Path,
+    ) -> io::Result<Vec<OsString>> {
+        // Omit FILE_SHARE_DELETE while enumerating. This pins the lexical name
+        // long enough to prove it still names the same directory as the
+        // retained capability and prevents a swap during read_dir.
+        let namespace_pin = std::fs::OpenOptions::new()
+            .access_mode(FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(requested_path)?;
+        require_directory(&namespace_pin)?;
+        if identity_from_file(&namespace_pin)? != identity_from_file(directory)? {
+            return Err(conflict("bound directory changed before enumeration"));
+        }
+        std::fs::read_dir(requested_path)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect()
+    }
+
     pub(super) fn open_directory_relative(parent: &File, name: &OsStr) -> io::Result<File> {
         nt_open_directory_relative(
             parent,
@@ -1765,6 +1858,12 @@ mod platform {
     pub(super) fn open_directory_anchor_read(_path: &Path) -> io::Result<File> {
         Err(unsupported())
     }
+    pub(super) fn read_directory_names(
+        _directory: &File,
+        _requested_path: &Path,
+    ) -> io::Result<Vec<OsString>> {
+        Err(unsupported())
+    }
     pub(super) fn open_directory_relative(_parent: &File, _name: &OsStr) -> io::Result<File> {
         Err(unsupported())
     }
@@ -1845,7 +1944,7 @@ use platform::{
     delete_relative_open_file, hard_link_open_file, identity_from_file, open_directory_anchor,
     open_directory_anchor_read, open_directory_relative, open_directory_relative_mutate,
     open_directory_relative_read, open_existing_relative, publish_open_file_no_replace,
-    rename_open_file,
+    read_directory_names, rename_open_file,
 };
 #[cfg(unix)]
 use platform::{exchange_file_names, remove_directory_tree_contents};
