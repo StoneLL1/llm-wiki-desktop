@@ -758,7 +758,7 @@ impl FileTransaction {
                 .has_same_directory_identity(&binding)
                 .map_err(|error| io_error(error, path))?
             {
-                return Err(staging_safe_io_error());
+                return Err(conflict_error());
             }
             return Ok(Arc::clone(retained));
         }
@@ -2688,7 +2688,7 @@ mod tests {
             transaction.write_many_if_hash_matches(&writes).unwrap_err()
         };
 
-        assert_eq!(error.code, crate::errors::IMPORT_V2_COMMIT_FAILED);
+        assert_eq!(error.code, IMPORT_V2_COMMIT_CONFLICT);
         assert_eq!(std::fs::read(parked.join("one.json")).unwrap(), b"before");
         assert_eq!(std::fs::read(parked.join("two.json")).unwrap(), b"before");
         assert!(std::fs::read_dir(&items).unwrap().next().is_none());
