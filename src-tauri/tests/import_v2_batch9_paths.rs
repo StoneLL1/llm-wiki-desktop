@@ -11,13 +11,19 @@ fn production_folder_scan_preserves_cjk_long_relative_path_and_case() {
     fs::create_dir_all(&project_root).unwrap();
     let mut relative = std::path::PathBuf::new();
     for index in 1..=9 {
-        relative.push(format!("第{index:02}层{}", "资料归档".repeat(8)));
+        // Stay above the traditional Windows MAX_PATH boundary without
+        // approaching macOS's much smaller UTF-8 path-byte ceiling.
+        relative.push(format!("第{index:02}层{}", "资料归档".repeat(6)));
     }
     relative.push("研究笔记.MD");
     let source = scan_root.join(&relative);
     assert!(
         relative.to_string_lossy().encode_utf16().count() > 260,
         "fixture must exceed the traditional Windows MAX_PATH boundary"
+    );
+    assert!(
+        relative.to_string_lossy().len() < 800,
+        "fixture must leave room beneath the macOS UTF-8 path-byte ceiling"
     );
     assert!(
         source.to_string_lossy().encode_utf16().count() > 260,
