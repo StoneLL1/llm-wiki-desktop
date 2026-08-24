@@ -101,6 +101,14 @@ impl Drop for ConnectorSessionService {
     }
 }
 impl ConnectorSessionService {
+    pub fn with_secret_service(secrets: SecretService) -> Self {
+        Self {
+            sessions: Arc::default(),
+            grants: Mutex::default(),
+            secrets,
+        }
+    }
+
     pub fn create(
         &self,
         platform: &str,
@@ -726,11 +734,7 @@ mod binding_tests {
     use super::*;
 
     fn service_with_memory_secrets() -> ConnectorSessionService {
-        ConnectorSessionService {
-            sessions: Arc::default(),
-            grants: Mutex::default(),
-            secrets: SecretService::memory(),
-        }
+        ConnectorSessionService::with_secret_service(SecretService::memory())
     }
 
     #[test]

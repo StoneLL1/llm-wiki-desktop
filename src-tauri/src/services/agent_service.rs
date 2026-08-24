@@ -5948,6 +5948,34 @@ mod tests {
     }
 
     #[cfg(windows)]
+    const STREAMING_OUTPUT_LIMIT_HELPER_TEST: &str =
+        "services::agent_service::tests::streaming_output_limit_process_helper";
+
+    #[cfg(windows)]
+    #[test]
+    fn streaming_output_limit_process_helper() {
+        if !std::env::args().any(|arg| arg == STREAMING_OUTPUT_LIMIT_HELPER_TEST)
+            || !Path::new(".agent-output-limit-helper").is_file()
+        {
+            return;
+        }
+
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let _lock = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .share_mode(0)
+            .open("output-limit-process.lock")
+            .unwrap();
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(&vec![b'x'; 4096]).unwrap();
+        stdout.write_all(b"\n").unwrap();
+        stdout.flush().unwrap();
+        thread::sleep(Duration::from_secs(30));
+    }
+
+    #[cfg(windows)]
     #[test]
     fn streaming_process_enforces_real_cancel_timeout_nonzero_and_kill_on_limit() {
         fn powershell_invocation(workspace: &Path, script: String) -> AgentInvocation {
@@ -6086,21 +6114,33 @@ mod tests {
             true,
         );
         let lifetime_lock = workspace.path().join("output-limit-process.lock");
-        let lock_arg = lifetime_lock
-            .to_string_lossy()
-            .replace(char::from(39), "''");
-        let output_then_mutate = powershell_invocation(
-            workspace.path(),
-            format!(
-                "$lock=[IO.File]::Open('{lock_arg}',[IO.FileMode]::Create,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None); try {{ $value='x' * 512; [Console]::Out.WriteLine($value); Start-Sleep -Seconds 30 }} finally {{ $lock.Dispose() }}"
-            ),
-        );
+        std::fs::write(
+            workspace.path().join(".agent-output-limit-helper"),
+            b"enabled",
+        )
+        .unwrap();
+        // The native helper acquires an exclusive file handle before writing
+        // oversized output. This keeps the process-reaping assertion real
+        // without making it depend on cold Windows PowerShell startup.
+        let output_then_mutate = AgentInvocation {
+            program: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            args: vec![
+                "--exact".into(),
+                STREAMING_OUTPUT_LIMIT_HELPER_TEST.into(),
+                "--nocapture".into(),
+            ],
+            stdin: None,
+            cwd: workspace.path().to_path_buf(),
+        };
         assert_eq!(
             run_with_limits(
                 &output_then_mutate,
                 &tasks,
                 &limited.id,
-                64,
+                1024,
                 Duration::from_secs(5),
             )
             .unwrap_err()
