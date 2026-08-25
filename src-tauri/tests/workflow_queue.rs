@@ -158,6 +158,109 @@ fn created(outcome: WorkflowStartOutcome) -> llm_wiki_desktop_lib::models::workf
     }
 }
 
+#[cfg(windows)]
+fn open_directory_attributes(path: &Path, write: bool) -> std::fs::File {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
+    };
+
+    let access = FILE_READ_ATTRIBUTES | if write { FILE_WRITE_ATTRIBUTES } else { 0 };
+    std::fs::OpenOptions::new()
+        .access_mode(access)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .unwrap()
+}
+
+#[cfg(windows)]
+fn directory_creation_time(path: &Path) -> windows_sys::Win32::Foundation::FILETIME {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::{Foundation::FILETIME, Storage::FileSystem::GetFileTime};
+
+    let directory = open_directory_attributes(path, false);
+    let mut creation_time = FILETIME::default();
+    let succeeded = unsafe {
+        GetFileTime(
+            directory.as_raw_handle().cast(),
+            &mut creation_time,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_ne!(
+        succeeded,
+        0,
+        "GetFileTime failed: {}",
+        std::io::Error::last_os_error()
+    );
+    creation_time
+}
+
+#[cfg(windows)]
+fn set_directory_creation_time(
+    path: &Path,
+    creation_time: &windows_sys::Win32::Foundation::FILETIME,
+) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::SetFileTime;
+
+    let directory = open_directory_attributes(path, true);
+    let succeeded = unsafe {
+        SetFileTime(
+            directory.as_raw_handle().cast(),
+            creation_time,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    assert_ne!(
+        succeeded,
+        0,
+        "SetFileTime failed: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_file_id_distinguishes_recreated_directory_when_legacy_metadata_collides() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("same-path-project");
+    let old_root = parent.path().join("old-project-object");
+    std::fs::create_dir(&root).unwrap();
+    let original = project_identity(&root).unwrap();
+    let original_creation_time = directory_creation_time(&root);
+    let child = root.join("ordinary-child.md");
+    std::fs::write(&child, "ordinary mutation").unwrap();
+    assert_eq!(
+        original.identity_revision,
+        project_identity(&root).unwrap().identity_revision
+    );
+    std::fs::remove_file(child).unwrap();
+
+    std::fs::rename(&root, &old_root).unwrap();
+    std::fs::create_dir(&root).unwrap();
+    set_directory_creation_time(&root, &original_creation_time);
+
+    let old_metadata = std::fs::metadata(&old_root).unwrap();
+    let replacement_metadata = std::fs::metadata(&root).unwrap();
+    assert_eq!(
+        old_metadata.created().unwrap(),
+        replacement_metadata.created().unwrap()
+    );
+    assert_eq!(old_metadata.len(), replacement_metadata.len());
+
+    let replacement = project_identity(&root).unwrap();
+    assert_eq!(
+        original.canonical_identity_key,
+        replacement.canonical_identity_key
+    );
+    assert_ne!(original.identity_revision, replacement.identity_revision);
+}
+
 #[test]
 fn enqueue_for_owner_rejects_same_path_identity_replacement() {
     let parent = tempfile::tempdir().unwrap();
