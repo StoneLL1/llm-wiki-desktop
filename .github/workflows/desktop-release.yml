@@ -24,7 +24,7 @@ env:
 
 jobs:
   preflight:
-    name: Freeze tag, commit, tools, policy, and secrets
+    name: Freeze tag, commit, tools, policy, and cryptographic signing inputs
     runs-on: ubuntu-24.04
     environment: desktop-release
     outputs:
@@ -94,18 +94,9 @@ jobs:
           CAPABILITY_KEY_ID: ${{ vars.CAPABILITY_SIGNING_KEY_ID }}
           UPDATER_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           UPDATER_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-          WINDOWS_PUBLISHER_SUBJECT: ${{ vars.WINDOWS_PUBLISHER_SUBJECT }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
           set -euo pipefail
-          for name in CAPABILITY_KEY_ID UPDATER_PRIVATE_KEY UPDATER_PRIVATE_KEY_PASSWORD WINDOWS_CERTIFICATE WINDOWS_CERTIFICATE_PASSWORD WINDOWS_PUBLISHER_SUBJECT APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID KEYCHAIN_PASSWORD; do
+          for name in CAPABILITY_KEY_ID UPDATER_PRIVATE_KEY UPDATER_PRIVATE_KEY_PASSWORD; do
             test -n "${!name:-}" || { echo "required protected release input is missing: $name" >&2; exit 1; }
           done
 
@@ -128,7 +119,7 @@ jobs:
     secrets: inherit
 
   desktop-build:
-    name: Build and sign ${{ matrix.platform }}
+    name: Build updater-signed ${{ matrix.platform }} without OS vendor identity signing
     needs: [preflight, capability-build]
     runs-on: ${{ matrix.os }}
     environment: desktop-release
@@ -207,67 +198,19 @@ jobs:
           "LLM_WIKI_CAPABILITY_CATALOG_MODE=release" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "LLM_WIKI_CAPABILITY_STAGING_DIR=$((Resolve-Path release-input/capabilities).Path)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Import Windows Authenticode certificate and create signing overlay
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $certificatePath = Join-Path $env:RUNNER_TEMP 'desktop-release.pfx'
-          [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
-          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
-          $certificate = Import-PfxCertificate -FilePath $certificatePath -CertStoreLocation Cert:\CurrentUser\My -Password $password
-          Remove-Item -LiteralPath $certificatePath -Force
-          $overlay = @{ bundle = @{ windows = @{ certificateThumbprint = $certificate.Thumbprint; digestAlgorithm = 'sha256'; timestampUrl = 'http://timestamp.digicert.com' } } }
-          $overlayPath = Join-Path $env:RUNNER_TEMP 'tauri.windows.release.json'
-          $overlay | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $overlayPath -Encoding utf8
-          "TAURI_RELEASE_CONFIG=$overlayPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Import Apple Developer ID certificate into an ephemeral keychain
-        if: runner.os == 'macOS'
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
-        run: |
-          set -euo pipefail
-          certificate="$RUNNER_TEMP/desktop-release.p12"
-          keychain="$RUNNER_TEMP/desktop-release.keychain-db"
-          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
-          security import "$certificate" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
-          security list-keychain -d user -s "$keychain"
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$keychain"
-          case "$APPLE_TEAM_ID" in ''|*[!A-Z0-9]*) echo 'APPLE_TEAM_ID must be uppercase alphanumeric.' >&2; exit 1;; esac
-          identities="$(security find-identity -v -p codesigning "$keychain")"
-          count="$(printf '%s\n' "$identities" | grep -c '"Developer ID Application:' || true)"
-          test "$count" = 1
-          identity="$(printf '%s\n' "$identities" | sed -n 's/.*"\(Developer ID Application:.*\)".*/\1/p')"
-          case "$identity" in *" ($APPLE_TEAM_ID)") ;; *) echo 'Developer ID identity does not match APPLE_TEAM_ID.' >&2; exit 1;; esac
-          printf 'APPLE_SIGNING_IDENTITY=%s\n' "$identity" >> "$GITHUB_ENV"
-          rm -f "$certificate"
-
-      - name: Build signed Windows installer and updater
+      - name: Build Windows installer and updater-signed artifact without Authenticode
         if: runner.os == 'Windows'
         shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run tauri -- build --target '${{ matrix.target }}' --bundles '${{ matrix.bundles }}' --config "$env:TAURI_RELEASE_CONFIG" -- --locked
+        run: npm run tauri -- build --target '${{ matrix.target }}' --bundles '${{ matrix.bundles }}' -- --locked
 
-      - name: Build signed, notarized, and stapled Apple installer and updater
+      - name: Build macOS installer and updater-signed artifact without Developer ID or notarization
         if: runner.os == 'macOS'
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
         run: npm run tauri -- build --target '${{ matrix.target }}' --bundles '${{ matrix.bundles }}' -- --locked
 
       - name: Build Linux installer and signed updater
@@ -277,46 +220,36 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri -- build --target '${{ matrix.target }}' --bundles '${{ matrix.bundles }}' -- --locked
 
-      - name: Verify Windows Authenticode independently from the updater signature
+      - name: Record explicit Windows Authenticode-not-required policy
         if: runner.os == 'Windows'
         shell: pwsh
-        env:
-          EXPECTED_SUBJECT: ${{ vars.WINDOWS_PUBLISHER_SUBJECT }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $release = 'src-tauri/target/${{ matrix.target }}/release'
-          $application = Get-Item -LiteralPath (Join-Path $release 'llm-wiki-desktop.exe')
-          $installers = @(Get-ChildItem -LiteralPath (Join-Path $release 'bundle') -Recurse -File -Filter '*-setup.exe')
+          $bundle = 'src-tauri/target/${{ matrix.target }}/release/bundle'
+          $installers = @(Get-ChildItem -LiteralPath $bundle -Recurse -File -Filter '*-setup.exe')
           if ($installers.Count -ne 1) { throw "Expected exactly one NSIS installer, found $($installers.Count)." }
-          $executables = @($application, $installers[0])
-          $signatures = @($executables | ForEach-Object { Get-AuthenticodeSignature -LiteralPath $_.FullName })
-          if (@($signatures | Where-Object { $_.Status -ne 'Valid' -or $_.SignerCertificate.Subject -ne $env:EXPECTED_SUBJECT }).Count -ne 0) {
-            throw 'Authenticode status or publisher subject did not match the protected release contract.'
-          }
-          @{ kind = 'windows-authenticode'; verified = $true; subject = $env:EXPECTED_SUBJECT; files = $executables.Count } | ConvertTo-Json | Set-Content "$env:RUNNER_TEMP/signing-evidence.json" -Encoding utf8
+          if (-not (Test-Path -LiteralPath "$($installers[0].FullName).sig" -PathType Leaf)) { throw 'Windows updater signature is missing.' }
+          [ordered]@{
+            schemaVersion = 1
+            kind = 'windows-authenticode-not-required'
+            platform = 'windows-x86_64'
+            required = $false
+            verified = $true
+            updaterSignatureRequired = $true
+            userNotice = 'smartscreen-or-unknown-publisher-warning-expected'
+          } | ConvertTo-Json -Compress | Set-Content "$env:RUNNER_TEMP/signing-evidence.json" -Encoding utf8
 
-      - name: Verify Apple Developer ID, Gatekeeper, notarization, and staple
+      - name: Record explicit Apple Developer-ID-not-required policy
         if: runner.os == 'macOS'
-        env:
-          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
           bundle="src-tauri/target/${{ matrix.target }}/release/bundle"
-          app="$(find "$bundle" -type d -name '*.app' -print -quit)"
           dmg="$(find "$bundle" -type f -name '*.dmg' -print -quit)"
-          test -n "$app" && test -n "$dmg"
-          codesign --verify --deep --strict --verbose=2 "$app"
-          signing_details="$(codesign -dv --verbose=4 "$app" 2>&1)"
-          team_id="$(printf '%s\n' "$signing_details" | sed -n 's/^TeamIdentifier=//p')"
-          authority="$(printf '%s\n' "$signing_details" | sed -n 's/^Authority=//p' | head -n 1)"
-          test "$team_id" = "$APPLE_TEAM_ID"
-          case "$authority" in 'Developer ID Application:'*) ;; *) echo 'Unexpected Apple signing authority.' >&2; exit 1;; esac
-          spctl --assess --type execute --verbose=2 "$app"
-          xcrun stapler validate "$app"
-          xcrun stapler validate "$dmg"
-          printf '%s\n' "{\"kind\":\"apple-developer-id-notarized\",\"verified\":true,\"gatekeeper\":true,\"stapled\":true,\"teamId\":\"$team_id\"}" > "$RUNNER_TEMP/signing-evidence.json"
+          updater="$(find "$bundle" -type f -name '*.app.tar.gz' -print -quit)"
+          test -n "$dmg" && test -n "$updater" && test -s "$updater.sig"
+          printf '%s\n' "{\"schemaVersion\":1,\"kind\":\"apple-developer-id-not-required\",\"platform\":\"${{ matrix.platform }}\",\"required\":false,\"verified\":true,\"updaterSignatureRequired\":true,\"userNotice\":\"gatekeeper-manual-override-may-be-required\"}" > "$RUNNER_TEMP/signing-evidence.json"
 
-      - name: Verify Linux updater signature and executable installer
+      - name: Record Linux OS-code-signing-not-applicable policy
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
@@ -324,7 +257,7 @@ jobs:
           appimage="$(find "$bundle" -type f -name '*.AppImage' -print -quit)"
           test -x "$appimage" && test -s "$appimage.sig"
           sha256sum "$appimage"
-          printf '%s\n' '{"kind":"linux-updater-signature","verified":true,"installerExecutable":true}' > "$RUNNER_TEMP/signing-evidence.json"
+          printf '%s\n' '{"schemaVersion":1,"kind":"linux-os-code-signing-not-applicable","platform":"linux-x86_64","required":false,"verified":true,"updaterSignatureRequired":true,"userNotice":"linux-distribution-integration-varies"}' > "$RUNNER_TEMP/signing-evidence.json"
 
       - name: Stage uniquely named desktop release assets
         shell: pwsh
@@ -352,7 +285,7 @@ jobs:
             --binary "src-tauri/target/${{ matrix.target }}/release/$binaryName" `
             --catalog release-input/capabilities/install-catalog.json --mode release
 
-      - name: Upload signed desktop transaction fragment
+      - name: Upload updater-signed desktop transaction fragment
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: desktop-${{ matrix.platform }}

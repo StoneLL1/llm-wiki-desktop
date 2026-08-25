@@ -9,6 +9,7 @@ import {
   collectRegularFiles,
   COMMIT_PATTERN,
   isPlainObject,
+  osIdentityEvidenceErrors,
   parseNamedArguments,
   RELEASE_PLATFORMS,
   RELEASE_REPOSITORY,
@@ -17,13 +18,6 @@ import {
 } from "./release-assets-contract.mjs";
 import { verifyCapabilityCatalog } from "./verify-capability-catalog.mjs";
 import { validateLatestJson } from "./verify-latest-json.mjs";
-
-const OS_SIGNING_KINDS = Object.freeze({
-  "windows-x86_64": "windows-authenticode",
-  "darwin-aarch64": "apple-developer-id-notarized",
-  "darwin-x86_64": "apple-developer-id-notarized",
-  "linux-x86_64": "linux-updater-signature",
-});
 
 const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 const existsFile = (file) => fs.existsSync(file) && fs.statSync(file).isFile();
@@ -55,10 +49,8 @@ function descriptorErrors({ root, descriptor, platform, tag, version, commitSha 
       errors.push(`${label} updater signature does not match its .sig asset`);
     }
   }
-  if (!isPlainObject(descriptor.osSigning)
-    || descriptor.osSigning.verified !== true
-    || descriptor.osSigning.kind !== OS_SIGNING_KINDS[platform]) {
-    errors.push(`${label} lacks the required independent platform-signing evidence`);
+  for (const error of osIdentityEvidenceErrors(descriptor.osSigning, platform)) {
+    errors.push(`${label} ${error}`);
   }
   return errors;
 }

@@ -522,7 +522,7 @@ PRD 仅列出当前不纳入 MVP 的内容，后续可重新评估：
 - Windows x64、macOS arm64/x64、Linux x64 的同 tag/commit installer、updater、capability catalog、签名、SBOM、provenance 和真实 packaged install/upgrade/uninstall 验证。
 - 小资料包与真实 `wiki/` 样本验收。
 
-当前 Batch 6 只完成本地源码/集成/release fixture 验收，public beta 仍为 No-Go：canonical repository、draft workflow、production signing/custody/reviewer、四平台签名安装升级与匿名 endpoint 尚无真实证据。不得用本地 fixture、jsdom、`cargo check` 或 unsigned build 替代，详见 `docs/release/batch-6-acceptance-evidence.md`。
+当前 Batch 6 已完成本地源码/集成/release fixture 与三平台 source CI，public beta 仍为 No-Go：capability trust key、updater/capability protected signing inputs、draft workflow、四平台真实安装升级与匿名 endpoint 尚无真实证据。初始版本明确不要求 Windows Authenticode 或 Apple Developer ID/notarization，但必须披露并实测 SmartScreen/Gatekeeper manual override；不得用本地 fixture、jsdom 或 `cargo check` 替代，详见 `docs/release/batch-6-acceptance-evidence.md`。
 
 ## 14. 风险与对策
 

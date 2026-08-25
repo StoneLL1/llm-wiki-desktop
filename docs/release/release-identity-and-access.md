@@ -1,6 +1,6 @@
 # Release identity, repository access, and signing ownership
 
-Status: Batch 6 local automated acceptance and cross-platform CI complete; repository/public Actions access restored; Public beta No-Go because signing, custody, capability trust, reviewer, branch-protection, signed-baseline, hardware, and remote-rehearsal blockers remain
+Status: Batch 6 local automated acceptance and cross-platform CI complete; repository access, branch protection, and solo-maintainer Environment approvals configured; Public beta No-Go because capability trust, protected updater/capability signing inputs, signed-baseline, hardware, and remote-rehearsal blockers remain
 Last verified: 2026-08-25
 
 ## Frozen public release coordinate
@@ -48,14 +48,14 @@ The release page must remain reachable without credentials. `latest.json` and in
 | --- | --- | --- |
 | Product name | `LLM Wiki Desktop` | Frozen |
 | Tauri identifier / Apple bundle identifier | `com.llmwiki.desktop` | Frozen |
-| Windows publisher subject | Not supplied | Release blocker; human owner input required |
-| Apple Team ID | Not supplied | Release blocker; human owner input required |
-| Updater signing public key | minisign key `0D274EE88AB90656` | Public key supplied and committed for Batch 4A; owner, backup custodian, and recovery evidence remain release blockers |
-| Capability signing public key ID | Not supplied; `capabilities/trusted-keys.json` is empty | Batch 3A blocker; human owner input required |
+| Windows publisher subject | Not configured | Authenticode is not required for the initial release; SmartScreen or unknown-publisher warnings are expected |
+| Apple Team ID | Not configured | Developer ID signing and notarization are not required for the initial release; Gatekeeper manual override may be required |
+| Updater signing public key | minisign key `0D274EE88AB90656` | Public key and owner `StoneLL1` confirmed; matching protected private-key inputs remain required |
+| Capability signing public key ID | Not supplied; `capabilities/trusted-keys.json` is empty | Owner `StoneLL1` confirmed; public key and matching protected private key remain Batch 3A blockers |
 
-The intended signing-custodian and approval-owner role is the `StoneLL1` repository owner, but this is an unverified placeholder rather than a named human assignment. The updater public key was supplied on 2026-08-20 and is safe to commit; its private half and password were not requested, read, logged, or written to the workspace. No named backup custodian, protected-environment reviewer configuration, or recovery evidence is currently available. Production signing material must be placed only in protected GitHub Environment secrets with a separately verified offline backup. The updater key, capability key, Windows code-signing identity, and Apple Developer ID/Team identity are distinct contracts. No private key, certificate password, PAT, or production secret may be committed to the repository.
+`StoneLL1` is the confirmed sole maintainer, release approver, updater-key owner, and capability-key owner. Both protected Environments use `StoneLL1` as the required reviewer with self-review allowed because no second maintainer exists. The updater public key was supplied on 2026-08-20 and is safe to commit; its private half and password were not requested, read, logged, or written to the workspace. Production updater and capability signing material must remain only in their protected GitHub Environment secrets. No private key, password, PAT, certificate, or production secret may be committed to the repository.
 
-The exact publisher subject, Team ID, capability public-key ID, named updater owner, named backup custodian, and recovery evidence must replace the explicit `pending-human-input` fields before the first public stable release. A missing or lost key stops release; it never permits unsigned artifacts or signature verification bypass.
+The project deliberately does not require a backup custodian, Windows Authenticode identity, or Apple Developer ID/Team identity for the initial release. This accepts single-maintainer continuity risk and visible operating-system trust warnings; checksums and GitHub attestations do not turn an OS-unsigned installer into an OS-identified one. The capability public-key ID and matching protected capability/updater private inputs must still be configured before a release candidate can run. A missing or lost cryptographic signing key stops release; it never permits an unsigned updater, unsigned capability catalog, or signature-verification bypass.
 
 ## Updater signing key operations
 
@@ -66,17 +66,17 @@ Only jobs in the protected `desktop-release` GitHub Environment may expose the c
 - `TAURI_SIGNING_PRIVATE_KEY`
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
 
-The updater private key must not be reused as a capability-catalog key, OS code-signing key, developer credential, or local project secret. Before the first public stable release, a named primary owner and a different named backup custodian must each confirm the public key ID, verify that an encrypted offline backup can be recovered, and record the evidence location without recording secret material in Git.
+The updater private key must not be reused as a capability-catalog key, OS code-signing key, developer credential, or local project secret. `StoneLL1` owns the key and has explicitly chosen not to require a different backup custodian. An encrypted offline recovery copy remains strongly recommended, but it is not a release gate; loss of the only private key permanently breaks automatic-update continuity for clients that trust the committed public key.
 
 Recovery and rotation are fail-closed. The current static `releases/latest` channel has one trust anchor and no version-aware routing or dual-key verification, so it cannot guarantee a lossless key rotation for clients that miss a bridge release:
 
-1. Stop publication if the protected secret, password, owner approval, or offline recovery evidence is unavailable.
+1. Stop publication if the protected secret, password, or owner approval is unavailable.
 2. Restore the exact existing key only through approved protected-environment secret administration, then produce a signed release candidate and verify an upgrade from the previous signed installer.
 3. A planned rotation requires a separately approved migration design before changing this repository's committed key. It must keep an old-key-signed bridge manifest and artifact reachable for older clients while a new channel serves clients that already trust the new key, or add an audited dual-trust/version-aware mechanism. Shipping one bridge build through `releases/latest` and then replacing it is not sufficient.
-4. If the project deliberately switches the single static channel after a bridge period, clients that missed the bridge require an explicit manually downloaded, OS-signed reinstall. Record that continuity loss in the release approval; never describe it as transparent rotation.
+4. If the project deliberately switches the single static channel after a bridge period, clients that missed the bridge require an explicit manually downloaded reinstall whose checksum, GitHub attestation, and new updater signature are verified. Windows/macOS OS-identity warnings remain expected under the current policy. Record that continuity loss in the release approval; never describe it as transparent rotation.
 5. If the old private key is lost before a compatible migration reaches existing clients, in-place updater continuity is lost. Do not publish unsigned artifacts or disable verification; use the manual reinstall and incident process.
 
-Current custody record: primary owner `pending-human-input`; backup custodian `pending-human-input`; offline restore evidence `pending-human-input`. These are release blockers, although they do not prevent compiling or testing the Batch 4A backend with the public key.
+Current custody record: primary owner `StoneLL1`; backup custodian `not-required`; offline restore evidence `recommended-but-not-required`. The matching `desktop-release` Environment secrets remain a release blocker, although their absence does not prevent compiling or testing the Batch 4A backend with the committed public key.
 
 ## Workflow permissions and approvals
 
@@ -85,9 +85,9 @@ Current custody record: primary owner `pending-human-input`; backup custodian `p
 - The reusable capability workflow has `contents: read`, accepts the unified release tag, and uploads only same-run workflow artifacts. It cannot create or upload to a GitHub Release.
 - `.github/workflows/desktop-release.yml` owns the atomic capability + four-platform desktop transaction. Only its final `publish-stable` job receives `contents: write`, and that job is protected by the `desktop-release` environment.
 - The sealed candidate remains a workflow artifact through build, manifest, packaged-smoke, attestation, and full asset rehearsal. The protected publisher creates one draft only after those gates, uploads the complete bundle, then publishes and performs anonymous post-publish verification.
-- The repository owner must configure required reviewers for both `capability-release` and `desktop-release`. The 2026-08-25 audit confirmed that both Environment names exist but have no reviewer rule or deployment-branch policy.
+- Both `capability-release` and `desktop-release` require reviewer `StoneLL1`, allow sole-maintainer self-review, and allow deployments only from `master` or tags matching `app-v*`.
 
-No remote release workflow rehearsal is claimed for Batch 5 or Batch 6. The 2026-08-25 audit closed public repository and authorized GitHub access, but found no branch protection, required reviewers, environment branch policy, configured release secret names, repository variable names, tag, Release, or release asset. The capability trust-key set is also empty. These are release blockers, not local test failures. The complete Batch 6 decision and platform matrix are in [`batch-6-acceptance-evidence.md`](batch-6-acceptance-evidence.md).
+No remote release workflow rehearsal is claimed for Batch 5 or Batch 6. The 2026-08-25 configuration pass closed public access, `master` protection, required reviewers, and Environment deployment policy. The capability trust-key set, `CAPABILITY_SIGNING_KEY_ID`, capability private-key secret, updater private-key/password secrets, release tag, Release, and release assets are still absent. These are release blockers, not local test failures. The complete Batch 6 decision and platform matrix are in [`batch-6-acceptance-evidence.md`](batch-6-acceptance-evidence.md).
 
 ## Local and CI checks
 
