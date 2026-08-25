@@ -1,6 +1,8 @@
 # Known limitations for 0.1.0
 
 - The canonical updater path is NSIS on Windows, DMG plus the signed app updater archive on macOS, and AppImage on Linux.
+- Windows installers are not Authenticode-signed for 0.1.0. SmartScreen or an unknown-publisher warning is expected; verify the exact-tag checksum and GitHub attestation before deliberately continuing.
+- macOS installers are not signed with Apple Developer ID or notarized for 0.1.0. Gatekeeper may block first launch and require a deliberate manual override after the exact-tag checksum and GitHub attestation are verified.
 - Linux desktop integration and library availability still vary by distribution; the canonical release qualification target is Ubuntu 24.04 x64.
 - Compatible Markdown vaults retain their existing layout. App-owned compatibility guidance remains under `.app/compat/`.
 - Natural-language answers require Chat or an explicit workflow and a configured Agent/BYOK provider; local navigation search remains keyword/filter based.

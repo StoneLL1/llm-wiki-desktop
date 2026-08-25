@@ -9,11 +9,66 @@ export const RELEASE_PLATFORMS = Object.freeze({
   "linux-x86_64": "x86_64-unknown-linux-gnu",
 });
 
+export const OS_IDENTITY_EVIDENCE = Object.freeze({
+  "windows-x86_64": Object.freeze({
+    schemaVersion: 1,
+    kind: "windows-authenticode-not-required",
+    platform: "windows-x86_64",
+    required: false,
+    verified: true,
+    updaterSignatureRequired: true,
+    userNotice: "smartscreen-or-unknown-publisher-warning-expected",
+  }),
+  "darwin-aarch64": Object.freeze({
+    schemaVersion: 1,
+    kind: "apple-developer-id-not-required",
+    platform: "darwin-aarch64",
+    required: false,
+    verified: true,
+    updaterSignatureRequired: true,
+    userNotice: "gatekeeper-manual-override-may-be-required",
+  }),
+  "darwin-x86_64": Object.freeze({
+    schemaVersion: 1,
+    kind: "apple-developer-id-not-required",
+    platform: "darwin-x86_64",
+    required: false,
+    verified: true,
+    updaterSignatureRequired: true,
+    userNotice: "gatekeeper-manual-override-may-be-required",
+  }),
+  "linux-x86_64": Object.freeze({
+    schemaVersion: 1,
+    kind: "linux-os-code-signing-not-applicable",
+    platform: "linux-x86_64",
+    required: false,
+    verified: true,
+    updaterSignatureRequired: true,
+    userNotice: "linux-distribution-integration-varies",
+  }),
+});
+
 export const STABLE_TAG_PATTERN = /^app-v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 export const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 
 export function isPlainObject(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function osIdentityEvidenceErrors(evidence, platform) {
+  const expected = OS_IDENTITY_EVIDENCE[platform];
+  if (!expected) return [`unsupported desktop platform: ${platform}`];
+  if (!isPlainObject(evidence)) return [`${platform} OS identity evidence must be an object`];
+  const errors = [];
+  const actualKeys = Object.keys(evidence).sort();
+  const expectedKeys = Object.keys(expected).sort();
+  if (JSON.stringify(actualKeys) !== JSON.stringify(expectedKeys)) {
+    errors.push(`${platform} OS identity evidence must contain exactly the policy fields`);
+  }
+  for (const [key, value] of Object.entries(expected)) {
+    if (evidence[key] !== value) errors.push(`${platform} OS identity evidence has invalid ${key}`);
+  }
+  return errors;
 }
 
 export function safeAssetName(value) {

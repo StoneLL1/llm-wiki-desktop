@@ -129,30 +129,74 @@ export function validateReleaseState({
   if (contract.publishing.latestManifestChannel !== "stable-only") {
     errors.push("latest.json generation must remain stable-only");
   }
-  const approvalOwnerConfirmed = typeof contract.publishing.approvalOwner === "string"
-    && contract.publishing.approvalOwner.trim().length > 0;
-  const approvalOwnerPending = contract.publishing.approvalOwner === null
-    && contract.publishing.approvalOwnerStatus === "pending-human-input"
+  const approvalOwnerConfirmed = contract.publishing.approvalOwner === "StoneLL1"
+    && contract.publishing.approvalOwnerStatus === "confirmed"
     && typeof contract.publishing.approvalOwnerRole === "string"
     && contract.publishing.approvalOwnerRole.trim().length > 0;
+  const environmentReviewerConfigured = contract.publishing.environmentReviewer === "StoneLL1"
+    && contract.publishing.environmentReviewerStatus === "configured"
+    && contract.publishing.environmentPreventSelfReview === false;
   if (contract.publishing.stableEnvironment !== "desktop-release"
     || contract.publishing.capabilityEnvironment !== "capability-release"
-    || (!approvalOwnerConfirmed && !approvalOwnerPending)) {
-    errors.push("protected release environments and confirmed-or-pending approval ownership must remain explicit");
+    || !approvalOwnerConfirmed
+    || !environmentReviewerConfigured) {
+    errors.push("protected release environments and the confirmed sole-maintainer approval policy must remain explicit");
   }
-  for (const signingKind of ["updater", "capability", "windows", "apple"]) {
+  if (contract.signing?.privateKeyPolicy !== "protected-environment-secrets-only"
+    || contract.signing?.continuity?.backupCustodianRequired !== false
+    || contract.signing?.continuity?.decisionOwner !== "StoneLL1"
+    || contract.signing?.continuity?.riskStatus !== "single-maintainer-continuity-risk-accepted") {
+    errors.push("single-maintainer key continuity policy must remain explicit");
+  }
+  for (const signingKind of ["updater", "capability"]) {
     const signingContract = contract.signing?.[signingKind];
-    const ownerConfirmed = typeof signingContract?.owner === "string"
-      && signingContract.owner.trim().length > 0;
-    const ownerPending = signingContract?.owner === null
-      && signingContract?.status === "pending-human-input"
+    const ownerConfirmed = signingContract?.owner === "StoneLL1"
+      && signingContract?.status === "owner-confirmed"
       && typeof signingContract?.ownerRole === "string"
       && signingContract.ownerRole.trim().length > 0;
-    if (!ownerConfirmed && !ownerPending) {
-      errors.push(`${signingKind} signing ownership must be confirmed or explicitly pending`);
+    if (!ownerConfirmed) {
+      errors.push(`${signingKind} signing ownership must be confirmed for StoneLL1`);
+    }
+    if (signingContract?.backupCustodian !== null || signingContract?.backupStatus !== "not-required") {
+      errors.push(`${signingKind} signing backup-custodian policy must be explicitly not required`);
     }
     if (signingContract && Object.hasOwn(signingContract, "privateKey")) {
       errors.push(`${signingKind} private key material cannot appear in the release contract`);
+    }
+  }
+  const updaterPublicKey = contract.signing?.updater?.publicKey;
+  const updaterPublicKeyId = contract.signing?.updater?.publicKeyId;
+  const updaterPublicKeyDocument = typeof updaterPublicKey === "string" && /^[A-Za-z0-9+/]+={0,2}$/.test(updaterPublicKey)
+    ? Buffer.from(updaterPublicKey, "base64").toString("utf8")
+    : "";
+  if (updaterPublicKey !== tauriConfig.plugins?.updater?.pubkey
+    || !/^[0-9A-F]{16}$/.test(updaterPublicKeyId ?? "")
+    || !updaterPublicKeyDocument.includes(`minisign public key: ${updaterPublicKeyId}\n`)) {
+    errors.push("updater public key and key ID must match the committed Tauri trust anchor");
+  }
+  const capabilityPublicKeyPending = contract.signing?.capability?.publicKeyId === null
+    && contract.signing?.capability?.publicKeyStatus === "pending-human-input";
+  const capabilityPublicKeyCommitted = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(
+    contract.signing?.capability?.publicKeyId ?? "",
+  ) && contract.signing?.capability?.publicKeyStatus === "committed";
+  if (!capabilityPublicKeyPending && !capabilityPublicKeyCommitted) {
+    errors.push("capability public key must be committed or explicitly pending human input");
+  }
+  const osIdentityPolicies = [
+    ["windows", "publisherSubject", "smartscreen-or-unknown-publisher-warning-expected"],
+    ["apple", "teamId", "gatekeeper-manual-override-may-be-required"],
+  ];
+  for (const [platform, identityField, userWarning] of osIdentityPolicies) {
+    const osContract = contract.signing?.[platform];
+    if (osContract?.owner !== "StoneLL1"
+      || osContract?.status !== "not-required"
+      || osContract?.osIdentityPolicy !== "not-required"
+      || osContract?.[identityField] !== null
+      || osContract?.userWarning !== userWarning) {
+      errors.push(`${platform} OS vendor identity signing must remain explicitly not required`);
+    }
+    if (osContract && Object.hasOwn(osContract, "privateKey")) {
+      errors.push(`${platform} private key material cannot appear in the release contract`);
     }
   }
   if (contract.application.identifier !== contract.signing.apple.bundleIdentifier) {
@@ -284,9 +328,33 @@ export function validateDesktopReleaseWorkflow({ desktopWorkflow, capabilityWork
     "generate-release-checksums.mjs --root remote-draft --verify",
     "generate-release-checksums.mjs --root published-assets --verify",
     "packaged-process-alive",
-    "APPLE_TEAM_ID",
+    "CAPABILITY_SIGNING_KEY_ID",
+    "TAURI_SIGNING_PRIVATE_KEY",
+    "windows-authenticode-not-required",
+    "apple-developer-id-not-required",
+    "linux-os-code-signing-not-applicable",
   ]) {
     if (!desktopWorkflow.includes(marker)) errors.push(`desktop release workflow is missing required marker: ${marker}`);
+  }
+  for (const forbiddenMarker of [
+    "WINDOWS_CERTIFICATE",
+    "WINDOWS_PUBLISHER_SUBJECT",
+    "APPLE_CERTIFICATE",
+    "APPLE_CERTIFICATE_PASSWORD",
+    "APPLE_TEAM_ID",
+    "APPLE_ID",
+    "APPLE_PASSWORD",
+    "KEYCHAIN_PASSWORD",
+    "Import-PfxCertificate",
+    "xcrun stapler",
+    "spctl --assess",
+  ]) {
+    if (desktopWorkflow.includes(forbiddenMarker)) {
+      errors.push(`desktop release workflow must not require OS vendor signing credentials or verification: ${forbiddenMarker}`);
+    }
+  }
+  if (!/for name in CAPABILITY_KEY_ID UPDATER_PRIVATE_KEY UPDATER_PRIVATE_KEY_PASSWORD; do/.test(desktopWorkflow)) {
+    errors.push("desktop release preflight must require exactly the capability and updater signing inputs");
   }
   if (!/gh release create[^\r\n]*--draft(?:\s|$)/.test(desktopWorkflow)) {
     errors.push("publish-stable must create the GitHub Release as a draft");
