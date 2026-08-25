@@ -14,7 +14,7 @@ This record contains no private key, certificate, token, user project path, user
 
 Current candidate baseline: `9c2b6a6cef8534d0edb59f254b222c17d6d62711` on public `master`
 
-Decision: **Public beta No-Go; cross-platform source CI and local release rehearsal green, signed draft and packaged evidence blocked**
+Decision: **Public beta No-Go; cross-platform source CI and local release rehearsal green, updater/capability-signed draft and packaged evidence blocked**
 
 ### Merge and CI evidence
 
@@ -36,13 +36,14 @@ Decision: **Public beta No-Go; cross-platform source CI and local release rehear
 | Anonymous Releases page | Passed: HTTP 200 |
 | Stable `latest.json` | HTTP 404, expected before the first Release; remains mandatory after draft assets exist |
 | GitHub authorization | Working as `StoneLL1`; repository viewer permission is `ADMIN` and Actions default workflow permission is `read` |
-| Protected default branch | **Pending:** GitHub reports `master` is not protected |
-| Required Environments | Names exist, but both have no protection rules, required reviewers, or branch policy |
+| Protected default branch | Complete on 2026-08-25: strict Windows/macOS/Ubuntu checks, admin enforcement, PR and conversation-resolution gates, force-push/deletion disabled |
+| Required Environments | Complete on 2026-08-25: both require `StoneLL1`, allow sole-maintainer self-review, and permit only `master` or `app-v*` deployments |
 | Protected secret names | **Pending:** both Environment secret-name lists are empty; no value was requested or read |
-| Repository variable names | **Pending:** `CAPABILITY_SIGNING_KEY_ID`, `WINDOWS_PUBLISHER_SUBJECT`, and `APPLE_TEAM_ID` are absent; no value was requested or read |
+| Repository variable names | **Pending:** `CAPABILITY_SIGNING_KEY_ID` is absent; Windows publisher and Apple Team variables are intentionally not required |
+| OS vendor identity policy | Owner decision complete: Windows Authenticode and Apple Developer ID/notarization are not required; OS warnings and manual-override evidence remain mandatory acceptance items |
 | Tags and Releases | None exist; no stable tag, Draft, stable Release, or latest-channel mutation was created |
 
-The release-owner handoff and ready-to-fill four-platform matrix are in [`first-release-candidate-checklist.md`](first-release-candidate-checklist.md). No workflow was dispatched because the capability trust contract, signing identities, custody record, protected inputs/reviewers, signed upgrade baseline, and real platform hosts are not ready. The `publish-stable` job was not approved or started.
+The release-owner handoff and ready-to-fill four-platform matrix are in [`first-release-candidate-checklist.md`](first-release-candidate-checklist.md). No release workflow was dispatched because the capability trust contract, protected updater/capability inputs, signed upgrade baseline, and real platform hosts are not ready. Branch protection, Environment approval, sole-maintainer ownership, no-backup-custodian, and no-OS-certificate decisions are now explicit. The `publish-stable` job was not approved or started.
 
 ## Local automated evidence
 
@@ -77,12 +78,12 @@ Consequently there is no workflow run URL, draft tag, draft release, public `lat
 
 | Target | Required evidence | Batch 6 state |
 | --- | --- | --- |
-| Windows x64 | Canonical NSIS install, launch, old signed version upgrade, locked-file/AV/standard-user behavior, uninstall, project byte preservation, Authenticode evidence | Pending; no signed draft artifact or Windows publisher identity |
-| macOS arm64 | Developer ID, notarization, staple, Gatekeeper, install/launch/upgrade/uninstall, project preservation | Pending; no Apple Team ID/certificate or macOS runner evidence |
-| macOS x64 | Independent artifact/signature/manifest entry plus install/launch/upgrade | Pending; no Apple Team ID/certificate or macOS runner evidence |
+| Windows x64 | Canonical NSIS install, launch, old updater-signed version upgrade, locked-file/AV/standard-user behavior, uninstall, project byte preservation, updater signature and SmartScreen/unknown-publisher manual path | Pending; no updater-signed draft artifact or Windows packaged-host evidence |
+| macOS arm64 | Updater signature, Gatekeeper manual-override path, install/launch/upgrade/uninstall, project preservation; no Developer ID/notarization claim | Pending; no updater-signed draft artifact or macOS arm64 host evidence |
+| macOS x64 | Independent artifact/signature/manifest entry plus Gatekeeper manual-override and install/launch/upgrade | Pending; no updater-signed draft artifact or macOS x64 host evidence |
 | Linux x64 | AppImage permissions, desktop launch, old-version upgrade, uninstall/project preservation; deb/rpm smoke if published | Pending; no draft artifact or Linux packaged runner evidence |
 
-The updater public key is committed, but its named primary owner, independent backup custodian, and offline restore evidence remain Pending. Capability signing key identity, Windows publisher subject, Apple Team ID, production protected-environment secrets, and required environment reviewers remain Pending. No temporary production key was generated and no signing verification was bypassed.
+The updater public key and owner `StoneLL1` are committed, and a separate backup custodian is explicitly not required. Capability signing key identity and the production protected-environment updater/capability secrets remain Pending. Windows publisher and Apple Team identity are intentionally not configured under the initial no-OS-certificate policy. No temporary production key was generated and no updater/capability signature verification was bypassed.
 
 ## Core journeys, recovery, and security
 
@@ -96,7 +97,7 @@ The following Batch 6 requirements remain release-blocking because they require 
 - provider authorization, Chat/BYOK revoke, malicious Git/Agent, junction/symlink race, and secret-free support evidence in packaged apps;
 - updater offline/DNS/TLS/HTTP/status/oversize/JSON/platform/SemVer/redirect/signature/crash/interrupted-install matrix;
 - uninstall preserving every user project byte;
-- Windows Authenticode and macOS Developer ID/notarization/staple verification;
+- Windows SmartScreen/unknown-publisher and macOS Gatekeeper manual-override acceptance without any false Authenticode, Developer ID, or notarization claim;
 - protected draft workflow rehearsal and anonymous reverse-download verification.
 
 Local-first Wiki, Search, and Edit source-level gates remain independent of the unavailable remote updater. No packaged-network-failure claim is made without a packaged candidate.
@@ -110,11 +111,11 @@ Local-first Wiki, Search, and Edit source-level gates remain independent of the 
 | FINAL-03 four-target capability install and original Import continuation | **Not closed** |
 | FINAL-04 real old-to-new signed upgrade | **Not closed** |
 | One tag/commit for every installer/catalog/manifest/signature | Local workflow contract green; no remote artifact set |
-| Windows/macOS signing and notarization | **Not closed** |
+| Windows/macOS explicit no-OS-identity warning and manual-override evidence | **Not closed** |
 | Update failure preserves old version and projects | Source contract green; packaged recovery evidence Pending |
 | Two final reviews without unresolved P1/P2 | Closed; both final review passes reported P1/P2 clean |
 | Full `npm run check` from the beginning | Closed; passed in 14m 40.6s after the final high-risk fixes |
 | Draft release rehearsal and anonymous endpoint | **Not closed** |
 | Graphify, progress, audits, runbook | Synchronized; final graph refresh produced 15,973 nodes, 46,089 edges, and 724 communities |
 
-The remediation plan must therefore remain not Completed and the first public beta must not be published. The next action is external release-owner work: make the canonical repository publicly reachable, restore authorized GitHub access, configure named custodians/reviewers and production signing identities, then run the protected draft transaction and the complete four-platform packaged matrix without changing the fail-closed contracts.
+The remediation plan must therefore remain not Completed and the first public beta must not be published. Public access, branch protection, required reviewer, and owner decisions are now configured. The next external release-owner work is to establish the capability trust key, install the matching capability/updater protected secrets, identify an updater-signed upgrade baseline, and provide the four real acceptance hosts; only then may the protected draft transaction and complete packaged matrix run without changing the fail-closed updater/capability contracts.

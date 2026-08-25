@@ -25,42 +25,56 @@
     "latestManifestChannel": "stable-only",
     "stableEnvironment": "desktop-release",
     "capabilityEnvironment": "capability-release",
-    "approvalOwner": null,
-    "approvalOwnerRole": "StoneLL1 repository owner",
-    "approvalOwnerStatus": "pending-human-input",
-    "environmentReviewerStatus": "unverified"
+    "approvalOwner": "StoneLL1",
+    "approvalOwnerRole": "sole repository owner and maintainer",
+    "approvalOwnerStatus": "confirmed",
+    "environmentReviewer": "StoneLL1",
+    "environmentReviewerStatus": "configured",
+    "environmentPreventSelfReview": false
   },
   "signing": {
-    "privateKeyPolicy": "protected-environment-secrets-and-offline-backup-only",
+    "privateKeyPolicy": "protected-environment-secrets-only",
+    "continuity": {
+      "backupCustodianRequired": false,
+      "decisionOwner": "StoneLL1",
+      "riskStatus": "single-maintainer-continuity-risk-accepted"
+    },
     "updater": {
       "publicKey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDBEMjc0RUU4OEFCOTA2NTYKUldSV0JybUs2RTRuRGN2UlZENGdNY1FxUE1aZ2F1Y2NBSnpiZ25qTmRtdURURzYrMitUdms4SUEK",
       "publicKeyId": "0D274EE88AB90656",
       "publicKeyStatus": "supplied-2026-08-20",
-      "owner": null,
-      "ownerRole": "StoneLL1 repository owner",
-      "status": "pending-human-input",
+      "owner": "StoneLL1",
+      "ownerRole": "sole repository owner and maintainer",
+      "status": "owner-confirmed",
       "backupCustodian": null,
-      "backupStatus": "pending-human-input",
+      "backupStatus": "not-required",
       "rotationProcedure": "docs/release/release-identity-and-access.md#updater-signing-key-operations"
     },
     "capability": {
       "publicKeyId": null,
-      "owner": null,
-      "ownerRole": "StoneLL1 repository owner",
-      "status": "pending-human-input"
+      "publicKeyStatus": "pending-human-input",
+      "owner": "StoneLL1",
+      "ownerRole": "sole repository owner and maintainer",
+      "status": "owner-confirmed",
+      "backupCustodian": null,
+      "backupStatus": "not-required"
     },
     "windows": {
       "publisherSubject": null,
-      "owner": null,
-      "ownerRole": "StoneLL1 repository owner",
-      "status": "pending-human-input"
+      "osIdentityPolicy": "not-required",
+      "owner": "StoneLL1",
+      "ownerRole": "sole repository owner and maintainer",
+      "status": "not-required",
+      "userWarning": "smartscreen-or-unknown-publisher-warning-expected"
     },
     "apple": {
       "bundleIdentifier": "com.llmwiki.desktop",
       "teamId": null,
-      "owner": null,
-      "ownerRole": "StoneLL1 repository owner",
-      "status": "pending-human-input"
+      "osIdentityPolicy": "not-required",
+      "owner": "StoneLL1",
+      "ownerRole": "sole repository owner and maintainer",
+      "status": "not-required",
+      "userWarning": "gatekeeper-manual-override-may-be-required"
     }
   }
 }

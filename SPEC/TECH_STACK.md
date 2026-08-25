@@ -573,7 +573,7 @@ Agent 生成内容时，应根据用户语言偏好输出对应语言。
 
 应用更新使用 pinned `tauri-plugin-updater` v2.9.0 vendor patch：除 upstream API 外，当前 patch 强制 transport-level manifest size limit，并在 Windows 检查 `ShellExecuteW` launch result。升级 vendor 时必须证明两个边界等价并保留 root integration contracts。
 
-发布技术合同由 `.github/workflows/desktop-release.yml` 和 `release/release-contract.json` 固定：精确 Node/Rust、`npm ci`、Cargo `--locked`、actions SHA pin、同 tag/commit/run 的 4×5 capability catalog 与四 target desktop artifacts、updater 与 OS signing evidence、checksums、SBOM、provenance/attestation、packaged smoke、draft reverse verification，以及 protected final publisher。只有最终 job 可请求 `contents: write`；publish-through-anonymous-verification 使用 guarded `EXIT/INT/TERM` rollback，硬 runner/GitHub control-plane loss仍需 release owner incident response。
+发布技术合同由 `.github/workflows/desktop-release.yml` 和 `release/release-contract.json` 固定：精确 Node/Rust、`npm ci`、Cargo `--locked`、actions SHA pin、同 tag/commit/run 的 4×5 capability catalog 与四 target desktop artifacts、强制 updater signature 与明确的 OS vendor identity policy evidence、checksums、SBOM、provenance/attestation、packaged smoke、draft reverse verification，以及 protected final publisher。初始发布不要求 Windows Authenticode 或 Apple Developer ID/notarization，相关平台警告必须如实披露；只有最终 job 可请求 `contents: write`，publish-through-anonymous-verification 使用 guarded `EXIT/INT/TERM` rollback，硬 runner/GitHub control-plane loss仍需 release owner incident response。
 
 本地 fixture、jsdom、`cargo check` 或 unsigned artifact 不代表真实签名安装、升级、公证或匿名 endpoint。当前 Batch 6 Public beta No-Go 与外部 Pending 见 `docs/release/batch-6-acceptance-evidence.md`。
 

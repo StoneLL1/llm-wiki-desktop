@@ -110,17 +110,39 @@ test("canonical endpoints cannot drift to a different repository", () => {
   assert.equal(result.errors.filter((error) => error.includes("canonical repository")).length, 2);
 });
 
-test("unknown human signing and approval owners remain explicit pending states", () => {
-  assert.equal(contract.publishing.approvalOwner, null);
-  assert.equal(contract.publishing.approvalOwnerStatus, "pending-human-input");
-  assert.equal(["updater", "capability", "windows", "apple"].every((kind) => {
-    const { owner, ownerRole, status } = contract.signing[kind];
-    return owner === null && ownerRole === "StoneLL1 repository owner" && status === "pending-human-input";
+test("the sole maintainer owns cryptographic signing while backup and OS certificates are not required", () => {
+  assert.equal(contract.publishing.approvalOwner, "StoneLL1");
+  assert.equal(contract.publishing.approvalOwnerStatus, "confirmed");
+  assert.equal(contract.publishing.environmentReviewer, "StoneLL1");
+  assert.equal(contract.publishing.environmentPreventSelfReview, false);
+  assert.equal(["updater", "capability"].every((kind) => {
+    const { owner, ownerRole, status, backupCustodian, backupStatus } = contract.signing[kind];
+    return owner === "StoneLL1"
+      && ownerRole === "sole repository owner and maintainer"
+      && status === "owner-confirmed"
+      && backupCustodian === null
+      && backupStatus === "not-required";
   }), true);
+  assert.equal(contract.signing.windows.publisherSubject, null);
+  assert.equal(contract.signing.windows.osIdentityPolicy, "not-required");
+  assert.equal(contract.signing.apple.teamId, null);
+  assert.equal(contract.signing.apple.osIdentityPolicy, "not-required");
 
   const ambiguous = structuredClone(contract);
   delete ambiguous.signing.updater.ownerRole;
   assert.equal(state({ contract: ambiguous }).errors.some((error) => error.includes("updater signing ownership")), true);
+
+  const backupRequired = structuredClone(contract);
+  backupRequired.signing.capability.backupStatus = "pending-human-input";
+  assert.equal(state({ contract: backupRequired }).errors.some((error) => error.includes("backup-custodian policy")), true);
+
+  const hiddenCertificateGate = structuredClone(contract);
+  hiddenCertificateGate.signing.windows.publisherSubject = "CN=Fixture";
+  assert.equal(state({ contract: hiddenCertificateGate }).errors.some((error) => error.includes("not required")), true);
+
+  const wrongUpdaterKeyId = structuredClone(contract);
+  wrongUpdaterKeyId.signing.updater.publicKeyId = "AAAAAAAAAAAAAAAA";
+  assert.equal(state({ contract: wrongUpdaterKeyId }).errors.some((error) => error.includes("Tauri trust anchor")), true);
 });
 
 test("capability workflow permissions stay read-only, reusable, and non-publishing", () => {
@@ -244,6 +266,18 @@ test("the committed desktop workflow is the only atomic publisher and pins every
   const noCryptoVerification = desktopWorkflow.replaceAll("verify-updater-signatures.mjs", "inspect-updater-signatures.mjs");
   assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: noCryptoVerification, capabilityWorkflow })
     .some((error) => error.includes("verify-updater-signatures.mjs")), true);
+
+  const legacyCertificateGate = desktopWorkflow.replace(
+    "CAPABILITY_KEY_ID: ${{ vars.CAPABILITY_SIGNING_KEY_ID }}",
+    "CAPABILITY_KEY_ID: ${{ vars.CAPABILITY_SIGNING_KEY_ID }}\n          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}",
+  );
+  assert.notEqual(legacyCertificateGate, desktopWorkflow);
+  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: legacyCertificateGate, capabilityWorkflow })
+    .some((error) => error.includes("must not require OS vendor signing credentials")), true);
+
+  const missingUnsignedPolicy = desktopWorkflow.replace("windows-authenticode-not-required", "windows-policy-missing");
+  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: missingUnsignedPolicy, capabilityWorkflow })
+    .some((error) => error.includes("windows-authenticode-not-required")), true);
 
   const mutableSealingToolchain = desktopWorkflow.replaceAll(
     "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",

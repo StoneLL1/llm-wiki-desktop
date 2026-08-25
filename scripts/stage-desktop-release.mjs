@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import {
   collectRegularFiles,
   COMMIT_PATTERN,
-  isPlainObject,
+  osIdentityEvidenceErrors,
   parseNamedArguments,
   RELEASE_PLATFORMS,
   STABLE_TAG_PATTERN,
@@ -31,9 +31,8 @@ export function stageDesktopRelease({ source, output, platform, releaseTag, vers
   if (!STABLE_TAG_PATTERN.test(releaseTag ?? "")) throw new Error("release tag must be a stable app-v tag");
   if (!COMMIT_PATTERN.test(commitSha ?? "")) throw new Error("commit SHA must be 40 lowercase hex characters");
   const evidence = JSON.parse(fs.readFileSync(path.resolve(signingEvidence), "utf8"));
-  if (!isPlainObject(evidence) || evidence.verified !== true || typeof evidence.kind !== "string") {
-    throw new Error("OS signing evidence must be a verified structured record");
-  }
+  const evidenceErrors = osIdentityEvidenceErrors(evidence, platform);
+  if (evidenceErrors.length > 0) throw new Error(evidenceErrors.join("; "));
   const files = collectRegularFiles(source);
   const installer = exactlyOne(files, patterns.installer, `${platform} installer`);
   const updater = exactlyOne(files, patterns.updater, `${platform} updater`);
