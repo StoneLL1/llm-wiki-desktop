@@ -1,7 +1,7 @@
 # Release identity, repository access, and signing ownership
 
-Status: Batch 6 local automated acceptance complete; Public beta No-Go because external signing, reviewer, public-access, authorized Actions access, and remote-rehearsal blockers remain
-Last verified: 2026-08-21
+Status: Batch 6 local automated acceptance and cross-platform CI complete; repository/public Actions access restored; Public beta No-Go because signing, custody, capability trust, reviewer, branch-protection, signed-baseline, hardware, and remote-rehearsal blockers remain
+Last verified: 2026-08-25
 
 ## Frozen public release coordinate
 
@@ -22,7 +22,7 @@ The machine-readable source of truth is [`release/release-contract.json`](../../
 
 ## Anonymous access evidence
 
-The following fail-closed, no-credential probe was executed on 2026-08-16. It disables terminal prompts and both configured and request-scoped Git credentials, so a cached credential cannot make a private repository look public:
+The following fail-closed, no-credential probe was first executed on 2026-08-16 and rerun on 2026-08-25. It disables terminal prompts and both configured and request-scoped Git credentials, so a cached credential cannot make a private repository look public:
 
 ```powershell
 $env:GIT_TERMINAL_PROMPT = '0'
@@ -30,9 +30,9 @@ $env:GCM_INTERACTIVE = 'never'
 git -c credential.helper= -c http.extraHeader= ls-remote --symref https://github.com/StoneLL1/llm-wiki-desktop.git HEAD
 ```
 
-It failed without prompting for a username. Independent unauthenticated `HEAD` requests to the Releases page and the frozen `latest.json` endpoint both returned HTTP `404`. Therefore public repository access, remote default-branch discovery, the Releases page, `latest.json`, and installer assets are release-blocking Pending items. This result must be fixed by making the confirmed repository publicly reachable; it must not be worked around with a client Authorization header, GitHub token, or PAT.
+The 2026-08-16 probe failed without prompting for a username. On 2026-08-25 the same no-credential probe succeeded and returned `refs/heads/master` at `9c2b6a6cef8534d0edb59f254b222c17d6d62711`; an independent unauthenticated `HEAD` request to the Releases page returned HTTP `200`. Public repository access and remote default-branch discovery are therefore closed. The frozen `latest.json` endpoint returned HTTP `404`, which is expected before the first Release exists, while every installer/updater asset probe remains Pending until a sealed draft candidate exists.
 
-After the repository exists publicly, rerun the command above and record the returned `HEAD` symbolic ref. For every draft candidate, also verify from an unsigned, logged-out client:
+For every draft candidate, rerun the command above and also verify from an unsigned, logged-out client:
 
 ```powershell
 curl.exe --fail --location --head https://github.com/StoneLL1/llm-wiki-desktop/releases
@@ -40,7 +40,7 @@ curl.exe --fail --location --head https://github.com/StoneLL1/llm-wiki-desktop/r
 curl.exe --fail --location --head <each-installer-and-updater-asset-url>
 ```
 
-The release page must be reachable without credentials. `latest.json` and installer checks remain Pending until draft assets exist, then become mandatory before stable publication.
+The release page must remain reachable without credentials. `latest.json` and installer checks remain Pending until draft assets exist, then become mandatory before stable publication.
 
 ## Frozen application identity
 
@@ -85,9 +85,9 @@ Current custody record: primary owner `pending-human-input`; backup custodian `p
 - The reusable capability workflow has `contents: read`, accepts the unified release tag, and uploads only same-run workflow artifacts. It cannot create or upload to a GitHub Release.
 - `.github/workflows/desktop-release.yml` owns the atomic capability + four-platform desktop transaction. Only its final `publish-stable` job receives `contents: write`, and that job is protected by the `desktop-release` environment.
 - The sealed candidate remains a workflow artifact through build, manifest, packaged-smoke, attestation, and full asset rehearsal. The protected publisher creates one draft only after those gates, uploads the complete bundle, then publishes and performs anonymous post-publish verification.
-- The repository owner must configure required reviewers for both `capability-release` and `desktop-release`. Remote configuration remains unverified because anonymous repository access fails.
+- The repository owner must configure required reviewers for both `capability-release` and `desktop-release`. The 2026-08-25 audit confirmed that both Environment names exist but have no reviewer rule or deployment-branch policy.
 
-No remote workflow rehearsal is claimed for Batch 5 or Batch 6: the 2026-08-21 no-credential rerun still could not read the repository, the Releases page and stable `latest.json` returned 404, local GitHub authorization was invalid, and no draft tag or release asset exists. This is a release blocker, not a local test failure. The complete Batch 6 decision and platform matrix are in [`batch-6-acceptance-evidence.md`](batch-6-acceptance-evidence.md).
+No remote release workflow rehearsal is claimed for Batch 5 or Batch 6. The 2026-08-25 audit closed public repository and authorized GitHub access, but found no branch protection, required reviewers, environment branch policy, configured release secret names, repository variable names, tag, Release, or release asset. The capability trust-key set is also empty. These are release blockers, not local test failures. The complete Batch 6 decision and platform matrix are in [`batch-6-acceptance-evidence.md`](batch-6-acceptance-evidence.md).
 
 ## Local and CI checks
 

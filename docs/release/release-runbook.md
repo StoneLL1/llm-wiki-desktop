@@ -1,6 +1,6 @@
 # Atomic desktop release runbook
 
-Status: Batch 6 local automated acceptance complete with a Public beta No-Go decision. The first remote draft rehearsal remains blocked until the repository owner supplies and configures the production signing identities, protected-environment reviewers, valid GitHub authorization, and public repository access listed below. See [`batch-6-acceptance-evidence.md`](batch-6-acceptance-evidence.md).
+Status: Batch 6 local automated acceptance is complete and the cross-platform CI remediation is merged. Public repository access and authorized GitHub access were restored and reverified on 2026-08-25. The Public beta remains No-Go until the repository owner supplies the production signing identities and custody evidence, commits the capability trust key, configures protected-environment reviewers/secrets/variables and `master` branch protection, identifies a prior signed upgrade baseline, and provides the four real platform hosts required below. See [`batch-6-acceptance-evidence.md`](batch-6-acceptance-evidence.md) and [`first-release-candidate-checklist.md`](first-release-candidate-checklist.md).
 
 ## Transaction and authority
 
@@ -50,7 +50,9 @@ A real remote rehearsal must use a disposable stable-format tag at the current c
 
 The 2026-08-21 local acceptance gates are recorded in [`batch-6-acceptance-evidence.md`](batch-6-acceptance-evidence.md). The canonical repository and Releases page were not anonymously reachable, the stable `latest.json` endpoint returned 404, local GitHub authorization was invalid, and named production signing/custody/reviewer inputs remain unavailable. Therefore no draft tag or workflow run was created and no platform was marked installed, upgraded, signed, notarized, uninstalled, or anonymously reverse-downloaded.
 
-This is a release No-Go, not permission to weaken the workflow. Resume only after the owner has made the repository public, restored authorized Actions access, filled every pending identity/custody field, configured both protected environments, and supplied the production secrets without copying them into the workspace. Start with a draft candidate; do not expose the stable updater channel until the full four-platform Batch 6 matrix passes.
+The 2026-08-25 resumption audit confirmed that the repository is now public, anonymous `HEAD` resolves to `master`, the Releases page returns HTTP 200, and authenticated Actions access works. It also confirmed that `master` is not protected; both required Environments have no reviewer or branch policy; their secret-name lists and the repository variable-name list are empty; the capability trust-key file is empty; and no tag, Release, prior signed upgrade baseline, or four-platform packaged evidence exists. The first-release `latest.json` endpoint therefore still returns the expected pre-release HTTP 404.
+
+This remains a release No-Go, not permission to weaken the workflow. Resume only after the remaining owner, custodian, reviewer, branch-protection, capability-trust, signing-input, signed-baseline, and hardware requirements in [`first-release-candidate-checklist.md`](first-release-candidate-checklist.md) are satisfied without copying secret material into the workspace. Run through the sealed `draft-release-bundle` candidate first; do not approve `publish-stable` or expose the stable updater channel until the full four-platform Batch 6 matrix passes and the user gives a separate explicit approval.
 
 ## Approval checklist
 
