@@ -1,7 +1,7 @@
 # Batch 6 release acceptance evidence
 
 Date: 2026-08-21
-Last updated: 2026-08-25
+Last updated: 2026-08-26
 
 Original candidate baseline: `5eac9315b32b8fcaad188e19e783716eb969bde5` on local `master`
 
@@ -9,6 +9,17 @@ Release coordinate: `StoneLL1/llm-wiki-desktop`, `0.1.0`
 Original decision: **Public beta No-Go; Batch 6 local automated acceptance complete, remote and packaged evidence Pending**
 
 This record contains no private key, certificate, token, user project path, user content, or private signed URL. It distinguishes deterministic source-level evidence from real signed package evidence; the former must not be used to claim the latter.
+
+## 2026-08-26 updater identity confirmation and master closure
+
+Audited predecessor baseline: `82690d5297d404c173b08102e88feab277280132` on public `master` before this updater-contract change
+
+Decision: **Public beta No-Go; updater public identity and cross-platform source CI are closed, while capability trust, protected signing inputs, signed-baseline, and packaged-host evidence remain blocked**
+
+- PR [#3](https://github.com/StoneLL1/llm-wiki-desktop/pull/3) merged normally as `82690d5297d404c173b08102e88feab277280132`; [Actions run 32870822902](https://github.com/StoneLL1/llm-wiki-desktop/actions/runs/32870822902) completed successfully for Ubuntu, Windows, and macOS at that exact merge SHA.
+- The owner selected the existing updater key pair for the first release. The supplied public-key document matches `release/release-contract.json` and `src-tauri/tauri.conf.json` byte-for-byte and identifies minisign key `0D274EE88AB90656`; no private key or password was requested, read, logged, or written to the workspace.
+- The no-credential Git probe resolves `master` to the candidate SHA, the Releases page returns HTTP `200`, and the pre-release stable `latest.json` endpoint returns the expected HTTP `404`.
+- Read-only GitHub metadata shows both protected Environment secret-name lists and the repository variable list are empty; no tag or Release exists. The matching updater protected secrets, capability trust/public key and protected secret, signed upgrade baseline, and four real acceptance hosts remain external release blockers.
 
 ## 2026-08-25 resumption audit
 
