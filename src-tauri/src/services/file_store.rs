@@ -15,6 +15,12 @@ pub struct FileStore;
 
 static GUARDED_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+#[cfg(test)]
+thread_local! {
+    static BEFORE_CHECKED_WRITE_PUBLISH: std::cell::RefCell<Option<Box<dyn Fn(&Path)>>> =
+        std::cell::RefCell::new(None);
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", tag = "kind", content = "hash")]
 pub enum WriteMode {
@@ -109,6 +115,12 @@ impl FileStore {
         let binding = bind_project_write(context, &path, ensure_parent)?;
         let expected_identity =
             self.verify_write_mode(&binding, &path, relative_path, mode.clone())?;
+        #[cfg(test)]
+        BEFORE_CHECKED_WRITE_PUBLISH.with(|slot| {
+            if let Some(hook) = slot.borrow_mut().take() {
+                hook(&path);
+            }
+        });
         write_bound_atomic(&binding, &path, contents.as_bytes(), expected_identity)?;
         // The hash check and atomic rename cannot form an OS-level compare-and
         // swap for edits made by an external editor. Verify the postcondition
@@ -132,6 +144,28 @@ impl FileStore {
                 })));
             }
         }
+        Ok(())
+    }
+
+    /// Validate an overwrite token before a potentially expensive or
+    /// fallible safety checkpoint. This is only a preflight: callers must
+    /// still use `write_markdown_checked` with the same token so the final
+    /// mutation retains its identity-and-hash compare-and-swap guard.
+    pub(crate) fn preflight_markdown_overwrite_hash(
+        &self,
+        context: &ProjectContext,
+        relative_path: &str,
+        expected_hash: &str,
+    ) -> Result<(), BackendError> {
+        let path = context.resolve_project_write_path(relative_path)?;
+        let binding = BoundProjectMutationRoot::bind_read(&context.root, &path)
+            .map_err(|error| io_error("FILE_READ_FAILED", error, &path))?;
+        self.verify_write_mode(
+            &binding,
+            &path,
+            relative_path,
+            WriteMode::OverwriteIfHashMatches(expected_hash.to_string()),
+        )?;
         Ok(())
     }
 
@@ -500,24 +534,58 @@ fn write_bound_atomic(
     bytes: &[u8],
     expected: Option<(BoundFileIdentity, String)>,
 ) -> Result<(), BackendError> {
-    let result = if let Some((expected_identity, expected_hash)) = expected {
+    if let Some((expected_identity, expected_hash)) = expected {
         let temporary = binding
             .write_synced_temp(path, bytes)
             .map_err(|error| io_error("FILE_WRITE_FAILED", error, path))?;
-        let result = binding.replace_existing_if_identity_and_hash(
+        let publish = binding.replace_existing_if_identity_and_hash(
             &temporary,
             path,
             expected_identity,
             &expected_hash,
         );
-        if result.is_err() {
-            let _ = binding.remove_file(&temporary);
+        match publish {
+            Ok(()) => binding
+                .sync()
+                .map_err(|error| io_error("FILE_WRITE_FAILED", error, path)),
+            Err(error) => {
+                let _ = binding.remove_file(&temporary);
+                if error.kind() == std::io::ErrorKind::WouldBlock {
+                    Err(final_hash_mismatch(binding, path, &expected_hash))
+                } else {
+                    Err(io_error("FILE_WRITE_FAILED", error, path))
+                }
+            }
         }
-        result.and_then(|()| binding.sync())
     } else {
-        binding.write_atomic_replace(path, bytes)
-    };
-    result.map_err(|error| io_error("FILE_WRITE_FAILED", error, path))
+        binding
+            .write_atomic_replace(path, bytes)
+            .map_err(|error| io_error("FILE_WRITE_FAILED", error, path))
+    }
+}
+
+fn final_hash_mismatch(
+    binding: &BoundProjectMutationRoot,
+    path: &Path,
+    expected_hash: &str,
+) -> BackendError {
+    let current = binding.read_regular(path).ok();
+    let current_hash = current.as_deref().map(hash_bytes);
+    let mut details = serde_json::json!({
+        "path": path.to_string_lossy(),
+        "expectedHash": expected_hash,
+        "currentHash": current_hash,
+    });
+    if let Some(baseline) = current.and_then(|bytes| String::from_utf8(bytes).ok()) {
+        details["baselineContent"] = serde_json::Value::String(baseline);
+    }
+    BackendError::new(
+        "FILE_HASH_MISMATCH",
+        "File changed during the final guarded publish. Reload before overwriting.",
+        true,
+        true,
+    )
+    .with_details(details)
 }
 
 fn write_bound_create_new(
@@ -743,6 +811,39 @@ mod tests {
             "# Second"
         );
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn final_checked_publish_race_is_reported_as_hash_mismatch() {
+        let (context, root) = tmp_context("final-cas-conflict");
+        let store = FileStore;
+        let relative = "wiki/notes/race.md";
+        store
+            .write_markdown_checked(&context, relative, "before", WriteMode::CreateNew)
+            .unwrap();
+        let expected_hash = store.file_hash(&context, relative).unwrap();
+        super::BEFORE_CHECKED_WRITE_PUBLISH.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(|path| {
+                std::fs::remove_file(path).unwrap();
+                std::fs::write(path, b"external replacement").unwrap();
+            }));
+        });
+
+        let error = store
+            .write_markdown_checked(
+                &context,
+                relative,
+                "candidate",
+                WriteMode::OverwriteIfHashMatches(expected_hash),
+            )
+            .expect_err("the final namespace CAS must reject an external replacement");
+
+        assert_eq!(error.code, "FILE_HASH_MISMATCH");
+        assert_eq!(
+            std::fs::read_to_string(root.join(relative)).unwrap(),
+            "external replacement"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

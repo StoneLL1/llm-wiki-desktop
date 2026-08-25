@@ -2645,6 +2645,8 @@ pub(crate) fn default_config_dir() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::create_native_repair_directory;
     use super::{ProjectRepairOperationType, ProjectService};
     use crate::models::graph::GraphData;
     use crate::models::paths::ProjectContext;

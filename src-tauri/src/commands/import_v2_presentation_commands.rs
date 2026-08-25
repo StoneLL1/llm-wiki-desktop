@@ -2001,14 +2001,65 @@ fn available_memory_bytes() -> Option<u64> {
 
     let mut status: MEMORYSTATUSEX = unsafe { zeroed() };
     status.dwLength = size_of::<MEMORYSTATUSEX>() as u32;
-    (unsafe { GlobalMemoryStatusEx(&mut status) } != 0).then_some(status.ullAvailPhys)
+    (unsafe { GlobalMemoryStatusEx(&mut status) } != 0)
+        .then_some(status.ullAvailPhys)
+        .and_then(|bytes| memory_bytes_from_pages(bytes, 1))
 }
 
-#[cfg(unix)]
+fn memory_bytes_from_pages(pages: u64, page_size: i64) -> Option<u64> {
+    (page_size > 0).then(|| pages.saturating_mul(page_size as u64))
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn available_memory_bytes() -> Option<u64> {
     let pages = unsafe { libc::sysconf(libc::_SC_AVPHYS_PAGES) };
     let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    (pages > 0 && page_size > 0).then(|| (pages as u64).saturating_mul(page_size as u64))
+    (pages >= 0)
+        .then_some(pages as u64)
+        .and_then(|pages| memory_bytes_from_pages(pages, page_size))
+}
+
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+fn available_memory_bytes() -> Option<u64> {
+    use std::mem::MaybeUninit;
+
+    extern "C" {
+        fn mach_port_deallocate(
+            task: libc::mach_port_t,
+            name: libc::mach_port_t,
+        ) -> libc::kern_return_t;
+    }
+
+    let host = unsafe { libc::mach_host_self() };
+    let mut stats = MaybeUninit::<libc::vm_statistics64>::zeroed();
+    let mut count = libc::HOST_VM_INFO64_COUNT;
+    let result = unsafe {
+        libc::host_statistics64(
+            host,
+            libc::HOST_VM_INFO64,
+            stats.as_mut_ptr().cast::<libc::integer_t>(),
+            &mut count,
+        )
+    };
+    let _ = unsafe { mach_port_deallocate(libc::mach_task_self(), host) };
+    if result != libc::KERN_SUCCESS || count < libc::HOST_VM_INFO64_COUNT {
+        return None;
+    }
+
+    let stats = unsafe { stats.assume_init() };
+    // XNU reports speculative pages inside free_count, so do not add speculative_count again.
+    let pages = u64::from(stats.free_count).saturating_add(u64::from(stats.inactive_count));
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    memory_bytes_from_pages(pages, page_size)
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "linux", target_os = "android", target_os = "macos"))
+))]
+fn available_memory_bytes() -> Option<u64> {
+    None
 }
 
 #[cfg(not(any(windows, unix)))]
@@ -2276,6 +2327,14 @@ mod tests {
             ),
             ImportAsrProfile::Accurate
         );
+    }
+
+    #[test]
+    fn memory_page_conversion_preserves_zero_rejects_invalid_size_and_saturates() {
+        assert_eq!(memory_bytes_from_pages(3, 4096), Some(12_288));
+        assert_eq!(memory_bytes_from_pages(0, 4096), Some(0));
+        assert_eq!(memory_bytes_from_pages(3, -1), None);
+        assert_eq!(memory_bytes_from_pages(u64::MAX, 4096), Some(u64::MAX));
     }
 
     #[test]

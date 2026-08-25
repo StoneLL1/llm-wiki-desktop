@@ -40,6 +40,14 @@ const MAX_ASSESSMENT_PATH_NAME_ENTRIES: usize = 4_096;
 const MAX_APP_STATE_JSON_BYTES: u64 = 1024 * 1024;
 const ASSESSMENT_SCAN_BUDGET: Duration = Duration::from_secs(2);
 
+#[cfg(test)]
+thread_local! {
+    static ASSESSMENT_PHASE_TRACE: std::cell::RefCell<Vec<&'static str>> =
+        std::cell::RefCell::new(Vec::new());
+    static FAIL_COLLISION_READ_DIR: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 #[derive(Clone)]
 pub struct ProjectAssessmentService {
     inner: Arc<AssessmentRegistry>,
@@ -392,6 +400,25 @@ pub fn assess_project_folder(
         ProjectTrustState::Untrusted => metadata_filesystem_access(&canonical_root),
     };
     check_cancelled(cancelled)?;
+    // Readable Markdown is the core project-open capability. Probe it before
+    // optional Git metadata so a slow or incomplete repository cannot consume
+    // the shared assessment budget and misclassify readable content.
+    let markdown_scan = bounded_markdown_readability(
+        &canonical_root,
+        &resolution.layout,
+        cancelled,
+        assessment_deadline,
+    )?;
+    check_cancelled(cancelled)?;
+    // Portable-name collision detection gates write capability, so it receives
+    // its own bounded budget and must complete before optional Git metadata.
+    let collision_scan =
+        bounded_path_name_collisions(&canonical_root, cancelled, assessment_deadline)?;
+    #[cfg(test)]
+    ASSESSMENT_PHASE_TRACE.with(|trace| trace.borrow_mut().push("collision"));
+    check_cancelled(cancelled)?;
+    #[cfg(test)]
+    ASSESSMENT_PHASE_TRACE.with(|trace| trace.borrow_mut().push("git"));
     let (git, git_warning) = match GitService.repository_status_for_assessment(
         &context,
         assessment_deadline,
@@ -415,16 +442,6 @@ pub fn assess_project_folder(
         ),
     };
     check_cancelled(cancelled)?;
-    let markdown_scan = bounded_markdown_readability(
-        &canonical_root,
-        &resolution.layout,
-        cancelled,
-        assessment_deadline,
-    )?;
-    check_cancelled(cancelled)?;
-    let collision_scan =
-        bounded_path_name_collisions(&canonical_root, cancelled, assessment_deadline)?;
-    check_cancelled(cancelled)?;
     let app_state_corrupt = app_state_is_corrupt(&canonical_root, cancelled)?;
     let health = health_with_path_collisions(
         derive_health(
@@ -434,6 +451,7 @@ pub fn assess_project_folder(
             &native_inspection,
         ),
         &collision_scan.warnings,
+        collision_scan.limited,
     );
     let repair_available = match (&native_inspection.state, health) {
         (NativeLayoutState::RepairableLegacy { .. }, ProjectHealth::Repairable) => true,
@@ -778,6 +796,7 @@ fn bounded_path_name_collisions(
     let mut seen = HashMap::<String, String>::new();
     let mut warnings = Vec::new();
     let mut visited = 0usize;
+    let mut limited = false;
 
     while let Some((directory, depth)) = queue.pop_front() {
         check_cancelled(cancelled)?;
@@ -787,8 +806,12 @@ fn bounded_path_name_collisions(
                 limited: true,
             });
         }
-        let Ok(entries) = fs::read_dir(&directory) else {
-            continue;
+        let entries = match read_collision_directory(&directory) {
+            Ok(entries) => entries,
+            Err(_) => {
+                limited = true;
+                continue;
+            }
         };
         let parent = directory
             .strip_prefix(root)
@@ -804,13 +827,21 @@ fn bounded_path_name_collisions(
                     limited: true,
                 });
             }
-            let Ok(entry) = entry else {
-                continue;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => {
+                    limited = true;
+                    continue;
+                }
             };
             visited += 1;
             let path = entry.path();
-            let Ok(metadata) = fs::symlink_metadata(&path) else {
-                continue;
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(_) => {
+                    limited = true;
+                    continue;
+                }
             };
             if metadata.file_type().is_symlink() {
                 continue;
@@ -823,20 +854,45 @@ fn bounded_path_name_collisions(
             };
             record_path_name_collision(&mut seen, &mut warnings, &parent, &name, &display_path);
 
-            if metadata.is_dir()
-                && depth < MAX_ASSESSMENT_MARKDOWN_DEPTH
-                && !ignored_assessment_directory(&name)
-                && validate_existing_project_directory(root, &path).is_ok()
-            {
-                queue.push_back((path, depth + 1));
+            if metadata.is_dir() && !ignored_assessment_directory(&name) {
+                match validate_existing_project_directory(root, &path) {
+                    Ok(_) if depth < MAX_ASSESSMENT_MARKDOWN_DEPTH => {
+                        queue.push_back((path, depth + 1));
+                    }
+                    Ok(_) => {
+                        // A skipped subtree can contain a portable case/Unicode
+                        // collision. Preserve readable access, but never report
+                        // a complete safety scan or grant writes on that evidence.
+                        limited = true;
+                    }
+                    Err(_) => {
+                        // An in-scope directory that cannot be safely rebound
+                        // is incomplete evidence, not proof that it has no
+                        // portable-name collisions.
+                        limited = true;
+                    }
+                }
             }
         }
     }
 
-    Ok(PathCollisionScan {
-        warnings,
-        limited: false,
-    })
+    Ok(PathCollisionScan { warnings, limited })
+}
+
+fn read_collision_directory(path: &Path) -> std::io::Result<fs::ReadDir> {
+    #[cfg(test)]
+    if FAIL_COLLISION_READ_DIR.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .is_some_and(|candidate| candidate == path)
+    }) {
+        FAIL_COLLISION_READ_DIR.with(|slot| slot.borrow_mut().take());
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "injected collision directory read failure",
+        ));
+    }
+    fs::read_dir(path)
 }
 
 fn record_path_name_collision(
@@ -876,11 +932,12 @@ fn ignored_assessment_directory(name: &str) -> bool {
 fn health_with_path_collisions(
     health: ProjectHealth,
     collisions: &[ProjectAssessmentWarning],
+    collision_scan_limited: bool,
 ) -> ProjectHealth {
-    if health == ProjectHealth::Healthy && !collisions.is_empty() {
+    if health == ProjectHealth::Healthy && (!collisions.is_empty() || collision_scan_limited) {
         // A portable-name collision is readable but unsafe to write: Windows
-        // and macOS may fold names that Linux keeps distinct. Keep content
-        // available while routing mutations through the repair path.
+        // and macOS may fold names that Linux keeps distinct. An incomplete
+        // scan cannot prove absence either, so both states remain read-only.
         ProjectHealth::Repairable
     } else {
         health
@@ -1376,11 +1433,11 @@ mod tests {
             portable_path_name_key("e\u{301}.md")
         );
         assert_eq!(
-            health_with_path_collisions(ProjectHealth::Healthy, &warnings),
+            health_with_path_collisions(ProjectHealth::Healthy, &warnings, false),
             ProjectHealth::Repairable
         );
         assert_eq!(
-            health_with_path_collisions(ProjectHealth::Unreadable, &warnings),
+            health_with_path_collisions(ProjectHealth::Unreadable, &warnings, false),
             ProjectHealth::Unreadable
         );
     }
@@ -1607,6 +1664,7 @@ mod tests {
         fs::create_dir(root.join(".git")).unwrap();
         fs::write(root.join("note.md"), "# Note").unwrap();
 
+        ASSESSMENT_PHASE_TRACE.with(|trace| trace.borrow_mut().clear());
         let assessment = assess_project_folder(
             root.to_string_lossy().as_ref(),
             &config,
@@ -1618,10 +1676,100 @@ mod tests {
         assert_eq!(assessment.health, ProjectHealth::Healthy);
         assert!(!assessment.git.is_repository);
         assert!(assessment
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "PROJECT_GIT_UNAVAILABLE"));
+        assert!(assessment
             .capabilities
             .contains(&ProjectCapability::ReadMarkdown));
+        ASSESSMENT_PHASE_TRACE.with(|trace| {
+            assert_eq!(trace.borrow().as_slice(), &["collision", "git"]);
+        });
         fs::remove_dir_all(root).ok();
         fs::remove_dir_all(config).ok();
+    }
+
+    #[test]
+    fn incomplete_collision_scan_is_readable_but_never_writable() {
+        let root = temp_root("collision-limit");
+        for path in ["raw/sources", "wiki", ".app/tasks", "exports", "skills"] {
+            fs::create_dir_all(root.join(path)).unwrap();
+        }
+        fs::write(root.join("purpose.md"), "# Purpose").unwrap();
+        fs::write(root.join("schema.md"), "# Schema").unwrap();
+        fs::write(root.join("wiki/note.md"), "# Note").unwrap();
+        let resolution = resolve_layout(&root).unwrap();
+        let writable_without_limit = derive_capabilities(
+            ProjectFormat::NativeCurrent,
+            ProjectTrustState::Trusted,
+            ProjectFilesystemAccess::Writable,
+            ProjectHealth::Healthy,
+            true,
+            true,
+            &resolution.layout,
+        );
+        let health = health_with_path_collisions(ProjectHealth::Healthy, &[], true);
+        let capabilities = derive_capabilities(
+            ProjectFormat::NativeCurrent,
+            ProjectTrustState::Trusted,
+            ProjectFilesystemAccess::Writable,
+            health,
+            true,
+            true,
+            &resolution.layout,
+        );
+
+        assert!(writable_without_limit.contains(&ProjectCapability::ProjectWrite));
+        assert_eq!(health, ProjectHealth::Repairable);
+        assert!(capabilities.contains(&ProjectCapability::ReadMarkdown));
+        assert!(!capabilities.contains(&ProjectCapability::ProjectWrite));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn collision_scan_depth_limit_is_never_treated_as_complete() {
+        let root = temp_root("collision-depth-limit");
+        let mut directory = root.clone();
+        for index in 0..=MAX_ASSESSMENT_MARKDOWN_DEPTH {
+            directory = directory.join(format!("level-{index}"));
+            fs::create_dir(&directory).unwrap();
+        }
+        fs::write(directory.join("deeper.md"), "# Deeper").unwrap();
+
+        let scan = bounded_path_name_collisions(
+            &root,
+            &AtomicBool::new(false),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+
+        assert!(
+            scan.limited,
+            "a skipped deeper subtree cannot prove portable-name safety"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn collision_scan_io_failure_is_never_treated_as_complete() {
+        let root = temp_root("collision-io-limit");
+        let unreadable = root.join("unreadable");
+        fs::create_dir(&unreadable).unwrap();
+        fs::write(unreadable.join("note.md"), "# Note").unwrap();
+        FAIL_COLLISION_READ_DIR.with(|slot| *slot.borrow_mut() = Some(unreadable));
+
+        let scan = bounded_path_name_collisions(
+            &root,
+            &AtomicBool::new(false),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+
+        assert!(
+            scan.limited,
+            "an unreadable in-scope subtree cannot prove portable-name safety"
+        );
+        fs::remove_dir_all(root).ok();
     }
 
     #[cfg(unix)]

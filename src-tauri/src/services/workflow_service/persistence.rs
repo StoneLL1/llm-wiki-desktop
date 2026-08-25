@@ -1,5 +1,5 @@
 use std::path::{Component, Path};
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 use std::time::UNIX_EPOCH;
 
 use chrono::Utc;
@@ -28,9 +28,7 @@ pub fn project_identity(root: &Path) -> Result<ProjectWorkflowIdentity, String> 
         normalized = normalized.to_lowercase();
     }
     let canonical_identity_key = hex_sha256(format!("workflow-root-v1\n{normalized}").as_bytes());
-    let metadata = std::fs::metadata(&canonical_root)
-        .map_err(|error| format!("Project root metadata is unavailable: {error}"))?;
-    let revision_material = platform_revision_material(&metadata);
+    let revision_material = platform_revision_material(&canonical_root)?;
     let identity_revision = hex_sha256(
         format!("workflow-identity-v1\n{canonical_identity_key}\n{revision_material}").as_bytes(),
     );
@@ -42,13 +40,87 @@ pub fn project_identity(root: &Path) -> Result<ProjectWorkflowIdentity, String> 
 }
 
 #[cfg(unix)]
-fn platform_revision_material(metadata: &std::fs::Metadata) -> String {
+fn platform_revision_material(path: &Path) -> Result<String, String> {
     use std::os::unix::fs::MetadataExt;
-    format!("unix:{}:{}", metadata.dev(), metadata.ino())
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("Project root metadata is unavailable: {error}"))?;
+    Ok(format!("unix:{}:{}", metadata.dev(), metadata.ino()))
 }
 
-#[cfg(not(unix))]
-fn platform_revision_material(metadata: &std::fs::Metadata) -> String {
+#[cfg(windows)]
+fn platform_revision_material(path: &Path) -> Result<String, String> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileIdInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    // Omitting FILE_SHARE_DELETE pins the lexical root while its identity is
+    // measured. OPEN_REPARSE_POINT then prevents a raced leaf junction from
+    // being followed after canonicalization.
+    let directory = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|error| format!("Project root could not be opened safely: {error}"))?;
+    let metadata = directory
+        .metadata()
+        .map_err(|error| format!("Project root metadata is unavailable: {error}"))?;
+    let attributes = metadata.file_attributes();
+    if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        return Err("Project root is not a directory.".into());
+    }
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err("Project root resolved to a reparse point.".into());
+    }
+
+    let mut information = FILE_ID_INFO::default();
+    // SAFETY: `directory` owns a live directory handle for the duration of the
+    // call and `information` is writable storage with the exact Win32 layout.
+    let succeeded = unsafe {
+        GetFileInformationByHandleEx(
+            directory.as_raw_handle().cast(),
+            FileIdInfo,
+            (&mut information as *mut FILE_ID_INFO).cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
+    if succeeded == 0 {
+        return Err(format!(
+            "Project root file identity is unavailable: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if information
+        .FileId
+        .Identifier
+        .iter()
+        .all(|byte| *byte == 0)
+    {
+        return Err(
+            "Project root filesystem does not expose a stable 128-bit file identity.".into(),
+        );
+    }
+
+    let file_id = information
+        .FileId
+        .Identifier
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(format!(
+        "windows:{:016x}:{file_id}",
+        information.VolumeSerialNumber
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn platform_revision_material(path: &Path) -> Result<String, String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("Project root metadata is unavailable: {error}"))?;
     let created = metadata
         .created()
         .or_else(|_| metadata.modified())
@@ -56,7 +128,7 @@ fn platform_revision_material(metadata: &std::fs::Metadata) -> String {
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
-    format!("portable:{created}:{}", metadata.len())
+    Ok(format!("portable:{created}:{}", metadata.len()))
 }
 
 pub fn recover_workflow(

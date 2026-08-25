@@ -12,6 +12,7 @@ use crate::services::import_v2::engine::{
 };
 use crate::services::import_v2::source_registry::SOURCE_REGISTRY_SCHEMA_VERSION;
 use crate::services::import_v2::transaction::set_fail_next_candidate_install;
+use crate::services::SecretService;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -527,7 +528,7 @@ fn extend_source_for_ai(fixture: &Fixture) -> String {
 #[test]
 fn source_ai_input_is_current_source_only_bounded_and_prompts_for_ocr_when_insufficient() {
     let fixture = package_fixture("ai-input");
-    let service = ImportV2Service::default();
+    let service = ImportV2Service::with_secret_service(SecretService::memory());
     let insufficient = service
         .prepare_source_ai_organize_input(
             &fixture.context,
@@ -581,7 +582,7 @@ fn source_ai_input_is_current_source_only_bounded_and_prompts_for_ocr_when_insuf
 #[test]
 fn source_ai_candidate_stays_staged_then_applies_checkpointed_version_and_restores_original() {
     let fixture = package_fixture("ai-apply");
-    let service = ImportV2Service::default();
+    let service = ImportV2Service::with_secret_service(SecretService::memory());
     let files = FileStore;
     let git = GitService;
     let extended = extend_source_for_ai(&fixture);
@@ -1356,7 +1357,7 @@ fn refresh_executes_the_registered_route_instead_of_reusing_current_markdown() {
     let mut loaded = load_source(&fixture.context, &FileStore, &fixture.source_id).unwrap();
     loaded.manifest.canonical_url = Some("https://example.com/source".into());
     loaded.version.provenance.route = "fixture.refresh".into();
-    let service = ImportV2Service::default();
+    let service = ImportV2Service::with_secret_service(SecretService::memory());
     service
         .register_engine(Arc::new(RefreshFixtureEngine))
         .unwrap();

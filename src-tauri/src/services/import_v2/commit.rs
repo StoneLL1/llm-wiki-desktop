@@ -3366,21 +3366,20 @@ fn opened_file_matches_path(file: &std::fs::File, canonical: &Path) -> bool {
 
 #[cfg(target_os = "macos")]
 fn opened_file_matches_path(file: &std::fs::File, canonical: &Path) -> bool {
-    use std::os::unix::io::AsRawFd;
-    unsafe extern "C" {
-        fn fcntl(fd: i32, command: i32, buffer: *mut std::ffi::c_void) -> i32;
-    }
-    const F_GETPATH: i32 = 50;
-    let mut buffer = vec![0u8; 1024];
-    // SAFETY: the descriptor is live and the buffer is writable for MAXPATHLEN bytes.
-    if unsafe { fcntl(file.as_raw_fd(), F_GETPATH, buffer.as_mut_ptr().cast()) } == -1 {
+    use std::os::unix::fs::MetadataExt;
+
+    // F_GETPATH can preserve macOS's logical `/var` spelling while
+    // `canonicalize` returns `/private/var`. Compare the opened object with
+    // the canonical namespace entry instead of comparing those aliases as
+    // strings. The retained descriptor still prevents a later replacement
+    // from redirecting the subsequent read.
+    let Ok(opened) = file.metadata() else {
         return false;
-    }
-    let length = buffer
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(buffer.len());
-    std::str::from_utf8(&buffer[..length]).is_ok_and(|path| Path::new(path) == canonical)
+    };
+    let Ok(named) = std::fs::symlink_metadata(canonical) else {
+        return false;
+    };
+    named.is_file() && opened.dev() == named.dev() && opened.ino() == named.ino()
 }
 
 #[cfg(windows)]

@@ -109,7 +109,9 @@ fn real_platform_race_matrix_is_mandatory() {
     assert!(source.contains("windows_locked_target_fails_without_losing_original_bytes"));
     assert!(source.contains("permission_change_keeps_complete_original_or_replacement"));
     assert!(source.contains("unix_special_file_is_rejected_without_blocking"));
-    assert!(source.contains("assert_eq!(swaps.load(Ordering::Acquire), ROUNDS)"));
+    assert!(source.contains("swap_request_tx.send(()).unwrap()"));
+    assert!(source.contains("symlink swap timed out"));
+    assert!(source.contains("assert_eq!(attacker.join().unwrap(), ROUNDS)"));
     assert!(source.contains("assert_eq!(mutations, ROUNDS)"));
     let transaction = include_str!("../src/services/import_v2/transaction.rs");
     assert!(transaction.contains("live_rollback_uses_retained_parent_while_symlink_swap_is_active"));

@@ -890,7 +890,14 @@ fn traversal_result_is_rejected_before_local_asr_can_read_or_overwrite_it() {
         session.session_id, item.item_id
     ));
     std::fs::create_dir_all(&staging).unwrap();
-    let sentinel = staging.join("../../sentinel.md");
+    // Keep the assertion path independent of `staging`: terminal failure
+    // removes that directory, and Unix cannot traverse a now-missing path
+    // component even when later `..` components would escape it.
+    let sentinel = staging
+        .parent()
+        .and_then(std::path::Path::parent)
+        .unwrap()
+        .join("sentinel.md");
     std::fs::write(&sentinel, "do not overwrite").unwrap();
     let tasks = TaskService::default();
     let task = tasks

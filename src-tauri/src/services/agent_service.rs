@@ -5802,18 +5802,32 @@ mod tests {
     fn agent_probe_and_formal_capture_do_not_inherit_sensitive_environment() {
         const NAME: &str = "LLM_WIKI_BATCH2C_FAKE_CLOUD_TOKEN";
         const SECRET: &str = "must-not-reach-agent-probe";
+
+        struct RemoveEnvOnDrop(&'static str);
+
+        impl Drop for RemoveEnvOnDrop {
+            fn drop(&mut self) {
+                std::env::remove_var(self.0);
+            }
+        }
+
         std::env::set_var(NAME, SECRET);
+        let _remove_env = RemoveEnvOnDrop(NAME);
 
         #[cfg(windows)]
         let (target, args) = (
             SpawnTarget {
-                program: r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe".into(),
+                program: std::env::var_os("ComSpec")
+                    .unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows\System32\cmd.exe"))
+                    .to_string_lossy()
+                    .into_owned(),
                 leading_args: Vec::new(),
             },
             vec![
-                "-NoProfile".to_string(),
-                "-Command".to_string(),
-                format!("Write-Output $env:{NAME}"),
+                "/D".to_string(),
+                "/S".to_string(),
+                "/C".to_string(),
+                format!("echo %{NAME}%"),
             ],
         );
         #[cfg(unix)]
@@ -5836,7 +5850,6 @@ mod tests {
                 cwd: workspace.path().to_path_buf(),
             })
             .expect("formal capture should complete");
-        std::env::remove_var(NAME);
 
         assert!(
             !output.contains(SECRET),
@@ -5935,12 +5948,67 @@ mod tests {
     }
 
     #[cfg(windows)]
+    const STREAMING_OUTPUT_LIMIT_HELPER_TEST: &str =
+        "services::agent_service::tests::streaming_output_limit_process_helper";
+
+    #[cfg(windows)]
+    #[test]
+    fn streaming_output_limit_process_helper() {
+        if !std::env::args().any(|arg| arg == STREAMING_OUTPUT_LIMIT_HELPER_TEST)
+            || !Path::new(".agent-output-limit-helper").is_file()
+        {
+            return;
+        }
+
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let _lock = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .share_mode(0)
+            .open("output-limit-process.lock")
+            .unwrap();
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(&vec![b'x'; 4096]).unwrap();
+        stdout.write_all(b"\n").unwrap();
+        stdout.flush().unwrap();
+        thread::sleep(Duration::from_secs(30));
+    }
+
+    #[cfg(windows)]
     #[test]
     fn streaming_process_enforces_real_cancel_timeout_nonzero_and_kill_on_limit() {
         fn powershell_invocation(workspace: &Path, script: String) -> AgentInvocation {
             AgentInvocation {
                 program: r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe".into(),
                 args: vec!["-NoProfile".into(), "-Command".into(), script],
+                stdin: None,
+                cwd: workspace.to_path_buf(),
+            }
+        }
+        fn immediate_nonzero_invocation(workspace: &Path) -> AgentInvocation {
+            let program = std::env::var_os("COMSPEC")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
+            AgentInvocation {
+                program: program.to_string_lossy().into_owned(),
+                args: vec!["/D".into(), "/S".into(), "/C".into(), "exit /B 7".into()],
+                stdin: None,
+                cwd: workspace.to_path_buf(),
+            }
+        }
+        fn raw_file_invocation(workspace: &Path, file_name: &str) -> AgentInvocation {
+            let program = std::env::var_os("COMSPEC")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
+            AgentInvocation {
+                program: program.to_string_lossy().into_owned(),
+                args: vec![
+                    "/D".into(),
+                    "/S".into(),
+                    "/C".into(),
+                    format!("type {file_name}"),
+                ],
                 stdin: None,
                 cwd: workspace.to_path_buf(),
             }
@@ -6002,7 +6070,10 @@ mod tests {
             "nonzero fixture".into(),
             true,
         );
-        let exit = powershell_invocation(workspace.path(), "exit 7".into());
+        // This branch verifies exit-code mapping, not shell startup. Hosted
+        // Windows runners can spend the entire process deadline starting cold
+        // Windows PowerShell, turning an immediate exit into a false timeout.
+        let exit = immediate_nonzero_invocation(workspace.path());
         assert_eq!(
             run_with_limits(&exit, &tasks, &nonzero.id, 1024, Duration::from_secs(5),)
                 .unwrap_err()
@@ -6016,10 +6087,13 @@ mod tests {
             "malformed fixture".into(),
             true,
         );
-        let valid_then_invalid = powershell_invocation(
-            workspace.path(),
-            "$stream=[Console]::OpenStandardOutput(); $bytes=[Text.Encoding]::UTF8.GetBytes('{\"type\":\"result\",\"result\":\"ok\"}`n'); $stream.Write($bytes,0,$bytes.Length); $stream.WriteByte(255); $stream.Flush()".into(),
-        );
+        // Exercise the decoder through a real lightweight child process.
+        // Depending on a cold Windows PowerShell startup made the old byte
+        // fixture race the product timeout on hosted runners before it emitted
+        // output. `cmd.exe type` copies these prepared bytes without transcoding.
+        let invalid_output = workspace.path().join("invalid-agent-output.bin");
+        std::fs::write(&invalid_output, b"valid output\n\xff").unwrap();
+        let valid_then_invalid = raw_file_invocation(workspace.path(), "invalid-agent-output.bin");
         assert_eq!(
             run_with_limits(
                 &valid_then_invalid,
@@ -6039,31 +6113,57 @@ mod tests {
             "limit fixture".into(),
             true,
         );
-        let marker = workspace.path().join("must-not-exist.txt");
-        let marker_arg = marker.to_string_lossy().replace(char::from(39), "''");
-        let output_then_mutate = powershell_invocation(
-            workspace.path(),
-            format!(
-                "$value='x' * 512; [Console]::Out.WriteLine($value); Start-Sleep -Milliseconds 700; Set-Content -LiteralPath '{marker_arg}' -Value 'alive'"
-            ),
-        );
+        let lifetime_lock = workspace.path().join("output-limit-process.lock");
+        std::fs::write(
+            workspace.path().join(".agent-output-limit-helper"),
+            b"enabled",
+        )
+        .unwrap();
+        // The native helper acquires an exclusive file handle before writing
+        // oversized output. This keeps the process-reaping assertion real
+        // without making it depend on cold Windows PowerShell startup.
+        let output_then_mutate = AgentInvocation {
+            program: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            args: vec![
+                "--exact".into(),
+                STREAMING_OUTPUT_LIMIT_HELPER_TEST.into(),
+                "--nocapture".into(),
+            ],
+            stdin: None,
+            cwd: workspace.path().to_path_buf(),
+        };
         assert_eq!(
             run_with_limits(
                 &output_then_mutate,
                 &tasks,
                 &limited.id,
-                64,
+                1024,
                 Duration::from_secs(5),
             )
             .unwrap_err()
             .code,
             "IMPORT_AGENT_OUTPUT_TOO_LARGE"
         );
-        std::thread::sleep(Duration::from_millis(900));
-        assert!(
-            !marker.exists(),
-            "output-limit failure left its child alive"
-        );
+        // The fixture opens this file with FileShare::None before writing the
+        // oversized output. Successful deletion therefore proves the exact
+        // process has terminated and closed its handles; it cannot false-pass
+        // merely because a delayed marker has not run yet.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match std::fs::remove_file(&lifetime_lock) {
+                Ok(()) => break,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::PermissionDenied
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::yield_now();
+                }
+                Err(error) => panic!("output-limit failure left its child handle alive: {error}"),
+            }
+        }
     }
 
     #[test]

@@ -17,6 +17,27 @@ use super::{LintService, LINT_REPORTS_DIR};
 
 const LINT_HISTORY_PATH: &str = ".app/lint-history.json";
 const LINT_HISTORY_LIMIT: usize = 50;
+const LINT_MEMORY_PROJECT_LIMIT: usize = 64;
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static AFTER_MEMORY_NAMESPACE_TRIM: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(all(test, unix))]
+fn set_after_memory_namespace_trim(hook: impl FnOnce() + 'static) {
+    AFTER_MEMORY_NAMESPACE_TRIM.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+fn run_after_memory_namespace_trim() {
+    #[cfg(all(test, unix))]
+    AFTER_MEMORY_NAMESPACE_TRIM.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
 
 impl LintService {
     pub fn health_check_report_digest(report: &HealthCheckReport) -> Result<String, BackendError> {
@@ -119,8 +140,9 @@ impl LintService {
         context: &ProjectContext,
     ) -> Result<LintHistoryFile, BackendError> {
         let mut file = self.load_history(context)?;
+        let project_key = self.memory_project_key(context)?;
         if let Ok(memory) = self.memory_reports.read() {
-            if let Some(reports) = memory.get(&memory_project_key(context)?) {
+            if let Some(reports) = memory.get(&project_key) {
                 file.entries
                     .extend(reports.values().map(|report| report.entry.clone()));
             }
@@ -137,11 +159,9 @@ impl LintService {
         id: &str,
     ) -> Result<PersistedLintReport, BackendError> {
         reject_report_id(id)?;
+        let project_key = self.memory_project_key(context)?;
         if let Ok(memory) = self.memory_reports.read() {
-            if let Some(report) = memory
-                .get(&memory_project_key(context)?)
-                .and_then(|reports| reports.get(id))
-            {
+            if let Some(report) = memory.get(&project_key).and_then(|reports| reports.get(id)) {
                 return Ok(report.clone());
             }
         }
@@ -181,7 +201,7 @@ impl LintService {
         id: &str,
     ) -> Result<HealthCheckReport, BackendError> {
         reject_report_id(id)?;
-        let project_key = memory_project_key(context)?;
+        let project_key = self.memory_project_key(context)?;
         let memory_report = {
             let memory = self.memory_reports.read().map_err(|_| {
                 BackendError::new(
@@ -306,7 +326,16 @@ impl LintService {
             health_check_report: Some(report.clone()),
         };
         if !report.persistent {
-            let project_key = memory_project_key(context)?;
+            #[cfg(unix)]
+            let (project_key, project_anchor) = {
+                let identity =
+                    crate::services::project_identity(&context.root).map_err(|message| {
+                        BackendError::new("LINT_PROJECT_IDENTITY_UNAVAILABLE", message, true, true)
+                    })?;
+                self.memory_project_identity(identity)?
+            };
+            #[cfg(not(unix))]
+            let project_key = self.memory_project_key(context)?;
             let mut memory = self.memory_reports.write().map_err(|_| {
                 BackendError::new(
                     "LINT_MEMORY_REPORTS_LOCKED",
@@ -315,12 +344,43 @@ impl LintService {
                     false,
                 )
             })?;
-            let reports = memory.entry(project_key).or_default();
+            // All namespace/anchor mutations use one fixed lock order and stay
+            // within the same memory write critical section. This keeps
+            // eviction linearizable: no writer can recreate an evicted report
+            // namespace between its removal and the matching anchor release.
+            #[cfg(unix)]
+            let mut roots = self.memory_project_roots.lock().map_err(|_| {
+                BackendError::new(
+                    "LINT_PROJECT_IDENTITY_UNAVAILABLE",
+                    "In-memory project identity registry is unavailable.",
+                    true,
+                    false,
+                )
+            })?;
+            #[cfg(unix)]
+            roots.entry(project_key.clone()).or_insert(project_anchor);
+            let reports = memory.entry(project_key.clone()).or_default();
             reports.insert(report.report_id.clone(), persisted);
             trim_memory_reports(reports);
             if let Err(error) = validate() {
                 reports.remove(&report.report_id);
+                let remove_namespace = reports.is_empty();
+                if remove_namespace {
+                    memory.remove(&project_key);
+                }
+                #[cfg(unix)]
+                if remove_namespace {
+                    roots.remove(&project_key);
+                }
                 return Err(error);
+            }
+            let evicted = trim_memory_project_namespaces(&mut memory, &project_key);
+            #[cfg(not(unix))]
+            let _ = &evicted;
+            run_after_memory_namespace_trim();
+            #[cfg(unix)]
+            for key in &evicted {
+                roots.remove(key);
             }
             return Ok(entry);
         }
@@ -556,17 +616,54 @@ fn lint_history_entry_for_health_check(report: &HealthCheckReport) -> LintHistor
     }
 }
 
-fn memory_project_key(context: &ProjectContext) -> Result<String, BackendError> {
-    crate::services::project_identity(&context.root)
-        .map(|identity| {
-            format!(
+impl LintService {
+    fn memory_project_key(&self, context: &ProjectContext) -> Result<String, BackendError> {
+        let identity = crate::services::project_identity(&context.root).map_err(|message| {
+            BackendError::new("LINT_PROJECT_IDENTITY_UNAVAILABLE", message, true, true)
+        })?;
+
+        #[cfg(unix)]
+        {
+            self.memory_project_identity(identity).map(|(key, _)| key)
+        }
+
+        #[cfg(not(unix))]
+        {
+            Ok(format!(
                 "{}:{}",
                 identity.canonical_identity_key, identity.identity_revision
+            ))
+        }
+    }
+
+    #[cfg(unix)]
+    fn memory_project_identity(
+        &self,
+        identity: crate::services::ProjectWorkflowIdentity,
+    ) -> Result<(String, super::MemoryProjectRootAnchor), BackendError> {
+        use std::os::unix::fs::MetadataExt;
+
+        let anchor = std::fs::File::open(&identity.canonical_root).map_err(|error| {
+            BackendError::new(
+                "LINT_PROJECT_IDENTITY_UNAVAILABLE",
+                format!("Project root could not be pinned: {error}"),
+                true,
+                true,
             )
-        })
-        .map_err(|message| {
-            BackendError::new("LINT_PROJECT_IDENTITY_UNAVAILABLE", message, true, true)
-        })
+        })?;
+        let metadata = anchor.metadata().map_err(|error| {
+            BackendError::new(
+                "LINT_PROJECT_IDENTITY_UNAVAILABLE",
+                format!("Pinned project root metadata is unavailable: {error}"),
+                true,
+                true,
+            )
+        })?;
+        let device = metadata.dev();
+        let inode = metadata.ino();
+        let key = format!("{}:unix:{device}:{inode}", identity.canonical_identity_key);
+        Ok((key, super::MemoryProjectRootAnchor { _anchor: anchor }))
+    }
 }
 
 fn trim_memory_reports(reports: &mut std::collections::HashMap<String, PersistedLintReport>) {
@@ -584,6 +681,35 @@ fn trim_memory_reports(reports: &mut std::collections::HashMap<String, Persisted
         .map(|(_, id)| id)
         .collect::<std::collections::HashSet<_>>();
     reports.retain(|id, _| retained.contains(id));
+}
+
+fn trim_memory_project_namespaces(
+    memory: &mut std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, PersistedLintReport>,
+    >,
+    protected: &str,
+) -> Vec<String> {
+    let mut evicted = Vec::new();
+    while memory.len() > LINT_MEMORY_PROJECT_LIMIT {
+        let Some(oldest) = memory
+            .iter()
+            .filter(|(key, _)| key.as_str() != protected)
+            .min_by_key(|(_, reports)| {
+                reports
+                    .values()
+                    .map(|report| report.entry.created_at.as_str())
+                    .max()
+                    .unwrap_or_default()
+            })
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        memory.remove(&oldest);
+        evicted.push(oldest);
+    }
+    evicted
 }
 
 fn reject_report_id(id: &str) -> Result<(), BackendError> {
@@ -1115,17 +1241,207 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn in_memory_project_key_changes_when_same_path_is_recreated() {
         let (context, root) = tmp_context("health-memory-identity");
-        let first = super::memory_project_key(&context).unwrap();
+        let service = LintService::default();
+        service
+            .store_health_check_report(
+                &context,
+                &health_report("identity-a", false, "2026-08-24T00:00:00Z".into()),
+            )
+            .unwrap();
+        let first = service.memory_project_key(&context).unwrap();
 
         std::fs::remove_dir_all(&root).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(10));
         std::fs::create_dir_all(&root).unwrap();
-        let second = super::memory_project_key(&context).unwrap();
+        service
+            .store_health_check_report(
+                &context,
+                &health_report("identity-b", false, "2026-08-24T00:00:01Z".into()),
+            )
+            .unwrap();
+        let second = service.memory_project_key(&context).unwrap();
+
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        service
+            .store_health_check_report(
+                &context,
+                &health_report("identity-c", false, "2026-08-24T00:00:02Z".into()),
+            )
+            .unwrap();
+        let third = service.memory_project_key(&context).unwrap();
 
         assert_ne!(first, second);
+        assert_ne!(first, third);
+        assert_ne!(second, third);
+        let anchors = service.memory_project_roots.lock().unwrap();
+        assert!(anchors.contains_key(&first));
+        assert!(anchors.contains_key(&second));
+        assert!(anchors.contains_key(&third));
+        drop(anchors);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn memory_project_key_is_stable_for_child_edits_and_canonical_aliases() {
+        use std::os::unix::fs::symlink;
+
+        let (context, root) = tmp_context("health-memory-stable-identity");
+        let alias = root.with_extension("alias");
+        let service = LintService::default();
+        service
+            .store_health_check_report(
+                &context,
+                &health_report("stable", false, "2026-08-24T00:00:00Z".into()),
+            )
+            .unwrap();
+        let before = service.memory_project_key(&context).unwrap();
+        std::fs::write(root.join("ordinary-child.md"), "changed").unwrap();
+        let after_child_edit = service.memory_project_key(&context).unwrap();
+        symlink(&root, &alias).unwrap();
+        let alias_context = ProjectContext::new("project-a", alias.clone());
+        let through_alias = service.memory_project_key(&alias_context).unwrap();
+
+        assert_eq!(before, after_child_edit);
+        assert_eq!(before, through_alias);
+        std::fs::remove_file(alias).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn memory_report_namespaces_and_unix_anchors_are_bounded_together() {
+        let service = LintService::default();
+        let mut roots = Vec::new();
+        for index in 0..=super::LINT_MEMORY_PROJECT_LIMIT {
+            let (context, root) = tmp_context(&format!("health-memory-cap-{index}"));
+            service
+                .store_health_check_report(
+                    &context,
+                    &health_report(
+                        &format!("memory-{index}"),
+                        false,
+                        format!("2026-08-24T00:{index:02}:00Z"),
+                    ),
+                )
+                .unwrap();
+            roots.push(root);
+        }
+
+        assert_eq!(
+            service.memory_reports.read().unwrap().len(),
+            super::LINT_MEMORY_PROJECT_LIMIT
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            service.memory_project_roots.lock().unwrap().len(),
+            super::LINT_MEMORY_PROJECT_LIMIT
+        );
+        drop(service);
+        for root in roots {
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn namespace_recreation_cannot_race_eviction_anchor_release() {
+        use std::sync::{mpsc, Arc};
+        use std::time::Duration;
+
+        let service = Arc::new(LintService::default());
+        let (victim_context, victim_root) = tmp_context("health-memory-linear-victim");
+        service
+            .store_health_check_report(
+                &victim_context,
+                &health_report("victim-old", false, "2026-08-24T00:00:00Z".into()),
+            )
+            .unwrap();
+        let mut roots = vec![victim_root];
+        for index in 0..(super::LINT_MEMORY_PROJECT_LIMIT - 1) {
+            let (context, root) = tmp_context(&format!("health-memory-linear-fill-{index}"));
+            service
+                .store_health_check_report(
+                    &context,
+                    &health_report(
+                        &format!("fill-{index}"),
+                        false,
+                        format!("2026-08-24T01:{index:02}:00Z"),
+                    ),
+                )
+                .unwrap();
+            roots.push(root);
+        }
+
+        let (new_context, new_root) = tmp_context("health-memory-linear-new");
+        roots.push(new_root);
+        let (trim_reached_tx, trim_reached_rx) = mpsc::channel();
+        let (release_trim_tx, release_trim_rx) = mpsc::channel();
+        let service_a = Arc::clone(&service);
+        let thread_a = std::thread::spawn(move || {
+            super::set_after_memory_namespace_trim(move || {
+                trim_reached_tx.send(()).unwrap();
+                release_trim_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap();
+            });
+            service_a
+                .store_health_check_report(
+                    &new_context,
+                    &health_report("new", false, "2026-08-24T03:00:00Z".into()),
+                )
+                .unwrap();
+        });
+        trim_reached_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+
+        let (victim_done_tx, victim_done_rx) = mpsc::channel();
+        let service_b = Arc::clone(&service);
+        let victim_context_for_thread = victim_context.clone();
+        let thread_b = std::thread::spawn(move || {
+            let result = service_b.store_health_check_report(
+                &victim_context_for_thread,
+                &health_report("victim-new", false, "2026-08-24T04:00:00Z".into()),
+            );
+            victim_done_tx.send(result).unwrap();
+        });
+
+        assert!(
+            victim_done_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "namespace recreation escaped the atomic report/anchor eviction section"
+        );
+        release_trim_tx.send(()).unwrap();
+        thread_a.join().unwrap();
+        victim_done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        thread_b.join().unwrap();
+
+        let victim_key = service.memory_project_key(&victim_context).unwrap();
+        assert!(service
+            .memory_reports
+            .read()
+            .unwrap()
+            .contains_key(&victim_key));
+        assert!(
+            service
+                .memory_project_roots
+                .lock()
+                .unwrap()
+                .contains_key(&victim_key),
+            "every live memory-report namespace must retain its root anchor"
+        );
+
+        drop(service);
+        for root in roots {
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 }

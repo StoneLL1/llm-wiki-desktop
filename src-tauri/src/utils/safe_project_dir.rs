@@ -181,6 +181,17 @@ impl BoundProjectMutationRoot {
         &self.requested_parent
     }
 
+    pub(crate) fn has_same_directory_identity(&self, other: &Self) -> io::Result<bool> {
+        Ok(identity_from_file(&self.anchor)? == identity_from_file(&other.anchor)?)
+    }
+
+    /// Enumerate the child namespace represented by the retained directory
+    /// capability. The returned names are diagnostics/input for subsequent
+    /// handle-relative operations; the ambient path is never the authority.
+    pub(crate) fn read_entry_names(&self) -> io::Result<Vec<OsString>> {
+        read_directory_names(&self.anchor, &self.requested_parent)
+    }
+
     pub(crate) fn read_regular(&self, path: &Path) -> io::Result<Vec<u8>> {
         self.read_regular_with_identity(path)
             .map(|(bytes, _)| bytes)
@@ -221,7 +232,7 @@ impl BoundProjectMutationRoot {
         truncate: bool,
     ) -> io::Result<File> {
         let name = self.entry_name(path)?;
-        let file = match open_existing_relative(&self.anchor, name, OpenPurpose::Mutate) {
+        let file = match open_existing_relative(&self.anchor, name, OpenPurpose::ContentWrite) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 create_new_relative(&self.anchor, name)?
@@ -820,14 +831,15 @@ enum OpenPurpose {
     Read,
     ReadIdentity,
     Pin,
+    ContentWrite,
     Mutate,
 }
 
 #[cfg(unix)]
 mod platform {
     use super::*;
-    use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::ffi::OsStrExt;
+    use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
     pub(super) fn open_directory_anchor(path: &Path) -> io::Result<File> {
@@ -839,6 +851,71 @@ mod platform {
 
     pub(super) fn open_directory_anchor_read(path: &Path) -> io::Result<File> {
         open_directory_anchor(path)
+    }
+
+    pub(super) fn read_directory_names(
+        directory: &File,
+        _requested_path: &Path,
+    ) -> io::Result<Vec<OsString>> {
+        let descriptor = directory.try_clone()?.into_raw_fd();
+        // SAFETY: `descriptor` is an owned duplicate. `fdopendir` takes
+        // ownership on success; on failure we close it exactly once below.
+        let stream = unsafe { libc::fdopendir(descriptor) };
+        if stream.is_null() {
+            let error = io::Error::last_os_error();
+            // SAFETY: fdopendir failed and did not take ownership.
+            unsafe { libc::close(descriptor) };
+            return Err(error);
+        }
+
+        let result = (|| {
+            let mut names = Vec::new();
+            loop {
+                // SAFETY: the errno pointer is thread-local for the supported
+                // Unix targets and remains valid for this immediate access.
+                unsafe { *errno_location() = 0 };
+                // SAFETY: `stream` remains open until the loop completes.
+                let entry = unsafe { libc::readdir(stream) };
+                if entry.is_null() {
+                    // SAFETY: see the errno reset immediately above.
+                    let errno = unsafe { *errno_location() };
+                    if errno != 0 {
+                        return Err(io::Error::from_raw_os_error(errno));
+                    }
+                    break;
+                }
+                // SAFETY: readdir returned a live dirent with a NUL-terminated
+                // d_name valid until the next readdir call.
+                let bytes = unsafe {
+                    std::ffi::CStr::from_ptr((*entry).d_name.as_ptr())
+                        .to_bytes()
+                        .to_vec()
+                };
+                if bytes != b"." && bytes != b".." {
+                    names.push(OsString::from_vec(bytes));
+                }
+            }
+            Ok(names)
+        })();
+        // SAFETY: fdopendir succeeded, so closedir owns and closes the
+        // duplicate descriptor exactly once.
+        let close_result = unsafe { libc::closedir(stream) };
+        if close_result != 0 && result.is_ok() {
+            return Err(io::Error::last_os_error());
+        }
+        result
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    unsafe fn errno_location() -> *mut libc::c_int {
+        // SAFETY: caller observes the platform's thread-local errno slot.
+        unsafe { libc::__errno_location() }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    unsafe fn errno_location() -> *mut libc::c_int {
+        // SAFETY: caller observes the platform's thread-local errno slot.
+        unsafe { libc::__error() }
     }
 
     pub(super) fn open_directory_relative(parent: &File, name: &OsStr) -> io::Result<File> {
@@ -882,16 +959,21 @@ mod platform {
     pub(super) fn open_existing_relative(
         parent: &File,
         name: &OsStr,
-        _purpose: OpenPurpose,
+        purpose: OpenPurpose,
     ) -> io::Result<File> {
         let name = std::ffi::CString::new(name.as_bytes())?;
+        let access = if matches!(purpose, OpenPurpose::ContentWrite) {
+            libc::O_RDWR
+        } else {
+            libc::O_RDONLY
+        };
         // SAFETY: parent and the single-component C string remain valid; the
         // returned descriptor is transferred exactly once.
         let descriptor = unsafe {
             libc::openat(
                 parent.as_raw_fd(),
                 name.as_ptr(),
-                libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                access | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC,
                 0,
             )
         };
@@ -1309,6 +1391,27 @@ mod platform {
             .open(path)
     }
 
+    pub(super) fn read_directory_names(
+        directory: &File,
+        requested_path: &Path,
+    ) -> io::Result<Vec<OsString>> {
+        // Omit FILE_SHARE_DELETE while enumerating. This pins the lexical name
+        // long enough to prove it still names the same directory as the
+        // retained capability and prevents a swap during read_dir.
+        let namespace_pin = std::fs::OpenOptions::new()
+            .access_mode(FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(requested_path)?;
+        require_directory(&namespace_pin)?;
+        if identity_from_file(&namespace_pin)? != identity_from_file(directory)? {
+            return Err(conflict("bound directory changed before enumeration"));
+        }
+        std::fs::read_dir(requested_path)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect()
+    }
+
     pub(super) fn open_directory_relative(parent: &File, name: &OsStr) -> io::Result<File> {
         nt_open_directory_relative(
             parent,
@@ -1368,6 +1471,10 @@ mod platform {
             ),
             OpenPurpose::Pin => (
                 FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                FILE_SHARE_READ,
+            ),
+            OpenPurpose::ContentWrite => (
+                FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE,
                 FILE_SHARE_READ,
             ),
             OpenPurpose::Mutate => (
@@ -1755,6 +1862,12 @@ mod platform {
     pub(super) fn open_directory_anchor_read(_path: &Path) -> io::Result<File> {
         Err(unsupported())
     }
+    pub(super) fn read_directory_names(
+        _directory: &File,
+        _requested_path: &Path,
+    ) -> io::Result<Vec<OsString>> {
+        Err(unsupported())
+    }
     pub(super) fn open_directory_relative(_parent: &File, _name: &OsStr) -> io::Result<File> {
         Err(unsupported())
     }
@@ -1835,7 +1948,7 @@ use platform::{
     delete_relative_open_file, hard_link_open_file, identity_from_file, open_directory_anchor,
     open_directory_anchor_read, open_directory_relative, open_directory_relative_mutate,
     open_directory_relative_read, open_existing_relative, publish_open_file_no_replace,
-    rename_open_file,
+    read_directory_names, rename_open_file,
 };
 #[cfg(unix)]
 use platform::{exchange_file_names, remove_directory_tree_contents};
@@ -2039,6 +2152,52 @@ mod tests {
         }));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn unix_namespace_mutations_do_not_require_content_write_permission() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("wiki");
+        std::fs::create_dir(&parent).unwrap();
+        let target = parent.join("readonly.md");
+        let renamed = parent.join("renamed.md");
+        std::fs::write(&target, b"original").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let binding = BoundProjectMutationRoot::bind(root.path(), &target).unwrap();
+
+        binding
+            .write_atomic_replace(&target, b"replacement")
+            .unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o444)).unwrap();
+        binding.rename(&target, &renamed, false).unwrap();
+        binding.remove_file(&renamed).unwrap();
+
+        assert!(!target.exists());
+        assert!(!renamed.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_content_write_handle_can_truncate_and_replace_existing_bytes() {
+        use std::io::{Seek, SeekFrom, Write};
+
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("download.partial");
+        std::fs::write(&target, b"old-prefix").unwrap();
+        let binding = BoundProjectMutationRoot::bind(root.path(), &target).unwrap();
+
+        let mut file = binding
+            .open_regular_mutate_or_create(&target, true)
+            .unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(b"replacement").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"replacement");
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_locked_target_fails_without_losing_original_bytes() {
@@ -2088,8 +2247,7 @@ mod tests {
     #[test]
     fn unix_symlink_swap_race_never_changes_outside_sentinel() {
         use std::os::unix::fs::symlink;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
+        use std::sync::mpsc;
 
         const ROUNDS: usize = 16;
         let root = tempfile::tempdir().unwrap();
@@ -2099,32 +2257,25 @@ mod tests {
         std::fs::create_dir(&live).unwrap();
         let sentinel = outside.path().join("sentinel.md");
         std::fs::write(&sentinel, b"outside").unwrap();
-        let phase = Arc::new(AtomicUsize::new(9));
-        let swaps = Arc::new(AtomicUsize::new(0));
-        let attacker_phase = Arc::clone(&phase);
-        let attacker_swaps = Arc::clone(&swaps);
+        let (swap_request_tx, swap_request_rx) = mpsc::sync_channel::<()>(0);
+        let (swapped_tx, swapped_rx) = mpsc::sync_channel::<()>(0);
+        let (restore_request_tx, restore_request_rx) = mpsc::sync_channel::<()>(0);
+        let (restored_tx, restored_rx) = mpsc::sync_channel::<()>(0);
         let live_for_attacker = live.clone();
         let parked_for_attacker = parked.clone();
         let outside_for_attacker = outside.path().to_path_buf();
         let attacker = std::thread::spawn(move || {
             for _ in 0..ROUNDS {
-                while attacker_phase.load(Ordering::Acquire) != 0 {
-                    std::thread::yield_now();
-                }
+                swap_request_rx.recv().unwrap();
                 std::fs::rename(&live_for_attacker, &parked_for_attacker).unwrap();
                 symlink(&outside_for_attacker, &live_for_attacker).unwrap();
-                attacker_swaps.fetch_add(1, Ordering::AcqRel);
-                attacker_phase.store(1, Ordering::Release);
-                while attacker_phase.load(Ordering::Acquire) != 2 {
-                    std::thread::yield_now();
-                }
+                swapped_tx.send(()).unwrap();
+                restore_request_rx.recv().unwrap();
                 std::fs::remove_file(&live_for_attacker).unwrap();
                 std::fs::rename(&parked_for_attacker, &live_for_attacker).unwrap();
-                attacker_phase.store(3, Ordering::Release);
-                while attacker_phase.load(Ordering::Acquire) != 4 {
-                    std::thread::yield_now();
-                }
+                restored_tx.send(()).unwrap();
             }
+            ROUNDS
         });
 
         let mut mutations = 0;
@@ -2132,15 +2283,10 @@ mod tests {
             let target = live.join(format!("inside-{round}.md"));
             let renamed = live.join(format!("inside-{round}-renamed.md"));
             let binding = BoundProjectMutationRoot::bind(root.path(), &target).unwrap();
-            phase.store(0, Ordering::Release);
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while phase.load(Ordering::Acquire) != 1 {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "symlink swap timed out"
-                );
-                std::thread::yield_now();
-            }
+            swap_request_tx.send(()).unwrap();
+            swapped_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("symlink swap timed out");
             assert!(
                 BoundProjectMutationRoot::bind(root.path(), &live.join("sentinel.md")).is_err()
             );
@@ -2150,20 +2296,13 @@ mod tests {
             binding.remove_file(&renamed).unwrap();
             mutations += 1;
             assert_eq!(std::fs::read(&sentinel).unwrap(), b"outside");
-            phase.store(2, Ordering::Release);
-
-            while phase.load(Ordering::Acquire) != 3 {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "symlink restore timed out"
-                );
-                std::thread::yield_now();
-            }
+            restore_request_tx.send(()).unwrap();
+            restored_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("symlink restore timed out");
             assert_eq!(std::fs::read(&sentinel).unwrap(), b"outside");
-            phase.store(4, Ordering::Release);
         }
-        attacker.join().unwrap();
-        assert_eq!(swaps.load(Ordering::Acquire), ROUNDS);
+        assert_eq!(attacker.join().unwrap(), ROUNDS);
         assert_eq!(mutations, ROUNDS);
         assert_eq!(std::fs::read(&sentinel).unwrap(), b"outside");
     }

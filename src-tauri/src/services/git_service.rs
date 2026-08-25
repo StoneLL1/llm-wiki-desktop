@@ -1,6 +1,8 @@
 #[derive(Default)]
 pub struct GitService;
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
@@ -28,6 +30,11 @@ use crate::utils::safe_project_dir::BoundProjectMutationRoot;
 
 thread_local! {
     static GIT_TASK_CANCELLATION: RefCell<Vec<CancellationToken>> = const { RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_GIT_PROCESS_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
 }
 
 struct GitTaskCancellationScope;
@@ -421,6 +428,18 @@ impl GitService {
     ) -> Result<GitRepositoryStatus, BackendError> {
         let root = validate_existing_project_root(&context.root).map_err(git_path_unsafe)?;
         let has_git_marker = validate_git_marker(&root)?;
+        // A project-local repository must own a real `.git` directory or
+        // worktree marker. Avoid spawning Git for ordinary projects: a
+        // missing executable (or transient process pressure) must still map
+        // to the stable Unavailable state when no repository exists.
+        if !has_git_marker {
+            return Ok(GitRepositoryStatus {
+                is_repository: false,
+                branch: None,
+                head: None,
+                has_changes: false,
+            });
+        }
         if run_git(context, &["--version"]).is_err() {
             return Err(BackendError::new(
                 "GIT_COMMAND_FAILED",
@@ -1292,6 +1311,8 @@ fn run_git_process(
     max_stream_bytes: usize,
     cancelled: impl Fn() -> bool,
 ) -> Result<CapturedProcessOutput, BoundedProcessError> {
+    #[cfg(test)]
+    TEST_GIT_PROCESS_ATTEMPTS.with(|count| count.set(count.get() + 1));
     let effective_cancelled = || cancelled() || git_task_cancelled();
     if effective_cancelled() {
         return Err(BoundedProcessError::Cancelled);
@@ -1325,22 +1346,23 @@ fn reject_local_git_filters(
         return Ok(());
     }
     let mut command = hardened_git_command(context);
-    command.args([
-        "config",
-        "--local",
-        "--includes",
-        "--name-only",
-        "--get-regexp",
-        r"^filter\.",
-    ]);
+    // Inspect every scope still visible to the hardened command. In
+    // particular, `--local` omits `.git/config.worktree` when a repository
+    // enables `extensions.worktreeConfig`, even though later Git commands
+    // load filters from that worktree scope.
+    command.args(["config", "--no-includes", "--name-only", "--list"]);
     let output = run_bounded_process(&mut command, None, timeout, 64 * 1024, cancelled)?;
-    if output.status.success() && !output.stdout.is_empty() {
+    let has_unsafe_execution_config = output.stdout.split(|byte| *byte == b'\n').any(|line| {
+        let key = String::from_utf8_lossy(line).trim().to_ascii_lowercase();
+        key.starts_with("filter.") || key.starts_with("include.") || key.starts_with("includeif.")
+    });
+    if output.status.success() && has_unsafe_execution_config {
         return Err(BoundedProcessError::Wait(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
-            "repository-defined Git clean/smudge/process filters are not allowed",
+            "repository-defined Git filters or config includes are not allowed",
         )));
     }
-    if output.status.success() || output.status.code() == Some(1) {
+    if output.status.success() {
         Ok(())
     } else {
         Err(BoundedProcessError::Wait(std::io::Error::other(
@@ -1804,7 +1826,10 @@ fn normalize_git_path(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{git_project_lane, remove_project_path, run_git, untracked_file_diff, GitService};
+    use super::{
+        git_project_lane, remove_project_path, run_git, untracked_file_diff, GitService,
+        TEST_GIT_PROCESS_ATTEMPTS,
+    };
     use crate::models::git::{CheckpointPurpose, GitChangedFileKind};
     use crate::models::paths::ProjectContext;
     use crate::tasks::task_model::CancellationToken;
@@ -1908,6 +1933,43 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(timeout_error.code, "GIT_ASSESSMENT_TIMEOUT");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn markerless_repository_status_does_not_spawn_git() {
+        let root = unique_temp_dir("markerless-status");
+        let context = ProjectContext::new("project-1", root.clone());
+        let before = TEST_GIT_PROCESS_ATTEMPTS.with(|count| count.get());
+
+        let status = GitService.repository_status(&context).unwrap();
+
+        assert!(!status.is_repository);
+        assert_eq!(status.branch, None);
+        assert_eq!(status.head, None);
+        assert!(!status.has_changes);
+        assert_eq!(
+            TEST_GIT_PROCESS_ATTEMPTS.with(|count| count.get()),
+            before,
+            "markerless repository status must not depend on an external Git process"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn invalid_git_marker_is_not_downgraded_to_unavailable() {
+        let root = unique_temp_dir("invalid-marker-status");
+        fs::create_dir(root.join(".git")).unwrap();
+        let context = ProjectContext::new("project-1", root.clone());
+        let before = TEST_GIT_PROCESS_ATTEMPTS.with(|count| count.get());
+
+        let error = GitService.repository_status(&context).unwrap_err();
+
+        assert_eq!(error.code, "GIT_REPOSITORY_INVALID");
+        assert!(
+            TEST_GIT_PROCESS_ATTEMPTS.with(|count| count.get()) > before,
+            "a project-local Git marker must keep repository validation fail-closed"
+        );
         fs::remove_dir_all(root).ok();
     }
 
@@ -2056,6 +2118,50 @@ mod tests {
             );
             fs::remove_dir_all(root).ok();
         }
+    }
+
+    #[test]
+    fn app_owned_git_rejects_filters_from_worktree_config() {
+        let root = unique_temp_dir("hardened-worktree-filter");
+        fs::create_dir_all(root.join("wiki")).unwrap();
+        fs::write(root.join("wiki/page.md"), "baseline\n").unwrap();
+        run_git_in(&root, &["init"]);
+        run_git_in(&root, &["config", "user.email", "tests@example.com"]);
+        run_git_in(&root, &["config", "user.name", "Tests"]);
+        run_git_in(&root, &["add", "--all"]);
+        run_git_in(&root, &["commit", "-m", "baseline"]);
+
+        let marker = root.join("unsafe-worktree-filter-marker.txt");
+        let helper = root.join("unsafe-worktree-filter.sh");
+        write_marker_script(&helper, &marker);
+        let helper_config = helper.to_string_lossy().replace('\\', "/");
+        run_git_in(&root, &["config", "extensions.worktreeConfig", "true"]);
+        run_git_in(
+            &root,
+            &[
+                "config",
+                "--worktree",
+                "filter.batch2c.clean",
+                &helper_config,
+            ],
+        );
+        fs::write(root.join(".gitattributes"), "*.md filter=batch2c\n").unwrap();
+        fs::write(root.join("wiki/page.md"), "candidate\n").unwrap();
+
+        let context = ProjectContext::new("project-1", root.clone());
+        let error = GitService
+            .create_checkpoint(
+                &context,
+                CheckpointPurpose::HighRiskOperation,
+                "must reject worktree filters",
+            )
+            .expect_err("worktree-scoped repository filters must fail closed");
+        assert_eq!(error.code, "GIT_COMMAND_FAILED");
+        assert!(
+            !marker.exists(),
+            "worktree-scoped Git filter executed before policy rejection"
+        );
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
