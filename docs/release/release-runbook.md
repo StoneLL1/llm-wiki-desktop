@@ -1,6 +1,6 @@
 # Atomic desktop release runbook
 
-Status: Batch 6 local automated acceptance complete with a Public beta No-Go decision. The first remote draft rehearsal remains blocked until the repository owner supplies and configures the production signing identities, protected-environment reviewers, valid GitHub authorization, and public repository access listed below. See [`batch-6-acceptance-evidence.md`](batch-6-acceptance-evidence.md).
+Status: Batch 6 local automated acceptance is complete and the cross-platform CI remediation is merged. Public access, `master` protection, and both solo-maintainer protected Environments were configured on 2026-08-25. Windows Authenticode and Apple Developer ID/notarization are explicitly not required; updater and capability cryptographic signing remain mandatory. The Public beta remains No-Go until the capability trust key, protected updater/capability signing inputs, prior signed upgrade baseline, and four real platform hosts are ready. See [`batch-6-acceptance-evidence.md`](batch-6-acceptance-evidence.md) and [`first-release-candidate-checklist.md`](first-release-candidate-checklist.md).
 
 ## Transaction and authority
 
@@ -10,7 +10,7 @@ The transaction is ordered as follows:
 
 1. `preflight` checks the canonical repository/tag/commit/version/identifier, the pinned Node and Rust toolchains, lockfiles, required protected inputs, and the complete `npm run check` gate.
 2. `capability-build` calls the reusable non-publishing capability workflow and produces 20 signed packs plus the exact catalog/trust/provenance inputs.
-3. `desktop-build` builds Windows x64, macOS arm64, macOS x64, and Linux x64 from that same catalog. It verifies catalog embedding and records updater-signature evidence separately from Windows Authenticode or Apple Developer ID/notarization/stapling evidence.
+3. `desktop-build` builds Windows x64, macOS arm64, macOS x64, and Linux x64 from that same catalog. It verifies catalog embedding and every updater signature, and records exact machine-readable evidence that Windows Authenticode and Apple Developer ID/notarization are not required by the release policy.
 4. `manifest-and-provenance` creates exact-tag `latest.json`, deterministic CycloneDX inventories from `package-lock.json` and `Cargo.lock`, and same-run provenance.
 5. `packaged-smoke` installs and launches each packaged target and verifies the candidate fixture manifest without contacting the production endpoint. The real old-version-to-draft update path and the broader upgrade, recovery, security, and user-journey matrix remain Batch 6 acceptance work; Batch 5 evidence must not be described as that later acceptance.
 6. `assemble-release` merges smoke evidence, creates GitHub artifact attestations, generates flat checksums for the exact public asset names, cryptographically verifies every updater against the committed Tauri public key, runs the full local release-bundle rehearsal, and uploads the sealed `draft-release-bundle` workflow artifact.
@@ -20,17 +20,17 @@ No capability job, matrix build, manifest job, smoke job, or attestation job may
 
 ## Required repository configuration
 
-The repository owner must complete all items before the first remote rehearsal:
+The repository owner must complete all remaining items before the first remote rehearsal:
 
-- make `StoneLL1/llm-wiki-desktop` publicly reachable and confirm `master` as the protected default branch;
-- configure `capability-release` and `desktop-release` GitHub Environments with required reviewers; only the default branch may approve a stable tag;
-- set repository variables `CAPABILITY_SIGNING_KEY_ID`, `WINDOWS_PUBLISHER_SUBJECT`, and `APPLE_TEAM_ID`;
+- keep `StoneLL1/llm-wiki-desktop` public and retain the required three-platform `master` protection checks with force-push/deletion disabled;
+- keep `capability-release` and `desktop-release` restricted to `master` and `app-v*`, with required reviewer `StoneLL1` and sole-maintainer self-review allowed;
+- set only the repository variable `CAPABILITY_SIGNING_KEY_ID` after its matching public key is committed;
 - place `LLM_WIKI_CAPABILITY_SIGNING_KEY_PKCS8_HEX` only in the protected `capability-release` environment;
-- place `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, `WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD`, `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD`, and `KEYCHAIN_PASSWORD` only in the protected `desktop-release` environment used by preflight, desktop signing, and the final publisher;
-- verify primary and backup custody for the updater and capability keys without recording secret material in Git, logs, notes, artifacts, or support evidence;
+- place only `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` in the protected `desktop-release` environment used by preflight, updater signing, and the final publisher;
+- keep `StoneLL1` as the named owner of both cryptographic signing keys; a separate backup custodian is not required, while an encrypted recovery copy remains recommended;
 - update `docs/release/release-notes.md` and `docs/release/known-limitations.md` for the exact version before creating its tag.
 
-The preflight checks only whether protected values are present. It never prints their contents. Production credentials must not be used for pull-request workflows or local fixture rehearsals.
+The preflight checks only whether the capability key ID and updater protected values are present. It never prints their contents. Capability signing fails closed inside the protected reusable workflow if its private-key secret is missing or mismatched. Production credentials must not be used for pull-request workflows or local fixture rehearsals. Do not configure Windows certificate, Windows publisher, Apple certificate, Apple account, Team ID, notarization, or keychain inputs under the current policy.
 
 ## Local rehearsal
 
@@ -42,15 +42,17 @@ npm run check:release-config
 npm run check
 ```
 
-The fixture rehearsal covers four desktop descriptors, exact tag/commit/run identity, 20 unique capability archives, exact-tag `latest.json`, distinct OS/updater signing evidence, Node and Rust SBOMs, packaged-smoke evidence, provenance, exported attestation evidence, and deterministic flat checksums. Negative cases cover mutable URLs, missing platforms/assets, run drift, incomplete smoke, invalid signing evidence, duplicate public basenames, changed updater bytes, wrong updater keys, and tampering.
+The fixture rehearsal covers four desktop descriptors, exact tag/commit/run identity, 20 unique capability archives, exact-tag `latest.json`, exact OS-identity policy evidence, mandatory updater signatures, Node and Rust SBOMs, packaged-smoke evidence, provenance, exported attestation evidence, and deterministic flat checksums. Negative cases cover mutable URLs, missing platforms/assets, run drift, incomplete smoke, obsolete or altered OS-certificate evidence, duplicate public basenames, changed updater bytes, wrong updater keys, and tampering.
 
-A real remote rehearsal must use a disposable stable-format tag at the current candidate commit, keep the GitHub Release as a draft until the protected publisher step, install every workflow artifact, and save the workflow URL plus artifact digests. Do not describe local fixture tests as a successful platform signing, notarization, installation, upgrade, or anonymous-network rehearsal.
+A real remote rehearsal must use a disposable stable-format tag at the current candidate commit, keep the GitHub Release as a draft until the protected publisher step, install every workflow artifact, and save the workflow URL plus artifact digests. Do not describe local fixture tests as a successful installation, upgrade, or anonymous-network rehearsal, and do not describe GitHub checksums/attestations as Windows or Apple OS identity.
 
 ## Batch 6 release decision
 
 The 2026-08-21 local acceptance gates are recorded in [`batch-6-acceptance-evidence.md`](batch-6-acceptance-evidence.md). The canonical repository and Releases page were not anonymously reachable, the stable `latest.json` endpoint returned 404, local GitHub authorization was invalid, and named production signing/custody/reviewer inputs remain unavailable. Therefore no draft tag or workflow run was created and no platform was marked installed, upgraded, signed, notarized, uninstalled, or anonymously reverse-downloaded.
 
-This is a release No-Go, not permission to weaken the workflow. Resume only after the owner has made the repository public, restored authorized Actions access, filled every pending identity/custody field, configured both protected environments, and supplied the production secrets without copying them into the workspace. Start with a draft candidate; do not expose the stable updater channel until the full four-platform Batch 6 matrix passes.
+The 2026-08-25 resumption audit confirmed that the repository is public, anonymous `HEAD` resolves to `master`, the Releases page returns HTTP 200, and authenticated Actions access works. The follow-up configuration added strict three-platform `master` protection and protected both release Environments with reviewer `StoneLL1`, self-review allowed, and `master`/`app-v*` deployment rules. Secret-name lists and the repository variable-name list remain empty; the capability trust-key file is empty; and no tag, Release, prior signed upgrade baseline, or four-platform packaged evidence exists. The first-release `latest.json` endpoint therefore still returns the expected pre-release HTTP 404.
+
+This remains a release No-Go, not permission to weaken updater or capability verification. Resume only after the remaining capability-trust, protected cryptographic signing-input, signed-baseline, and hardware requirements in [`first-release-candidate-checklist.md`](first-release-candidate-checklist.md) are satisfied without copying secret material into the workspace. Run through the sealed `draft-release-bundle` candidate first; do not approve `publish-stable` or expose the stable updater channel until the full four-platform Batch 6 matrix passes and the user gives a separate explicit approval.
 
 ## Approval checklist
 
@@ -58,13 +60,13 @@ The `desktop-release` reviewer confirms all of the following before approving `p
 
 - tag, commit SHA, workflow run, version, repository, and bundle identifier agree;
 - 4 desktop installers/updaters and their `.sig` files exist;
-- Windows Authenticode publisher subject and Apple Developer ID Team ID match the protected variables;
-- both macOS builds pass codesign, Gatekeeper, notarization, and staple validation;
+- Windows/macOS descriptors contain the exact `not-required` OS-identity policy evidence and no certificate/account requirement has returned;
+- release notes and known limitations clearly warn that Windows SmartScreen/unknown-publisher prompts and macOS Gatekeeper manual override may occur;
 - the catalog has exactly 20 unique entries and all URLs use the same exact tag;
 - `latest.json` has exactly the four supported Tauri platform keys and contains no mutable internal URL;
 - SBOMs, GitHub attestation, checksums, release notes, known limitations, and packaged-smoke summary are present;
 - Batch 6 acceptance evidence is attached when the release is intended for public stable users;
-- no active incident, expired certificate, key-custody gap, or production-endpoint anomaly is open.
+- no active incident, cryptographic-key availability gap, or production-endpoint anomaly is open.
 
 ## Rollback and incidents
 
@@ -74,11 +76,11 @@ Owner: release approver. Immediately mark the bad release as a draft. If release
 
 ### Updater key loss or compromise
 
-Owner: updater key primary custodian with the independent backup custodian. Stop publication. Attempt recovery of the exact existing key through the documented offline backup. If recovery is impossible, follow the bridge/manual-reinstall constraints in `release-identity-and-access.md`; never disable verification, reuse an OS certificate as the updater key, or publish an unsigned updater.
+Owner: `StoneLL1`. Stop publication. Attempt recovery of the exact existing key from owner-managed secure storage. If recovery is impossible, follow the bridge/manual-reinstall constraints in `release-identity-and-access.md`; never disable verification, reuse an OS certificate as the updater key, or publish an unsigned updater.
 
-### Windows or Apple certificate expiry/revocation
+### Windows SmartScreen or macOS Gatekeeper blocking
 
-Owner: platform-signing custodian. Stop the affected platform matrix. Renew or replace the certificate through the issuer, update the reviewed publisher/Team contract if it changes, run a separate signing-policy review, and repeat notarization/Authenticode plus packaged installation. Do not ship a Tauri updater signature as substitute OS-signing evidence.
+Owner: `StoneLL1`. Treat the warning or block as expected under the explicit no-OS-certificate policy, not as proof that the updater signature failed. Verify the exact-tag checksum, GitHub attestation, and updater signature, then execute and document the platform's deliberate manual-override path on a clean acceptance host. Do not claim that these controls provide Authenticode, Developer ID, notarization, or publisher identity. If the manual path is unusable or unsafe for the target audience, stop that platform and revisit the OS-signing policy through a reviewed contract change.
 
 ### GitHub outage, 403/404/429/5xx, or unavailable anonymous endpoint
 

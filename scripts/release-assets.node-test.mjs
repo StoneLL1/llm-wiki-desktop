@@ -9,6 +9,7 @@ import { verifyChecksums, writeChecksums } from "./generate-release-checksums.mj
 import { nodeSbom, rustSbom } from "./generate-release-sbom.mjs";
 import {
   exactReleaseAssetUrl,
+  OS_IDENTITY_EVIDENCE,
   RELEASE_PLATFORMS,
 } from "./release-assets-contract.mjs";
 import { stageDesktopRelease } from "./stage-desktop-release.mjs";
@@ -24,13 +25,6 @@ const RUN_ID = "1234567890";
 const MINISIGN_SIGNATURE = Buffer.from(
   "untrusted comment: signature from minisign secret key\nRWQf6LRCGA9i59SLOFxz6NxvASXDJeRtuZykwQepbDEGt87ig1BNpWaVWuNrm73YiIiJbq71Wi+dP9eKL8OC351vwIasSSbXxwA=\ntrusted comment: timestamp:1555779966\tfile:test\nQtKMXWyYcwdpZAlPF7tE2ENJkRd1ujvKjlj1m9RtHTBnZPa5WKU5uWRs5GoP5M/VqE81QFuMKI5k/SfNQUaOAA==\n",
 ).toString("base64");
-const SIGNING_KINDS = {
-  "windows-x86_64": "windows-authenticode",
-  "darwin-aarch64": "apple-developer-id-notarized",
-  "darwin-x86_64": "apple-developer-id-notarized",
-  "linux-x86_64": "linux-updater-signature",
-};
-
 const writeJson = (file, value) => {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
@@ -69,7 +63,7 @@ function createReleaseBundle(root) {
       targetTriple,
       installer: { file: installer },
       updater: { file: updater, signatureFile, signature: MINISIGN_SIGNATURE },
-      osSigning: { kind: SIGNING_KINDS[platform], verified: true },
+      osSigning: OS_IDENTITY_EVIDENCE[platform],
     };
     writeJson(path.join(directory, "release-entry.json"), descriptor);
     descriptors.push(descriptor);
@@ -193,7 +187,7 @@ test("checksums use the exact flat publish contract and reject duplicate basenam
   assert.throws(() => writeChecksums(root, output), /duplicate public release asset name/);
 });
 
-test("desktop staging selects one canonical updater and requires OS-signing evidence", (context) => {
+test("desktop staging selects one canonical updater and requires exact OS-identity policy evidence", (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "llm-wiki-stage-"));
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const source = path.join(root, "source");
@@ -202,16 +196,37 @@ test("desktop staging selects one canonical updater and requires OS-signing evid
   fs.writeFileSync(path.join(source, "app-setup.exe"), "installer");
   fs.writeFileSync(path.join(source, "app-setup.exe.sig"), MINISIGN_SIGNATURE);
   const evidence = path.join(root, "evidence.json");
-  writeJson(evidence, { kind: "windows-authenticode", verified: true, subject: "CN=Fixture" });
+  writeJson(evidence, OS_IDENTITY_EVIDENCE["windows-x86_64"]);
   const descriptor = stageDesktopRelease({
     source, output, platform: "windows-x86_64", releaseTag: TAG, version: VERSION, commitSha: COMMIT, signingEvidence: evidence,
   });
   assert.equal(descriptor.updater.file.startsWith("windows-x86_64-"), true);
   assert.equal(descriptor.installer.file, descriptor.updater.file);
-  writeJson(evidence, { kind: "windows-authenticode", verified: false });
+  writeJson(evidence, {
+    ...OS_IDENTITY_EVIDENCE["windows-x86_64"],
+    required: true,
+  });
   assert.throws(() => stageDesktopRelease({
     source, output, platform: "windows-x86_64", releaseTag: TAG, version: VERSION, commitSha: COMMIT, signingEvidence: evidence,
-  }), /verified structured record/);
+  }), /invalid required/);
+});
+
+test("release verification rejects obsolete OS certificate evidence without weakening updater signatures", (context) => {
+  const root = fixture(context);
+  const descriptorPath = path.join(root, "desktop", "windows-x86_64", "release-entry.json");
+  const descriptor = JSON.parse(fs.readFileSync(descriptorPath, "utf8"));
+  descriptor.osSigning = {
+    kind: "windows-authenticode",
+    verified: true,
+    subject: "CN=Fixture",
+  };
+  writeJson(descriptorPath, descriptor);
+  writeChecksums(root, path.join(root, "CHECKSUMS.sha256"));
+  const errors = verifyReleaseAssets({
+    root, tag: TAG, version: VERSION, commitSha: COMMIT, workflowRunId: RUN_ID,
+  }).errors;
+  assert.equal(errors.some((error) => error.includes("OS identity evidence")), true);
+  assert.equal(errors.some((error) => error.includes("updater signature file is missing")), false);
 });
 
 test("flat reverse-download verification resolves all four latest.json updater pairs", (context) => {
