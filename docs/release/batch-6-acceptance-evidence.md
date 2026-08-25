@@ -1,13 +1,48 @@
 # Batch 6 release acceptance evidence
 
 Date: 2026-08-21
+Last updated: 2026-08-25
 
-Candidate baseline: `5eac9315b32b8fcaad188e19e783716eb969bde5` on local `master`
+Original candidate baseline: `5eac9315b32b8fcaad188e19e783716eb969bde5` on local `master`
 
 Release coordinate: `StoneLL1/llm-wiki-desktop`, `0.1.0`
-Decision: **Public beta No-Go; Batch 6 local automated acceptance complete, remote and packaged evidence Pending**
+Original decision: **Public beta No-Go; Batch 6 local automated acceptance complete, remote and packaged evidence Pending**
 
 This record contains no private key, certificate, token, user project path, user content, or private signed URL. It distinguishes deterministic source-level evidence from real signed package evidence; the former must not be used to claim the latter.
+
+## 2026-08-25 resumption audit
+
+Current candidate baseline: `9c2b6a6cef8534d0edb59f254b222c17d6d62711` on public `master`
+
+Decision: **Public beta No-Go; cross-platform source CI and local release rehearsal green, signed draft and packaged evidence blocked**
+
+### Merge and CI evidence
+
+- Final remediation push SHA `0783a16a0a4ce828cccbcab175a7de9fabb51186` passed Windows, Ubuntu, and macOS in [Actions run 32828848340](https://github.com/StoneLL1/llm-wiki-desktop/actions/runs/32828848340).
+- PR [#2](https://github.com/StoneLL1/llm-wiki-desktop/pull/2) used the exact head above and passed its merge-ref matrix in [Actions run 32832825787](https://github.com/StoneLL1/llm-wiki-desktop/actions/runs/32832825787): Windows job `97755090746`, Ubuntu job `97755090991`, and macOS job `97755090998` all succeeded.
+- PR #2 was merged normally at `2026-08-25T10:24:26Z` as `9c2b6a6cef8534d0edb59f254b222c17d6d62711`.
+- The merge SHA itself passed [Actions run 32837062325](https://github.com/StoneLL1/llm-wiki-desktop/actions/runs/32837062325): Ubuntu job `97768173201` completed at `10:46:01Z`, Windows job `97768173333` at `10:56:36Z`, and macOS job `97768173009` at `11:07:05Z`.
+
+### Current local and remote release gates
+
+| Gate | 2026-08-25 evidence |
+| --- | --- |
+| Release config | Passed: 30/30 Node contracts, updater signature verifier 1/1, version and source catalog checks |
+| Local release coordinate | Passed in a clean shallow clone of public `master` at the exact merge SHA; the linked worktree exposes a separate `commondir` handling limitation documented in `gotchas.txt` |
+| Final-four meta-contracts | Passed: 14/14 |
+| Strict final-four gate | **Blocked as designed:** only `capability-release-catalog` remains RED because no committed capability trust key or release-mode 4-target × 5-pack catalog exists |
+| Complete `npm run check` | Final from-beginning rerun passed in 12m54.2s: frontend 143/143 files and 1,213/1,213 tests; Rust library 1,180 passed with 4 intentional ignores; every integration and doc-test target green |
+| Anonymous repository probe | Passed: `HEAD` resolves to `refs/heads/master` at the merge SHA |
+| Anonymous Releases page | Passed: HTTP 200 |
+| Stable `latest.json` | HTTP 404, expected before the first Release; remains mandatory after draft assets exist |
+| GitHub authorization | Working as `StoneLL1`; repository viewer permission is `ADMIN` and Actions default workflow permission is `read` |
+| Protected default branch | **Pending:** GitHub reports `master` is not protected |
+| Required Environments | Names exist, but both have no protection rules, required reviewers, or branch policy |
+| Protected secret names | **Pending:** both Environment secret-name lists are empty; no value was requested or read |
+| Repository variable names | **Pending:** `CAPABILITY_SIGNING_KEY_ID`, `WINDOWS_PUBLISHER_SUBJECT`, and `APPLE_TEAM_ID` are absent; no value was requested or read |
+| Tags and Releases | None exist; no stable tag, Draft, stable Release, or latest-channel mutation was created |
+
+The release-owner handoff and ready-to-fill four-platform matrix are in [`first-release-candidate-checklist.md`](first-release-candidate-checklist.md). No workflow was dispatched because the capability trust contract, signing identities, custody record, protected inputs/reviewers, signed upgrade baseline, and real platform hosts are not ready. The `publish-stable` job was not approved or started.
 
 ## Local automated evidence
 
