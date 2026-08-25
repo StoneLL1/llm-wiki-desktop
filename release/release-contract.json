@@ -42,7 +42,7 @@
     "updater": {
       "publicKey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDBEMjc0RUU4OEFCOTA2NTYKUldSV0JybUs2RTRuRGN2UlZENGdNY1FxUE1aZ2F1Y2NBSnpiZ25qTmRtdURURzYrMitUdms4SUEK",
       "publicKeyId": "0D274EE88AB90656",
-      "publicKeyStatus": "supplied-2026-08-20",
+      "publicKeyStatus": "confirmed-existing-keypair",
       "owner": "StoneLL1",
       "ownerRole": "sole repository owner and maintainer",
       "status": "owner-confirmed",

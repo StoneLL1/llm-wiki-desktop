@@ -1,7 +1,7 @@
 # Release identity, repository access, and signing ownership
 
-Status: Batch 6 local automated acceptance and cross-platform CI complete; repository access, branch protection, and solo-maintainer Environment approvals configured; Public beta No-Go because capability trust, protected updater/capability signing inputs, signed-baseline, hardware, and remote-rehearsal blockers remain
-Last verified: 2026-08-25
+Status: Batch 6 local automated acceptance and cross-platform CI complete; the existing updater key pair is selected and its public half is frozen; repository access, branch protection, and solo-maintainer Environment approvals are configured; Public beta No-Go because capability trust, protected updater/capability signing inputs, signed-baseline, hardware, and remote-rehearsal blockers remain
+Last verified: 2026-08-26
 
 ## Frozen public release coordinate
 
@@ -30,7 +30,7 @@ $env:GCM_INTERACTIVE = 'never'
 git -c credential.helper= -c http.extraHeader= ls-remote --symref https://github.com/StoneLL1/llm-wiki-desktop.git HEAD
 ```
 
-The 2026-08-16 probe failed without prompting for a username. On 2026-08-25 the same no-credential probe succeeded and returned `refs/heads/master` at `9c2b6a6cef8534d0edb59f254b222c17d6d62711`; an independent unauthenticated `HEAD` request to the Releases page returned HTTP `200`. Public repository access and remote default-branch discovery are therefore closed. The frozen `latest.json` endpoint returned HTTP `404`, which is expected before the first Release exists, while every installer/updater asset probe remains Pending until a sealed draft candidate exists.
+The 2026-08-16 probe failed without prompting for a username. On 2026-08-25 the same no-credential probe succeeded and returned `refs/heads/master` at `9c2b6a6cef8534d0edb59f254b222c17d6d62711`. On 2026-08-26 it returned the newer merge SHA `82690d5297d404c173b08102e88feab277280132`; an independent unauthenticated `HEAD` request to the Releases page returned HTTP `200`. Public repository access and remote default-branch discovery are therefore closed. The frozen `latest.json` endpoint returned HTTP `404`, which is expected before the first Release exists, while every installer/updater asset probe remains Pending until a sealed draft candidate exists.
 
 For every draft candidate, rerun the command above and also verify from an unsigned, logged-out client:
 
@@ -50,10 +50,10 @@ The release page must remain reachable without credentials. `latest.json` and in
 | Tauri identifier / Apple bundle identifier | `com.llmwiki.desktop` | Frozen |
 | Windows publisher subject | Not configured | Authenticode is not required for the initial release; SmartScreen or unknown-publisher warnings are expected |
 | Apple Team ID | Not configured | Developer ID signing and notarization are not required for the initial release; Gatekeeper manual override may be required |
-| Updater signing public key | minisign key `0D274EE88AB90656` | Public key and owner `StoneLL1` confirmed; matching protected private-key inputs remain required |
+| Updater signing public key | minisign key `0D274EE88AB90656` | Existing key pair selected; owner-supplied public bytes match the frozen contract and Tauri trust anchor; matching protected private-key inputs remain required |
 | Capability signing public key ID | Not supplied; `capabilities/trusted-keys.json` is empty | Owner `StoneLL1` confirmed; public key and matching protected private key remain Batch 3A blockers |
 
-`StoneLL1` is the confirmed sole maintainer, release approver, updater-key owner, and capability-key owner. Both protected Environments use `StoneLL1` as the required reviewer with self-review allowed because no second maintainer exists. The updater public key was supplied on 2026-08-20 and is safe to commit; its private half and password were not requested, read, logged, or written to the workspace. Production updater and capability signing material must remain only in their protected GitHub Environment secrets. No private key, password, PAT, certificate, or production secret may be committed to the repository.
+`StoneLL1` is the confirmed sole maintainer, release approver, updater-key owner, and capability-key owner. Both protected Environments use `StoneLL1` as the required reviewer with self-review allowed because no second maintainer exists. The updater public key was supplied on 2026-08-20. On 2026-08-26 the owner explicitly selected that existing key pair for the first release, and the supplied `.pub` bytes were verified byte-for-byte against both committed copies. Its private half and password were not requested, read, logged, or written to the workspace. Production updater and capability signing material must remain only in their protected GitHub Environment secrets. No private key, password, PAT, certificate, or production secret may be committed to the repository.
 
 The project deliberately does not require a backup custodian, Windows Authenticode identity, or Apple Developer ID/Team identity for the initial release. This accepts single-maintainer continuity risk and visible operating-system trust warnings; checksums and GitHub attestations do not turn an OS-unsigned installer into an OS-identified one. The capability public-key ID and matching protected capability/updater private inputs must still be configured before a release candidate can run. A missing or lost cryptographic signing key stops release; it never permits an unsigned updater, unsigned capability catalog, or signature-verification bypass.
 
@@ -76,7 +76,7 @@ Recovery and rotation are fail-closed. The current static `releases/latest` chan
 4. If the project deliberately switches the single static channel after a bridge period, clients that missed the bridge require an explicit manually downloaded reinstall whose checksum, GitHub attestation, and new updater signature are verified. Windows/macOS OS-identity warnings remain expected under the current policy. Record that continuity loss in the release approval; never describe it as transparent rotation.
 5. If the old private key is lost before a compatible migration reaches existing clients, in-place updater continuity is lost. Do not publish unsigned artifacts or disable verification; use the manual reinstall and incident process.
 
-Current custody record: primary owner `StoneLL1`; backup custodian `not-required`; offline restore evidence `recommended-but-not-required`. The matching `desktop-release` Environment secrets remain a release blocker, although their absence does not prevent compiling or testing the Batch 4A backend with the committed public key.
+Current custody record: existing updater key pair selected; primary owner `StoneLL1`; backup custodian `not-required`; offline restore evidence `recommended-but-not-required`. The matching `desktop-release` Environment secrets remain a release blocker, although their absence does not prevent compiling or testing the Batch 4A backend with the committed public key.
 
 ## Workflow permissions and approvals
 
@@ -87,7 +87,7 @@ Current custody record: primary owner `StoneLL1`; backup custodian `not-required
 - The sealed candidate remains a workflow artifact through build, manifest, packaged-smoke, attestation, and full asset rehearsal. The protected publisher creates one draft only after those gates, uploads the complete bundle, then publishes and performs anonymous post-publish verification.
 - Both `capability-release` and `desktop-release` require reviewer `StoneLL1`, allow sole-maintainer self-review, and allow deployments only from `master` or tags matching `app-v*`.
 
-No remote release workflow rehearsal is claimed for Batch 5 or Batch 6. The 2026-08-25 configuration pass closed public access, `master` protection, required reviewers, and Environment deployment policy. The capability trust-key set, `CAPABILITY_SIGNING_KEY_ID`, capability private-key secret, updater private-key/password secrets, release tag, Release, and release assets are still absent. These are release blockers, not local test failures. The complete Batch 6 decision and platform matrix are in [`batch-6-acceptance-evidence.md`](batch-6-acceptance-evidence.md).
+No remote release workflow rehearsal is claimed for Batch 5 or Batch 6. The 2026-08-25 configuration pass closed public access, `master` protection, required reviewers, and Environment deployment policy. The 2026-08-26 read-only audit confirmed that both Environment secret-name lists and the repository variable list remain empty, and that no tag or Release exists. The capability trust-key set, `CAPABILITY_SIGNING_KEY_ID`, capability private-key secret, updater private-key/password secrets, release tag, Release, and release assets are therefore still absent. These are release blockers, not local test failures. The complete Batch 6 decision and platform matrix are in [`batch-6-acceptance-evidence.md`](batch-6-acceptance-evidence.md).
 
 ## Local and CI checks
 

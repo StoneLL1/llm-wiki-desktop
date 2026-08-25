@@ -143,6 +143,10 @@ test("the sole maintainer owns cryptographic signing while backup and OS certifi
   const wrongUpdaterKeyId = structuredClone(contract);
   wrongUpdaterKeyId.signing.updater.publicKeyId = "AAAAAAAAAAAAAAAA";
   assert.equal(state({ contract: wrongUpdaterKeyId }).errors.some((error) => error.includes("Tauri trust anchor")), true);
+
+  const unconfirmedUpdaterPair = structuredClone(contract);
+  unconfirmedUpdaterPair.signing.updater.publicKeyStatus = "supplied";
+  assert.equal(state({ contract: unconfirmedUpdaterPair }).errors.some((error) => error.includes("key-pair selection")), true);
 });
 
 test("capability workflow permissions stay read-only, reusable, and non-publishing", () => {
