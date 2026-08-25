@@ -1,9 +1,9 @@
 use std::io::{Read, Write};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use llm_wiki_desktop_lib::models::llm::{
     LlmProviderConfig, LlmProviderKind, ProviderCredentialBinding,
@@ -11,6 +11,46 @@ use llm_wiki_desktop_lib::models::llm::{
 use llm_wiki_desktop_lib::models::paths::ProjectContext;
 use llm_wiki_desktop_lib::services::import_v2::url_policy::UrlPolicy;
 use llm_wiki_desktop_lib::services::{LlmService, SecretService};
+
+const MAX_TEST_HTTP_REQUEST_BYTES: usize = 64 * 1024;
+const TEST_SERVER_SHUTDOWN_SENTINEL: &[u8] = b"llm-wiki-test-server-shutdown\n";
+
+#[derive(Debug, PartialEq, Eq)]
+enum TestConnection {
+    Empty,
+    HttpRequest,
+    Shutdown,
+}
+
+struct TestServerWorker {
+    shutdown: Arc<AtomicBool>,
+    address: SocketAddr,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl TestServerWorker {
+    fn signal_shutdown(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        if let Ok(mut stream) = TcpStream::connect(self.address) {
+            let _ = stream.write_all(TEST_SERVER_SHUTDOWN_SENTINEL);
+            let _ = stream.flush();
+        }
+    }
+
+    fn join(mut self) -> thread::Result<()> {
+        self.signal_shutdown();
+        self.worker.take().unwrap().join()
+    }
+}
+
+impl Drop for TestServerWorker {
+    fn drop(&mut self) {
+        if self.worker.is_some() {
+            self.signal_shutdown();
+            let _ = self.worker.take().unwrap().join();
+        }
+    }
+}
 
 fn config(provider: LlmProviderKind, base_url: impl Into<String>) -> LlmProviderConfig {
     LlmProviderConfig {
@@ -49,7 +89,7 @@ fn approved_binding(
     }
 }
 
-fn spawn_server(response: Option<String>) -> (String, Arc<AtomicUsize>, thread::JoinHandle<()>) {
+fn spawn_server(response: Option<String>) -> (String, Arc<AtomicUsize>, TestServerWorker) {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let address = listener.local_addr().unwrap();
     let (count, worker) = spawn_bound_server(listener, response);
@@ -59,40 +99,142 @@ fn spawn_server(response: Option<String>) -> (String, Arc<AtomicUsize>, thread::
 fn spawn_bound_server(
     listener: TcpListener,
     response: Option<String>,
-) -> (Arc<AtomicUsize>, thread::JoinHandle<()>) {
-    listener.set_nonblocking(true).unwrap();
+) -> (Arc<AtomicUsize>, TestServerWorker) {
+    let address = listener.local_addr().unwrap();
     let count = Arc::new(AtomicUsize::new(0));
     let observed = count.clone();
-    let worker = thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline {
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    stream
-                        .set_read_timeout(Some(Duration::from_secs(1)))
-                        .unwrap();
-                    let mut request = [0_u8; 4_096];
-                    let Ok(read) = stream.read(&mut request) else {
-                        continue;
-                    };
-                    if read == 0 {
-                        continue;
-                    }
-                    observed.fetch_add(1, Ordering::SeqCst);
-                    if let Some(response) = response.as_deref() {
-                        let _ = stream.write_all(response.as_bytes());
-                        let _ = stream.flush();
-                    }
-                    return;
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_requested = shutdown.clone();
+    let worker = thread::spawn(move || loop {
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                match read_test_connection(&mut stream, &shutdown_requested) {
+                    Ok(TestConnection::Empty) | Err(_) => continue,
+                    Ok(TestConnection::Shutdown) => return,
+                    Ok(TestConnection::HttpRequest) => {}
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(10));
+                observed.fetch_add(1, Ordering::SeqCst);
+                if let Some(response) = response.as_deref() {
+                    stream.write_all(response.as_bytes()).unwrap();
+                    stream.flush().unwrap();
                 }
-                Err(_) => return,
+                return;
             }
+            Err(_) => return,
         }
     });
-    (count, worker)
+    (
+        count,
+        TestServerWorker {
+            shutdown,
+            address,
+            worker: Some(worker),
+        },
+    )
+}
+
+fn read_test_connection(
+    reader: &mut impl Read,
+    shutdown_requested: &AtomicBool,
+) -> std::io::Result<TestConnection> {
+    let mut request = Vec::with_capacity(4_096);
+    let mut chunk = [0_u8; 4_096];
+    loop {
+        let read = reader.read(&mut chunk)?;
+        if read == 0 {
+            if request.is_empty() {
+                return Ok(TestConnection::Empty);
+            }
+            if shutdown_requested.load(Ordering::SeqCst) && request == TEST_SERVER_SHUTDOWN_SENTINEL
+            {
+                return Ok(TestConnection::Shutdown);
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "test HTTP request ended before its declared body",
+            ));
+        }
+        let next_len = request.len().checked_add(read).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "test HTTP request length overflowed",
+            )
+        })?;
+        if next_len > MAX_TEST_HTTP_REQUEST_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "test HTTP request exceeded the bounded fixture limit",
+            ));
+        }
+        request.extend_from_slice(&chunk[..read]);
+
+        if shutdown_requested.load(Ordering::SeqCst) && request == TEST_SERVER_SHUTDOWN_SENTINEL {
+            return Ok(TestConnection::Shutdown);
+        }
+        if shutdown_requested.load(Ordering::SeqCst)
+            && TEST_SERVER_SHUTDOWN_SENTINEL.starts_with(&request)
+        {
+            continue;
+        }
+        if let Some(expected_len) = expected_http_request_len(&request)? {
+            if request.len() >= expected_len {
+                return Ok(TestConnection::HttpRequest);
+            }
+        }
+    }
+}
+
+fn expected_http_request_len(request: &[u8]) -> std::io::Result<Option<usize>> {
+    let Some(header_start) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return Ok(None);
+    };
+    let header_len = header_start + 4;
+    let header = std::str::from_utf8(&request[..header_len]).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "test HTTP request headers were not UTF-8",
+        )
+    })?;
+    let mut content_length = None;
+    for line in header.split("\r\n").skip(1) {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if !name.eq_ignore_ascii_case("content-length") {
+            continue;
+        }
+        let parsed = value.trim().parse::<usize>().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "test HTTP request had an invalid Content-Length",
+            )
+        })?;
+        if content_length.is_some_and(|existing| existing != parsed) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "test HTTP request had conflicting Content-Length values",
+            ));
+        }
+        content_length = Some(parsed);
+    }
+    let expected_len = header_len
+        .checked_add(content_length.unwrap_or_default())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "test HTTP request length overflowed",
+            )
+        })?;
+    if expected_len > MAX_TEST_HTTP_REQUEST_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "test HTTP request exceeded the bounded fixture limit",
+        ));
+    }
+    Ok(Some(expected_len))
 }
 
 #[test]
@@ -109,6 +251,27 @@ fn request_sentinel_ignores_bare_tcp_probes() {
 
     worker.join().unwrap();
     assert_eq!(request_count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn request_reader_waits_for_a_fragmented_declared_body() {
+    let first =
+        std::io::Cursor::new(b"POST / HTTP/1.1\r\nContent-Length: 11\r\n\r\nhello".to_vec());
+    let second = std::io::Cursor::new(b" world".to_vec());
+    let mut fragmented = first.chain(second);
+
+    assert_eq!(
+        read_test_connection(&mut fragmented, &AtomicBool::new(false)).unwrap(),
+        TestConnection::HttpRequest
+    );
+}
+
+#[test]
+fn explicit_server_shutdown_is_not_counted_as_a_request() {
+    let (_server, request_count, worker) = spawn_server(None);
+
+    worker.join().unwrap();
+    assert_eq!(request_count.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
