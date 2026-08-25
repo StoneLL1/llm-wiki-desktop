@@ -166,6 +166,7 @@ export function validateReleaseState({
   }
   const updaterPublicKey = contract.signing?.updater?.publicKey;
   const updaterPublicKeyId = contract.signing?.updater?.publicKeyId;
+  const updaterPublicKeyStatus = contract.signing?.updater?.publicKeyStatus;
   const updaterPublicKeyDocument = typeof updaterPublicKey === "string" && /^[A-Za-z0-9+/]+={0,2}$/.test(updaterPublicKey)
     ? Buffer.from(updaterPublicKey, "base64").toString("utf8")
     : "";
@@ -173,6 +174,9 @@ export function validateReleaseState({
     || !/^[0-9A-F]{16}$/.test(updaterPublicKeyId ?? "")
     || !updaterPublicKeyDocument.includes(`minisign public key: ${updaterPublicKeyId}\n`)) {
     errors.push("updater public key and key ID must match the committed Tauri trust anchor");
+  }
+  if (updaterPublicKeyStatus !== "confirmed-existing-keypair") {
+    errors.push("updater key-pair selection must be confirmed in the release contract");
   }
   const capabilityPublicKeyPending = contract.signing?.capability?.publicKeyId === null
     && contract.signing?.capability?.publicKeyStatus === "pending-human-input";

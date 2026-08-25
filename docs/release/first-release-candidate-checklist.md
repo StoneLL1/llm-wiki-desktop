@@ -2,9 +2,9 @@
 
 Status: **Blocked before remote candidate execution**
 
-Prepared: 2026-08-25
+Prepared: 2026-08-26
 
-Candidate master: `9c2b6a6cef8534d0edb59f254b222c17d6d62711`
+Audited predecessor master (before this contract update): `82690d5297d404c173b08102e88feab277280132`
 
 Intended version/tag: `0.1.0` / `app-v0.1.0` — **tag not created**
 
@@ -23,8 +23,9 @@ Complete these outside the workspace before requesting a remote candidate run. R
 | Repository variable `CAPABILITY_SIGNING_KEY_ID` | **Pending; no repository variables exist** | Names-only audit |
 | `capability-release` secret name `LLM_WIKI_CAPABILITY_SIGNING_KEY_PKCS8_HEX` | **Pending; secret-name list is empty** | Names-only audit |
 | `desktop-release` secret names `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | **Pending; secret-name list is empty** | Names-only audit |
+| Existing updater key pair selected and public trust anchor committed | Complete; owner reconfirmed the existing pair on 2026-08-26 and the supplied `.pub` bytes match `release/release-contract.json` and `src-tauri/tauri.conf.json` | Reviewed contract and same-SHA CI; no private material in the workspace |
 | Capability public key ID and public key committed to `capabilities/trusted-keys.json` | **Pending; file is empty** | Reviewed commit and same-SHA CI |
-| Public identity fields in `release/release-contract.json` | Owner decisions complete: `StoneLL1`; backup custodian not required; Windows/Apple OS vendor identity not required. Capability key ID remains Pending | Reviewed commit and same-SHA CI |
+| Public identity fields in `release/release-contract.json` | Owner decisions complete: `StoneLL1`; existing updater pair confirmed; backup custodian not required; Windows/Apple OS vendor identity not required. Capability key ID remains Pending | Reviewed commit and same-SHA CI |
 | Updater/capability key ownership and continuity policy | Complete decision: owner `StoneLL1`, no backup custodian required; encrypted offline recovery remains recommended | Reviewed contract; never record secret material |
 | Windows Authenticode and Apple Developer ID/notarization | Explicitly not required for the initial release; user-facing OS warnings must remain documented | Reviewed contract and exact workflow policy evidence |
 | Prior production-key-signed version for the real old-to-candidate upgrade | **Pending; no prior signed package exists** | Exact version, artifact digest, signing evidence, installation source |
