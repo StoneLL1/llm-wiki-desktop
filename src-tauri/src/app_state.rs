@@ -575,18 +575,45 @@ fn context_mismatch() -> BackendError {
 }
 
 fn root_match_key(path: &Path) -> String {
+    // Roots can arrive through platform aliases (for example an 8.3 path
+    // from RUNNER_TEMP on Windows) while the registry stores the canonical
+    // spelling. A relocation's leaf is already absent, so canonicalize the
+    // nearest surviving ancestor and append the missing tail.
+    let canonical = canonicalize_nearest_existing_ancestor(path);
+    lexical_root_match_key(&canonical)
+}
+
+fn canonicalize_nearest_existing_ancestor(path: &Path) -> PathBuf {
+    let mut candidate = path;
+    let mut missing_tail = Vec::new();
+    loop {
+        if let Ok(mut canonical) = candidate.canonicalize() {
+            for component in missing_tail.iter().rev() {
+                canonical.push(component);
+            }
+            return canonical;
+        }
+        let (Some(parent), Some(name)) = (candidate.parent(), candidate.file_name()) else {
+            return path.to_path_buf();
+        };
+        missing_tail.push(name.to_os_string());
+        candidate = parent;
+    }
+}
+
+fn lexical_root_match_key(path: &Path) -> String {
     let mut key = path
         .to_string_lossy()
         .trim_end_matches(['/', '\\'])
         .replace('\\', "/");
     if cfg!(windows) {
+        key.make_ascii_lowercase();
         if let Some(without_device_prefix) = key.strip_prefix("//?/") {
             key = without_device_prefix.to_string();
             if let Some(unc_path) = key.strip_prefix("unc/") {
                 key = format!("//{unc_path}");
             }
         }
-        key = key.to_ascii_lowercase();
     }
     key
 }
@@ -1582,6 +1609,8 @@ mod project_registry_tests {
     use std::sync::{mpsc, Arc, Barrier};
     use std::time::Duration;
 
+    #[cfg(windows)]
+    use super::lexical_root_match_key;
     use super::{AppState, ProjectRegistry, ProjectTrustAuthority, ProjectWriteRootKind};
     use crate::errors::{BackendError, PROJECT_CONTEXT_MISMATCH};
     use crate::models::confirmation::{
@@ -1599,6 +1628,57 @@ mod project_registry_tests {
     use crate::services::{
         workflow_stages, EnqueueWorkflow, ProjectAssessmentService, ProjectService, WorkflowRunner,
     };
+
+    #[cfg(windows)]
+    #[test]
+    fn root_match_key_normalizes_windows_unc_device_prefixes() {
+        assert_eq!(
+            lexical_root_match_key(std::path::Path::new(r"\\?\UNC\Server\Share\moved")),
+            lexical_root_match_key(std::path::Path::new(r"\\server\share\moved")),
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn relocation_matches_an_aliased_parent_after_the_old_leaf_moves() {
+        let holder = temp_project("relocate-aliased-parent");
+        let actual_parent = holder.join("canonical-parent");
+        let alias_parent = holder.join("alias-parent");
+        fs::create_dir_all(&actual_parent).unwrap();
+        let output = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&alias_parent)
+            .arg(&actual_parent)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "mklink /J failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+
+        let seed = strict_native_project("relocate-aliased-seed");
+        let old_root = actual_parent.join("old-project");
+        let aliased_old_root = alias_parent.join("old-project");
+        let new_root = holder.join("new-project");
+        fs::rename(&seed, &old_root).unwrap();
+        let registry = ProjectRegistry::default();
+        registry
+            .register_trusted_native("native-project", &aliased_old_root)
+            .unwrap();
+        fs::rename(&old_root, &new_root).unwrap();
+
+        let context = registry
+            .relocate_trusted_native("native-project", &aliased_old_root, &new_root, || Ok(()))
+            .expect("a moved project must retain its canonical registered identity");
+        assert_eq!(context.root, new_root.canonicalize().unwrap());
+
+        fs::remove_dir(&alias_parent).ok();
+        fs::remove_dir_all(holder).ok();
+    }
 
     #[derive(Default)]
     struct CountingWorkflowRunner(AtomicUsize);

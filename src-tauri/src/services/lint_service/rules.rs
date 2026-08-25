@@ -1371,9 +1371,15 @@ mod tests {
             .issues
             .iter()
             .any(|i| i.issue_type == LintIssueType::DuplicateFilename));
-        // PathCase detection requires a case-sensitive filesystem — on
-        // Windows (NTFS) the two names collide and overwrite each other.
-        if cfg!(not(target_os = "windows")) {
+        // PathCase detection requires a case-sensitive filesystem. Default
+        // Windows and macOS volumes collapse these two names into one entry.
+        let distinct_case_entries = std::fs::read_dir(root.join("wiki/concepts"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| matches!(entry.file_name().to_str(), Some("React.md" | "react.md")))
+            .count()
+            == 2;
+        if distinct_case_entries {
             assert!(report
                 .issues
                 .iter()

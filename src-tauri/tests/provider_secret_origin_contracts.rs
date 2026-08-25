@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpListener};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -68,12 +68,17 @@ fn spawn_bound_server(
         while Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut stream, _)) => {
-                    observed.fetch_add(1, Ordering::SeqCst);
                     stream
-                        .set_read_timeout(Some(Duration::from_millis(250)))
+                        .set_read_timeout(Some(Duration::from_secs(1)))
                         .unwrap();
                     let mut request = [0_u8; 4_096];
-                    let _ = stream.read(&mut request);
+                    let Ok(read) = stream.read(&mut request) else {
+                        continue;
+                    };
+                    if read == 0 {
+                        continue;
+                    }
+                    observed.fetch_add(1, Ordering::SeqCst);
                     if let Some(response) = response.as_deref() {
                         let _ = stream.write_all(response.as_bytes());
                         let _ = stream.flush();
@@ -88,6 +93,22 @@ fn spawn_bound_server(
         }
     });
     (count, worker)
+}
+
+#[test]
+fn request_sentinel_ignores_bare_tcp_probes() {
+    let response = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    let (server, request_count, worker) = spawn_server(Some(response.into()));
+    let address = server.strip_prefix("http://").unwrap();
+
+    TcpStream::connect(address).unwrap();
+    let mut request = TcpStream::connect(address).unwrap();
+    request
+        .write_all(b"GET /sentinel HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+
+    worker.join().unwrap();
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

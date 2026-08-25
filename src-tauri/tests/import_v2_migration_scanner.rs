@@ -45,6 +45,7 @@ fn scanner_is_read_only_and_fingerprints_metadata_deterministically() {
     let directory = tempdir().unwrap();
     let root = directory.path();
     fs::create_dir_all(root.join(".app/import-history")).unwrap();
+    fs::create_dir_all(root.join("raw")).unwrap();
     fs::create_dir_all(root.join(".app/tasks")).unwrap();
     fs::create_dir_all(root.join("raw/sources")).unwrap();
     fs::create_dir_all(root.join("wiki")).unwrap();
@@ -90,7 +91,7 @@ fn scanner_warns_on_corrupt_metadata_and_does_not_follow_links() {
 
     let outside = tempdir().unwrap();
     fs::write(outside.path().join("secret.md"), "must not be read").unwrap();
-    let link = root.join("raw-link");
+    let link = root.join("raw/raw-link");
     #[cfg(windows)]
     let link_result = std::os::windows::fs::symlink_file(outside.path().join("secret.md"), &link);
     #[cfg(unix)]
@@ -100,7 +101,7 @@ fn scanner_warns_on_corrupt_metadata_and_does_not_follow_links() {
         assert!(inventory
             .scanned_files
             .iter()
-            .all(|file| file.relative_path != "raw-link"));
+            .all(|file| file.relative_path != "raw/raw-link"));
         assert!(inventory
             .warnings
             .iter()

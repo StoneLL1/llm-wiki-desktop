@@ -1,6 +1,6 @@
-#[cfg(test)]
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -24,6 +24,8 @@ thread_local! {
     static FAIL_NEXT_CANDIDATE_INSTALL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static BEFORE_NEW_INSTALL_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&Path) -> bool>>> = std::cell::RefCell::new(None);
     static FAIL_NEXT_CLEANUP: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+    #[cfg(unix)]
+    static FAIL_NEXT_JOURNAL_DELETE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FAIL_NEXT_IDENTITY_QUERY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static BEFORE_RECOVERY_MUTATION_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
         std::cell::RefCell::new(None);
@@ -31,12 +33,52 @@ thread_local! {
         std::cell::RefCell::new(None);
     static RECOVERY_PROCESS_DEATH_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&str) -> bool>>> =
         std::cell::RefCell::new(None);
+    #[cfg(unix)]
+    static AFTER_JOURNAL_DIRECTORY_BIND_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+    static AFTER_INITIAL_JOURNAL_PUBLISH_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+        std::cell::RefCell::new(None);
     static SIMULATED_PROCESS_ABORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(all(test, unix))]
+fn set_fail_next_journal_delete() {
+    FAIL_NEXT_JOURNAL_DELETE.with(|flag| flag.set(true));
 }
 
 #[cfg(test)]
 fn set_recovery_process_death_hook(hook: impl FnMut(&str) -> bool + 'static) {
     RECOVERY_PROCESS_DEATH_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(all(test, unix))]
+fn set_after_journal_directory_bind_hook(hook: impl FnOnce() + 'static) {
+    AFTER_JOURNAL_DIRECTORY_BIND_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+fn run_after_journal_directory_bind_hook() {
+    #[cfg(all(test, unix))]
+    AFTER_JOURNAL_DIRECTORY_BIND_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(test)]
+fn set_after_initial_journal_publish_hook(hook: impl FnOnce(&Path) + 'static) {
+    AFTER_INITIAL_JOURNAL_PUBLISH_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+fn run_after_initial_journal_publish_hook(path: &Path) {
+    #[cfg(test)]
+    AFTER_INITIAL_JOURNAL_PUBLISH_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook(path);
+        }
+    });
+    #[cfg(not(test))]
+    let _ = path;
 }
 
 fn recovery_fault_boundary(phase: &str) {
@@ -217,7 +259,7 @@ struct Journal {
 /// Keeping this small record lets large import cohorts write one complete
 /// recovery journal instead of repeatedly serializing a growing JSON array.
 struct PendingCheckedReplacement {
-    parent_binding: RecoveryParentBinding,
+    parent_binding: Arc<RecoveryParentBinding>,
     path: PathBuf,
     temporary: PathBuf,
     guard: PathBuf,
@@ -228,13 +270,13 @@ struct PendingCheckedReplacement {
 }
 
 struct LiveBackup {
-    binding: RecoveryParentBinding,
+    binding: Arc<RecoveryParentBinding>,
     path: PathBuf,
     previous: Option<Vec<u8>>,
 }
 
 struct LiveRecoveryArtifact {
-    binding: RecoveryParentBinding,
+    binding: Arc<RecoveryParentBinding>,
     path: PathBuf,
 }
 
@@ -242,6 +284,7 @@ pub struct FileTransaction {
     backups: Vec<LiveBackup>,
     created_dirs: Vec<BoundCreatedProjectDirectory>,
     recovery_artifacts: Vec<LiveRecoveryArtifact>,
+    retained_mutation_parents: std::collections::HashMap<PathBuf, Arc<RecoveryParentBinding>>,
     installed_ownership: std::collections::HashMap<PathBuf, InstalledOwnership>,
     unverified_installs: std::collections::HashSet<PathBuf>,
     guard_by_destination: std::collections::HashMap<PathBuf, PathBuf>,
@@ -251,7 +294,7 @@ pub struct FileTransaction {
     journal_entries: Vec<JournalEntry>,
     journal_artifacts: Vec<String>,
     #[cfg(test)]
-    cohort_parent_syncs: usize,
+    cohort_pin_parent_syncs: usize,
     finished: bool,
 }
 
@@ -277,6 +320,7 @@ impl FileTransaction {
         self.backups.clear();
         self.created_dirs.clear();
         self.recovery_artifacts.clear();
+        self.retained_mutation_parents.clear();
         std::mem::forget(self);
     }
     pub fn new() -> Self {
@@ -284,6 +328,7 @@ impl FileTransaction {
             backups: Vec::new(),
             created_dirs: Vec::new(),
             recovery_artifacts: Vec::new(),
+            retained_mutation_parents: std::collections::HashMap::new(),
             installed_ownership: std::collections::HashMap::new(),
             unverified_installs: std::collections::HashSet::new(),
             guard_by_destination: std::collections::HashMap::new(),
@@ -293,7 +338,7 @@ impl FileTransaction {
             journal_entries: Vec::new(),
             journal_artifacts: Vec::new(),
             #[cfg(test)]
-            cohort_parent_syncs: 0,
+            cohort_pin_parent_syncs: 0,
             finished: false,
         }
     }
@@ -322,34 +367,21 @@ impl FileTransaction {
         // deleting entries. Every journal read and mutation is resolved through
         // this capability even if the lexical directory name is replaced.
         let journal_binding = bind_recovery_parent(root, &directory.join("entry"))?;
-        let entries: Vec<PathBuf> = match std::fs::read_dir(&directory) {
-            Ok(entries) => entries
-                .map(|entry| {
-                    entry
-                        .map(|entry| entry.path())
-                        .map_err(|error| io_error(error, &directory))
-                })
-                .collect::<Result<_, _>>()?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(io_error(error, &directory)),
-        };
-        // Collect first so Windows' ReadDirectoryChanges/read-directory handle is
-        // closed before we reopen the directory for a durable metadata flush.
+        run_after_journal_directory_bind_hook();
+        let entries = journal_binding
+            .read_entry_names()
+            .map_err(|error| io_error(error, &directory))?
+            .into_iter()
+            .map(|name| directory.join(name))
+            .collect::<Vec<_>>();
         for path in entries {
             if path.extension().and_then(|value| value.to_str()) != Some("json") {
                 continue;
             }
-            let metadata =
-                std::fs::symlink_metadata(&path).map_err(|error| io_error(error, &path))?;
-            if !metadata.is_file()
-                || metadata.file_type().is_symlink()
-                || transaction_is_reparse_point(&metadata)
-            {
-                return Err(staging_safe_io_error());
-            }
             let mut journal: Journal =
                 serde_json::from_slice(&read_regular_nofollow(&journal_binding, &path)?)
                     .map_err(|_| staging_safe_io_error())?;
+            validate_journal_recovery_artifacts(root, &journal)?;
             let indices: Vec<usize> = if journal.state == JournalState::Committed {
                 (0..journal.entries.len()).collect()
             } else {
@@ -367,7 +399,14 @@ impl FileTransaction {
                 let current_hash = current.as_deref().map(digest_bytes);
                 if journal.state == JournalState::Committed {
                     let desired_is_present = current_hash.as_deref() == Some(&intent.desired_hash)
-                        && journal_identity_matches(&parent_binding, &target, intent)?;
+                        && journal_identity_matches(
+                            root,
+                            &journal,
+                            &parent_binding,
+                            &target,
+                            intent,
+                            false,
+                        )?;
                     if (intent.desired_absent && current.is_some())
                         || (!intent.desired_absent && !desired_is_present)
                     {
@@ -398,6 +437,9 @@ impl FileTransaction {
                 }
                 if intent.recovery.is_some() || current_hash != previous_hash {
                     if intent.recovery.is_some() {
+                        if !journal_candidate_pin_matches(root, &journal, intent)? {
+                            return Err(conflict_error());
+                        }
                         resume_recovery_entry(
                             root,
                             &journal_binding,
@@ -410,7 +452,14 @@ impl FileTransaction {
                         continue;
                     }
                     if current_hash.as_deref() != Some(&intent.desired_hash)
-                        || !journal_identity_matches(&parent_binding, &target, intent)?
+                        || !journal_identity_matches(
+                            root,
+                            &journal,
+                            &parent_binding,
+                            &target,
+                            intent,
+                            true,
+                        )?
                     {
                         return Err(conflict_error());
                     }
@@ -428,13 +477,6 @@ impl FileTransaction {
             for relative in &journal.recovery_artifacts {
                 let artifact = safe_journal_target(root, relative)?;
                 let parent_binding = bind_recovery_parent(root, &artifact)?;
-                let name = artifact
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or_default();
-                if !(name.contains(".tmp") || name.contains(".wiki-guard-")) {
-                    return Err(staging_safe_io_error());
-                }
                 run_before_recovery_mutation_hook(&artifact);
                 match bound_remove_file(&parent_binding, &artifact) {
                     Ok(()) => {
@@ -502,6 +544,7 @@ impl FileTransaction {
         })
         .map_err(|_| staging_safe_io_error())?;
         write_atomic_bytes(root, &journal_path, &bytes)?;
+        run_after_initial_journal_publish_hook(&journal_path);
         Ok(())
     }
 
@@ -543,10 +586,12 @@ impl FileTransaction {
             recovery_artifacts: self.journal_artifacts.clone(),
         })
         .map_err(|_| staging_safe_io_error())?;
-        write_atomic_bytes(root, &journal_path, &bytes)
+        write_atomic_bytes(root, &journal_path, &bytes)?;
+        run_after_initial_journal_publish_hook(&journal_path);
+        Ok(())
     }
 
-    fn record_recovery_artifact(&mut self, path: &Path) -> Result<(), BackendError> {
+    fn stage_recovery_artifact(&mut self, path: &Path) -> Result<(), BackendError> {
         let Some(root) = self.project_root.as_deref() else {
             return Ok(());
         };
@@ -556,17 +601,7 @@ impl FileTransaction {
                 .to_string_lossy()
                 .replace('\\', "/"),
         );
-        let journal_path = self
-            .journal_path
-            .as_deref()
-            .ok_or_else(staging_safe_io_error)?;
-        let bytes = serde_json::to_vec(&Journal {
-            state: JournalState::InProgress,
-            entries: self.journal_entries.clone(),
-            recovery_artifacts: self.journal_artifacts.clone(),
-        })
-        .map_err(|_| staging_safe_io_error())?;
-        write_atomic_bytes(root, journal_path, &bytes)
+        Ok(())
     }
 
     fn mark_journal_committed(&self) -> Result<(), BackendError> {
@@ -589,6 +624,13 @@ impl FileTransaction {
 
     fn finish_journal(&mut self) -> Result<(), BackendError> {
         if let Some(path) = self.journal_path.take() {
+            #[cfg(all(test, unix))]
+            if FAIL_NEXT_JOURNAL_DELETE.with(|flag| flag.replace(false)) {
+                return Err(io_error(
+                    std::io::Error::other("injected journal delete failure"),
+                    &path,
+                ));
+            }
             let root = self
                 .project_root
                 .as_deref()
@@ -606,10 +648,15 @@ impl FileTransaction {
     pub fn write_new(&mut self, path: &Path, bytes: &[u8]) -> Result<(), BackendError> {
         let parent_binding = self.ensure_and_bind_mutation_parent(path)?;
         let temporary = write_synced_temp(&parent_binding, path, bytes)?;
-        let candidate_identity = bound_file_identity(&parent_binding, &temporary)?;
-        self.record_intent(path, None, bytes, candidate_identity)?;
         self.track_artifact(&parent_binding, &temporary)?;
-        self.record_recovery_artifact(&temporary)?;
+        let candidate_identity = bound_file_identity(&parent_binding, &temporary)?;
+        let candidate_pin = self.pin_candidate_identity(&parent_binding, &temporary)?;
+        self.sync_candidate_pin_parent(&parent_binding, candidate_pin.as_deref())?;
+        self.stage_recovery_artifact(&temporary)?;
+        if let Some(pin) = candidate_pin.as_deref() {
+            self.stage_recovery_artifact(pin)?;
+        }
+        self.record_intent(path, None, bytes, candidate_identity)?;
         #[cfg(test)]
         if let Some(entry) = self.journal_entries.last() {
             commit_fault_boundary("intent", Some(entry.relative_path.as_str()));
@@ -624,19 +671,26 @@ impl FileTransaction {
             }
         });
         if let Err(error) = install_candidate(&parent_binding, &temporary, path) {
-            let cleanup = self.cleanup_artifact(&temporary);
-            return match cleanup {
-                Ok(()) => Err(io_error(error, path)),
-                Err(cleanup) => Err(rollback_failure(
-                    "New-file install failed and temporary cleanup failed.",
-                    vec!["candidate install failed".to_string(), cleanup.message],
-                )),
-            };
+            let mut cleanup_failures = Vec::new();
+            for artifact in [Some(temporary.as_path()), candidate_pin.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                if let Err(cleanup) = self.cleanup_artifact(artifact) {
+                    cleanup_failures.push(cleanup.message);
+                }
+            }
+            if cleanup_failures.is_empty() {
+                return Err(io_error(error, path));
+            }
+            cleanup_failures.insert(0, "candidate install failed".to_string());
+            return Err(rollback_failure(
+                "New-file install failed and recovery artifact cleanup failed.",
+                cleanup_failures,
+            ));
         }
         self.backups.push(LiveBackup {
-            binding: parent_binding
-                .try_clone()
-                .map_err(|error| io_error(error, path))?,
+            binding: Arc::clone(&parent_binding),
             path: path.to_path_buf(),
             previous: None,
         });
@@ -658,7 +712,11 @@ impl FileTransaction {
     fn ensure_and_bind_mutation_parent(
         &mut self,
         path: &Path,
-    ) -> Result<RecoveryParentBinding, BackendError> {
+    ) -> Result<Arc<RecoveryParentBinding>, BackendError> {
+        let parent = path.parent().ok_or_else(staging_safe_io_error)?;
+        if self.retained_mutation_parents.contains_key(parent) {
+            return self.bind_mutation_parent(path);
+        }
         let fallback_root;
         let root = if let Some(root) = self.project_root.as_deref() {
             root
@@ -673,15 +731,41 @@ impl FileTransaction {
         let (binding, created) = RecoveryParentBinding::ensure_and_bind(root, path)
             .map_err(|error| io_error(error, path))?;
         self.created_dirs.extend(created);
-        Ok(binding)
+        self.retain_mutation_parent(path, binding)
     }
 
-    fn bind_mutation_parent(&self, path: &Path) -> Result<RecoveryParentBinding, BackendError> {
-        if let Some(root) = self.project_root.as_deref() {
-            return bind_recovery_parent(root, path);
-        }
+    fn bind_mutation_parent(
+        &mut self,
+        path: &Path,
+    ) -> Result<Arc<RecoveryParentBinding>, BackendError> {
         let parent = path.parent().ok_or_else(staging_safe_io_error)?;
-        RecoveryParentBinding::bind(parent, path).map_err(|error| io_error(error, path))
+        let binding = if let Some(root) = self.project_root.as_deref() {
+            bind_recovery_parent(root, path)?
+        } else {
+            RecoveryParentBinding::bind(parent, path).map_err(|error| io_error(error, path))?
+        };
+        self.retain_mutation_parent(path, binding)
+    }
+
+    fn retain_mutation_parent(
+        &mut self,
+        path: &Path,
+        binding: RecoveryParentBinding,
+    ) -> Result<Arc<RecoveryParentBinding>, BackendError> {
+        let key = binding.parent().to_path_buf();
+        if let Some(retained) = self.retained_mutation_parents.get(&key) {
+            if !retained
+                .has_same_directory_identity(&binding)
+                .map_err(|error| io_error(error, path))?
+            {
+                return Err(conflict_error());
+            }
+            return Ok(Arc::clone(retained));
+        }
+        let binding = Arc::new(binding);
+        self.retained_mutation_parents
+            .insert(key, Arc::clone(&binding));
+        Ok(binding)
     }
 
     fn cleanup_artifact(&mut self, path: &Path) -> Result<(), BackendError> {
@@ -710,10 +794,7 @@ impl FileTransaction {
             .iter()
             .find(|artifact| artifact.path == path)
         {
-            artifact
-                .binding
-                .try_clone()
-                .map_err(|error| io_error(error, path))?
+            Arc::clone(&artifact.binding)
         } else {
             self.bind_mutation_parent(path)?
         };
@@ -729,13 +810,57 @@ impl FileTransaction {
 
     fn track_artifact(
         &mut self,
-        binding: &RecoveryParentBinding,
+        binding: &Arc<RecoveryParentBinding>,
         path: &Path,
     ) -> Result<(), BackendError> {
         self.recovery_artifacts.push(LiveRecoveryArtifact {
-            binding: binding.try_clone().map_err(|error| io_error(error, path))?,
+            binding: Arc::clone(binding),
             path: path.to_path_buf(),
         });
+        Ok(())
+    }
+
+    fn pin_candidate_identity(
+        &mut self,
+        binding: &Arc<RecoveryParentBinding>,
+        temporary: &Path,
+    ) -> Result<Option<PathBuf>, BackendError> {
+        #[cfg(unix)]
+        {
+            let pin = binding
+                .parent()
+                .join(format!(".wiki-guard-installed-{}", uuid::Uuid::new_v4()));
+            if let Err(error) = bound_hard_link(binding, temporary, &pin) {
+                return Err(hard_link_identity_proof_error(error, &pin));
+            }
+            if let Err(error) = self.track_artifact(binding, &pin) {
+                let _ = bound_remove_file(binding, &pin);
+                return Err(error);
+            }
+            Ok(Some(pin))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (binding, temporary);
+            Ok(None)
+        }
+    }
+
+    fn sync_candidate_pin_parent(
+        &mut self,
+        binding: &RecoveryParentBinding,
+        pin: Option<&Path>,
+    ) -> Result<(), BackendError> {
+        if pin.is_none() {
+            return Ok(());
+        }
+        if let Err(error) = binding.sync() {
+            let primary = io_error(error, binding.parent());
+            if let Some(pin) = pin {
+                let _ = self.cleanup_artifact(pin);
+            }
+            return Err(primary);
+        }
         Ok(())
     }
 
@@ -762,7 +887,7 @@ impl FileTransaction {
         run_before_checked_displace_hook(path);
         if let Err(error) = bound_hard_link(&parent_binding, path, &guard) {
             let _ = self.cleanup_artifact(&temporary);
-            return Err(io_error(error, path));
+            return Err(hard_link_identity_proof_error(error, path));
         }
         self.track_artifact(&parent_binding, &guard)?;
         self.guard_by_destination
@@ -786,14 +911,19 @@ impl FileTransaction {
             return Err(conflict_error());
         }
         let candidate_identity = bound_file_identity(&parent_binding, &temporary)?;
+        let candidate_pin = self.pin_candidate_identity(&parent_binding, &temporary)?;
+        self.sync_candidate_pin_parent(&parent_binding, candidate_pin.as_deref())?;
+        self.stage_recovery_artifact(&temporary)?;
+        self.stage_recovery_artifact(&guard)?;
+        if let Some(pin) = candidate_pin.as_deref() {
+            self.stage_recovery_artifact(pin)?;
+        }
         self.record_intent(
             path,
             Some(previous_before.clone()),
             bytes,
             candidate_identity,
         )?;
-        self.record_recovery_artifact(&temporary)?;
-        self.record_recovery_artifact(&guard)?;
         #[cfg(test)]
         if let Some(entry) = self.journal_entries.last() {
             commit_fault_boundary("intent", Some(entry.relative_path.as_str()));
@@ -803,6 +933,9 @@ impl FileTransaction {
         if FAIL_NEXT_CANDIDATE_INSTALL.with(|flag| flag.replace(false)) {
             let _ = self.cleanup_artifact(&temporary);
             let _ = self.cleanup_artifact(&guard);
+            if let Some(pin) = candidate_pin.as_deref() {
+                let _ = self.cleanup_artifact(pin);
+            }
             return Err(io_error(
                 std::io::Error::other("injected candidate install failure"),
                 path,
@@ -816,12 +949,13 @@ impl FileTransaction {
         ) {
             let _ = self.cleanup_artifact(&temporary);
             let _ = self.cleanup_artifact(&guard);
+            if let Some(pin) = candidate_pin.as_deref() {
+                let _ = self.cleanup_artifact(pin);
+            }
             return Err(io_error(error, path));
         }
         self.backups.push(LiveBackup {
-            binding: parent_binding
-                .try_clone()
-                .map_err(|error| io_error(error, path))?,
+            binding: Arc::clone(&parent_binding),
             path: path.to_path_buf(),
             previous: Some(previous_before.clone()),
         });
@@ -893,7 +1027,7 @@ impl FileTransaction {
             run_before_checked_displace_hook(path);
             if let Err(error) = bound_hard_link(&parent_binding, path, &guard) {
                 let _ = self.cleanup_artifact(&temporary);
-                return Err(io_error(error, path));
+                return Err(hard_link_identity_proof_error(error, path));
             }
             self.track_artifact(&parent_binding, &guard)?;
             self.guard_by_destination
@@ -905,6 +1039,7 @@ impl FileTransaction {
                 return Err(conflict_error());
             }
             let candidate_identity = bound_file_identity(&parent_binding, &temporary)?;
+            self.pin_candidate_identity(&parent_binding, &temporary)?;
             pending.push(PendingCheckedReplacement {
                 parent_binding,
                 path: path.clone(),
@@ -915,6 +1050,22 @@ impl FileTransaction {
                 candidate_identity,
                 desired: desired.clone(),
             });
+        }
+        #[cfg(unix)]
+        {
+            let mut synced_pin_parents = HashSet::new();
+            for replacement in &pending {
+                if synced_pin_parents.insert(replacement.parent_binding.parent().to_path_buf()) {
+                    replacement
+                        .parent_binding
+                        .sync()
+                        .map_err(|error| io_error(error, replacement.parent_binding.parent()))?;
+                    #[cfg(test)]
+                    {
+                        self.cohort_pin_parent_syncs += 1;
+                    }
+                }
+            }
         }
         if should_cancel() {
             return Err(transaction_cancelled_error());
@@ -940,10 +1091,7 @@ impl FileTransaction {
                 )
                 .map_err(|error| io_error(error, &replacement.path))?;
             self.backups.push(LiveBackup {
-                binding: replacement
-                    .parent_binding
-                    .try_clone()
-                    .map_err(|error| io_error(error, &replacement.path))?,
+                binding: Arc::clone(&replacement.parent_binding),
                 path: replacement.path.clone(),
                 previous: Some(replacement.previous),
             });
@@ -963,25 +1111,31 @@ impl FileTransaction {
         if should_cancel() {
             return Err(transaction_cancelled_error());
         }
-        #[cfg(test)]
-        {
-            self.cohort_parent_syncs = writes
-                .iter()
-                .filter_map(|(path, _, _)| path.parent())
-                .collect::<HashSet<_>>()
-                .len();
-        }
         // The journal retains all artifact names until commit, but the live
         // vector need not remove them one-by-one (which is quadratic at
         // 10,000 items). If an earlier step failed, this line is not reached
         // and rollback still owns the complete artifact set.
-        self.recovery_artifacts.clear();
+        self.recovery_artifacts
+            .retain(|artifact| is_candidate_identity_pin(&artifact.path));
         Ok(())
     }
 
     #[cfg(test)]
-    fn cohort_parent_sync_count(&self) -> usize {
-        self.cohort_parent_syncs
+    fn cohort_pin_parent_sync_count(&self) -> usize {
+        self.cohort_pin_parent_syncs
+    }
+
+    #[cfg(test)]
+    fn retained_mutation_parent_count(&self) -> usize {
+        self.retained_mutation_parents.len()
+    }
+
+    #[cfg(test)]
+    fn retained_installed_anchor_count(&self) -> usize {
+        self.installed_ownership
+            .values()
+            .filter(|ownership| ownership._anchor.is_some())
+            .count()
     }
 
     pub fn delete_if_hash_matches(
@@ -1003,7 +1157,8 @@ impl FileTransaction {
             .join(format!(".wiki-delete-guard-{}", uuid::Uuid::new_v4()));
         let parent_binding = self.bind_mutation_parent(path)?;
         run_before_checked_displace_hook(path);
-        bound_hard_link(&parent_binding, path, &guard).map_err(|error| io_error(error, path))?;
+        bound_hard_link(&parent_binding, path, &guard)
+            .map_err(|error| hard_link_identity_proof_error(error, path))?;
         self.track_artifact(&parent_binding, &guard)?;
         let before_identity = bound_file_identity(&parent_binding, path)?;
         let guard_identity = bound_file_identity(&parent_binding, &guard)?;
@@ -1012,8 +1167,8 @@ impl FileTransaction {
             let _ = self.cleanup_artifact(&guard);
             return Err(conflict_error());
         }
+        self.stage_recovery_artifact(&guard)?;
         self.record_delete_intent(path, previous.clone())?;
-        self.record_recovery_artifact(&guard)?;
         #[cfg(test)]
         if let Some(entry) = self.journal_entries.last() {
             commit_fault_boundary("intent", Some(entry.relative_path.as_str()));
@@ -1027,9 +1182,7 @@ impl FileTransaction {
             .remove_file_if_identity_and_hash(path, before_identity, expected_hash)
             .map_err(|error| io_error(error, path))?;
         self.backups.push(LiveBackup {
-            binding: parent_binding
-                .try_clone()
-                .map_err(|error| io_error(error, path))?,
+            binding: Arc::clone(&parent_binding),
             path: path.to_path_buf(),
             previous: Some(previous),
         });
@@ -1045,9 +1198,14 @@ impl FileTransaction {
     }
 
     pub fn commit(mut self) -> Result<(), BackendError> {
+        if let Err(error) = self.verify_live_installed_ownership() {
+            return Err(self.rollback_after(error));
+        }
+        let has_durable_journal = self.journal_path.is_some();
         let artifacts = self
             .recovery_artifacts
             .iter()
+            .filter(|artifact| !has_durable_journal || !is_candidate_identity_pin(&artifact.path))
             .map(|artifact| artifact.path.clone())
             .collect::<Vec<_>>();
         for artifact in artifacts {
@@ -1055,10 +1213,38 @@ impl FileTransaction {
                 return Err(self.rollback_after(error));
             }
         }
-        self.mark_journal_committed()?;
+        if let Err(error) = self.mark_journal_committed() {
+            return Err(self.rollback_after(error));
+        }
+        if has_durable_journal {
+            // A durable committed marker is the point of no return. Candidate
+            // identity pins must survive until this marker reaches disk, and a
+            // later cleanup failure must never make Drop roll back committed
+            // project bytes. The committed journal remains available for the
+            // next reconciliation attempt when cleanup cannot finish here.
+            self.finished = true;
+        }
         #[cfg(test)]
         commit_fault_boundary("committed", None);
-        self.finish_journal()?;
+        if has_durable_journal {
+            let identity_pins = self
+                .recovery_artifacts
+                .iter()
+                .filter(|artifact| is_candidate_identity_pin(&artifact.path))
+                .map(|artifact| artifact.path.clone())
+                .collect::<Vec<_>>();
+            for pin in identity_pins {
+                if self.cleanup_artifact(&pin).is_err() {
+                    // The durable committed journal remains the source of
+                    // truth. Reconciliation can retry cleanup; callers must
+                    // not treat already-committed project bytes as rolled back.
+                    return Ok(());
+                }
+            }
+        }
+        if self.finish_journal().is_err() && has_durable_journal {
+            return Ok(());
+        }
         #[cfg(test)]
         commit_fault_boundary("deleted", None);
         self.finished = true;
@@ -1127,16 +1313,22 @@ impl FileTransaction {
 
     fn capture_cohort_install(
         &mut self,
-        binding: &RecoveryParentBinding,
+        binding: &Arc<RecoveryParentBinding>,
         path: &Path,
         bytes: &[u8],
         expected_identity: FileIdentity,
     ) -> Result<(), BackendError> {
         self.unverified_installs.insert(path.to_path_buf());
-        let anchor = binding
-            .open_regular_pinned(path)
-            .map_err(|error| io_error(error, path))?;
-        let identity = file_identity_from_file(&anchor, path)?;
+        #[cfg(unix)]
+        let (identity, anchor) = (bound_file_identity(binding, path)?, None);
+        #[cfg(not(unix))]
+        let (identity, anchor) = {
+            let anchor = binding
+                .open_regular_pinned(path)
+                .map_err(|error| io_error(error, path))?;
+            let identity = file_identity_from_file(&anchor, path)?;
+            (identity, Some(anchor))
+        };
         if identity != expected_identity {
             return Err(conflict_error());
         }
@@ -1145,7 +1337,7 @@ impl FileTransaction {
             InstalledOwnership {
                 identity,
                 hash: digest_bytes(bytes),
-                binding: binding.try_clone().map_err(|error| io_error(error, path))?,
+                binding: Arc::clone(binding),
                 _anchor: anchor,
             },
         );
@@ -1155,7 +1347,7 @@ impl FileTransaction {
 
     fn capture_installed_expected(
         &mut self,
-        binding: &RecoveryParentBinding,
+        binding: &Arc<RecoveryParentBinding>,
         path: &Path,
         bytes: &[u8],
         expected_identity: FileIdentity,
@@ -1168,10 +1360,16 @@ impl FileTransaction {
                 path,
             ));
         }
-        let anchor = binding
-            .open_regular_pinned(path)
-            .map_err(|error| io_error(error, path))?;
-        let identity = file_identity_from_file(&anchor, path)?;
+        #[cfg(unix)]
+        let (identity, anchor) = (bound_file_identity(binding, path)?, None);
+        #[cfg(not(unix))]
+        let (identity, anchor) = {
+            let anchor = binding
+                .open_regular_pinned(path)
+                .map_err(|error| io_error(error, path))?;
+            let identity = file_identity_from_file(&anchor, path)?;
+            (identity, Some(anchor))
+        };
         if identity != expected_identity {
             return Err(conflict_error());
         }
@@ -1180,7 +1378,7 @@ impl FileTransaction {
             InstalledOwnership {
                 identity,
                 hash: digest_bytes(bytes),
-                binding: binding.try_clone().map_err(|error| io_error(error, path))?,
+                binding: Arc::clone(binding),
                 _anchor: anchor,
             },
         );
@@ -1210,6 +1408,39 @@ impl FileTransaction {
         Ok(())
     }
 
+    fn verify_live_installed_ownership(&self) -> Result<(), BackendError> {
+        for (path, ownership) in &self.installed_ownership {
+            let target_still_owned = bound_file_identity(&ownership.binding, path).ok()
+                == Some(ownership.identity)
+                && read_regular_nofollow(&ownership.binding, path)
+                    .ok()
+                    .map(|bytes| digest_bytes(&bytes))
+                    .as_deref()
+                    == Some(ownership.hash.as_str());
+            if !target_still_owned || !self.live_candidate_pin_matches(ownership.identity) {
+                return Err(conflict_error());
+            }
+        }
+        Ok(())
+    }
+
+    fn live_candidate_pin_matches(&self, expected: FileIdentity) -> bool {
+        #[cfg(unix)]
+        {
+            self.recovery_artifacts
+                .iter()
+                .filter(|artifact| is_candidate_identity_pin(&artifact.path))
+                .any(|artifact| {
+                    bound_file_identity(&artifact.binding, &artifact.path).ok() == Some(expected)
+                })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = expected;
+            true
+        }
+    }
+
     pub(super) fn rollback(&mut self) -> Result<(), BackendError> {
         let mut failures = Vec::new();
         let mut ownership_valid = std::collections::HashMap::new();
@@ -1220,7 +1451,8 @@ impl FileTransaction {
                     .ok()
                     .map(|bytes| digest_bytes(&bytes))
                     .as_ref()
-                    == Some(&ownership.hash);
+                    == Some(&ownership.hash)
+                && self.live_candidate_pin_matches(ownership.identity);
             ownership_valid.insert(
                 path.clone(),
                 valid.then(|| (ownership.identity, ownership.hash.clone())),
@@ -1328,6 +1560,11 @@ impl FileTransaction {
         // can safely rebind those recorded names.
         self.backups.clear();
         self.recovery_artifacts.clear();
+        // Shared parent capabilities deliberately outlive every individual
+        // mutation, but Windows keeps their directory handles open. Release
+        // them before removing transaction-created directories so an otherwise
+        // complete rollback is not mislabeled as incomplete.
+        self.retained_mutation_parents.clear();
         if failures.is_empty() {
             while let Some(directory) = self.created_dirs.pop() {
                 if let Err(error) = directory.remove_if_empty() {
@@ -1461,6 +1698,52 @@ fn conflict_error() -> BackendError {
     )
 }
 
+fn candidate_identity_pin_error(error: std::io::Error, path: &Path) -> BackendError {
+    BackendError::new(
+        "IMPORT_V2_IDENTITY_PIN_UNAVAILABLE",
+        "The project filesystem cannot provide the hard-link identity proof required for a fail-closed import write.",
+        false,
+        true,
+    )
+    .with_details(serde_json::json!({
+        "path": path.to_string_lossy(),
+        "error": error.to_string(),
+    }))
+}
+
+fn hard_link_identity_proof_error(error: std::io::Error, path: &Path) -> BackendError {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return conflict_error();
+    }
+    if hard_link_capability_unavailable(&error) {
+        return candidate_identity_pin_error(error, path);
+    }
+    io_error(error, path)
+}
+
+fn hard_link_capability_unavailable(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::Unsupported {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        matches!(
+            error.raw_os_error(),
+            Some(libc::EXDEV) | Some(libc::EPERM) | Some(libc::EOPNOTSUPP)
+        )
+    }
+    #[cfg(windows)]
+    {
+        // ERROR_INVALID_FUNCTION, ERROR_NOT_SAME_DEVICE,
+        // ERROR_NOT_SUPPORTED.
+        matches!(error.raw_os_error(), Some(1) | Some(17) | Some(50))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
+}
+
 /// Derive a journal path from the transaction's explicit trusted root.
 ///
 /// Existing write resolvers return a canonical parent on Windows, which may
@@ -1513,6 +1796,110 @@ fn safe_journal_target(root: &Path, relative: &str) -> Result<PathBuf, BackendEr
     Ok(target)
 }
 
+#[derive(Clone, Copy)]
+enum JournalArtifactKind {
+    Candidate,
+    OriginalGuard,
+    DeleteGuard,
+}
+
+fn validate_journal_recovery_artifacts(root: &Path, journal: &Journal) -> Result<(), BackendError> {
+    if journal.entries.is_empty() && !journal.recovery_artifacts.is_empty() {
+        return Err(staging_safe_io_error());
+    }
+    let mut unique = HashSet::new();
+    for relative in &journal.recovery_artifacts {
+        if !unique.insert(relative.as_str()) {
+            return Err(staging_safe_io_error());
+        }
+        let artifact = safe_journal_target(root, relative)?;
+        let artifact_parent = artifact.parent().ok_or_else(staging_safe_io_error)?;
+        let artifact_name = artifact
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(staging_safe_io_error)?;
+        let associations = journal
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                let target = safe_journal_target(root, &entry.relative_path).ok()?;
+                if target.parent() != Some(artifact_parent) {
+                    return None;
+                }
+                journal_artifact_kind(artifact_name, &target, entry).map(|kind| (entry, kind))
+            })
+            .collect::<Vec<_>>();
+        if associations.is_empty() {
+            return Err(staging_safe_io_error());
+        }
+        let binding = bind_recovery_parent(root, &artifact)?;
+        let existing = match binding.read_regular_with_identity(&artifact) {
+            Ok((bytes, identity)) => Some((digest_bytes(&bytes), identity)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return Err(staging_safe_io_error()),
+        };
+
+        let matches_entry = associations
+            .into_iter()
+            .any(|(entry, kind)| match (&existing, kind) {
+                (None, _) => true,
+                (Some((hash, identity)), JournalArtifactKind::Candidate) => {
+                    !entry.desired_absent
+                        && hash == &entry.desired_hash
+                        && entry.installed_identity.as_ref() == Some(identity)
+                }
+                (Some((hash, _)), JournalArtifactKind::OriginalGuard) => {
+                    !entry.desired_absent
+                        && entry.previous.as_deref().map(digest_bytes).as_ref() == Some(hash)
+                }
+                (Some((hash, _)), JournalArtifactKind::DeleteGuard) => {
+                    entry.desired_absent
+                        && entry.previous.as_deref().map(digest_bytes).as_ref() == Some(hash)
+                }
+            });
+        if !matches_entry {
+            // The journal still owns a structurally valid artifact name, but
+            // the namespace object no longer proves the recorded transaction
+            // identity. Treat that as external drift and stop fail-closed;
+            // malformed or unassociated artifact names are rejected above.
+            return Err(conflict_error());
+        }
+    }
+    Ok(())
+}
+
+fn journal_artifact_kind(
+    artifact_name: &str,
+    target: &Path,
+    entry: &JournalEntry,
+) -> Option<JournalArtifactKind> {
+    let target_name = target.file_name()?.to_string_lossy();
+    let temporary_prefix = format!(".{target_name}.");
+    if generated_uuid_name(artifact_name, &temporary_prefix, ".tmp") {
+        return Some(JournalArtifactKind::Candidate);
+    }
+    if generated_uuid_name(artifact_name, ".wiki-guard-installed-", "") {
+        return Some(JournalArtifactKind::Candidate);
+    }
+    if entry.previous.is_some() && generated_uuid_name(artifact_name, ".wiki-guard-", "") {
+        return Some(JournalArtifactKind::OriginalGuard);
+    }
+    if entry.desired_absent && generated_uuid_name(artifact_name, ".wiki-delete-guard-", "") {
+        return Some(JournalArtifactKind::DeleteGuard);
+    }
+    None
+}
+
+fn generated_uuid_name(name: &str, prefix: &str, suffix: &str) -> bool {
+    let Some(rest) = name.strip_prefix(prefix) else {
+        return false;
+    };
+    let Some(id) = rest.strip_suffix(suffix) else {
+        return false;
+    };
+    uuid::Uuid::parse_str(id).is_ok()
+}
+
 fn bind_recovery_parent(root: &Path, target: &Path) -> Result<RecoveryParentBinding, BackendError> {
     RecoveryParentBinding::bind(root, target).map_err(|error| io_error(error, target))
 }
@@ -1527,6 +1914,11 @@ fn bound_hard_link(
     new_path: &Path,
 ) -> Result<(), std::io::Error> {
     binding.hard_link(existing, new_path)
+}
+
+fn is_candidate_identity_pin(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with(".wiki-guard-installed-"))
 }
 
 fn persist_recovery_journal(
@@ -1803,21 +2195,64 @@ fn digest_bytes(bytes: &[u8]) -> String {
 }
 
 fn journal_identity_matches(
+    root: &Path,
+    journal: &Journal,
     binding: &RecoveryParentBinding,
     path: &Path,
+    entry: &JournalEntry,
+    require_candidate_pin: bool,
+) -> Result<bool, BackendError> {
+    let Some(expected) = entry.installed_identity else {
+        return Ok(false);
+    };
+    let target_matches = bound_file_identity(binding, path).map(|actual| actual == expected)?;
+    if !target_matches {
+        return Ok(false);
+    }
+    if require_candidate_pin {
+        journal_candidate_pin_matches(root, journal, entry)
+    } else {
+        Ok(true)
+    }
+}
+
+fn journal_candidate_pin_matches(
+    root: &Path,
+    journal: &Journal,
     entry: &JournalEntry,
 ) -> Result<bool, BackendError> {
     let Some(expected) = entry.installed_identity else {
         return Ok(false);
     };
-    bound_file_identity(binding, path).map(|actual| actual == expected)
+    #[cfg(unix)]
+    {
+        for relative in &journal.recovery_artifacts {
+            let artifact = safe_journal_target(root, relative)?;
+            if !is_candidate_identity_pin(&artifact) {
+                continue;
+            }
+            let binding = bind_recovery_parent(root, &artifact)?;
+            match binding.file_identity(&artifact) {
+                Ok(actual) if actual == expected => return Ok(true),
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(io_error(error, &artifact)),
+            }
+        }
+        Ok(false)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (root, journal, expected);
+        Ok(true)
+    }
 }
 
 struct InstalledOwnership {
     identity: FileIdentity,
     hash: String,
-    binding: RecoveryParentBinding,
-    _anchor: std::fs::File,
+    binding: Arc<RecoveryParentBinding>,
+    _anchor: Option<std::fs::File>,
 }
 
 #[cfg(unix)]
@@ -1907,16 +2342,34 @@ fn io_error(error: std::io::Error, path: &Path) -> BackendError {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::set_after_journal_directory_bind_hook;
     use super::{
-        digest_bytes, set_before_checked_displace_hook, set_before_checked_final_mutation_hook,
+        digest_bytes, hard_link_identity_proof_error, set_after_initial_journal_publish_hook,
+        set_before_checked_displace_hook, set_before_checked_final_mutation_hook,
         set_before_new_install_hook, set_before_recovery_final_mutation_hook,
         set_before_recovery_mutation_hook, set_before_rollback_final_mutation_hook,
         set_fail_next_candidate_install, set_fail_next_cleanup, set_fail_next_identity_query,
-        set_recovery_process_death_hook, FileTransaction, IMPORT_V2_CANCELLED,
-        IMPORT_V2_COMMIT_CONFLICT,
+        set_recovery_process_death_hook, FileTransaction, Journal, JournalState,
+        IMPORT_V2_CANCELLED, IMPORT_V2_COMMIT_CONFLICT,
     };
     use sha2::Digest;
     use std::path::Path;
+
+    #[cfg(unix)]
+    fn candidate_identity_pin(root: &Path) -> std::path::PathBuf {
+        std::fs::read_dir(root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".wiki-guard-installed-")
+            })
+            .expect("candidate identity pin")
+            .path()
+    }
 
     #[test]
     fn checked_overwrite_and_delete_preserve_last_moment_external_edits() {
@@ -1942,6 +2395,25 @@ mod tests {
             assert_eq!(std::fs::read(&path).unwrap(), b"external");
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn hard_link_identity_proof_errors_preserve_race_classification() {
+        let path = Path::new("wiki/page.md");
+        let race = hard_link_identity_proof_error(
+            std::io::Error::from(std::io::ErrorKind::NotFound),
+            path,
+        );
+        assert_eq!(race.code, IMPORT_V2_COMMIT_CONFLICT);
+
+        #[cfg(unix)]
+        let unsupported = std::io::Error::from_raw_os_error(libc::EXDEV);
+        #[cfg(windows)]
+        let unsupported = std::io::Error::from_raw_os_error(50);
+        #[cfg(not(any(unix, windows)))]
+        let unsupported = std::io::Error::from(std::io::ErrorKind::Unsupported);
+        let capability = hard_link_identity_proof_error(unsupported, path);
+        assert_eq!(capability.code, "IMPORT_V2_IDENTITY_PIN_UNAVAILABLE");
     }
 
     #[test]
@@ -1971,6 +2443,29 @@ mod tests {
             assert_eq!(std::fs::read(&path).unwrap(), b"external");
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_rejects_external_target_replacement_even_while_candidate_pin_survives() {
+        let root = std::env::temp_dir().join(format!(
+            "import-v2-commit-target-replacement-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("page.md");
+        let displaced = root.join("candidate-displaced.md");
+
+        let mut transaction = FileTransaction::new_for_project(&root);
+        transaction.write_new(&path, b"candidate").unwrap();
+        std::fs::rename(&path, &displaced).unwrap();
+        std::fs::write(&path, b"external").unwrap();
+
+        let result = transaction.commit();
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"external");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2016,6 +2511,38 @@ mod tests {
                 b"derived",
             )
             .unwrap();
+        transaction.commit().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn first_single_file_journal_publish_contains_every_prepared_artifact() {
+        let root = std::env::temp_dir().join(format!(
+            "import-v2-initial-journal-artifacts-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("page.md");
+        let observed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let hook_observed = observed.clone();
+        set_after_initial_journal_publish_hook(move |path| {
+            let journal: Journal = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            assert_eq!(journal.entries.len(), 1);
+            assert!(journal
+                .recovery_artifacts
+                .iter()
+                .any(|artifact| artifact.starts_with(".page.md.") && artifact.ends_with(".tmp")));
+            #[cfg(unix)]
+            assert!(journal
+                .recovery_artifacts
+                .iter()
+                .any(|artifact| artifact.starts_with(".wiki-guard-installed-")));
+            hook_observed.set(true);
+        });
+
+        let mut transaction = FileTransaction::new_for_project(&root);
+        transaction.write_new(&target, b"candidate").unwrap();
+        assert!(observed.get());
         transaction.commit().unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -2101,7 +2628,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_cohort_syncs_each_parent_once_not_once_per_item() {
+    fn checked_cohort_reuses_one_retained_parent_capability_and_syncs_once() {
         let root = std::env::temp_dir().join(format!("import-v2-cohort-{}", uuid::Uuid::new_v4()));
         let items = root.join(".app/import-sessions/s/items");
         std::fs::create_dir_all(&items).unwrap();
@@ -2114,11 +2641,57 @@ mod tests {
             .collect::<Vec<_>>();
         let mut transaction = FileTransaction::new_for_project(&root);
         transaction.write_many_if_hash_matches(&writes).unwrap();
-        assert_eq!(transaction.cohort_parent_sync_count(), 1);
+        assert_eq!(transaction.retained_mutation_parent_count(), 1);
+        assert_eq!(
+            transaction.retained_installed_anchor_count(),
+            if cfg!(unix) { 0 } else { writes.len() }
+        );
+        assert_eq!(
+            transaction.cohort_pin_parent_sync_count(),
+            usize::from(cfg!(unix))
+        );
         transaction.commit().unwrap();
         assert!(writes
             .iter()
             .all(|(path, _, _)| std::fs::read(path).unwrap() == b"after"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_cohort_rejects_a_parent_directory_swap_before_reusing_its_capability() {
+        let root = std::env::temp_dir().join(format!(
+            "import-v2-cohort-parent-swap-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let items = root.join(".app/import-sessions/s/items");
+        let parked = root.join("parked-items");
+        std::fs::create_dir_all(&items).unwrap();
+        let writes = ["one.json", "two.json"]
+            .into_iter()
+            .map(|name| {
+                let path = items.join(name);
+                std::fs::write(&path, b"before").unwrap();
+                (path, b"after".to_vec(), digest_bytes(b"before"))
+            })
+            .collect::<Vec<_>>();
+        let live_for_hook = items.clone();
+        let parked_for_hook = parked.clone();
+        set_before_checked_displace_hook(move |_| {
+            std::fs::rename(&live_for_hook, &parked_for_hook).unwrap();
+            std::fs::create_dir_all(&live_for_hook).unwrap();
+            true
+        });
+
+        let error = {
+            let mut transaction = FileTransaction::new_for_project(&root);
+            transaction.write_many_if_hash_matches(&writes).unwrap_err()
+        };
+
+        assert_eq!(error.code, IMPORT_V2_COMMIT_CONFLICT);
+        assert_eq!(std::fs::read(parked.join("one.json")).unwrap(), b"before");
+        assert_eq!(std::fs::read(parked.join("two.json")).unwrap(), b"before");
+        assert!(std::fs::read_dir(&items).unwrap().next().is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2386,6 +2959,135 @@ mod tests {
         });
         transaction.rollback().unwrap_err();
         assert_eq!(std::fs::read(&path).unwrap(), b"same bytes");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn candidate_identity_pin_is_journaled_until_durable_commit() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = std::env::temp_dir().join(format!("import-v2-tx-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("new.bin");
+        let mut transaction = FileTransaction::new_for_project(&root);
+        transaction.write_new(&path, b"candidate").unwrap();
+
+        let identity_pin = candidate_identity_pin(&root);
+        let installed_metadata = std::fs::metadata(&path).unwrap();
+        let pin_metadata = std::fs::metadata(&identity_pin).unwrap();
+        assert_eq!(
+            (installed_metadata.dev(), installed_metadata.ino()),
+            (pin_metadata.dev(), pin_metadata.ino())
+        );
+
+        let journal_path = transaction.journal_path.as_ref().unwrap();
+        let journal: super::Journal =
+            serde_json::from_slice(&std::fs::read(journal_path).unwrap()).unwrap();
+        assert!(journal.recovery_artifacts.iter().any(|artifact| {
+            artifact
+                .split('/')
+                .next_back()
+                .is_some_and(|name| name.starts_with(".wiki-guard-installed-"))
+        }));
+
+        transaction.commit().unwrap();
+        assert!(!identity_pin.exists());
+        assert_eq!(
+            std::fs::read_dir(root.join(".app/import-v2-journal"))
+                .unwrap()
+                .count(),
+            0
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_rollback_preserves_candidate_when_identity_pin_is_missing() {
+        let root = std::env::temp_dir().join(format!("import-v2-tx-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("new.bin");
+        let mut transaction = FileTransaction::new_for_project(&root);
+        transaction.write_new(&path, b"candidate").unwrap();
+        std::fs::remove_file(candidate_identity_pin(&root)).unwrap();
+
+        let error = transaction
+            .rollback()
+            .expect_err("a missing pin must invalidate live rollback ownership");
+
+        assert_eq!(error.code, crate::errors::IMPORT_V2_COMMIT_FAILED);
+        assert_eq!(std::fs::read(&path).unwrap(), b"candidate");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restart_recovery_rejects_missing_or_rebound_identity_pin() {
+        for rebind in [false, true] {
+            let root = std::env::temp_dir().join(format!("import-v2-tx-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&root).unwrap();
+            let path = root.join("new.bin");
+            let mut transaction = FileTransaction::new_for_project(&root);
+            transaction.write_new(&path, b"candidate").unwrap();
+            let pin = candidate_identity_pin(&root);
+            transaction.simulate_process_crash();
+            std::fs::remove_file(&pin).unwrap();
+            if rebind {
+                std::fs::write(&pin, b"unrelated pin replacement").unwrap();
+            }
+
+            let error = FileTransaction::reconcile_project(&root)
+                .expect_err("recovery must require the journaled candidate inode anchor");
+
+            assert_eq!(error.code, IMPORT_V2_COMMIT_CONFLICT);
+            assert_eq!(std::fs::read(&path).unwrap(), b"candidate");
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn committed_pin_cleanup_failure_is_success_and_reconciles_later() {
+        let root = std::env::temp_dir().join(format!("import-v2-tx-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("new.bin");
+        let mut transaction = FileTransaction::new_for_project(&root);
+        transaction.write_new(&path, b"candidate").unwrap();
+        set_fail_next_cleanup("guard");
+
+        transaction
+            .commit()
+            .expect("cleanup after the durable marker cannot undo commit success");
+        assert_eq!(std::fs::read(&path).unwrap(), b"candidate");
+        assert!(candidate_identity_pin(&root).exists());
+        FileTransaction::reconcile_project(&root).unwrap();
+        assert!(!std::fs::read_dir(root.join(".app/import-v2-journal"))
+            .unwrap()
+            .any(|entry| entry.is_ok()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn committed_journal_without_pin_reconciles_after_delete_failure() {
+        let root = std::env::temp_dir().join(format!("import-v2-tx-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("new.bin");
+        let mut transaction = FileTransaction::new_for_project(&root);
+        transaction.write_new(&path, b"candidate").unwrap();
+        let pin = candidate_identity_pin(&root);
+        super::set_fail_next_journal_delete();
+
+        transaction
+            .commit()
+            .expect("durably committed bytes remain successful when journal cleanup is pending");
+        assert!(!pin.exists());
+        assert_eq!(std::fs::read(&path).unwrap(), b"candidate");
+        FileTransaction::reconcile_project(&root).unwrap();
+        assert!(!std::fs::read_dir(root.join(".app/import-v2-journal"))
+            .unwrap()
+            .any(|entry| entry.is_ok()));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2833,6 +3535,72 @@ mod tests {
         if displaced.exists() {
             std::fs::remove_dir_all(displaced).unwrap();
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_enumerates_the_bound_journal_directory_after_lexical_swap() {
+        let root = std::env::temp_dir().join(format!(
+            "import-v2-journal-bind-swap-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let displaced = std::env::temp_dir().join(format!(
+            "import-v2-journal-bind-displaced-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("wiki/new.md");
+        let mut transaction = FileTransaction::new_for_project(&root);
+        transaction.write_new(&target, b"installed").unwrap();
+        transaction.simulate_process_crash();
+
+        let journal = root.join(".app/import-v2-journal");
+        let hook_journal = journal.clone();
+        let hook_displaced = displaced.clone();
+        set_after_journal_directory_bind_hook(move || {
+            std::fs::rename(&hook_journal, &hook_displaced).unwrap();
+            std::fs::create_dir(&hook_journal).unwrap();
+        });
+
+        FileTransaction::reconcile_project(&root).unwrap();
+
+        assert!(!target.exists());
+        assert!(!std::fs::read_dir(&displaced)
+            .unwrap()
+            .any(|entry| entry.is_ok()));
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(displaced).unwrap();
+    }
+
+    #[test]
+    fn recovery_rejects_unbound_artifact_before_touching_project_bytes() {
+        let root = std::env::temp_dir().join(format!(
+            "import-v2-malicious-artifact-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let journal_directory = root.join(".app/import-v2-journal");
+        let immutable_source = root.join("raw/sources/evidence.tmp");
+        std::fs::create_dir_all(&journal_directory).unwrap();
+        std::fs::create_dir_all(immutable_source.parent().unwrap()).unwrap();
+        std::fs::write(&immutable_source, b"immutable evidence").unwrap();
+        let journal = Journal {
+            state: JournalState::Committed,
+            entries: Vec::new(),
+            recovery_artifacts: vec!["raw/sources/evidence.tmp".to_string()],
+        };
+        std::fs::write(
+            journal_directory.join("malicious.json"),
+            serde_json::to_vec(&journal).unwrap(),
+        )
+        .unwrap();
+
+        FileTransaction::reconcile_project(&root).unwrap_err();
+
+        assert_eq!(
+            std::fs::read(&immutable_source).unwrap(),
+            b"immutable evidence"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]

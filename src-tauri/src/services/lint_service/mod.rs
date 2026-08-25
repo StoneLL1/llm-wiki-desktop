@@ -43,6 +43,18 @@ pub struct LintService {
     /// identity revision and the inner key is the report/task id, so a replaced
     /// folder at the same path cannot observe the previous project's result.
     pub(super) memory_reports: RwLock<HashMap<String, HashMap<String, PersistedLintReport>>>,
+    /// Retain the root object behind every process-local report namespace.
+    /// On Unix the open directory handle pins its inode, preventing an
+    /// immediately recreated path from receiving the same `(dev, ino)` pair.
+    /// This is intentionally separate from the durable workflow identity:
+    /// directory ctime is not stable across ordinary child mutations.
+    #[cfg(unix)]
+    pub(super) memory_project_roots: Mutex<HashMap<String, MemoryProjectRootAnchor>>,
+}
+
+#[cfg(unix)]
+pub(super) struct MemoryProjectRootAnchor {
+    pub(super) _anchor: std::fs::File,
 }
 
 impl LintService {

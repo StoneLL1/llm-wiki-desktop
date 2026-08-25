@@ -26,6 +26,7 @@ use crate::services::{
 };
 use crate::tasks::task_model::LogLevel;
 use crate::tasks::TaskService;
+use crate::utils::private_directory::{create_private_directory, ensure_private_directory};
 use serde::{Deserialize, Serialize};
 
 use super::super::fingerprint::{canonical_json, hex_sha256};
@@ -573,7 +574,7 @@ fn persist_candidate_state(
     baseline_hashes: &HashMap<String, String>,
     checkpoint_hash: Option<String>,
 ) -> Result<String, BackendError> {
-    let workspace = workspace_for_task(task_id);
+    let workspace = create_candidate_workspace_for_task(task_id)?;
     let metadata = std::fs::symlink_metadata(&workspace).map_err(|error| {
         BackendError::new(
             "WORKFLOW_CANDIDATE_PERSIST_FAILED",
@@ -1652,6 +1653,45 @@ fn workspace_for_task(task_id: &str) -> std::path::PathBuf {
     std::env::temp_dir().join("llm-wiki-desktop").join(task_id)
 }
 
+fn create_candidate_workspace_for_task(task_id: &str) -> Result<std::path::PathBuf, BackendError> {
+    let canonical = uuid::Uuid::parse_str(task_id).map_err(|_| {
+        BackendError::new(
+            "WORKFLOW_CANDIDATE_ID_INVALID",
+            "The workflow candidate id must be a canonical UUID.",
+            false,
+            true,
+        )
+    })?;
+    if canonical.to_string() != task_id {
+        return Err(BackendError::new(
+            "WORKFLOW_CANDIDATE_ID_INVALID",
+            "The workflow candidate id must be a canonical UUID.",
+            false,
+            true,
+        ));
+    }
+
+    let workspace_root = std::env::temp_dir().join("llm-wiki-desktop");
+    ensure_private_directory(&workspace_root).map_err(|error| {
+        BackendError::new(
+            "WORKFLOW_CANDIDATE_PERSIST_FAILED",
+            error.to_string(),
+            true,
+            false,
+        )
+    })?;
+    let workspace = workspace_root.join(task_id);
+    create_private_directory(&workspace).map_err(|error| {
+        BackendError::new(
+            "WORKFLOW_CANDIDATE_PERSIST_FAILED",
+            error.to_string(),
+            true,
+            false,
+        )
+    })?;
+    Ok(workspace)
+}
+
 pub fn discard_update_wiki_candidate(task_id: &str) -> Result<(), BackendError> {
     if uuid::Uuid::parse_str(task_id).is_err() {
         return Err(BackendError::new(
@@ -2257,6 +2297,29 @@ fn candidate_file_diff_len(path: &str, content: Option<&str>) -> usize {
 #[cfg(test)]
 mod batch6_diff_summary_tests {
     use super::*;
+
+    #[test]
+    fn update_wiki_candidate_workspace_is_private_and_create_new() {
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let workspace = create_candidate_workspace_for_task(&task_id).unwrap();
+        assert_eq!(
+            workspace.file_name().and_then(|name| name.to_str()),
+            Some(task_id.as_str())
+        );
+        assert!(create_candidate_workspace_for_task(&task_id).is_err());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                std::fs::metadata(&workspace).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+
+        discard_update_wiki_candidate(&task_id).unwrap();
+    }
 
     #[test]
     fn task_owned_review_helpers_accept_a_lint_repair_candidate_view() {

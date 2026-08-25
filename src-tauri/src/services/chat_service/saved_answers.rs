@@ -113,6 +113,12 @@ impl ChatService {
                     true,
                 )
             })?;
+            // Reject a stale editor token before Git checkpoint preflight can
+            // obscure the actionable conflict. The checked write below repeats
+            // this comparison after the checkpoint and retains the final
+            // identity-and-hash CAS against external edits.
+            self.file_store
+                .preflight_markdown_overwrite_hash(context, &resolved, expected)?;
             // The Git checkpoint is the data-safety boundary for an overwrite.
             // A checkpoint failure must stop the write rather than silently
             // replacing a user-visible query page without recovery history.
@@ -390,6 +396,74 @@ mod tests {
             std::fs::read_to_string(context.resolve_project_path("wiki/queries/q.md").unwrap())
                 .unwrap();
         assert!(on_disk.contains("Second."));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_answer_hash_is_rejected_before_git_checkpoint_preflight() {
+        let (context, root) = tmp_context("save-stale-before-checkpoint");
+        seed_vault(&context);
+        let git = GitService;
+        git.initialize_repository(&context, "init").unwrap();
+
+        let service = ChatService::default();
+        let markdown_v1 = "---\ntype: query\n---\n\n# Q\n\nFirst.";
+        let markdown_v2 = "---\ntype: query\n---\n\n# Q\n\nSecond.";
+        service
+            .save_answer_to_wiki(&context, &git, None, None, false, markdown_v1, "q")
+            .unwrap();
+
+        // A repository-owned filter makes the checkpoint preflight fail
+        // closed. A stale compare-and-swap token must still be rejected before
+        // Git is consulted, while a matching token must continue to require a
+        // valid checkpoint.
+        let configured = std::process::Command::new("git")
+            .args(["config", "filter.saved-answer.clean", "false"])
+            .current_dir(&context.root)
+            .status()
+            .unwrap();
+        assert!(configured.success());
+
+        let error = service
+            .save_answer_to_wiki(
+                &context,
+                &git,
+                None,
+                Some("stale-hash"),
+                true,
+                markdown_v2,
+                "q",
+            )
+            .expect_err("a stale hash must win before checkpoint preflight");
+        assert_eq!(error.code, "FILE_HASH_MISMATCH");
+        assert_eq!(
+            std::fs::read_to_string(context.resolve_project_path("wiki/queries/q.md").unwrap())
+                .unwrap(),
+            markdown_v1
+        );
+
+        let current_hash = service
+            .file_store
+            .file_hash(&context, "wiki/queries/q.md")
+            .unwrap();
+        let error = service
+            .save_answer_to_wiki(
+                &context,
+                &git,
+                None,
+                Some(&current_hash),
+                true,
+                markdown_v2,
+                "q",
+            )
+            .expect_err("a matching hash must still require a valid checkpoint");
+        assert_eq!(error.code, "GIT_CHECKPOINT_FAILED");
+        assert_eq!(
+            std::fs::read_to_string(context.resolve_project_path("wiki/queries/q.md").unwrap())
+                .unwrap(),
+            markdown_v1
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }
