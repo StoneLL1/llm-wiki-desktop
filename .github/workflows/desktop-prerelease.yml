@@ -168,6 +168,7 @@ jobs:
       - name: Create and publish GitHub Prerelease
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
           COMMIT_SHA: ${{ needs.preflight.outputs.commit_sha }}
         run: |
