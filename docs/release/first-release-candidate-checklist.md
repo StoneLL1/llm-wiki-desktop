@@ -1,10 +1,12 @@
 # First updater/capability-signed draft and packaged acceptance checklist
 
-Status: **Blocked pending reviewed contract merge, same-SHA CI, a sealed candidate, and deferred four-platform clean-install acceptance**
+Status: **Blocked pending a separately approved tag, sealed candidate, deferred four-platform clean-install acceptance, and separate final publication approval**
 
 Prepared: 2026-08-26
 
 Audited predecessor master (before this contract update): `82690d5297d404c173b08102e88feab277280132`
+
+Reviewed signing-contract merge: `41dee7207778222c8b4e44c5cf7da25e87cc6ec9` — three-platform [same-SHA CI passed](https://github.com/StoneLL1/llm-wiki-desktop/actions/runs/32933847144)
 
 Intended version/tag: `0.1.0` / `app-v0.1.0` — **tag not created**
 
@@ -24,14 +26,14 @@ Complete these outside the workspace before requesting a remote candidate run. R
 | `capability-release` secret name `LLM_WIKI_CAPABILITY_SIGNING_KEY_PKCS8_HEX` | Complete; protected secret name visible on 2026-08-26 | Names-only audit; value was not read back |
 | `desktop-release` secret names `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Complete; both protected secret names visible on 2026-08-26 | Names-only audit; values were not read back |
 | Existing updater key pair selected and public trust anchor committed | Complete; owner reconfirmed the existing pair on 2026-08-26 and the supplied `.pub` bytes match `release/release-contract.json` and `src-tauri/tauri.conf.json` | Reviewed contract and same-SHA CI; no private material in the workspace |
-| Capability public key ID and public key committed to `capabilities/trusted-keys.json` | Prepared on branch: `llm-wiki-capability-v1`; pending reviewed merge and same-SHA CI | Reviewed commit and same-SHA CI |
-| Public identity fields in `release/release-contract.json` | Prepared on branch: updater and capability identities confirmed; backup custodian not required; owner DPAPI-encrypted capability recovery copy confirmed; Windows/Apple OS vendor identity not required | Reviewed commit and same-SHA CI |
+| Capability public key ID and public key committed to `capabilities/trusted-keys.json` | Complete on `master`: `llm-wiki-capability-v1`; reviewed merge and same-SHA CI passed | PR #5 merge `41dee7207778222c8b4e44c5cf7da25e87cc6ec9`; Actions run 32933847144 |
+| Public identity fields in `release/release-contract.json` | Complete on `master`: updater and capability identities confirmed; backup custodian not required; owner DPAPI-encrypted capability recovery copy confirmed; Windows/Apple OS vendor identity not required | PR #5 merge `41dee7207778222c8b4e44c5cf7da25e87cc6ec9`; Actions run 32933847144 |
 | Updater/capability key ownership and continuity policy | Complete decision: owner `StoneLL1`, no backup custodian required; encrypted offline recovery remains recommended | Reviewed contract; never record secret material |
 | Windows Authenticode and Apple Developer ID/notarization | Explicitly not required for the initial release; user-facing OS warnings must remain documented | Reviewed contract and exact workflow policy evidence |
 | Prior production-key-signed version for the real old-to-candidate upgrade | Not required for `0.1.0` only under the owner-approved one-time bootstrap waiver; mandatory from `0.1.1` | Machine-checked release contract and approval record |
 | Real acceptance hosts | **Pending and intentionally deferred for now:** Windows x64, macOS arm64, macOS x64, Ubuntu 24.04 x64; `0.1.0` still requires clean-install acceptance before publication | Host owner and sanitized OS/build record |
 
-Because `capabilities/trusted-keys.json` and the capability key ID in `release/release-contract.json` are public, reviewable values, this branch must pass a fresh full gate and same-SHA three-platform CI before it is release authority. Adding the protected secret alone is not sufficient. The private capability key must match the committed public key and remain only in the protected Environment; the owner recovery copy remains encrypted outside the workspace.
+Because `capabilities/trusted-keys.json` and the capability key ID in `release/release-contract.json` are public, reviewable values, they passed the required full gate, protected PR merge, and same-SHA three-platform CI before becoming release authority. Adding the protected secret alone was not sufficient. The private capability key must continue to match the committed public key and remain only in the protected Environment; the owner recovery copy remains encrypted outside the workspace.
 
 The `0.1.0` waiver is narrow: it removes only the impossible prior-version upgrade row when no production release exists. It does not waive updater signatures, capability signatures, packaged smoke, clean installation, launch/restart, uninstall/project preservation, OS-warning evidence, or final protected approval. Starting with `0.1.1`, a real installed production version must upgrade to the candidate on all four targets.
 
