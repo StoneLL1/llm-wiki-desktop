@@ -9,7 +9,7 @@ import {
   osIdentityEvidenceErrors,
   parseNamedArguments,
   RELEASE_PLATFORMS,
-  STABLE_TAG_PATTERN,
+  RELEASE_TAG_PATTERN,
 } from "./release-assets-contract.mjs";
 
 const BUNDLE_PATTERNS = {
@@ -28,7 +28,7 @@ const exactlyOne = (files, pattern, label) => {
 export function stageDesktopRelease({ source, output, platform, releaseTag, version, commitSha, signingEvidence }) {
   const patterns = BUNDLE_PATTERNS[platform];
   if (!patterns) throw new Error(`unsupported desktop platform: ${platform}`);
-  if (!STABLE_TAG_PATTERN.test(releaseTag ?? "")) throw new Error("release tag must be a stable app-v tag");
+  if (!RELEASE_TAG_PATTERN.test(releaseTag ?? "")) throw new Error("release tag must be a stable or RC app-v tag");
   if (!COMMIT_PATTERN.test(commitSha ?? "")) throw new Error("commit SHA must be 40 lowercase hex characters");
   const evidence = JSON.parse(fs.readFileSync(path.resolve(signingEvidence), "utf8"));
   const evidenceErrors = osIdentityEvidenceErrors(evidence, platform);

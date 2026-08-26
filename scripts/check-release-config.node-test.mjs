@@ -12,6 +12,7 @@ import {
   validateReleaseCommitTrace,
   validateReleaseState,
   validateDesktopReleaseWorkflow,
+  validateDesktopPrereleaseWorkflow,
   validateWorkflowPermissions,
 } from "./check-release-version.mjs";
 
@@ -40,7 +41,7 @@ test("version drift is a deterministic release failure", () => {
 });
 
 test("the first public version remains historical while later synchronized versions are valid", () => {
-  const nextCargo = cargoToml.replace('version = "0.1.0"', 'version = "0.1.1"');
+  const nextCargo = cargoToml.replace(`version = "${packageJson.version}"`, 'version = "0.1.1"');
   const result = validateReleaseState({
     contract,
     packageJson: { ...packageJson, version: "0.1.1" },
@@ -55,7 +56,7 @@ test("the first public version remains historical while later synchronized versi
   const invalidResult = validateReleaseState({
     contract,
     packageJson: { ...packageJson, version: invalidPrerelease },
-    cargoToml: cargoToml.replace('version = "0.1.0"', `version = "${invalidPrerelease}"`),
+    cargoToml: cargoToml.replace(`version = "${packageJson.version}"`, `version = "${invalidPrerelease}"`),
     tauriConfig: { ...tauriConfig, version: invalidPrerelease },
     trustedKeys,
   });
@@ -84,7 +85,7 @@ test("stable and prerelease tags use the frozen app-v SemVer grammar", () => {
   const rcResult = validateReleaseState({
     contract,
     packageJson: { ...packageJson, version: rcVersion },
-    cargoToml: cargoToml.replace('version = "0.1.0"', `version = "${rcVersion}"`),
+    cargoToml: cargoToml.replace(`version = "${packageJson.version}"`, `version = "${rcVersion}"`),
     tauriConfig: { ...tauriConfig, version: rcVersion },
     trustedKeys,
     tag: "app-v0.1.0-rc.2",
@@ -237,6 +238,10 @@ test("the committed desktop workflow is the only atomic publisher and pins every
   assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: unpinned, capabilityWorkflow })
     .some((error) => error.includes("not pinned")), true);
 
+  const overlappingRcTrigger = desktopWorkflow.replace('      - "!app-v*.*.*-rc.*"\n', "");
+  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: overlappingRcTrigger, capabilityWorkflow })
+    .some((error) => error.includes("exclude RC tags")), true);
+
   const earlyPublisher = desktopWorkflow.replace(
     /^ {2}manifest-and-provenance:/m,
     "  early-release:\n    steps:\n      - run: gh release create app-v0.1.0\n  manifest-and-provenance:",
@@ -336,6 +341,61 @@ test("local Git validation normalizes .git while rejecting the wrong origin or m
     throw new Error("missing ref");
   };
   assert.equal(validateLocalGit("fixture", contract, wrongOrigin).length, 2);
+});
+
+test("the committed desktop prerelease workflow publishes only signed Windows and macOS RC assets", () => {
+  const prereleaseWorkflow = fs.readFileSync(
+    path.join(repositoryRoot, ".github/workflows/desktop-prerelease.yml"),
+    "utf8",
+  );
+  assert.deepEqual(validateDesktopPrereleaseWorkflow({ prereleaseWorkflow }), []);
+
+  const linuxLeak = prereleaseWorkflow.replace(
+    "          - platform: darwin-x86_64",
+    "          - platform: linux-x86_64\n            os: ubuntu-24.04\n          - platform: darwin-x86_64",
+  );
+  assert.equal(validateDesktopPrereleaseWorkflow({ prereleaseWorkflow: linuxLeak })
+    .some((error) => error.includes("linux-x86_64")), true);
+
+  const stableLeak = prereleaseWorkflow.replace(
+    "          gh release edit \"$RELEASE_TAG\" --draft=false --prerelease --latest=false",
+    "          gh release edit \"$RELEASE_TAG\" --draft=false --prerelease --latest=true",
+  );
+  assert.equal(validateDesktopPrereleaseWorkflow({ prereleaseWorkflow: stableLeak })
+    .some((error) => error.includes("--latest=true")), true);
+
+  const earlyWrite = prereleaseWorkflow.replace(
+    /^ {2}desktop-build:/m,
+    "  desktop-build:\n    permissions:\n      contents: write",
+  );
+  assert.equal(validateDesktopPrereleaseWorkflow({ prereleaseWorkflow: earlyWrite })
+    .some((error) => error.includes("only publish-prerelease")), true);
+
+  const publicFirst = prereleaseWorkflow.replace(" --prerelease --draft --latest=false", " --prerelease --latest=false");
+  assert.equal(validateDesktopPrereleaseWorkflow({ prereleaseWorkflow: publicFirst })
+    .some((error) => error.includes("--prerelease --draft --latest=false")), true);
+
+  const noPartialDraftCleanup = prereleaseWorkflow.replace("trap 'cleanup_unverified_prerelease' EXIT", ":");
+  assert.equal(validateDesktopPrereleaseWorkflow({ prereleaseWorkflow: noPartialDraftCleanup })
+    .some((error) => error.includes("cleanup transaction")), true);
+
+  const publishOffset = prereleaseWorkflow.indexOf("  publish-prerelease:");
+  const publisherWithoutProtectedCheckout = `${prereleaseWorkflow.slice(0, publishOffset)}${prereleaseWorkflow
+    .slice(publishOffset)
+    .replace("          persist-credentials: false\n", "")}`;
+  assert.equal(validateDesktopPrereleaseWorkflow({ prereleaseWorkflow: publisherWithoutProtectedCheckout })
+    .some((error) => error.includes("must not persist")), true);
+
+  const createWithoutAmbiguousResultCleanup = prereleaseWorkflow.replace("          creation_attempted=1\n", "");
+  assert.equal(validateDesktopPrereleaseWorkflow({ prereleaseWorkflow: createWithoutAmbiguousResultCleanup })
+    .some((error) => error.includes("cleanup transaction")), true);
+
+  const cleanupDisarmedBeforeReverseVerification = prereleaseWorkflow.replace(
+    '          gh release upload "$RELEASE_TAG" "${assets[@]}"\n',
+    '          gh release upload "$RELEASE_TAG" "${assets[@]}"\n          trap - EXIT INT TERM\n',
+  );
+  assert.equal(validateDesktopPrereleaseWorkflow({ prereleaseWorkflow: cleanupDisarmedBeforeReverseVerification })
+    .some((error) => error.includes("cleanup transaction")), true);
 });
 
 test("local Git validation follows a linked worktree commondir", (context) => {

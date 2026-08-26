@@ -313,6 +313,9 @@ export function validateWorkflowPermissions({ ciWorkflow, capabilityWorkflow }) 
 
 export function validateDesktopReleaseWorkflow({ desktopWorkflow, capabilityWorkflow }) {
   const errors = [];
+  if (!desktopWorkflow.includes('- "!app-v*.*.*-rc.*"')) {
+    errors.push("stable desktop release tags must explicitly exclude RC tags");
+  }
   if (!/^permissions:\s*\r?\n\s+contents:\s+read\s*$/m.test(desktopWorkflow)) {
     errors.push("desktop release workflow must default to contents: read");
   }
@@ -448,6 +451,123 @@ export function validateDesktopReleaseWorkflow({ desktopWorkflow, capabilityWork
   return errors;
 }
 
+export function validateDesktopPrereleaseWorkflow({ prereleaseWorkflow }) {
+  const errors = [];
+  if (!/^permissions:\s*\r?\n\s+contents:\s+read\s*$/m.test(prereleaseWorkflow)) {
+    errors.push("desktop prerelease workflow must default to contents: read");
+  }
+  const publishOffset = prereleaseWorkflow.search(/^ {2}publish-prerelease:\s*$/m);
+  if (publishOffset < 0) {
+    errors.push("desktop prerelease workflow must have one final publish-prerelease job");
+  } else {
+    const beforePublish = prereleaseWorkflow.slice(0, publishOffset);
+    const publisher = prereleaseWorkflow.slice(publishOffset);
+    if (/\bcontents:\s*write\b/.test(beforePublish)) {
+      errors.push("only publish-prerelease may request contents: write");
+    }
+    if ((publisher.match(/\bcontents:\s*write\b/g) ?? []).length !== 1) {
+      errors.push("publish-prerelease must request contents: write exactly once");
+    }
+    if (!/^ {4}environment:\s*desktop-release\s*$/m.test(publisher)) {
+      errors.push("publish-prerelease must use the protected desktop-release environment");
+    }
+    if (/\bgh release (?:create|upload|edit)\b/i.test(beforePublish)) {
+      errors.push("no job before publish-prerelease may mutate a GitHub release");
+    }
+    if (!/- name:\s*Checkout exact prerelease commit\s*\r?\n\s+uses:\s*actions\/checkout@[0-9a-f]{40}[^\r\n]*\r?\n\s+with:\s*\r?\n\s+ref:\s*\$\{\{ needs\.preflight\.outputs\.commit_sha \}\}\s*\r?\n\s+persist-credentials:\s*false/.test(publisher)) {
+      errors.push("publish-prerelease checkout must not persist its contents: write credential");
+    }
+  }
+  for (const job of [
+    "preflight",
+    "desktop-build",
+    "candidate",
+    "packaged-smoke",
+    "assemble-prerelease",
+    "publish-prerelease",
+  ]) {
+    if (!new RegExp(`^ {2}${job}:\\s*$`, "m").test(prereleaseWorkflow)) {
+      errors.push(`desktop prerelease workflow is missing ${job}`);
+    }
+  }
+  for (const marker of [
+    '"app-v*.*.*-rc.*"',
+    "npm ci",
+    "npm run check",
+    "cargo metadata --locked",
+    "libwebkit2gtk-4.1-dev",
+    "TAURI_SIGNING_PRIVATE_KEY",
+    "TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
+    "verify-updater-signatures.mjs",
+    "verify-prerelease-assets.mjs",
+    "prerelease-release-bundle",
+    "actions/attest-build-provenance@",
+    "gh attestation verify",
+    "windows-authenticode-not-required",
+    "apple-developer-id-not-required",
+    "--prerelease --draft --latest=false",
+    '--draft=false --prerelease --latest=false',
+    "gh release download",
+    "generate-release-checksums.mjs --root remote-draft --verify",
+    "generate-release-checksums.mjs --root published-assets --verify",
+    "cleanup_unverified_prerelease",
+  ]) {
+    if (!prereleaseWorkflow.includes(marker)) {
+      errors.push(`desktop prerelease workflow is missing required marker: ${marker}`);
+    }
+  }
+  for (const platform of ["windows-x86_64", "darwin-aarch64", "darwin-x86_64"]) {
+    if (!prereleaseWorkflow.includes(platform)) errors.push(`desktop prerelease matrix is missing ${platform}`);
+  }
+  for (const forbidden of ["linux-x86_64", "latest.json", "--latest=true", "LLM_WIKI_CAPABILITY_SIGNING_KEY_PKCS8_HEX"]) {
+    if (prereleaseWorkflow.includes(forbidden)) {
+      errors.push(`desktop prerelease workflow must not contain stable/Linux/capability marker: ${forbidden}`);
+    }
+  }
+  if (!/\[\[ "\$RELEASE_TAG" =~ \^app-v\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+-rc\\\.\[1-9\]\[0-9\]\*\$ \]\]/.test(prereleaseWorkflow)
+    || !/check-release-version\.mjs --tag "\$RELEASE_TAG"/.test(prereleaseWorkflow)
+    || !/git rev-parse "\$RELEASE_TAG\^\{commit\}"/.test(prereleaseWorkflow)) {
+    errors.push("desktop prerelease preflight must bind one valid RC tag to the exact workflow commit");
+  }
+  if (!/group:\s*desktop-prerelease-/.test(prereleaseWorkflow)
+    || !/cancel-in-progress:\s*false/.test(prereleaseWorkflow)) {
+    errors.push("desktop prerelease workflow must serialize each RC without cancellation");
+  }
+  const cleanupOffset = prereleaseWorkflow.indexOf("cleanup_unverified_prerelease() {");
+  const cleanupTrapOffset = prereleaseWorkflow.indexOf("trap 'cleanup_unverified_prerelease' EXIT", cleanupOffset);
+  const creationAttemptedOffset = prereleaseWorkflow.indexOf("creation_attempted=1", cleanupTrapOffset);
+  const createDraftOffset = prereleaseWorkflow.indexOf('gh release create "$RELEASE_TAG"', cleanupTrapOffset);
+  const uploadDraftOffset = prereleaseWorkflow.indexOf('gh release upload "$RELEASE_TAG"', createDraftOffset);
+  const reverseDraftOffset = prereleaseWorkflow.indexOf('gh release download "$RELEASE_TAG" --dir remote-draft', uploadDraftOffset);
+  const publishDraftOffset = prereleaseWorkflow.indexOf('gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false', reverseDraftOffset);
+  const anonymousVerifyOffset = prereleaseWorkflow.indexOf("https://api.github.com/repos/StoneLL1/llm-wiki-desktop/releases/tags/$RELEASE_TAG", publishDraftOffset);
+  const verifiedOffset = prereleaseWorkflow.indexOf("verified=1", anonymousVerifyOffset);
+  const firstDisarmAfterArmingOffset = prereleaseWorkflow.indexOf("trap - EXIT INT TERM", cleanupTrapOffset);
+  const disarmCleanupOffset = prereleaseWorkflow.indexOf("trap - EXIT INT TERM", verifiedOffset);
+  if (cleanupOffset < 0
+    || cleanupTrapOffset < cleanupOffset
+    || creationAttemptedOffset < cleanupTrapOffset
+    || createDraftOffset < creationAttemptedOffset
+    || uploadDraftOffset < createDraftOffset
+    || reverseDraftOffset < uploadDraftOffset
+    || publishDraftOffset < reverseDraftOffset
+    || anonymousVerifyOffset < publishDraftOffset
+    || verifiedOffset < anonymousVerifyOffset
+    || disarmCleanupOffset < verifiedOffset
+    || firstDisarmAfterArmingOffset !== disarmCleanupOffset
+    || !/cleanup_unverified_prerelease\(\)\s*\{[\s\S]*"\$creation_attempted" -eq 1[\s\S]*"\$verified" -ne 1[\s\S]*gh release view "\$RELEASE_TAG" --json isDraft,isPrerelease,tagName,targetCommitish[\s\S]*"\$is_prerelease" = true[\s\S]*"\$tag_name" = "\$RELEASE_TAG"[\s\S]*"\$target_commitish" = "\$\{\{ needs\.preflight\.outputs\.commit_sha \}\}"[\s\S]*gh release edit "\$RELEASE_TAG" --draft=true --prerelease --latest=false[\s\S]*gh release delete "\$RELEASE_TAG" --yes/.test(prereleaseWorkflow)) {
+    errors.push("desktop prerelease publication must keep one cleanup transaction armed through anonymous verification");
+  }
+  for (const match of prereleaseWorkflow.matchAll(/^\s*(?:-\s+)?uses:\s*([^\s#]+)(?:\s+#.*)?$/gm)) {
+    const reference = match[1];
+    if (reference.startsWith("./")) continue;
+    if (!/@[0-9a-f]{40}$/.test(reference)) {
+      errors.push(`GitHub Action is not pinned to a full commit SHA: ${reference}`);
+    }
+  }
+  return errors;
+}
+
 const normalizeOrigin = (value) => value.trim().replace(/\/$/, "").replace(/\.git$/, "").toLowerCase();
 
 const resolveGitDirectory = (root) => {
@@ -554,6 +674,9 @@ export function checkRepository(root, options = {}) {
     ...validateDesktopReleaseWorkflow({
       desktopWorkflow: fs.readFileSync(path.join(root, ".github/workflows/desktop-release.yml"), "utf8"),
       capabilityWorkflow: fs.readFileSync(path.join(root, ".github/workflows/capability-release.yml"), "utf8"),
+    }),
+    ...validateDesktopPrereleaseWorkflow({
+      prereleaseWorkflow: fs.readFileSync(path.join(root, ".github/workflows/desktop-prerelease.yml"), "utf8"),
     }),
   ];
   if (options.checkGit) errors.push(...validateLocalGit(root, contract));
