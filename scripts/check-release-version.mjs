@@ -79,6 +79,7 @@ export function validateReleaseState({
   packageJson,
   cargoToml,
   tauriConfig,
+  trustedKeys = null,
   tag = null,
   repository = null,
 }) {
@@ -142,6 +143,23 @@ export function validateReleaseState({
     || !environmentReviewerConfigured) {
     errors.push("protected release environments and the confirmed sole-maintainer approval policy must remain explicit");
   }
+  const firstStableAcceptance = contract.acceptance?.firstStable;
+  const subsequentStableAcceptance = contract.acceptance?.subsequentStable;
+  if (firstStableAcceptance?.version !== "0.1.0"
+    || firstStableAcceptance?.tag !== "app-v0.1.0"
+    || firstStableAcceptance?.priorVersionUpgradeGate !== "waived-once-no-prior-production-release"
+    || firstStableAcceptance?.replacementGate !== "four-platform-clean-install-required"
+    || firstStableAcceptance?.scope !== "first-stable-only"
+    || firstStableAcceptance?.approvedBy !== "StoneLL1"
+    || firstStableAcceptance?.approvedOn !== "2026-08-26"
+    || firstStableAcceptance.version !== contract.application.firstPublicVersion
+    || firstStableAcceptance.tag !== contract.tags.firstStable) {
+    errors.push("the 0.1.0 upgrade waiver must remain one-time, owner-approved, and replaced by four-platform clean-install acceptance");
+  }
+  if (subsequentStableAcceptance?.firstRequiredVersion !== "0.1.1"
+    || subsequentStableAcceptance?.priorVersionUpgradeGate !== "real-prior-production-to-candidate-required") {
+    errors.push("real prior-production-to-candidate upgrade acceptance must be mandatory from 0.1.1");
+  }
   if (contract.signing?.privateKeyPolicy !== "protected-environment-secrets-only"
     || contract.signing?.continuity?.backupCustodianRequired !== false
     || contract.signing?.continuity?.decisionOwner !== "StoneLL1"
@@ -180,11 +198,21 @@ export function validateReleaseState({
   }
   const capabilityPublicKeyPending = contract.signing?.capability?.publicKeyId === null
     && contract.signing?.capability?.publicKeyStatus === "pending-human-input";
+  const capabilityPublicKeyId = contract.signing?.capability?.publicKeyId;
   const capabilityPublicKeyCommitted = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(
-    contract.signing?.capability?.publicKeyId ?? "",
+    capabilityPublicKeyId ?? "",
   ) && contract.signing?.capability?.publicKeyStatus === "committed";
   if (!capabilityPublicKeyPending && !capabilityPublicKeyCommitted) {
     errors.push("capability public key must be committed or explicitly pending human input");
+  }
+  if (capabilityPublicKeyCommitted) {
+    const trustedPublicKey = trustedKeys?.[capabilityPublicKeyId];
+    if (!/^[0-9a-f]{64}$/.test(trustedPublicKey ?? "")) {
+      errors.push("the committed capability key ID must resolve to one 32-byte lowercase hex trust anchor");
+    }
+    if (contract.signing?.capability?.recoveryCopyStatus !== "owner-dpapi-encrypted-copy-confirmed") {
+      errors.push("the owner-encrypted capability recovery copy must remain explicitly confirmed");
+    }
   }
   const osIdentityPolicies = [
     ["windows", "publisherSubject", "smartscreen-or-unknown-publisher-warning-expected"],
@@ -427,7 +455,12 @@ const resolveGitDirectory = (root) => {
   if (fs.statSync(dotGit).isDirectory()) return dotGit;
   const pointer = fs.readFileSync(dotGit, "utf8").match(/^gitdir:\s*(.+)\s*$/i)?.[1];
   if (!pointer) throw new Error(".git does not contain a gitdir pointer");
-  return path.resolve(root, pointer);
+  const worktreeGitDirectory = path.resolve(root, pointer);
+  const commonDirectoryFile = path.join(worktreeGitDirectory, "commondir");
+  if (!fs.existsSync(commonDirectoryFile)) return worktreeGitDirectory;
+  const commonDirectoryPointer = fs.readFileSync(commonDirectoryFile, "utf8").trim();
+  if (!commonDirectoryPointer) throw new Error("linked worktree commondir is empty");
+  return path.resolve(worktreeGitDirectory, commonDirectoryPointer);
 };
 
 const readLocalGitState = (root, contract) => {
@@ -508,6 +541,7 @@ export function checkRepository(root, options = {}) {
     packageJson: readJson(root, "package.json"),
     cargoToml: fs.readFileSync(path.join(root, "src-tauri/Cargo.toml"), "utf8"),
     tauriConfig: readJson(root, "src-tauri/tauri.conf.json"),
+    trustedKeys: readJson(root, "capabilities/trusted-keys.json"),
     tag,
     repository: process.env.GITHUB_REPOSITORY ?? null,
   });

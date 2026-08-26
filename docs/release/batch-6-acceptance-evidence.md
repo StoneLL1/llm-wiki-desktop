@@ -10,6 +10,18 @@ Original decision: **Public beta No-Go; Batch 6 local automated acceptance compl
 
 This record contains no private key, certificate, token, user project path, user content, or private signed URL. It distinguishes deterministic source-level evidence from real signed package evidence; the former must not be used to claim the latter.
 
+## 2026-08-26 signing-input and first-release bootstrap decision
+
+Audited public baseline: `a3a3393984a0ca213235c9c456ba0bf87b4ca032` on `master`; public trust/acceptance changes are prepared on `codex/prepare-first-release-signing`
+
+Decision: **Public beta No-Go; protected signing inputs are configured and the `0.1.0` bootstrap policy is owner-approved, while reviewed merge, same-SHA CI, sealed artifacts, and four-platform clean-install evidence remain blocked or deferred**
+
+- A names-only GitHub audit confirms `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` exist in `desktop-release`. Their values were not read back.
+- The owner authorized capability key ID `llm-wiki-capability-v1`. A ring-compatible Ed25519 PKCS#8 key was generated in process memory, validated through the repository `capability_release public-key` command, sent directly to protected secret `LLM_WIKI_CAPABILITY_SIGNING_KEY_PKCS8_HEX`, and paired with repository variable `CAPABILITY_SIGNING_KEY_ID=llm-wiki-capability-v1`.
+- Only public key `19db7a4d9b22d202ad129b3e86e537803473bd145ed093b0794a9276f08a2f7e` is prepared for `capabilities/trusted-keys.json`. The private key was not printed or written to the workspace; an owner DPAPI-encrypted recovery copy was round-trip verified outside the workspace, and only its status—not its private location or contents—is recorded here.
+- The owner approved a one-time `0.1.0` exception for the nonexistent prior-production upgrade row. Four-platform clean installation remains mandatory for `0.1.0`; real prior-production-to-candidate upgrade acceptance becomes mandatory from `0.1.1`.
+- Real-host acceptance is intentionally deferred in this phase. No platform row was marked complete, and no tag, workflow release run, Draft, Release, `latest.json`, or protected publication approval was created.
+
 ## 2026-08-26 updater identity confirmation and master closure
 
 Audited predecessor baseline: `82690d5297d404c173b08102e88feab277280132` on public `master` before this updater-contract change
@@ -74,7 +86,7 @@ The release-owner handoff and ready-to-fill four-platform matrix are in [`first-
 
 The focused frontend run found one stale CI assertion left by Batch 5: `src/test/ci-contracts.test.ts` still expected the old `check:release-config` command and therefore did not lock the new release-asset and updater-signature subgates. Batch 6 updated only that contract and reran the full 24-file focused group successfully.
 
-## Anonymous repository and endpoint evidence
+## Historical 2026-08-21 anonymous repository and endpoint evidence
 
 The no-credential probes were rerun outside the restricted process sandbox on 2026-08-21:
 
@@ -83,18 +95,18 @@ The no-credential probes were rerun outside the restricted process sandbox on 20
 - `HEAD https://github.com/StoneLL1/llm-wiki-desktop/releases/latest/download/latest.json` returned HTTP 404.
 - Local `gh` authentication for `StoneLL1` is invalid, so no authenticated Actions run can be inspected or dispatched from this machine.
 
-Consequently there is no workflow run URL, draft tag, draft release, public `latest.json`, or anonymously downloadable installer to record. A local fixture rehearsal is green but is not a remote workflow rehearsal.
+At that time there was no workflow run URL, draft tag, draft release, public `latest.json`, or anonymously downloadable installer to record. Later dated sections above supersede the repository-access and authentication state; no later section claims a release artifact exists.
 
 ## Packaged and signing matrix
 
 | Target | Required evidence | Batch 6 state |
 | --- | --- | --- |
-| Windows x64 | Canonical NSIS install, launch, old updater-signed version upgrade, locked-file/AV/standard-user behavior, uninstall, project byte preservation, updater signature and SmartScreen/unknown-publisher manual path | Pending; no updater-signed draft artifact or Windows packaged-host evidence |
-| macOS arm64 | Updater signature, Gatekeeper manual-override path, install/launch/upgrade/uninstall, project preservation; no Developer ID/notarization claim | Pending; no updater-signed draft artifact or macOS arm64 host evidence |
-| macOS x64 | Independent artifact/signature/manifest entry plus Gatekeeper manual-override and install/launch/upgrade | Pending; no updater-signed draft artifact or macOS x64 host evidence |
-| Linux x64 | AppImage permissions, desktop launch, old-version upgrade, uninstall/project preservation; deb/rpm smoke if published | Pending; no draft artifact or Linux packaged runner evidence |
+| Windows x64 | Canonical NSIS clean install, launch/restart, locked-file/AV/standard-user behavior, uninstall, project byte preservation, updater signature and SmartScreen/unknown-publisher manual path | Pending; execution intentionally deferred and no signed candidate exists |
+| macOS arm64 | Updater signature, Gatekeeper manual-override path, clean install/launch/restart/uninstall, project preservation; no Developer ID/notarization claim | Pending; execution intentionally deferred and no signed candidate exists |
+| macOS x64 | Independent artifact/signature/manifest entry plus Gatekeeper manual-override and clean install/launch/restart/uninstall | Pending; execution intentionally deferred and no signed candidate exists |
+| Linux x64 | AppImage permissions, desktop clean install/launch/restart, uninstall/project preservation; deb/rpm smoke if published | Pending; execution intentionally deferred and no signed candidate exists |
 
-The updater public key and owner `StoneLL1` are committed, and a separate backup custodian is explicitly not required. Capability signing key identity and the production protected-environment updater/capability secrets remain Pending. Windows publisher and Apple Team identity are intentionally not configured under the initial no-OS-certificate policy. No temporary production key was generated and no updater/capability signature verification was bypassed.
+The updater public key and owner `StoneLL1` are committed, and a separate backup custodian is explicitly not required. The updater/capability protected secret names and capability Key ID are configured; capability public trust key `llm-wiki-capability-v1` is prepared on the review branch. Windows publisher and Apple Team identity are intentionally not configured under the initial no-OS-certificate policy. No updater/capability signature verification was bypassed.
 
 ## Core journeys, recovery, and security
 
@@ -102,7 +114,7 @@ Source-level and integration tests cover structured errors, provider-origin bind
 
 The following Batch 6 requirements remain release-blocking because they require real signed artifacts, clean machines, credentials, or OS-specific runners:
 
-- old signed version to new signed version install/upgrade on all four targets;
+- `0.1.0` clean install/launch/restart/uninstall on all four targets; from `0.1.1`, old signed production version to candidate upgrade on all four targets;
 - CJK/space/long-path, native/compatible/read-only/restricted/untrusted/recovery user journeys in packaged apps;
 - OCR/ASR/browser capability interrupted download, recovery, install, health, and exact original Import item continuation on all targets;
 - provider authorization, Chat/BYOK revoke, malicious Git/Agent, junction/symlink race, and secret-free support evidence in packaged apps;
@@ -120,7 +132,7 @@ Local-first Wiki, Search, and Edit source-level gates remain independent of the 
 | FINAL-01 known security P1 code and negative evidence | Code-level closed; packaged adversarial evidence Pending |
 | FINAL-02 structured user-facing errors | Closed by source and frontend regression evidence |
 | FINAL-03 four-target capability install and original Import continuation | **Not closed** |
-| FINAL-04 real old-to-new signed upgrade | **Not closed** |
+| FINAL-04 real old-to-new signed upgrade | Waived once for `0.1.0` because no production predecessor exists; mandatory and **Not closed** from `0.1.1` |
 | One tag/commit for every installer/catalog/manifest/signature | Local workflow contract green; no remote artifact set |
 | Windows/macOS explicit no-OS-identity warning and manual-override evidence | **Not closed** |
 | Update failure preserves old version and projects | Source contract green; packaged recovery evidence Pending |
@@ -129,4 +141,4 @@ Local-first Wiki, Search, and Edit source-level gates remain independent of the 
 | Draft release rehearsal and anonymous endpoint | **Not closed** |
 | Graphify, progress, audits, runbook | Synchronized; final graph refresh produced 15,973 nodes, 46,089 edges, and 724 communities |
 
-The remediation plan must therefore remain not Completed and the first public beta must not be published. Public access, branch protection, required reviewer, and owner decisions are now configured. The next external release-owner work is to establish the capability trust key, install the matching capability/updater protected secrets, identify an updater-signed upgrade baseline, and provide the four real acceptance hosts; only then may the protected draft transaction and complete packaged matrix run without changing the fail-closed updater/capability contracts.
+The remediation plan must therefore remain not Completed and the first public beta must not be published. Public access, branch protection, required reviewer, updater/capability protected inputs, capability Key ID, and the `0.1.0` bootstrap decision are configured. The next repository work is to review and merge the public trust/acceptance contract and pass same-SHA CI; a sealed signed candidate can then be built only after separate tag approval. The four real clean-install hosts remain intentionally deferred and must be completed before `0.1.0` publication. From `0.1.1`, the real updater-signed predecessor upgrade matrix is again mandatory.
