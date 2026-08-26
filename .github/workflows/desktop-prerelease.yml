@@ -1,0 +1,184 @@
+name: Desktop prerelease
+
+on:
+  push:
+    tags:
+      - "app-v*.*.*-rc.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-prerelease-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: 22.23.1
+  RUST_VERSION: 1.92.0
+
+jobs:
+  preflight:
+    name: Freeze prerelease tag and commit
+    runs-on: ubuntu-24.04
+    outputs:
+      release_tag: ${{ steps.coordinate.outputs.release_tag }}
+      version: ${{ steps.coordinate.outputs.version }}
+      commit_sha: ${{ steps.coordinate.outputs.commit_sha }}
+    steps:
+      - name: Checkout exact prerelease tag
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Validate RC coordinate
+        id: coordinate
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "StoneLL1/llm-wiki-desktop"
+          [[ "$RELEASE_TAG" =~ ^app-v[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*$ ]]
+          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$GITHUB_SHA"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${RELEASE_TAG#app-v}" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  desktop-build:
+    name: Build updater-signed ${{ matrix.platform }} prerelease
+    needs: preflight
+    runs-on: ${{ matrix.os }}
+    environment: desktop-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x86_64
+            os: windows-2025
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+          - platform: darwin-aarch64
+            os: macos-15
+            target: aarch64-apple-darwin
+            bundles: dmg
+          - platform: darwin-x86_64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            bundles: dmg
+    steps:
+      - name: Checkout exact prerelease commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.preflight.outputs.commit_sha }}
+
+      - name: Setup pinned Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Setup pinned Rust target
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          rustup toolchain install $env:RUST_VERSION --profile minimal --no-self-update
+          rustup default $env:RUST_VERSION
+          rustup target add '${{ matrix.target }}'
+
+      - name: Install exact locked dependencies
+        run: npm ci
+
+      - name: Build updater-signed prerelease bundle
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) { throw 'TAURI_SIGNING_PRIVATE_KEY is missing' }
+          $configOverride = @{ version = $env:VERSION } | ConvertTo-Json -Compress
+          npm run tauri -- build --target '${{ matrix.target }}' --bundles '${{ matrix.bundles }}' --config $configOverride -- --locked
+
+      - name: Collect installer and updater signature
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bundleRoot = Join-Path $PWD 'src-tauri/target/${{ matrix.target }}/release/bundle'
+          if (-not (Test-Path -LiteralPath $bundleRoot -PathType Container)) { throw "bundle root is missing: $bundleRoot" }
+          $files = @(Get-ChildItem -LiteralPath $bundleRoot -Recurse -File)
+          if ('${{ runner.os }}' -eq 'Windows') {
+            $installer = @($files | Where-Object Name -Like '*-setup.exe')
+            if ($installer.Count -ne 1) { throw "expected one NSIS installer, found $($installer.Count)" }
+            $signature = Get-Item -LiteralPath "$($installer[0].FullName).sig"
+            $selected = @($installer[0], $signature)
+          } else {
+            $installer = @($files | Where-Object Name -Like '*.dmg')
+            $updater = @($files | Where-Object Name -Like '*.app.tar.gz')
+            if ($installer.Count -ne 1) { throw "expected one DMG, found $($installer.Count)" }
+            if ($updater.Count -ne 1) { throw "expected one macOS updater archive, found $($updater.Count)" }
+            $signature = Get-Item -LiteralPath "$($updater[0].FullName).sig"
+            $selected = @($installer[0], $updater[0], $signature)
+          }
+          $output = New-Item -ItemType Directory -Path prerelease-assets -Force
+          foreach ($file in $selected) {
+            Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $output.FullName "${{ matrix.platform }}-$($file.Name)")
+          }
+
+      - name: Upload prerelease fragment
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-${{ matrix.platform }}
+          path: prerelease-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-prerelease:
+    name: Publish GitHub Prerelease
+    needs: [preflight, desktop-build]
+    runs-on: ubuntu-24.04
+    environment: desktop-release
+    permissions:
+      contents: write
+    steps:
+      - name: Download Windows and macOS bundles
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: desktop-*
+          path: downloaded
+
+      - name: Flatten assets and generate checksums
+        run: |
+          set -euo pipefail
+          mkdir publish
+          while IFS= read -r -d '' source; do
+            name="$(basename "$source")"
+            test ! -e "publish/$name"
+            cp "$source" "publish/$name"
+          done < <(find downloaded -type f -print0)
+          test "$(find publish -maxdepth 1 -type f | wc -l | tr -d ' ')" = 8
+          test "$(find publish -maxdepth 1 -type f -name 'windows-x86_64-*-setup.exe' | wc -l | tr -d ' ')" = 1
+          test "$(find publish -maxdepth 1 -type f -name 'windows-x86_64-*-setup.exe.sig' | wc -l | tr -d ' ')" = 1
+          test "$(find publish -maxdepth 1 -type f -name 'darwin-*.dmg' | wc -l | tr -d ' ')" = 2
+          test "$(find publish -maxdepth 1 -type f -name 'darwin-*.app.tar.gz' | wc -l | tr -d ' ')" = 2
+          test "$(find publish -maxdepth 1 -type f -name 'darwin-*.app.tar.gz.sig' | wc -l | tr -d ' ')" = 2
+          (cd publish && sha256sum -- * > CHECKSUMS.sha256)
+
+      - name: Create and publish GitHub Prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          COMMIT_SHA: ${{ needs.preflight.outputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 && { echo "release already exists: $RELEASE_TAG" >&2; exit 1; }
+          gh release create "$RELEASE_TAG" --target "$COMMIT_SHA" --title "LLM Wiki Desktop ${RELEASE_TAG#app-v}" --generate-notes --prerelease --draft --latest=false
+          mapfile -d '' assets < <(find publish -maxdepth 1 -type f -print0)
+          gh release upload "$RELEASE_TAG" "${assets[@]}"
+          expected="$(find publish -maxdepth 1 -type f | wc -l | tr -d ' ')"
+          actual="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets | length')"
+          test "$actual" = "$expected"
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
+          test "$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft')" = false
+          test "$(gh release view "$RELEASE_TAG" --json isPrerelease --jq '.isPrerelease')" = true
