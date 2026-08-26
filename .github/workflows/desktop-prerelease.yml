@@ -59,11 +59,11 @@ jobs:
           - platform: darwin-aarch64
             os: macos-15
             target: aarch64-apple-darwin
-            bundles: dmg
+            bundles: app,dmg
           - platform: darwin-x86_64
             os: macos-15-intel
             target: x86_64-apple-darwin
-            bundles: dmg
+            bundles: app,dmg
     steps:
       - name: Checkout exact prerelease commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
