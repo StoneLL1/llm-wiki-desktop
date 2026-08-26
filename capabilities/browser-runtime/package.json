@@ -1,1 +1,1 @@
-{"name":"browser-runtime","version":"0.1.0","private":true,"type":"module","dependencies":{"@mozilla/readability":"0.6.0","dompurify":"3.4.12","jsdom":"25.0.1","playwright":"1.61.1","turndown":"7.2.0"}}
+{"name":"browser-runtime","version":"0.1.0","private":true,"type":"module","dependencies":{"@mozilla/readability":"0.6.0","dompurify":"3.4.14","jsdom":"25.0.1","playwright":"1.61.1","turndown":"7.2.0"}}
