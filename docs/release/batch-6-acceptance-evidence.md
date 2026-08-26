@@ -10,6 +10,17 @@ Original decision: **Public beta No-Go; Batch 6 local automated acceptance compl
 
 This record contains no private key, certificate, token, user project path, user content, or private signed URL. It distinguishes deterministic source-level evidence from real signed package evidence; the former must not be used to claim the latter.
 
+## 2026-08-26 signing-contract merge and same-SHA CI closure
+
+Release-authority merge baseline: `41dee7207778222c8b4e44c5cf7da25e87cc6ec9` on public `master`
+
+Decision: **Public beta No-Go; public signing identities, protected inputs, first-release policy, reviewed merge, and same-SHA source CI are closed, while a sealed candidate and four-platform clean-install evidence remain intentionally pending**
+
+- PR [#5](https://github.com/StoneLL1/llm-wiki-desktop/pull/5) merged normally at `2026-08-26T05:23:17Z` as `41dee7207778222c8b4e44c5cf7da25e87cc6ec9` without bypassing protected `master`.
+- [Actions run 32933847144](https://github.com/StoneLL1/llm-wiki-desktop/actions/runs/32933847144) passed at that exact merge SHA: Ubuntu completed at `2026-08-26T05:49:01Z`, Windows at `2026-08-26T05:53:02Z`, and macOS at `2026-08-26T05:59:56Z`.
+- Local `master` was fast-forwarded to the same merge SHA without overwriting or cleaning the owner's pre-existing Graphify modifications and untracked files.
+- No `app-v0.1.0` tag, release workflow, Draft, Release, stable `latest.json`, or `publish-stable` approval was created. A separate tag approval is still required before producing `draft-release-bundle`; real-host acceptance remains deferred and must pass before publication.
+
 ## 2026-08-26 signing-input and first-release bootstrap decision
 
 Audited public baseline: `a3a3393984a0ca213235c9c456ba0bf87b4ca032` on `master`; public trust/acceptance changes are prepared on `codex/prepare-first-release-signing`
