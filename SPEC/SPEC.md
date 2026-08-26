@@ -748,6 +748,7 @@ npm install @milkdown/core @milkdown/react @milkdown/plugin-math
 - `.github/workflows/desktop-release.yml` 是唯一 stable publisher：同一 tag/commit/run 组合 capability catalog、四 target desktop artifact、强制 updater signature、明确的 OS vendor identity policy evidence、完整 `latest.json`、checksums、SBOM、provenance/attestation、packaged smoke 与 draft reverse verification；只有 protected final publisher 可获得 `contents: write`。
 - 本地 fixture、源码测试或 `cargo check` 不能替代真实安装、旧版升级、卸载、恢复、匿名 endpoint 与平台证据。初始发布明确不要求 Windows Authenticode 与 Apple Developer ID/notarization；Windows SmartScreen/unknown-publisher 和 macOS Gatekeeper manual override 必须在限制说明与真实平台验收中如实记录，checksums/attestation 不得被描述成 OS publisher identity。Batch 6 当前结论为 Public beta No-Go；权威 Pending 矩阵见 `docs/release/batch-6-acceptance-evidence.md`。
 - production updater/capability private key、密码、PAT 不进入 workspace、日志或 artifact metadata；缺 capability trust key、matching protected secret、updater signing secret、protected reviewer 或公开 endpoint 任一项即停止发布，不得临时生成 production key 或禁用验证。`StoneLL1` 是唯一 owner/approver；backup custodian 不作为门槛，但单维护者 key-loss continuity risk 必须保持显式。
+- 首个 stable `0.1.0` 因不存在 prior production release，仅对“旧生产版→候选版升级”单项做一次性 owner-approved 豁免，并以 Windows x64、macOS arm64、macOS x64、Ubuntu 24.04 x64 四平台干净安装/启动重启/卸载/项目字节保持验收替代；updater/capability 签名、packaged smoke、OS warning、protected approval 均不豁免。自 `0.1.1` 起恢复真实 prior-production-to-candidate 四平台升级硬门禁。
 
 ## 17. 参考方向
 

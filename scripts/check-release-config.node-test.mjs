@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -18,12 +19,14 @@ const contract = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "release/r
 const packageJson = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "package.json"), "utf8"));
 const cargoToml = fs.readFileSync(path.join(repositoryRoot, "src-tauri/Cargo.toml"), "utf8");
 const tauriConfig = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "src-tauri/tauri.conf.json"), "utf8"));
+const trustedKeys = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "capabilities/trusted-keys.json"), "utf8"));
 
 const state = (overrides = {}) => validateReleaseState({
   contract,
   packageJson,
   cargoToml,
   tauriConfig,
+  trustedKeys,
   ...overrides,
 });
 
@@ -43,6 +46,7 @@ test("the first public version remains historical while later synchronized versi
     packageJson: { ...packageJson, version: "0.1.1" },
     cargoToml: nextCargo,
     tauriConfig: { ...tauriConfig, version: "0.1.1" },
+    trustedKeys,
     tag: "app-v0.1.1",
   });
   assert.deepEqual(result.errors, []);
@@ -53,6 +57,7 @@ test("the first public version remains historical while later synchronized versi
     packageJson: { ...packageJson, version: invalidPrerelease },
     cargoToml: cargoToml.replace('version = "0.1.0"', `version = "${invalidPrerelease}"`),
     tauriConfig: { ...tauriConfig, version: invalidPrerelease },
+    trustedKeys,
   });
   assert.equal(invalidResult.errors.some((error) => error.includes("not valid SemVer")), true);
 });
@@ -81,6 +86,7 @@ test("stable and prerelease tags use the frozen app-v SemVer grammar", () => {
     packageJson: { ...packageJson, version: rcVersion },
     cargoToml: cargoToml.replace('version = "0.1.0"', `version = "${rcVersion}"`),
     tauriConfig: { ...tauriConfig, version: rcVersion },
+    trustedKeys,
     tag: "app-v0.1.0-rc.2",
   });
   assert.deepEqual(rcResult.errors, []);
@@ -106,7 +112,7 @@ test("canonical endpoints cannot drift to a different repository", () => {
   const changed = structuredClone(contract);
   changed.endpoints.stableUpdaterManifest = "https://github.com/example/fork/releases/latest/download/latest.json";
   changed.endpoints.capabilityAssetBaseTemplate = "https://github.com/example/fork/releases/download/<exact-tag>/";
-  const result = validateReleaseState({ contract: changed, packageJson, cargoToml, tauriConfig });
+  const result = validateReleaseState({ contract: changed, packageJson, cargoToml, tauriConfig, trustedKeys });
   assert.equal(result.errors.filter((error) => error.includes("canonical repository")).length, 2);
 });
 
@@ -147,6 +153,32 @@ test("the sole maintainer owns cryptographic signing while backup and OS certifi
   const unconfirmedUpdaterPair = structuredClone(contract);
   unconfirmedUpdaterPair.signing.updater.publicKeyStatus = "supplied";
   assert.equal(state({ contract: unconfirmedUpdaterPair }).errors.some((error) => error.includes("key-pair selection")), true);
+});
+
+test("the committed capability key ID resolves to the reviewed public trust anchor", () => {
+  assert.equal(contract.signing.capability.publicKeyId, "llm-wiki-capability-v1");
+  assert.equal(contract.signing.capability.publicKeyStatus, "committed");
+  assert.match(trustedKeys[contract.signing.capability.publicKeyId], /^[0-9a-f]{64}$/);
+  assert.deepEqual(state().errors, []);
+
+  const missingTrustAnchor = state({ trustedKeys: {} });
+  assert.equal(missingTrustAnchor.errors.some((error) => error.includes("32-byte lowercase hex trust anchor")), true);
+
+  const missingRecoveryEvidence = structuredClone(contract);
+  delete missingRecoveryEvidence.signing.capability.recoveryCopyStatus;
+  assert.equal(state({ contract: missingRecoveryEvidence }).errors.some((error) => error.includes("recovery copy")), true);
+});
+
+test("the 0.1.0 upgrade waiver is one-time and 0.1.1 restores the real upgrade gate", () => {
+  assert.deepEqual(state().errors, []);
+
+  const widenedWaiver = structuredClone(contract);
+  widenedWaiver.acceptance.subsequentStable.firstRequiredVersion = "0.2.0";
+  assert.equal(state({ contract: widenedWaiver }).errors.some((error) => error.includes("mandatory from 0.1.1")), true);
+
+  const missingReplacementGate = structuredClone(contract);
+  missingReplacementGate.acceptance.firstStable.replacementGate = "source-tests-only";
+  assert.equal(state({ contract: missingReplacementGate }).errors.some((error) => error.includes("four-platform clean-install")), true);
 });
 
 test("capability workflow permissions stay read-only, reusable, and non-publishing", () => {
@@ -304,6 +336,27 @@ test("local Git validation normalizes .git while rejecting the wrong origin or m
     throw new Error("missing ref");
   };
   assert.equal(validateLocalGit("fixture", contract, wrongOrigin).length, 2);
+});
+
+test("local Git validation follows a linked worktree commondir", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "llm-wiki-release-linked-worktree-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const checkout = path.join(root, "checkout");
+  const commonGit = path.join(root, "common.git");
+  const worktreeGit = path.join(commonGit, "worktrees", "fixture");
+  fs.mkdirSync(checkout, { recursive: true });
+  fs.mkdirSync(worktreeGit, { recursive: true });
+  fs.mkdirSync(path.join(commonGit, "refs", "heads"), { recursive: true });
+  fs.writeFileSync(path.join(checkout, ".git"), `gitdir: ${worktreeGit}\n`);
+  fs.writeFileSync(path.join(worktreeGit, "commondir"), "../..\n");
+  fs.writeFileSync(path.join(commonGit, "config"), [
+    '[remote "origin"]',
+    "  url = https://github.com/StoneLL1/llm-wiki-desktop.git",
+    "",
+  ].join("\n"));
+  fs.writeFileSync(path.join(commonGit, "refs", "heads", "master"), `${"a".repeat(40)}\n`);
+
+  assert.deepEqual(validateLocalGit(checkout, contract), []);
 });
 
 test("release tags must resolve to a commit reachable from the frozen default branch", () => {
