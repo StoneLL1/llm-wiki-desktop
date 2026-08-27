@@ -86,13 +86,13 @@ describe("CI validation contract", () => {
 
     expect(packageJson.scripts.check).toBe("node scripts/run-checks.mjs");
     expect(checkOrchestrator).toContain(
-      'scripts: ["check:release-config", "test:final-four-redlines", "check:import-source-media", "test", "test:capability-tools", "lint", "build", "check:bundle", "check:console"]',
+      'scripts: ["check:release-config", "test:final-four-redlines", "check:command-execution", "check:import-source-media", "test", "test:capability-tools", "lint", "build", "check:bundle", "check:console"]',
     );
     expect(checkOrchestrator).toContain(
       'scripts: ["check:rust:gui", "test:rust"]',
     );
     expect(checkOrchestrator).toContain(
-      'scripts: ["check:release-config", "test:final-four-redlines", "lint", "build", "check:bundle", "check:console"]',
+      'scripts: ["check:release-config", "test:final-four-redlines", "check:command-execution", "lint", "build", "check:bundle", "check:console"]',
     );
     expect(checkOrchestrator).toContain(
       'scripts: ["check:rust:core"]',

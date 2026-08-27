@@ -17,6 +17,7 @@ tauri-build = { version = "2", features = [], optional = true }
 [features]
 default = ["gui"]
 gui = ["dep:tauri", "dep:tauri-plugin-dialog", "dep:tauri-plugin-notification", "dep:tauri-plugin-updater", "dep:tauri-build"]
+performance-observers = []
 
 [dependencies]
 base64 = "0.22"

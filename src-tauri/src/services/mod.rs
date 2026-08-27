@@ -47,6 +47,8 @@ pub use compile_service::{
 pub use desktop_update_runtime::DesktopUpdateRuntime;
 pub use export_service::{ExportService, ValidatedExportArtifact};
 pub use file_store::{FileStore, WriteMode};
+#[cfg(feature = "performance-observers")]
+pub use file_store::{FileStoreObservation, FileStoreObservationSnapshot};
 pub use git_service::GitService;
 #[cfg(feature = "gui")]
 pub(crate) use graph_service::GraphCachePolicy;

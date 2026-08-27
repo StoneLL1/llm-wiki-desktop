@@ -57,6 +57,31 @@ pub(crate) fn is_import_batch_operation_task(task: &BackendTask) -> bool {
     task.is_import_operation()
 }
 
+#[cfg(feature = "performance-observers")]
+#[derive(Debug, Clone, Default, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportLockWaitSnapshot {
+    pub acquisitions: u64,
+    pub total_wait_nanos: u64,
+    pub max_wait_nanos: u64,
+    pub waits_over_50_ms: u64,
+}
+
+#[cfg(feature = "performance-observers")]
+pub struct ImportLockWaitObservation {
+    snapshot: Arc<Mutex<ImportLockWaitSnapshot>>,
+}
+
+#[cfg(feature = "performance-observers")]
+impl ImportLockWaitObservation {
+    pub fn snapshot(&self) -> ImportLockWaitSnapshot {
+        self.snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
 pub struct ImportV2Service {
     pub(super) sessions: SessionStore,
     pub(super) engines: EngineRegistry,
@@ -67,6 +92,8 @@ pub struct ImportV2Service {
     source_ai_active: Mutex<HashSet<String>>,
     pub(super) web_targets: Arc<WebTargetStore>,
     connector_profiles_root: Arc<RwLock<Option<PathBuf>>>,
+    #[cfg(feature = "performance-observers")]
+    lock_wait_observer: Mutex<Option<Arc<Mutex<ImportLockWaitSnapshot>>>>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -324,7 +351,34 @@ impl ImportV2Service {
             source_ai_active: Mutex::new(HashSet::new()),
             web_targets,
             connector_profiles_root,
+            #[cfg(feature = "performance-observers")]
+            lock_wait_observer: Mutex::new(None),
         }
+    }
+
+    #[cfg(feature = "performance-observers")]
+    pub fn observe_lock_waits(&self) -> ImportLockWaitObservation {
+        let snapshot = Arc::new(Mutex::new(ImportLockWaitSnapshot::default()));
+        *self
+            .lock_wait_observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(snapshot.clone());
+        ImportLockWaitObservation { snapshot }
+    }
+
+    #[cfg(feature = "performance-observers")]
+    pub fn hold_mutation_lock_for_observation(
+        &self,
+        duration: std::time::Duration,
+        acquired: Option<&std::sync::Barrier>,
+    ) {
+        let _guard = self
+            .lock()
+            .expect("synthetic observer lock must be available");
+        if let Some(acquired) = acquired {
+            acquired.wait();
+        }
+        std::thread::sleep(duration);
     }
 
     /// Configure the app-owned persistent connector profile root once the
@@ -4719,10 +4773,33 @@ impl ImportV2Service {
         // protect an in-memory invariant. FileTransaction rolls back during
         // unwind, so recovering a poisoned guard keeps later imports usable
         // after a worker panic without exposing a half-applied cohort.
-        Ok(self
+        #[cfg(feature = "performance-observers")]
+        let wait_started = std::time::Instant::now();
+        let guard = self
             .mutation_lock
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner))
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        #[cfg(feature = "performance-observers")]
+        {
+            let wait = wait_started.elapsed();
+            let observer = self
+                .lock_wait_observer
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(observer) = observer {
+                let mut snapshot = observer
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let nanos = wait.as_nanos().min(u64::MAX as u128) as u64;
+                snapshot.acquisitions += 1;
+                snapshot.total_wait_nanos = snapshot.total_wait_nanos.saturating_add(nanos);
+                snapshot.max_wait_nanos = snapshot.max_wait_nanos.max(nanos);
+                snapshot.waits_over_50_ms +=
+                    u64::from(wait >= std::time::Duration::from_millis(50));
+            }
+        }
+        Ok(guard)
     }
 
     pub(crate) fn with_agent_candidate_action_lock<T>(

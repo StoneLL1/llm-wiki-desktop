@@ -41,6 +41,7 @@ use crate::services::import_v2::capability_installer::{
     catalog_entry, install_catalog_entry, CapabilityInstallPhase,
 };
 use crate::services::import_v2::capability_runtime::CapabilityRuntimeStatus;
+use crate::services::import_v2::history_reader::read_v2_history_records;
 use crate::services::import_v2::migration::{
     LegacyHistoryAdapter, MigrationService, REQUIRED_IMPORT_V2_CONTRACT,
 };
@@ -832,84 +833,11 @@ fn read_v2_history(
     ),
     BackendError,
 > {
-    let history_dir = context.resolve_project_path(".app/import-history")?;
-    let metadata = match fs::symlink_metadata(&history_dir) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((Vec::new(), HashSet::new(), Vec::new()));
-        }
-        Err(error) => {
-            return Err(presentation_error(
-                "IMPORT_V2_HISTORY_READ_FAILED",
-                format!("Import history could not be read: {error}"),
-            ));
-        }
-    };
-    if !metadata.is_dir() || metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
-        return Err(presentation_error(
-            "IMPORT_V2_HISTORY_READ_FAILED",
-            "Import history directory is invalid.",
-        ));
-    }
-
-    let mut files = fs::read_dir(&history_dir)
-        .map_err(|_| {
-            presentation_error(
-                "IMPORT_V2_HISTORY_READ_FAILED",
-                "Import history could not be read.",
-            )
-        })?
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension().and_then(|value| value.to_str()) == Some("json")
-                && fs::symlink_metadata(path)
-                    .is_ok_and(|value| value.is_file() && !value.file_type().is_symlink())
-        })
-        .collect::<Vec<_>>();
-    files.sort();
-
+    let scan = read_v2_history_records(context, &state.file_store, &state.import_v2_service)?;
     let mut entries = Vec::new();
-    let mut v2_paths = HashSet::new();
-    let mut warnings = Vec::new();
-    for path in files {
-        let relative = path
-            .strip_prefix(&context.root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(_) => continue,
-        };
-        let value = match serde_json::from_slice::<serde_json::Value>(&bytes) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        let looks_like_v2 = value.get("sessionId").is_some() && value.get("items").is_some();
-        if !looks_like_v2 {
-            continue;
-        }
-        // Claim every recognizable V2 record before deserialization so a
-        // malformed V2 file is not reintroduced as a misleading legacy entry.
-        v2_paths.insert(relative.clone());
-        let batch: ImportBatchResult = match serde_json::from_value(value) {
-            Ok(batch) => batch,
-            Err(_) => {
-                warnings.push(crate::models::import_v2_migration::LegacyHistoryWarning {
-                    code: "IMPORT_V2_HISTORY_CORRUPT".into(),
-                    message: "A V2 import history record could not be read.".into(),
-                    evidence_path: relative,
-                });
-                continue;
-            }
-        };
-        let session = batch.history_snapshot.clone().or_else(|| {
-            state
-                .import_v2_service
-                .load_session(context, &state.file_store, &batch.session_id)
-                .ok()
-        });
+    for record in scan.records {
+        let batch = record.batch;
+        let session = record.session;
         let item_ids = batch
             .items
             .iter()
@@ -955,12 +883,7 @@ fn read_v2_history(
         }) {
             available_actions.push(ImportHistoryAction::UpdateWiki);
         }
-        let modified_millis = parse_timestamp_millis(&batch.created_at)
-            .unwrap_or_else(|| file_modified_millis(&path));
-        let updated_at = fs::metadata(&path)
-            .ok()
-            .and_then(|metadata| metadata.modified().ok())
-            .map(|time| chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339());
+        let updated_at = record.updated_at;
         let title = history_title(&batch, session.as_ref());
         let entry = ImportHistoryEntry {
             id: batch.batch_id.clone(),
@@ -983,11 +906,11 @@ fn read_v2_history(
         };
         entries.push(HistoryRecord::V2 {
             entry,
-            modified_millis,
+            modified_millis: record.modified_millis,
         });
     }
     entries.sort_by(history_record_cmp);
-    Ok((entries, v2_paths, warnings))
+    Ok((entries, scan.claimed_paths, scan.warnings))
 }
 
 fn history_record_cmp(left: &HistoryRecord, right: &HistoryRecord) -> Ordering {

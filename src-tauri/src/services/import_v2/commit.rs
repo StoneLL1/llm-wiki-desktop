@@ -3259,11 +3259,8 @@ fn validate_complete_decision_set(
                 "Import commit decisions must be unique.",
             ));
         }
-        let item = session
-            .items
-            .iter()
-            .find(|item| item.item_id == decision.item_id)
-            .ok_or_else(|| {
+        let item =
+            find_session_item_for_decision(&session.items, &decision.item_id).ok_or_else(|| {
                 commit_error(
                     IMPORT_V2_STATE_INVALID,
                     "Import item was not found for commit.",
@@ -3299,6 +3296,22 @@ fn validate_complete_decision_set(
         }
     }
     Ok(())
+}
+
+#[cfg(feature = "performance-observers")]
+thread_local! {
+    static COMMIT_LOOKUP_COMPARISONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn find_session_item_for_decision<'a>(
+    items: &'a [ImportItem],
+    decision_item_id: &str,
+) -> Option<&'a ImportItem> {
+    items.iter().find(|item| {
+        #[cfg(feature = "performance-observers")]
+        COMMIT_LOOKUP_COMPARISONS.with(|count| count.set(count.get() + 1));
+        item.item_id == decision_item_id
+    })
 }
 
 fn verified_artifact(
@@ -3553,6 +3566,41 @@ mod tests {
     };
     use super::{validate_source_package_update, SourcePackageManifest, SourcePackageMemberRole};
     use crate::services::import_v2::transaction::set_before_checked_displace_hook;
+
+    #[cfg(feature = "performance-observers")]
+    #[test]
+    fn batch_zero_decision_lookup_counter_records_current_quadratic_shape() {
+        for decision_count in [100usize, 1_000, 10_000] {
+            let items = (0..decision_count)
+                .map(|index| {
+                    crate::models::import_v2::ImportItem::queued(
+                        &format!("item-{index}"),
+                        ImportInput {
+                            kind: ImportInputKind::File,
+                            display_name: format!("{index}.md"),
+                            locator: format!("fixture/{index}.md"),
+                            normalized_locator: None,
+                            source_identity: None,
+                            media_save_mode: MediaSaveMode::ExtractOnly,
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+            super::COMMIT_LOOKUP_COMPARISONS.with(|count| count.set(0));
+            for index in 0..decision_count {
+                assert!(
+                    super::find_session_item_for_decision(&items, &format!("item-{index}"))
+                        .is_some()
+                );
+            }
+            let comparisons = super::COMMIT_LOOKUP_COMPARISONS.with(std::cell::Cell::get);
+            assert_eq!(
+                comparisons,
+                (decision_count as u64 * (decision_count as u64 + 1)) / 2
+            );
+            println!("BATCH0_COMMIT_LOOKUP D={decision_count} comparisons={comparisons}");
+        }
+    }
     use crate::services::import_v2::transaction::{
         set_before_new_install_hook, set_fail_next_candidate_install,
     };
