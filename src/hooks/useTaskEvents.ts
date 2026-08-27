@@ -78,11 +78,13 @@ export function useTaskEvents(): void {
     const unregisterStoreListener = registerTaskEventOwner((event) => {
       const activeProject = useProjectStore.getState().currentProject;
       const scopeEpoch = captureProjectScope();
+      // The owner records every valid task snapshot for audit/recovery. Only
+      // current-project presentation effects continue past the scope guard.
+      handleTaskEvent(event);
       if (!isTaskEventForProject(event, activeProject.projectId)) return;
       if (event.eventType === "project_refreshed" && isProjectSummary(event.payload)) {
         useProjectStore.getState().setCurrentProject(event.payload);
       }
-      handleTaskEvent(event);
       void import("../services/projectResourceInvalidation").then((service) =>
         isProjectScopeCurrent(scopeEpoch) && invalidateProjectResources(
           { projectId: activeProject.projectId, rootPath: activeProject.rootPath },
@@ -96,9 +98,11 @@ export function useTaskEvents(): void {
       listen<BackendEvent>(channel, (evt) => {
         if (cancelled) return;
         const event = evt.payload as BackendEvent;
-        if (event.eventType === "workflow_updated") void notifyTaskEvent(event);
         const activeProject = useProjectStore.getState().currentProject;
-        if (!isTaskEventForProject(event, activeProject.projectId)) return;
+        if (
+          event.eventType === "workflow_updated"
+          && isTaskEventForProject(event, activeProject.projectId)
+        ) void notifyTaskEvent(event);
         dispatchTaskEvent(event);
       })
         .then((unlisten) => {

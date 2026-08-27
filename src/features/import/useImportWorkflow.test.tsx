@@ -1,10 +1,10 @@
 import { act, render, renderHook, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { defaultProject, useProjectStore } from "../../stores/projectStore";
 import { importProjectKey, useImportStore } from "../../stores/importStore";
 import { useNavigationStore } from "../../stores/navigationStore";
-import { useTaskStore } from "../../stores/taskStore";
+import { handleTaskEvent, useTaskStore } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import type { TaskLauncher } from "../../hooks/useTaskLauncher";
 import type { ImportCompletion, ImportItem, ImportSession } from "../../types/importV2";
@@ -14,7 +14,11 @@ import type { ProjectSessionAuthority } from "../../types/project";
 import type { ImportHistoryPage } from "../../types/importV2Presentation";
 import type { LegacyInventory, MigrationConfirmation, MigrationPlan, MigrationReport } from "../../types/importV2Migration";
 import type { AppView } from "../../stores/navigationStore";
-import { dispatchTaskEvent as notifyTaskEventListeners } from "../../services/taskEventDispatcher";
+import {
+  clearPendingTaskEvents,
+  dispatchTaskEvent as notifyTaskEventListeners,
+  registerTaskEventOwner,
+} from "../../services/taskEventDispatcher";
 import { useWikiStore } from "../wiki/wikiStore";
 
 const api = vi.hoisted(() => ({
@@ -200,7 +204,19 @@ const completion: ImportCompletion = {
   failures: [],
 };
 
+let unregisterTaskEventOwner: (() => void) | null = null;
+
+beforeAll(() => {
+  unregisterTaskEventOwner = registerTaskEventOwner(handleTaskEvent);
+});
+
+afterAll(() => {
+  clearPendingTaskEvents();
+  unregisterTaskEventOwner?.();
+});
+
 beforeEach(() => {
+  clearPendingTaskEvents();
   vi.clearAllMocks();
   tauriInvoke.mockResolvedValue([]);
   Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
@@ -210,6 +226,10 @@ beforeEach(() => {
   useTaskStore.setState({
     activeProjectId: projectA.projectId,
     activeProjectRootPath: projectA.rootPath,
+    taskById: {},
+    taskIdsByProject: {},
+    runningCountByProject: {},
+    taskFacts: {},
     tasks: [],
     logs: {},
     activities: {},
@@ -625,6 +645,12 @@ describe("useImportWorkflow", () => {
   it("recovers the unfinished session without creating a competing draft", async () => {
     api.getReadiness.mockResolvedValue({ ...readiness, unfinishedSessionId: "session-recover" });
     api.getSession.mockResolvedValue({ ...session(projectA.projectId, [item("recover.md")]), sessionId: "session-recover" });
+    let recoveryFactPublications = 0;
+    const unsubscribe = useTaskStore.subscribe((state, previous) => {
+      if (state.taskById["session-recovery"] !== previous.taskById["session-recovery"]) {
+        recoveryFactPublications += 1;
+      }
+    });
 
     const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
 
@@ -643,6 +669,8 @@ describe("useImportWorkflow", () => {
     await waitFor(() => expect(
       useTaskStore.getState().tasks.find((entry) => entry.id === "session-recovery"),
     ).toMatchObject({ operation: { kind: "import_recovery", sessionId: "session-recover" } }));
+    unsubscribe();
+    expect(recoveryFactPublications).toBe(1);
   });
 
   it("refreshes the unfinished session when its recovery task reaches terminal state", async () => {
@@ -1146,7 +1174,6 @@ describe("useImportWorkflow", () => {
       updatedAt: "2026-07-13T00:00:01Z",
     };
     await act(async () => {
-      useTaskStore.getState().upsertTask(advanced);
       notifyTaskEventListeners({
         eventId: "recovered-asr-progress",
         eventType: "task_updated",
@@ -1157,7 +1184,8 @@ describe("useImportWorkflow", () => {
       });
     });
 
-    expect(result.current.session?.items[0].progress).toEqual(advanced.progress);
+    expect(useTaskStore.getState().taskById[advanced.id]?.progress).toEqual(advanced.progress);
+    await waitFor(() => expect(result.current.session?.items[0].progress).toEqual(advanced.progress));
   });
 
   it("recovers a review-ready batch that is waiting for confirmation", async () => {

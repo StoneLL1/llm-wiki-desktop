@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useShallow } from "zustand/react/shallow";
 import { ChevronDown, Pencil, Sparkles, Trash2 } from "lucide-react";
 
 import { latestAssistantMessage, useChatStore } from "../../stores/chatStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useProjectStore } from "../../stores/projectStore";
-import { fetchTaskActivities, useTaskStore } from "../../stores/taskStore";
+import { fetchTaskActivities, selectProjectTaskById, useTaskStore } from "../../stores/taskStore";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useWikiStore } from "../../features/wiki/wikiStore";
 import { isTerminalStatus } from "../../types/task";
@@ -93,14 +94,26 @@ export function ChatView() {
   const ensureChatConvenienceAuthorization = useSettingsStore((state) => state.ensureChatConvenienceAuthorization);
   const setChatConvenienceAuthorization = useSettingsStore((state) => state.setChatConvenienceAuthorization);
 
-  const tasks = useTaskStore((state) => state.tasks);
-  const activities = useTaskStore((state) => state.activities);
+  const { projectId, rootPath } = currentProject;
+  const relevantTaskIds = useMemo(() => [...new Set([
+    ...(sendTaskId ? [sendTaskId] : []),
+    ...(activeSession?.messages.flatMap((message) => message.taskId ? [message.taskId] : []) ?? []),
+  ])], [activeSession?.messages, sendTaskId]);
+  const tasks = useTaskStore(useShallow((state) =>
+    relevantTaskIds
+      .map((taskId) => selectProjectTaskById(state, projectId, taskId))
+      .filter((task): task is NonNullable<typeof task> => Boolean(task)),
+  ));
+  const activities = useTaskStore(useShallow((state) => Object.fromEntries(
+    relevantTaskIds.flatMap((taskId) => state.activities[taskId]
+      ? [[taskId, state.activities[taskId]]]
+      : []),
+  )));
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
   const setActiveView = useNavigationStore((state) => state.setActiveView);
   const openSettings = useNavigationStore((state) => state.openSettings);
   const openWikiPage = useWikiStore((state) => state.openPage);
 
-  const { projectId, rootPath } = currentProject;
   const presentationProjectKey = projectResourceKey(projectId, rootPath);
   const setRoutePreference = useCallback((route: ChatRoutePreference) => {
     saveChatRoutePreference(route);

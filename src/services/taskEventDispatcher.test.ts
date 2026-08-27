@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { BackendEvent, BackendEventType, StreamDelta } from "../types/task";
+import type { BackendEvent, BackendEventType, BackendTask, StreamDelta } from "../types/task";
 import { TaskEventDispatcher } from "./taskEventDispatcher";
 
 function streamEvent(projectId: string, taskId: string, delta: string): BackendEvent<StreamDelta> {
@@ -29,6 +29,31 @@ function terminalEvent(
   };
 }
 
+function taskSnapshotEvent(progress = 1): BackendEvent<BackendTask> {
+  return {
+    eventId: `task-a-${progress}`,
+    eventType: "task_updated",
+    projectId: "project-a",
+    taskId: "task-a",
+    timestamp: `2026-08-16T00:00:0${progress}Z`,
+    payload: {
+      id: "task-a",
+      taskType: "import",
+      projectId: "project-a",
+      title: "Import",
+      status: "running",
+      progress: { current: progress, total: 10, label: "Importing" },
+      startedAt: "2026-08-16T00:00:00Z",
+      updatedAt: `2026-08-16T00:00:0${progress}Z`,
+      completedAt: null,
+      cancellable: true,
+      logPath: null,
+      result: null,
+      error: null,
+    },
+  };
+}
+
 describe("TaskEventDispatcher", () => {
   it("always runs the event owner before feature listeners", () => {
     const dispatcher = new TaskEventDispatcher();
@@ -40,6 +65,22 @@ describe("TaskEventDispatcher", () => {
     dispatcher.dispatch(terminalEvent("project-a", "task-a", "task_completed"));
 
     expect(order).toEqual(["owner", "feature-first-registered", "feature-second"]);
+  });
+
+  it("publishes one canonical snapshot before feature listeners inspect it", () => {
+    const dispatcher = new TaskEventDispatcher();
+    let canonicalTask: BackendTask | null = null;
+    const observed: BackendTask[] = [];
+    dispatcher.registerOwner((event) => { canonicalTask = event.payload as BackendTask; });
+    dispatcher.register(() => {
+      if (canonicalTask) observed.push(canonicalTask);
+    });
+
+    const event = taskSnapshotEvent();
+    dispatcher.dispatch(event);
+    dispatcher.dispatch({ ...event, eventId: "semantic-duplicate" });
+
+    expect(observed).toEqual([event.payload]);
   });
 
   it.each(["task_completed", "task_failed", "task_cancelled"] as const)(

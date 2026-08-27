@@ -43,7 +43,17 @@ describe("graphStore", () => {
     invokeMock.mockReset();
     waitForTaskTerminalMock.mockReset();
     useGraphStore.getState().reset();
-    useTaskStore.setState({ tasks: [], logs: {}, drawerOpen: false, selectedTaskId: null, runningCount: 0 });
+    useTaskStore.setState({
+      taskById: {},
+      taskIdsByProject: {},
+      runningCountByProject: {},
+      taskFacts: {},
+      tasks: [],
+      logs: {},
+      drawerOpen: false,
+      selectedTaskId: null,
+      runningCount: 0,
+    });
     invalidateProjectScope();
   });
   it("starts with sensible defaults", () => {
@@ -210,7 +220,7 @@ describe("graphStore", () => {
       projectRootPath: "D:/wiki",
     });
     expect(invokeMock).not.toHaveBeenCalledWith("get_task", expect.anything());
-    expect(useTaskStore.getState().tasks).toContainEqual(completed);
+    expect(useTaskStore.getState().taskById[completed.id]).toEqual(completed);
   });
 
   it("keeps previous data visible when rebuild is cancelled", async () => {

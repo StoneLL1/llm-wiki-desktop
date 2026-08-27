@@ -10,7 +10,12 @@ import {
 } from "../../lib/backendError";
 import type { ImportCapabilityRequirement } from "../../types/importV2Presentation";
 import type { BackendTask } from "../../types/task";
-import { cancelTaskRequest, useTaskStore } from "../../stores/taskStore";
+import {
+  cancelTaskRequest,
+  selectProjectTaskById,
+  selectTaskIdsForProject,
+  useTaskStore,
+} from "../../stores/taskStore";
 import { capabilityInstallState } from "./capabilityInstallState";
 import { capabilityDisplayName, capabilityPurpose } from "./importCapabilityPresentation";
 
@@ -36,15 +41,22 @@ export function ImportCapabilityDialog({ open, requirement, sessionId, itemId, o
   const [acknowledged, setAcknowledged] = useState(false);
   const [starting, setStarting] = useState(false);
   const [startedTaskId, setStartedTaskId] = useState<string | null>(null);
-  const tasks = useTaskStore((state) => state.tasks);
-  const capabilityTasks = useMemo(() => tasks.filter((task) => {
-    const operation = task.operation;
-    return operation?.kind === "capability_install"
-      && operation.sessionId === sessionId
-      && operation.itemId === itemId
-      && operation.capabilityId === requirement?.requirement.capabilityId
-      && operation.requirementRevision === requirement?.requirementRevision;
-  }), [itemId, requirement?.requirement.capabilityId, requirement?.requirementRevision, sessionId, tasks]);
+  const activeProjectId = useTaskStore((state) => state.activeProjectId);
+  const projectTaskIds = useTaskStore((state) => selectTaskIdsForProject(state, activeProjectId));
+  const capabilityTasks = useMemo(() => {
+    const state = useTaskStore.getState();
+    return projectTaskIds
+      .map((taskId) => selectProjectTaskById(state, activeProjectId, taskId))
+      .filter((task): task is BackendTask => task !== null)
+      .filter((task) => {
+        const operation = task.operation;
+        return operation?.kind === "capability_install"
+          && operation.sessionId === sessionId
+          && operation.itemId === itemId
+          && operation.capabilityId === requirement?.requirement.capabilityId
+          && operation.requirementRevision === requirement?.requirementRevision;
+      });
+  }, [activeProjectId, itemId, projectTaskIds, requirement, sessionId]);
   const [installError, setInstallError] = useState<NormalizedBackendError | null>(null);
   useEffect(() => {
     setAcknowledged(false);

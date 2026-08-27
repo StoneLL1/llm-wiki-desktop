@@ -8,7 +8,12 @@ import {
   normalizeBackendError,
   type NormalizedBackendError,
 } from "../../lib/backendError";
-import { cancelTaskRequest, useTaskStore } from "../../stores/taskStore";
+import {
+  cancelTaskRequest,
+  selectProjectTaskById,
+  selectTaskIdsForProject,
+  useTaskStore,
+} from "../../stores/taskStore";
 import type { ImportAsrProfile } from "../../types/importV2";
 import type { ImportAsrEnablementPlan, ImportAsrProfilePlan } from "../../types/importV2Presentation";
 import type { BackendTask } from "../../types/task";
@@ -79,7 +84,6 @@ export function ImportAsrDialog({
   const [busy, setBusy] = useState(false);
   const [startedTaskId, setStartedTaskId] = useState<string | null>(null);
   const [installError, setInstallError] = useState<NormalizedBackendError | null>(null);
-  const tasks = useTaskStore((state) => state.tasks);
 
   useEffect(() => {
     if (!open) return;
@@ -96,14 +100,22 @@ export function ImportAsrDialog({
     () => plan?.profiles.find((entry) => entry.profile === profile) ?? null,
     [plan, profile],
   );
-  const capabilityTasks = useMemo(() => tasks.filter((task) => {
-    const operation = task.operation;
-    return operation?.kind === "capability_install"
-      && operation.sessionId === sessionId
-      && operation.itemId === itemId
-      && operation.capabilityId === selected?.capabilityId
-      && operation.requirementRevision === plan?.requirementRevision;
-  }), [itemId, plan?.requirementRevision, selected?.capabilityId, sessionId, tasks]);
+  const activeProjectId = useTaskStore((state) => state.activeProjectId);
+  const projectTaskIds = useTaskStore((state) => selectTaskIdsForProject(state, activeProjectId));
+  const capabilityTasks = useMemo(() => {
+    const state = useTaskStore.getState();
+    return projectTaskIds
+      .map((taskId) => selectProjectTaskById(state, activeProjectId, taskId))
+      .filter((task): task is BackendTask => task !== null)
+      .filter((task) => {
+        const operation = task.operation;
+        return operation?.kind === "capability_install"
+          && operation.sessionId === sessionId
+          && operation.itemId === itemId
+          && operation.capabilityId === selected?.capabilityId
+          && operation.requirementRevision === plan?.requirementRevision;
+      });
+  }, [activeProjectId, itemId, plan?.requirementRevision, projectTaskIds, selected?.capabilityId, sessionId]);
   const task = capabilityTasks.find((candidate) => candidate.id === startedTaskId)
     ?? [...capabilityTasks].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]
     ?? null;

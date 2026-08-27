@@ -11,6 +11,8 @@ import {
   fetchTasks,
   handleTaskEvent,
   recoverTasksForProject,
+  selectProjectTaskById,
+  selectTaskIdsForProject,
   useTaskStore,
 } from "./taskStore";
 import { defaultProject, useProjectStore } from "./projectStore";
@@ -48,6 +50,10 @@ beforeEach(() => {
   useTaskStore.setState({
     activeProjectId: "project-a",
     activeProjectRootPath: "D:/project-a",
+    taskById: {},
+    taskIdsByProject: {},
+    runningCountByProject: {},
+    taskFacts: {},
     tasks: [],
     logs: {},
     activities: {},
@@ -215,6 +221,91 @@ describe("recoverTasksForProject", () => {
     unsubscribe();
     expect(publications).toBe(1);
     expect(useTaskStore.getState().tasks).toHaveLength(100);
+  });
+
+  it("does not publish a semantically identical task snapshot twice", () => {
+    const current = task("task-a", "project-a");
+    useTaskStore.getState().upsertTask(current);
+    let publications = 0;
+    const unsubscribe = useTaskStore.subscribe(() => { publications += 1; });
+
+    useTaskStore.getState().upsertTask({
+      ...current,
+      progress: current.progress,
+    });
+
+    unsubscribe();
+    expect(publications).toBe(0);
+    expect(useTaskStore.getState().tasks[0]).toBe(current);
+  });
+
+  it("does not publish an older snapshot over a newer terminal fact", () => {
+    const completed = succeededTask("task-a", "project-a");
+    useTaskStore.getState().upsertTask(completed);
+    let publications = 0;
+    const unsubscribe = useTaskStore.subscribe(() => { publications += 1; });
+
+    useTaskStore.getState().upsertTask(task("task-a", "project-a"));
+
+    unsubscribe();
+    expect(publications).toBe(0);
+    expect(useTaskStore.getState().taskById[completed.id]).toBe(completed);
+  });
+
+  it("keeps project ids and running counts referentially stable for progress-only updates", () => {
+    const running = task("task-a", "project-a");
+    useTaskStore.getState().upsertTask(running);
+    const before = useTaskStore.getState();
+
+    useTaskStore.getState().upsertTask({
+      ...running,
+      progress: { current: 1, total: 2, label: "Importing" },
+      updatedAt: "2026-06-21T00:00:01Z",
+    });
+
+    const after = useTaskStore.getState();
+    expect(after.taskIdsByProject).toBe(before.taskIdsByProject);
+    expect(after.taskIdsByProject["project-a"]).toBe(before.taskIdsByProject["project-a"]);
+    expect(after.runningCountByProject).toBe(before.runningCountByProject);
+    expect(after.runningCount).toBe(1);
+  });
+
+  it("keeps running-count indexes stable when adding a non-running task", () => {
+    const before = useTaskStore.getState().runningCountByProject;
+
+    useTaskStore.getState().upsertTask(succeededTask("task-a", "project-a"));
+
+    expect(useTaskStore.getState().runningCountByProject).toBe(before);
+  });
+
+  it("provides stable project ids and rejects retained facts from another project", () => {
+    const retained = task("task-a", "project-a");
+    useTaskStore.getState().upsertTask(retained);
+    const firstIds = selectTaskIdsForProject(useTaskStore.getState(), "project-a");
+
+    expect(selectTaskIdsForProject(useTaskStore.getState(), "project-a")).toBe(firstIds);
+    expect(selectProjectTaskById(useTaskStore.getState(), "project-b", retained.id)).toBeNull();
+    expect(selectProjectTaskById(useTaskStore.getState(), "project-a", retained.id)).toBe(retained);
+  });
+
+  it("records background-project facts without changing current-project presentation", () => {
+    const background = task("task-b", "project-b");
+    useTaskStore.setState({ drawerOpen: true, selectedTaskId: "task-a" });
+
+    handleTaskEvent({
+      eventId: "event-project-b",
+      eventType: "task_updated",
+      projectId: "project-b",
+      taskId: background.id,
+      timestamp: background.updatedAt,
+      payload: background,
+    });
+
+    const state = useTaskStore.getState();
+    expect(state.taskFacts[background.id]).toEqual(background);
+    expect(state.tasks).toEqual([]);
+    expect(state.drawerOpen).toBe(true);
+    expect(state.selectedTaskId).toBe("task-a");
   });
 
   it("publishes one exact bounded tail for an aggregated stream delta", () => {
