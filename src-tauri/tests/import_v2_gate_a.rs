@@ -898,6 +898,8 @@ fn real_collection_selection_runs_children_through_candidate_and_commit_in_sourc
                 session_id: session.session_id,
                 batch_task_id: None,
                 acknowledge_restricted_content: false,
+                expected_selection_revision: None,
+                expected_confirmation_digest: None,
                 decisions,
             },
         )
@@ -1065,6 +1067,8 @@ fn run_gate_a_case(case: GateACase) {
                 session_id: session.session_id.clone(),
                 batch_task_id: None,
                 acknowledge_restricted_content: false,
+                expected_selection_revision: None,
+                expected_confirmation_digest: None,
                 decisions: vec![CommitItemDecision {
                     item_id: item_id.clone(),
                     resolution,

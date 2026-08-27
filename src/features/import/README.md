@@ -39,6 +39,16 @@ decides thresholds, mutates source files, or treats app-state persistence as
 content write authority. The legacy per-item start IPC remains an explicit
 small-cohort compatibility boundary, not the primary workflow.
 
+The active workbench reads a bounded session window: `state.json` supplies
+revisioned counts and the confirmation digest, `order/*.json` supplies stable
+item order in pages of at most 256 identifiers, and the public item-page IPC
+returns at most 200 items. `active-session.json` is the normal startup pointer.
+Existing `session.json` plus `items/*.json` remain canonical; when sidecars are
+missing, foreground reads report `rebuild_required` and the explicit recovery
+task rebuilds them without turning a GET into a write. Confirmation submits the
+overview's selection revision and digest, so a stale workbench cannot commit a
+different selection after pagination or concurrent item updates.
+
 Aggregate and per-spreadsheet risk are separate saved-scan acknowledgements:
 aggregate acceptance admits only ordinary files and keeps large CSV/XLSX (or
 an XLS with an incomplete output estimate) pending. Both stages retain the

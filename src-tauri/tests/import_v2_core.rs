@@ -312,6 +312,8 @@ impl CoreIntegrationFixture {
                     session_id: session.into(),
                     batch_task_id: None,
                     acknowledge_restricted_content: false,
+                    expected_selection_revision: None,
+                    expected_confirmation_digest: None,
                     decisions: vec![CommitItemDecision {
                         item_id: item.into(),
                         resolution,

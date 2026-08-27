@@ -1,5 +1,4 @@
 import { File, Folder, Globe2, LockKeyhole } from "lucide-react";
-import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ImportItem } from "../../types/importV2";
 import type { BackendTask } from "../../types/task";
@@ -25,6 +24,9 @@ export interface ImportQueueProps {
   sessionSyncing?: boolean;
   discoveryTask?: BackendTask | null;
   resetKey?: string | null;
+  hasMoreItems?: boolean;
+  loadingMoreItems?: boolean;
+  onLoadMoreItems?: () => void;
 }
 
 const FILTERS: readonly { key: ImportQueueFilter; labelKey: string; count: (counts: ImportQueueCounts) => number }[] = [
@@ -34,8 +36,6 @@ const FILTERS: readonly { key: ImportQueueFilter; labelKey: string; count: (coun
   { key: "needs_action", labelKey: "importV2.queue.filter.needsAction", count: (counts) => counts.needsAction },
   { key: "failed", labelKey: "importV2.queue.filter.failed", count: (counts) => counts.failed },
 ];
-
-const QUEUE_PAGE_SIZE = 200;
 
 function itemIcon(item: ImportItem) {
   if (item.input.kind === "url") return Globe2;
@@ -62,21 +62,17 @@ export function ImportQueue({
   onCopyLocator,
   sessionSyncing = false,
   discoveryTask,
-  resetKey,
+  hasMoreItems = false,
+  loadingMoreItems = false,
+  onLoadMoreItems,
 }: ImportQueueProps) {
   const { t } = useTranslation();
-  const [visibleLimit, setVisibleLimit] = useState(QUEUE_PAGE_SIZE);
-  useEffect(() => {
-    setVisibleLimit(QUEUE_PAGE_SIZE);
-  }, [filter, resetKey]);
   const percent = progressPercent(progress);
   const processed = progress.processed ?? progress.completed;
   const failed = progress.failed ?? counts.failed;
   const needsAction = progress.needsAction ?? counts.needsAction;
   const discoveryActive = discoveryTask?.status === "queued" || discoveryTask?.status === "running" || discoveryTask?.status === "cancelling";
   const discoveryCount = discoveryTask?.progress?.current ?? 0;
-  const renderedItems = items.slice(0, visibleLimit);
-  const hasMoreItems = renderedItems.length < items.length;
   return (
     <section className="import-v2-queue" aria-label={t("importV2.queue.label")}>
       <header className="import-v2-queue__header">
@@ -116,7 +112,7 @@ export function ImportQueue({
           <div className="import-v2-queue__empty" role="status">
             <p className="m-0 text-[13px] text-[var(--text-secondary)]">{discoveryActive ? t("importV2.queue.building", { count: discoveryCount }) : t("importV2.queue.empty")}</p>
           </div>
-        ) : renderedItems.map((item) => {
+        ) : items.map((item) => {
           const presentation = presentImportItem(item);
           const SourceIcon = itemIcon(item);
           const isSelected = selectedItemId === item.itemId;
@@ -181,7 +177,7 @@ export function ImportQueue({
           );
         })}
       </div>
-      {hasMoreItems ? <div className="import-v2-queue__paging" role="status"><span>{t("importV2.queue.showing", { shown: renderedItems.length, total: items.length })}</span><button type="button" className="btn btn--sm" onClick={() => setVisibleLimit((limit) => Math.min(limit + QUEUE_PAGE_SIZE, items.length))}>{t("importV2.queue.loadMore")}</button></div> : null}
+      {hasMoreItems ? <div className="import-v2-queue__paging" role="status"><span>{t("importV2.queue.showing", { shown: items.length, total: progress.total })}</span><button type="button" className="btn btn--sm" disabled={loadingMoreItems} onClick={onLoadMoreItems}>{t("importV2.queue.loadMore")}</button></div> : null}
     </section>
   );
 }

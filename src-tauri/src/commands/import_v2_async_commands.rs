@@ -14,9 +14,10 @@ use crate::commands::import_v2_commands::{
     AddImportItemsV2Request, AddImportTextV2Request, CancelImportBatchV2Request,
     CancelImportItemV2Request, CreateImportSessionV2Request,
     GetImportRestrictedContentStatusV2Request, GetImportSessionV2Request,
-    ImportMergeContextV2Request, ImportRestrictedContentStatus, SelectImportSubtitleV2Request,
-    SetImportItemResolutionV2Request, SetImportItemSelectionV2Request,
-    StageImportManualMergeV2Request, StartImportBatchV2Request, StartImportItemsV2Request,
+    ImportMergeContextV2Request, ImportRestrictedContentStatus, ListImportSessionItemsV2Request,
+    SelectImportSubtitleV2Request, SetImportItemResolutionV2Request,
+    SetImportItemSelectionV2Request, StageImportManualMergeV2Request, StartImportBatchV2Request,
+    StartImportItemsV2Request,
 };
 use crate::commands::import_v2_file_commands::{
     AcceptImportScanV2Request, AcceptImportScanV2Result, AddImportPathsV2Request,
@@ -34,7 +35,7 @@ use crate::commands::runtime::run_blocking;
 use crate::errors::BackendError;
 use crate::models::import_backend_activation::{ActivationResult, ImportBackendActivation};
 use crate::models::import_v2::{
-    CommitImportSessionRequest, ImportCompletion, ImportItem, ImportSession,
+    CommitImportSessionRequest, ImportCompletion, ImportItem, ImportItemPage, ImportSession,
     ImportSessionOverview, ImportThreeWayMergeContext,
 };
 use crate::models::import_v2_agent::{
@@ -171,6 +172,16 @@ pub async fn get_import_session_overview_v2(
 ) -> Result<ImportSessionOverview, BackendError> {
     blocking!(app, BlockingWorkClass::MetadataIo, |_app, state| {
         core::get_import_session_overview_v2(state, request)
+    })
+}
+
+#[tauri::command]
+pub async fn list_import_session_items_v2(
+    app: AppHandle,
+    request: ListImportSessionItemsV2Request,
+) -> Result<ImportItemPage, BackendError> {
+    blocking!(app, BlockingWorkClass::MetadataIo, |_app, state| {
+        core::list_import_session_items_v2(state, request)
     })
 }
 

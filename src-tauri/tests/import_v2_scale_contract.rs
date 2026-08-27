@@ -2,7 +2,8 @@ use std::cell::Cell;
 use std::path::PathBuf;
 
 use llm_wiki_desktop_lib::models::import_v2::{
-    ImportInput, ImportInputKind, ImportItem, ImportResourceMode, ImportSession,
+    ImportInput, ImportInputKind, ImportItem, ImportItemPageFilter, ImportResourceMode,
+    ImportSession,
 };
 use llm_wiki_desktop_lib::models::import_v2_file::FileScanPolicy;
 use llm_wiki_desktop_lib::models::paths::ProjectContext;
@@ -106,6 +107,197 @@ fn expected_red_single_item_update_rewrites_every_persisted_item_file() {
         .filter(|(path, before)| std::fs::metadata(path).unwrap().modified().unwrap() > *before)
         .count();
     assert_eq!(rewritten, 1, "an item state transition must be incremental");
+}
+
+#[test]
+#[cfg(feature = "performance-observers")]
+fn overview_and_first_page_are_bounded_for_ten_thousand_items() {
+    let root = tempfile::tempdir().unwrap();
+    let context = ProjectContext::new("scale-page", root.path().to_path_buf());
+    let store = SessionStore::default();
+    let files = FileStore::default();
+    let mut session = ImportSession::new(
+        "scale-page-session",
+        "scale-page",
+        ImportResourceMode::Balanced,
+    );
+    session.items = (0..10_000).map(synthetic_item).collect();
+    store.save(&context, &files, &session).unwrap();
+
+    let overview_observer = files.observe_project(&context);
+    let overview = store
+        .read_overview(&context, &files, &session.session_id)
+        .unwrap();
+    let overview_io = overview_observer.snapshot();
+    assert_eq!(overview.item_count, 10_000);
+    assert_eq!(
+        overview_io.read_ops, 1,
+        "overview must read only state.json"
+    );
+    assert_eq!(overview_io.write_ops, 0);
+
+    let page_observer = files.observe_project(&context);
+    let first = store
+        .list_items(
+            &context,
+            &files,
+            &session.session_id,
+            ImportItemPageFilter::All,
+            None,
+            200,
+        )
+        .unwrap();
+    let page_io = page_observer.snapshot();
+    assert_eq!(first.items.len(), 200);
+    assert!(first.next_cursor.is_some());
+    assert_eq!(first.total, 10_000);
+    assert!(
+        page_io.read_ops <= 202,
+        "first page may read state + one order page + at most 200 item files: {page_io:?}"
+    );
+    assert_eq!(page_io.write_ops, 0);
+}
+
+#[test]
+fn item_revision_invalidates_an_older_page_cursor() {
+    let root = tempfile::tempdir().unwrap();
+    let context = ProjectContext::new("scale-stale", root.path().to_path_buf());
+    let store = SessionStore::default();
+    let files = FileStore::default();
+    let mut session = ImportSession::new(
+        "scale-stale-session",
+        "scale-stale",
+        ImportResourceMode::Balanced,
+    );
+    session.items = (0..3).map(synthetic_item).collect();
+    store.save(&context, &files, &session).unwrap();
+    let first = store
+        .list_items(
+            &context,
+            &files,
+            &session.session_id,
+            ImportItemPageFilter::All,
+            None,
+            1,
+        )
+        .unwrap();
+    let cursor = first.next_cursor.unwrap();
+    let mut changed = session.items[0].clone();
+    changed.selected = false;
+    store
+        .update_item(&context, &files, &session.session_id, changed)
+        .unwrap();
+    let stored = store
+        .load_item(&context, &files, &session.session_id, "item-0")
+        .unwrap();
+    assert_eq!(stored.item_revision, 2);
+    let stale = store
+        .list_items(
+            &context,
+            &files,
+            &session.session_id,
+            ImportItemPageFilter::All,
+            Some(&cursor),
+            1,
+        )
+        .unwrap_err();
+    assert_eq!(stale.code, "IMPORT_V2_SESSION_CURSOR_STALE");
+}
+
+#[test]
+fn unrelated_status_progress_does_not_stale_the_selection_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let context = ProjectContext::new("scale-selection", root.path().to_path_buf());
+    let store = SessionStore::default();
+    let files = FileStore::default();
+    let mut session = ImportSession::new(
+        "scale-selection-session",
+        "scale-selection",
+        ImportResourceMode::Balanced,
+    );
+    session.items = vec![synthetic_item(0)];
+    store.save(&context, &files, &session).unwrap();
+    let before = store
+        .read_overview(&context, &files, &session.session_id)
+        .unwrap();
+
+    let mut inspecting = session.items[0].clone();
+    inspecting.status = llm_wiki_desktop_lib::models::import_v2::ImportItemStatus::Inspecting;
+    store
+        .update_item(&context, &files, &session.session_id, inspecting)
+        .unwrap();
+
+    let after = store
+        .validate_selection_snapshot(
+            &context,
+            &files,
+            &session.session_id,
+            before.selection_revision,
+            &before.confirmation_digest,
+        )
+        .unwrap();
+    assert!(after.semantic_revision > before.semantic_revision);
+    assert_eq!(after.selection_revision, before.selection_revision);
+    assert_eq!(after.confirmation_digest, before.confirmation_digest);
+}
+
+#[test]
+#[cfg(feature = "performance-observers")]
+fn active_pointer_and_legacy_rebuild_keep_foreground_reads_bounded() {
+    let root = tempfile::tempdir().unwrap();
+    let context = ProjectContext::new("scale-pointer", root.path().to_path_buf());
+    let store = SessionStore::default();
+    let files = FileStore::default();
+    let mut session = ImportSession::new(
+        "scale-pointer-session",
+        "scale-pointer",
+        ImportResourceMode::Balanced,
+    );
+    session.items = (0..100).map(synthetic_item).collect();
+    store.save(&context, &files, &session).unwrap();
+
+    let pointer_observer = files.observe_project(&context);
+    assert_eq!(
+        store.find_unfinished_session(&context, &files).unwrap(),
+        Some(session.session_id.clone())
+    );
+    let pointer_io = pointer_observer.snapshot();
+    assert_eq!(
+        pointer_io.read_ops, 2,
+        "pointer discovery reads pointer + state only"
+    );
+    assert_eq!(pointer_io.write_ops, 0);
+
+    let session_root = root
+        .path()
+        .join(".app/import-sessions")
+        .join(&session.session_id);
+    std::fs::remove_file(session_root.join("state.json")).unwrap();
+    std::fs::remove_dir_all(session_root.join("order")).unwrap();
+    std::fs::remove_file(root.path().join(".app/import-sessions/active-session.json")).unwrap();
+
+    let legacy_observer = files.observe_project(&context);
+    let legacy = store
+        .read_overview(&context, &files, &session.session_id)
+        .unwrap();
+    let legacy_io = legacy_observer.snapshot();
+    assert_eq!(
+        legacy.index_state,
+        llm_wiki_desktop_lib::models::import_v2::ImportSessionIndexState::RebuildRequired
+    );
+    assert_eq!(
+        legacy_io.write_ops, 0,
+        "foreground GET must not rebuild sidecars"
+    );
+
+    store.rebuild_sidecars(&context, &files, &session).unwrap();
+    assert_eq!(
+        store
+            .read_overview(&context, &files, &session.session_id)
+            .unwrap()
+            .index_state,
+        llm_wiki_desktop_lib::models::import_v2::ImportSessionIndexState::Ready
+    );
 }
 
 #[test]

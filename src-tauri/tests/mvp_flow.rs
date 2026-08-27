@@ -203,6 +203,8 @@ fn import_markdown_source(context: &ProjectContext, root: &Path) -> String {
                 session_id: session.session_id,
                 batch_task_id: None,
                 acknowledge_restricted_content: false,
+                expected_selection_revision: None,
+                expected_confirmation_digest: None,
                 decisions: vec![CommitItemDecision {
                     item_id: item.item_id.clone(),
                     resolution: preview

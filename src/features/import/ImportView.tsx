@@ -6,7 +6,7 @@ import { useImportStore } from "../../stores/importStore";
 import { selectTaskIdsForProject, useTaskStore } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import type { AgentCandidateView } from "../../types/importV2Agent";
-import type { CommitItemDecision, ImportItem, ImportSession } from "../../types/importV2";
+import type { ImportItem, ImportSession } from "../../types/importV2";
 import {
   canOpenHistoricalResult,
   type ImportHistoryAction,
@@ -263,6 +263,15 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
   }, [workflow.discoveryTask?.id, workflow.discoveryTask?.status]);
 
   const commitCounts = useMemo(() => {
+    if (workflow.overview) {
+      return {
+        selected: workflow.overview.selection.selected,
+        newSources: workflow.overview.selection.newSources,
+        updates: workflow.overview.selection.updates,
+        warnings: workflow.overview.selection.warnings,
+        pending: workflow.overview.selection.pending,
+      };
+    }
     const selected = (session?.items ?? []).filter(
       (item) => item.selected && presentImportItem(item).committable,
     );
@@ -287,13 +296,7 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
         },
       ).length,
     };
-  }, [session]);
-  const decisions = useMemo<CommitItemDecision[]>(() => (session?.items ?? [])
-    .filter((item) => item.selected && presentImportItem(item).committable)
-    .map((item) => ({
-      itemId: item.itemId,
-      resolution: item.preview?.resolution?.defaultResolution ?? null,
-    })), [session]);
+  }, [session, workflow.overview]);
 
   async function compareCandidate(itemId: string) {
     const requestProjectKey = workflow.projectKey;
@@ -683,6 +686,9 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
               sessionSyncing={workflow.isSyncingSession}
               discoveryTask={workflow.discoveryTask}
               resetKey={session?.sessionId}
+              hasMoreItems={workflow.hasMoreItems}
+              loadingMoreItems={workflow.isLoadingMoreItems}
+              onLoadMoreItems={() => { void workflow.loadMoreItems?.(); }}
               onAction={(action, itemId) => { void handleActionRequest(action, itemId).catch(() => undefined); }}
             />
           </>
@@ -707,7 +713,7 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
           />
         )}
       </div>
-      {activeSection === "workbench" ? <ImportCommitBar counts={commitCounts} isConfirming={workflow.isConfirming} disabled={writesBlocked} onConfirm={() => { void workflow.confirm(decisions); }} /> : null}
+      {activeSection === "workbench" ? <ImportCommitBar counts={commitCounts} isConfirming={workflow.isConfirming} disabled={writesBlocked} onConfirm={() => { void workflow.confirm(); }} /> : null}
       <ImportV2Dialogs
         workflow={workflow}
         privateItem={privateItem}

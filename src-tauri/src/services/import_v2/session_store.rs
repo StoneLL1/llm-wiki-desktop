@@ -1,16 +1,20 @@
 use std::collections::{HashMap, HashSet};
+use std::fs;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::errors::{
-    BackendError, IMPORT_V2_ITEM_NOT_FOUND, IMPORT_V2_SESSION_INVALID, IMPORT_V2_SESSION_NOT_FOUND,
-    IMPORT_V2_STATE_INVALID,
+    BackendError, IMPORT_V2_ITEM_NOT_FOUND, IMPORT_V2_SELECTION_STALE,
+    IMPORT_V2_SESSION_CURSOR_INVALID, IMPORT_V2_SESSION_CURSOR_STALE, IMPORT_V2_SESSION_INVALID,
+    IMPORT_V2_SESSION_NOT_FOUND, IMPORT_V2_STATE_INVALID,
 };
 use crate::models::import_v2::{
     ImportCollectionChildRelation, ImportCollectionRelation, ImportInput, ImportItem,
-    ImportItemStatus, ImportMediaAuthorization, ImportResourceMode, ImportSession,
-    ImportSessionOverview, ImportSessionStatus, IMPORT_V2_SCHEMA_VERSION,
+    ImportItemPage, ImportItemPageFilter, ImportItemStatus, ImportMediaAuthorization,
+    ImportResourceMode, ImportSelectionSummary, ImportSession, ImportSessionCounts,
+    ImportSessionIndexState, ImportSessionOverview, ImportSessionStatus, QualityLevel,
+    IMPORT_V2_SCHEMA_VERSION,
 };
 use crate::models::paths::ProjectContext;
 use crate::services::import_v2::transaction::FileTransaction;
@@ -42,6 +46,101 @@ struct SessionRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     collection_relations: Vec<ImportCollectionRelation>,
     item_ids: Vec<String>,
+}
+
+const SESSION_CONTROL_SCHEMA_VERSION: u32 = 1;
+const ACTIVE_SESSION_SCHEMA_VERSION: u32 = 1;
+const ORDER_PAGE_SCHEMA_VERSION: u32 = 1;
+const ORDER_PAGE_SIZE: usize = 256;
+pub const MAX_SESSION_ITEM_PAGE_SIZE: u16 = 200;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionControlRecord {
+    schema_version: u32,
+    session_id: String,
+    project_id: String,
+    status: ImportSessionStatus,
+    resource_mode: ImportResourceMode,
+    created_at: String,
+    updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    discovery_task_id: Option<String>,
+    semantic_revision: u64,
+    selection_revision: u64,
+    confirmation_digest: String,
+    item_count: u64,
+    counts: ImportSessionCounts,
+    selection: ImportSelectionSummary,
+    status_counts: ImportItemStatusCounts,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ImportItemStatusCounts {
+    queued: u64,
+    inspecting: u64,
+    waiting_capability: u64,
+    waiting_login: u64,
+    waiting_authorization: u64,
+    extracting: u64,
+    validating: u64,
+    preview_ready: u64,
+    needs_merge: u64,
+    committing: u64,
+    completed: u64,
+    paused: u64,
+    cancelled: u64,
+    skipped: u64,
+    failed: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ActiveSessionPointer {
+    schema_version: u32,
+    session_id: String,
+    status: ImportSessionStatus,
+    control_revision: u64,
+    summary_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionOrderPage {
+    schema_version: u32,
+    session_id: String,
+    page_index: u64,
+    item_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionItemCursor {
+    version: u8,
+    session_id: String,
+    filter: ImportItemPageFilter,
+    snapshot_revision: u64,
+    after: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ItemProjection {
+    all: u64,
+    active: u64,
+    ready: u64,
+    needs_action: u64,
+    failed: u64,
+    completed: u64,
+    waiting: u64,
+    processed: u64,
+    cancelled: u64,
+    selected: u64,
+    new_sources: u64,
+    updates: u64,
+    warnings: u64,
+    pending: u64,
+    restricted: u64,
 }
 
 impl From<&ImportSession> for SessionRecord {
@@ -95,7 +194,609 @@ fn session_root(context: &ProjectContext, session_id: &str) -> Result<String, Ba
     Ok(format!("{root}/{session_id}"))
 }
 
+fn active_session_path(context: &ProjectContext) -> Result<String, BackendError> {
+    let root = context.layout.import_state_root.as_deref().ok_or_else(|| {
+        BackendError::new(
+            IMPORT_V2_STATE_INVALID,
+            "Import state is unavailable for this project layout.",
+            true,
+            false,
+        )
+    })?;
+    Ok(format!("{root}/active-session.json"))
+}
+
+fn item_projection(item: &ImportItem) -> ItemProjection {
+    let active = matches!(
+        item.status,
+        ImportItemStatus::Queued
+            | ImportItemStatus::Inspecting
+            | ImportItemStatus::Extracting
+            | ImportItemStatus::Validating
+            | ImportItemStatus::Committing
+    );
+    let resolution = item
+        .preview
+        .as_ref()
+        .and_then(|preview| preview.resolution.as_ref());
+    let exact_duplicate = resolution.is_some_and(|value| {
+        value.kind == crate::models::import_v2::ImportResolutionKind::ExactDuplicate
+    });
+    let resolved_merge = matches!(item.status, ImportItemStatus::NeedsMerge)
+        && resolution
+            .and_then(|value| value.default_resolution.as_ref())
+            .is_some();
+    let ready = (matches!(item.status, ImportItemStatus::PreviewReady) && !exact_duplicate)
+        || (matches!(item.status, ImportItemStatus::PreviewReady)
+            && exact_duplicate
+            && item.restricted_content)
+        || resolved_merge;
+    let needs_action = matches!(
+        item.status,
+        ImportItemStatus::WaitingCapability
+            | ImportItemStatus::WaitingLogin
+            | ImportItemStatus::WaitingAuthorization
+            | ImportItemStatus::Paused
+    ) || (matches!(item.status, ImportItemStatus::NeedsMerge)
+        && !resolved_merge);
+    let failed = item.status == ImportItemStatus::Failed;
+    let completed = item.status == ImportItemStatus::Completed;
+    let skipped = item.status == ImportItemStatus::Skipped;
+    let cancelled = item.status == ImportItemStatus::Cancelled;
+    let processed = matches!(
+        item.status,
+        ImportItemStatus::PreviewReady
+            | ImportItemStatus::NeedsMerge
+            | ImportItemStatus::Completed
+            | ImportItemStatus::Failed
+            | ImportItemStatus::Cancelled
+            | ImportItemStatus::Skipped
+    );
+    let waiting = matches!(
+        item.status,
+        ImportItemStatus::WaitingCapability
+            | ImportItemStatus::WaitingLogin
+            | ImportItemStatus::WaitingAuthorization
+    );
+    let committable = item_is_snapshot_committable(item);
+    let update = resolution.is_some_and(|value| {
+        matches!(
+            value.kind,
+            crate::models::import_v2::ImportResolutionKind::SameSourceNewVersion
+                | crate::models::import_v2::ImportResolutionKind::NeedsThreeWayMerge
+        )
+    });
+    let new_source = resolution.is_some_and(|value| {
+        value.kind == crate::models::import_v2::ImportResolutionKind::NewSource
+    });
+    let warning = item
+        .preview
+        .as_ref()
+        .is_some_and(|preview| preview.quality.level == QualityLevel::Warning);
+    ItemProjection {
+        all: u64::from(!completed && !skipped),
+        active: u64::from(active),
+        ready: u64::from(ready && !completed && !skipped),
+        needs_action: u64::from(needs_action && !completed && !skipped),
+        failed: u64::from(failed),
+        completed: u64::from(completed),
+        waiting: u64::from(waiting),
+        processed: u64::from(processed),
+        cancelled: u64::from(cancelled),
+        selected: u64::from(committable),
+        new_sources: u64::from(committable && new_source),
+        updates: u64::from(committable && update),
+        warnings: u64::from(committable && warning),
+        pending: u64::from(needs_action || failed),
+        restricted: u64::from(committable && item.restricted_content),
+    }
+}
+
+pub(crate) fn item_is_snapshot_committable(item: &ImportItem) -> bool {
+    let Some(preview) = item.preview.as_ref() else {
+        return false;
+    };
+    let resolution = preview.resolution.as_ref();
+    let exact_duplicate = resolution.is_some_and(|value| {
+        value.kind == crate::models::import_v2::ImportResolutionKind::ExactDuplicate
+    });
+    let resolved_merge = item.status == ImportItemStatus::NeedsMerge
+        && resolution
+            .and_then(|value| value.default_resolution.as_ref())
+            .is_some();
+    item.selected
+        && preview.quality.level != QualityLevel::Fail
+        && ((item.status == ImportItemStatus::PreviewReady
+            && (!exact_duplicate || item.restricted_content))
+            || resolved_merge)
+}
+
+fn counts_and_selection(items: &[ImportItem]) -> (ImportSessionCounts, ImportSelectionSummary) {
+    let mut counts = ImportSessionCounts::default();
+    let mut selection = ImportSelectionSummary::default();
+    for item in items {
+        let value = item_projection(item);
+        counts.all += value.all;
+        counts.active += value.active;
+        counts.ready += value.ready;
+        counts.needs_action += value.needs_action;
+        counts.failed += value.failed;
+        counts.completed += value.completed;
+        counts.waiting += value.waiting;
+        counts.processed += value.processed;
+        counts.cancelled += value.cancelled;
+        selection.selected += value.selected;
+        selection.new_sources += value.new_sources;
+        selection.updates += value.updates;
+        selection.warnings += value.warnings;
+        selection.pending += value.pending;
+        selection.restricted += value.restricted;
+    }
+    (counts, selection)
+}
+
+fn status_counts(items: &[ImportItem]) -> ImportItemStatusCounts {
+    let mut counts = ImportItemStatusCounts::default();
+    for item in items {
+        apply_status_count(&mut counts, &item.status, 1, 0);
+    }
+    counts
+}
+
+fn apply_status_count(
+    counts: &mut ImportItemStatusCounts,
+    status: &ImportItemStatus,
+    after: u64,
+    before: u64,
+) {
+    let value = match status {
+        ImportItemStatus::Queued => &mut counts.queued,
+        ImportItemStatus::Inspecting => &mut counts.inspecting,
+        ImportItemStatus::WaitingCapability => &mut counts.waiting_capability,
+        ImportItemStatus::WaitingLogin => &mut counts.waiting_login,
+        ImportItemStatus::WaitingAuthorization => &mut counts.waiting_authorization,
+        ImportItemStatus::Extracting => &mut counts.extracting,
+        ImportItemStatus::Validating => &mut counts.validating,
+        ImportItemStatus::PreviewReady => &mut counts.preview_ready,
+        ImportItemStatus::NeedsMerge => &mut counts.needs_merge,
+        ImportItemStatus::Committing => &mut counts.committing,
+        ImportItemStatus::Completed => &mut counts.completed,
+        ImportItemStatus::Paused => &mut counts.paused,
+        ImportItemStatus::Cancelled => &mut counts.cancelled,
+        ImportItemStatus::Skipped => &mut counts.skipped,
+        ImportItemStatus::Failed => &mut counts.failed,
+    };
+    *value = value.saturating_sub(before).saturating_add(after);
+}
+
+fn confirmation_digest(
+    session_id: &str,
+    selection_revision: u64,
+    selection: &ImportSelectionSummary,
+) -> String {
+    let value = format!(
+        "{session_id}\0{selection_revision}\0{}\0{}\0{}\0{}\0{}\0{}",
+        selection.selected,
+        selection.new_sources,
+        selection.updates,
+        selection.warnings,
+        selection.pending,
+        selection.restricted,
+    );
+    format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+
+fn control_from_session(session: &ImportSession, revision: u64) -> SessionControlRecord {
+    let (counts, selection) = counts_and_selection(&session.items);
+    let semantic_revision = revision.max(1);
+    let selection_revision = revision.max(1);
+    let confirmation_digest =
+        confirmation_digest(&session.session_id, selection_revision, &selection);
+    SessionControlRecord {
+        schema_version: SESSION_CONTROL_SCHEMA_VERSION,
+        session_id: session.session_id.clone(),
+        project_id: session.project_id.clone(),
+        status: super::orchestrator::derive_session_status(&session.items),
+        resource_mode: session.resource_mode.clone(),
+        created_at: session.created_at.clone(),
+        updated_at: session.updated_at.clone(),
+        discovery_task_id: session.discovery_task_id.clone(),
+        semantic_revision,
+        selection_revision,
+        confirmation_digest,
+        item_count: session.items.len() as u64,
+        counts,
+        selection,
+        status_counts: status_counts(&session.items),
+    }
+}
+
+fn pointer_from_control(
+    control: &SessionControlRecord,
+) -> Result<ActiveSessionPointer, BackendError> {
+    let bytes = serde_json::to_vec(control)
+        .map_err(|_| invalid_session("Import session control record could not be serialized."))?;
+    Ok(ActiveSessionPointer {
+        schema_version: ACTIVE_SESSION_SCHEMA_VERSION,
+        session_id: control.session_id.clone(),
+        status: control.status.clone(),
+        control_revision: control.semantic_revision,
+        summary_hash: format!("{:x}", Sha256::digest(bytes)),
+    })
+}
+
+fn overview_from_control(control: SessionControlRecord) -> ImportSessionOverview {
+    ImportSessionOverview {
+        schema_version: IMPORT_V2_SCHEMA_VERSION,
+        session_id: control.session_id,
+        project_id: control.project_id,
+        status: control.status,
+        resource_mode: control.resource_mode,
+        created_at: control.created_at,
+        updated_at: control.updated_at,
+        discovery_task_id: control.discovery_task_id,
+        item_count: control.item_count,
+        semantic_revision: control.semantic_revision,
+        selection_revision: control.selection_revision,
+        confirmation_digest: control.confirmation_digest,
+        counts: control.counts,
+        selection: control.selection,
+        index_state: ImportSessionIndexState::Ready,
+    }
+}
+
+fn item_matches_filter(item: &ImportItem, filter: &ImportItemPageFilter) -> bool {
+    let value = item_projection(item);
+    match filter {
+        ImportItemPageFilter::All => value.all == 1,
+        ImportItemPageFilter::Active => value.active == 1,
+        ImportItemPageFilter::Ready => value.ready == 1,
+        ImportItemPageFilter::NeedsAction => value.needs_action == 1,
+        ImportItemPageFilter::Failed => value.failed == 1,
+        ImportItemPageFilter::Completed => value.completed == 1,
+    }
+}
+
+fn filter_total(control: &SessionControlRecord, filter: &ImportItemPageFilter) -> u64 {
+    match filter {
+        ImportItemPageFilter::All => control.counts.all,
+        ImportItemPageFilter::Active => control.counts.active,
+        ImportItemPageFilter::Ready => control.counts.ready,
+        ImportItemPageFilter::NeedsAction => control.counts.needs_action,
+        ImportItemPageFilter::Failed => control.counts.failed,
+        ImportItemPageFilter::Completed => control.counts.completed,
+    }
+}
+
+fn status_from_control(control: &SessionControlRecord) -> ImportSessionStatus {
+    let statuses = &control.status_counts;
+    if statuses.inspecting + statuses.extracting + statuses.validating + statuses.committing > 0 {
+        return ImportSessionStatus::Processing;
+    }
+    if statuses.completed > 0 && statuses.failed + statuses.cancelled > 0 {
+        return ImportSessionStatus::PartiallyCommitted;
+    }
+    if control.item_count > 0
+        && statuses.completed + statuses.skipped + statuses.cancelled == control.item_count
+        && statuses.completed + statuses.skipped > 0
+    {
+        return ImportSessionStatus::Completed;
+    }
+    if control.item_count > 0 && statuses.cancelled == control.item_count {
+        return ImportSessionStatus::Cancelled;
+    }
+    if statuses.preview_ready
+        + statuses.needs_merge
+        + statuses.waiting_capability
+        + statuses.waiting_login
+        + statuses.waiting_authorization
+        + statuses.failed
+        > 0
+    {
+        return ImportSessionStatus::WaitingForConfirmation;
+    }
+    ImportSessionStatus::Draft
+}
+
 impl SessionStore {
+    fn read_control(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+        session_id: &str,
+    ) -> Result<SessionControlRecord, BackendError> {
+        let root = session_root(context, session_id)?;
+        let control: SessionControlRecord =
+            file_store.read_json(context, &format!("{root}/state.json"))?;
+        if control.schema_version != SESSION_CONTROL_SCHEMA_VERSION
+            || control.session_id != session_id
+            || control.project_id != context.project_id
+        {
+            return Err(invalid_session("Import session control record is invalid."));
+        }
+        Ok(control)
+    }
+
+    fn control_writes_for_item_changes(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+        session_id: &str,
+        changes: &[(&ImportItem, &ImportItem)],
+    ) -> Result<Vec<(std::path::PathBuf, Vec<u8>, String)>, BackendError> {
+        let root = session_root(context, session_id)?;
+        let control_path = format!("{root}/state.json");
+        let before_control = self.read_control(context, file_store, session_id)?;
+        let mut after_control = before_control.clone();
+        after_control.semantic_revision = before_control.semantic_revision.saturating_add(1);
+        after_control.updated_at = chrono::Utc::now().to_rfc3339();
+        let mut selection_changed = false;
+        for (before, after) in changes {
+            if before.item_id != after.item_id {
+                return Err(invalid_session("Import item identity changed."));
+            }
+            let before_projection = item_projection(before);
+            let after_projection = item_projection(after);
+            apply_projection_delta(
+                &mut after_control.counts,
+                &mut after_control.selection,
+                before_projection,
+                after_projection,
+            );
+            apply_status_count(&mut after_control.status_counts, &before.status, 0, 1);
+            apply_status_count(&mut after_control.status_counts, &after.status, 1, 0);
+            selection_changed |= selection_projection_changed(before_projection, after_projection);
+        }
+        if selection_changed {
+            after_control.selection_revision = before_control.selection_revision.saturating_add(1);
+        }
+        after_control.status = status_from_control(&after_control);
+        after_control.confirmation_digest = confirmation_digest(
+            session_id,
+            after_control.selection_revision,
+            &after_control.selection,
+        );
+
+        let pointer_path = active_session_path(context)?;
+        let before_pointer: ActiveSessionPointer = file_store.read_json(context, &pointer_path)?;
+        let expected_pointer = pointer_from_control(&before_control)?;
+        if before_pointer.session_id != session_id
+            || before_pointer.control_revision != expected_pointer.control_revision
+            || before_pointer.summary_hash != expected_pointer.summary_hash
+            || before_pointer.status != expected_pointer.status
+        {
+            return Err(invalid_session(
+                "Active import session pointer does not match the item update.",
+            ));
+        }
+        let after_pointer = pointer_from_control(&after_control)?;
+        Ok(vec![
+            (
+                context.resolve_project_path(&control_path)?,
+                pretty_bytes(&after_control, "Import session control record")?,
+                format!(
+                    "{:x}",
+                    Sha256::digest(pretty_bytes(
+                        &before_control,
+                        "Import session control record"
+                    )?)
+                ),
+            ),
+            (
+                context.resolve_project_path(&pointer_path)?,
+                pretty_bytes(&after_pointer, "Active import session pointer")?,
+                format!(
+                    "{:x}",
+                    Sha256::digest(pretty_bytes(
+                        &before_pointer,
+                        "Active import session pointer"
+                    )?)
+                ),
+            ),
+        ])
+    }
+
+    pub(crate) fn stage_item_sidecar_update(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+        transaction: &mut FileTransaction,
+        session_id: &str,
+        before: &ImportItem,
+        after: &ImportItem,
+    ) -> Result<Vec<(std::path::PathBuf, usize)>, BackendError> {
+        let writes = self.control_writes_for_item_changes(
+            context,
+            file_store,
+            session_id,
+            &[(before, after)],
+        )?;
+        // The caller may already have staged canonical source/history/item
+        // writes in this transaction. Appending each checked sidecar keeps the
+        // existing journal cohort intact; the bulk helper starts a fresh
+        // checked-replacement cohort and would discard those prior intents.
+        for (path, bytes, expected_hash) in &writes {
+            transaction.write_if_hash_matches(path, bytes, expected_hash)?;
+        }
+        Ok(writes
+            .iter()
+            .map(|(path, bytes, _)| (path.clone(), bytes.len()))
+            .collect())
+    }
+
+    pub fn rebuild_sidecars(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+        session: &ImportSession,
+    ) -> Result<(), BackendError> {
+        let previous_revision = self
+            .read_control(context, file_store, &session.session_id)
+            .map(|control| control.semantic_revision.saturating_add(1))
+            .unwrap_or(1);
+        self.write_sidecars(context, file_store, session, previous_revision)
+    }
+
+    pub fn find_unfinished_session(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+    ) -> Result<Option<String>, BackendError> {
+        let pointer_path = active_session_path(context)?;
+        if file_store.exists(context, &pointer_path) {
+            if let Ok(pointer) =
+                file_store.read_json::<ActiveSessionPointer>(context, &pointer_path)
+            {
+                if pointer.schema_version == ACTIVE_SESSION_SCHEMA_VERSION
+                    && validate_id(&pointer.session_id).is_ok()
+                {
+                    if let Ok(control) = self.read_control(context, file_store, &pointer.session_id)
+                    {
+                        let expected = pointer_from_control(&control)?;
+                        if pointer.control_revision == expected.control_revision
+                            && pointer.summary_hash == expected.summary_hash
+                            && pointer.status == expected.status
+                        {
+                            return Ok((!matches!(
+                                control.status,
+                                ImportSessionStatus::Completed | ImportSessionStatus::Cancelled
+                            ))
+                            .then_some(pointer.session_id));
+                        }
+                    }
+                }
+            }
+        }
+
+        let import_state_root = context.layout.import_state_root.as_deref().ok_or_else(|| {
+            BackendError::new(
+                IMPORT_V2_STATE_INVALID,
+                "Import state is unavailable for this project layout.",
+                true,
+                false,
+            )
+        })?;
+        let root = context.resolve_project_path(import_state_root)?;
+        let metadata = match fs::symlink_metadata(&root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(BackendError::new(
+                    "IMPORT_V2_SESSION_SCAN_FAILED",
+                    error.to_string(),
+                    true,
+                    true,
+                ))
+            }
+        };
+        if !metadata.is_dir()
+            || metadata.file_type().is_symlink()
+            || crate::services::import_v2::transaction::is_project_reparse_point(&metadata)
+        {
+            return Err(BackendError::new(
+                "IMPORT_V2_SESSION_SCAN_FAILED",
+                "Import session directory is not safe.",
+                false,
+                true,
+            ));
+        }
+        let mut candidates = Vec::new();
+        for entry in fs::read_dir(root)
+            .map_err(|error| {
+                BackendError::new(
+                    "IMPORT_V2_SESSION_SCAN_FAILED",
+                    error.to_string(),
+                    true,
+                    true,
+                )
+            })?
+            .flatten()
+        {
+            let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            if !metadata.is_dir()
+                || metadata.file_type().is_symlink()
+                || crate::services::import_v2::transaction::is_project_reparse_point(&metadata)
+            {
+                continue;
+            }
+            let id = entry.file_name().to_string_lossy().into_owned();
+            if validate_id(&id).is_err() {
+                continue;
+            }
+            let root = session_root(context, &id)?;
+            let record = match file_store
+                .read_json::<SessionRecord>(context, &format!("{root}/session.json"))
+            {
+                Ok(record) => record,
+                Err(error)
+                    if matches!(
+                        error.code.as_str(),
+                        crate::errors::IMPORT_V2_SESSION_INVALID
+                            | crate::errors::IMPORT_V2_SESSION_NOT_FOUND
+                            | "JSON_PARSE_FAILED"
+                            | "FILE_READ_FAILED"
+                    ) =>
+                {
+                    continue
+                }
+                Err(error) => return Err(error),
+            };
+            if record.session_id != id || record.project_id != context.project_id {
+                continue;
+            }
+            if !matches!(
+                record.status,
+                ImportSessionStatus::Completed | ImportSessionStatus::Cancelled
+            ) {
+                candidates.push((record.updated_at, id));
+            }
+        }
+        candidates.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+        Ok(candidates.pop().map(|(_, id)| id))
+    }
+
+    fn write_sidecars(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+        session: &ImportSession,
+        revision: u64,
+    ) -> Result<(), BackendError> {
+        let root = session_root(context, &session.session_id)?;
+        file_store.ensure_dir(context, &format!("{root}/order"))?;
+        for (page_index, item_ids) in session
+            .items
+            .chunks(ORDER_PAGE_SIZE)
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| item.item_id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .enumerate()
+        {
+            file_store.write_json_atomic(
+                context,
+                &format!("{root}/order/{page_index:06}.json"),
+                &SessionOrderPage {
+                    schema_version: ORDER_PAGE_SCHEMA_VERSION,
+                    session_id: session.session_id.clone(),
+                    page_index: page_index as u64,
+                    item_ids,
+                },
+            )?;
+        }
+        let control = control_from_session(session, revision);
+        file_store.write_json_atomic(context, &format!("{root}/state.json"), &control)?;
+        file_store.write_json_atomic(
+            context,
+            &active_session_path(context)?,
+            &pointer_from_control(&control)?,
+        )
+    }
+
     pub fn read_overview(
         &self,
         context: &ProjectContext,
@@ -104,6 +805,20 @@ impl SessionStore {
     ) -> Result<ImportSessionOverview, BackendError> {
         validate_id(session_id)?;
         let root = session_root(context, session_id)?;
+        let control_path = format!("{root}/state.json");
+        if file_store.exists(context, &control_path) {
+            if let Ok(control) =
+                file_store.read_json::<SessionControlRecord>(context, &control_path)
+            {
+                if control.schema_version == SESSION_CONTROL_SCHEMA_VERSION
+                    && control.session_id == session_id
+                    && control.project_id == context.project_id
+                {
+                    return Ok(overview_from_control(control));
+                }
+            }
+        }
+
         let summary_path = format!("{root}/session.json");
         if !file_store.exists(context, &summary_path) {
             return Err(BackendError::new(
@@ -132,7 +847,198 @@ impl SessionStore {
             updated_at: record.updated_at,
             discovery_task_id: record.discovery_task_id,
             item_count: record.item_ids.len() as u64,
+            semantic_revision: 0,
+            selection_revision: 0,
+            confirmation_digest: String::new(),
+            counts: ImportSessionCounts {
+                all: record.item_ids.len() as u64,
+                ..ImportSessionCounts::default()
+            },
+            selection: ImportSelectionSummary::default(),
+            index_state: ImportSessionIndexState::RebuildRequired,
         })
+    }
+
+    pub fn validate_selection_snapshot(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+        session_id: &str,
+        expected_revision: u64,
+        expected_digest: &str,
+    ) -> Result<ImportSessionOverview, BackendError> {
+        let overview = self.read_overview(context, file_store, session_id)?;
+        if overview.selection_revision != expected_revision
+            || overview.confirmation_digest != expected_digest
+        {
+            return Err(BackendError::new(
+                IMPORT_V2_SELECTION_STALE,
+                "The import selection changed before confirmation.",
+                true,
+                false,
+            ));
+        }
+        Ok(overview)
+    }
+
+    pub fn list_items(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+        session_id: &str,
+        filter: ImportItemPageFilter,
+        cursor: Option<&str>,
+        limit: u16,
+    ) -> Result<ImportItemPage, BackendError> {
+        validate_id(session_id)?;
+        if limit == 0 || limit > MAX_SESSION_ITEM_PAGE_SIZE {
+            return Err(BackendError::new(
+                IMPORT_V2_SESSION_CURSOR_INVALID,
+                "Import item page limit must be between 1 and 200.",
+                false,
+                true,
+            ));
+        }
+        let root = session_root(context, session_id)?;
+        let control_path = format!("{root}/state.json");
+        let usable_control = file_store
+            .exists(context, &control_path)
+            .then(|| file_store.read_json::<SessionControlRecord>(context, &control_path))
+            .transpose()
+            .ok()
+            .flatten()
+            .filter(|control| {
+                control.schema_version == SESSION_CONTROL_SCHEMA_VERSION
+                    && control.session_id == session_id
+                    && control.project_id == context.project_id
+            });
+        let (snapshot_revision, item_count, total, indexed) = if let Some(control) = usable_control
+        {
+            (
+                control.semantic_revision,
+                control.item_count,
+                filter_total(&control, &filter),
+                true,
+            )
+        } else {
+            let record: SessionRecord =
+                file_store.read_json(context, &format!("{root}/session.json"))?;
+            if record.session_id != session_id || record.project_id != context.project_id {
+                return Err(invalid_session("Import session metadata is invalid."));
+            }
+            (
+                0,
+                record.item_ids.len() as u64,
+                record.item_ids.len() as u64,
+                false,
+            )
+        };
+
+        let start = if let Some(value) = cursor {
+            let parsed = serde_json::from_str::<SessionItemCursor>(value).map_err(|_| {
+                BackendError::new(
+                    IMPORT_V2_SESSION_CURSOR_INVALID,
+                    "Import item cursor is invalid.",
+                    false,
+                    true,
+                )
+            })?;
+            if parsed.version != 1 || parsed.session_id != session_id || parsed.filter != filter {
+                return Err(BackendError::new(
+                    IMPORT_V2_SESSION_CURSOR_INVALID,
+                    "Import item cursor does not match this session and filter.",
+                    false,
+                    true,
+                ));
+            }
+            if parsed.snapshot_revision != snapshot_revision {
+                return Err(BackendError::new(
+                    IMPORT_V2_SESSION_CURSOR_STALE,
+                    "Import session changed while this page was being read.",
+                    true,
+                    false,
+                ));
+            }
+            parsed.after
+        } else {
+            0
+        };
+        if start > item_count {
+            return Err(BackendError::new(
+                IMPORT_V2_SESSION_CURSOR_INVALID,
+                "Import item cursor is outside this session.",
+                false,
+                true,
+            ));
+        }
+
+        let scan_end = (start + u64::from(limit)).min(item_count);
+        let item_ids = if indexed {
+            self.read_order_range(context, file_store, session_id, start, scan_end)?
+        } else {
+            let record: SessionRecord =
+                file_store.read_json(context, &format!("{root}/session.json"))?;
+            record.item_ids[start as usize..scan_end as usize].to_vec()
+        };
+        let mut items = Vec::with_capacity(item_ids.len());
+        for item_id in item_ids {
+            let item = self.load_item(context, file_store, session_id, &item_id)?;
+            if item_matches_filter(&item, &filter) {
+                items.push(item);
+            }
+        }
+        let next_cursor = (scan_end < item_count)
+            .then(|| {
+                serde_json::to_string(&SessionItemCursor {
+                    version: 1,
+                    session_id: session_id.to_string(),
+                    filter,
+                    snapshot_revision,
+                    after: scan_end,
+                })
+                .map_err(|_| invalid_session("Import item cursor could not be serialized."))
+            })
+            .transpose()?;
+        Ok(ImportItemPage {
+            session_id: session_id.to_string(),
+            snapshot_revision,
+            items,
+            next_cursor,
+            total,
+        })
+    }
+
+    fn read_order_range(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+        session_id: &str,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<String>, BackendError> {
+        let root = session_root(context, session_id)?;
+        let mut ids = Vec::with_capacity((end - start) as usize);
+        let mut position = start as usize;
+        while position < end as usize {
+            let page_index = position / ORDER_PAGE_SIZE;
+            let page: SessionOrderPage =
+                file_store.read_json(context, &format!("{root}/order/{page_index:06}.json"))?;
+            if page.schema_version != ORDER_PAGE_SCHEMA_VERSION
+                || page.session_id != session_id
+                || page.page_index != page_index as u64
+                || page.item_ids.len() > ORDER_PAGE_SIZE
+            {
+                return Err(invalid_session("Import session order page is invalid."));
+            }
+            let offset = position % ORDER_PAGE_SIZE;
+            let take = (end as usize - position).min(page.item_ids.len().saturating_sub(offset));
+            if take == 0 {
+                return Err(invalid_session("Import session order page is incomplete."));
+            }
+            ids.extend_from_slice(&page.item_ids[offset..offset + take]);
+            position += take;
+        }
+        Ok(ids)
     }
 
     pub(crate) fn ensure_accepts_new_items(session: &ImportSession) -> Result<(), BackendError> {
@@ -288,7 +1194,8 @@ impl SessionStore {
             context,
             &format!("{root}/session.json"),
             &SessionRecord::from(session),
-        )
+        )?;
+        self.rebuild_sidecars(context, file_store, session)
     }
 
     pub fn add_inputs(
@@ -528,11 +1435,81 @@ impl SessionStore {
         validate_id(session_id)?;
         validate_id(&item.item_id)?;
         let root = session_root(context, session_id)?;
-        file_store.write_json_atomic(
-            context,
-            &format!("{root}/items/{}.json", item.item_id),
-            item,
-        )
+        let control_path = format!("{root}/state.json");
+        if !file_store.exists(context, &control_path) {
+            let session = self.load(context, file_store, session_id)?;
+            self.rebuild_sidecars(context, file_store, &session)?;
+        }
+        let before = self.load_item(context, file_store, session_id, &item.item_id)?;
+        let mut after = item.clone();
+        after.item_revision = after
+            .item_revision
+            .max(before.item_revision.saturating_add(1));
+        let before_control = self.read_control(context, file_store, session_id)?;
+        let mut after_control = before_control.clone();
+        after_control.semantic_revision = before_control.semantic_revision.saturating_add(1);
+        after_control.updated_at = chrono::Utc::now().to_rfc3339();
+        let before_projection = item_projection(&before);
+        let after_projection = item_projection(&after);
+        apply_projection_delta(
+            &mut after_control.counts,
+            &mut after_control.selection,
+            before_projection,
+            after_projection,
+        );
+        apply_status_count(&mut after_control.status_counts, &before.status, 0, 1);
+        apply_status_count(&mut after_control.status_counts, &after.status, 1, 0);
+        if selection_projection_changed(before_projection, after_projection) {
+            after_control.selection_revision = before_control.selection_revision.saturating_add(1);
+        }
+        after_control.status = status_from_control(&after_control);
+        after_control.confirmation_digest = confirmation_digest(
+            session_id,
+            after_control.selection_revision,
+            &after_control.selection,
+        );
+        let pointer_path = active_session_path(context)?;
+        let before_pointer: ActiveSessionPointer = file_store.read_json(context, &pointer_path)?;
+        if before_pointer.session_id != session_id {
+            return Err(invalid_session(
+                "Active import session pointer does not match the item update.",
+            ));
+        }
+        let after_pointer = pointer_from_control(&after_control)?;
+        let item_path =
+            context.resolve_project_path(&format!("{root}/items/{}.json", after.item_id))?;
+        let state_path = context.resolve_project_path(&control_path)?;
+        let pointer_absolute = context.resolve_project_path(&pointer_path)?;
+        let before_item_bytes = pretty_bytes(&before, "Import session item")?;
+        let after_item_bytes = pretty_bytes(&after, "Import session item")?;
+        let before_control_bytes = pretty_bytes(&before_control, "Import session control record")?;
+        let after_control_bytes = pretty_bytes(&after_control, "Import session control record")?;
+        let before_pointer_bytes = pretty_bytes(&before_pointer, "Active import session pointer")?;
+        let after_pointer_bytes = pretty_bytes(&after_pointer, "Active import session pointer")?;
+        let writes = vec![
+            (
+                item_path,
+                after_item_bytes,
+                format!("{:x}", Sha256::digest(before_item_bytes)),
+            ),
+            (
+                state_path,
+                after_control_bytes,
+                format!("{:x}", Sha256::digest(before_control_bytes)),
+            ),
+            (
+                pointer_absolute,
+                after_pointer_bytes,
+                format!("{:x}", Sha256::digest(before_pointer_bytes)),
+            ),
+        ];
+        let mut transaction = FileTransaction::new_for_project(&context.root);
+        transaction.write_many_if_hash_matches(&writes)?;
+        transaction.commit()?;
+        for (path, bytes, _) in &writes {
+            file_store.observe_atomic_write(path, bytes.len());
+        }
+        Ok(())
     }
 
     pub fn write_items(
@@ -543,7 +1520,13 @@ impl SessionStore {
         items: &[ImportItem],
     ) -> Result<(), BackendError> {
         for item in items {
-            self.write_item(context, file_store, session_id, item)?;
+            let root = session_root(context, session_id)?;
+            let path = format!("{root}/items/{}.json", item.item_id);
+            if file_store.exists(context, &path) {
+                self.write_item(context, file_store, session_id, item)?;
+            } else {
+                file_store.write_json_atomic(context, &path, item)?;
+            }
         }
         Ok(())
     }
@@ -554,14 +1537,14 @@ impl SessionStore {
     pub(crate) fn write_item_cohort_if_unchanged(
         &self,
         context: &ProjectContext,
-        _file_store: &FileStore,
+        file_store: &FileStore,
         session_id: &str,
         originals: &[ImportItem],
         replacements: &[ImportItem],
     ) -> Result<(), BackendError> {
         self.write_item_cohort_if_unchanged_with_cancel(
             context,
-            _file_store,
+            file_store,
             session_id,
             originals,
             replacements,
@@ -572,7 +1555,7 @@ impl SessionStore {
     pub(crate) fn write_item_cohort_if_unchanged_with_cancel<F>(
         &self,
         context: &ProjectContext,
-        _file_store: &FileStore,
+        file_store: &FileStore,
         session_id: &str,
         originals: &[ImportItem],
         replacements: &[ImportItem],
@@ -587,7 +1570,8 @@ impl SessionStore {
             ));
         }
         let root = session_root(context, session_id)?;
-        let mut writes = Vec::with_capacity(originals.len());
+        let mut revised_items = Vec::with_capacity(replacements.len());
+        let mut writes = Vec::with_capacity(originals.len() + 2);
         for (before, after) in originals.iter().zip(replacements) {
             if should_cancel() {
                 return Err(BackendError::new(
@@ -606,17 +1590,30 @@ impl SessionStore {
                     invalid_session("Import session item could not be serialized.")
                 })?)
             );
-            let desired = serde_json::to_vec_pretty(after)
+            let mut revised = after.clone();
+            revised.item_revision = revised
+                .item_revision
+                .max(before.item_revision.saturating_add(1));
+            let desired = serde_json::to_vec_pretty(&revised)
                 .map_err(|_| invalid_session("Import session item could not be serialized."))?;
             writes.push((
                 context.resolve_project_path(&format!("{root}/items/{}.json", after.item_id))?,
                 desired,
                 expected,
             ));
+            revised_items.push(revised);
         }
+        let changes = originals.iter().zip(&revised_items).collect::<Vec<_>>();
+        writes.extend(
+            self.control_writes_for_item_changes(context, file_store, session_id, &changes)?,
+        );
         let mut transaction = FileTransaction::new_for_project(&context.root);
         transaction.write_many_if_hash_matches_with_cancel(&writes, should_cancel)?;
-        transaction.commit()
+        transaction.commit()?;
+        for (path, bytes, _) in &writes {
+            file_store.observe_atomic_write(path, bytes.len());
+        }
+        Ok(())
     }
 
     /// Publish recovery changes as one compare-and-swap transaction. Item
@@ -643,7 +1640,8 @@ impl SessionStore {
             ));
         }
         let root = session_root(context, &after_session.session_id)?;
-        let mut writes = Vec::with_capacity(replacements.len() + 1);
+        let mut revised_items = Vec::with_capacity(replacements.len());
+        let mut writes = Vec::with_capacity(replacements.len() + 3);
         for (before, after) in originals.iter().zip(replacements) {
             if should_cancel() {
                 return Err(BackendError::new(
@@ -658,13 +1656,18 @@ impl SessionStore {
             }
             let expected_bytes = serde_json::to_vec_pretty(before)
                 .map_err(|_| invalid_session("Import session item could not be serialized."))?;
-            let desired = serde_json::to_vec_pretty(after)
+            let mut revised = after.clone();
+            revised.item_revision = revised
+                .item_revision
+                .max(before.item_revision.saturating_add(1));
+            let desired = serde_json::to_vec_pretty(&revised)
                 .map_err(|_| invalid_session("Import session item could not be serialized."))?;
             writes.push((
                 context.resolve_project_path(&format!("{root}/items/{}.json", after.item_id))?,
                 desired,
                 format!("{:x}", Sha256::digest(expected_bytes)),
             ));
+            revised_items.push(revised);
         }
 
         let before_record = serde_json::to_vec_pretty(&SessionRecord::from(before_session))
@@ -676,6 +1679,13 @@ impl SessionStore {
             after_record,
             format!("{:x}", Sha256::digest(before_record)),
         ));
+        let changes = originals.iter().zip(&revised_items).collect::<Vec<_>>();
+        writes.extend(self.control_writes_for_item_changes(
+            context,
+            file_store,
+            &after_session.session_id,
+            &changes,
+        )?);
 
         let mut transaction = FileTransaction::new_for_project(&context.root);
         transaction.write_many_if_hash_matches_with_cancel(&writes, should_cancel)?;
@@ -693,11 +1703,109 @@ impl SessionStore {
         session: &ImportSession,
     ) -> Result<(), BackendError> {
         let root = session_root(context, &session.session_id)?;
-        file_store.write_json_atomic(
-            context,
+        let control_path = format!("{root}/state.json");
+        let pointer_path = active_session_path(context)?;
+        if !file_store.exists(context, &control_path) || !file_store.exists(context, &pointer_path)
+        {
+            file_store.write_json_atomic(
+                context,
+                &format!("{root}/session.json"),
+                &SessionRecord::from(session),
+            )?;
+            return self.rebuild_sidecars(context, file_store, session);
+        }
+
+        let before_control = self.read_control(context, file_store, &session.session_id)?;
+        let mut after_control =
+            control_from_session(session, before_control.semantic_revision.saturating_add(1));
+        if after_control.selection == before_control.selection {
+            after_control.selection_revision = before_control.selection_revision;
+        } else {
+            after_control.selection_revision = before_control.selection_revision.saturating_add(1);
+        }
+        after_control.confirmation_digest = confirmation_digest(
+            &session.session_id,
+            after_control.selection_revision,
+            &after_control.selection,
+        );
+        let before_pointer: ActiveSessionPointer = file_store.read_json(context, &pointer_path)?;
+        let expected_pointer = pointer_from_control(&before_control)?;
+        if before_pointer.session_id != session.session_id
+            || before_pointer.control_revision != expected_pointer.control_revision
+            || before_pointer.summary_hash != expected_pointer.summary_hash
+            || before_pointer.status != expected_pointer.status
+        {
+            return Err(invalid_session(
+                "Active import session pointer does not match the session update.",
+            ));
+        }
+        let before_record: SessionRecord =
+            file_store.read_json(context, &format!("{root}/session.json"))?;
+        file_store.ensure_dir(context, &format!("{root}/order"))?;
+        let mut transaction = FileTransaction::new_for_project(&context.root);
+        let mut observed = Vec::new();
+
+        let mut stage_existing =
+            |relative: &str, before: Vec<u8>, after: Vec<u8>| -> Result<(), BackendError> {
+                let path = context.resolve_project_path(relative)?;
+                transaction.write_if_hash_matches(
+                    &path,
+                    &after,
+                    &format!("{:x}", Sha256::digest(before)),
+                )?;
+                observed.push((path, after.len()));
+                Ok(())
+            };
+        stage_existing(
             &format!("{root}/session.json"),
-            &SessionRecord::from(session),
-        )
+            pretty_bytes(&before_record, "Import session record")?,
+            pretty_bytes(&SessionRecord::from(session), "Import session record")?,
+        )?;
+        stage_existing(
+            &control_path,
+            pretty_bytes(&before_control, "Import session control record")?,
+            pretty_bytes(&after_control, "Import session control record")?,
+        )?;
+        stage_existing(
+            &pointer_path,
+            pretty_bytes(&before_pointer, "Active import session pointer")?,
+            pretty_bytes(
+                &pointer_from_control(&after_control)?,
+                "Active import session pointer",
+            )?,
+        )?;
+        drop(stage_existing);
+
+        for (page_index, items) in session.items.chunks(ORDER_PAGE_SIZE).enumerate() {
+            let relative = format!("{root}/order/{page_index:06}.json");
+            let page = SessionOrderPage {
+                schema_version: ORDER_PAGE_SCHEMA_VERSION,
+                session_id: session.session_id.clone(),
+                page_index: page_index as u64,
+                item_ids: items.iter().map(|item| item.item_id.clone()).collect(),
+            };
+            let bytes = pretty_bytes(&page, "Import session order page")?;
+            let path = context.resolve_project_path(&relative)?;
+            if file_store.exists(context, &relative) {
+                let before: SessionOrderPage = file_store.read_json(context, &relative)?;
+                transaction.write_if_hash_matches(
+                    &path,
+                    &bytes,
+                    &format!(
+                        "{:x}",
+                        Sha256::digest(pretty_bytes(&before, "Import session order page")?)
+                    ),
+                )?;
+            } else {
+                transaction.write_new(&path, &bytes)?;
+            }
+            observed.push((path, bytes.len()));
+        }
+        transaction.commit()?;
+        for (path, bytes) in observed {
+            file_store.observe_atomic_write(&path, bytes);
+        }
+        Ok(())
     }
 
     pub fn add_items(
@@ -712,6 +1820,59 @@ impl SessionStore {
         self.write_items(context, file_store, &session.session_id, new_items)?;
         self.write_session_record(context, file_store, session)
     }
+}
+
+fn pretty_bytes<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, BackendError> {
+    serde_json::to_vec_pretty(value)
+        .map_err(|_| invalid_session(&format!("{label} could not be serialized.")))
+}
+
+fn apply_counter(value: &mut u64, before: u64, after: u64) {
+    *value = value.saturating_sub(before).saturating_add(after);
+}
+
+fn apply_projection_delta(
+    counts: &mut ImportSessionCounts,
+    selection: &mut ImportSelectionSummary,
+    before: ItemProjection,
+    after: ItemProjection,
+) {
+    apply_counter(&mut counts.all, before.all, after.all);
+    apply_counter(&mut counts.active, before.active, after.active);
+    apply_counter(&mut counts.ready, before.ready, after.ready);
+    apply_counter(
+        &mut counts.needs_action,
+        before.needs_action,
+        after.needs_action,
+    );
+    apply_counter(&mut counts.failed, before.failed, after.failed);
+    apply_counter(&mut counts.completed, before.completed, after.completed);
+    apply_counter(&mut counts.waiting, before.waiting, after.waiting);
+    apply_counter(&mut counts.processed, before.processed, after.processed);
+    apply_counter(&mut counts.cancelled, before.cancelled, after.cancelled);
+    apply_counter(&mut selection.selected, before.selected, after.selected);
+    apply_counter(
+        &mut selection.new_sources,
+        before.new_sources,
+        after.new_sources,
+    );
+    apply_counter(&mut selection.updates, before.updates, after.updates);
+    apply_counter(&mut selection.warnings, before.warnings, after.warnings);
+    apply_counter(&mut selection.pending, before.pending, after.pending);
+    apply_counter(
+        &mut selection.restricted,
+        before.restricted,
+        after.restricted,
+    );
+}
+
+fn selection_projection_changed(before: ItemProjection, after: ItemProjection) -> bool {
+    before.selected != after.selected
+        || before.new_sources != after.new_sources
+        || before.updates != after.updates
+        || before.warnings != after.warnings
+        || before.pending != after.pending
+        || before.restricted != after.restricted
 }
 
 fn public_import_input(mut input: ImportInput) -> Result<ImportInput, BackendError> {

@@ -6,12 +6,14 @@ use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
 use crate::app_state::{AppState, ProjectTaskMutationPermit, ProjectWritePermit};
-use crate::errors::{BackendError, IMPORT_V2_ENGINE_PANICKED};
+use crate::errors::{
+    BackendError, IMPORT_V2_ENGINE_PANICKED, IMPORT_V2_SELECTION_STALE, IMPORT_V2_STATE_INVALID,
+};
 use crate::models::import_v2::{
     CommitImportSessionRequest, ImportBatchResult, ImportCompletion, ImportInput, ImportItem,
-    ImportItemResolution, ImportItemStatus, ImportRecoveryAction, ImportResourceMode,
-    ImportSession, ImportSessionOverview, ImportSessionPatchCounts, ImportSessionPatchEvent,
-    ImportThreeWayMergeContext,
+    ImportItemPage, ImportItemPageFilter, ImportItemResolution, ImportItemStatus,
+    ImportRecoveryAction, ImportResourceMode, ImportSession, ImportSessionOverview,
+    ImportSessionPatchCounts, ImportSessionPatchEvent, ImportThreeWayMergeContext,
 };
 use crate::models::paths::ProjectContext;
 use crate::models::task::{BackendTask, TaskResult, TaskResultReference, TaskStatus, TaskType};
@@ -20,6 +22,7 @@ use crate::services::import_v2::execution_control::{
     batch_terminal_status, BatchExecutionControl, BatchOperationState, ImportExecutionControl,
     ImportItemRunOutcome,
 };
+use crate::services::import_v2::session_store::item_is_snapshot_committable;
 use crate::services::import_v2::{
     import_batch_operation_session_id, is_import_batch_operation_task,
 };
@@ -67,6 +70,14 @@ request!(GetImportSessionV2Request {
     project_root_path: String,
     session_id: String,
     history_batch_id: Option<String>
+});
+request!(ListImportSessionItemsV2Request {
+    project_id: String,
+    project_root_path: String,
+    session_id: String,
+    filter: ImportItemPageFilter,
+    cursor: Option<String>,
+    limit: Option<u16>
 });
 request!(GetImportRestrictedContentStatusV2Request {
     project_id: String,
@@ -194,10 +205,23 @@ pub fn get_import_session_overview_v2(
     request: GetImportSessionV2Request,
 ) -> Result<ImportSessionOverview, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state.import_v2_service.read_session_overview(
+    state
+        .import_v2_service
+        .read_session_overview(&context, &state.file_store, &request.session_id)
+}
+
+pub fn list_import_session_items_v2(
+    state: State<'_, AppState>,
+    request: ListImportSessionItemsV2Request,
+) -> Result<ImportItemPage, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.import_v2_service.list_session_items(
         &context,
         &state.file_store,
         &request.session_id,
+        request.filter,
+        request.cursor.as_deref(),
+        request.limit.unwrap_or(200),
     )
 }
 
@@ -1635,22 +1659,70 @@ pub fn confirm_import_session_v2(
                     &state.file_store,
                     &request.session_id,
                 )?;
-                let includes_restricted = request.decisions.iter().any(|decision| {
-                    session
-                        .items
-                        .iter()
-                        .any(|item| item.item_id == decision.item_id && item.restricted_content)
-                });
-                let preview_task_ids = request
-                    .decisions
-                    .iter()
-                    .filter_map(|decision| {
+                let confirmation_item_ids = match (
+                    request.expected_selection_revision,
+                    request.expected_confirmation_digest.as_deref(),
+                ) {
+                    (Some(expected_revision), Some(expected_digest)) => {
+                        let overview = state.import_v2_service.read_session_overview(
+                            context,
+                            &state.file_store,
+                            &request.session_id,
+                        )?;
+                        if overview.selection_revision != expected_revision
+                            || overview.confirmation_digest != expected_digest
+                        {
+                            return Err(BackendError::new(
+                                IMPORT_V2_SELECTION_STALE,
+                                "The import selection changed before confirmation.",
+                                true,
+                                false,
+                            ));
+                        }
                         session
                             .items
                             .iter()
-                            .find(|item| item.item_id == decision.item_id)
+                            .filter(|item| item_is_snapshot_committable(item))
+                            .map(|item| item.item_id.clone())
+                            .collect::<HashSet<_>>()
+                    }
+                    (None, None) if request.decisions.len() <= 200 => request
+                        .decisions
+                        .iter()
+                        .map(|decision| decision.item_id.clone())
+                        .collect::<HashSet<_>>(),
+                    (None, None) => {
+                        return Err(BackendError::new(
+                            IMPORT_V2_STATE_INVALID,
+                            "Legacy import confirmation is limited to 200 decisions.",
+                            false,
+                            true,
+                        ))
+                    }
+                    _ => {
+                        return Err(BackendError::new(
+                            IMPORT_V2_SELECTION_STALE,
+                            "Import confirmation requires a complete selection snapshot.",
+                            true,
+                            false,
+                        ))
+                    }
+                };
+                let includes_restricted = confirmation_item_ids.iter().any(|item_id| {
+                    session
+                        .items
+                        .iter()
+                        .any(|item| item.item_id == *item_id && item.restricted_content)
+                });
+                let preview_task_ids = confirmation_item_ids
+                    .iter()
+                    .filter_map(|item_id| {
+                        session
+                            .items
+                            .iter()
+                            .find(|item| item.item_id == *item_id)
                             .and_then(|item| item.task_id.as_ref())
-                            .map(|task_id| (decision.item_id.clone(), task_id.clone()))
+                            .map(|task_id| (item_id.clone(), task_id.clone()))
                     })
                     .collect::<HashMap<_, _>>();
                 if includes_restricted

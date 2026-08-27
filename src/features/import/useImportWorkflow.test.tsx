@@ -26,6 +26,8 @@ const api = vi.hoisted(() => ({
   getPreviewContent: vi.fn(),
   createSession: vi.fn(),
   getSession: vi.fn(),
+  getSessionOverview: vi.fn(),
+  listSessionItems: vi.fn(),
   startSessionRecovery: vi.fn(),
   addPaths: vi.fn(),
   getScanResult: vi.fn(),
@@ -179,6 +181,32 @@ function launcher(): TaskLauncher {
   };
 }
 
+function overviewFor(value: ImportSession) {
+  const active = value.items.filter((entry) => ["queued", "inspecting", "extracting", "validating", "committing"].includes(entry.status)).length;
+  const ready = value.items.filter((entry) => entry.selected && entry.status === "preview_ready").length;
+  return {
+    ...value,
+    items: undefined,
+    itemCount: value.items.length,
+    semanticRevision: 1,
+    selectionRevision: 1,
+    confirmationDigest: `digest-${value.sessionId}`,
+    counts: {
+      all: value.items.filter((entry) => entry.status !== "completed" && entry.status !== "skipped").length,
+      active,
+      ready,
+      needsAction: value.items.filter((entry) => ["waiting_capability", "waiting_login", "waiting_authorization", "needs_merge"].includes(entry.status)).length,
+      failed: value.items.filter((entry) => entry.status === "failed").length,
+      completed: value.items.filter((entry) => entry.status === "completed").length,
+      waiting: value.items.filter((entry) => ["waiting_capability", "waiting_login", "waiting_authorization"].includes(entry.status)).length,
+      processed: value.items.filter((entry) => ["preview_ready", "needs_merge", "completed", "failed", "cancelled", "skipped"].includes(entry.status)).length,
+      cancelled: value.items.filter((entry) => entry.status === "cancelled").length,
+    },
+    selection: { selected: ready, newSources: ready, updates: 0, warnings: 0, pending: 0, restricted: value.items.filter((entry) => entry.selected && entry.restrictedContent).length },
+    indexState: "ready" as const,
+  };
+}
+
 const completion: ImportCompletion = {
   sessionId: "session-project-a",
   batchId: "batch-complete",
@@ -242,6 +270,21 @@ beforeEach(() => {
   api.getReadiness.mockResolvedValue(readiness);
   api.createSession.mockResolvedValue(session(projectA.projectId));
   api.getSession.mockResolvedValue(session(projectA.projectId));
+  let windowSession: Promise<ImportSession> | null = null;
+  api.getSessionOverview.mockImplementation(async (request: { sessionId: string }) => {
+    windowSession = Promise.resolve(api.getSession(request));
+    return overviewFor(await windowSession);
+  });
+  api.listSessionItems.mockImplementation(async (request: { sessionId: string }) => {
+    const value = await (windowSession ?? Promise.resolve(api.getSession(request)));
+    return {
+      sessionId: value.sessionId,
+      snapshotRevision: 1,
+      items: value.items,
+      nextCursor: null,
+      total: value.items.length,
+    };
+  });
   api.startSessionRecovery.mockResolvedValue({
     ...task("session-recovery"),
     operation: { kind: "import_recovery", sessionId: "session-recover" },
@@ -546,6 +589,47 @@ describe("useImportWorkflow", () => {
     }));
   });
 
+  it("loads an existing session as a bounded first page and appends the next cursor page", async () => {
+    const first = item("first.md");
+    const second = item("second.md");
+    const existing = session(projectA.projectId, [first, second]);
+    api.getReadiness.mockResolvedValue({ ...readiness, unfinishedSessionId: existing.sessionId });
+    api.getSessionOverview.mockResolvedValue(overviewFor(existing));
+    api.listSessionItems
+      .mockResolvedValueOnce({
+        sessionId: existing.sessionId,
+        snapshotRevision: 1,
+        items: [first],
+        nextCursor: "cursor-1",
+        total: 2,
+      })
+      .mockResolvedValueOnce({
+        sessionId: existing.sessionId,
+        snapshotRevision: 1,
+        items: [second],
+        nextCursor: null,
+        total: 2,
+      });
+
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.session?.items.map((entry) => entry.itemId)).toEqual(["first.md"]));
+    expect(result.current.hasMoreItems).toBe(true);
+
+    await act(async () => result.current.loadMoreItems?.());
+
+    expect(result.current.session?.items.map((entry) => entry.itemId)).toEqual(["first.md", "second.md"]);
+    expect(result.current.hasMoreItems).toBe(false);
+    expect(api.listSessionItems).toHaveBeenLastCalledWith({
+      projectId: projectA.projectId,
+      projectRootPath: projectA.rootPath,
+      sessionId: existing.sessionId,
+      filter: "all",
+      cursor: "cursor-1",
+      limit: 200,
+    });
+    expect(api.startSessionRecovery).not.toHaveBeenCalled();
+  });
+
   it("rejects an async session mutation after the project authority revision changes", async () => {
     useProjectStore.setState({ authority: authorityA });
     let resolveAddition!: (value: ImportSession) => void;
@@ -645,6 +729,10 @@ describe("useImportWorkflow", () => {
   it("recovers the unfinished session without creating a competing draft", async () => {
     api.getReadiness.mockResolvedValue({ ...readiness, unfinishedSessionId: "session-recover" });
     api.getSession.mockResolvedValue({ ...session(projectA.projectId, [item("recover.md")]), sessionId: "session-recover" });
+    api.getSessionOverview.mockResolvedValue({
+      ...overviewFor({ ...session(projectA.projectId, [item("recover.md")]), sessionId: "session-recover" }),
+      indexState: "rebuild_required" as const,
+    });
     let recoveryFactPublications = 0;
     const unsubscribe = useTaskStore.subscribe((state, previous) => {
       if (state.taskById["session-recovery"] !== previous.taskById["session-recovery"]) {
@@ -656,11 +744,11 @@ describe("useImportWorkflow", () => {
 
     await waitFor(() => expect(result.current.session?.sessionId).toBe("session-recover"));
     expect(api.createSession).not.toHaveBeenCalled();
-    expect(api.getSession).toHaveBeenCalledWith({
+    expect(api.getSession).toHaveBeenCalledWith(expect.objectContaining({
       projectId: projectA.projectId,
       projectRootPath: projectA.rootPath,
       sessionId: "session-recover",
-    });
+    }));
     expect(api.startSessionRecovery).toHaveBeenCalledWith({
       projectId: projectA.projectId,
       projectRootPath: projectA.rootPath,
@@ -680,6 +768,10 @@ describe("useImportWorkflow", () => {
     api.getSession
       .mockResolvedValueOnce(initial)
       .mockResolvedValueOnce({ ...initial, items: [recoveredItem] });
+    api.getSessionOverview.mockResolvedValue({
+      ...overviewFor(initial),
+      indexState: "rebuild_required" as const,
+    });
 
     const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
     await waitFor(() => expect(result.current.session?.sessionId).toBe("session-recover"));
@@ -1882,11 +1974,34 @@ describe("useImportWorkflow", () => {
       itemId: "retry.md",
     });
     expect(taskLauncher.cancel).not.toHaveBeenCalled();
-    expect(api.confirmSession).toHaveBeenCalledWith(expect.objectContaining({
+    expect(api.confirmSession).toHaveBeenCalledWith({
       projectId: projectA.projectId,
       projectRootPath: projectA.rootPath,
       sessionId: "session-project-a",
-    }));
+      expectedSelectionRevision: 1,
+      expectedConfirmationDigest: "digest-session-project-a",
+    });
+  });
+
+  it("refreshes the selection snapshot before an immediate confirmation", async () => {
+    const ready = { ...item("ready-now.md", "preview_ready"), selected: false };
+    const selectedSession = session(projectA.projectId, [{ ...ready, selected: true }]);
+    api.createSession.mockResolvedValue(session(projectA.projectId, [ready]));
+    api.setSelection.mockResolvedValue(selectedSession);
+    api.getSession.mockResolvedValue(selectedSession);
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.session?.items[0].selected).toBe(false));
+
+    await act(async () => result.current.setItemSelected("ready-now.md", true));
+    await act(async () => result.current.confirm());
+
+    expect(api.confirmSession).toHaveBeenCalledWith({
+      projectId: projectA.projectId,
+      projectRootPath: projectA.rootPath,
+      sessionId: "session-project-a",
+      expectedSelectionRevision: 1,
+      expectedConfirmationDigest: "digest-session-project-a",
+    });
   });
 
   it("cancels one item through the item command without cancelling its shared operation", async () => {
@@ -1895,6 +2010,10 @@ describe("useImportWorkflow", () => {
     const second = { ...item("second.md", "extracting"), taskId: operationId };
     api.createSession.mockResolvedValue(session(projectA.projectId, [first, second]));
     api.cancelItem.mockResolvedValue(session(projectA.projectId, [
+      { ...first, status: "cancelled" },
+      second,
+    ]));
+    api.getSession.mockResolvedValue(session(projectA.projectId, [
       { ...first, status: "cancelled" },
       second,
     ]));
@@ -1918,9 +2037,9 @@ describe("useImportWorkflow", () => {
     expect(useTaskStore.getState().tasks.find((candidate) => candidate.id === operationId)?.status).not.toBe("cancelled");
   });
 
-  it("requires the project acknowledgement for a restricted duplicate decision even when selection is implicit", async () => {
+  it("requires the project acknowledgement for a restricted selected duplicate", async () => {
     const restrictedDuplicate = item("restricted-duplicate.md", "preview_ready");
-    restrictedDuplicate.selected = false;
+    restrictedDuplicate.selected = true;
     restrictedDuplicate.restrictedContent = true;
     api.createSession.mockResolvedValue(session(projectA.projectId, [restrictedDuplicate]));
     api.getRestrictedContentStatus.mockResolvedValue({ confirmationRequired: true });

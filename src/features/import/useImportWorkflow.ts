@@ -56,6 +56,8 @@ export function useImportWorkflow(
   const importActive = activeView === "import";
   const inactiveSnapshotRef = useRef({
     session: useImportStore.getState().session,
+    overview: useImportStore.getState().overview,
+    nextItemCursor: useImportStore.getState().nextItemCursor,
     completion: useImportStore.getState().completion,
     selectedItemId: useImportStore.getState().selectedItemId,
     filter: useImportStore.getState().filter,
@@ -83,6 +85,8 @@ export function useImportWorkflow(
     refreshForScope,
   } = useImportSessionScope(project, activeView);
   const session = useImportStore((state) => importActive ? state.session : inactiveSnapshotRef.current.session);
+  const overview = useImportStore((state) => importActive ? state.overview : inactiveSnapshotRef.current.overview);
+  const nextItemCursor = useImportStore((state) => importActive ? state.nextItemCursor : inactiveSnapshotRef.current.nextItemCursor);
   const completion = useImportStore((state) => importActive ? state.completion : inactiveSnapshotRef.current.completion);
   const selectedItemId = useImportStore((state) => importActive ? state.selectedItemId : inactiveSnapshotRef.current.selectedItemId);
   const filter = useImportStore((state) => importActive ? state.filter : inactiveSnapshotRef.current.filter);
@@ -106,6 +110,8 @@ export function useImportWorkflow(
   if (importActive) {
     inactiveSnapshotRef.current = {
       session,
+      overview,
+      nextItemCursor,
       completion,
       selectedItemId,
       filter,
@@ -130,8 +136,10 @@ export function useImportWorkflow(
   } | null>(null);
   const sourceAdditionTailsRef = useRef(new Map<string, Promise<void>>());
   const sourceAdditionRevisionRef = useRef(0);
+  const filterRequestRevisionRef = useRef(0);
   const [remoteMediaRetentionPlan, setRemoteMediaRetentionPlan] = useState<RemoteMediaRetentionPlan | null>(null);
   const [restrictedCommitDecisions, setRestrictedCommitDecisions] = useState<CommitItemDecision[] | null>(null);
+  const [isLoadingMoreItems, setIsLoadingMoreItems] = useState(false);
   useEffect(() => {
     setPendingCollection(null);
     setRemoteMediaRetentionPlan(null);
@@ -224,14 +232,7 @@ export function useImportWorkflow(
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey) return false;
     const ended = current.session.status === "completed"
-      || current.session.status === "cancelled"
-      || (
-        current.session.items.length > 0
-        && current.session.items.every((item) =>
-          item.status === "completed"
-          || item.status === "skipped"
-          || item.status === "cancelled")
-      );
+      || current.session.status === "cancelled";
     if (!ended) return true;
 
     const inFlight = sessionRenewalRef.current;
@@ -484,7 +485,9 @@ export function useImportWorkflow(
     useImportStore.getState().replaceItem(projectKey, { ...originalItem, selected }, epoch);
     try {
       const nextSession = await importV2Api.setSelection({ projectId, projectRootPath: rootPath, sessionId: current.session.sessionId, itemId, selected });
-      await reconcileMutationSession(nextSession, projectKey, epoch, mutationRevision, current.session.sessionId);
+      if (await reconcileMutationSession(nextSession, projectKey, epoch, mutationRevision, current.session.sessionId)) {
+        await refreshForScope(projectKey, epoch, current.session.sessionId);
+      }
     } catch (error) {
       if (isScopeCurrent(projectKey, epoch, current.session.sessionId)) {
         if (isSessionMutationRevisionCurrent(mutationRevision)) {
@@ -595,13 +598,15 @@ export function useImportWorkflow(
         sessionId: current.session!.sessionId,
         itemId,
       });
-      await reconcileMutationSession(nextSession, projectKey, epoch, mutationRevision, current.session!.sessionId);
+      if (await reconcileMutationSession(nextSession, projectKey, epoch, mutationRevision, current.session!.sessionId)) {
+        await refreshForScope(projectKey, epoch, current.session!.sessionId);
+      }
     } catch (error) {
       if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
     } finally {
       endPendingItems(acceptedIds, projectKey, epoch);
     }
-  }, [beginPendingItems, endPendingItems, isScopeCurrent, nextSessionMutationRevision, projectId, projectKey, pushToast, reconcileMutationSession, rootPath, t]);
+  }, [beginPendingItems, endPendingItems, isScopeCurrent, nextSessionMutationRevision, projectId, projectKey, pushToast, reconcileMutationSession, refreshForScope, rootPath, t]);
 
   const authorizeLocalAsrGroup = useCallback(async (itemIds: readonly string[], options: AsrAuthorizationOptions) => {
     const current = useImportStore.getState();
@@ -702,20 +707,19 @@ export function useImportWorkflow(
         sessionId: current.session!.sessionId,
         itemId,
       });
-      await reconcileMutationSession(nextSession, projectKey, epoch, mutationRevision, current.session!.sessionId);
+      if (await reconcileMutationSession(nextSession, projectKey, epoch, mutationRevision, current.session!.sessionId)) {
+        await refreshForScope(projectKey, epoch, current.session!.sessionId);
+      }
     } catch (error) {
       if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
     } finally {
       endPendingItems(acceptedIds, projectKey, epoch);
     }
-  }, [beginPendingItems, endPendingItems, isScopeCurrent, nextSessionMutationRevision, projectId, projectKey, pushToast, reconcileMutationSession, rootPath, t]);
+  }, [beginPendingItems, endPendingItems, isScopeCurrent, nextSessionMutationRevision, projectId, projectKey, pushToast, reconcileMutationSession, refreshForScope, rootPath, t]);
 
-  const startConfirmation = useCallback(async (
-    decisions: CommitItemDecision[],
-    acknowledgeRestrictedContent: boolean,
-  ) => {
+  const startConfirmation = useCallback(async (acknowledgeRestrictedContent: boolean) => {
     const current = useImportStore.getState();
-    if (!current.session || current.projectKey !== projectKey || decisions.length === 0 || current.isConfirming) return;
+    if (!current.session || !current.overview || current.projectKey !== projectKey || current.overview.selection.selected === 0 || current.isConfirming) return;
     const epoch = current.sessionEpoch;
     current.setIsConfirming(true);
     try {
@@ -723,7 +727,8 @@ export function useImportWorkflow(
         projectId,
         projectRootPath: rootPath,
         sessionId: current.session.sessionId,
-        decisions,
+        expectedSelectionRevision: current.overview.selectionRevision,
+        expectedConfirmationDigest: current.overview.confirmationDigest,
         ...(acknowledgeRestrictedContent ? { acknowledgeRestrictedContent: true } : {}),
       });
       setRestrictedCommitDecisions(null);
@@ -736,13 +741,10 @@ export function useImportWorkflow(
     }
   }, [isScopeCurrent, projectId, projectKey, pushToast, rootPath, t, trackConfirmationTask]);
 
-  const confirm = useCallback(async (decisions: CommitItemDecision[]) => {
+  const confirm = useCallback(async (_legacyDecisions: CommitItemDecision[] = []) => {
     const current = useImportStore.getState();
-    if (!current.session || current.projectKey !== projectKey || decisions.length === 0 || current.isConfirming) return;
-    const selectedIds = new Set(decisions.map((decision) => decision.itemId));
-    const includesRestricted = current.session.items.some(
-      (item) => selectedIds.has(item.itemId) && item.restrictedContent,
-    );
+    if (!current.session || !current.overview || current.projectKey !== projectKey || current.overview.selection.selected === 0 || current.isConfirming) return;
+    const includesRestricted = current.overview.selection.restricted > 0;
     if (includesRestricted) {
       try {
         const status = await importV2Api.getRestrictedContentStatus({
@@ -750,7 +752,7 @@ export function useImportWorkflow(
           projectRootPath: rootPath,
         });
         if (status.confirmationRequired) {
-          setRestrictedCommitDecisions([...decisions]);
+          setRestrictedCommitDecisions([]);
           return;
         }
       } catch (error) {
@@ -758,13 +760,12 @@ export function useImportWorkflow(
         return;
       }
     }
-    await startConfirmation(decisions, false);
+    await startConfirmation(false);
   }, [projectId, projectKey, pushToast, rootPath, startConfirmation, t]);
 
   const confirmRestrictedContent = useCallback(async () => {
-    const decisions = restrictedCommitDecisions;
-    if (!decisions) return;
-    await startConfirmation(decisions, true);
+    if (!restrictedCommitDecisions) return;
+    await startConfirmation(true);
   }, [restrictedCommitDecisions, startConfirmation]);
 
   const dismissRestrictedContent = useCallback(() => setRestrictedCommitDecisions(null), []);
@@ -951,11 +952,80 @@ export function useImportWorkflow(
   );
 
   const { visibleItems, counts, progress } = useMemo(
-    () => selectImportViewModel(session, filter),
-    [filter, session],
+    () => selectImportViewModel(session, filter, overview),
+    [filter, overview, session],
   );
   const selectItem = useImportStore((state) => state.selectItem);
-  const setFilter = useImportStore((state) => state.setFilter);
+  const setStoreFilter = useImportStore((state) => state.setFilter);
+  const setFilter = useCallback((nextFilter: typeof filter) => {
+    setStoreFilter(nextFilter);
+    const filterRevision = ++filterRequestRevisionRef.current;
+    const current = useImportStore.getState();
+    if (!current.session || current.projectKey !== projectKey) return;
+    const epoch = current.sessionEpoch;
+    const sessionId = current.session.sessionId;
+    setIsLoadingMoreItems(true);
+    void Promise.all([
+      importV2Api.getSessionOverview({ projectId, projectRootPath: rootPath, sessionId }),
+      importV2Api.listSessionItems({
+        projectId,
+        projectRootPath: rootPath,
+        sessionId,
+        filter: nextFilter,
+        limit: 200,
+      }),
+    ]).then(([nextOverview, page]) => {
+      if (
+        filterRequestRevisionRef.current === filterRevision
+        && isScopeCurrent(projectKey, epoch, sessionId)
+        && useImportStore.getState().filter === nextFilter
+      ) {
+        if (!useImportStore.getState().attachSessionWindow(projectKey, nextOverview, page, epoch)) {
+          void refreshForScope(projectKey, epoch, sessionId).catch(() => undefined);
+        }
+      }
+    }).catch((error) => {
+      if (filterRequestRevisionRef.current === filterRevision && isScopeCurrent(projectKey, epoch, sessionId)) {
+        pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+      }
+    }).finally(() => {
+      if (filterRequestRevisionRef.current === filterRevision && isScopeCurrent(projectKey, epoch, sessionId)) {
+        setIsLoadingMoreItems(false);
+      }
+    });
+  }, [isScopeCurrent, projectId, projectKey, pushToast, refreshForScope, rootPath, setStoreFilter, t]);
+
+  const loadMoreItems = useCallback(async () => {
+    const current = useImportStore.getState();
+    if (!current.session || !current.nextItemCursor || current.projectKey !== projectKey || isLoadingMoreItems) return;
+    const epoch = current.sessionEpoch;
+    const sessionId = current.session.sessionId;
+    setIsLoadingMoreItems(true);
+    try {
+      const page = await importV2Api.listSessionItems({
+        projectId,
+        projectRootPath: rootPath,
+        sessionId,
+        filter: current.filter,
+        cursor: current.nextItemCursor,
+        limit: 200,
+      });
+      if (!isScopeCurrent(projectKey, epoch, sessionId)) return;
+      if (!useImportStore.getState().appendItemPage(projectKey, page, epoch)) {
+        await refreshForScope(projectKey, epoch, sessionId);
+      }
+    } catch (error) {
+      if (isScopeCurrent(projectKey, epoch, sessionId)) {
+        if (["IMPORT_V2_SESSION_CURSOR_STALE", "IMPORT_V2_SESSION_CURSOR_INVALID"].includes((error as { code?: string })?.code ?? "")) {
+          await refreshForScope(projectKey, epoch, sessionId);
+        } else {
+          pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
+        }
+      }
+    } finally {
+      if (isScopeCurrent(projectKey, epoch, sessionId)) setIsLoadingMoreItems(false);
+    }
+  }, [isLoadingMoreItems, isScopeCurrent, projectId, projectKey, pushToast, refreshForScope, rootPath, t]);
 
   const requestClipboard = useCallback(async (content: string) => {
     if (!content.trim()) return;
@@ -1006,6 +1076,7 @@ export function useImportWorkflow(
   return {
     projectKey,
     session,
+    overview,
     completion,
     readiness,
     readinessWarning,
@@ -1066,6 +1137,9 @@ export function useImportWorkflow(
     refreshSession,
     selectItem,
     setFilter,
+    hasMoreItems: nextItemCursor !== null,
+    isLoadingMoreItems,
+    loadMoreItems,
     requestClipboard,
     loadPreview,
     loadMergeContext,
