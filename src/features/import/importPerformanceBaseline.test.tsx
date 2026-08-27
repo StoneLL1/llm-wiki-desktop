@@ -11,8 +11,20 @@ import type { ImportItem, ImportSession } from "../../types/importV2";
 import type { BackendEvent, BackendTask } from "../../types/task";
 import { ImportQueue } from "./ImportQueue";
 
+const statusRenders = vi.hoisted(() => new Map<string, number>());
+vi.mock("./ImportItemStatus", () => ({
+  ImportItemStatus: ({ item: renderedItem }: { item: ImportItem }) => {
+    statusRenders.set(renderedItem.itemId, (statusRenders.get(renderedItem.itemId) ?? 0) + 1);
+    return <span data-testid={`status-render-${renderedItem.itemId}`} />;
+  },
+}));
+
 const SCALE = [100, 1_000, 10_000] as const;
 const projectKey = importProjectKey("perf-project", "D:/fixture-project");
+const onFilterChange = vi.fn();
+const onSelectItem = vi.fn();
+const onSetItemSelected = vi.fn();
+const onAction = vi.fn();
 
 function task(progress: number): BackendTask {
   return {
@@ -79,14 +91,15 @@ function queue(items: readonly ImportItem[], observer?: ReturnType<typeof create
   const content = (
     <ImportQueue
       items={items}
+      totalItems={items.length}
       counts={{ all: items.length, active: items.length, ready: 0, needsAction: 0, failed: 0, completed: 0 }}
       progress={{ completed: 0, total: items.length, active: items.length }}
       selectedItemId={null}
       filter="all"
-      onFilterChange={vi.fn()}
-      onSelectItem={vi.fn()}
-      onSetItemSelected={vi.fn()}
-      onAction={vi.fn()}
+      onFilterChange={onFilterChange}
+      onSelectItem={onSelectItem}
+      onSetItemSelected={onSetItemSelected}
+      onAction={onAction}
     />
   );
   return observer ? <Profiler id="import-queue-baseline" onRender={observer.onRender}>{content}</Profiler> : content;
@@ -113,6 +126,7 @@ beforeEach(async () => {
     projectPersistenceReason: null,
   });
   useImportStore.getState().reset();
+  statusRenders.clear();
 });
 
 describe("three-core performance frontend contracts", () => {
@@ -151,36 +165,41 @@ describe("three-core performance frontend contracts", () => {
     vi.useRealTimers();
   });
 
-  it("observes a full 10k item-array replacement for one changed Import item", () => {
+  it("replaces only the changed normalized Import item during a 10k session patch", () => {
     useImportStore.getState().attachSession(projectKey, session(10_000));
-    const before = useImportStore.getState().session?.items;
+    const before = useImportStore.getState().itemById;
+    const unchanged = before["item-1"];
     const observer = observeStorePublications((listener) => useImportStore.subscribe(listener));
 
     useImportStore.getState().patchItems(projectKey, [{ ...item(0), progress: { current: 2, total: 100, label: "Synthetic progress" } }]);
 
-    const after = useImportStore.getState().session?.items;
+    const after = useImportStore.getState().itemById;
     observer.stop();
     expect(observer.publications).toBe(1);
-    expect(after).toHaveLength(10_000);
+    expect(Object.keys(after)).toHaveLength(10_000);
     expect(after).not.toBe(before);
-    expect(after?.[1]).toBe(before?.[1]);
+    expect(after["item-1"]).toBe(unchanged);
+    expect(useImportStore.getState().session?.items.length).toBeLessThanOrEqual(600);
   });
 
-  it("observes Queue commits and the current cumulative 10k mounted-row growth", () => {
+  it("keeps Queue commits and mounted rows bounded while reaching the 10k tail", async () => {
     const items = session(10_000).items;
     const commits = createReactCommitObserver();
     const rendered = render(queue(items, commits));
-    expect(screen.getAllByRole("listitem")).toHaveLength(200);
+    expect(screen.getAllByRole("listitem").length).toBeLessThanOrEqual(80);
 
     const updated = [...items];
     updated[0] = { ...updated[0], progress: { current: 2, total: 100, label: "Synthetic progress" } };
     rendered.rerender(queue(updated, commits));
     expect(commits.commits).toBe(2);
+    expect(statusRenders.get("item-0")).toBe(2);
+    expect(statusRenders.get("item-1")).toBe(1);
 
-    for (let page = 1; page < 50; page += 1) {
-      fireEvent.click(screen.getByRole("button", { name: /load more/i }));
-    }
-    expect(screen.getAllByRole("listitem")).toHaveLength(10_000);
-    expect(commits.commits).toBe(99);
+    fireEvent.scroll(screen.getByRole("list", { name: "Sources" }), {
+      target: { scrollTop: 9_999 * 72 },
+    });
+    expect(await screen.findByTestId("import-item-item-9999")).toBeInTheDocument();
+    expect(screen.getAllByRole("listitem").length).toBeLessThanOrEqual(80);
+    expect(commits.commits).toBeLessThanOrEqual(4);
   }, 300_000);
 });

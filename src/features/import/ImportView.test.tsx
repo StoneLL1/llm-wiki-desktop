@@ -288,7 +288,9 @@ describe("ImportView V2 composition", () => {
     };
     render(<ImportView workflow={workflow({ readiness, listHistory })} />);
 
+    expect(listHistory).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: /history/i }));
+    await waitFor(() => expect(listHistory).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(screen.getByText(/no import history/i)).toBeInTheDocument());
     expect(screen.queryByRole("button", { name: /import to source library/i })).not.toBeInTheDocument();
 
@@ -298,6 +300,17 @@ describe("ImportView V2 composition", () => {
     expect(screen.getByText("Supported source types: 1")).toBeInTheDocument();
     expect(screen.queryByText("media.asr")).not.toBeInTheDocument();
     expect(screen.queryByRole("region", { name: /import methods/i })).not.toBeInTheDocument();
+  });
+
+  it("coalesces the initial History read when a completion is already present", async () => {
+    const listHistory = vi.fn().mockResolvedValue({ entries: [], legacyReadOnly: [], nextCursor: null, warnings: [] });
+    render(<ImportView workflow={workflow({
+      completion: { batchId: "batch-existing", sessionId: "session-a", newSources: [], updatedSources: [], duplicateSkips: [], warnings: [], failures: [] },
+      listHistory,
+    })} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /history/i }));
+    await waitFor(() => expect(listHistory).toHaveBeenCalledTimes(1));
   });
 
   it("restores and persists the project-scoped tab, filter, scroll, and input collapse state", async () => {
@@ -504,10 +517,11 @@ describe("ImportView V2 composition", () => {
     const previousWorkflow = workflow({ projectKey: "project-a\0D:/wiki/a", listHistory: previousHistory });
     const currentWorkflow = workflow({ projectKey: "project-a\0D:/wiki/b", listHistory: currentHistory });
     const { rerender } = render(<ImportView workflow={previousWorkflow} />);
-
-    await waitFor(() => expect(previousHistory).toHaveBeenCalled());
+    expect(previousHistory).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: /history/i }));
+    await waitFor(() => expect(previousHistory).toHaveBeenCalledTimes(1));
     rerender(<ImportView workflow={currentWorkflow} />);
-    await waitFor(() => expect(currentHistory).toHaveBeenCalled());
+    await waitFor(() => expect(currentHistory).toHaveBeenCalledTimes(1));
 
     await act(async () => {
       resolvePrevious({

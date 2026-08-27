@@ -142,4 +142,24 @@ describe("buildImportBatchProgress", () => {
     expect(progress?.tasks).toHaveLength(1);
     expect(progress?.tasks[0]?.id).toBe(operation.id);
   });
+
+  it("uses operation-local counters without scanning the compatibility session", () => {
+    const operation = { ...task("operation-counted", "running"), batchId: "operation-counted" };
+    const record = {
+      id: operation.id, sessionId: "session-a", projectKey: "project-a\0D:/wiki", epoch: 2,
+      tasks: [{ taskId: operation.id, itemId: "", title: operation.title }],
+      itemIds: Array.from({ length: 10_000 }, (_, index) => `item-${index}`),
+      operationTaskId: operation.id,
+    };
+    const [progress] = buildImportBatchProgress(
+      [record], [operation], null,
+      { [operation.id]: { total: 10_000, processed: 4_000, succeeded: 3_900, waiting: 50, failed: 40, cancelled: 10 } },
+      { [operation.id]: ["item-failed"] },
+    );
+
+    expect(progress).toMatchObject({
+      total: 10_000, processed: 4_000, active: 6_000, completed: 3_900,
+      waitingForConfirmation: 3_950, failed: 40, cancelled: 10, failedItemIds: ["item-failed"],
+    });
+  });
 });

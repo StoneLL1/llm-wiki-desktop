@@ -35,7 +35,7 @@ export interface ImportV2DialogsProps {
 
 export function ImportV2Dialogs({ workflow, privateItem, asrItem, asrItemIds = [], subtitleItem, candidateView, onCloseCandidate, onCandidateIntent, onClosePrivate, onCloseAsr, onCloseSubtitle }: ImportV2DialogsProps) {
   const { t } = useTranslation();
-  const session = useImportStore((state) => state.session);
+  const sessionId = useImportStore((state) => state.session?.sessionId ?? null);
   const previewItemId = useImportStore((state) => state.previewItemId);
   const capabilityItemId = useImportStore((state) => state.capabilityItemId);
   const loginItemId = useImportStore((state) => state.loginItemId);
@@ -44,10 +44,10 @@ export function ImportV2Dialogs({ workflow, privateItem, asrItem, asrItemIds = [
   const closeLogin = useImportStore((state) => state.closeLogin);
   const asrItemId = asrItem?.itemId ?? null;
 
-  const previewItem = session?.items.find((item) => item.itemId === previewItemId) ?? null;
-  const previewIdentity = session && previewItem ? { sessionId: session.sessionId, itemId: previewItem.itemId, candidateId: null } : null;
-  const capabilityItem = session?.items.find((item) => item.itemId === capabilityItemId) ?? null;
-  const loginItem = session?.items.find((item) => item.itemId === loginItemId) ?? null;
+  const previewItem = useImportStore((state) => previewItemId ? state.itemById[previewItemId] ?? null : null);
+  const capabilityItem = useImportStore((state) => capabilityItemId ? state.itemById[capabilityItemId] ?? null : null);
+  const loginItem = useImportStore((state) => loginItemId ? state.itemById[loginItemId] ?? null : null);
+  const previewIdentity = sessionId && previewItem ? { sessionId, itemId: previewItem.itemId, candidateId: null } : null;
 
   const [capability, setCapability] = useState<ImportCapabilityRequirement | null>(null);
   const [asrPlan, setAsrPlan] = useState<ImportAsrEnablementPlan | null>(null);
@@ -129,7 +129,7 @@ export function ImportV2Dialogs({ workflow, privateItem, asrItem, asrItemIds = [
       <ImportCapabilityDialog
         open={Boolean(capabilityItemId && capability)}
         requirement={capability}
-        sessionId={session?.sessionId ?? null}
+        sessionId={sessionId}
         itemId={capabilityItem?.itemId ?? null}
         onCancel={closeCapability}
         onInstall={async (capabilityId) => {
@@ -158,7 +158,7 @@ export function ImportV2Dialogs({ workflow, privateItem, asrItem, asrItemIds = [
           }
           onCloseAsr();
         }}
-        sessionId={session?.sessionId ?? null}
+        sessionId={sessionId}
         itemId={asrItem?.itemId ?? null}
         onInstall={async (capabilityId, options) => {
           if (!asrItem) return;

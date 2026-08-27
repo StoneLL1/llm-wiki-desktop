@@ -1,5 +1,5 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { i18next } from "../../i18n";
 import type { ImportItem } from "../../types/importV2";
@@ -34,6 +34,8 @@ function item(itemId: string, status: ImportItem["status"], selected = false): I
 beforeEach(async () => {
   await i18next.changeLanguage("en");
 });
+
+afterEach(() => vi.useRealTimers());
 
 describe("ImportQueue", () => {
   it("renders counts, filters, measurable progress, and stable row identities", () => {
@@ -277,5 +279,104 @@ describe("ImportQueue", () => {
       "Queue updated: 2 items, 0 need action, 1 ready.",
     );
     expect(screen.getByRole("list", { name: "Sources" })).not.toHaveAttribute("aria-live");
+  });
+
+  it("coalesces rapid live-region summaries to at most two updates per second", () => {
+    vi.useFakeTimers();
+    const base = {
+      items: [item("rapid", "queued")],
+      totalItems: 1,
+      selectedItemId: null,
+      filter: "all" as const,
+      onFilterChange: vi.fn(),
+      onSelectItem: vi.fn(),
+      onSetItemSelected: vi.fn(),
+      onAction: vi.fn(),
+    };
+    const rendered = render(<ImportQueue {...base} counts={{ all: 1, active: 1, ready: 0, needsAction: 0, failed: 0, completed: 0 }} progress={{ completed: 0, total: 1, active: 1 }} />);
+    for (let tick = 0; tick < 5; tick += 1) {
+      rendered.rerender(<ImportQueue {...base} counts={{ all: 1, active: 1, ready: 0, needsAction: tick, failed: 0, completed: 0 }} progress={{ completed: 0, total: 1, active: 1, needsAction: tick }} />);
+      act(() => vi.advanceTimersByTime(100));
+    }
+    expect(screen.getByRole("status")).not.toHaveTextContent("4 need action");
+    act(() => vi.advanceTimersByTime(500));
+    expect(screen.getByRole("status")).toHaveTextContent("4 need action");
+  });
+
+  it("restores the filter-scoped top-item anchor after a Queue remount", () => {
+    const items = Array.from({ length: 500 }, (_, index) => item(`anchor-${index}`, "queued"));
+    const props = {
+      items,
+      totalItems: 500,
+      resetKey: "anchor-session",
+      counts: { all: 500, active: 500, ready: 0, needsAction: 0, failed: 0, completed: 0 },
+      progress: { completed: 0, total: 500, active: 500 },
+      selectedItemId: null,
+      filter: "all" as const,
+      onFilterChange: vi.fn(),
+      onSelectItem: vi.fn(),
+      onSetItemSelected: vi.fn(),
+      onAction: vi.fn(),
+    };
+    const rendered = render(<ImportQueue {...props} />);
+    fireEvent.scroll(screen.getByRole("list", { name: "Sources" }), { target: { scrollTop: 14400 } });
+    rendered.unmount();
+    render(<ImportQueue {...props} />);
+    expect(screen.getByRole("list", { name: "Sources" })).toHaveProperty("scrollTop", 14400);
+  });
+
+  it("keeps a 10k queue inside the virtual DOM budget and exposes global ARIA positions", async () => {
+    const items = Array.from({ length: 10_000 }, (_, index) => item(`item-${index}`, "queued"));
+    render(
+      <ImportQueue
+        items={items}
+        totalItems={10_000}
+        counts={{ all: 10_000, active: 10_000, ready: 0, needsAction: 0, failed: 0, completed: 0 }}
+        progress={{ completed: 0, total: 10_000, active: 10_000 }}
+        selectedItemId={null}
+        filter="all"
+        onFilterChange={vi.fn()}
+        onSelectItem={vi.fn()}
+        onSetItemSelected={vi.fn()}
+        onAction={vi.fn()}
+      />,
+    );
+
+    const list = screen.getByRole("list", { name: "Sources" });
+    expect(screen.getAllByRole("listitem").length).toBeLessThanOrEqual(80);
+    expect(screen.getAllByRole("listitem")[0]).toHaveAttribute("aria-posinset", "1");
+    expect(screen.getAllByRole("listitem")[0]).toHaveAttribute("aria-setsize", "10000");
+
+    fireEvent.scroll(list, { target: { scrollTop: 9_999 * 72 } });
+    await waitFor(() => expect(screen.getByTestId("import-item-item-9999")).toBeInTheDocument());
+    expect(screen.getAllByRole("listitem").length).toBeLessThanOrEqual(80);
+    expect(screen.getByTestId("import-item-item-9999")).toHaveAttribute("aria-posinset", "10000");
+  });
+
+  it("moves focus to the virtual list with a visible active descendant when a focused row is recycled", async () => {
+    const items = Array.from({ length: 500 }, (_, index) => item(`focus-${index}`, "queued"));
+    render(
+      <ImportQueue
+        items={items}
+        totalItems={500}
+        resetKey="focus-transfer"
+        counts={{ all: 500, active: 500, ready: 0, needsAction: 0, failed: 0, completed: 0 }}
+        progress={{ completed: 0, total: 500, active: 500 }}
+        selectedItemId={null}
+        filter="all"
+        onFilterChange={vi.fn()}
+        onSelectItem={vi.fn()}
+        onSetItemSelected={vi.fn()}
+        onAction={vi.fn()}
+      />,
+    );
+
+    const list = screen.getByRole("list", { name: "Sources" });
+    screen.getByTestId("import-item-focus-0").focus();
+    fireEvent.scroll(list, { target: { scrollTop: 300 * 72 } });
+
+    await waitFor(() => expect(screen.getByTestId("import-item-focus-300")).toHaveFocus());
+    expect(screen.getByTestId("import-item-focus-300")).toHaveAttribute("aria-posinset", "301");
+    expect(list).not.toHaveAttribute("aria-activedescendant");
   });
 });

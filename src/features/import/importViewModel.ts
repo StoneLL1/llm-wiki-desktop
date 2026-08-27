@@ -1,26 +1,6 @@
 import type { ImportItem, ImportSession, ImportItemStatus, ImportSessionOverview } from "../../types/importV2";
-import type { ImportQueueFilter } from "../../stores/importStore";
+import type { ImportQueueCounts, ImportQueueFilter, ImportSessionProgress } from "../../stores/importStore";
 import { presentImportItem } from "./importStatusPresentation";
-
-export interface ImportQueueCounts {
-  all: number;
-  active: number;
-  ready: number;
-  needsAction: number;
-  failed: number;
-  completed: number;
-  waiting?: number;
-}
-
-export interface ImportSessionProgress {
-  completed: number;
-  total: number;
-  active: number;
-  processed?: number;
-  failed?: number;
-  cancelled?: number;
-  needsAction?: number;
-}
 
 export interface ImportViewModelSnapshot {
   visibleItems: ImportItem[];

@@ -630,6 +630,60 @@ describe("useImportWorkflow", () => {
     expect(api.startSessionRecovery).not.toHaveBeenCalled();
   });
 
+  it("coalesces duplicate load-more calls before React loading state commits", async () => {
+    const first = item("first.md");
+    const second = item("second.md");
+    const existing = session(projectA.projectId, [first, second]);
+    let resolveNext!: (page: { sessionId: string; snapshotRevision: number; items: ImportItem[]; nextCursor: null; total: number }) => void;
+    api.getReadiness.mockResolvedValue({ ...readiness, unfinishedSessionId: existing.sessionId });
+    api.getSessionOverview.mockResolvedValue(overviewFor(existing));
+    api.listSessionItems
+      .mockResolvedValueOnce({ sessionId: existing.sessionId, snapshotRevision: 1, items: [first], nextCursor: "cursor-1", total: 2 })
+      .mockReturnValueOnce(new Promise((resolve) => { resolveNext = resolve; }));
+
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.hasMoreItems).toBe(true));
+    let firstLoad!: Promise<void>;
+    act(() => {
+      firstLoad = result.current.loadMoreItems?.() ?? Promise.resolve();
+      void result.current.loadMoreItems?.();
+    });
+    expect(api.listSessionItems).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      resolveNext({ sessionId: existing.sessionId, snapshotRevision: 1, items: [second], nextCursor: null, total: 2 });
+      await firstLoad;
+    });
+    expect(result.current.visibleItems.map((entry) => entry.itemId)).toEqual(["first.md", "second.md"]);
+  });
+
+  it("rejects a delayed load-more page after the Queue filter generation changes", async () => {
+    const first = item("first.md");
+    const staleSecond = item("stale-second.md");
+    const existing = session(projectA.projectId, [first, staleSecond]);
+    let resolveStale!: (page: { sessionId: string; snapshotRevision: number; items: ImportItem[]; nextCursor: null; total: number }) => void;
+    api.getReadiness.mockResolvedValue({ ...readiness, unfinishedSessionId: existing.sessionId });
+    api.getSessionOverview.mockResolvedValue(overviewFor(existing));
+    api.listSessionItems
+      .mockResolvedValueOnce({ sessionId: existing.sessionId, snapshotRevision: 1, items: [first], nextCursor: "cursor-1", total: 2 })
+      .mockReturnValueOnce(new Promise((resolve) => { resolveStale = resolve; }))
+      .mockResolvedValueOnce({ sessionId: existing.sessionId, snapshotRevision: 1, items: [], nextCursor: null, total: 0 });
+
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.hasMoreItems).toBe(true));
+    let staleLoad!: Promise<void>;
+    act(() => {
+      staleLoad = result.current.loadMoreItems?.() ?? Promise.resolve();
+      result.current.setFilter("failed");
+    });
+    await waitFor(() => expect(api.listSessionItems).toHaveBeenCalledTimes(3));
+    await act(async () => {
+      resolveStale({ sessionId: existing.sessionId, snapshotRevision: 1, items: [staleSecond], nextCursor: null, total: 2 });
+      await staleLoad;
+    });
+    expect(result.current.filter).toBe("failed");
+    expect(result.current.visibleItems).toEqual([]);
+  });
+
   it("rejects an async session mutation after the project authority revision changes", async () => {
     useProjectStore.setState({ authority: authorityA });
     let resolveAddition!: (value: ImportSession) => void;
@@ -2105,7 +2159,7 @@ describe("useImportWorkflow", () => {
         expectedCurrentWikiSha256: null,
       }));
 
-      expect(result.current.session?.items[0].status).toBe("completed");
+      expect(useImportStore.getState().itemById[failed.itemId]?.status).toBe("completed");
       expect(result.current.completion).toEqual(duplicateCompletion);
       expect(scan).toHaveBeenCalledWith(projectA.projectId, projectA.rootPath);
     } finally {

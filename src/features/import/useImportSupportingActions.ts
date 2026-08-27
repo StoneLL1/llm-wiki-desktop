@@ -69,7 +69,7 @@ export function useImportSupportingActions({
   ) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey
-      || !current.session.items.some((item) => item.itemId === itemId)) return null;
+      || !current.knownItemIds.has(itemId)) return null;
     const epoch = current.sessionEpoch;
     try {
       const task = await importV2Api.startAgentAssistance({
@@ -93,7 +93,7 @@ export function useImportSupportingActions({
   const acceptAgentCandidate = useCallback(async (itemId: string, taskId: string) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey
-      || !current.session.items.some((item) => item.itemId === itemId)) return null;
+      || !current.knownItemIds.has(itemId)) return null;
     const epoch = current.sessionEpoch;
     try {
       const view = await importV2Api.acceptAgentCandidate({
@@ -118,7 +118,7 @@ export function useImportSupportingActions({
   }) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey
-      || !current.session.items.some((item) => item.itemId === request.itemId)) return null;
+      || !current.knownItemIds.has(request.itemId)) return null;
     const epoch = current.sessionEpoch;
     try {
       const result = await importV2Api.selectAgentCandidate({
@@ -145,7 +145,7 @@ export function useImportSupportingActions({
   const discardAgentCandidate = useCallback(async (itemId: string, candidateId: string) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey
-      || !current.session.items.some((item) => item.itemId === itemId)) return null;
+      || !current.knownItemIds.has(itemId)) return null;
     const epoch = current.sessionEpoch;
     try {
       const result = await importV2Api.discardAgentCandidate({
@@ -169,7 +169,7 @@ export function useImportSupportingActions({
   const beginLogin = useCallback(async (itemId: string, platform: string) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey
-      || !current.session.items.some((item) => item.itemId === itemId)) return null;
+      || !current.knownItemIds.has(itemId)) return null;
     const epoch = current.sessionEpoch;
     try {
       const result = await importV2Api.beginLogin({
@@ -189,7 +189,7 @@ export function useImportSupportingActions({
   const completeLogin = useCallback(async (itemId: string, connectorSessionId: string) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey
-      || !current.session.items.some((item) => item.itemId === itemId)) return null;
+      || !current.knownItemIds.has(itemId)) return null;
     const epoch = current.sessionEpoch;
     try {
       const result = await importV2Api.completeLogin({
@@ -229,7 +229,7 @@ export function useImportSupportingActions({
   const authorizePrivateTarget = useCallback(async (itemId: string, url: string) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey
-      || !current.session.items.some((item) => item.itemId === itemId)) return null;
+      || !current.knownItemIds.has(itemId)) return null;
     const epoch = current.sessionEpoch;
     try {
       const grant = await importV2Api.authorizePrivateTarget({
@@ -249,7 +249,7 @@ export function useImportSupportingActions({
   const getCapabilityRequirement = useCallback(async (itemId: string) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey
-      || !current.session.items.some((item) => item.itemId === itemId)) return null;
+      || !current.knownItemIds.has(itemId)) return null;
     const epoch = current.sessionEpoch;
     try {
       const result = await importV2Api.getCapabilityRequirement({
@@ -268,7 +268,7 @@ export function useImportSupportingActions({
   const getAsrEnablementPlan = useCallback(async (itemId: string) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey
-      || !current.session.items.some((item) => item.itemId === itemId)) return null;
+      || !current.knownItemIds.has(itemId)) return null;
     const epoch = current.sessionEpoch;
     try {
       const result = await importV2Api.getAsrEnablementPlan({
@@ -292,7 +292,7 @@ export function useImportSupportingActions({
   ) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey
-      || !current.session.items.some((item) => item.itemId === itemId)) return null;
+      || !current.knownItemIds.has(itemId)) return null;
     const epoch = current.sessionEpoch;
     try {
       const task = await importV2Api.installCapability({

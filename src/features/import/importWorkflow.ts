@@ -19,7 +19,7 @@ import type {
 } from "../../types/importV2Presentation";
 import type { BackendTask } from "../../types/task";
 import type { ImportQueueFilter } from "../../stores/importStore";
-import type { ImportQueueCounts, ImportSessionProgress } from "./importViewModel";
+import type { ImportQueueCounts, ImportSessionProgress } from "../../stores/importStore";
 
 export type ImportBootstrapState = "loading" | "ready" | "blocked" | "error";
 export interface AsrAuthorizationOptions { profile: ImportAsrProfile; language: string | null; }
@@ -66,6 +66,8 @@ export interface ImportWorkflow {
   retryBootstrap?: () => void;
   bootstrapState: ImportBootstrapState;
   visibleItems: ImportItem[];
+  totalItems?: number;
+  itemIndexOffset?: number;
   counts: ImportQueueCounts;
   progress: ImportSessionProgress;
   discoveryTask?: BackendTask | null;
