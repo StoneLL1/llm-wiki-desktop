@@ -22,6 +22,7 @@ use crate::services::import_v2::execution_control::{
 use crate::services::import_v2::{
     import_batch_operation_session_id, is_import_batch_operation_task,
 };
+use crate::services::BlockingWorkClass;
 use crate::tasks::task_model::LogLevel;
 use crate::tasks::TaskService;
 
@@ -99,7 +100,6 @@ pub struct ImportRestrictedContentStatus {
     pub confirmation_required: bool,
 }
 
-#[tauri::command]
 pub fn get_import_restricted_content_status_v2(
     state: State<'_, AppState>,
     request: GetImportRestrictedContentStatusV2Request,
@@ -162,7 +162,6 @@ pub struct StartImportItemsV2Request {
 /// expect one task per item.
 pub type StartImportBatchV2Request = StartImportItemsV2Request;
 
-#[tauri::command]
 pub fn create_import_session_v2(
     state: State<'_, AppState>,
     request: CreateImportSessionV2Request,
@@ -179,7 +178,6 @@ pub fn create_import_session_v2(
         },
     )
 }
-#[tauri::command]
 pub fn get_import_session_v2(
     state: State<'_, AppState>,
     request: GetImportSessionV2Request,
@@ -203,7 +201,6 @@ pub fn get_import_session_v2(
         },
     )
 }
-#[tauri::command]
 pub fn add_import_items_v2(
     state: State<'_, AppState>,
     request: AddImportItemsV2Request,
@@ -222,7 +219,6 @@ pub fn add_import_items_v2(
     )
 }
 
-#[tauri::command]
 pub fn add_import_text_v2(
     state: State<'_, AppState>,
     request: AddImportTextV2Request,
@@ -241,7 +237,6 @@ pub fn add_import_text_v2(
         },
     )
 }
-#[tauri::command]
 pub fn set_import_item_selection_v2(
     state: State<'_, AppState>,
     request: SetImportItemSelectionV2Request,
@@ -264,7 +259,6 @@ pub fn set_import_item_selection_v2(
     )
 }
 
-#[tauri::command]
 pub fn select_import_subtitle_v2(
     state: State<'_, AppState>,
     request: SelectImportSubtitleV2Request,
@@ -289,7 +283,6 @@ pub fn select_import_subtitle_v2(
     )
 }
 
-#[tauri::command]
 pub fn get_import_merge_context_v2(
     state: State<'_, AppState>,
     request: ImportMergeContextV2Request,
@@ -303,7 +296,6 @@ pub fn get_import_merge_context_v2(
     )
 }
 
-#[tauri::command]
 pub fn set_import_item_resolution_v2(
     state: State<'_, AppState>,
     request: SetImportItemResolutionV2Request,
@@ -323,7 +315,6 @@ pub fn set_import_item_resolution_v2(
     )
 }
 
-#[tauri::command]
 pub fn stage_import_manual_merge_v2(
     state: State<'_, AppState>,
     request: StageImportManualMergeV2Request,
@@ -346,7 +337,6 @@ pub fn stage_import_manual_merge_v2(
 /// Read a historical session without recovery side effects. History views are
 /// inspection-only; opening them must not resume tasks, accept candidates, or
 /// rewrite staging/session evidence.
-#[tauri::command]
 pub fn get_import_history_session_v2(
     state: State<'_, AppState>,
     request: GetImportSessionV2Request,
@@ -362,7 +352,6 @@ pub fn get_import_history_session_v2(
         .load_session(&context, &state.file_store, &request.session_id)
 }
 
-#[tauri::command]
 pub fn get_import_completion_v2(
     state: State<'_, AppState>,
     request: GetImportSessionV2Request,
@@ -433,7 +422,6 @@ pub(crate) fn load_history_batch(
     Ok(batch)
 }
 
-#[tauri::command]
 pub fn cancel_import_item_v2(
     state: State<'_, AppState>,
     request: CancelImportItemV2Request,
@@ -509,7 +497,6 @@ pub fn cancel_import_item_v2(
     )
 }
 
-#[tauri::command]
 pub fn skip_import_item_v2(
     state: State<'_, AppState>,
     request: CancelImportItemV2Request,
@@ -532,7 +519,6 @@ pub fn skip_import_item_v2(
     )
 }
 
-#[tauri::command]
 pub fn start_import_items_v2(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -682,7 +668,6 @@ pub(crate) fn start_import_items_for_state(
     Ok(tasks)
 }
 
-#[tauri::command]
 pub fn start_import_batch_v2(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -737,126 +722,151 @@ pub(crate) fn start_import_batch_for_state(
         .unwrap_or(DEFAULT_IMPORT_WORKER_LIMIT);
     let background_app = app.clone();
     let operation_task_id = task.id.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let panic_app = background_app.clone();
-        let panic_task_id = operation_task_id.clone();
-        let panic_project_id = request.project_id.clone();
-        let panic_project_root_path = request.project_root_path.clone();
-        let panic_session_id = request.session_id.clone();
-        let panic_item_ids = request.item_ids.clone();
-        let preparation_job = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let state = background_app.state::<AppState>();
-            let preparation = state.with_current_project_write_access(
-                &request.project_id,
-                &request.project_root_path,
-                |permit, _context| {
-                    state.import_v2_service.prepare_batch_operation_authorized(
-                        permit,
-                        &state.file_store,
-                        &state.task_service,
-                        &request.session_id,
-                        &operation_task_id,
-                        &request.item_ids,
-                        || state.task_service.is_cancelled(&operation_task_id),
-                    )
-                },
-            );
-            let replaced_task_ids = match preparation {
-                Ok(task_ids) => task_ids,
-                Err(error) if error.code == crate::errors::IMPORT_V2_CANCELLED => {
-                    let _ = state.task_service.finalize_cancellation(&operation_task_id);
-                    return;
-                }
-                Err(error) => {
-                    fail_task_unless_cancelled(&state, &operation_task_id, error);
-                    return;
-                }
-            };
-            for replaced_task_id in replaced_task_ids {
-                if state
-                    .task_service
-                    .get_task(&replaced_task_id)
-                    .is_some_and(|task| task.status == TaskStatus::WaitingForConfirmation)
-                {
-                    let _ = state.task_service.cancel_task(&replaced_task_id);
-                }
-            }
-            if state.task_service.is_cancelled(&operation_task_id) {
-                let _ = state.with_current_project_write_access(
-                    &request.project_id,
-                    &request.project_root_path,
-                    |permit, _context| {
-                        for item_id in &request.item_ids {
-                            let _ = state.import_v2_service.cancel_batch_item_authorized(
-                                permit,
-                                &state.file_store,
-                                &request.session_id,
-                                item_id,
-                            );
-                        }
-                        Ok(())
-                    },
-                );
-                let _ = state.task_service.finalize_cancellation(&operation_task_id);
-                return;
-            }
-            let _ = state.task_service.update_progress(
-                &operation_task_id,
-                0,
-                Some(request.item_ids.len() as u64),
-                Some("Starting import".into()),
-            );
-            let operation = BatchOperationJob {
-                state: Arc::new(Mutex::new(BatchOperationState::new(
-                    request.item_ids.len() as u64
-                ))),
-                pending_items: Arc::new(Mutex::new(HashMap::new())),
-            };
-            let jobs = request
-                .item_ids
-                .into_iter()
-                .map(|item_id| ImportWorkerJob {
-                    app: background_app.clone(),
-                    project_id: request.project_id.clone(),
-                    project_root_path: request.project_root_path.clone(),
-                    session_id: request.session_id.clone(),
-                    item_id,
-                    task_id: operation_task_id.clone(),
-                    recovery_action: request.recovery_action.clone(),
-                    batch_operation: Some(operation.clone()),
-                })
-                .collect::<Vec<_>>();
-            // The atomic claim completes before enqueue, so failed or cancelled
-            // preparation cannot leave a partially running cohort.
-            enqueue_import_jobs(jobs, worker_limit);
-        }));
-        if preparation_job.is_err() {
-            let state = panic_app.state::<AppState>();
-            let _ = state.with_current_project_write_access(
-                &panic_project_id,
-                &panic_project_root_path,
-                |permit, _context| {
-                    for item_id in panic_item_ids {
-                        let _ = state.import_v2_service.cancel_batch_item_authorized(
-                            permit,
-                            &state.file_store,
-                            &panic_session_id,
-                            &item_id,
+    let coordinator = state.blocking_work.clone();
+    let cancellation = state
+        .task_service
+        .get_cancellation_token(&operation_task_id)
+        .unwrap_or_default();
+    let failure_app = background_app.clone();
+    let failure_task_id = operation_task_id.clone();
+    tauri::async_runtime::spawn(async move {
+        let worker_result = coordinator
+            .run_cancellable(BlockingWorkClass::HeavyIo, cancellation, move || {
+                let panic_app = background_app.clone();
+                let panic_task_id = operation_task_id.clone();
+                let panic_project_id = request.project_id.clone();
+                let panic_project_root_path = request.project_root_path.clone();
+                let panic_session_id = request.session_id.clone();
+                let panic_item_ids = request.item_ids.clone();
+                let preparation_job =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let state = background_app.state::<AppState>();
+                        let preparation = state.with_current_project_write_access(
+                            &request.project_id,
+                            &request.project_root_path,
+                            |permit, _context| {
+                                state.import_v2_service.prepare_batch_operation_authorized(
+                                    permit,
+                                    &state.file_store,
+                                    &state.task_service,
+                                    &request.session_id,
+                                    &operation_task_id,
+                                    &request.item_ids,
+                                    || state.task_service.is_cancelled(&operation_task_id),
+                                )
+                            },
                         );
-                    }
-                    Ok(())
-                },
-            );
-            fail_task_unless_cancelled(
-                &state,
-                &panic_task_id,
-                BackendError::new(
-                    IMPORT_V2_ENGINE_PANICKED,
-                    "Import batch preparation stopped unexpectedly.",
-                    true,
-                    false,
-                ),
-            );
+                        let replaced_task_ids = match preparation {
+                            Ok(task_ids) => task_ids,
+                            Err(error) if error.code == crate::errors::IMPORT_V2_CANCELLED => {
+                                let _ =
+                                    state.task_service.finalize_cancellation(&operation_task_id);
+                                return;
+                            }
+                            Err(error) => {
+                                fail_task_unless_cancelled(&state, &operation_task_id, error);
+                                return;
+                            }
+                        };
+                        for replaced_task_id in replaced_task_ids {
+                            if state
+                                .task_service
+                                .get_task(&replaced_task_id)
+                                .is_some_and(|task| {
+                                    task.status == TaskStatus::WaitingForConfirmation
+                                })
+                            {
+                                let _ = state.task_service.cancel_task(&replaced_task_id);
+                            }
+                        }
+                        if state.task_service.is_cancelled(&operation_task_id) {
+                            let _ = state.with_current_project_write_access(
+                                &request.project_id,
+                                &request.project_root_path,
+                                |permit, _context| {
+                                    for item_id in &request.item_ids {
+                                        let _ =
+                                            state.import_v2_service.cancel_batch_item_authorized(
+                                                permit,
+                                                &state.file_store,
+                                                &request.session_id,
+                                                item_id,
+                                            );
+                                    }
+                                    Ok(())
+                                },
+                            );
+                            let _ = state.task_service.finalize_cancellation(&operation_task_id);
+                            return;
+                        }
+                        let _ = state.task_service.update_progress(
+                            &operation_task_id,
+                            0,
+                            Some(request.item_ids.len() as u64),
+                            Some("Starting import".into()),
+                        );
+                        let operation = BatchOperationJob {
+                            state: Arc::new(Mutex::new(BatchOperationState::new(
+                                request.item_ids.len() as u64,
+                            ))),
+                            pending_items: Arc::new(Mutex::new(HashMap::new())),
+                        };
+                        let jobs = request
+                            .item_ids
+                            .into_iter()
+                            .map(|item_id| ImportWorkerJob {
+                                app: background_app.clone(),
+                                project_id: request.project_id.clone(),
+                                project_root_path: request.project_root_path.clone(),
+                                session_id: request.session_id.clone(),
+                                item_id,
+                                task_id: operation_task_id.clone(),
+                                recovery_action: request.recovery_action.clone(),
+                                batch_operation: Some(operation.clone()),
+                            })
+                            .collect::<Vec<_>>();
+                        // The atomic claim completes before enqueue, so failed or cancelled
+                        // preparation cannot leave a partially running cohort.
+                        enqueue_import_jobs(jobs, worker_limit);
+                    }));
+                if preparation_job.is_err() {
+                    let state = panic_app.state::<AppState>();
+                    let _ = state.with_current_project_write_access(
+                        &panic_project_id,
+                        &panic_project_root_path,
+                        |permit, _context| {
+                            for item_id in panic_item_ids {
+                                let _ = state.import_v2_service.cancel_batch_item_authorized(
+                                    permit,
+                                    &state.file_store,
+                                    &panic_session_id,
+                                    &item_id,
+                                );
+                            }
+                            Ok(())
+                        },
+                    );
+                    fail_task_unless_cancelled(
+                        &state,
+                        &panic_task_id,
+                        BackendError::new(
+                            IMPORT_V2_ENGINE_PANICKED,
+                            "Import batch preparation stopped unexpectedly.",
+                            true,
+                            false,
+                        ),
+                    );
+                }
+                Ok(())
+            })
+            .await;
+        if let Err(error) = worker_result {
+            let state = failure_app.state::<AppState>();
+            if state.task_service.is_cancelled(&failure_task_id) {
+                let _ = state.task_service.finalize_cancellation(&failure_task_id);
+            } else {
+                fail_task_unless_cancelled(&state, &failure_task_id, error);
+            }
         }
     });
     Ok(running_task)
@@ -902,46 +912,64 @@ fn schedule_import_workers() {
         {
             continue;
         }
+        let coordinator = {
+            let queue = import_work_queue()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(job) = queue.front() else {
+                ACTIVE_IMPORT_WORKERS.fetch_sub(1, Ordering::AcqRel);
+                return;
+            };
+            job.app.state::<AppState>().blocking_work.clone()
+        };
         // ImportEngine is a synchronous boundary that performs filesystem,
-        // process, and network-adapter work. A process-wide bounded queue keeps
-        // it off Tokio's async workers without creating one blocking worker per
-        // imported item.
-        tauri::async_runtime::spawn_blocking(|| {
-            loop {
-                if ACTIVE_IMPORT_WORKERS.load(Ordering::Acquire)
-                    > IMPORT_WORKER_LIMIT.load(Ordering::Acquire).max(1)
-                {
-                    break;
-                }
-                let job = import_work_queue()
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .pop_front();
-                let Some(job) = job else {
-                    break;
-                };
-                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run_import_worker_job(&job);
-                }))
-                .is_err()
-                {
-                    let state = job.app.state::<AppState>();
-                    if job.batch_operation.is_some() {
-                        finish_batch_worker(&state, &job, ImportItemRunOutcome::SystemicError);
-                    } else {
-                        fail_task_unless_cancelled(
-                            &state,
-                            &job.task_id,
-                            BackendError::new(
-                                IMPORT_V2_ENGINE_PANICKED,
-                                "The import worker stopped unexpectedly.",
-                                true,
-                                false,
-                            ),
-                        );
+        // process, and network-adapter work. The domain queue and shared heavy
+        // lane jointly bound it without occupying Tokio async workers.
+        tauri::async_runtime::spawn(async move {
+            let _ = coordinator
+                .run(BlockingWorkClass::HeavyIo, || {
+                    loop {
+                        if ACTIVE_IMPORT_WORKERS.load(Ordering::Acquire)
+                            > IMPORT_WORKER_LIMIT.load(Ordering::Acquire).max(1)
+                        {
+                            break;
+                        }
+                        let job = import_work_queue()
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .pop_front();
+                        let Some(job) = job else {
+                            break;
+                        };
+                        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            run_import_worker_job(&job);
+                        }))
+                        .is_err()
+                        {
+                            let state = job.app.state::<AppState>();
+                            if job.batch_operation.is_some() {
+                                finish_batch_worker(
+                                    &state,
+                                    &job,
+                                    ImportItemRunOutcome::SystemicError,
+                                );
+                            } else {
+                                fail_task_unless_cancelled(
+                                    &state,
+                                    &job.task_id,
+                                    BackendError::new(
+                                        IMPORT_V2_ENGINE_PANICKED,
+                                        "The import worker stopped unexpectedly.",
+                                        true,
+                                        false,
+                                    ),
+                                );
+                            }
+                        }
                     }
-                }
-            }
+                    Ok(())
+                })
+                .await;
             ACTIVE_IMPORT_WORKERS.fetch_sub(1, Ordering::AcqRel);
             // Cover the enqueue/worker-exit race: an enqueue can observe the
             // old active count just before this worker becomes idle.
@@ -1004,30 +1032,55 @@ fn run_import_worker_job(job: &ImportWorkerJob) {
             let restricted_content_acknowledged = state
                 .file_store
                 .exists(&context, RESTRICTED_CONTENT_ACK_PATH);
-            if let Some(batch) = state
-                .import_v2_service
-                .finalize_exact_duplicate_cancellable_authorized(
-                    &execution,
-                    &state.file_store,
-                    &state.git_service,
-                    &job.session_id,
-                    &job.item_id,
-                    &job.task_id,
-                    restricted_content_acknowledged,
-                    || state.task_service.is_cancelled(&job.task_id),
-                    || {
-                        if job.batch_operation.is_some() {
-                            Ok(())
-                        } else {
+            let git_cancellation = state
+                .task_service
+                .get_cancellation_token(&job.task_id)
+                .unwrap_or_default();
+            let duplicate_batch = state.with_current_project_write_access(
+                &job.project_id,
+                &job.project_root_path,
+                |_permit, write_context| {
+                    let canonical_project_identity =
+                        crate::services::project_identity(&write_context.root)
+                            .map_err(|error| {
+                                BackendError::new("PROJECT_IDENTITY_FAILED", error, true, false)
+                            })?
+                            .canonical_identity_key;
+                    state.blocking_work.run_project_git_blocking(
+                        canonical_project_identity,
+                        Some(&git_cancellation),
+                        || {
                             state
-                                .task_service
-                                .transition_status(&job.task_id, TaskStatus::Running)
-                                .map(|_| ())
-                                .map_err(|error| task_error(&error))
-                        }
-                    },
-                )?
-            {
+                                .import_v2_service
+                                .finalize_exact_duplicate_cancellable_authorized(
+                                    &execution,
+                                    &state.file_store,
+                                    &state.git_service,
+                                    &job.session_id,
+                                    &job.item_id,
+                                    &job.task_id,
+                                    restricted_content_acknowledged,
+                                    || state.task_service.is_cancelled(&job.task_id),
+                                    || {
+                                        if job.batch_operation.is_some() {
+                                            Ok(())
+                                        } else {
+                                            state
+                                                .task_service
+                                                .transition_status(
+                                                    &job.task_id,
+                                                    TaskStatus::Running,
+                                                )
+                                                .map(|_| ())
+                                                .map_err(|error| task_error(&error))
+                                        }
+                                    },
+                                )
+                        },
+                    )
+                },
+            )?;
+            if let Some(batch) = duplicate_batch {
                 if job.batch_operation.is_none() {
                     state
                         .task_service
@@ -1242,7 +1295,6 @@ fn finish_batch_worker(state: &AppState, job: &ImportWorkerJob, outcome: ImportI
 /// Cancel only the import tasks belonging to one backend-issued batch. The
 /// session lookup is intentional: a batch id alone must never reach tasks
 /// from another import session in the same project.
-#[tauri::command]
 pub fn cancel_import_batch_v2(
     state: State<'_, AppState>,
     request: CancelImportBatchV2Request,
@@ -1373,132 +1425,168 @@ fn prepare_all<T>(
     Ok(prepared)
 }
 
-#[tauri::command]
 pub fn confirm_import_session_v2(
     app: AppHandle,
     state: State<'_, AppState>,
     request: CommitImportSessionRequest,
 ) -> Result<BackendTask, BackendError> {
-    let (task, preview_task_ids) = state.with_current_project_write_access(
-        &request.project_id,
-        &request.project_root_path,
-        |_permit, context| {
-            let session = state.import_v2_service.load_session(
-                context,
-                &state.file_store,
-                &request.session_id,
-            )?;
-            let includes_restricted = request.decisions.iter().any(|decision| {
-                session
-                    .items
-                    .iter()
-                    .any(|item| item.item_id == decision.item_id && item.restricted_content)
-            });
-            let preview_task_ids = request
-                .decisions
-                .iter()
-                .filter_map(|decision| {
+    let (task, preview_task_ids, canonical_project_identity) = state
+        .with_current_project_write_access(
+            &request.project_id,
+            &request.project_root_path,
+            |_permit, context| {
+                let session = state.import_v2_service.load_session(
+                    context,
+                    &state.file_store,
+                    &request.session_id,
+                )?;
+                let includes_restricted = request.decisions.iter().any(|decision| {
                     session
                         .items
                         .iter()
-                        .find(|item| item.item_id == decision.item_id)
-                        .and_then(|item| item.task_id.as_ref())
-                        .map(|task_id| (decision.item_id.clone(), task_id.clone()))
-                })
-                .collect::<HashMap<_, _>>();
-            if includes_restricted
-                && !state
-                    .file_store
-                    .exists(context, RESTRICTED_CONTENT_ACK_PATH)
-            {
-                if !request.acknowledge_restricted_content {
-                    return Err(BackendError::new(
+                        .any(|item| item.item_id == decision.item_id && item.restricted_content)
+                });
+                let preview_task_ids = request
+                    .decisions
+                    .iter()
+                    .filter_map(|decision| {
+                        session
+                            .items
+                            .iter()
+                            .find(|item| item.item_id == decision.item_id)
+                            .and_then(|item| item.task_id.as_ref())
+                            .map(|task_id| (decision.item_id.clone(), task_id.clone()))
+                    })
+                    .collect::<HashMap<_, _>>();
+                if includes_restricted
+                    && !state
+                        .file_store
+                        .exists(context, RESTRICTED_CONTENT_ACK_PATH)
+                {
+                    if !request.acknowledge_restricted_content {
+                        return Err(BackendError::new(
                         "IMPORT_V2_RESTRICTED_CONTENT_CONFIRMATION_REQUIRED",
                         "Restricted content must be acknowledged before its first project commit.",
                         false,
                         true,
                     ));
+                    }
+                    state.file_store.write_json_atomic(
+                        context,
+                        RESTRICTED_CONTENT_ACK_PATH,
+                        &serde_json::json!({
+                            "schemaVersion": 1,
+                            "acknowledgedAt": chrono::Utc::now().to_rfc3339(),
+                        }),
+                    )?;
                 }
-                state.file_store.write_json_atomic(
-                    context,
-                    RESTRICTED_CONTENT_ACK_PATH,
-                    &serde_json::json!({
-                        "schemaVersion": 1,
-                        "acknowledgedAt": chrono::Utc::now().to_rfc3339(),
-                    }),
-                )?;
-            }
-            let task = state
-                .task_service
-                .create_project_import_commit_task(
-                    request.project_id.clone(),
-                    context.root.clone(),
-                    "Confirm import session".into(),
-                    request.session_id.clone(),
-                )
-                .map_err(|error| task_error(&error))?;
-            Ok((task, preview_task_ids))
-        },
-    )?;
+                let task = state
+                    .task_service
+                    .create_project_import_commit_task(
+                        request.project_id.clone(),
+                        context.root.clone(),
+                        "Confirm import session".into(),
+                        request.session_id.clone(),
+                    )
+                    .map_err(|error| task_error(&error))?;
+                let canonical_project_identity = crate::services::project_identity(&context.root)
+                    .map_err(|error| {
+                        BackendError::new("PROJECT_IDENTITY_FAILED", error, true, false)
+                    })?
+                    .canonical_identity_key;
+                Ok((task, preview_task_ids, canonical_project_identity))
+            },
+        )?;
     let task_id = task.id.clone();
     let mut commit_request = request.clone();
     commit_request.batch_task_id = Some(task_id.clone());
+    let coordinator = state.blocking_work.clone();
+    let cancellation = state
+        .task_service
+        .get_cancellation_token(&task_id)
+        .unwrap_or_default();
+    let failure_app = app.clone();
+    let failure_task_id = task_id.clone();
     tauri::async_runtime::spawn(async move {
-        let state = app.state::<AppState>();
-        let result = (|| -> Result<TaskResult, BackendError> {
-            let context =
-                state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-            let _execution_lease = state.begin_project_external_task(&context, &task_id)?;
-            let batch = state.with_current_project_write_access(
-                &request.project_id,
-                &request.project_root_path,
-                |permit, _context| {
-                    state
-                        .task_service
-                        .transition_status(&task_id, TaskStatus::Running)
-                        .map_err(|error| task_error(&error))?;
-                    state
-                        .import_v2_service
-                        .commit_items_cancellable_with_progress_authorized(
-                            permit,
-                            &state.file_store,
-                            &state.git_service,
-                            &commit_request,
-                            || state.task_service.is_cancelled(&task_id),
-                            |batch| {
-                                settle_confirmed_preview_tasks(
-                                    &state.task_service,
-                                    &preview_task_ids,
-                                    batch,
-                                );
-                            },
-                            None,
-                            || Ok(()),
-                        )
-                },
-            )?;
-            Ok(TaskResult {
-                summary: format!(
-                    "Committed {} import item(s); {} failed.",
-                    batch.committed_count, batch.failed_count
-                ),
-                affected_paths: vec![format!(".app/import-history/{}.json", batch.batch_id)],
-                reference: Some(TaskResultReference::ImportV2SessionPreview {
-                    session_id: batch.session_id.clone(),
-                    batch_id: Some(batch.batch_id.clone()),
-                    completion: batch.completion.clone(),
-                }),
-                pending_action: None,
+        let git_coordinator = coordinator.clone();
+        let git_cancellation = cancellation.clone();
+        let worker_result = coordinator
+            .run_cancellable(BlockingWorkClass::HeavyIo, cancellation, move || {
+                let state = app.state::<AppState>();
+                let result = (|| -> Result<TaskResult, BackendError> {
+                    let context = state
+                        .resolve_project_context(&request.project_id, &request.project_root_path)?;
+                    let _execution_lease = state.begin_project_external_task(&context, &task_id)?;
+                    let batch = state.with_current_project_write_access(
+                        &request.project_id,
+                        &request.project_root_path,
+                        |permit, _context| {
+                            git_coordinator.run_project_git_blocking(
+                                canonical_project_identity,
+                                Some(&git_cancellation),
+                                || {
+                                    state
+                                        .task_service
+                                        .transition_status(&task_id, TaskStatus::Running)
+                                        .map_err(|error| task_error(&error))?;
+                                    state
+                                        .import_v2_service
+                                        .commit_items_cancellable_with_progress_authorized(
+                                            permit,
+                                            &state.file_store,
+                                            &state.git_service,
+                                            &commit_request,
+                                            || state.task_service.is_cancelled(&task_id),
+                                            |batch| {
+                                                settle_confirmed_preview_tasks(
+                                                    &state.task_service,
+                                                    &preview_task_ids,
+                                                    batch,
+                                                );
+                                            },
+                                            None,
+                                            || Ok(()),
+                                        )
+                                },
+                            )
+                        },
+                    )?;
+                    Ok(TaskResult {
+                        summary: format!(
+                            "Committed {} import item(s); {} failed.",
+                            batch.committed_count, batch.failed_count
+                        ),
+                        affected_paths: vec![format!(
+                            ".app/import-history/{}.json",
+                            batch.batch_id
+                        )],
+                        reference: Some(TaskResultReference::ImportV2SessionPreview {
+                            session_id: batch.session_id.clone(),
+                            batch_id: Some(batch.batch_id.clone()),
+                            completion: batch.completion.clone(),
+                        }),
+                        pending_action: None,
+                    })
+                })();
+                match result {
+                    Ok(result) => {
+                        let _ = state
+                            .task_service
+                            .complete_running_with_result(&task_id, result);
+                    }
+                    Err(error) => {
+                        fail_task_unless_cancelled(&state, &task_id, error);
+                    }
+                }
+                Ok(())
             })
-        })();
-        match result {
-            Ok(result) => {
-                let _ = state
-                    .task_service
-                    .complete_running_with_result(&task_id, result);
-            }
-            Err(error) => {
-                fail_task_unless_cancelled(&state, &task_id, error);
+            .await;
+        if let Err(error) = worker_result {
+            let state = failure_app.state::<AppState>();
+            if state.task_service.is_cancelled(&failure_task_id) {
+                let _ = state.task_service.finalize_cancellation(&failure_task_id);
+            } else {
+                fail_task_unless_cancelled(&state, &failure_task_id, error);
             }
         }
     });

@@ -17,9 +17,10 @@ use crate::services::import_v2::capability_runtime::ImportCapabilityRuntime;
 use crate::services::import_v2::connector_session::ConnectorSessionService;
 use crate::services::import_v2::ImportV2Service;
 use crate::services::{
-    AgentService, BookmarkService, ChatConvenienceService, ChatService, ExportService, FileStore,
-    GitService, GraphService, LintService, LlmService, ProjectAssessmentService, ProjectService,
-    SearchService, SecretService, SettingsService, WorkflowService,
+    AgentService, BlockingWorkCoordinator, BookmarkService, ChatConvenienceService, ChatService,
+    ExportService, FileStore, GitService, GraphService, LintService, LlmService,
+    ProjectAssessmentService, ProjectService, SearchService, SecretService, SettingsService,
+    WorkflowService,
 };
 use crate::tasks::TaskService;
 use crate::utils::path_safety::validate_existing_project_directory;
@@ -171,6 +172,7 @@ impl ProjectWriteRootKind {
 
 #[derive(Default)]
 pub struct AppState {
+    pub blocking_work: BlockingWorkCoordinator,
     pub project_registry: ProjectRegistry,
     pub project_service: ProjectService,
     pub project_assessment_service: ProjectAssessmentService,

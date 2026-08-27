@@ -17,6 +17,7 @@ use crate::services::import_v2::scan_confirmation::{
     prepare_legacy_scan_staging, prepare_saved_scan_acceptance, prepare_scan_staging,
     SavedScanAcceptance,
 };
+use crate::services::BlockingWorkClass;
 
 const DISCOVERY_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -41,7 +42,6 @@ fn import_scan_path(
     Ok(format!("{root}/{session_id}/scans/{task_id}.json"))
 }
 
-#[tauri::command]
 pub fn get_import_capability_statuses(state: State<'_, AppState>) -> Vec<CapabilityRuntimeStatus> {
     state.import_capability_runtime.statuses()
 }
@@ -100,7 +100,6 @@ pub struct DiscardImportScanV2Request {
 
 /// Starts durable discovery work and returns immediately. The existing
 /// synchronous command remains for compatibility with older frontends.
-#[tauri::command]
 pub fn start_add_import_paths_v2(
     app: AppHandle,
     request: AddImportPathsV2Request,
@@ -145,7 +144,16 @@ pub fn start_add_import_paths_v2(
             .discard_unstarted_tasks(std::slice::from_ref(&task_id));
         return Err(error);
     }
-    tauri::async_runtime::spawn_blocking(move || {
+    let coordinator = state.blocking_work.clone();
+    let cancellation = state
+        .task_service
+        .get_cancellation_token(&task_id)
+        .unwrap_or_default();
+    let failure_app = app.clone();
+    let failure_task_id = task_id.clone();
+    tauri::async_runtime::spawn(async move {
+        let worker_result = coordinator
+            .run_cancellable(BlockingWorkClass::HeavyIo, cancellation, move || {
         let state = app.state::<AppState>();
         let run = || -> Result<(), BackendError> {
             let context =
@@ -284,11 +292,24 @@ pub fn start_add_import_paths_v2(
                     .transition_status(&task_id, TaskStatus::Failed);
             }
         }
+        Ok(())
+            })
+            .await;
+        if let Err(error) = worker_result {
+            let state = failure_app.state::<AppState>();
+            if state.task_service.is_cancelled(&failure_task_id) {
+                let _ = state.task_service.finalize_cancellation(&failure_task_id);
+            } else {
+                let _ = state.task_service.set_error(&failure_task_id, error);
+                let _ = state
+                    .task_service
+                    .transition_status(&failure_task_id, TaskStatus::Failed);
+            }
+        }
     });
     Ok(task)
 }
 
-#[tauri::command]
 pub fn get_import_scan_result_v2(
     state: State<'_, AppState>,
     request: GetImportScanResultV2Request,
@@ -298,7 +319,6 @@ pub fn get_import_scan_result_v2(
     state.file_store.read_json(&context, &path)
 }
 
-#[tauri::command]
 pub fn accept_import_scan_v2(
     state: State<'_, AppState>,
     request: AcceptImportScanV2Request,
@@ -375,7 +395,6 @@ pub fn accept_import_scan_v2(
     )
 }
 
-#[tauri::command]
 pub fn discard_import_scan_v2(
     state: State<'_, AppState>,
     request: DiscardImportScanV2Request,
@@ -423,7 +442,6 @@ fn task_error(message: String) -> BackendError {
     BackendError::new("TASK_SERVICE", message, true, false)
 }
 
-#[tauri::command]
 pub fn add_import_paths_v2(
     state: State<'_, AppState>,
     request: AddImportPathsV2Request,

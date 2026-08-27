@@ -1,0 +1,55 @@
+{
+  "batch": 1,
+  "status": "completed",
+  "sourceCommit": "089516a7c9c3e24ec3efd80674e66a1ef1b9e49d",
+  "commandInventory": {
+    "total": 200,
+    "sync": 136,
+    "async": 64,
+    "importTotal": 55,
+    "importSync": 0,
+    "blockingSyncBaseline": 133
+  },
+  "blockingWork": {
+    "metadataIoLimit": 4,
+    "heavyIoLimit": 2,
+    "projectGitLimitPerCanonicalProject": 1,
+    "focusedTestsPassed": 6,
+    "capabilityInstallerTestsPassed": 18
+  },
+  "packagedTrace": {
+    "commands": [
+      "get_import_frontend_readiness_v2",
+      "create_import_session_v2",
+      "get_import_session_v2",
+      "list_import_history_v2",
+      "get_import_history_session_v2",
+      "get_import_preview_content_v2",
+      "set_import_item_resolution_v2",
+      "authorize_local_asr_v2",
+      "confirm_import_session_v2"
+    ],
+    "p0CommandCount": 8,
+    "spanCount": 9,
+    "callerThread": "ThreadId(27)",
+    "workerThread": "ThreadId(110)",
+    "allSpansUsedDistinctCallerAndWorkerThreads": true,
+    "traceFieldAllowlistVerified": true,
+    "frameSamples": 3897,
+    "maxFrameGapMs": 9.4,
+    "longTaskCount": 0,
+    "containsProjectPathOrContent": false
+  },
+  "verification": {
+    "commandExecutionGate": "passed",
+    "fullRustGateWithTemporaryAppData": "passed",
+    "tauriReleaseBuild": "passed",
+    "repositoryFullGate": "blocked_by_two_pre_existing_final_four_owner_state_redlines"
+  },
+  "deferred": [
+    "session wire and bounded paging",
+    "normalized store",
+    "commit algorithm rewrite and global Import lock sharding",
+    "non-Import legacy synchronous command debt"
+  ]
+}

@@ -33,7 +33,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use tauri::{AppHandle, Manager, State};
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoginRequest {
     pub project_id: String,
@@ -64,7 +64,7 @@ pub struct CompleteLoginResult {
     pub resumed_item_ids: Vec<String>,
     pub tasks: Vec<BackendTask>,
 }
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthorizePrivateTargetRequest {
     pub project_id: String,
@@ -73,7 +73,6 @@ pub struct AuthorizePrivateTargetRequest {
     pub item_id: String,
     pub url: String,
 }
-#[tauri::command]
 pub fn add_import_url_v2(
     state: State<'_, AppState>,
     request: AddImportUrlV2Request,
@@ -106,27 +105,44 @@ pub fn add_import_url_v2(
     )
 }
 
-#[tauri::command]
 pub async fn discover_import_collection_v2(
-    state: State<'_, AppState>,
+    app: AppHandle,
     request: DiscoverImportCollectionV2Request,
 ) -> Result<Option<ImportCollectionPreview>, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state
-        .import_v2_service
-        .load_session(&context, &state.file_store, &request.session_id)?;
-    let execution = state.begin_project_external_execution(
-        &context,
-        &format!("collection-discovery:{}", request.session_id),
-    )?;
-    let target = UrlPolicy.normalize_for_session(&request.url)?;
-    if !looks_like_collection_url(&target.public.public_url) {
+    let coordinator = app.state::<AppState>().blocking_work.clone();
+    let preflight_app = app.clone();
+    let preflight_request = request.clone();
+    let Some((context, execution, target, allowed_host_suffixes)) = coordinator
+        .run(crate::services::BlockingWorkClass::HeavyIo, move || {
+            let state = preflight_app.state::<AppState>();
+            let context = state.resolve_project_context(
+                &preflight_request.project_id,
+                &preflight_request.project_root_path,
+            )?;
+            state.import_v2_service.load_session(
+                &context,
+                &state.file_store,
+                &preflight_request.session_id,
+            )?;
+            let execution = state.begin_project_external_execution(
+                &context,
+                &format!("collection-discovery:{}", preflight_request.session_id),
+            )?;
+            let target = UrlPolicy.normalize_for_session(&preflight_request.url)?;
+            if !looks_like_collection_url(&target.public.public_url) {
+                return Ok(None);
+            }
+            let allowed_host_suffixes =
+                trusted_platform_page_host_suffixes(&target.public.public_url)
+                    .iter()
+                    .map(|suffix| (*suffix).into())
+                    .collect();
+            Ok(Some((context, execution, target, allowed_host_suffixes)))
+        })
+        .await?
+    else {
         return Ok(None);
-    }
-    let allowed_host_suffixes = trusted_platform_page_host_suffixes(&target.public.public_url)
-        .iter()
-        .map(|suffix| (*suffix).into())
-        .collect();
+    };
     let artifact = WebFetchService
         .fetch(
             target.clone(),
@@ -146,89 +162,94 @@ pub async fn discover_import_collection_v2(
             || false,
         )
         .await?;
-    let platform = Platform::from_url(&artifact.final_public_url).ok_or_else(|| {
-        BackendError::new(
-            "IMPORT_WEB_COLLECTION_UNSUPPORTED",
-            "This collection platform is not supported.",
-            false,
-            true,
-        )
-    })?;
-    let html = String::from_utf8_lossy(&artifact.bytes);
-    let Some(collection) = extract_platform_collection(platform, &html, &artifact.final_public_url)
-    else {
-        return Ok(None);
-    };
-    let known = state.import_v2_service.completed_collection_fingerprints(
-        &context,
-        &state.file_store,
-        &target.public.public_url,
-        &collection.platform,
-    );
-    let mut pending_items = Vec::with_capacity(collection.items.len());
-    let mut total_duration_seconds: Option<u64> = None;
-    let mut estimated_login_count = 0;
-    let mut estimated_asr_count = 0;
-    for item in collection.items {
-        let child = UrlPolicy.normalize_for_session(&item.url)?;
-        if known
-            .get(&child.public.public_url)
-            .is_some_and(|fingerprint| fingerprint == &item.discovery_fingerprint)
-        {
-            continue;
-        }
-        if let Some(duration) = item.duration_seconds {
-            total_duration_seconds = Some(
-                total_duration_seconds
-                    .unwrap_or_default()
-                    .saturating_add(duration),
+    coordinator
+        .run(crate::services::BlockingWorkClass::HeavyIo, move || {
+            let state = app.state::<AppState>();
+            let platform = Platform::from_url(&artifact.final_public_url).ok_or_else(|| {
+                BackendError::new(
+                    "IMPORT_WEB_COLLECTION_UNSUPPORTED",
+                    "This collection platform is not supported.",
+                    false,
+                    true,
+                )
+            })?;
+            let html = String::from_utf8_lossy(&artifact.bytes);
+            let Some(collection) =
+                extract_platform_collection(platform, &html, &artifact.final_public_url)
+            else {
+                return Ok(None);
+            };
+            let known = state.import_v2_service.completed_collection_fingerprints(
+                &context,
+                &state.file_store,
+                &target.public.public_url,
+                &collection.platform,
             );
-        }
-        estimated_login_count += usize::from(item.estimated_login_required);
-        estimated_asr_count += usize::from(item.estimated_asr_required);
-        pending_items.push((item.title, child, item.discovery_fingerprint));
-    }
-    state.require_current_execution_epoch(&context, &execution)?;
-    let (collection_ref, page) = state.with_current_project_write_access(
-        &request.project_id,
-        &request.project_root_path,
-        |_permit, _context| {
-            state.import_v2_service.store_web_collection(
+            let mut pending_items = Vec::with_capacity(collection.items.len());
+            let mut total_duration_seconds: Option<u64> = None;
+            let mut estimated_login_count = 0;
+            let mut estimated_asr_count = 0;
+            for item in collection.items {
+                let child = UrlPolicy.normalize_for_session(&item.url)?;
+                if known
+                    .get(&child.public.public_url)
+                    .is_some_and(|fingerprint| fingerprint == &item.discovery_fingerprint)
+                {
+                    continue;
+                }
+                if let Some(duration) = item.duration_seconds {
+                    total_duration_seconds = Some(
+                        total_duration_seconds
+                            .unwrap_or_default()
+                            .saturating_add(duration),
+                    );
+                }
+                estimated_login_count += usize::from(item.estimated_login_required);
+                estimated_asr_count += usize::from(item.estimated_asr_required);
+                pending_items.push((item.title, child, item.discovery_fingerprint));
+            }
+            state.require_current_execution_epoch(&context, &execution)?;
+            let (collection_ref, page) = state.with_current_project_write_access(
                 &request.project_id,
-                &request.session_id,
-                target.public.public_url.clone(),
-                collection.platform.clone(),
-                collection.title.clone(),
-                pending_items,
-            )
-        },
-    )?;
-    let items = page
-        .items
-        .into_iter()
-        .map(|item| ImportCollectionItemPreview {
-            item_ref: item.item_ref,
-            title: item.title,
-            public_url: item.public_url,
+                &request.project_root_path,
+                |_permit, _context| {
+                    state.import_v2_service.store_web_collection(
+                        &request.project_id,
+                        &request.session_id,
+                        target.public.public_url.clone(),
+                        collection.platform.clone(),
+                        collection.title.clone(),
+                        pending_items,
+                    )
+                },
+            )?;
+            let items = page
+                .items
+                .into_iter()
+                .map(|item| ImportCollectionItemPreview {
+                    item_ref: item.item_ref,
+                    title: item.title,
+                    public_url: item.public_url,
+                })
+                .collect();
+            Ok(Some(ImportCollectionPreview {
+                collection_ref,
+                source_url: target.public.public_url,
+                platform: collection.platform,
+                title: collection.title,
+                total_duration_seconds,
+                estimated_login_count,
+                estimated_asr_count,
+                discovered_total: page.discovered_total,
+                loaded_count: page.loaded_count,
+                has_more: page.has_more,
+                next_cursor: page.next_cursor,
+                items,
+            }))
         })
-        .collect();
-    Ok(Some(ImportCollectionPreview {
-        collection_ref,
-        source_url: target.public.public_url,
-        platform: collection.platform,
-        title: collection.title,
-        total_duration_seconds,
-        estimated_login_count,
-        estimated_asr_count,
-        discovered_total: page.discovered_total,
-        loaded_count: page.loaded_count,
-        has_more: page.has_more,
-        next_cursor: page.next_cursor,
-        items,
-    }))
+        .await
 }
 
-#[tauri::command]
 pub fn load_import_collection_page_v2(
     state: State<'_, AppState>,
     request: LoadImportCollectionPageV2Request,
@@ -268,7 +289,6 @@ pub fn load_import_collection_page_v2(
     )
 }
 
-#[tauri::command]
 pub fn add_import_collection_items_v2(
     state: State<'_, AppState>,
     request: AddImportCollectionItemsV2Request,
@@ -368,7 +388,6 @@ pub fn add_import_collection_items_v2(
     )
 }
 
-#[tauri::command]
 pub fn get_remote_media_retention_plan_v2(
     state: State<'_, AppState>,
     request: RemoteMediaRetentionRequest,
@@ -401,7 +420,6 @@ pub fn get_remote_media_retention_plan_v2(
     build_remote_media_retention_plan(&context, &request.session_id, item)
 }
 
-#[tauri::command]
 pub fn confirm_remote_media_retention_v2(
     state: State<'_, AppState>,
     request: ConfirmRemoteMediaRetentionV2Request,
@@ -459,7 +477,6 @@ pub fn confirm_remote_media_retention_v2(
     )
 }
 
-#[tauri::command]
 pub fn begin_import_login_v2(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -549,7 +566,6 @@ pub fn begin_import_login_v2(
     )?;
     Ok(session)
 }
-#[tauri::command]
 pub fn revoke_import_login_v2(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -575,7 +591,6 @@ pub fn revoke_import_login_v2(
         state.connector_session_service.revoke(&request.session_id)
     }
 }
-#[tauri::command]
 pub fn complete_import_login_v2(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -710,88 +725,104 @@ pub fn complete_import_login_v2(
         },
     )
 }
-#[tauri::command]
 pub async fn authorize_import_private_target_v2(
-    state: State<'_, AppState>,
+    app: AppHandle,
     request: AuthorizePrivateTargetRequest,
 ) -> Result<String, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let session =
-        state
-            .import_v2_service
-            .load_session(&context, &state.file_store, &request.session_id)?;
-    let item = session
-        .items
-        .iter()
-        .find(|item| item.item_id == request.item_id)
-        .ok_or_else(|| {
-            BackendError::new(
-                "IMPORT_V2_ITEM_NOT_FOUND",
-                "Import item was not found.",
-                false,
-                true,
-            )
-        })?;
-    if item.input.kind != ImportInputKind::Url {
-        return Err(BackendError::new(
-            "IMPORT_V2_URL_REJECTED",
-            "Private authorization is available only for URL imports.",
-            false,
-            true,
-        ));
-    }
-    let target = state.import_v2_service.resolve_web_target(
-        &item.input.locator,
-        item.input.normalized_locator.as_deref(),
-    )?;
-    let confirmed = UrlPolicy.normalize_for_session(&request.url)?;
-    if confirmed.public != target.public {
-        return Err(BackendError::new(
-            "IMPORT_V2_URL_REFERENCE_MISMATCH",
-            "The confirmed private target does not match this import item.",
-            false,
-            true,
-        ));
-    }
-    let port = target.request_url.port_or_known_default().ok_or_else(|| {
-        BackendError::new(
-            "IMPORT_V2_URL_REJECTED",
-            "URL port is invalid.",
-            false,
-            true,
-        )
-    })?;
-    let execution = state.begin_project_external_execution(
-        &context,
-        &format!(
-            "private-target-dns:{}:{}",
-            request.session_id, request.item_id
-        ),
-    )?;
+    let coordinator = app.state::<AppState>().blocking_work.clone();
+    let preflight_app = app.clone();
+    let preflight_request = request.clone();
+    let (context, execution, target, port) = coordinator
+        .run(crate::services::BlockingWorkClass::HeavyIo, move || {
+            let state = preflight_app.state::<AppState>();
+            let context = state.resolve_project_context(
+                &preflight_request.project_id,
+                &preflight_request.project_root_path,
+            )?;
+            let session = state.import_v2_service.load_session(
+                &context,
+                &state.file_store,
+                &preflight_request.session_id,
+            )?;
+            let item = session
+                .items
+                .iter()
+                .find(|item| item.item_id == preflight_request.item_id)
+                .ok_or_else(|| {
+                    BackendError::new(
+                        "IMPORT_V2_ITEM_NOT_FOUND",
+                        "Import item was not found.",
+                        false,
+                        true,
+                    )
+                })?;
+            if item.input.kind != ImportInputKind::Url {
+                return Err(BackendError::new(
+                    "IMPORT_V2_URL_REJECTED",
+                    "Private authorization is available only for URL imports.",
+                    false,
+                    true,
+                ));
+            }
+            let target = state.import_v2_service.resolve_web_target(
+                &item.input.locator,
+                item.input.normalized_locator.as_deref(),
+            )?;
+            let confirmed = UrlPolicy.normalize_for_session(&preflight_request.url)?;
+            if confirmed.public != target.public {
+                return Err(BackendError::new(
+                    "IMPORT_V2_URL_REFERENCE_MISMATCH",
+                    "The confirmed private target does not match this import item.",
+                    false,
+                    true,
+                ));
+            }
+            let port = target.request_url.port_or_known_default().ok_or_else(|| {
+                BackendError::new(
+                    "IMPORT_V2_URL_REJECTED",
+                    "URL port is invalid.",
+                    false,
+                    true,
+                )
+            })?;
+            let execution = state.begin_project_external_execution(
+                &context,
+                &format!(
+                    "private-target-dns:{}:{}",
+                    preflight_request.session_id, preflight_request.item_id
+                ),
+            )?;
+            Ok((context, execution, target, port))
+        })
+        .await?;
     let ips = tokio::net::lookup_host((target.public.host.as_str(), port))
         .await
         .map_err(|_| {
             BackendError::new("IMPORT_V2_DNS_FAILED", "DNS resolution failed.", true, true)
         })?
         .map(|a| a.ip())
-        .collect();
-    state.require_current_execution_epoch(&context, &execution)?;
-    let grant = PrivateTargetGrant {
-        item_id: request.item_id.clone(),
-        scheme: target.public.scheme,
-        host: target.public.host,
-        port,
-        resolved_ips: ips,
-        expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
-    };
-    state.with_current_project_write_access(
-        &request.project_id,
-        &request.project_root_path,
-        |_permit, _context| state.import_v2_service.authorize_private_target(grant),
-    )
+        .collect::<Vec<_>>();
+    coordinator
+        .run(crate::services::BlockingWorkClass::HeavyIo, move || {
+            let state = app.state::<AppState>();
+            state.require_current_execution_epoch(&context, &execution)?;
+            let grant = PrivateTargetGrant {
+                item_id: request.item_id.clone(),
+                scheme: target.public.scheme,
+                host: target.public.host,
+                port,
+                resolved_ips: ips,
+                expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+            };
+            state.with_current_project_write_access(
+                &request.project_id,
+                &request.project_root_path,
+                |_permit, _context| state.import_v2_service.authorize_private_target(grant),
+            )
+        })
+        .await
 }
 
-#[tauri::command]
 pub fn authorize_local_asr_v2(
     state: State<'_, AppState>,
     request: AuthorizeLocalAsrV2Request,
@@ -799,7 +830,6 @@ pub fn authorize_local_asr_v2(
     authorize_local_asr(&state, request, None)
 }
 
-#[tauri::command]
 pub fn authorize_local_ocr_v2(
     state: State<'_, AppState>,
     request: AuthorizeLocalOcrV2Request,
@@ -823,7 +853,6 @@ pub fn authorize_local_ocr_v2(
     )
 }
 
-#[tauri::command]
 pub fn authorize_bilibili_asr_v2(
     state: State<'_, AppState>,
     request: AuthorizeBilibiliAsrV2Request,
