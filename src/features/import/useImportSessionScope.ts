@@ -230,9 +230,10 @@ export function useImportSessionScope(
               })
               .then((task) => {
                 const taskStore = useTaskStore.getState();
-                taskStore.recordTaskFact(task);
                 if (!cancelled && isScopeCurrent(projectKey, epoch)) {
                   taskStore.upsertTask(task);
+                } else {
+                  taskStore.recordTaskFact(task);
                 }
               })
               .catch((error) => {

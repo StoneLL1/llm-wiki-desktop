@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { BackendEvent } from "../types/task";
+import type { BackendEvent, BackendTask } from "../types/task";
 import { defaultProject, useProjectStore } from "../stores/projectStore";
 import { useTaskStore } from "../stores/taskStore";
 import { useChatStore } from "../stores/chatStore";
@@ -54,6 +54,10 @@ beforeEach(() => {
   useTaskStore.setState({
     activeProjectId: "project-a",
     activeProjectRootPath: "",
+    taskById: {},
+    taskIdsByProject: {},
+    runningCountByProject: {},
+    taskFacts: {},
     tasks: [],
     logs: {},
     activities: {},
@@ -111,6 +115,53 @@ describe("task event listener bridge", () => {
       listenMock.mock.calls.filter(([channel]) => channel === "task://stream-output"),
     ).toHaveLength(1);
     unmount();
+  });
+
+  it("records a background task fact without changing active-project presentation", async () => {
+    let taskUpdated!: (event: { payload: BackendEvent<BackendTask> }) => void;
+    listenMock.mockImplementation(async (channel: string, callback: typeof taskUpdated) => {
+      if (channel === "task://updated") taskUpdated = callback;
+      return vi.fn();
+    });
+    useTaskStore.setState({ drawerOpen: true, selectedTaskId: "task-a" });
+    const mounted = renderHook(() => useTaskEvents());
+    await waitFor(() => expect(taskUpdated).toBeTypeOf("function"));
+    const backgroundTask: BackendTask = {
+      id: "task-b",
+      taskType: "import",
+      projectId: "project-b",
+      title: "Background Import",
+      status: "running",
+      progress: { current: 1, total: 2, label: "Importing" },
+      startedAt: "2026-08-16T00:00:00Z",
+      updatedAt: "2026-08-16T00:00:01Z",
+      completedAt: null,
+      cancellable: true,
+      logPath: null,
+      result: null,
+      error: null,
+    };
+
+    act(() => {
+      taskUpdated({
+        payload: {
+          eventId: "background-task",
+          eventType: "task_updated",
+          projectId: "project-b",
+          taskId: backgroundTask.id,
+          timestamp: backgroundTask.updatedAt,
+          payload: backgroundTask,
+        },
+      });
+    });
+
+    const state = useTaskStore.getState();
+    expect(state.taskById[backgroundTask.id]).toEqual(backgroundTask);
+    expect(state.tasks).toEqual([]);
+    expect(state.drawerOpen).toBe(true);
+    expect(state.selectedTaskId).toBe("task-a");
+    expect(notifyTaskEventMock).not.toHaveBeenCalled();
+    mounted.unmount();
   });
 
   it("marks and revalidates only observed resources on window focus", async () => {

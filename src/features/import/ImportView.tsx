@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import type { AiCapabilitiesWorkflow } from "../../hooks/useAiCapabilities";
 import { useImportStore } from "../../stores/importStore";
-import { useTaskStore } from "../../stores/taskStore";
+import { selectTaskIdsForProject, useTaskStore } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import type { AgentCandidateView } from "../../types/importV2Agent";
 import type { CommitItemDecision, ImportItem, ImportSession } from "../../types/importV2";
@@ -66,7 +66,7 @@ function itemById(items: readonly ImportItem[], itemId: string | null): ImportIt
 
 export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: ImportViewProps) {
   const { t } = useTranslation();
-  const taskList = useTaskStore((state) => state.tasks);
+  const taskIds = useTaskStore((state) => selectTaskIdsForProject(state, state.activeProjectId));
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
   const pushToast = useToastStore((state) => state.pushToast);
   const session = workflow.session;
@@ -657,7 +657,7 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
                 }}
                 onDismiss={(batchId) => workflow.dismissBatch?.(batchId)}
                 onViewTask={(taskId) => {
-                  if (taskList.some((task) => task.id === taskId)) {
+                  if (taskIds.includes(taskId)) {
                     openTaskDrawer(taskId);
                   } else {
                     pushToast("info", t("importV2.batch.taskUnavailable"));
@@ -745,7 +745,7 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
           setHistoryResultUnavailable(false);
           setHistoryPreviewIdentity({ sessionId: historyDetail.session.sessionId, itemId, candidateId: null, historyBatchId: historyDetail.entry.batchId });
         }}
-        canViewLogs={(taskId) => taskList.some((task) => task.id === taskId)}
+        canViewLogs={(taskId) => taskIds.includes(taskId)}
         onViewLogs={(taskId) => {
           setHistoryDetail(null);
           openTaskDrawer(taskId);

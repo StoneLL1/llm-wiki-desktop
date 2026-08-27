@@ -1,5 +1,6 @@
 import type { BackendEvent, StreamDelta } from "../types/task";
 import { StreamDeltaBatcher, type StreamDeltaScheduler } from "./streamDeltaBatcher";
+import { TaskSnapshotBatcher } from "./taskSnapshotBatcher";
 
 export type TaskEventListener = (event: BackendEvent) => void;
 
@@ -7,6 +8,7 @@ interface TaskEventDispatcherOptions {
   scheduler?: StreamDeltaScheduler;
   flushIntervalMs?: number;
   frameFallbackMs?: number;
+  taskFlushIntervalMs?: number;
 }
 
 function isTerminalEvent(event: BackendEvent): boolean {
@@ -18,6 +20,7 @@ function isTerminalEvent(event: BackendEvent): boolean {
 export class TaskEventDispatcher {
   private readonly listeners = new Set<TaskEventListener>();
   private readonly streamBatcher: StreamDeltaBatcher;
+  private readonly taskSnapshotBatcher: TaskSnapshotBatcher;
   private ownerListener: TaskEventListener | null = null;
 
   constructor(options: TaskEventDispatcherOptions = {}) {
@@ -25,8 +28,16 @@ export class TaskEventDispatcher {
       (event) => this.emit(event),
       options,
     );
+    this.taskSnapshotBatcher = new TaskSnapshotBatcher(
+      (event) => this.emit(event),
+      {
+        scheduler: options.scheduler,
+        flushIntervalMs: options.taskFlushIntervalMs,
+      },
+    );
   }
 
+  /** Feature listeners consume delivered events; they never own canonical task facts. */
   register(listener: TaskEventListener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -47,15 +58,18 @@ export class TaskEventDispatcher {
     if (isTerminalEvent(event) && event.taskId) {
       this.streamBatcher.flushTask(event.projectId, event.taskId);
     }
+    if (this.taskSnapshotBatcher.enqueue(event)) return;
     this.emit(event);
   }
 
   retainProject(projectId: string | null): void {
     this.streamBatcher.retainProject(projectId);
+    this.taskSnapshotBatcher.retainProject(projectId);
   }
 
-  clearPending(shouldFlush?: (event: BackendEvent<StreamDelta>) => boolean): void {
-    this.streamBatcher.dispose(shouldFlush);
+  clearPending(shouldFlush?: (event: BackendEvent) => boolean): void {
+    this.streamBatcher.dispose(shouldFlush ? (event) => shouldFlush(event) : undefined);
+    this.taskSnapshotBatcher.dispose(shouldFlush ? (event) => shouldFlush(event) : undefined);
   }
 
   private emit(event: BackendEvent): void {
@@ -83,7 +97,7 @@ export function retainTaskEventProject(projectId: string | null): void {
 }
 
 export function clearPendingTaskEvents(
-  shouldFlush?: (event: BackendEvent<StreamDelta>) => boolean,
+  shouldFlush?: (event: BackendEvent) => boolean,
 ): void {
   taskEventDispatcher.clearPending(shouldFlush);
 }

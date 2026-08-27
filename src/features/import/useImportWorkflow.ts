@@ -4,7 +4,12 @@ import { useTranslation } from "react-i18next";
 import type { TaskLauncher } from "../../hooks/useTaskLauncher";
 import { importV2Api } from "../../services/importV2Api";
 import { useImportStore } from "../../stores/importStore";
-import { useTaskStore } from "../../stores/taskStore";
+import {
+  selectProjectTaskById,
+  selectTaskIdsForProject,
+  selectTasksForProject,
+  useTaskStore,
+} from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import type { CommitItemDecision, ImportItemResolution, ImportRecoveryAction, ImportSession, MediaSaveMode } from "../../types/importV2";
 import type { ProjectSummary } from "../../types/project";
@@ -22,6 +27,9 @@ import type { ImportCollectionPreview, RemoteMediaRetentionPlan } from "../../ty
 import type { ImportWorkbenchPreferences } from "../../types/importV2Presentation";
 
 export type { ImportBatchProgress, ImportWorkflow } from "./importWorkflow";
+
+const selectImportTasks = (state: Parameters<typeof selectTasksForProject>[0], projectId: string) =>
+  selectTasksForProject(state, projectId).filter((task) => task.taskType === "import");
 
 function copyTextWithDomFallback(content: string): boolean {
   if (typeof document === "undefined" || typeof document.execCommand !== "function") return false;
@@ -54,7 +62,8 @@ export function useImportWorkflow(
     isConfirming: useImportStore.getState().isConfirming,
     mutationKeys: useImportStore.getState().mutationKeys,
     sessionEpoch: useImportStore.getState().sessionEpoch,
-    taskList: useTaskStore.getState().tasks,
+    taskList: selectImportTasks(useTaskStore.getState(), project.projectId),
+    taskIds: selectTaskIdsForProject(useTaskStore.getState(), project.projectId),
     tasksHydrated: useTaskStore.getState().tasksHydrated,
   });
   const {
@@ -78,7 +87,18 @@ export function useImportWorkflow(
   const selectedItemId = useImportStore((state) => importActive ? state.selectedItemId : inactiveSnapshotRef.current.selectedItemId);
   const filter = useImportStore((state) => importActive ? state.filter : inactiveSnapshotRef.current.filter);
   const isConfirming = useImportStore((state) => importActive ? state.isConfirming : inactiveSnapshotRef.current.isConfirming);
-  const taskList = useTaskStore((state) => importActive ? state.tasks : inactiveSnapshotRef.current.taskList);
+  const taskIds = useTaskStore((state) => importActive
+    ? selectTaskIdsForProject(state, project.projectId)
+    : inactiveSnapshotRef.current.taskIds);
+  // Import progress is reconciled by the event coordinator. Keep this
+  // workflow-level task snapshot stable for progress-only updates so its
+  // session/batch effects run only on task membership or lifecycle changes.
+  const taskList = useMemo(() => importActive
+    ? taskIds
+        .map((taskId) => selectProjectTaskById(useTaskStore.getState(), project.projectId, taskId))
+        .filter((task): task is NonNullable<typeof task> => task?.taskType === "import")
+    : inactiveSnapshotRef.current.taskList,
+  [importActive, project.projectId, taskIds]);
   const tasksHydrated = useTaskStore((state) => importActive ? state.tasksHydrated : inactiveSnapshotRef.current.tasksHydrated);
   const pushToast = useToastStore((state) => state.pushToast);
   const mutationKeys = useImportStore((state) => importActive ? state.mutationKeys : inactiveSnapshotRef.current.mutationKeys);
@@ -93,6 +113,7 @@ export function useImportWorkflow(
       mutationKeys,
       sessionEpoch,
       taskList,
+      taskIds,
       tasksHydrated,
     };
   }

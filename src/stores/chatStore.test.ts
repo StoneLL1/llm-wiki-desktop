@@ -164,7 +164,7 @@ describe("chatStore", () => {
     resolveTask?.({ id: "task-after-switch" });
     await pending;
 
-    expect(useTaskStore.getState().tasks.some((task) => task.id === "task-after-switch")).toBe(true);
+    expect(useTaskStore.getState().taskById["task-after-switch"]).toBeDefined();
   });
 
   it("replays stream deltas that arrive before the send response binds the task", async () => {

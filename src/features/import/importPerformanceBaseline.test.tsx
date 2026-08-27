@@ -97,6 +97,9 @@ beforeEach(async () => {
   useTaskStore.setState({
     activeProjectId: "perf-project",
     activeProjectRootPath: "D:/fixture-project",
+    taskById: {},
+    taskIdsByProject: {},
+    runningCountByProject: {},
     taskFacts: {},
     tasks: [],
     logs: {},
@@ -112,12 +115,12 @@ beforeEach(async () => {
   useImportStore.getState().reset();
 });
 
-describe("three-core performance Batch 0 frontend red baseline", () => {
+describe("three-core performance frontend contracts", () => {
   it("freezes the N fixtures used by store and Queue observers", () => {
     expect(SCALE).toEqual([100, 1_000, 10_000]);
   });
 
-  it("observes two task-store publications for one snapshot when owner and Import listener both upsert", () => {
+  it("publishes one task fact when owner and a legacy listener observe the same snapshot", () => {
     const dispatcher = new TaskEventDispatcher();
     dispatcher.registerOwner(handleTaskEvent);
     dispatcher.register((event) => useTaskStore.getState().upsertTask(event.payload as BackendTask));
@@ -126,19 +129,26 @@ describe("three-core performance Batch 0 frontend red baseline", () => {
     dispatcher.dispatch(taskEvent(1));
 
     observer.stop();
-    expect(observer.publications).toBe(2);
+    expect(observer.publications).toBe(1);
   });
 
-  it("observes twenty task-store publications during one second of 10 Hz progress replay", () => {
+  it("publishes task progress no faster than 5 Hz during a 10 Hz replay", () => {
+    vi.useFakeTimers();
     const dispatcher = new TaskEventDispatcher();
     dispatcher.registerOwner(handleTaskEvent);
     dispatcher.register((event) => useTaskStore.getState().upsertTask(event.payload as BackendTask));
     const observer = observeStorePublications((listener) => useTaskStore.subscribe(listener));
 
-    for (let progress = 1; progress <= 10; progress += 1) dispatcher.dispatch(taskEvent(progress));
+    for (let progress = 1; progress <= 10; progress += 1) {
+      dispatcher.dispatch(taskEvent(progress));
+      vi.advanceTimersByTime(100);
+    }
+    vi.advanceTimersByTime(250);
 
     observer.stop();
-    expect(observer.publications).toBe(20);
+    expect(observer.publications).toBeLessThanOrEqual(5);
+    expect(useTaskStore.getState().tasks[0]?.progress?.current).toBe(10);
+    vi.useRealTimers();
   });
 
   it("observes a full 10k item-array replacement for one changed Import item", () => {

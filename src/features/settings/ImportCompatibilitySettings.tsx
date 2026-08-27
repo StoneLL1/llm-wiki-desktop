@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import { ImportMigrationDialog, type ImportMigrationUiStatus } from "../import/ImportMigrationDialog";
 import type { ImportWorkflow } from "../import/importWorkflow";
-import { useTaskStore } from "../../stores/taskStore";
+import { selectTaskById, useTaskStore } from "../../stores/taskStore";
 import type {
   LegacyInventory,
   MigrationConfirmation,
@@ -33,11 +33,9 @@ export function ImportCompatibilitySettings({ workflow }: ImportCompatibilitySet
   const [report, setReport] = useState<MigrationReport | null>(null);
   const [confirmation, setConfirmation] = useState<MigrationConfirmation | null>(null);
   const [migrationTaskId, setMigrationTaskId] = useState<string | null>(null);
-  const migrationTaskStatus = useTaskStore((state) => (
-    migrationTaskId
-      ? state.tasks.find((task) => task.id === migrationTaskId)?.status ?? null
-      : null
-  ));
+  const migrationTaskStatus = useTaskStore((state) =>
+    selectTaskById(state, migrationTaskId)?.status ?? null,
+  );
   const activeProjectKeyRef = useRef(workflow?.projectKey ?? null);
   activeProjectKeyRef.current = workflow?.projectKey ?? null;
 

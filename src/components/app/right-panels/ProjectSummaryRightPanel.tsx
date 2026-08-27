@@ -2,7 +2,7 @@ import { useTranslation } from "react-i18next";
 
 import { useProjectStatus } from "../../../hooks/useProjectStatus";
 import { useProjectStore } from "../../../stores/projectStore";
-import { useTaskStore } from "../../../stores/taskStore";
+import { selectRunningCountForProject, useTaskStore } from "../../../stores/taskStore";
 import type { GraphState, IndexState } from "../../../types/project";
 import { RightPanelHeader } from "../RightPanelHeader";
 import type { RightPanelHostProps } from "./types";
@@ -11,7 +11,8 @@ export function ProjectSummaryRightPanel({ currentProject }: RightPanelHostProps
   const { t } = useTranslation();
   const authority = useProjectStore((state) => state.authority);
   const pendingAction = useProjectStore((state) => state.pendingAction);
-  const tasks = useTaskStore((state) => state.tasks);
+  const runningCount = useTaskStore((state) =>
+    selectRunningCountForProject(state, currentProject.projectId));
   const status = useProjectStatus(currentProject.projectId, currentProject.rootPath, true);
   const health = currentProject.health;
   const pendingCount = pendingAction ? 1 : 0;
@@ -124,33 +125,15 @@ export function ProjectSummaryRightPanel({ currentProject }: RightPanelHostProps
         <div className="border-b border-[var(--border-subtle)] py-3">
           <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">{t("rightpanel.section.tasks")}</h4>
           <div className="flex flex-col gap-2 text-[12px]">
-            {tasks.filter((task) => task.status === "running").length === 0 ? (
-              tasks.filter((task) => task.status === "queued").length === 0 ? (
-                <p className="m-0 text-[11px] text-[var(--text-muted)]">{t("rightpanel.tasks.none")}</p>
-              ) : tasks.filter((task) => task.status === "queued").map((task) => (
-                <div key={task.id} className="flex items-center gap-2">
-                  <span className="dotstatus dotstatus--ok" aria-hidden="true" />
-                  <span className="min-w-0 flex-1 truncate">{task.title}</span>
-                  <span className="shrink-0 text-[var(--text-muted)]">{t(`task.status.${task.status}`)}</span>
-                </div>
-              ))
-            ) : tasks.filter((task) => task.status === "running" || task.status === "queued").slice(0, 5).map((task) => (
-              <div key={task.id} className="flex items-center gap-2">
-                <span className={`dotstatus ${task.status === "running" ? "dotstatus--busy" : "dotstatus--ok"}`} aria-hidden="true" />
-                <span className="min-w-0 flex-1 truncate">{task.title}</span>
-                {task.progress != null ? (
-                  <span className="shrink-0 font-mono text-[var(--text-muted)]">
-                    {task.progress.total != null && task.progress.total > 0
-                      ? `${Math.round((task.progress.current / task.progress.total) * 100)}%`
-                      : (task.progress.label ?? task.progress.current)}
-                  </span>
-                ) : <span className="shrink-0 text-[var(--text-muted)]">{t(`task.status.${task.status}`)}</span>}
+            {runningCount === 0 ? (
+              <p className="m-0 text-[11px] text-[var(--text-muted)]">{t("rightpanel.tasks.none")}</p>
+            ) : (
+              <div className="flex items-center gap-2">
+                <span className="dotstatus dotstatus--busy" aria-hidden="true" />
+                <span className="font-mono text-[var(--text-secondary)]">{runningCount}</span>
+                <span className="text-[var(--text-muted)]">{t("task.status.running")}</span>
               </div>
-            ))}
-            {tasks.filter((task) => task.status === "succeeded" || task.status === "failed").length > 0
-              && tasks.filter((task) => task.status === "running" || task.status === "queued").length === 0
-              ? <p className="m-0 text-[11px] text-[var(--text-muted)]">{t("rightpanel.tasks.noOthers")}</p>
-              : null}
+            )}
           </div>
         </div>
       </div>

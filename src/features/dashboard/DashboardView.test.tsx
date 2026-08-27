@@ -22,6 +22,16 @@ describe("DashboardView", () => {
     useGraphStore.getState().reset();
     useNavigationStore.getState().setActiveView("dashboard");
     useProjectStore.getState().setCurrentProject(project({ wikiPageCount: 42, graphState: "stale" }));
+    useTaskStore.setState({
+      activeProjectId: "sample",
+      activeProjectRootPath: "D:/wiki",
+      taskById: {},
+      taskIdsByProject: {},
+      runningCountByProject: {},
+      taskFacts: {},
+      tasks: [],
+      runningCount: 0,
+    });
     useTaskStore.getState().setTasks([]);
   });
 

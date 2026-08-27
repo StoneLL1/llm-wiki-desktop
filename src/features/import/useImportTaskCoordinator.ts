@@ -154,6 +154,18 @@ export function useImportTaskCoordinator({
   const trackedDiscoveryTaskIdsRef = useRef(new Set<string>());
   const reconciliationDelayRef = useRef(250);
   const [reconciliationRevision, setReconciliationRevision] = useState(0);
+  const sessionItemIdsByTaskId = useMemo(() => {
+    const index = new Map<string, string[]>();
+    for (const item of session?.items ?? []) {
+      if (!item.taskId) continue;
+      const itemIds = index.get(item.taskId) ?? [];
+      itemIds.push(item.itemId);
+      index.set(item.taskId, itemIds);
+    }
+    return index;
+  }, [session]);
+  const sessionItemIdsByTaskIdRef = useRef(sessionItemIdsByTaskId);
+  sessionItemIdsByTaskIdRef.current = sessionItemIdsByTaskId;
 
   const requestTaskReconciliation = useCallback(() => {
     reconciliationDelayRef.current = 250;
@@ -401,7 +413,7 @@ export function useImportTaskCoordinator({
       return;
     }
     const resolvedTasks = tasks.map(
-      (task) => useTaskStore.getState().tasks.find((current) => current.id === task.id) ?? task,
+      (task) => useTaskStore.getState().taskById[task.id] ?? task,
     );
     const operation = resolvedTasks.length === 1
       && resolvedTasks[0] !== undefined
@@ -541,7 +553,7 @@ export function useImportTaskCoordinator({
   }, [consumeTaskCompletion, isScopeCurrent, projectId, projectKey, refreshForScope, settleConfirmationTask, settleItemTask, settleOperationTask, settlePathTask]);
 
   const trackPathTask = useCallback((task: BackendTask, pending: PendingPathTask) => {
-    const knownTask = useTaskStore.getState().tasks.find((candidate) => candidate.id === task.id);
+    const knownTask = useTaskStore.getState().taskById[task.id];
     const observedTask = knownTask && isSettledImportTask(knownTask) ? knownTask : task;
     selectedTaskUpsert(observedTask);
     if (!isScopeCurrent(pending.projectKey, pending.epoch)) {
@@ -563,7 +575,7 @@ export function useImportTaskCoordinator({
   }, [isScopeCurrent, requestTaskReconciliation, selectedTaskUpsert, settlePathTask]);
 
   const trackConfirmationTask = useCallback((task: BackendTask, pending: PendingScopedTask) => {
-    const knownTask = useTaskStore.getState().tasks.find((candidate) => candidate.id === task.id);
+    const knownTask = useTaskStore.getState().taskById[task.id];
     const observedTask = knownTask && isTerminalStatus(knownTask.status) ? knownTask : task;
     selectedTaskUpsert(observedTask);
     if (!isScopeCurrent(pending.projectKey, pending.epoch)) return;
@@ -596,12 +608,11 @@ export function useImportTaskCoordinator({
         || !isScopeCurrent(projectKey, current.sessionEpoch, patch.sessionId)
       ) return;
       const pending = pendingItemTasks.current.get(patch.batchId);
-      const recoveryTask = useTaskStore.getState().tasks.find(
-        (task) => task.id === patch.batchId
-          && task.operation?.kind === "import_recovery"
-          && task.operation.sessionId === patch.sessionId,
-      );
-      if (recoveryTask) {
+      const recoveryTask = useTaskStore.getState().taskById[patch.batchId];
+      if (
+        recoveryTask?.operation?.kind === "import_recovery"
+        && recoveryTask.operation.sessionId === patch.sessionId
+      ) {
         applyOperationPatch(patch, projectKey, current.sessionEpoch);
         return;
       }
@@ -640,9 +651,9 @@ export function useImportTaskCoordinator({
     }
     if (!event.taskId || !isTaskSnapshotEvent(event)) return;
     const payloadTask = event.payload as BackendTask;
-    selectedTaskUpsert(payloadTask);
-    const task = useTaskStore.getState().tasks.find((candidate) => candidate.id === event.taskId)
-      ?? payloadTask;
+    // useTaskEvents' owner has already committed this fact. Feature listeners
+    // consume the canonical snapshot and never upsert it a second time.
+    const task = useTaskStore.getState().taskById[event.taskId] ?? payloadTask;
     const currentScope = useImportStore.getState();
     if (event.projectId === projectId && currentScope.projectKey === projectKey && currentScope.session) {
       consumeTaskCompletion(
@@ -653,9 +664,15 @@ export function useImportTaskCoordinator({
       );
     }
     const pendingItem = pendingItemTasks.current.get(event.taskId);
-    if (pendingItem && !pendingItem.operation) {
-      for (const itemId of pendingItem.itemIds) {
-        syncItemTask(task, itemId, pendingItem.projectKey, pendingItem.epoch);
+    if (!pendingItem?.operation && !isImportBatchOperationTask(task)) {
+      const itemIds = pendingItem?.itemIds ?? sessionItemIdsByTaskIdRef.current.get(event.taskId) ?? [];
+      for (const itemId of itemIds) {
+        syncItemTask(
+          task,
+          itemId,
+          pendingItem?.projectKey ?? projectKey,
+          pendingItem?.epoch ?? currentScope.sessionEpoch,
+        );
       }
     }
     if (!isTerminalTaskEvent(event) && !isWaitingTaskEvent(event)) return;
@@ -692,7 +709,7 @@ export function useImportTaskCoordinator({
     ) {
       void refreshForScope(projectKey, current.sessionEpoch).catch(() => undefined);
     }
-  }, [applyOperationPatch, consumeTaskCompletion, isScopeCurrent, projectId, projectKey, refreshForScope, rootPath, selectedTaskUpsert, settleConfirmationTask, settleItemTask, settleOperationTask, settlePathTask, syncItemTask]);
+  }, [applyOperationPatch, consumeTaskCompletion, isScopeCurrent, projectId, projectKey, refreshForScope, rootPath, settleConfirmationTask, settleItemTask, settleOperationTask, settlePathTask, syncItemTask]);
 
   const cancelDiscovery = useCallback(async () => {
     if (!discoveryTaskId) return;
@@ -849,7 +866,8 @@ export function useImportTaskCoordinator({
     if (!session || session.projectId !== projectId || !session.discoveryTaskId) return;
     const taskId = session.discoveryTaskId;
     if (trackedDiscoveryTaskIdsRef.current.has(taskId) || pendingPathTasks.current.has(taskId)) return;
-    const task = taskList.find((candidate) => candidate.id === taskId && candidate.projectId === projectId);
+    const task = useTaskStore.getState().taskById[taskId]
+      ?? taskList.find((candidate) => candidate.id === taskId && candidate.projectId === projectId);
     if (!task) return;
     const mutationKey = `add-paths:${projectKey}:${sessionEpoch}:recovered:${taskId}`;
     useImportStore.getState().beginMutation(mutationKey);
@@ -863,7 +881,8 @@ export function useImportTaskCoordinator({
 
   useEffect(() => {
     if (!session || session.projectId !== projectId) return;
-    const tasksById = new Map(taskList.map((task) => [task.id, task]));
+    const currentTaskById = useTaskStore.getState().taskById;
+    const tasksById = new Map(taskList.map((task) => [task.id, currentTaskById[task.id] ?? task]));
     const operationItems = new Map<string, string[]>();
     for (const item of session.items) {
       if (!item.taskId) continue;

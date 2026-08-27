@@ -16,7 +16,7 @@ import {
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useGraphStore } from "../../stores/graphStore";
 import { useProjectStore } from "../../stores/projectStore";
-import { useTaskStore } from "../../stores/taskStore";
+import { selectProjectTaskById, selectTaskIdsForProject, useTaskStore } from "../../stores/taskStore";
 import { useWikiStore } from "../wiki/wikiStore";
 import { PAGE_TYPE_COLORS } from "../../types/graph";
 import type { TaskType } from "../../types/task";
@@ -48,7 +48,30 @@ const ACTIVITY_ICON: Partial<Record<TaskType, LucideIcon>> = {
 export function DashboardView() {
   const { t } = useTranslation();
   const project = useProjectStore((state) => state.currentProject);
-  const tasks = useTaskStore((state) => state.tasks);
+  const taskIds = useTaskStore((state) => selectTaskIdsForProject(state, project.projectId));
+  const dashboardTasks = useMemo(() => {
+    const state = useTaskStore.getState();
+    const projectTasks = taskIds
+      .map((taskId) => selectProjectTaskById(state, project.projectId, taskId))
+      .filter((task): task is NonNullable<typeof task> => Boolean(task));
+    const selected = [...projectTasks]
+      .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""))
+      .slice(0, 8);
+    const selectedIds = new Set(selected.map((task) => task.id));
+    const latestCompile = latestCompileTask(projectTasks);
+    const currentGraph = projectTasks.find((task) => task.taskType === "graph_build"
+      && (task.status === "running" || task.status === "queued"));
+    for (const task of [latestCompile, currentGraph]) {
+      if (task && !selectedIds.has(task.id)) selected.push(task);
+    }
+    return {
+      selected,
+      pendingLint: projectTasks.filter((task) =>
+        (task.taskType === "deep_lint" || task.taskType === "auto_fix")
+        && task.status === "waiting_for_confirmation").length,
+    };
+  }, [project.projectId, taskIds]);
+  const tasks = dashboardTasks.selected;
   const graphData = useGraphStore((state) => state.data);
   const graphStatus = useGraphStore((state) => state.status);
   const setActiveView = useNavigationStore((state) => state.setActiveView);
@@ -119,9 +142,7 @@ export function DashboardView() {
   const lastCompileTask = latestCompileTask(tasks);
   const lastCompileTime = lastCompileTask?.completedAt ?? lastCompileTask?.updatedAt ?? null;
 
-  const pendingLint = tasks.filter(
-    (task) => (task.taskType === "deep_lint" || task.taskType === "auto_fix") && task.status === "waiting_for_confirmation",
-  ).length;
+  const pendingLint = dashboardTasks.pendingLint;
 
   return (
     <div className="min-h-0 flex-1 overflow-auto">

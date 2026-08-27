@@ -1,8 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 
 import { useProjectStore } from "../../stores/projectStore";
-import { useTaskStore } from "../../stores/taskStore";
+import { selectTasksForProject, useTaskStore } from "../../stores/taskStore";
 import type { BackendTask } from "../../types/task";
 import { CompileConflictDialog } from "./CompileConflictDialog";
 import { ConfirmationDialog } from "./ConfirmationDialog";
@@ -24,9 +25,13 @@ export function ProjectConfirmationController() {
   const cancelPendingAction = useProjectStore(
     (state) => state.cancelPendingAction,
   );
-  const tasks = useTaskStore((state) => state.tasks);
+  const compileTasksWaitingForConfirmation = useTaskStore(useShallow((state) =>
+    selectTasksForProject(state, currentProject.projectId).filter(
+      (task) => task.taskType === "wiki_compile" && task.status === "waiting_for_confirmation",
+    ),
+  ));
   const upsertTask = useTaskStore((state) => state.upsertTask);
-  const compilePendingAction = tasks.find(
+  const compilePendingAction = compileTasksWaitingForConfirmation.find(
     (task) =>
       task.projectId === currentProject.projectId &&
       task.taskType === "wiki_compile" &&

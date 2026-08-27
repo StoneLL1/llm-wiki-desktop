@@ -26,6 +26,7 @@ import {
   cancelTaskRequest,
   fetchTaskActivities,
   fetchTaskLogs,
+  selectTaskById,
   useTaskStore,
 } from "../../stores/taskStore";
 import type { AgentInfo } from "../../types/agent";
@@ -146,11 +147,7 @@ export function SourceAiOrganizeDialog({
   const previewAttemptedRef = useRef<string | null>(null);
   const previewRequestSerialRef = useRef(0);
 
-  const ownedTask = useTaskStore((state) =>
-    ownedTaskId
-      ? (state.tasks.find((entry) => entry.id === ownedTaskId) ?? null)
-      : null,
-  );
+  const ownedTask = useTaskStore((state) => selectTaskById(state, ownedTaskId));
   const currentTask = ownedTask ?? task ?? failedTask;
   const taskId = currentTask?.id ?? null;
   const taskActivities = useTaskStore((state) =>
