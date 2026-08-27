@@ -2,17 +2,62 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { importV2Api } from "../../services/importV2Api";
-import { importProjectKey, useImportStore } from "../../stores/importStore";
+import { importProjectKey, useImportStore, type ImportQueueFilter } from "../../stores/importStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useTaskStore } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import type { AppView } from "../../stores/navigationStore";
+import type { ImportSession, ImportSessionOverview } from "../../types/importV2";
 import type { ImportFrontendReadiness } from "../../types/importV2Presentation";
 import type { ProjectSessionAuthority, ProjectSummary } from "../../types/project";
 import type { ImportBootstrapState } from "./importWorkflow";
 
 export const hasImportTauriRuntime = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+function createdSessionOverview(session: ImportSession): ImportSessionOverview {
+  const activeStatuses = new Set(["queued", "inspecting", "extracting", "validating", "committing"]);
+  const readyItems = session.items.filter((item) => item.status === "preview_ready");
+  const selected = readyItems.filter((item) => item.selected && item.preview?.quality.level !== "fail");
+  return {
+    ...session,
+    itemCount: session.items.length,
+    semanticRevision: 1,
+    selectionRevision: 1,
+    confirmationDigest: `created:${session.sessionId}`,
+    counts: {
+      all: session.items.filter((item) => item.status !== "completed" && item.status !== "skipped").length,
+      active: session.items.filter((item) => activeStatuses.has(item.status)).length,
+      ready: readyItems.length,
+      needsAction: session.items.filter((item) => ["waiting_capability", "waiting_login", "waiting_authorization", "needs_merge"].includes(item.status)).length,
+      failed: session.items.filter((item) => item.status === "failed").length,
+      completed: session.items.filter((item) => item.status === "completed").length,
+      waiting: session.items.filter((item) => ["waiting_capability", "waiting_login", "waiting_authorization"].includes(item.status)).length,
+      processed: session.items.filter((item) => ["preview_ready", "needs_merge", "completed", "failed", "cancelled", "skipped"].includes(item.status)).length,
+      cancelled: session.items.filter((item) => item.status === "cancelled").length,
+    },
+    selection: {
+      selected: selected.length,
+      newSources: selected.filter((item) => !item.preview?.resolution || item.preview.resolution.kind === "new_source").length,
+      updates: selected.filter((item) => item.preview?.resolution?.kind === "same_source_new_version" || item.preview?.resolution?.kind === "needs_three_way_merge").length,
+      warnings: selected.filter((item) => item.preview?.quality.level === "warning").length,
+      pending: session.items.filter((item) => ["failed", "needs_merge", "waiting_capability", "waiting_login", "waiting_authorization"].includes(item.status)).length,
+      restricted: selected.filter((item) => item.restrictedContent).length,
+    },
+    indexState: "ready",
+  };
+}
+
+function attachCreatedSession(projectKey: string, epoch: number, session: ImportSession): void {
+  const overview = createdSessionOverview(session);
+  useImportStore.getState().attachSessionWindow(projectKey, overview, {
+    sessionId: session.sessionId,
+    snapshotRevision: overview.semanticRevision,
+    items: session.items.slice(0, 200),
+    nextCursor: session.items.length > 200 ? "created-session-window" : null,
+    total: session.items.length,
+  }, epoch);
+}
 
 function authorityRevisionKey(
   authority: ProjectSessionAuthority | null,
@@ -38,6 +83,28 @@ export function importWorkflowErrorMessage(error: unknown): string {
     }
   }
   return String(error);
+}
+
+async function loadConsistentSessionWindow(
+  projectId: string,
+  projectRootPath: string,
+  sessionId: string,
+  filter: ImportQueueFilter,
+) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const [overview, page] = await Promise.all([
+      importV2Api.getSessionOverview({ projectId, projectRootPath, sessionId }),
+      importV2Api.listSessionItems({
+        projectId,
+        projectRootPath,
+        sessionId,
+        filter,
+        limit: 200,
+      }),
+    ]);
+    if (overview.semanticRevision === page.snapshotRevision) return { overview, page };
+  }
+  throw new Error("Import session changed while its first page was loading.");
 }
 
 export interface ImportSessionScope {
@@ -124,8 +191,9 @@ export function useImportSessionScope(
     let refreshAgain = false;
     setIsSyncingSession(true);
 
+    const filter = useImportStore.getState().filter;
     const request = Promise.all([
-      importV2Api.getSession({ projectId, projectRootPath: rootPath, sessionId }),
+      loadConsistentSessionWindow(projectId, rootPath, sessionId, filter),
       importV2Api.getReadiness({ projectId, projectRootPath: rootPath })
         .then((nextReadiness) => ({ nextReadiness, warning: null as string | null }))
         .catch((error) => ({
@@ -134,13 +202,15 @@ export function useImportSessionScope(
         })),
     ]);
     const refresh = request
-      .then(([nextSession, readinessResult]) => {
+      .then(([window, readinessResult]) => {
         if (isScopeCurrent(requestKey, epoch)) {
           if (readinessResult.nextReadiness) setReadiness(readinessResult.nextReadiness);
           setReadinessWarning(readinessResult.warning);
         }
         if (isScopeCurrent(requestKey, epoch) && sessionMutationRevisionRef.current === refreshRevision) {
-          useImportStore.getState().replaceSession(requestKey, nextSession, epoch);
+          if (!useImportStore.getState().attachSessionWindow(requestKey, window.overview, window.page, epoch)) {
+            refreshAgain = true;
+          }
         } else if (isScopeCurrent(requestKey, epoch)) {
           refreshAgain = true;
         }
@@ -213,52 +283,75 @@ export function useImportSessionScope(
         if (cancelled || !isScopeCurrent(projectKey, epoch)) return;
         setReadiness(nextReadiness);
 
-        let nextSession;
+        let sessionId: string;
+        let attached = false;
         if (nextReadiness?.unfinishedSessionId) {
           try {
-            nextSession = await importV2Api.getSession({
+            sessionId = nextReadiness.unfinishedSessionId;
+            const { overview, page } = await loadConsistentSessionWindow(
               projectId,
-              projectRootPath: rootPath,
-              sessionId: nextReadiness.unfinishedSessionId,
-            });
+              rootPath,
+              sessionId,
+              useImportStore.getState().filter,
+            );
             if (cancelled || !isScopeCurrent(projectKey, epoch)) return;
-            void importV2Api
-              .startSessionRecovery({
-                projectId,
-                projectRootPath: rootPath,
-                sessionId: nextReadiness.unfinishedSessionId,
-              })
-              .then((task) => {
-                const taskStore = useTaskStore.getState();
-                if (!cancelled && isScopeCurrent(projectKey, epoch)) {
-                  taskStore.upsertTask(task);
-                } else {
-                  taskStore.recordTaskFact(task);
-                }
-              })
-              .catch((error) => {
-                if (!cancelled && isScopeCurrent(projectKey, epoch)) {
-                  setReadinessWarning(importWorkflowErrorMessage(error));
-                }
-              });
+            useImportStore.getState().attachSessionWindow(projectKey, overview, page, epoch);
+            if (overview.indexState === "rebuild_required") {
+              setIsSyncingSession(true);
+              void importV2Api
+                .startSessionRecovery({
+                  projectId,
+                  projectRootPath: rootPath,
+                  sessionId: nextReadiness.unfinishedSessionId,
+                })
+                .then((task) => {
+                  const taskStore = useTaskStore.getState();
+                  if (!cancelled && isScopeCurrent(projectKey, epoch)) {
+                    taskStore.upsertTask(task);
+                  } else {
+                    taskStore.recordTaskFact(task);
+                  }
+                })
+                .catch((error) => {
+                  if (!cancelled && isScopeCurrent(projectKey, epoch)) {
+                    setIsSyncingSession(false);
+                    setReadinessWarning(importWorkflowErrorMessage(error));
+                  }
+                });
+            }
           } catch (error) {
             if (cancelled || !isScopeCurrent(projectKey, epoch)) return;
             setReadinessWarning(importWorkflowErrorMessage(error));
-            nextSession = await importV2Api.createSession({
+            const created = await importV2Api.createSession({
               projectId,
               projectRootPath: rootPath,
               resourceMode: "balanced",
             });
+            sessionId = created.sessionId;
+            attachCreatedSession(projectKey, epoch, created);
+            attached = true;
           }
         } else {
-          nextSession = await importV2Api.createSession({
+          const created = await importV2Api.createSession({
             projectId,
             projectRootPath: rootPath,
             resourceMode: "balanced",
           });
+          sessionId = created.sessionId;
+          attachCreatedSession(projectKey, epoch, created);
+          attached = true;
         }
         if (cancelled || !isScopeCurrent(projectKey, epoch)) return;
-        useImportStore.getState().attachSession(projectKey, nextSession, epoch);
+        if (!attached && useImportStore.getState().session?.sessionId !== sessionId) {
+          const { overview, page } = await loadConsistentSessionWindow(
+            projectId,
+            rootPath,
+            sessionId,
+            useImportStore.getState().filter,
+          );
+          if (cancelled || !isScopeCurrent(projectKey, epoch)) return;
+          useImportStore.getState().attachSessionWindow(projectKey, overview, page, epoch);
+        }
         setBootstrapState("ready");
       } catch (error) {
         if (cancelled || !isScopeCurrent(projectKey, epoch)) return;
@@ -292,8 +385,5 @@ export function useImportSessionScope(
 }
 
 function matchesEndedSession(session: { status: string; items: readonly { status: string }[] }): boolean {
-  if (session.status === "completed" || session.status === "cancelled") return true;
-  return session.items.length > 0 && session.items.every(
-    (item) => item.status === "completed" || item.status === "skipped" || item.status === "cancelled",
-  );
+  return session.status === "completed" || session.status === "cancelled";
 }

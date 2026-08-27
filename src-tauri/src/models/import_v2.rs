@@ -64,6 +64,72 @@ pub struct ImportSessionOverview {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discovery_task_id: Option<String>,
     pub item_count: u64,
+    pub semantic_revision: u64,
+    pub selection_revision: u64,
+    pub confirmation_digest: String,
+    pub counts: ImportSessionCounts,
+    pub selection: ImportSelectionSummary,
+    pub index_state: ImportSessionIndexState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportSessionIndexState {
+    Ready,
+    RebuildRequired,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSessionCounts {
+    pub all: u64,
+    pub active: u64,
+    pub ready: u64,
+    pub needs_action: u64,
+    pub failed: u64,
+    pub completed: u64,
+    pub waiting: u64,
+    pub processed: u64,
+    pub cancelled: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSelectionSummary {
+    pub selected: u64,
+    pub new_sources: u64,
+    pub updates: u64,
+    pub warnings: u64,
+    pub pending: u64,
+    pub restricted: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportItemPageFilter {
+    All,
+    Active,
+    Ready,
+    NeedsAction,
+    Failed,
+    Completed,
+}
+
+impl Default for ImportItemPageFilter {
+    fn default() -> Self {
+        Self::All
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportItemPage {
+    pub session_id: String,
+    pub snapshot_revision: u64,
+    pub items: Vec<ImportItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    pub total: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -708,6 +774,8 @@ pub struct ImportPreviewArtifact {
 #[serde(rename_all = "camelCase")]
 pub struct ImportItem {
     pub item_id: String,
+    #[serde(default)]
+    pub item_revision: u64,
     pub input: ImportInput,
     pub status: ImportItemStatus,
     pub selected: bool,
@@ -734,6 +802,7 @@ impl ImportItem {
     pub fn queued(item_id: &str, input: ImportInput) -> Self {
         Self {
             item_id: item_id.to_string(),
+            item_revision: 1,
             input,
             status: ImportItemStatus::Queued,
             selected: true,
@@ -893,6 +962,11 @@ pub struct CommitImportSessionRequest {
     pub batch_task_id: Option<String>,
     #[serde(default)]
     pub acknowledge_restricted_content: bool,
+    #[serde(default)]
+    pub expected_selection_revision: Option<u64>,
+    #[serde(default)]
+    pub expected_confirmation_digest: Option<String>,
+    #[serde(default)]
     pub decisions: Vec<CommitItemDecision>,
 }
 

@@ -8,7 +8,7 @@ use unicode_normalization::UnicodeNormalization;
 use crate::app_state::{ProjectExecutionLease, ProjectWritePermit};
 use crate::errors::{
     BackendError, IMPORT_V2_CANCELLED, IMPORT_V2_COMMIT_CONFLICT, IMPORT_V2_COMMIT_FAILED,
-    IMPORT_V2_QUALITY_FAILED, IMPORT_V2_STATE_INVALID,
+    IMPORT_V2_QUALITY_FAILED, IMPORT_V2_SELECTION_STALE, IMPORT_V2_STATE_INVALID,
 };
 use crate::models::git::CheckpointPurpose;
 use crate::models::import_v2::{
@@ -23,6 +23,7 @@ use crate::models::import_v2::{
 use crate::models::paths::ProjectContext;
 use crate::models::source_package::{SourcePackageManifest, SourcePackageMemberRole};
 use crate::services::import_v2::orchestrator::derive_session_status;
+use crate::services::import_v2::session_store::item_is_snapshot_committable;
 use crate::services::import_v2::source_finalization::{
     candidate_record, finalize_source, inspect_candidate, validate_final_source_binding,
     CandidateInspection, FinalizationInput,
@@ -119,7 +120,12 @@ fn classify_commit_target(relative: &str) -> CommitPersistenceTarget {
         CommitPersistenceTarget::History
     } else if relative.contains("/items/") && relative.ends_with(".json") {
         CommitPersistenceTarget::SessionItem
-    } else if relative.starts_with(".app/import-sessions/") && relative.ends_with("/session.json") {
+    } else if relative == ".app/import-sessions/active-session.json"
+        || (relative.starts_with(".app/import-sessions/")
+            && (relative.ends_with("/session.json")
+                || relative.ends_with("/state.json")
+                || relative.contains("/order/")))
+    {
         CommitPersistenceTarget::SessionSummary
     } else {
         panic!("unclassified Import V2 commit persistence target: {relative}");
@@ -609,6 +615,8 @@ impl ImportV2Service {
                 session_id: session_id.to_string(),
                 batch_task_id: None,
                 acknowledge_restricted_content: false,
+                expected_selection_revision: None,
+                expected_confirmation_digest: None,
                 decisions: vec![CommitItemDecision {
                     item_id: item_id.to_string(),
                     resolution: Some(decision),
@@ -844,6 +852,34 @@ impl ImportV2Service {
         let mut session = self
             .sessions
             .load(context, file_store, &request.session_id)?;
+        let decisions = match (
+            request.expected_selection_revision,
+            request.expected_confirmation_digest.as_deref(),
+        ) {
+            (Some(expected_revision), Some(expected_digest)) => {
+                self.sessions.validate_selection_snapshot(
+                    context,
+                    file_store,
+                    &request.session_id,
+                    expected_revision,
+                    expected_digest,
+                )?;
+                snapshot_commit_decisions(&session)
+            }
+            (None, None) if request.decisions.len() <= 200 => request.decisions.clone(),
+            (None, None) => {
+                return Err(commit_error(
+                    IMPORT_V2_STATE_INVALID,
+                    "Legacy import confirmation is limited to 200 decisions.",
+                ))
+            }
+            _ => {
+                return Err(commit_error(
+                    IMPORT_V2_SELECTION_STALE,
+                    "Import confirmation requires a complete selection snapshot.",
+                ))
+            }
+        };
         // These hashes protect the same item bytes that supplied the working
         // snapshot below.  Do not recalculate a "current" hash inside
         // `commit_one`: that would bless a newer external edit while writing
@@ -868,10 +904,9 @@ impl ImportV2Service {
             }
         }
         before_locked_commit()?;
-        validate_complete_decision_set(&session, &request.decisions)?;
+        validate_complete_decision_set(&session, &decisions)?;
         let mut history_snapshot = session.clone();
-        history_snapshot.items = request
-            .decisions
+        history_snapshot.items = decisions
             .iter()
             .filter_map(|decision| {
                 session
@@ -905,10 +940,10 @@ impl ImportV2Service {
             &json_bytes(&batch)?,
         )?;
         initial_history.commit()?;
-        for (position, decision) in request.decisions.iter().enumerate() {
+        for (position, decision) in decisions.iter().enumerate() {
             let history_hash_before = file_store.file_hash(context, &history_path)?;
             if is_cancelled() {
-                for unprocessed in &request.decisions[position..] {
+                for unprocessed in &decisions[position..] {
                     let result = ImportItemCommitResult {
                         item_id: unprocessed.item_id.clone(),
                         source_id: None,
@@ -1017,6 +1052,8 @@ impl ImportV2Service {
             expected_summary_hash,
         )?;
         summary_transaction.commit()?;
+        self.sessions
+            .rebuild_sidecars(context, file_store, &session)?;
         Ok(batch)
     }
 
@@ -1944,6 +1981,7 @@ impl ImportV2Service {
             run_commit_durable_targets_hook(targets);
         }
         let mut transaction = FileTransaction::new_for_project(&context.root);
+        let mut sidecar_observer_writes = Vec::new();
         let write_result = (|| -> Result<(), BackendError> {
             if !duplicate {
                 transaction.write_new(
@@ -2028,6 +2066,9 @@ impl ImportV2Service {
             )?;
             session.items[item_position].status = ImportItemStatus::Committing;
             session.items[item_position].status = ImportItemStatus::Completed;
+            session.items[item_position].item_revision = session.items[item_position]
+                .item_revision
+                .max(item.item_revision.saturating_add(1));
             let item_path = format!(
                 "{}/{}/items/{}.json",
                 context.layout.import_state_root.as_deref().ok_or_else(|| {
@@ -2049,12 +2090,23 @@ impl ImportV2Service {
                 })?,
                 item_expected_hash,
             )?;
+            sidecar_observer_writes = self.sessions.stage_item_sidecar_update(
+                context,
+                files,
+                &mut transaction,
+                &session.session_id,
+                &item,
+                &session.items[item_position],
+            )?;
             Ok(())
         })();
         if let Err(error) = write_result {
             return Err(transaction.rollback_after(error));
         }
         transaction.commit()?;
+        for (path, bytes) in sidecar_observer_writes {
+            files.observe_atomic_write(&path, bytes);
+        }
         remove_committed_clipboard_input(context, &session.session_id, &item.input);
         Ok(result)
     }
@@ -3241,6 +3293,22 @@ fn canonical_candidate_locator(
     Some(format!("platform:{platform}:{platform_id}"))
 }
 
+fn snapshot_commit_decisions(session: &ImportSession) -> Vec<CommitItemDecision> {
+    session
+        .items
+        .iter()
+        .filter(|item| item_is_snapshot_committable(item))
+        .map(|item| CommitItemDecision {
+            item_id: item.item_id.clone(),
+            resolution: item
+                .preview
+                .as_ref()
+                .and_then(|preview| preview.resolution.as_ref())
+                .and_then(|resolution| resolution.default_resolution.clone()),
+        })
+        .collect()
+}
+
 fn validate_complete_decision_set(
     session: &crate::models::import_v2::ImportSession,
     decisions: &[CommitItemDecision],
@@ -3942,6 +4010,8 @@ source_url: https://www.xiaohongshu.com/explore/other-note
                 session_id: self.session_id.clone(),
                 batch_task_id: None,
                 acknowledge_restricted_content: false,
+                expected_selection_revision: None,
+                expected_confirmation_digest: None,
                 decisions,
             }
         }
@@ -6162,6 +6232,14 @@ source_url: https://www.xiaohongshu.com/explore/other-note
             expected.push(CommitPersistenceBoundary::JournalIntent(target.clone()));
             expected.push(CommitPersistenceBoundary::TargetInstalled(target));
         }
+        for _ in 0..2 {
+            expected.push(CommitPersistenceBoundary::JournalIntent(
+                CommitPersistenceTarget::SessionSummary,
+            ));
+            expected.push(CommitPersistenceBoundary::TargetInstalled(
+                CommitPersistenceTarget::SessionSummary,
+            ));
+        }
         expected.push(CommitPersistenceBoundary::CommittedMarkerPersisted);
         expected.push(CommitPersistenceBoundary::JournalDeleted);
         if let Some((label, path)) = summary {
@@ -6317,7 +6395,9 @@ source_url: https://www.xiaohongshu.com/explore/other-note
         let reopened = ImportV2Service::default();
         let session = reopened
             .load_session(&fixture.context, &fixture.files, &fixture.session_id)
-            .unwrap();
+            .unwrap_or_else(|error| {
+                panic!("session recovery failed at {target:?} occurrence {occurrence}: {error:?}")
+            });
         let forward = matches!(
             target,
             CommitPersistenceBoundary::CommittedMarkerPersisted
@@ -6330,7 +6410,7 @@ source_url: https://www.xiaohongshu.com/explore/other-note
                     | CommitPersistenceBoundary::TargetInstalled(
                         CommitPersistenceTarget::SessionSummary
                     )
-            );
+            ) && occurrence >= 3;
         assert_eq!(
             session.items[0].status == ImportItemStatus::Completed,
             item_forward

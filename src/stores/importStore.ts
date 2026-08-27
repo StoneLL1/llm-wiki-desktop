@@ -1,7 +1,13 @@
 import { create } from "zustand";
 import { registerProjectScopeResetHandler } from "./projectScopeResetRegistry";
 
-import type { ImportCompletion, ImportItem, ImportSession } from "../types/importV2";
+import type {
+  ImportCompletion,
+  ImportItem,
+  ImportItemPage,
+  ImportSession,
+  ImportSessionOverview,
+} from "../types/importV2";
 
 export type ImportQueueFilter =
   | "all"
@@ -17,6 +23,9 @@ export const importProjectKey = (projectId: string, rootPath: string): string =>
 interface ImportState {
   projectKey: string | null;
   session: ImportSession | null;
+  overview: ImportSessionOverview | null;
+  nextItemCursor: string | null;
+  itemPageTotal: number;
   completion: ImportCompletion | null;
   selectedItemId: string | null;
   filter: ImportQueueFilter;
@@ -34,6 +43,8 @@ interface ImportState {
     epoch?: number,
   ) => boolean;
   attachSession: (projectKey: string, session: ImportSession, epoch?: number) => boolean;
+  attachSessionWindow: (projectKey: string, overview: ImportSessionOverview, page: ImportItemPage, epoch?: number) => boolean;
+  appendItemPage: (projectKey: string, page: ImportItemPage, epoch?: number) => boolean;
   replaceSession: (projectKey: string, session: ImportSession, epoch?: number) => boolean;
   replaceItem: (projectKey: string, item: ImportItem, epoch?: number) => boolean;
   patchItems: (projectKey: string, items: readonly ImportItem[], epoch?: number) => boolean;
@@ -62,6 +73,26 @@ function selectedItemIdFor(session: ImportSession | null, selectedItemId: string
   return null;
 }
 
+function acceptsItemRevision(current: ImportItem, incoming: ImportItem): boolean {
+  return current.itemRevision === undefined
+    || incoming.itemRevision === undefined
+    || incoming.itemRevision > current.itemRevision;
+}
+
+function sessionFromWindow(overview: ImportSessionOverview, items: ImportItem[]): ImportSession {
+  return {
+    schemaVersion: overview.schemaVersion,
+    sessionId: overview.sessionId,
+    projectId: overview.projectId,
+    status: overview.status,
+    resourceMode: overview.resourceMode,
+    createdAt: overview.createdAt,
+    updatedAt: overview.updatedAt,
+    discoveryTaskId: overview.discoveryTaskId,
+    items,
+  };
+}
+
 function scopeAccepts(state: ImportState, projectKey: string, epoch?: number): boolean {
   if (state.projectKey === null && epoch === undefined) return true;
   if (state.projectKey !== projectKey) return false;
@@ -79,6 +110,9 @@ function clearDialogs() {
 export const useImportStore = create<ImportState>((set, get) => ({
   projectKey: null,
   session: null,
+  overview: null,
+  nextItemCursor: null,
+  itemPageTotal: 0,
   completion: null,
   selectedItemId: null,
   filter: "all",
@@ -102,6 +136,9 @@ export const useImportStore = create<ImportState>((set, get) => ({
     set({
       projectKey,
       session,
+      overview: null,
+      nextItemCursor: null,
+      itemPageTotal: session.items.length,
       completion:
         state.session?.sessionId === session.sessionId ? state.completion : null,
       selectedItemId: selectedItemIdFor(session, state.selectedItemId),
@@ -121,10 +158,46 @@ export const useImportStore = create<ImportState>((set, get) => ({
     const session = {
       ...state.session,
       items: state.session.items.map((current) =>
-        current.itemId === item.itemId ? item : current,
+        current.itemId === item.itemId && acceptsItemRevision(current, item) ? item : current,
       ),
     };
     set({ session, selectedItemId: selectedItemIdFor(session, state.selectedItemId) });
+    return true;
+  },
+  attachSessionWindow: (projectKey, overview, page, epoch) => {
+    const state = get();
+    if (
+      !scopeAccepts(state, projectKey, epoch)
+      || overview.sessionId !== page.sessionId
+      || overview.semanticRevision !== page.snapshotRevision
+    ) return false;
+    const session = sessionFromWindow(overview, page.items);
+    set({
+      projectKey,
+      overview,
+      session,
+      nextItemCursor: page.nextCursor ?? null,
+      itemPageTotal: page.total,
+      completion: state.session?.sessionId === session.sessionId ? state.completion : null,
+      selectedItemId: selectedItemIdFor(session, state.selectedItemId),
+    });
+    return true;
+  },
+  appendItemPage: (projectKey, page, epoch) => {
+    const state = get();
+    if (!scopeAccepts(state, projectKey, epoch) || !state.session || !state.overview) return false;
+    if (page.sessionId !== state.session.sessionId || page.snapshotRevision !== state.overview.semanticRevision) return false;
+    const known = new Set(state.session.items.map((item) => item.itemId));
+    const session = {
+      ...state.session,
+      items: [...state.session.items, ...page.items.filter((item) => !known.has(item.itemId))],
+    };
+    set({
+      session,
+      nextItemCursor: page.nextCursor ?? null,
+      itemPageTotal: page.total,
+      selectedItemId: selectedItemIdFor(session, state.selectedItemId),
+    });
     return true;
   },
   patchItems: (projectKey, items, epoch) => {
@@ -139,6 +212,7 @@ export const useImportStore = create<ImportState>((set, get) => ({
         const patch = patches.get(current.itemId);
         if (!patch) return current;
         patches.delete(current.itemId);
+        if (!acceptsItemRevision(current, patch)) return current;
         changed = true;
         return patch;
       }),
@@ -155,6 +229,9 @@ export const useImportStore = create<ImportState>((set, get) => ({
     set((state) => ({
       projectKey,
       session: null,
+      overview: null,
+      nextItemCursor: null,
+      itemPageTotal: 0,
       completion: null,
       selectedItemId: null,
       filter: "all",
@@ -206,6 +283,9 @@ export const useImportStore = create<ImportState>((set, get) => ({
     set({
       projectKey: null,
       session: null,
+      overview: null,
+      nextItemCursor: null,
+      itemPageTotal: 0,
       completion: null,
       selectedItemId: null,
       filter: "all",

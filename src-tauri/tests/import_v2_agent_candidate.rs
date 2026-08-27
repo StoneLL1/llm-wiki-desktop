@@ -621,6 +621,8 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
                 session_id: "session-a".into(),
                 batch_task_id: None,
                 acknowledge_restricted_content: false,
+                expected_selection_revision: None,
+                expected_confirmation_digest: None,
                 decisions: vec![CommitItemDecision {
                     item_id: "item-a".into(),
                     resolution: Some(default_resolution),

@@ -100,9 +100,9 @@ fn session_read_update_and_noop_recovery_publish_exact_file_store_counts() {
             .unwrap();
         assert!(!updated.items[0].selected);
         let update = update_observation.snapshot();
-        assert_eq!(update.read_ops, item_count as u64 + 2);
-        assert_eq!(update.write_ops, 1);
-        assert_eq!(update.atomic_replaces, 1);
+        assert_eq!(update.read_ops, item_count as u64 + 5);
+        assert_eq!(update.write_ops, 3);
+        assert_eq!(update.atomic_replaces, 3);
         assert!(update.bytes_read > 0);
         assert!(update.bytes_written > 0);
         println!(
@@ -117,7 +117,7 @@ fn session_read_update_and_noop_recovery_publish_exact_file_store_counts() {
             .unwrap();
         assert_eq!(recovered.items.len(), item_count);
         let recovery = recovery_observation.snapshot();
-        assert_eq!(recovery.read_ops, item_count as u64 + 1);
+        assert_eq!(recovery.read_ops, item_count as u64 + 2);
         assert_eq!(recovery.write_ops, 0);
         assert_eq!(recovery.atomic_replaces, 0);
         assert!(recovery.bytes_read > 0);
@@ -158,9 +158,9 @@ fn recovery_writes_only_stale_items_and_the_session_record() {
         .take(3)
         .all(|item| item.task_id.is_none()));
     let snapshot = observation.snapshot();
-    assert_eq!(snapshot.read_ops, 101);
-    assert_eq!(snapshot.write_ops, 4);
-    assert_eq!(snapshot.atomic_replaces, 4);
+    assert_eq!(snapshot.read_ops, 104);
+    assert_eq!(snapshot.write_ops, 6);
+    assert_eq!(snapshot.atomic_replaces, 6);
 }
 
 #[test]

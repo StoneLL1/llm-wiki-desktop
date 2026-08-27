@@ -21,10 +21,10 @@
   ],
   "baseline": {
     "status": "batch1_import_green",
-    "total": 200,
+    "total": 203,
     "sync": 136,
-    "async": 64,
-    "importTotal": 55,
+    "async": 67,
+    "importTotal": 58,
     "importSync": 0,
     "blockingSync": 133,
     "measuredAt": "2026-08-27",
@@ -444,6 +444,27 @@
       "classification": "BlockingRead",
       "currentExecution": "async",
       "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_import_session_overview_v2",
+      "module": "import_v2_async_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "async",
+      "rationale": "Reads the small durable Import session control record on the shared bounded metadata lane without loading item files or mutating recovery state."
+    },
+    {
+      "command": "list_import_session_items_v2",
+      "module": "import_v2_async_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "async",
+      "rationale": "Reads one bounded Import session item page through the shared metadata lane; the public limit is capped at 200 items."
+    },
+    {
+      "command": "start_import_session_recovery_v2",
+      "module": "import_v2_async_commands",
+      "classification": "LongTaskStart",
+      "currentExecution": "async",
+      "rationale": "Creates a cancellable maintenance task and schedules session recovery on the shared bounded blocking runtime."
     },
     {
       "command": "get_import_restricted_content_status_v2",

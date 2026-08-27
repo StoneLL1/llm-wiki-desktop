@@ -1,5 +1,5 @@
 import type { AgentKind } from "../../types/agent";
-import type { CommitItemDecision, ImportAsrProfile, ImportCompletion, ImportItem, ImportItemResolution, ImportRecoveryAction, ImportSession, ImportThreeWayMergeContext, MediaSaveMode } from "../../types/importV2";
+import type { CommitItemDecision, ImportAsrProfile, ImportCompletion, ImportItem, ImportItemResolution, ImportRecoveryAction, ImportSession, ImportSessionOverview, ImportThreeWayMergeContext, MediaSaveMode } from "../../types/importV2";
 import type {
   AgentAssistanceTrigger,
   AgentCandidateActionResult,
@@ -56,6 +56,7 @@ export interface ImportBatchProgress {
 export interface ImportWorkflow {
   projectKey: string;
   session: ImportSession | null;
+  overview?: ImportSessionOverview | null;
   completion: ImportCompletion | null;
   readiness: ImportFrontendReadiness | null;
   /** Readiness is advisory; a warning must not prevent V2 staging. */
@@ -108,7 +109,7 @@ export interface ImportWorkflow {
   authorizeLocalOcr: (itemId: string) => Promise<void>;
   authorizeLocalOcrGroup?: (itemIds: readonly string[]) => Promise<void>;
   selectSubtitle: (itemId: string, fileName: string) => Promise<void>;
-  confirm: (decisions: CommitItemDecision[]) => Promise<void>;
+  confirm: (legacyDecisions?: CommitItemDecision[]) => Promise<void>;
   restrictedCommitPending: boolean;
   confirmRestrictedContent: () => Promise<void>;
   dismissRestrictedContent: () => void;
@@ -121,6 +122,9 @@ export interface ImportWorkflow {
   refreshSession: () => Promise<void>;
   selectItem: (itemId: string | null) => void;
   setFilter: (filter: ImportQueueFilter) => void;
+  hasMoreItems?: boolean;
+  isLoadingMoreItems?: boolean;
+  loadMoreItems?: () => Promise<void>;
   requestClipboard: (content: string) => Promise<void>;
   loadPreview: (identity: { sessionId: string; itemId: string; candidateId: string | null; historyBatchId?: string | null }) => Promise<ImportPreviewContent>;
   loadMergeContext: (itemId: string) => Promise<ImportThreeWayMergeContext>;

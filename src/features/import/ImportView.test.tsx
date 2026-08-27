@@ -184,7 +184,7 @@ describe("ImportView V2 composition", () => {
     expect(screen.getByText("Update decision selected")).toBeInTheDocument();
     expect(screen.getByText("Updates 1")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Import to Source library (1)" }));
-    expect(confirm).toHaveBeenCalledWith([{ itemId: "merge.md", resolution }]);
+    expect(confirm).toHaveBeenCalledWith();
   });
 
   it("includes a restricted exact duplicate in the confirmation batch", () => {
@@ -211,10 +211,7 @@ describe("ImportView V2 composition", () => {
     })} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Import to Source library (1)" }));
-    expect(confirm).toHaveBeenCalledWith([{
-      itemId: duplicate.itemId,
-      resolution,
-    }]);
+    expect(confirm).toHaveBeenCalledWith();
   });
 
   it("binds a three-way merge selection to the Wiki version shown in the diff", () => {

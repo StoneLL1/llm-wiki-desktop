@@ -118,6 +118,24 @@ describe("Import V2 session store", () => {
     ]);
   });
 
+  it("keeps the highest item revision when patches arrive out of order", () => {
+    useImportStore.getState().attachSession(projectA, session([
+      { ...item("one", "extracting"), itemRevision: 2 },
+    ]));
+
+    useImportStore.getState().patchItems(projectA, [
+      { ...item("one", "completed"), itemRevision: 4 },
+    ]);
+    useImportStore.getState().patchItems(projectA, [
+      { ...item("one", "validating"), itemRevision: 3 },
+    ]);
+
+    expect(useImportStore.getState().session?.items[0]).toMatchObject({
+      status: "completed",
+      itemRevision: 4,
+    });
+  });
+
   it.each<ImportQueueFilter>(["all", "active", "ready", "needs_action", "failed", "completed"])(
     "stores queue filter %s and item-scoped dialog identities",
     (filter) => {

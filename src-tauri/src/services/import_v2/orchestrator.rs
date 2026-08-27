@@ -1,6 +1,5 @@
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -11,9 +10,9 @@ use crate::errors::{
 };
 use crate::models::import_v2::{
     AttemptOutcome, AttemptRecord, ImportAsrProfile, ImportInput, ImportInputKind, ImportIssue,
-    ImportItem, ImportItemStatus, ImportMediaAuthorization, ImportMediaAuthorizationKind,
-    ImportRecoveryAction, ImportResourceMode, ImportSession, ImportSessionOverview,
-    ImportSessionStatus, ImportStage, SourceIdentity,
+    ImportItem, ImportItemPage, ImportItemPageFilter, ImportItemStatus, ImportMediaAuthorization,
+    ImportMediaAuthorizationKind, ImportRecoveryAction, ImportResourceMode, ImportSession,
+    ImportSessionOverview, ImportSessionStatus, ImportStage, SourceIdentity,
 };
 use crate::models::import_v2_agent::AgentAssistanceTrigger;
 use crate::models::import_v2_agent::AgentCandidate;
@@ -215,93 +214,7 @@ impl ImportV2Service {
         context: &ProjectContext,
         files: &FileStore,
     ) -> Result<Option<String>, BackendError> {
-        let import_state_root = context.layout.import_state_root.as_deref().ok_or_else(|| {
-            BackendError::new(
-                IMPORT_V2_STATE_INVALID,
-                "Import state is unavailable for this project layout.",
-                true,
-                false,
-            )
-        })?;
-        let root = context.resolve_project_path(import_state_root)?;
-        let metadata = match fs::symlink_metadata(&root) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => {
-                return Err(BackendError::new(
-                    "IMPORT_V2_SESSION_SCAN_FAILED",
-                    error.to_string(),
-                    true,
-                    true,
-                ))
-            }
-        };
-        if !metadata.is_dir()
-            || metadata.file_type().is_symlink()
-            || crate::services::import_v2::transaction::is_project_reparse_point(&metadata)
-        {
-            return Err(BackendError::new(
-                "IMPORT_V2_SESSION_SCAN_FAILED",
-                "Import session directory is not safe.",
-                false,
-                true,
-            ));
-        }
-        let mut ids = fs::read_dir(root)
-            .map_err(|error| {
-                BackendError::new(
-                    "IMPORT_V2_SESSION_SCAN_FAILED",
-                    error.to_string(),
-                    true,
-                    true,
-                )
-            })?
-            .flatten()
-            .filter_map(|entry| {
-                let metadata = fs::symlink_metadata(entry.path()).ok()?;
-                if metadata.is_dir()
-                    && !metadata.file_type().is_symlink()
-                    && !crate::services::import_v2::transaction::is_project_reparse_point(&metadata)
-                {
-                    let id = entry.file_name().to_string_lossy().into_owned();
-                    (id.len() <= 64
-                        && id
-                            .bytes()
-                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
-                    .then_some(id)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-        ids.sort();
-        for id in ids {
-            let session = match self.sessions.load(context, files, &id) {
-                Ok(session) => session,
-                // A stale or partially written session is evidence to leave
-                // untouched, not a reason to make every new V2 import
-                // unavailable. Unsafe session roots still fail above.
-                Err(error)
-                    if matches!(
-                        error.code.as_str(),
-                        crate::errors::IMPORT_V2_SESSION_INVALID
-                            | crate::errors::IMPORT_V2_SESSION_NOT_FOUND
-                            | "JSON_PARSE_FAILED"
-                            | "FILE_READ_FAILED"
-                    ) =>
-                {
-                    continue
-                }
-                Err(error) => return Err(error),
-            };
-            if !matches!(
-                derive_session_status(&session.items),
-                ImportSessionStatus::Completed | ImportSessionStatus::Cancelled
-            ) {
-                return Ok(Some(id));
-            }
-        }
-        Ok(None)
+        self.sessions.find_unfinished_session(context, files)
     }
 
     pub fn with_secret_service(secrets: SecretService) -> Self {
@@ -909,6 +822,19 @@ impl ImportV2Service {
         session_id: &str,
     ) -> Result<ImportSessionOverview, BackendError> {
         self.sessions.read_overview(context, files, session_id)
+    }
+
+    pub fn list_session_items(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        filter: ImportItemPageFilter,
+        cursor: Option<&str>,
+        limit: u16,
+    ) -> Result<ImportItemPage, BackendError> {
+        self.sessions
+            .list_items(context, files, session_id, filter, cursor, limit)
     }
 
     /// Focused item read for worker safe points. It deliberately avoids
@@ -2415,6 +2341,12 @@ impl ImportV2Service {
     {
         let _guard = self.lock()?;
         self.preflight_locked(context)?;
+        let needs_index_rebuild = matches!(
+            self.sessions
+                .read_overview(context, files, session_id)?
+                .index_state,
+            crate::models::import_v2::ImportSessionIndexState::RebuildRequired
+        );
         let mut session = self.sessions.load(context, files, session_id)?;
         let before_session = session.clone();
         let mut staging_to_reconcile = Vec::new();
@@ -2632,6 +2564,17 @@ impl ImportV2Service {
         let session_record_changed =
             before_session.status != session.status || !originals.is_empty();
         if !session_record_changed {
+            if needs_index_rebuild {
+                if should_cancel() {
+                    return Err(BackendError::new(
+                        crate::errors::IMPORT_V2_CANCELLED,
+                        "Import recovery was cancelled.",
+                        true,
+                        false,
+                    ));
+                }
+                self.sessions.rebuild_sidecars(context, files, &session)?;
+            }
             return Ok(ImportSessionRecovery {
                 session,
                 changed_items: Vec::new(),
@@ -6818,6 +6761,8 @@ mod tests {
         assert_eq!(second.resource_mode, ImportResourceMode::Balanced);
         let session_dirs = std::fs::read_dir(context.app_dir.join("import-sessions"))
             .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
             .count();
         assert_eq!(session_dirs, 1);
         std::fs::remove_dir_all(root).ok();
@@ -7470,7 +7415,7 @@ mod tests {
             let sessions = std::fs::read_dir(self.context.app_dir.join("import-sessions")).unwrap();
             let session_id = sessions
                 .flatten()
-                .next()
+                .find(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
                 .unwrap()
                 .file_name()
                 .to_string_lossy()
@@ -7634,6 +7579,8 @@ mod tests {
                     session_id: session.session_id,
                     batch_task_id: None,
                     acknowledge_restricted_content: false,
+                    expected_selection_revision: None,
+                    expected_confirmation_digest: None,
                     decisions: vec![CommitItemDecision {
                         item_id: item.item_id,
                         resolution: Some(ImportItemResolution::NewSource),
