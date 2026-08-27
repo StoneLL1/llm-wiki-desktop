@@ -12,8 +12,8 @@ use crate::errors::{
 use crate::models::import_v2::{
     AttemptOutcome, AttemptRecord, ImportAsrProfile, ImportInput, ImportInputKind, ImportIssue,
     ImportItem, ImportItemStatus, ImportMediaAuthorization, ImportMediaAuthorizationKind,
-    ImportRecoveryAction, ImportResourceMode, ImportSession, ImportSessionStatus, ImportStage,
-    SourceIdentity,
+    ImportRecoveryAction, ImportResourceMode, ImportSession, ImportSessionOverview,
+    ImportSessionStatus, ImportStage, SourceIdentity,
 };
 use crate::models::import_v2_agent::AgentAssistanceTrigger;
 use crate::models::import_v2_agent::AgentCandidate;
@@ -94,6 +94,11 @@ pub struct ImportV2Service {
     connector_profiles_root: Arc<RwLock<Option<PathBuf>>>,
     #[cfg(feature = "performance-observers")]
     lock_wait_observer: Mutex<Option<Arc<Mutex<ImportLockWaitSnapshot>>>>,
+}
+
+pub(crate) struct ImportSessionRecovery {
+    pub session: ImportSession,
+    pub changed_items: Vec<ImportItem>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -882,6 +887,28 @@ impl ImportV2Service {
         // authoritative lifecycle fact and can advance between summary writes.
         session.status = derive_session_status(&session.items);
         Ok(session)
+    }
+
+    /// Read the durable session snapshot without migration, recovery, or
+    /// timestamp side effects. Maintenance belongs to an explicit task.
+    pub fn read_session(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+    ) -> Result<ImportSession, BackendError> {
+        let mut session = self.sessions.load(context, files, session_id)?;
+        session.status = derive_session_status(&session.items);
+        Ok(session)
+    }
+
+    pub fn read_session_overview(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+    ) -> Result<ImportSessionOverview, BackendError> {
+        self.sessions.read_overview(context, files, session_id)
     }
 
     /// Focused item read for worker safe points. It deliberately avoids
@@ -1954,14 +1981,27 @@ impl ImportV2Service {
         )
     }
 
-    pub(crate) fn recover_session_authorized(
+    pub(crate) fn recover_session_report_with_cancel_authorized<F, P>(
         &self,
         permit: &ProjectWritePermit<'_>,
         files: &FileStore,
         tasks: &TaskService,
         session_id: &str,
-    ) -> Result<ImportSession, BackendError> {
-        self.recover_session_unchecked(permit.context(), files, tasks, session_id)
+        should_cancel: F,
+        on_progress: P,
+    ) -> Result<ImportSessionRecovery, BackendError>
+    where
+        F: FnMut() -> bool,
+        P: FnMut(u64, u64),
+    {
+        self.recover_session_report_with_cancel_unchecked(
+            permit.context(),
+            files,
+            tasks,
+            session_id,
+            should_cancel,
+            on_progress,
+        )
     }
 
     pub(crate) fn set_item_selected_authorized(
@@ -2221,6 +2261,21 @@ impl ImportV2Service {
     }
 
     #[cfg(debug_assertions)]
+    pub fn recover_session_with_cancel<F>(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        should_cancel: F,
+    ) -> Result<ImportSession, BackendError>
+    where
+        F: FnMut() -> bool,
+    {
+        self.recover_session_with_cancel_unchecked(context, files, tasks, session_id, should_cancel)
+    }
+
+    #[cfg(debug_assertions)]
     pub fn set_item_selected(
         &self,
         context: &ProjectContext,
@@ -2320,10 +2375,60 @@ impl ImportV2Service {
         tasks: &TaskService,
         session_id: &str,
     ) -> Result<ImportSession, BackendError> {
+        self.recover_session_with_cancel_unchecked(context, files, tasks, session_id, || false)
+    }
+
+    fn recover_session_with_cancel_unchecked<F>(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        should_cancel: F,
+    ) -> Result<ImportSession, BackendError>
+    where
+        F: FnMut() -> bool,
+    {
+        self.recover_session_report_with_cancel_unchecked(
+            context,
+            files,
+            tasks,
+            session_id,
+            should_cancel,
+            |_, _| {},
+        )
+        .map(|report| report.session)
+    }
+
+    fn recover_session_report_with_cancel_unchecked<F, P>(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        mut should_cancel: F,
+        mut on_progress: P,
+    ) -> Result<ImportSessionRecovery, BackendError>
+    where
+        F: FnMut() -> bool,
+        P: FnMut(u64, u64),
+    {
         let _guard = self.lock()?;
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
-        for item in &mut session.items {
+        let before_session = session.clone();
+        let mut staging_to_reconcile = Vec::new();
+        let total_items = session.items.len() as u64;
+        let progress_stride = (total_items.saturating_add(99) / 100).max(1);
+        for (position, item) in session.items.iter_mut().enumerate() {
+            if should_cancel() {
+                return Err(BackendError::new(
+                    crate::errors::IMPORT_V2_CANCELLED,
+                    "Import recovery was cancelled.",
+                    true,
+                    false,
+                ));
+            }
             for attempt in &mut item.attempts {
                 let Some(task_id) = attempt
                     .route
@@ -2333,7 +2438,19 @@ impl ImportV2Service {
                 else {
                     continue;
                 };
-                let task_status = tasks.get_task(&task_id).map(|task| task.status);
+                let task = tasks.get_task(&task_id);
+                let sealed_agent_output = task.as_ref().is_some_and(|task| {
+                    task.status == TaskStatus::Failed
+                        && task.task_type == TaskType::AgentRun
+                        && matches!(
+                            task.result.as_ref().and_then(|result| result.reference.as_ref()),
+                            Some(TaskResultReference::ImportPreview {
+                                session_id: bound_session,
+                                item_id: bound_item,
+                            }) if bound_session == session_id && bound_item == &item.item_id
+                        )
+                });
+                let task_status = task.map(|task| task.status);
                 if matches!(
                     task_status,
                     Some(
@@ -2356,6 +2473,10 @@ impl ImportV2Service {
                         attempt.warnings = vec![
                             "Agent assistance was cancelled before recovery completed.".into(),
                         ];
+                    }
+                    _ if sealed_agent_output => {
+                        attempt.outcome = AttemptOutcome::Succeeded;
+                        attempt.warnings.clear();
                     }
                     _ => {
                         attempt.outcome = AttemptOutcome::Failed;
@@ -2457,9 +2578,7 @@ impl ImportV2Service {
                         session_id,
                         &item.item_id,
                     )?)?;
-                    crate::services::import_v2::media_router::recover_item_staging_temporary_workspaces(
-                        &staging,
-                    )?;
+                    staging_to_reconcile.push(staging);
                     transition_item(item, ImportItemStatus::Cancelled)?;
                     item.task_id = None;
                     item.progress = None;
@@ -2477,9 +2596,7 @@ impl ImportV2Service {
                         session_id,
                         &item.item_id,
                     )?)?;
-                    crate::services::import_v2::media_router::recover_item_staging_temporary_workspaces(
-                        &staging,
-                    )?;
+                    staging_to_reconcile.push(staging);
                     transition_item(item, ImportItemStatus::Paused)?;
                     item.task_id = None;
                     item.progress = None;
@@ -2498,11 +2615,56 @@ impl ImportV2Service {
                     });
                 }
             }
+            let completed = position as u64 + 1;
+            if completed == total_items || completed % progress_stride == 0 {
+                on_progress(completed, total_items);
+            }
         }
         session.status = derive_session_status(&session.items);
+        let mut originals = Vec::new();
+        let mut replacements = Vec::new();
+        for (before, after) in before_session.items.iter().zip(&session.items) {
+            if before != after {
+                originals.push(before.clone());
+                replacements.push(after.clone());
+            }
+        }
+        let session_record_changed =
+            before_session.status != session.status || !originals.is_empty();
+        if !session_record_changed {
+            return Ok(ImportSessionRecovery {
+                session,
+                changed_items: Vec::new(),
+            });
+        }
+        if should_cancel() {
+            return Err(BackendError::new(
+                crate::errors::IMPORT_V2_CANCELLED,
+                "Import recovery was cancelled.",
+                true,
+                false,
+            ));
+        }
         session.updated_at = chrono::Utc::now().to_rfc3339();
-        self.sessions.save(context, files, &session)?;
-        Ok(session)
+        self.sessions
+            .write_recovery_cohort_if_unchanged_with_cancel(
+                context,
+                files,
+                &before_session,
+                &session,
+                &originals,
+                &replacements,
+                should_cancel,
+            )?;
+        for staging in staging_to_reconcile {
+            crate::services::import_v2::media_router::recover_item_staging_temporary_workspaces(
+                &staging,
+            )?;
+        }
+        Ok(ImportSessionRecovery {
+            session,
+            changed_items: replacements,
+        })
     }
     pub fn register_engine(&self, engine: Arc<dyn ImportEngine>) -> Result<(), BackendError> {
         self.engines.register(engine)

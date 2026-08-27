@@ -48,6 +48,24 @@ pub enum ImportSessionStatus {
     Cancelled,
 }
 
+/// Small, read-only control record for foreground session discovery. Batch 4
+/// can extend this DTO with revisioned counts without changing the full
+/// session read contract.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSessionOverview {
+    pub schema_version: u32,
+    pub session_id: String,
+    pub project_id: String,
+    pub status: ImportSessionStatus,
+    pub resource_mode: ImportResourceMode,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery_task_id: Option<String>,
+    pub item_count: u64,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ImportUserState {

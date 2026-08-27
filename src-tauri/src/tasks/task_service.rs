@@ -562,6 +562,28 @@ impl TaskService {
         )
     }
 
+    pub fn create_project_import_recovery_task(
+        &self,
+        project_id: String,
+        project_root: PathBuf,
+        task_state_root: PathBuf,
+        title: String,
+        session_id: String,
+    ) -> Result<BackendTask, String> {
+        self.create_task_internal(
+            TaskType::Import,
+            Some(project_id),
+            Some(project_root),
+            title,
+            true,
+            None,
+            Some(TaskOperation::ImportRecovery { session_id }),
+            true,
+            None,
+            Some(task_state_root),
+        )
+    }
+
     /// A project-scoped read-only operation that must never create `.app`
     /// state. Used for restricted compatible-vault inventory work.
     pub fn create_memory_project_task(
@@ -2875,6 +2897,83 @@ impl TaskService {
         Ok(task)
     }
 
+    /// Persist the final result while the task is still running, and close
+    /// cancellation before a domain object derived from that result is
+    /// published. A crash after this seal leaves enough durable evidence for
+    /// domain recovery, without exposing a terminal event too early.
+    pub(crate) fn seal_running_with_result(
+        &self,
+        id: &str,
+        result: TaskResult,
+    ) -> Result<BackendTask, String> {
+        let mut tasks = self.tasks.write().expect("lock poisoned");
+        let entry = tasks
+            .get_mut(id)
+            .ok_or_else(|| format!("Task not found: {id}"))?;
+        if entry.task.status != TaskStatus::Running || entry.cancellation.is_cancelled() {
+            return Err(format!("Task is no longer running: {id}"));
+        }
+        let previous = entry.task.clone();
+        entry.task.result = Some(result);
+        entry.task.cancellable = false;
+        entry.task.updated_at = Utc::now().to_rfc3339();
+        let task = entry.task.clone();
+        drop(tasks);
+        if let Err(error) = self.persist_current_task(id) {
+            let mut tasks = self.tasks.write().expect("lock poisoned");
+            if let Some(entry) = tasks.get_mut(id) {
+                entry.task = previous;
+            }
+            drop(tasks);
+            let _ = self.persist_current_task(id);
+            return Err(error);
+        }
+        Ok(task)
+    }
+
+    /// Correct a task that crashed after its sealed result and successful
+    /// Import attempt were durable but before the terminal status was written.
+    pub(crate) fn recover_sealed_agent_completion(&self, id: &str) -> Result<BackendTask, String> {
+        let mut tasks = self.tasks.write().expect("lock poisoned");
+        let entry = tasks
+            .get_mut(id)
+            .ok_or_else(|| format!("Task not found: {id}"))?;
+        if entry.task.status != TaskStatus::Failed
+            || entry.task.task_type != TaskType::AgentRun
+            || entry.task.result.is_none()
+        {
+            return Err(format!(
+                "Task is not a recoverable sealed Agent completion: {id}"
+            ));
+        }
+        let previous = entry.task.clone();
+        let now = Utc::now().to_rfc3339();
+        entry.task.status = TaskStatus::Succeeded;
+        entry.task.error = None;
+        entry.task.updated_at = now.clone();
+        entry.task.completed_at = Some(now);
+        let task = entry.task.clone();
+        let pid = task.project_id.clone();
+        let tid = task.id.clone();
+        drop(tasks);
+        if let Err(error) = self.persist_current_task(id) {
+            let mut tasks = self.tasks.write().expect("lock poisoned");
+            if let Some(entry) = tasks.get_mut(id) {
+                entry.task = previous;
+            }
+            drop(tasks);
+            let _ = self.persist_current_task(id);
+            return Err(error);
+        }
+        self.emit(
+            crate::models::task::BackendEventType::TaskCompleted,
+            pid,
+            Some(tid),
+            task.clone(),
+        );
+        Ok(task)
+    }
+
     /// Atomically finish a multi-item operation. Cancellation wins if its
     /// shared token was set before this lock is acquired, so the final worker
     /// cannot strand the task in `cancelling` between result and status writes.
@@ -4372,6 +4471,37 @@ mod tests {
                 status => panic!("unexpected race terminal state: {status:?}"),
             }
         }
+    }
+
+    #[test]
+    fn sealed_agent_completion_closes_cancellation_and_recovers_after_interruption() {
+        let service = TaskService::default();
+        let task = service.create_task(TaskType::AgentRun, None, "agent".into(), true);
+        service
+            .transition_status(&task.id, TaskStatus::Running)
+            .unwrap();
+        let result = TaskResult {
+            summary: "candidate".into(),
+            affected_paths: vec![".app/agent/output".into()],
+            reference: None,
+            pending_action: None,
+        };
+
+        let sealed = service
+            .seal_running_with_result(&task.id, result.clone())
+            .unwrap();
+        assert_eq!(sealed.status, TaskStatus::Running);
+        assert!(!sealed.cancellable);
+        assert_eq!(sealed.result, Some(result));
+        assert!(service.request_cancel(&task.id).is_err());
+
+        service
+            .transition_status(&task.id, TaskStatus::Failed)
+            .unwrap();
+        let recovered = service.recover_sealed_agent_completion(&task.id).unwrap();
+        assert_eq!(recovered.status, TaskStatus::Succeeded);
+        assert!(recovered.result.is_some());
+        assert!(recovered.error.is_none());
     }
 
     fn make_service() -> (TaskService, Arc<Mutex<Vec<CapturedEvent>>>) {

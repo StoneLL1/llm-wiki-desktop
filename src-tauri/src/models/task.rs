@@ -39,9 +39,11 @@ impl BackendTask {
         }
         match self.operation.as_ref() {
             Some(TaskOperation::ImportBatch { session_id, .. }) => Some(session_id.as_str()),
-            Some(TaskOperation::CapabilityInstall { .. } | TaskOperation::ImportCommit { .. }) => {
-                None
-            }
+            Some(
+                TaskOperation::CapabilityInstall { .. }
+                | TaskOperation::ImportCommit { .. }
+                | TaskOperation::ImportRecovery { .. },
+            ) => None,
             None => self
                 .batch_id
                 .as_deref()
@@ -114,6 +116,9 @@ pub enum TaskOperation {
         requirement_revision: String,
     },
     ImportCommit {
+        session_id: String,
+    },
+    ImportRecovery {
         session_id: String,
     },
 }

@@ -10,7 +10,8 @@ use crate::errors::{BackendError, IMPORT_V2_ENGINE_PANICKED};
 use crate::models::import_v2::{
     CommitImportSessionRequest, ImportBatchResult, ImportCompletion, ImportInput, ImportItem,
     ImportItemResolution, ImportItemStatus, ImportRecoveryAction, ImportResourceMode,
-    ImportSession, ImportSessionPatchCounts, ImportSessionPatchEvent, ImportThreeWayMergeContext,
+    ImportSession, ImportSessionOverview, ImportSessionPatchCounts, ImportSessionPatchEvent,
+    ImportThreeWayMergeContext,
 };
 use crate::models::paths::ProjectContext;
 use crate::models::task::{BackendTask, TaskResult, TaskResultReference, TaskStatus, TaskType};
@@ -182,24 +183,218 @@ pub fn get_import_session_v2(
     state: State<'_, AppState>,
     request: GetImportSessionV2Request,
 ) -> Result<ImportSession, BackendError> {
-    state.with_current_project_write_access(
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state
+        .import_v2_service
+        .read_session(&context, &state.file_store, &request.session_id)
+}
+
+pub fn get_import_session_overview_v2(
+    state: State<'_, AppState>,
+    request: GetImportSessionV2Request,
+) -> Result<ImportSessionOverview, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    state.import_v2_service.read_session_overview(
+        &context,
+        &state.file_store,
+        &request.session_id,
+    )
+}
+
+pub fn start_import_session_recovery_v2(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: GetImportSessionV2Request,
+) -> Result<BackendTask, BackendError> {
+    let task = state.with_current_project_write_access(
         &request.project_id,
         &request.project_root_path,
-        |permit, _context| {
-            state.import_v2_service.recover_session_authorized(
-                permit,
-                &state.file_store,
-                &state.task_service,
-                &request.session_id,
-            )?;
-            AgentCandidateService::new(
-                &state.import_v2_service,
-                &state.file_store,
-                &state.task_service,
-            )
-            .recover_completed_outputs_authorized(permit, &request.session_id)
+        |_permit, context| {
+            let task_state_root = context
+                .layout
+                .task_state_root
+                .as_deref()
+                .ok_or_else(|| {
+                    task_error(
+                        "The project does not provide a writable task state root for import recovery.",
+                    )
+                })
+                .and_then(|relative| context.resolve_project_path(relative))?;
+            state
+                .task_service
+                .create_project_import_recovery_task(
+                    request.project_id.clone(),
+                    context.root.clone(),
+                    task_state_root,
+                    "Recover import session".into(),
+                    request.session_id.clone(),
+                )
+                .map_err(|error| task_error(&error))
         },
-    )
+    )?;
+    let running = match state
+        .task_service
+        .transition_status(&task.id, TaskStatus::Running)
+    {
+        Ok(task) => task,
+        Err(error) => {
+            let backend_error = task_error(&error);
+            let _ = state
+                .task_service
+                .set_error(&task.id, backend_error.clone());
+            let _ = state
+                .task_service
+                .transition_status(&task.id, TaskStatus::Failed);
+            return Err(backend_error);
+        }
+    };
+    let _ = state.task_service.update_progress(
+        &task.id,
+        0,
+        None,
+        Some("Checking import session".into()),
+    );
+    let _ = state.task_service.append_log(
+        &task.id,
+        LogLevel::Info,
+        "Import session recovery started.".into(),
+    );
+    let task_id = task.id.clone();
+    let coordinator = state.blocking_work.clone();
+    let cancellation = state
+        .task_service
+        .get_cancellation_token(&task_id)
+        .unwrap_or_default();
+    let failure_app = app.clone();
+    let failure_task_id = task_id.clone();
+    tauri::async_runtime::spawn(async move {
+        let worker_result = coordinator
+            .run_cancellable(BlockingWorkClass::HeavyIo, cancellation, move || {
+                let state = app.state::<AppState>();
+                let result = state.with_current_project_write_access(
+                    &request.project_id,
+                    &request.project_root_path,
+                    |permit, _context| {
+                        let recovery = state
+                            .import_v2_service
+                            .recover_session_report_with_cancel_authorized(
+                                permit,
+                                &state.file_store,
+                                &state.task_service,
+                                &request.session_id,
+                                || state.task_service.is_cancelled(&task_id),
+                                |current, total| {
+                                    let _ = state.task_service.update_progress(
+                                        &task_id,
+                                        current,
+                                        Some(total),
+                                        Some("Checking import session".into()),
+                                    );
+                                },
+                            )?;
+                        if state.task_service.is_cancelled(&task_id) {
+                            return Err(BackendError::new(
+                                crate::errors::IMPORT_V2_CANCELLED,
+                                "Import recovery was cancelled.",
+                                true,
+                                false,
+                            ));
+                        }
+                        let before_agent = recovery.session.items.clone();
+                        let _ = state.task_service.update_progress(
+                            &task_id,
+                            before_agent.len() as u64,
+                            Some(before_agent.len() as u64),
+                            Some("Checking completed Agent outputs".into()),
+                        );
+                        let session = AgentCandidateService::new(
+                            &state.import_v2_service,
+                            &state.file_store,
+                            &state.task_service,
+                        )
+                        .recover_completed_outputs_from_session_with_cancel_authorized(
+                            permit,
+                            recovery.session,
+                            || state.task_service.is_cancelled(&task_id),
+                        )?;
+                        let mut changed = recovery
+                            .changed_items
+                            .into_iter()
+                            .map(|item| (item.item_id.clone(), item))
+                            .collect::<HashMap<_, _>>();
+                        for (before, after) in before_agent.iter().zip(&session.items) {
+                            if before != after {
+                                changed.insert(after.item_id.clone(), after.clone());
+                            }
+                        }
+                        let changed_count = changed.len();
+                        state
+                            .task_service
+                            .emit_import_session_patch(ImportSessionPatchEvent {
+                                project_id: request.project_id.clone(),
+                                project_root_path: request.project_root_path.clone(),
+                                session_id: request.session_id.clone(),
+                                batch_id: task_id.clone(),
+                                items: changed.into_values().collect(),
+                                counts: recovery_patch_counts(&session),
+                            });
+                        let _ = state.task_service.append_log(
+                            &task_id,
+                            LogLevel::Info,
+                            format!(
+                                "Import session recovery completed; {changed_count} item(s) changed."
+                            ),
+                        );
+                        Ok(session)
+                    },
+                );
+                match result {
+                    Ok(session) => {
+                        let _ = state.task_service.update_progress(
+                            &task_id,
+                            session.items.len() as u64,
+                            Some(session.items.len() as u64),
+                            Some("Import recovery complete".into()),
+                        );
+                        state
+                            .task_service
+                            .complete_running_with_result(
+                                &task_id,
+                                TaskResult {
+                                    summary: "Import session recovery completed.".into(),
+                                    affected_paths: Vec::new(),
+                                    reference: Some(TaskResultReference::ImportV2SessionPreview {
+                                        session_id: request.session_id.clone(),
+                                        batch_id: None,
+                                        completion: None,
+                                    }),
+                                    pending_action: None,
+                                },
+                            )
+                            .map(|_| ())
+                            .map_err(|error| task_error(&error))
+                    }
+                    Err(error) if state.task_service.is_cancelled(&task_id) => {
+                        let _ = state.task_service.finalize_cancellation(&task_id);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        fail_task_unless_cancelled(&state, &task_id, error);
+                        Ok(())
+                    }
+                }
+            })
+            .await;
+        if let Err(error) = worker_result {
+            let state = failure_app.state::<AppState>();
+            if state.task_service.is_cancelled(&failure_task_id) {
+                let _ = state.task_service.finalize_cancellation(&failure_task_id);
+            } else {
+                fail_task_unless_cancelled(&state, &failure_task_id, error);
+            }
+        }
+    });
+    Ok(running)
 }
 pub fn add_import_items_v2(
     state: State<'_, AppState>,
@@ -1657,6 +1852,31 @@ fn settle_confirmed_preview_tasks(
 
 fn task_error(message: &str) -> BackendError {
     BackendError::new("IMPORT_V2_TASK_FAILED", message, true, false)
+}
+
+fn recovery_patch_counts(session: &ImportSession) -> ImportSessionPatchCounts {
+    let mut counts = ImportSessionPatchCounts {
+        total: session.items.len() as u64,
+        processed: session.items.len() as u64,
+        succeeded: 0,
+        waiting: 0,
+        failed: 0,
+        cancelled: 0,
+    };
+    for item in &session.items {
+        match item.status {
+            ImportItemStatus::PreviewReady
+            | ImportItemStatus::NeedsMerge
+            | ImportItemStatus::Completed => counts.succeeded += 1,
+            ImportItemStatus::WaitingCapability
+            | ImportItemStatus::WaitingLogin
+            | ImportItemStatus::WaitingAuthorization => counts.waiting += 1,
+            ImportItemStatus::Failed => counts.failed += 1,
+            ImportItemStatus::Cancelled => counts.cancelled += 1,
+            _ => {}
+        }
+    }
+    counts
 }
 
 fn fail_task_unless_cancelled(state: &AppState, task_id: &str, error: BackendError) {

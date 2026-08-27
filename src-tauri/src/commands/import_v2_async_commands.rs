@@ -35,7 +35,7 @@ use crate::errors::BackendError;
 use crate::models::import_backend_activation::{ActivationResult, ImportBackendActivation};
 use crate::models::import_v2::{
     CommitImportSessionRequest, ImportCompletion, ImportItem, ImportSession,
-    ImportThreeWayMergeContext,
+    ImportSessionOverview, ImportThreeWayMergeContext,
 };
 use crate::models::import_v2_agent::{
     AcceptImportAgentCandidateRequest, AgentCandidateActionResult, AgentCandidateView,
@@ -161,6 +161,26 @@ pub async fn get_import_session_v2(
 ) -> Result<ImportSession, BackendError> {
     blocking!(app, BlockingWorkClass::HeavyIo, |_app, state| {
         core::get_import_session_v2(state, request)
+    })
+}
+
+#[tauri::command]
+pub async fn get_import_session_overview_v2(
+    app: AppHandle,
+    request: GetImportSessionV2Request,
+) -> Result<ImportSessionOverview, BackendError> {
+    blocking!(app, BlockingWorkClass::MetadataIo, |_app, state| {
+        core::get_import_session_overview_v2(state, request)
+    })
+}
+
+#[tauri::command]
+pub async fn start_import_session_recovery_v2(
+    app: AppHandle,
+    request: GetImportSessionV2Request,
+) -> Result<BackendTask, BackendError> {
+    blocking!(app, BlockingWorkClass::MetadataIo, |worker_app, state| {
+        core::start_import_session_recovery_v2(worker_app.clone(), state, request)
     })
 }
 

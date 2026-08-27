@@ -22,6 +22,7 @@ const api = vi.hoisted(() => ({
   getPreviewContent: vi.fn(),
   createSession: vi.fn(),
   getSession: vi.fn(),
+  startSessionRecovery: vi.fn(),
   addPaths: vi.fn(),
   getScanResult: vi.fn(),
   acceptScan: vi.fn(),
@@ -221,6 +222,10 @@ beforeEach(() => {
   api.getReadiness.mockResolvedValue(readiness);
   api.createSession.mockResolvedValue(session(projectA.projectId));
   api.getSession.mockResolvedValue(session(projectA.projectId));
+  api.startSessionRecovery.mockResolvedValue({
+    ...task("session-recovery"),
+    operation: { kind: "import_recovery", sessionId: "session-recover" },
+  });
   api.getScanResult.mockResolvedValue({
     files: [],
     skipped: [],
@@ -630,6 +635,42 @@ describe("useImportWorkflow", () => {
       projectRootPath: projectA.rootPath,
       sessionId: "session-recover",
     });
+    expect(api.startSessionRecovery).toHaveBeenCalledWith({
+      projectId: projectA.projectId,
+      projectRootPath: projectA.rootPath,
+      sessionId: "session-recover",
+    });
+    await waitFor(() => expect(
+      useTaskStore.getState().tasks.find((entry) => entry.id === "session-recovery"),
+    ).toMatchObject({ operation: { kind: "import_recovery", sessionId: "session-recover" } }));
+  });
+
+  it("refreshes the unfinished session when its recovery task reaches terminal state", async () => {
+    api.getReadiness.mockResolvedValue({ ...readiness, unfinishedSessionId: "session-recover" });
+    const initial = { ...session(projectA.projectId, [item("recover.md")]), sessionId: "session-recover" };
+    const recoveredItem = item("recover.md", "paused");
+    api.getSession
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce({ ...initial, items: [recoveredItem] });
+
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.session?.sessionId).toBe("session-recover"));
+
+    const recoveryTask: BackendTask = {
+      ...task("session-recovery", projectA.projectId, "succeeded"),
+      operation: { kind: "import_recovery", sessionId: "session-recover" },
+    };
+    await act(async () => notifyTaskEventListeners({
+      eventId: "session-recovery-completed",
+      eventType: "task_completed",
+      projectId: projectA.projectId,
+      taskId: recoveryTask.id,
+      timestamp: recoveryTask.updatedAt,
+      payload: recoveryTask,
+    }));
+
+    await waitFor(() => expect(result.current.session?.items[0]?.status).toBe("paused"));
+    expect(api.getSession).toHaveBeenCalledTimes(2);
   });
 
   it("keeps the import surface usable while migration activation is pending", async () => {

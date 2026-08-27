@@ -12,6 +12,8 @@ describe("Import V2 presentation API", () => {
     expect(importV2Api.commandNames).toEqual({
       createSession: "create_import_session_v2",
       getSession: "get_import_session_v2",
+      getSessionOverview: "get_import_session_overview_v2",
+      startSessionRecovery: "start_import_session_recovery_v2",
       getHistorySession: "get_import_history_session_v2",
       getCompletion: "get_import_completion_v2",
       addItems: "add_import_items_v2",

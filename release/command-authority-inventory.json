@@ -131,15 +131,6 @@
       "writeAuthority": "ProjectWritePermit"
     },
     {
-      "name": "add_import_paths_v2",
-      "source": "src-tauri/src/commands/import_v2_file_commands.rs",
-      "classifications": [
-        "mutation"
-      ],
-      "projectScoped": true,
-      "writeAuthority": "ProjectWritePermit"
-    },
-    {
       "name": "add_import_text_v2",
       "source": "src-tauri/src/commands/import_v2_commands.rs",
       "classifications": [
@@ -822,14 +813,20 @@
       "projectScoped": true
     },
     {
+      "name": "get_import_session_overview_v2",
+      "source": "src-tauri/src/commands/import_v2_commands.rs",
+      "classifications": [
+        "read"
+      ],
+      "projectScoped": true
+    },
+    {
       "name": "get_import_session_v2",
       "source": "src-tauri/src/commands/import_v2_commands.rs",
       "classifications": [
-        "read",
-        "mutation"
+        "read"
       ],
-      "projectScoped": true,
-      "writeAuthority": "ProjectWritePermit"
+      "projectScoped": true
     },
     {
       "name": "get_import_v2_migration_status",
@@ -1849,6 +1846,15 @@
       ]
     },
     {
+      "name": "start_import_session_recovery_v2",
+      "source": "src-tauri/src/commands/import_v2_commands.rs",
+      "classifications": [
+        "mutation"
+      ],
+      "projectScoped": true,
+      "writeAuthority": "ProjectWritePermit"
+    },
+    {
       "name": "start_project_inventory",
       "source": "src-tauri/src/commands/project_commands.rs",
       "classifications": [
@@ -2033,7 +2039,7 @@
         "add_text_input_authorized",
         "set_discovery_task_id_authorized",
         "bind_item_task_ids_authorized",
-        "recover_session_authorized",
+        "recover_session_report_with_cancel_authorized",
         "set_item_selected_authorized",
         "select_subtitle_for_session_authorized"
       ],
@@ -2251,6 +2257,14 @@
     {
       "source": "src-tauri/src/services/import_v2/agent_assistance.rs",
       "function": "run_local",
+      "capability": "ProjectExecutionLease",
+      "requiredCalls": [
+        "run_local_with_before_terminal"
+      ]
+    },
+    {
+      "source": "src-tauri/src/services/import_v2/agent_assistance.rs",
+      "function": "run_local_with_before_terminal",
       "capability": "ProjectExecutionLease",
       "requiredCalls": [
         "with_current_write"

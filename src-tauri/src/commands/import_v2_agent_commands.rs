@@ -170,14 +170,14 @@ pub fn start_import_agent_assistance_v2(
                     .and_then(|context| {
                         let execution_lease =
                             state.begin_project_external_task(&context, &task_id)?;
-                        let run = AgentAssistanceService::new(
+                        AgentAssistanceService::new(
                             &state.import_v2_service,
                             &state.file_store,
                             &state.settings_service,
                             &state.agent_service,
                             &state.task_service,
                         )
-                        .run_local(
+                        .run_local_with_before_terminal(
                             &state,
                             &execution_lease,
                             &context,
@@ -186,28 +186,21 @@ pub fn start_import_agent_assistance_v2(
                             &task_id,
                             request.trigger,
                             request.agent_kind,
-                        );
-                        run.and_then(|()| {
-                            state.require_current_execution_epoch(&context, &execution_lease)?;
-                            state.with_current_project_write_access(
-                                &request.project_id,
-                                &request.project_root_path,
-                                |permit, _current| {
-                                    AgentCandidateService::new(
-                                        &state.import_v2_service,
-                                        &state.file_store,
-                                        &state.task_service,
-                                    )
-                                    .accept_staged_output_authorized(
-                                        permit,
-                                        &request.session_id,
-                                        &request.item_id,
-                                        &task_id,
-                                    )
-                                    .map(|_| ())
-                                },
-                            )
-                        })
+                            |permit, _current| {
+                                AgentCandidateService::new(
+                                    &state.import_v2_service,
+                                    &state.file_store,
+                                    &state.task_service,
+                                )
+                                .accept_staged_output_before_terminal_authorized(
+                                    permit,
+                                    &request.session_id,
+                                    &request.item_id,
+                                    &task_id,
+                                )
+                                .map(|_| ())
+                            },
+                        )
                     });
                 if let Err(error) = result {
                     let status = state
