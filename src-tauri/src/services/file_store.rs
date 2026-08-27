@@ -4,6 +4,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+#[cfg(feature = "performance-observers")]
+use std::collections::HashMap;
+#[cfg(feature = "performance-observers")]
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::errors::BackendError;
 use crate::models::layout::is_link_or_reparse;
 use crate::models::paths::ProjectContext;
@@ -14,6 +19,118 @@ use crate::utils::safe_project_dir::{BoundFileIdentity, BoundProjectMutationRoot
 pub struct FileStore;
 
 static GUARDED_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[cfg(feature = "performance-observers")]
+#[derive(Debug, Clone, Default, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FileStoreObservationSnapshot {
+    pub read_ops: u64,
+    pub write_ops: u64,
+    pub bytes_read: u64,
+    pub bytes_written: u64,
+    pub atomic_replaces: u64,
+}
+
+#[cfg(feature = "performance-observers")]
+struct FileStoreObserverEntry {
+    root: PathBuf,
+    snapshot: FileStoreObservationSnapshot,
+}
+
+#[cfg(feature = "performance-observers")]
+static FILE_STORE_OBSERVERS: OnceLock<Mutex<HashMap<u64, FileStoreObserverEntry>>> =
+    OnceLock::new();
+#[cfg(feature = "performance-observers")]
+static NEXT_FILE_STORE_OBSERVER_ID: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(feature = "performance-observers")]
+pub struct FileStoreObservation {
+    id: u64,
+}
+
+#[cfg(feature = "performance-observers")]
+impl FileStoreObservation {
+    pub fn snapshot(&self) -> FileStoreObservationSnapshot {
+        FILE_STORE_OBSERVERS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&self.id)
+            .map(|entry| entry.snapshot.clone())
+            .unwrap_or_default()
+    }
+}
+
+#[cfg(feature = "performance-observers")]
+impl Drop for FileStoreObservation {
+    fn drop(&mut self) {
+        FILE_STORE_OBSERVERS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.id);
+    }
+}
+
+#[cfg(feature = "performance-observers")]
+fn observe_file_read(path: &Path, bytes: usize) {
+    let mut observers = FILE_STORE_OBSERVERS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for observer in observers
+        .values_mut()
+        .filter(|entry| project_path_starts_with(path, &entry.root))
+    {
+        observer.snapshot.read_ops += 1;
+        observer.snapshot.bytes_read += bytes as u64;
+    }
+}
+
+#[cfg(not(feature = "performance-observers"))]
+fn observe_file_read(_path: &Path, _bytes: usize) {}
+
+#[cfg(feature = "performance-observers")]
+fn observe_file_write(path: &Path, bytes: usize, atomic_replace: bool) {
+    let mut observers = FILE_STORE_OBSERVERS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for observer in observers
+        .values_mut()
+        .filter(|entry| project_path_starts_with(path, &entry.root))
+    {
+        observer.snapshot.write_ops += 1;
+        observer.snapshot.bytes_written += bytes as u64;
+        observer.snapshot.atomic_replaces += u64::from(atomic_replace);
+    }
+}
+
+#[cfg(windows)]
+fn project_path_starts_with(path: &Path, root: &Path) -> bool {
+    fn comparable(path: &Path) -> String {
+        let raw = path.to_string_lossy();
+        raw.strip_prefix(r"\\?\")
+            .unwrap_or(raw.as_ref())
+            .replace('/', "\\")
+            .to_ascii_lowercase()
+    }
+
+    let path = comparable(path);
+    let mut root = comparable(root);
+    if !root.ends_with('\\') {
+        root.push('\\');
+    }
+    path == root.trim_end_matches('\\') || path.starts_with(&root)
+}
+
+#[cfg(not(windows))]
+fn project_path_starts_with(path: &Path, root: &Path) -> bool {
+    path.starts_with(root)
+}
+
+#[cfg(not(feature = "performance-observers"))]
+fn observe_file_write(_path: &Path, _bytes: usize, _atomic_replace: bool) {}
 
 #[cfg(test)]
 thread_local! {
@@ -29,6 +146,27 @@ pub enum WriteMode {
 }
 
 impl FileStore {
+    #[cfg(feature = "performance-observers")]
+    pub fn observe_project(&self, context: &ProjectContext) -> FileStoreObservation {
+        let id = NEXT_FILE_STORE_OBSERVER_ID.fetch_add(1, Ordering::Relaxed);
+        // ProjectContext resolves observed paths from this same absolute root.
+        // Keeping that lexical form also avoids Windows `\\?\` canonical-path
+        // prefixes making equivalent paths fail `starts_with` comparisons.
+        let root = context.root.clone();
+        FILE_STORE_OBSERVERS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                id,
+                FileStoreObserverEntry {
+                    root,
+                    snapshot: FileStoreObservationSnapshot::default(),
+                },
+            );
+        FileStoreObservation { id }
+    }
+
     pub fn exists(&self, context: &ProjectContext, relative_path: &str) -> bool {
         context
             .resolve_project_path(relative_path)
@@ -65,7 +203,10 @@ impl FileStore {
         relative_path: &str,
     ) -> Result<String, BackendError> {
         let path = context.resolve_project_path(relative_path)?;
-        fs::read_to_string(&path).map_err(|err| io_error("FILE_READ_FAILED", err, &path))
+        let contents =
+            fs::read_to_string(&path).map_err(|err| io_error("FILE_READ_FAILED", err, &path))?;
+        observe_file_read(&path, contents.len());
+        Ok(contents)
     }
 
     pub(crate) fn read_bytes(
@@ -74,7 +215,23 @@ impl FileStore {
         relative_path: &str,
     ) -> Result<Vec<u8>, BackendError> {
         let path = context.resolve_project_path(relative_path)?;
-        fs::read(&path).map_err(|err| io_error("FILE_READ_FAILED", err, &path))
+        let bytes = fs::read(&path).map_err(|err| io_error("FILE_READ_FAILED", err, &path))?;
+        observe_file_read(&path, bytes.len());
+        Ok(bytes)
+    }
+
+    #[cfg(feature = "performance-observers")]
+    pub fn read_project_bytes_absolute(
+        &self,
+        context: &ProjectContext,
+        path: &Path,
+    ) -> Result<Vec<u8>, BackendError> {
+        let relative = context.to_project_relative(path)?;
+        let resolved = context.resolve_project_path(&relative)?;
+        let bytes =
+            fs::read(&resolved).map_err(|err| io_error("FILE_READ_FAILED", err, &resolved))?;
+        observe_file_read(&resolved, bytes.len());
+        Ok(bytes)
     }
 
     pub(crate) fn content_hash(&self, bytes: &[u8]) -> String {
@@ -89,7 +246,9 @@ impl FileStore {
     ) -> Result<(), BackendError> {
         let path = context.resolve_project_write_path(relative_path)?;
         let binding = bind_project_write(context, &path, true)?;
-        write_bound_atomic(&binding, &path, contents.as_bytes(), None)
+        write_bound_atomic(&binding, &path, contents.as_bytes(), None)?;
+        observe_file_write(&path, contents.len(), true);
+        Ok(())
     }
 
     pub fn write_markdown_checked(
@@ -122,6 +281,7 @@ impl FileStore {
             }
         });
         write_bound_atomic(&binding, &path, contents.as_bytes(), expected_identity)?;
+        observe_file_write(&path, contents.len(), true);
         // The hash check and atomic rename cannot form an OS-level compare-and
         // swap for edits made by an external editor. Verify the postcondition
         // immediately so a racing replacement is reported and never enters
@@ -189,7 +349,9 @@ impl FileStore {
         let path = context.resolve_project_write_path(relative_path)?;
         let binding = bind_project_write(context, &path, true)?;
         self.verify_write_mode(&binding, &path, relative_path, WriteMode::CreateNew)?;
-        write_bound_create_new(&binding, &path, relative_path, contents.as_bytes())
+        write_bound_create_new(&binding, &path, relative_path, contents.as_bytes())?;
+        observe_file_write(&path, contents.len(), true);
+        Ok(())
     }
 
     pub fn write_text_absolute(
@@ -199,7 +361,9 @@ impl FileStore {
         contents: &str,
     ) -> Result<(), BackendError> {
         let binding = bind_absolute_write(root, path)?;
-        write_bound_atomic(&binding, path, contents.as_bytes(), None)
+        write_bound_atomic(&binding, path, contents.as_bytes(), None)?;
+        observe_file_write(path, contents.len(), true);
+        Ok(())
     }
 
     pub(crate) fn write_project_bytes_absolute(
@@ -209,7 +373,9 @@ impl FileStore {
         bytes: &[u8],
     ) -> Result<(), BackendError> {
         let binding = bind_project_write(context, path, true)?;
-        write_bound_atomic(&binding, path, bytes, None)
+        write_bound_atomic(&binding, path, bytes, None)?;
+        observe_file_write(path, bytes.len(), true);
+        Ok(())
     }
 
     pub(crate) fn write_project_bytes_absolute_if_hash_matches(
@@ -229,6 +395,7 @@ impl FileStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(io_error("FILE_READ_FAILED", error, path)),
         };
+        observe_file_read(path, current.len());
         if hash_bytes(&current) != expected_hash {
             return Ok(false);
         }
@@ -238,6 +405,7 @@ impl FileStore {
             bytes,
             Some((identity, expected_hash.to_string())),
         )?;
+        observe_file_write(path, bytes.len(), true);
         Ok(true)
     }
 
@@ -250,7 +418,9 @@ impl FileStore {
         let binding = bind_absolute_write(root, path)?;
         binding
             .write_atomic_create_new(path, bytes)
-            .map_err(|error| io_error("FILE_WRITE_FAILED", error, path))
+            .map_err(|error| io_error("FILE_WRITE_FAILED", error, path))?;
+        observe_file_write(path, bytes.len(), true);
+        Ok(())
     }
 
     pub fn read_json<T: serde::de::DeserializeOwned>(
@@ -271,6 +441,7 @@ impl FileStore {
     ) -> Result<T, BackendError> {
         let raw =
             fs::read_to_string(path).map_err(|err| io_error("FILE_READ_FAILED", err, path))?;
+        observe_file_read(path, raw.len());
         serde_json::from_str(&raw).map_err(|err| {
             BackendError::new("JSON_PARSE_FAILED", err.to_string(), true, false)
                 .with_details(serde_json::json!({ "path": path.to_string_lossy() }))
@@ -299,7 +470,9 @@ impl FileStore {
             BackendError::new("JSON_SERIALIZE_FAILED", err.to_string(), true, false)
         })?;
         let binding = bind_project_write(context, &path, true)?;
-        write_bound_atomic(&binding, &path, serialized.as_bytes(), None)
+        write_bound_atomic(&binding, &path, serialized.as_bytes(), None)?;
+        observe_file_write(&path, serialized.len(), true);
+        Ok(())
     }
 
     pub fn write_json_atomic_checked<T: serde::Serialize>(
@@ -327,7 +500,9 @@ impl FileStore {
         let serialized = serde_json::to_string_pretty(value).map_err(|err| {
             BackendError::new("JSON_SERIALIZE_FAILED", err.to_string(), true, false)
         })?;
-        write_bound_atomic(&binding, &path, serialized.as_bytes(), expected_identity)
+        write_bound_atomic(&binding, &path, serialized.as_bytes(), expected_identity)?;
+        observe_file_write(&path, serialized.len(), true);
+        Ok(())
     }
 
     pub fn write_json_atomic_absolute<T: serde::Serialize>(
@@ -340,7 +515,9 @@ impl FileStore {
             BackendError::new("JSON_SERIALIZE_FAILED", err.to_string(), true, false)
         })?;
         let binding = bind_absolute_write(root, path)?;
-        write_bound_atomic(&binding, path, serialized.as_bytes(), None)
+        write_bound_atomic(&binding, path, serialized.as_bytes(), None)?;
+        observe_file_write(path, serialized.len(), true);
+        Ok(())
     }
 
     pub fn list_markdown_files(&self, root: &Path) -> Result<Vec<PathBuf>, BackendError> {
@@ -377,7 +554,10 @@ impl FileStore {
             Err(error) => return Err(io_error("FILE_READ_FAILED", error, &path)),
         };
         match binding.read_regular(&path) {
-            Ok(bytes) => Ok(Some(hash_bytes(&bytes))),
+            Ok(bytes) => {
+                observe_file_read(&path, bytes.len());
+                Ok(Some(hash_bytes(&bytes)))
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(io_error("FILE_READ_FAILED", error, &path)),
         }
@@ -400,6 +580,7 @@ impl FileStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(io_error("FILE_READ_FAILED", error, &path)),
         };
+        observe_file_read(&path, bytes.len());
         if hash_bytes(&bytes) != expected_hash {
             return Ok(false);
         }
@@ -459,6 +640,7 @@ impl FileStore {
                     }
                     Err(error) => return Err(io_error("FILE_READ_FAILED", error, path)),
                 };
+                observe_file_read(path, bytes.len());
                 let current_hash = hash_bytes(&bytes);
                 if current_hash != expected_hash {
                     // Surface the on-disk baseline text so the frontend can run
@@ -500,6 +682,7 @@ fn hash_bound_file(
     let bytes = binding
         .read_regular(path)
         .map_err(|err| io_error("FILE_READ_FAILED", err, path))?;
+    observe_file_read(path, bytes.len());
     Ok(hash_bytes(&bytes))
 }
 

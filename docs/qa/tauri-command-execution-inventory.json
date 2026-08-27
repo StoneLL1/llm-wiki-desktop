@@ -1,0 +1,1435 @@
+{
+  "schemaVersion": 1,
+  "authority": "src-tauri/src/lib.rs tauri::generate_handler! registry plus explicit per-command review",
+  "classes": [
+    "PureMemory",
+    "BlockingRead",
+    "BlockingMutation",
+    "AsyncNetwork",
+    "LongTaskStart",
+    "ProcessOrMedia"
+  ],
+  "p0Commands": [
+    "get_import_frontend_readiness_v2",
+    "list_import_history_v2",
+    "get_import_session_v2",
+    "get_import_history_session_v2",
+    "confirm_import_session_v2",
+    "get_import_preview_content_v2",
+    "set_import_item_resolution_v2",
+    "authorize_local_asr_v2"
+  ],
+  "baseline": {
+    "status": "red",
+    "total": 200,
+    "sync": 189,
+    "async": 11,
+    "importTotal": 55,
+    "importSync": 53,
+    "blockingSync": 186,
+    "measuredAt": "2026-08-27",
+    "sourceCommit": "43cf323572f9e43cd59be93dfec8053fba6b3d8d"
+  },
+  "commands": [
+    {
+      "command": "detect_agents",
+      "module": "agent_commands",
+      "classification": "ProcessOrMedia",
+      "currentExecution": "sync",
+      "rationale": "Touches an external process, Agent, capability, OCR/ASR/media runner, shell integration, or application restart boundary."
+    },
+    {
+      "command": "get_update_state",
+      "module": "update_commands",
+      "classification": "PureMemory",
+      "currentExecution": "sync",
+      "rationale": "Bounded in-memory state access with no filesystem, network, process, Git, media, or durable mutation work."
+    },
+    {
+      "command": "get_global_update_preferences",
+      "module": "update_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "save_global_update_preferences",
+      "module": "update_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "check_app_update",
+      "module": "update_commands",
+      "classification": "AsyncNetwork",
+      "currentExecution": "async",
+      "rationale": "Performs network or updater work through an async command boundary."
+    },
+    {
+      "command": "download_app_update",
+      "module": "update_commands",
+      "classification": "AsyncNetwork",
+      "currentExecution": "async",
+      "rationale": "Performs network or updater work through an async command boundary."
+    },
+    {
+      "command": "cancel_app_update_download",
+      "module": "update_commands",
+      "classification": "PureMemory",
+      "currentExecution": "sync",
+      "rationale": "Bounded in-memory state access with no filesystem, network, process, Git, media, or durable mutation work."
+    },
+    {
+      "command": "install_app_update",
+      "module": "update_commands",
+      "classification": "AsyncNetwork",
+      "currentExecution": "async",
+      "rationale": "Performs network or updater work through an async command boundary."
+    },
+    {
+      "command": "restart_app_after_update",
+      "module": "update_commands",
+      "classification": "ProcessOrMedia",
+      "currentExecution": "sync",
+      "rationale": "Touches an external process, Agent, capability, OCR/ASR/media runner, shell integration, or application restart boundary."
+    },
+    {
+      "command": "dismiss_app_update",
+      "module": "update_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "Persists the dismissed update version through the global settings service and therefore performs durable filesystem mutation."
+    },
+    {
+      "command": "get_agent_config",
+      "module": "agent_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "set_default_agent",
+      "module": "agent_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "list_llm_providers",
+      "module": "llm_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "save_llm_provider",
+      "module": "llm_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "store_provider_secret",
+      "module": "llm_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "delete_provider_secret",
+      "module": "llm_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "provider_secret_status",
+      "module": "llm_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "check_ollama_reachable",
+      "module": "llm_commands",
+      "classification": "AsyncNetwork",
+      "currentExecution": "async",
+      "rationale": "Performs network or updater work through an async command boundary."
+    },
+    {
+      "command": "test_llm_provider",
+      "module": "llm_commands",
+      "classification": "AsyncNetwork",
+      "currentExecution": "async",
+      "rationale": "Performs network or updater work through an async command boundary."
+    },
+    {
+      "command": "start_wiki_compile",
+      "module": "compile_commands",
+      "classification": "LongTaskStart",
+      "currentExecution": "sync",
+      "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
+    },
+    {
+      "command": "list_compile_source_versions",
+      "module": "compile_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "confirm_compile_action",
+      "module": "compile_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_compile_conflict_details",
+      "module": "compile_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "resolve_compile_conflict",
+      "module": "compile_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_app_summary",
+      "module": "project_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "start_project_open_assessment",
+      "module": "project_commands",
+      "classification": "LongTaskStart",
+      "currentExecution": "sync",
+      "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
+    },
+    {
+      "command": "get_project_open_assessment",
+      "module": "project_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "cancel_project_open_assessment",
+      "module": "project_commands",
+      "classification": "PureMemory",
+      "currentExecution": "sync",
+      "rationale": "Bounded in-memory state access with no filesystem, network, process, Git, media, or durable mutation work."
+    },
+    {
+      "command": "open_assessed_project",
+      "module": "project_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "relocate_recent_project",
+      "module": "project_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "start_project_inventory",
+      "module": "project_commands",
+      "classification": "LongTaskStart",
+      "currentExecution": "sync",
+      "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
+    },
+    {
+      "command": "resolve_ambiguous_assessed_project",
+      "module": "project_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "remember_ambiguous_project_intent",
+      "module": "project_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "clear_ambiguous_project_intent",
+      "module": "project_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_project_session_authority",
+      "module": "project_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "trust_project",
+      "module": "project_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "revoke_project_trust",
+      "module": "project_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "enable_compatible_full_features",
+      "module": "project_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "configure_compatible_layout",
+      "module": "project_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "prepare_assessed_project_repair",
+      "module": "project_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "prepare_default_project_parent",
+      "module": "project_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "create_project",
+      "module": "project_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "open_project",
+      "module": "project_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "scan_project",
+      "module": "project_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "list_recent_projects",
+      "module": "project_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "remember_recent_project",
+      "module": "project_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "remove_recent_project",
+      "module": "project_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "read_markdown_file",
+      "module": "file_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "write_markdown_file",
+      "module": "file_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "write_json_file",
+      "module": "file_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_file_hash",
+      "module": "file_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "confirm_pending_action",
+      "module": "file_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "git_status",
+      "module": "git_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "initialize_git_repository",
+      "module": "git_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "request_assessed_git_checkpoint",
+      "module": "git_commands",
+      "classification": "LongTaskStart",
+      "currentExecution": "sync",
+      "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
+    },
+    {
+      "command": "create_git_checkpoint",
+      "module": "git_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "git_diff_markdown",
+      "module": "git_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "create_import_session_v2",
+      "module": "import_v2_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_import_session_v2",
+      "module": "import_v2_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_import_restricted_content_status_v2",
+      "module": "import_v2_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_import_history_session_v2",
+      "module": "import_v2_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_import_completion_v2",
+      "module": "import_v2_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "add_import_items_v2",
+      "module": "import_v2_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "add_import_text_v2",
+      "module": "import_v2_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "set_import_item_selection_v2",
+      "module": "import_v2_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "select_import_subtitle_v2",
+      "module": "import_v2_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_import_merge_context_v2",
+      "module": "import_v2_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "set_import_item_resolution_v2",
+      "module": "import_v2_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "stage_import_manual_merge_v2",
+      "module": "import_v2_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "cancel_import_item_v2",
+      "module": "import_v2_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "cancel_import_batch_v2",
+      "module": "import_v2_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "skip_import_item_v2",
+      "module": "import_v2_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "start_import_items_v2",
+      "module": "import_v2_commands",
+      "classification": "LongTaskStart",
+      "currentExecution": "sync",
+      "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
+    },
+    {
+      "command": "start_import_batch_v2",
+      "module": "import_v2_commands",
+      "classification": "LongTaskStart",
+      "currentExecution": "sync",
+      "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
+    },
+    {
+      "command": "confirm_import_session_v2",
+      "module": "import_v2_commands",
+      "classification": "LongTaskStart",
+      "currentExecution": "sync",
+      "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
+    },
+    {
+      "command": "start_import_agent_assistance_v2",
+      "module": "import_v2_agent_commands",
+      "classification": "ProcessOrMedia",
+      "currentExecution": "sync",
+      "rationale": "Touches an external process, Agent, capability, OCR/ASR/media runner, shell integration, or application restart boundary."
+    },
+    {
+      "command": "accept_import_agent_candidate_v2",
+      "module": "import_v2_agent_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "select_import_agent_candidate_v2",
+      "module": "import_v2_agent_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "discard_import_agent_candidate_v2",
+      "module": "import_v2_agent_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "start_add_import_paths_v2",
+      "module": "import_v2_file_commands",
+      "classification": "LongTaskStart",
+      "currentExecution": "sync",
+      "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
+    },
+    {
+      "command": "get_import_capability_statuses",
+      "module": "import_v2_file_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_import_scan_result_v2",
+      "module": "import_v2_file_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "accept_import_scan_v2",
+      "module": "import_v2_file_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "discard_import_scan_v2",
+      "module": "import_v2_file_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "add_import_url_v2",
+      "module": "import_v2_web_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "discover_import_collection_v2",
+      "module": "import_v2_web_commands",
+      "classification": "AsyncNetwork",
+      "currentExecution": "async",
+      "rationale": "Performs network or updater work through an async command boundary."
+    },
+    {
+      "command": "load_import_collection_page_v2",
+      "module": "import_v2_web_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "add_import_collection_items_v2",
+      "module": "import_v2_web_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_remote_media_retention_plan_v2",
+      "module": "import_v2_web_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "confirm_remote_media_retention_v2",
+      "module": "import_v2_web_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "begin_import_login_v2",
+      "module": "import_v2_web_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "complete_import_login_v2",
+      "module": "import_v2_web_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "revoke_import_login_v2",
+      "module": "import_v2_web_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "authorize_import_private_target_v2",
+      "module": "import_v2_web_commands",
+      "classification": "AsyncNetwork",
+      "currentExecution": "async",
+      "rationale": "Performs network or updater work through an async command boundary."
+    },
+    {
+      "command": "authorize_local_asr_v2",
+      "module": "import_v2_web_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "authorize_local_ocr_v2",
+      "module": "import_v2_web_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "authorize_bilibili_asr_v2",
+      "module": "import_v2_web_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "scan_import_v2_migration",
+      "module": "import_v2_migration",
+      "classification": "LongTaskStart",
+      "currentExecution": "sync",
+      "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
+    },
+    {
+      "command": "plan_import_v2_migration",
+      "module": "import_v2_migration",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "apply_import_v2_migration",
+      "module": "import_v2_migration",
+      "classification": "LongTaskStart",
+      "currentExecution": "sync",
+      "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
+    },
+    {
+      "command": "get_import_v2_migration_status",
+      "module": "import_v2_migration",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "resume_import_v2_migration",
+      "module": "import_v2_migration",
+      "classification": "LongTaskStart",
+      "currentExecution": "sync",
+      "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
+    },
+    {
+      "command": "activate_import_v2",
+      "module": "import_v2_activation",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_import_backend_activation",
+      "module": "import_v2_activation",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "Reads activation metadata and persisted JSON state from the project before returning the backend activation summary."
+    },
+    {
+      "command": "get_import_preview_content_v2",
+      "module": "import_v2_presentation_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_import_frontend_readiness_v2",
+      "module": "import_v2_presentation_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_import_workbench_preferences_v2",
+      "module": "import_v2_presentation_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "save_import_workbench_preferences_v2",
+      "module": "import_v2_presentation_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "list_import_history_v2",
+      "module": "import_v2_presentation_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_import_capability_requirement_v2",
+      "module": "import_v2_presentation_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_import_asr_enablement_plan_v2",
+      "module": "import_v2_presentation_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "install_import_capability_v2",
+      "module": "import_v2_presentation_commands",
+      "classification": "LongTaskStart",
+      "currentExecution": "sync",
+      "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
+    },
+    {
+      "command": "create_task",
+      "module": "task_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "list_tasks",
+      "module": "task_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_task",
+      "module": "task_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "cancel_task",
+      "module": "task_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_task_logs",
+      "module": "task_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_task_activities",
+      "module": "task_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "remove_completed_tasks",
+      "module": "task_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "set_active_project",
+      "module": "task_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "continue_queued_workflows",
+      "module": "task_commands",
+      "classification": "LongTaskStart",
+      "currentExecution": "sync",
+      "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
+    },
+    {
+      "command": "get_workflows_overview",
+      "module": "workflow_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "prepare_workflow",
+      "module": "workflow_commands",
+      "classification": "LongTaskStart",
+      "currentExecution": "sync",
+      "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
+    },
+    {
+      "command": "start_workflow",
+      "module": "workflow_commands",
+      "classification": "LongTaskStart",
+      "currentExecution": "sync",
+      "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
+    },
+    {
+      "command": "list_workflow_runs",
+      "module": "workflow_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_workflow_run",
+      "module": "workflow_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_workflow_file_diff",
+      "module": "workflow_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "cancel_workflow_run",
+      "module": "workflow_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "undo_cancel_queued_workflow",
+      "module": "workflow_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "reorder_queued_workflow",
+      "module": "workflow_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "retry_workflow",
+      "module": "workflow_commands",
+      "classification": "LongTaskStart",
+      "currentExecution": "sync",
+      "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
+    },
+    {
+      "command": "confirm_workflow_action",
+      "module": "workflow_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "discard_workflow_result",
+      "module": "workflow_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "scan_wiki",
+      "module": "wiki_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "async",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "read_wiki_page",
+      "module": "wiki_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "async",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "read_wiki_asset",
+      "module": "wiki_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "async",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "save_wiki_page",
+      "module": "wiki_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "create_wiki_page",
+      "module": "wiki_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "rename_wiki_page",
+      "module": "wiki_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "request_delete_wiki_page",
+      "module": "wiki_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_source_detail",
+      "module": "source_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "async",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "list_source_versions",
+      "module": "source_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "preview_source_update",
+      "module": "source_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "apply_source_candidate",
+      "module": "source_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "discard_source_candidate",
+      "module": "source_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "restore_source_version",
+      "module": "source_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "start_source_ai_organize",
+      "module": "source_commands",
+      "classification": "ProcessOrMedia",
+      "currentExecution": "sync",
+      "rationale": "Touches an external process, Agent, capability, OCR/ASR/media runner, shell integration, or application restart boundary."
+    },
+    {
+      "command": "retry_source_ai_organize",
+      "module": "source_commands",
+      "classification": "ProcessOrMedia",
+      "currentExecution": "sync",
+      "rationale": "Touches an external process, Agent, capability, OCR/ASR/media runner, shell integration, or application restart boundary."
+    },
+    {
+      "command": "reprocess_source_ocr",
+      "module": "source_commands",
+      "classification": "ProcessOrMedia",
+      "currentExecution": "sync",
+      "rationale": "Touches an external process, Agent, capability, OCR/ASR/media runner, shell integration, or application restart boundary."
+    },
+    {
+      "command": "reprocess_source_asr",
+      "module": "source_commands",
+      "classification": "ProcessOrMedia",
+      "currentExecution": "sync",
+      "rationale": "Touches an external process, Agent, capability, OCR/ASR/media runner, shell integration, or application restart boundary."
+    },
+    {
+      "command": "reprocess_source_subtitle",
+      "module": "source_commands",
+      "classification": "ProcessOrMedia",
+      "currentExecution": "sync",
+      "rationale": "Touches an external process, Agent, capability, OCR/ASR/media runner, shell integration, or application restart boundary."
+    },
+    {
+      "command": "refresh_source",
+      "module": "source_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "preview_move_source",
+      "module": "source_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "move_source",
+      "module": "source_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "preview_delete_source",
+      "module": "source_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "delete_source",
+      "module": "source_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "toggle_bookmark",
+      "module": "wiki_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "search_wiki",
+      "module": "search_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_settings",
+      "module": "settings_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "save_settings",
+      "module": "settings_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_global_ui_preferences",
+      "module": "settings_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "save_global_ui_preferences",
+      "module": "settings_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_provider_secret_status",
+      "module": "settings_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_chat_convenience_authorization",
+      "module": "settings_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "set_chat_convenience_authorization",
+      "module": "settings_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "revoke_all_chat_convenience_authorizations",
+      "module": "settings_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_graph",
+      "module": "graph_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "build_graph",
+      "module": "graph_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "save_graph_layout",
+      "module": "graph_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "create_chat_session",
+      "module": "chat_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "list_chat_sessions",
+      "module": "chat_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "load_chat_session",
+      "module": "chat_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "rename_chat_session",
+      "module": "chat_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "delete_chat_session",
+      "module": "chat_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "send_chat_message",
+      "module": "chat_commands",
+      "classification": "LongTaskStart",
+      "currentExecution": "sync",
+      "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
+    },
+    {
+      "command": "save_answer_to_wiki",
+      "module": "chat_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "resolve_chat_convenience_edit",
+      "module": "chat_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "rollback_last_chat_convenience_edit",
+      "module": "chat_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "run_local_lint",
+      "module": "lint_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "start_deep_lint",
+      "module": "lint_commands",
+      "classification": "LongTaskStart",
+      "currentExecution": "sync",
+      "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
+    },
+    {
+      "command": "prepare_agent_lint_repair",
+      "module": "lint_commands",
+      "classification": "LongTaskStart",
+      "currentExecution": "sync",
+      "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
+    },
+    {
+      "command": "confirm_agent_lint_repair_start",
+      "module": "lint_commands",
+      "classification": "LongTaskStart",
+      "currentExecution": "sync",
+      "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
+    },
+    {
+      "command": "cancel_agent_lint_repair_preparation",
+      "module": "lint_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "rollback_agent_lint_repair",
+      "module": "lint_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_deep_lint_report",
+      "module": "lint_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "list_lint_history",
+      "module": "lint_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "read_lint_history_report",
+      "module": "lint_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "apply_lint_fix",
+      "module": "lint_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "apply_lint_fixes",
+      "module": "lint_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "add_lint_ignore",
+      "module": "lint_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "remove_lint_ignore",
+      "module": "lint_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "list_lint_ignores",
+      "module": "lint_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "start_export",
+      "module": "export_commands",
+      "classification": "LongTaskStart",
+      "currentExecution": "sync",
+      "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
+    },
+    {
+      "command": "get_export_restricted_content_status",
+      "module": "export_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "regenerate_export",
+      "module": "export_commands",
+      "classification": "LongTaskStart",
+      "currentExecution": "sync",
+      "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
+    },
+    {
+      "command": "list_exports",
+      "module": "export_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "toggle_export_bookmark",
+      "module": "export_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "sync",
+      "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "read_export_preview",
+      "module": "export_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "sync",
+      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "open_export_in_browser",
+      "module": "export_commands",
+      "classification": "ProcessOrMedia",
+      "currentExecution": "sync",
+      "rationale": "Touches an external process, Agent, capability, OCR/ASR/media runner, shell integration, or application restart boundary."
+    },
+    {
+      "command": "open_export_folder",
+      "module": "export_commands",
+      "classification": "ProcessOrMedia",
+      "currentExecution": "sync",
+      "rationale": "Touches an external process, Agent, capability, OCR/ASR/media runner, shell integration, or application restart boundary."
+    }
+  ]
+}
