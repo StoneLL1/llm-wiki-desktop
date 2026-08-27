@@ -54,3 +54,20 @@ aggregate acceptance admits only ordinary files and keeps large CSV/XLSX (or
 an XLS with an incomplete output estimate) pending. Both stages retain the
 same scan token and are revalidated under the backend project-write authority
 critical section. A discovery hard-limit error never becomes a partial scan.
+
+The frontend keeps the same bounded shape after bootstrap. Import items are
+normalized by item ID, Queue ordering is held as page-scoped ID arrays, and
+overview counts are updated incrementally instead of rebuilding a full-session
+view model for each progress patch. At most the current, previous, and next
+200-item pages are retained for the paged path. The Queue mounts a virtual
+window (hard ceiling 80 rows), preserves a filter-scoped top-item scroll anchor,
+and reports global `aria-posinset` / `aria-setsize` values. Recycled focused
+rows transfer focus to the list with a visible active descendant, while the
+single aggregate live region is coalesced to no more than two updates per
+second.
+
+Task reconciliation follows pending task IDs and the normalized task-to-item
+index; it does not cross-scan the complete task and item collections. History
+page 1 is requested only while the History section is active. A commit marks
+the cached page stale, and an inactive History section performs no hidden
+prefetch; a remount may show its scoped cached page while revalidating it.

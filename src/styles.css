@@ -4201,10 +4201,19 @@ select:focus-visible {
   outline-offset: 2px;
 }
 .import-v2-queue__list {
+  position: relative;
+  height: min(56vh, 560px);
+  min-height: 216px;
   min-width: 0;
-  overflow: hidden;
+  overflow-y: auto;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
+}
+.import-v2-queue__virtual-spacer { position: relative; min-width: 0; }
+.import-v2-queue__virtual-window {
+  position: absolute;
+  inset: 0 0 auto;
+  min-width: 0;
 }
 .import-v2-item-status {
   min-width: 110px;
@@ -4228,6 +4237,8 @@ select:focus-visible {
 }
 .import-v2-queue__row {
   display: grid;
+  box-sizing: border-box;
+  height: 72px;
   min-width: 0;
   grid-template-columns: minmax(0, 1fr) minmax(110px, .4fr) auto;
   align-items: center;
@@ -4235,6 +4246,7 @@ select:focus-visible {
   border-bottom: 1px solid var(--border-subtle);
   padding: var(--sp-3) var(--sp-4);
   cursor: pointer;
+  overflow: hidden;
 }
 .import-v2-queue__row:last-child { border-bottom: 0; }
 .import-v2-queue__row:hover,

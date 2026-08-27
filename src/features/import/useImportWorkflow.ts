@@ -13,7 +13,6 @@ import {
 import { useToastStore } from "../../stores/toastStore";
 import type { CommitItemDecision, ImportItemResolution, ImportRecoveryAction, ImportSession, MediaSaveMode } from "../../types/importV2";
 import type { ProjectSummary } from "../../types/project";
-import { selectImportViewModel } from "./importViewModel";
 import type { AsrAuthorizationOptions, ImportWorkflow } from "./importWorkflow";
 import type { AppView } from "../../stores/navigationStore";
 import { importWorkflowErrorMessage as errorMessage, useImportSessionScope } from "./useImportSessionScope";
@@ -57,6 +56,12 @@ export function useImportWorkflow(
   const inactiveSnapshotRef = useRef({
     session: useImportStore.getState().session,
     overview: useImportStore.getState().overview,
+    counts: useImportStore.getState().counts,
+    progress: useImportStore.getState().progress,
+    itemPageTotal: useImportStore.getState().itemPageTotal,
+    loadedItemStartIndex: useImportStore.getState().loadedItemStartIndex,
+    operationCountsByBatchId: useImportStore.getState().operationCountsByBatchId,
+    operationFailedItemIdsByBatchId: useImportStore.getState().operationFailedItemIdsByBatchId,
     nextItemCursor: useImportStore.getState().nextItemCursor,
     completion: useImportStore.getState().completion,
     selectedItemId: useImportStore.getState().selectedItemId,
@@ -86,6 +91,12 @@ export function useImportWorkflow(
   } = useImportSessionScope(project, activeView);
   const session = useImportStore((state) => importActive ? state.session : inactiveSnapshotRef.current.session);
   const overview = useImportStore((state) => importActive ? state.overview : inactiveSnapshotRef.current.overview);
+  const counts = useImportStore((state) => importActive ? state.counts : inactiveSnapshotRef.current.counts);
+  const progress = useImportStore((state) => importActive ? state.progress : inactiveSnapshotRef.current.progress);
+  const itemPageTotal = useImportStore((state) => importActive ? state.itemPageTotal : inactiveSnapshotRef.current.itemPageTotal);
+  const loadedItemStartIndex = useImportStore((state) => importActive ? state.loadedItemStartIndex : inactiveSnapshotRef.current.loadedItemStartIndex);
+  const operationCountsByBatchId = useImportStore((state) => importActive ? state.operationCountsByBatchId : inactiveSnapshotRef.current.operationCountsByBatchId);
+  const operationFailedItemIdsByBatchId = useImportStore((state) => importActive ? state.operationFailedItemIdsByBatchId : inactiveSnapshotRef.current.operationFailedItemIdsByBatchId);
   const nextItemCursor = useImportStore((state) => importActive ? state.nextItemCursor : inactiveSnapshotRef.current.nextItemCursor);
   const completion = useImportStore((state) => importActive ? state.completion : inactiveSnapshotRef.current.completion);
   const selectedItemId = useImportStore((state) => importActive ? state.selectedItemId : inactiveSnapshotRef.current.selectedItemId);
@@ -111,6 +122,12 @@ export function useImportWorkflow(
     inactiveSnapshotRef.current = {
       session,
       overview,
+      counts,
+      progress,
+      itemPageTotal,
+      loadedItemStartIndex,
+      operationCountsByBatchId,
+      operationFailedItemIdsByBatchId,
       nextItemCursor,
       completion,
       selectedItemId,
@@ -137,6 +154,7 @@ export function useImportWorkflow(
   const sourceAdditionTailsRef = useRef(new Map<string, Promise<void>>());
   const sourceAdditionRevisionRef = useRef(0);
   const filterRequestRevisionRef = useRef(0);
+  const loadMoreRequestRef = useRef<string | null>(null);
   const [remoteMediaRetentionPlan, setRemoteMediaRetentionPlan] = useState<RemoteMediaRetentionPlan | null>(null);
   const [restrictedCommitDecisions, setRestrictedCommitDecisions] = useState<CommitItemDecision[] | null>(null);
   const [isLoadingMoreItems, setIsLoadingMoreItems] = useState(false);
@@ -160,6 +178,8 @@ export function useImportWorkflow(
     sessionEpoch,
     session,
     taskList,
+    operationCountsByBatchId,
+    operationFailedItemIdsByBatchId,
     tasksHydrated,
     taskLauncher,
     isScopeCurrent,
@@ -181,6 +201,7 @@ export function useImportWorkflow(
     acceptDiscovery,
     dismissDiscovery,
   } = useImportTaskCoordinator({
+    importActive,
     projectId,
     rootPath,
     projectKey,
@@ -274,7 +295,7 @@ export function useImportWorkflow(
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey) return;
     const epoch = current.sessionEpoch;
-    const existingItemIds = new Set(current.session.items.map((item) => item.itemId));
+    const existingItemIds = new Set(current.knownItemIds);
     const mutationKey = `add-paths:${projectKey}:${epoch}:${++sourceAdditionRevisionRef.current}`;
     nextSessionMutationRevision();
     current.beginMutation(mutationKey);
@@ -303,7 +324,7 @@ export function useImportWorkflow(
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey) return;
     const epoch = current.sessionEpoch;
-    const existingItemIds = new Set(current.session.items.map((item) => item.itemId));
+    const existingItemIds = new Set(current.knownItemIds);
     const mutationKey = `add-text:${projectKey}:${epoch}`;
     if (current.mutationKeys.has(mutationKey)) return;
     const mutationRevision = nextSessionMutationRevision();
@@ -352,7 +373,7 @@ export function useImportWorkflow(
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey) return;
     const epoch = current.sessionEpoch;
-    const existingItemIds = new Set(current.session.items.map((item) => item.itemId));
+    const existingItemIds = new Set(current.knownItemIds);
     const mutationKey = `add-url:${projectKey}:${epoch}`;
     if (current.mutationKeys.has(mutationKey)) return;
     const mutationRevision = nextSessionMutationRevision();
@@ -403,7 +424,7 @@ export function useImportWorkflow(
     const refs = [...new Set(itemRefs)];
     if (!pending || refs.length === 0 || !current.session || current.projectKey !== projectKey) return;
     const epoch = current.sessionEpoch;
-    const existingItemIds = new Set(current.session.items.map((item) => item.itemId));
+    const existingItemIds = new Set(current.knownItemIds);
     const mutationKey = `add-collection:${projectKey}:${epoch}`;
     if (current.mutationKeys.has(mutationKey)) return;
     const mutationRevision = nextSessionMutationRevision();
@@ -476,13 +497,13 @@ export function useImportWorkflow(
 
   const setItemSelected = useCallback(async (itemId: string, selected: boolean) => {
     const current = useImportStore.getState();
-    const originalItem = current.session?.items.find((item) => item.itemId === itemId);
+    const originalItem = current.itemById[itemId];
     if (!current.session || !originalItem || current.projectKey !== projectKey) return;
     const epoch = current.sessionEpoch;
     const acceptedIds = beginPendingItems([itemId], projectKey, epoch);
     if (acceptedIds.length === 0) return;
     const mutationRevision = nextSessionMutationRevision();
-    useImportStore.getState().replaceItem(projectKey, { ...originalItem, selected }, epoch);
+    useImportStore.getState().replaceItemLocal(projectKey, { ...originalItem, selected }, epoch);
     try {
       const nextSession = await importV2Api.setSelection({ projectId, projectRootPath: rootPath, sessionId: current.session.sessionId, itemId, selected });
       if (await reconcileMutationSession(nextSession, projectKey, epoch, mutationRevision, current.session.sessionId)) {
@@ -491,7 +512,7 @@ export function useImportWorkflow(
     } catch (error) {
       if (isScopeCurrent(projectKey, epoch, current.session.sessionId)) {
         if (isSessionMutationRevisionCurrent(mutationRevision)) {
-          useImportStore.getState().replaceItem(projectKey, originalItem, epoch);
+          useImportStore.getState().replaceItemLocal(projectKey, originalItem, epoch);
         } else {
           void refreshForScope(projectKey, epoch, current.session.sessionId).catch(() => undefined);
         }
@@ -505,7 +526,7 @@ export function useImportWorkflow(
   const startItems = useCallback(async (itemIds: readonly string[], recoveryAction: ImportRecoveryAction | null = null) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey) return;
-    const ids = [...new Set(itemIds)].filter((id) => current.session?.items.some((item) => item.itemId === id));
+    const ids = [...new Set(itemIds)].filter((id) => current.knownItemIds.has(id));
     if (ids.length === 0) return;
     const epoch = current.sessionEpoch;
     const acceptedIds = beginPendingItems(ids, projectKey, epoch);
@@ -585,7 +606,7 @@ export function useImportWorkflow(
 
   const skipItem = useCallback(async (itemId: string) => {
     const current = useImportStore.getState();
-    const item = current.session?.items.find((candidate) => candidate.itemId === itemId);
+    const item = current.itemById[itemId];
     if (!item || current.projectKey !== projectKey) return;
     const epoch = current.sessionEpoch;
     const acceptedIds = beginPendingItems([itemId], projectKey, epoch);
@@ -612,7 +633,7 @@ export function useImportWorkflow(
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey) return;
     const ids = [...new Set(itemIds)].filter((itemId) =>
-      current.session?.items.some((item) => item.itemId === itemId));
+      current.knownItemIds.has(itemId));
     if (ids.length === 0) return;
     const epoch = current.sessionEpoch;
     nextSessionMutationRevision();
@@ -645,7 +666,7 @@ export function useImportWorkflow(
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey) return;
     const ids = [...new Set(itemIds)].filter((itemId) =>
-      current.session?.items.some((item) => item.itemId === itemId));
+      current.knownItemIds.has(itemId));
     if (ids.length === 0) return;
     const epoch = current.sessionEpoch;
     nextSessionMutationRevision();
@@ -673,7 +694,7 @@ export function useImportWorkflow(
 
   const selectSubtitle = useCallback(async (itemId: string, fileName: string) => {
     const current = useImportStore.getState();
-    if (!current.session || current.projectKey !== projectKey || !current.session.items.some((item) => item.itemId === itemId)) return;
+    if (!current.session || current.projectKey !== projectKey || !current.knownItemIds.has(itemId)) return;
     const epoch = current.sessionEpoch;
     nextSessionMutationRevision();
     try {
@@ -694,7 +715,7 @@ export function useImportWorkflow(
 
   const cancelItem = useCallback(async (itemId: string) => {
     const current = useImportStore.getState();
-    const item = current.session?.items.find((candidate) => candidate.itemId === itemId);
+    const item = current.itemById[itemId];
     if (!item || current.projectKey !== projectKey) return;
     const epoch = current.sessionEpoch;
     const acceptedIds = beginPendingItems([itemId], projectKey, epoch);
@@ -951,10 +972,7 @@ export function useImportWorkflow(
     [projectId, rootPath],
   );
 
-  const { visibleItems, counts, progress } = useMemo(
-    () => selectImportViewModel(session, filter, overview),
-    [filter, overview, session],
-  );
+  const visibleItems = session?.items ?? [];
   const selectItem = useImportStore((state) => state.selectItem);
   const setStoreFilter = useImportStore((state) => state.setFilter);
   const setFilter = useCallback((nextFilter: typeof filter) => {
@@ -997,20 +1015,34 @@ export function useImportWorkflow(
 
   const loadMoreItems = useCallback(async () => {
     const current = useImportStore.getState();
-    if (!current.session || !current.nextItemCursor || current.projectKey !== projectKey || isLoadingMoreItems) return;
+    if (!current.session || !current.nextItemCursor || !current.overview || current.projectKey !== projectKey || loadMoreRequestRef.current) return;
     const epoch = current.sessionEpoch;
     const sessionId = current.session.sessionId;
+    const filter = current.filter;
+    const cursor = current.nextItemCursor;
+    const snapshotRevision = current.overview.semanticRevision;
+    const filterRevision = filterRequestRevisionRef.current;
+    const requestKey = `${projectKey}\0${epoch}\0${sessionId}\0${filter}\0${cursor}\0${snapshotRevision}`;
+    loadMoreRequestRef.current = requestKey;
     setIsLoadingMoreItems(true);
     try {
       const page = await importV2Api.listSessionItems({
         projectId,
         projectRootPath: rootPath,
         sessionId,
-        filter: current.filter,
-        cursor: current.nextItemCursor,
+        filter,
+        cursor,
         limit: 200,
       });
-      if (!isScopeCurrent(projectKey, epoch, sessionId)) return;
+      const latest = useImportStore.getState();
+      if (
+        loadMoreRequestRef.current !== requestKey
+        || filterRequestRevisionRef.current !== filterRevision
+        || !isScopeCurrent(projectKey, epoch, sessionId)
+        || latest.filter !== filter
+        || latest.nextItemCursor !== cursor
+        || latest.overview?.semanticRevision !== snapshotRevision
+      ) return;
       if (!useImportStore.getState().appendItemPage(projectKey, page, epoch)) {
         await refreshForScope(projectKey, epoch, sessionId);
       }
@@ -1023,9 +1055,12 @@ export function useImportWorkflow(
         }
       }
     } finally {
-      if (isScopeCurrent(projectKey, epoch, sessionId)) setIsLoadingMoreItems(false);
+      if (loadMoreRequestRef.current === requestKey) {
+        loadMoreRequestRef.current = null;
+        if (isScopeCurrent(projectKey, epoch, sessionId)) setIsLoadingMoreItems(false);
+      }
     }
-  }, [isLoadingMoreItems, isScopeCurrent, projectId, projectKey, pushToast, refreshForScope, rootPath, t]);
+  }, [isScopeCurrent, projectId, projectKey, pushToast, refreshForScope, rootPath, t]);
 
   const requestClipboard = useCallback(async (content: string) => {
     if (!content.trim()) return;
@@ -1084,6 +1119,8 @@ export function useImportWorkflow(
     retryBootstrap,
     bootstrapState,
     visibleItems,
+    totalItems: itemPageTotal,
+    itemIndexOffset: loadedItemStartIndex,
     counts,
     progress,
     discoveryTask,
