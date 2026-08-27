@@ -48,6 +48,9 @@ export async function inspectCommandExecution(repositoryRoot) {
     .map((entry) => entry.command)
     .filter((command, index, commands) => commands.indexOf(command) !== index);
   const invalidClasses = inventory.commands.filter((entry) => !COMMAND_CLASSES.includes(entry.classification));
+  const missingRationales = inventory.commands.filter(
+    (entry) => typeof entry.rationale !== "string" || entry.rationale.trim().length === 0,
+  );
   const signatures = [];
   for (const entry of registered) {
     signatures.push({ ...entry, execution: await commandSignature(repositoryRoot, entry) });
@@ -67,6 +70,7 @@ export async function inspectCommandExecution(repositoryRoot) {
     stale,
     duplicates,
     invalidClasses,
+    missingRationales,
     mismatchedModules,
     currentExecutionMismatches,
     counts: {
@@ -86,6 +90,7 @@ export function assertInventoryComplete(result) {
     ["stale inventory commands", result.stale],
     ["duplicate inventory commands", result.duplicates],
     ["invalid command classes", result.invalidClasses],
+    ["commands without an explicit rationale", result.missingRationales],
     ["module mismatches", result.mismatchedModules],
     ["signature mismatches", result.currentExecutionMismatches],
   ].filter(([, entries]) => entries.length > 0);

@@ -45,8 +45,8 @@ use crate::services::import_v2::history_reader::read_v2_history_records;
 use crate::services::import_v2::migration::{
     LegacyHistoryAdapter, MigrationService, REQUIRED_IMPORT_V2_CONTRACT,
 };
+use crate::services::BlockingWorkClass;
 
-#[tauri::command]
 pub fn get_import_workbench_preferences_v2(
     state: State<'_, AppState>,
     request: ImportWorkbenchPreferencesRequest,
@@ -65,7 +65,6 @@ pub fn get_import_workbench_preferences_v2(
     Ok(preferences)
 }
 
-#[tauri::command]
 pub fn save_import_workbench_preferences_v2(
     state: State<'_, AppState>,
     request: SaveImportWorkbenchPreferencesRequest,
@@ -102,7 +101,6 @@ fn validate_workbench_preferences(
     Ok(())
 }
 
-#[tauri::command]
 pub fn get_import_preview_content_v2(
     state: State<'_, AppState>,
     request: GetImportPreviewContentV2Request,
@@ -491,7 +489,6 @@ fn read_history_markdown(path: &Path, expected_hash: &str) -> Result<String, Bac
     })
 }
 
-#[tauri::command]
 pub fn get_import_frontend_readiness_v2(
     state: State<'_, AppState>,
     request: GetImportFrontendReadinessV2Request,
@@ -684,7 +681,6 @@ fn platform_readiness(
     vec![http, wechat, zhihu, bilibili, xiaohongshu, douyin, x]
 }
 
-#[tauri::command]
 pub fn list_import_history_v2(
     state: State<'_, AppState>,
     request: ListImportHistoryV2Request,
@@ -1013,7 +1009,6 @@ fn history_status(batch: &ImportBatchResult) -> &'static str {
     "failed"
 }
 
-#[tauri::command]
 pub fn get_import_capability_requirement_v2(
     state: State<'_, AppState>,
     request: GetImportCapabilityRequirementV2Request,
@@ -1064,7 +1059,6 @@ pub fn get_import_capability_requirement_v2(
     })
 }
 
-#[tauri::command]
 pub fn get_import_asr_enablement_plan_v2(
     state: State<'_, AppState>,
     request: GetImportAsrEnablementPlanV2Request,
@@ -1160,7 +1154,6 @@ pub fn get_import_asr_enablement_plan_v2(
     })
 }
 
-#[tauri::command]
 pub fn install_import_capability_v2(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -1325,6 +1318,7 @@ pub fn install_import_capability_v2(
             return;
         };
         let install_outcome = install_catalog_entry(
+            &state.blocking_work,
             &install_root,
             &entry,
             &task_id,
@@ -1344,7 +1338,7 @@ pub fn install_import_capability_v2(
             },
         )
         .await;
-        let mut install_outcome = match install_outcome {
+        let install_outcome = match install_outcome {
             Ok(outcome) => outcome,
             Err(error) => {
                 finish_capability_install_error(&state, &task_id, error);
@@ -1352,7 +1346,14 @@ pub fn install_import_capability_v2(
             }
         };
         if token.is_cancelled() {
-            let _ = install_outcome.rollback(&install_root, &entry);
+            let rollback_root = install_root.clone();
+            let rollback_entry = entry.clone();
+            let _ = state
+                .blocking_work
+                .run(BlockingWorkClass::HeavyIo, move || {
+                    install_outcome.rollback(&rollback_root, &rollback_entry)
+                })
+                .await;
             let _ = state
                 .task_service
                 .transition_status(&task_id, TaskStatus::Cancelled);
@@ -1364,31 +1365,42 @@ pub fn install_import_capability_v2(
             Some(entry.compressed_bytes),
             Some("capability.health_check".into()),
         );
-        let probed_pack = match state.import_capability_runtime.probe_version(
-            &install_root,
-            &entry.capability_id,
-            &entry.version,
-            &requested_route,
-            &token,
-        ) {
-            Ok(pack) => pack,
-            Err(error) => {
-                let _ = install_outcome.rollback(&install_root, &entry);
-                finish_capability_install_error(&state, &task_id, error);
-                return;
-            }
-        };
-        if let Err(error) = install_outcome.activate(&install_root) {
-            let _ = install_outcome.rollback(&install_root, &entry);
-            finish_capability_install_error(&state, &task_id, error);
-            return;
-        }
-        if let Err(error) = state.import_capability_runtime.activate_probed_version(
-            probed_pack,
-            &entry.capability_id,
-            &requested_route,
-            &state.import_v2_service,
-        ) {
+        let health_app = app.clone();
+        let health_root = install_root.clone();
+        let health_entry = entry.clone();
+        let health_route = requested_route.clone();
+        let health_token = token.clone();
+        let health_result = state
+            .blocking_work
+            .run_cancellable(BlockingWorkClass::HeavyIo, token.clone(), move || {
+                let state = health_app.state::<AppState>();
+                let mut install_outcome = install_outcome;
+                let probed_pack = match state.import_capability_runtime.probe_version(
+                    &health_root,
+                    &health_entry.capability_id,
+                    &health_entry.version,
+                    &health_route,
+                    &health_token,
+                ) {
+                    Ok(pack) => pack,
+                    Err(error) => {
+                        let _ = install_outcome.rollback(&health_root, &health_entry);
+                        return Err(error);
+                    }
+                };
+                if let Err(error) = install_outcome.activate(&health_root) {
+                    let _ = install_outcome.rollback(&health_root, &health_entry);
+                    return Err(error);
+                }
+                state.import_capability_runtime.activate_probed_version(
+                    probed_pack,
+                    &health_entry.capability_id,
+                    &health_route,
+                    &state.import_v2_service,
+                )
+            })
+            .await;
+        if let Err(error) = health_result {
             finish_capability_install_error(&state, &task_id, error);
             return;
         }
@@ -1399,18 +1411,28 @@ pub fn install_import_capability_v2(
             return;
         }
         if let Some(profile) = asr_profile.clone() {
-            if let Err(error) = crate::commands::import_v2_web_commands::authorize_local_asr(
-                &state,
-                AuthorizeLocalAsrV2Request {
-                    project_id: project_id.clone(),
-                    project_root_path: project_root_path.clone(),
-                    session_id: session_id.clone(),
-                    item_id: item_id.clone(),
-                    profile,
-                    language: recognition_language.clone(),
-                },
-                Some(&expected_item),
-            ) {
+            let authorization_app = app.clone();
+            let authorization_expected_item = expected_item.clone();
+            let authorization_request = AuthorizeLocalAsrV2Request {
+                project_id: project_id.clone(),
+                project_root_path: project_root_path.clone(),
+                session_id: session_id.clone(),
+                item_id: item_id.clone(),
+                profile,
+                language: recognition_language.clone(),
+            };
+            let authorization_result = state
+                .blocking_work
+                .run_cancellable(BlockingWorkClass::HeavyIo, token.clone(), move || {
+                    let state = authorization_app.state::<AppState>();
+                    crate::commands::import_v2_web_commands::authorize_local_asr(
+                        &state,
+                        authorization_request,
+                        Some(&authorization_expected_item),
+                    )
+                })
+                .await;
+            if let Err(error) = authorization_result {
                 if error.code.starts_with("PROJECT_") {
                     let _ = state.task_service.complete_running_with_result(
                         &task_id,
@@ -1435,17 +1457,25 @@ pub fn install_import_capability_v2(
         } else {
             (entry.capability_id == "ocr-cjk-accurate").then_some(ImportRecoveryAction::EnableOcr)
         };
-        let resume_result = state.with_current_project_write_access(
-            &project_id,
-            &project_root_path,
-            |permit, context| {
+        let resume_app = app.clone();
+        let resume_token = token.clone();
+        let continuation_entry = entry.clone();
+        let continuation_task_id = task_id.clone();
+        let resume_result = state
+            .blocking_work
+            .run_cancellable(BlockingWorkClass::HeavyIo, token.clone(), move || {
+                let state = resume_app.state::<AppState>();
+                state.with_current_project_write_access(
+                    &project_id,
+                    &project_root_path,
+                    |permit, context| {
                 let loaded_session = state.import_v2_service.load_session(
                     context,
                     &state.file_store,
                     &session_id,
                 )?;
                 let asr_capability = matches!(
-                    entry.capability_id.as_str(),
+                    continuation_entry.capability_id.as_str(),
                     "asr-sensevoice-small" | "asr-whisper"
                 );
                 let current_item = loaded_session
@@ -1458,7 +1488,7 @@ pub fn install_import_capability_v2(
                         .map(|(_, route, _)| route)
                         .unwrap_or("media.asr");
                     let same_capability = required.is_some_and(|(capability_id, _, _)| {
-                        capability_id == entry.capability_id.as_str()
+                        capability_id == continuation_entry.capability_id.as_str()
                     }) || (asr_capability
                         && candidate.issue.as_ref().is_some_and(|issue| {
                             issue
@@ -1470,18 +1500,22 @@ pub fn install_import_capability_v2(
                         }));
                     same_capability
                         && candidate.status == ImportItemStatus::WaitingCapability
-                        && capability_requirement_revision(candidate, &entry.capability_id, route)
+                        && capability_requirement_revision(
+                            candidate,
+                            &continuation_entry.capability_id,
+                            route,
+                        )
                             == requirement_revision
                 });
                 if !still_waiting {
                     state
                         .task_service
                         .complete_running_with_result(
-                            &task_id,
+                            &continuation_task_id,
                             TaskResult {
                                 summary: format!(
                                     "Installed {}; the original import item changed, so no UI continuation was started.",
-                                    entry.capability_id
+                                    continuation_entry.capability_id
                                 ),
                                 affected_paths: Vec::new(),
                                 reference: None,
@@ -1491,7 +1525,7 @@ pub fn install_import_capability_v2(
                         .map_err(|error| presentation_error("IMPORT_V2_TASK_FAILED", &error))?;
                     return Ok(());
                 }
-                if token.is_cancelled() {
+                if resume_token.is_cancelled() {
                     return Err(presentation_error(
                         "TASK_CANCELLED",
                         "Capability installation was cancelled before import continuation.",
@@ -1501,7 +1535,7 @@ pub fn install_import_capability_v2(
                     .cloned()
                     .expect("the continuation item was verified above");
                 let resume_tasks = start_import_items_for_state(
-                    app.clone(),
+                    resume_app.clone(),
                     &state,
                     permit,
                     StartImportItemsV2Request {
@@ -1512,9 +1546,9 @@ pub fn install_import_capability_v2(
                         recovery_action: resume_action.clone(),
                     },
                     Some(std::slice::from_ref(&expected_continuation_item)),
-                    Some(&token),
+                    Some(&resume_token),
                 )?;
-                if token.is_cancelled() {
+                if resume_token.is_cancelled() {
                     for resume_task in &resume_tasks {
                         let _ = state.task_service.cancel_task(&resume_task.id);
                     }
@@ -1526,11 +1560,11 @@ pub fn install_import_capability_v2(
                 state
                     .task_service
                     .complete_running_with_result(
-                        &task_id,
+                        &continuation_task_id,
                         TaskResult {
                             summary: format!(
                                 "Installed {} and created {} automatic resume task(s).",
-                                entry.capability_id,
+                                continuation_entry.capability_id,
                                 resume_tasks.len()
                             ),
                             affected_paths: Vec::new(),
@@ -1539,9 +1573,11 @@ pub fn install_import_capability_v2(
                         },
                     )
                     .map_err(|error| presentation_error("IMPORT_V2_TASK_FAILED", &error))?;
-                Ok(())
-            },
-        );
+                        Ok(())
+                    },
+                )
+            })
+            .await;
         if let Err(error) = resume_result {
             if error.code.starts_with("PROJECT_") {
                 let _ = state.task_service.complete_running_with_result(

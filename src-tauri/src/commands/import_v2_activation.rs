@@ -28,7 +28,6 @@ pub struct GetImportBackendActivationRequest {
     pub project_root_path: String,
 }
 
-#[tauri::command]
 pub fn activate_import_v2(
     state: State<'_, AppState>,
     request: ActivateImportV2Request,
@@ -37,20 +36,26 @@ pub fn activate_import_v2(
         &request.project_id,
         &request.project_root_path,
         |_permit, context| {
-            ImportV2ActivationService::default().activate(
-                &state.import_v2_service,
-                &state.git_service,
-                context,
-                &request.report,
-                &request.readiness,
-                &request.release_version,
-                request.confirmation,
-            )
+            let canonical_project_identity = crate::services::project_identity(&context.root)
+                .map_err(|error| BackendError::new("PROJECT_IDENTITY_FAILED", error, true, false))?
+                .canonical_identity_key;
+            state
+                .blocking_work
+                .run_project_git_blocking(canonical_project_identity, None, || {
+                    ImportV2ActivationService::default().activate(
+                        &state.import_v2_service,
+                        &state.git_service,
+                        context,
+                        &request.report,
+                        &request.readiness,
+                        &request.release_version,
+                        request.confirmation,
+                    )
+                })
         },
     )
 }
 
-#[tauri::command]
 pub fn get_import_backend_activation(
     state: State<'_, AppState>,
     request: GetImportBackendActivationRequest,

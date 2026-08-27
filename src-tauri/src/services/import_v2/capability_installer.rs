@@ -10,6 +10,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::errors::BackendError;
 use crate::models::import_v2_file::CapabilityRequirement;
+use crate::services::{BlockingWorkClass, BlockingWorkCoordinator};
 use crate::tasks::task_model::CancellationToken;
 use crate::utils::safe_project_dir::BoundProjectMutationRoot;
 
@@ -162,32 +163,62 @@ fn select_catalog_entry(
 }
 
 pub async fn install_catalog_entry(
+    blocking_work: &BlockingWorkCoordinator,
     install_root: &Path,
     entry: &CapabilityCatalogEntry,
     owner_task_id: &str,
     token: &CancellationToken,
     mut progress: impl FnMut(CapabilityInstallPhase, u64, u64),
 ) -> Result<CapabilityInstallOutcome, BackendError> {
-    if !valid_catalog_entry(entry) {
-        return Err(install_error("Capability catalog entry is invalid."));
-    }
-    std::fs::create_dir_all(install_root)
-        .map_err(|_| install_error("Capability install directory is unavailable."))?;
-    let install_root = install_root
-        .canonicalize()
-        .map_err(|_| install_error("Capability install directory cannot be resolved."))?;
-    let paths = partial_paths(&install_root, entry)?;
-    let install_identity = release_identity(entry);
-    let staging_root = install_root.join(format!(".installing-{install_identity}"));
-    let release_lock = acquire_release_lock(&install_root, &install_identity, owner_task_id)?;
-    recover_pending_activation_for_release(&install_root, &install_identity, entry)?;
-    let cleanup = InstallCleanup {
-        install_root: install_root.clone(),
-        staging_root: staging_root.clone(),
-    };
-    download_archive(entry, &paths, owner_task_id, token, &mut progress).await?;
+    let preflight_root = install_root.to_path_buf();
+    let preflight_entry = entry.clone();
+    let preflight_owner = owner_task_id.to_owned();
+    let (install_root, paths, install_identity, staging_root, release_lock) = blocking_work
+        .run_cancellable(BlockingWorkClass::HeavyIo, token.clone(), move || {
+            if !valid_catalog_entry(&preflight_entry) {
+                return Err(install_error("Capability catalog entry is invalid."));
+            }
+            std::fs::create_dir_all(&preflight_root)
+                .map_err(|_| install_error("Capability install directory is unavailable."))?;
+            let install_root = preflight_root
+                .canonicalize()
+                .map_err(|_| install_error("Capability install directory cannot be resolved."))?;
+            let paths = partial_paths(&install_root, &preflight_entry)?;
+            let install_identity = release_identity(&preflight_entry);
+            let staging_root = install_root.join(format!(".installing-{install_identity}"));
+            let release_lock =
+                acquire_release_lock(&install_root, &install_identity, &preflight_owner)?;
+            recover_pending_activation_for_release(
+                &install_root,
+                &install_identity,
+                &preflight_entry,
+            )?;
+            Ok((
+                install_root,
+                paths,
+                install_identity,
+                staging_root,
+                release_lock,
+            ))
+        })
+        .await?;
+    download_archive(
+        blocking_work,
+        entry,
+        &paths,
+        owner_task_id,
+        token,
+        &mut progress,
+    )
+    .await?;
     if token.is_cancelled() {
-        remove_partial(&paths);
+        let paths_for_cleanup = paths.clone();
+        blocking_work
+            .run(BlockingWorkClass::HeavyIo, move || {
+                remove_partial(&paths_for_cleanup);
+                Ok(())
+            })
+            .await?;
         return Err(cancelled());
     }
     progress(
@@ -195,90 +226,101 @@ pub async fn install_catalog_entry(
         entry.compressed_bytes,
         entry.compressed_bytes,
     );
-    let entry_for_extract = entry.clone();
-    let archive_for_extract = paths.archive.clone();
-    let staging_for_extract = staging_root.clone();
-    let token_for_extract = token.clone();
-    tokio::task::spawn_blocking(move || {
-        extract_and_verify(
-            &archive_for_extract,
-            &staging_for_extract,
-            &entry_for_extract,
-            &token_for_extract,
-        )
-    })
-    .await
-    .map_err(|_| install_error("Capability verification worker failed."))??;
-    if token.is_cancelled() {
-        remove_partial(&paths);
-        return Err(cancelled());
-    }
-    let staged_version = staging_root.join(&entry.capability_id).join(&entry.version);
-    let final_parent = install_root.join(&entry.capability_id);
-    let final_path = final_parent.join(&entry.version);
-    ensure_destination_parent(&install_root, &final_parent)?;
     progress(
         CapabilityInstallPhase::Installing,
         entry.compressed_bytes,
         entry.compressed_bytes,
     );
-    let mut pending_activation = None;
-    let created_by_this_call = match std::fs::symlink_metadata(&final_path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || is_reparse(&metadata) || !metadata.is_dir() {
-                return Err(install_error("Capability destination is unsafe."));
-            }
-            let pack = verify_installed_root(&install_root, entry).map_err(|_| {
-                install_error("Capability version collides with a different signed release.")
-            })?;
-            restore_executable_permissions(&pack)?;
-            false
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let pending_path = pending_activation_path(&install_root, &install_identity);
-            write_pending_activation(
-                &install_root,
-                &pending_path,
-                &PendingActivation {
-                    schema_version: 1,
-                    identity: install_identity.clone(),
-                    capability_id: entry.capability_id.clone(),
-                    version: entry.version.clone(),
-                    owner_task_id: owner_task_id.to_owned(),
-                },
+    let install_entry = entry.clone();
+    let install_owner = owner_task_id.to_owned();
+    let install_token = token.clone();
+    blocking_work
+        .run_cancellable(BlockingWorkClass::HeavyIo, token.clone(), move || {
+            let cleanup = InstallCleanup {
+                install_root: install_root.clone(),
+                staging_root: staging_root.clone(),
+            };
+            extract_and_verify(
+                &paths.archive,
+                &staging_root,
+                &install_entry,
+                &install_token,
             )?;
-            pending_activation = Some(pending_path.clone());
-            let source = BoundProjectMutationRoot::bind(&install_root, &staged_version)
-                .map_err(|_| install_error("Capability staging directory is unsafe."))?;
-            let destination = BoundProjectMutationRoot::bind(&install_root, &final_path)
-                .map_err(|_| install_error("Capability destination is unsafe."))?;
-            if source
-                .rename_directory_to_no_replace(&staged_version, &destination, &final_path)
-                .is_err()
-            {
-                let _ = remove_pending_activation(&install_root, &pending_path);
-                return Err(install_error(
-                    "Capability could not be installed atomically.",
-                ));
+            if install_token.is_cancelled() {
+                remove_partial(&paths);
+                return Err(cancelled());
             }
-            let post_install = verify_installed_root(&install_root, entry)
-                .and_then(|pack| restore_executable_permissions(&pack));
-            if let Err(error) = post_install {
-                let _ = rollback_installed_directory(&install_root, &final_path);
-                let _ = remove_pending_activation(&install_root, &pending_path);
-                return Err(error);
-            }
-            true
-        }
-        Err(_) => return Err(install_error("Capability destination cannot be inspected.")),
-    };
-    remove_partial(&paths);
-    drop(cleanup);
-    Ok(CapabilityInstallOutcome {
-        created_by_this_call,
-        release_lock,
-        pending_activation,
-    })
+            let staged_version = staging_root
+                .join(&install_entry.capability_id)
+                .join(&install_entry.version);
+            let final_parent = install_root.join(&install_entry.capability_id);
+            let final_path = final_parent.join(&install_entry.version);
+            ensure_destination_parent(&install_root, &final_parent)?;
+            let mut pending_activation = None;
+            let created_by_this_call = match std::fs::symlink_metadata(&final_path) {
+                Ok(metadata) => {
+                    if metadata.file_type().is_symlink()
+                        || is_reparse(&metadata)
+                        || !metadata.is_dir()
+                    {
+                        return Err(install_error("Capability destination is unsafe."));
+                    }
+                    let pack =
+                        verify_installed_root(&install_root, &install_entry).map_err(|_| {
+                            install_error(
+                                "Capability version collides with a different signed release.",
+                            )
+                        })?;
+                    restore_executable_permissions(&pack)?;
+                    false
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let pending_path = pending_activation_path(&install_root, &install_identity);
+                    write_pending_activation(
+                        &install_root,
+                        &pending_path,
+                        &PendingActivation {
+                            schema_version: 1,
+                            identity: install_identity.clone(),
+                            capability_id: install_entry.capability_id.clone(),
+                            version: install_entry.version.clone(),
+                            owner_task_id: install_owner.clone(),
+                        },
+                    )?;
+                    pending_activation = Some(pending_path.clone());
+                    let source = BoundProjectMutationRoot::bind(&install_root, &staged_version)
+                        .map_err(|_| install_error("Capability staging directory is unsafe."))?;
+                    let destination = BoundProjectMutationRoot::bind(&install_root, &final_path)
+                        .map_err(|_| install_error("Capability destination is unsafe."))?;
+                    if source
+                        .rename_directory_to_no_replace(&staged_version, &destination, &final_path)
+                        .is_err()
+                    {
+                        let _ = remove_pending_activation(&install_root, &pending_path);
+                        return Err(install_error(
+                            "Capability could not be installed atomically.",
+                        ));
+                    }
+                    let post_install = verify_installed_root(&install_root, &install_entry)
+                        .and_then(|pack| restore_executable_permissions(&pack));
+                    if let Err(error) = post_install {
+                        let _ = rollback_installed_directory(&install_root, &final_path);
+                        let _ = remove_pending_activation(&install_root, &pending_path);
+                        return Err(error);
+                    }
+                    true
+                }
+                Err(_) => return Err(install_error("Capability destination cannot be inspected.")),
+            };
+            remove_partial(&paths);
+            drop(cleanup);
+            Ok(CapabilityInstallOutcome {
+                created_by_this_call,
+                release_lock,
+                pending_activation,
+            })
+        })
+        .await
 }
 
 pub struct CapabilityInstallOutcome {
@@ -342,24 +384,27 @@ pub enum CapabilityInstallPhase {
 }
 
 async fn download_archive(
+    blocking_work: &BlockingWorkCoordinator,
     entry: &CapabilityCatalogEntry,
     paths: &PartialPaths,
     owner_task_id: &str,
     token: &CancellationToken,
     progress: &mut impl FnMut(CapabilityInstallPhase, u64, u64),
 ) -> Result<(), BackendError> {
-    let result = download_archive_inner(entry, paths, owner_task_id, token, progress).await;
+    let result =
+        download_archive_inner(blocking_work, entry, paths, owner_task_id, token, progress).await;
     if result
         .as_ref()
         .err()
         .is_some_and(|error| error.code == crate::errors::IMPORT_V2_CANCELLED)
     {
-        remove_partial(paths);
+        remove_partial_background(blocking_work, paths).await?;
     }
     result
 }
 
 async fn download_archive_inner(
+    blocking_work: &BlockingWorkCoordinator,
     entry: &CapabilityCatalogEntry,
     paths: &PartialPaths,
     owner_task_id: &str,
@@ -383,10 +428,15 @@ async fn download_archive_inner(
         .parent()
         .and_then(Path::parent)
         .ok_or_else(|| install_error("Capability download path is invalid."))?;
-    let (download_binding, _) =
-        BoundProjectMutationRoot::ensure_and_bind(download_root, &paths.archive).map_err(|_| {
-            install_error("Capability download directory cannot be created safely.")
-        })?;
+    let download_root = download_root.to_path_buf();
+    let archive_for_binding = paths.archive.clone();
+    let (download_binding, _) = blocking_work
+        .run_cancellable(BlockingWorkClass::HeavyIo, token.clone(), move || {
+            BoundProjectMutationRoot::ensure_and_bind(&download_root, &archive_for_binding).map_err(
+                |_| install_error("Capability download directory cannot be created safely."),
+            )
+        })
+        .await?;
     let binding_for_resume = download_binding
         .try_clone()
         .map_err(|_| install_error("Capability partial cannot be pinned."))?;
@@ -394,28 +444,32 @@ async fn download_archive_inner(
     let entry_for_resume = entry.clone();
     let owner_for_resume = owner_task_id.to_owned();
     let token_for_resume = token.clone();
-    let (mut metadata, mut hasher) = tokio::task::spawn_blocking(move || {
-        load_verified_partial(
-            &binding_for_resume,
-            &paths_for_resume,
-            &entry_for_resume,
-            &owner_for_resume,
-            &token_for_resume,
-        )
-    })
-    .await
-    .map_err(|_| install_error("Capability partial verification worker failed."))??;
+    let (mut metadata, mut hasher) = blocking_work
+        .run_cancellable(BlockingWorkClass::HeavyIo, token.clone(), move || {
+            load_verified_partial(
+                &binding_for_resume,
+                &paths_for_resume,
+                &entry_for_resume,
+                &owner_for_resume,
+                &token_for_resume,
+            )
+        })
+        .await?;
     if metadata.downloaded_bytes == entry.compressed_bytes {
         let archive_for_hash = paths.archive.clone();
         let binding_for_hash = download_binding
             .try_clone()
             .map_err(|_| install_error("Capability partial cannot be pinned."))?;
         let token_for_hash = token.clone();
-        let actual_sha256 = tokio::task::spawn_blocking(move || {
-            hash_bound_file_cancellable(&binding_for_hash, &archive_for_hash, Some(&token_for_hash))
-        })
-        .await
-        .map_err(|_| install_error("Capability integrity worker failed."))??;
+        let actual_sha256 = blocking_work
+            .run_cancellable(BlockingWorkClass::HeavyIo, token.clone(), move || {
+                hash_bound_file_cancellable(
+                    &binding_for_hash,
+                    &archive_for_hash,
+                    Some(&token_for_hash),
+                )
+            })
+            .await?;
         if actual_sha256.eq_ignore_ascii_case(&entry.archive_sha256) {
             progress(
                 CapabilityInstallPhase::Downloading,
@@ -424,7 +478,7 @@ async fn download_archive_inner(
             );
             return Ok(());
         }
-        remove_partial(paths);
+        remove_partial_background(blocking_work, paths).await?;
         metadata = PartialDownloadMetadata::new(entry, owner_task_id, 0);
         hasher = Sha256::new();
     }
@@ -475,14 +529,22 @@ async fn download_archive_inner(
     if !accepted_status {
         return Err(install_error("Capability download response is invalid."));
     }
-    let mut standard_file = download_binding
-        .open_regular_mutate_or_create(&paths.archive, !resumed)
-        .map_err(|_| install_error("Capability download file cannot be created."))?;
-    if resumed {
-        standard_file
-            .seek(SeekFrom::End(0))
-            .map_err(|_| install_error("Capability partial cannot be resumed."))?;
-    }
+    let binding_for_open = download_binding
+        .try_clone()
+        .map_err(|_| install_error("Capability partial cannot be pinned."))?;
+    let archive_for_open = paths.archive.clone();
+    let standard_file = blocking_work
+        .run_cancellable(BlockingWorkClass::HeavyIo, token.clone(), move || {
+            let mut file = binding_for_open
+                .open_regular_mutate_or_create(&archive_for_open, !resumed)
+                .map_err(|_| install_error("Capability download file cannot be created."))?;
+            if resumed {
+                file.seek(SeekFrom::End(0))
+                    .map_err(|_| install_error("Capability partial cannot be resumed."))?;
+            }
+            Ok(file)
+        })
+        .await?;
     let mut file = tokio::fs::File::from_std(standard_file);
     metadata.response_url = Some(response_url);
     metadata.etag = response_etag;
@@ -491,12 +553,12 @@ async fn download_archive_inner(
     let mut downloaded = metadata.downloaded_bytes;
     let mut last_checkpoint = downloaded;
     metadata.updated_at_unix_seconds = unix_seconds();
-    write_partial_metadata(&paths.metadata, &metadata)?;
+    write_partial_metadata_background(blocking_work, &paths.metadata, &metadata, token).await?;
     let mut stream = response.bytes_stream();
     loop {
         let next = loop {
             if token.is_cancelled() {
-                remove_partial(paths);
+                remove_partial_background(blocking_work, paths).await?;
                 return Err(cancelled());
             }
             match tokio::time::timeout(Duration::from_millis(250), stream.next()).await {
@@ -528,7 +590,8 @@ async fn download_archive_inner(
             file.sync_data()
                 .await
                 .map_err(|_| install_error("Capability download could not be checkpointed."))?;
-            write_partial_metadata(&paths.metadata, &metadata)?;
+            write_partial_metadata_background(blocking_work, &paths.metadata, &metadata, token)
+                .await?;
             last_checkpoint = downloaded;
         }
     }
@@ -541,24 +604,52 @@ async fn download_archive_inner(
     file.sync_data()
         .await
         .map_err(|_| install_error("Capability download could not be checkpointed."))?;
-    write_partial_metadata(&paths.metadata, &metadata)?;
+    write_partial_metadata_background(blocking_work, &paths.metadata, &metadata, token).await?;
     let archive_for_hash = paths.archive.clone();
     let binding_for_hash = download_binding
         .try_clone()
         .map_err(|_| install_error("Capability archive cannot be pinned."))?;
     let token_for_hash = token.clone();
-    let actual_sha256 = tokio::task::spawn_blocking(move || {
-        hash_bound_file_cancellable(&binding_for_hash, &archive_for_hash, Some(&token_for_hash))
-    })
-    .await
-    .map_err(|_| install_error("Capability integrity worker failed."))??;
+    let actual_sha256 = blocking_work
+        .run_cancellable(BlockingWorkClass::HeavyIo, token.clone(), move || {
+            hash_bound_file_cancellable(&binding_for_hash, &archive_for_hash, Some(&token_for_hash))
+        })
+        .await?;
     if downloaded != entry.compressed_bytes
         || !actual_sha256.eq_ignore_ascii_case(&entry.archive_sha256)
     {
-        remove_partial(paths);
+        remove_partial_background(blocking_work, paths).await?;
         return Err(install_error("Capability archive integrity check failed."));
     }
     Ok(())
+}
+
+async fn remove_partial_background(
+    blocking_work: &BlockingWorkCoordinator,
+    paths: &PartialPaths,
+) -> Result<(), BackendError> {
+    let paths = paths.clone();
+    blocking_work
+        .run(BlockingWorkClass::HeavyIo, move || {
+            remove_partial(&paths);
+            Ok(())
+        })
+        .await
+}
+
+async fn write_partial_metadata_background(
+    blocking_work: &BlockingWorkCoordinator,
+    path: &Path,
+    metadata: &PartialDownloadMetadata,
+    token: &CancellationToken,
+) -> Result<(), BackendError> {
+    let path = path.to_path_buf();
+    let metadata = metadata.clone();
+    blocking_work
+        .run_cancellable(BlockingWorkClass::HeavyIo, token.clone(), move || {
+            write_partial_metadata(&path, &metadata)
+        })
+        .await
 }
 
 async fn send_cancellable(
@@ -2112,7 +2203,9 @@ mod tests {
         metadata.prefix_sha256 = format!("{:x}", Sha256::digest(&bytes[..split]));
         write_partial_metadata(&paths.metadata, &metadata).unwrap();
 
+        let blocking_work = BlockingWorkCoordinator::default();
         download_archive(
+            &blocking_work,
             &entry,
             &paths,
             "new-task",
@@ -2172,7 +2265,9 @@ mod tests {
         metadata.prefix_sha256 = format!("{:x}", Sha256::digest(b"old-prefix"));
         write_partial_metadata(&paths.metadata, &metadata).unwrap();
 
+        let blocking_work = BlockingWorkCoordinator::default();
         download_archive(
+            &blocking_work,
             &entry,
             &paths,
             "new-task",
@@ -2235,9 +2330,17 @@ mod tests {
             cancellation.cancel();
         });
 
-        let error = download_archive(&entry, &paths, "new-task", &token, &mut |_, _, _| {})
-            .await
-            .unwrap_err();
+        let blocking_work = BlockingWorkCoordinator::default();
+        let error = download_archive(
+            &blocking_work,
+            &entry,
+            &paths,
+            "new-task",
+            &token,
+            &mut |_, _, _| {},
+        )
+        .await
+        .unwrap_err();
         server.abort();
 
         assert_eq!(error.code, crate::errors::IMPORT_V2_CANCELLED);
