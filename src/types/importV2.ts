@@ -255,6 +255,7 @@ export interface ImportMediaAuthorization { itemId: string; kind: ImportMediaAut
 export interface ImportCollectionChildRelation { itemId: string; canonicalUrl: string; discoveryFingerprint: string; }
 export interface ImportCollectionRelation { relationId: string; sourceUrl: string; platform: string; title: string; childItemIds: string[]; children?: ImportCollectionChildRelation[]; addedAt: string; }
 export interface ImportSession { schemaVersion: 2; sessionId: string; projectId: string; status: ImportSessionStatus; resourceMode: ImportResourceMode; createdAt: string; updatedAt: string; discoveryTaskId?: string | null; mediaAuthorizations?: ImportMediaAuthorization[]; collectionRelations?: ImportCollectionRelation[]; items: ImportItem[]; }
+export interface ImportSessionOverview { schemaVersion: 2; sessionId: string; projectId: string; status: ImportSessionStatus; resourceMode: ImportResourceMode; createdAt: string; updatedAt: string; discoveryTaskId?: string | null; itemCount: number; }
 
 export interface CreateImportSessionV2Request { projectId: string; projectRootPath: string; resourceMode: ImportResourceMode; }
 export interface GetImportSessionV2Request { projectId: string; projectRootPath: string; sessionId: string; historyBatchId?: string | null; }

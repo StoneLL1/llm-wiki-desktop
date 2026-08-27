@@ -676,6 +676,8 @@ pub fn run() {
             commands::git_commands::git_diff_markdown,
             commands::import_v2_async_commands::create_import_session_v2,
             commands::import_v2_async_commands::get_import_session_v2,
+            commands::import_v2_async_commands::get_import_session_overview_v2,
+            commands::import_v2_async_commands::start_import_session_recovery_v2,
             commands::import_v2_async_commands::get_import_restricted_content_status_v2,
             commands::import_v2_async_commands::get_import_history_session_v2,
             commands::import_v2_async_commands::get_import_completion_v2,

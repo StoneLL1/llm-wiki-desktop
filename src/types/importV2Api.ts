@@ -10,6 +10,7 @@ import type {
   ImportItem,
   ImportMergeContextV2Request,
   ImportSession,
+  ImportSessionOverview,
   ImportThreeWayMergeContext,
   SetImportItemResolutionV2Request,
   SetImportItemSelectionV2Request,
@@ -93,6 +94,8 @@ import type { BackendTask } from "./task";
 export interface ImportV2CommandNames {
   readonly createSession: "create_import_session_v2";
   readonly getSession: "get_import_session_v2";
+  readonly getSessionOverview: "get_import_session_overview_v2";
+  readonly startSessionRecovery: "start_import_session_recovery_v2";
   readonly getHistorySession: "get_import_history_session_v2";
   readonly getCompletion: "get_import_completion_v2";
   readonly addItems: "add_import_items_v2";
@@ -150,6 +153,8 @@ export interface ImportV2Api {
   readonly commandNames: ImportV2CommandNames;
   readonly createSession: (request: CreateImportSessionV2Request) => Promise<ImportSession>;
   readonly getSession: (request: GetImportSessionV2Request) => Promise<ImportSession>;
+  readonly getSessionOverview: (request: GetImportSessionV2Request) => Promise<ImportSessionOverview>;
+  readonly startSessionRecovery: (request: GetImportSessionV2Request) => Promise<BackendTask>;
   readonly getHistorySession: (request: GetImportSessionV2Request) => Promise<ImportSession>;
   readonly getCompletion: (request: GetImportSessionV2Request) => Promise<ImportCompletion | null>;
   readonly addItems: (request: AddImportItemsV2Request) => Promise<ImportSession>;

@@ -57,17 +57,21 @@ impl<'a> AgentCandidateService<'a> {
         session_id: &str,
         item_id: &str,
         task_id: &str,
+        allow_running: bool,
+        allow_interrupted: bool,
     ) -> Result<AgentCandidate, BackendError> {
         let task = self
             .tasks
             .get_task(task_id)
             .ok_or_else(|| candidate_error("Agent task was not found."))?;
-        if task.status != TaskStatus::Succeeded
+        if (!matches!(task.status, TaskStatus::Succeeded)
+            && !(allow_running && task.status == TaskStatus::Running))
+            && !(allow_interrupted && task.status == TaskStatus::Failed)
             || task.task_type != TaskType::AgentRun
             || task.project_id.as_deref() != Some(context.project_id.as_str())
         {
             return Err(candidate_error(
-                "Only a succeeded task bound to this project may be validated.",
+                "Only an eligible task bound to this project may be validated.",
             ));
         }
         let result = task
@@ -94,7 +98,14 @@ impl<'a> AgentCandidateService<'a> {
         let previous = self.imports.begin_agent_candidate_validation_unchecked(
             context, self.files, session_id, item_id, task_id,
         )?;
-        match self.accept_staged_output_validating(context, session_id, item_id, task_id) {
+        match self.accept_staged_output_validating(
+            context,
+            session_id,
+            item_id,
+            task_id,
+            allow_running,
+            allow_interrupted,
+        ) {
             Ok(candidate) => Ok(candidate),
             Err(validation_error) => {
                 self.imports.reject_agent_candidate_validation(
@@ -111,12 +122,16 @@ impl<'a> AgentCandidateService<'a> {
         session_id: &str,
         item_id: &str,
         task_id: &str,
+        allow_running: bool,
+        allow_interrupted: bool,
     ) -> Result<AgentCandidate, BackendError> {
         let task = self
             .tasks
             .get_task(task_id)
             .ok_or_else(|| candidate_error("Agent task was not found."))?;
-        if task.status != TaskStatus::Succeeded
+        if (!matches!(task.status, TaskStatus::Succeeded)
+            && !(allow_running && task.status == TaskStatus::Running))
+            && !(allow_interrupted && task.status == TaskStatus::Failed)
             || task.task_type != TaskType::AgentRun
             || task.project_id.as_deref() != Some(context.project_id.as_str())
         {
@@ -381,7 +396,31 @@ impl<'a> AgentCandidateService<'a> {
         item_id: &str,
         task_id: &str,
     ) -> Result<AgentCandidate, BackendError> {
-        self.accept_staged_output_unchecked(permit.context(), session_id, item_id, task_id)
+        self.accept_staged_output_unchecked(
+            permit.context(),
+            session_id,
+            item_id,
+            task_id,
+            false,
+            false,
+        )
+    }
+
+    pub(crate) fn accept_staged_output_before_terminal_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+    ) -> Result<AgentCandidate, BackendError> {
+        self.accept_staged_output_unchecked(
+            permit.context(),
+            session_id,
+            item_id,
+            task_id,
+            true,
+            false,
+        )
     }
 
     #[cfg(debug_assertions)]
@@ -392,7 +431,7 @@ impl<'a> AgentCandidateService<'a> {
         item_id: &str,
         task_id: &str,
     ) -> Result<AgentCandidate, BackendError> {
-        self.accept_staged_output_unchecked(context, session_id, item_id, task_id)
+        self.accept_staged_output_unchecked(context, session_id, item_id, task_id, false, false)
     }
 
     pub fn load_candidate(
@@ -687,15 +726,70 @@ impl<'a> AgentCandidateService<'a> {
         context: &ProjectContext,
         session_id: &str,
     ) -> Result<crate::models::import_v2::ImportSession, BackendError> {
+        self.recover_completed_outputs_with_cancel_unchecked(context, session_id, || false)
+    }
+
+    fn recover_completed_outputs_with_cancel_unchecked<F>(
+        &self,
+        context: &ProjectContext,
+        session_id: &str,
+        should_cancel: F,
+    ) -> Result<crate::models::import_v2::ImportSession, BackendError>
+    where
+        F: FnMut() -> bool,
+    {
         let session = self.imports.load_session(context, self.files, session_id)?;
+        self.recover_completed_outputs_from_session_with_cancel_unchecked(
+            context,
+            session,
+            should_cancel,
+        )
+    }
+
+    fn recover_completed_outputs_from_session_with_cancel_unchecked<F>(
+        &self,
+        context: &ProjectContext,
+        session: crate::models::import_v2::ImportSession,
+        mut should_cancel: F,
+    ) -> Result<crate::models::import_v2::ImportSession, BackendError>
+    where
+        F: FnMut() -> bool,
+    {
+        let session_id = session.session_id.clone();
         for item in &session.items {
+            if should_cancel() {
+                return Err(BackendError::new(
+                    crate::errors::IMPORT_V2_CANCELLED,
+                    "Import recovery was cancelled.",
+                    true,
+                    false,
+                ));
+            }
+            let recoverable_sealed_output = |task_id: &str| {
+                let exact_attempt = item.attempts.iter().any(|attempt| {
+                    attempt.route == format!("agent_assistance/{task_id}")
+                        && attempt.outcome == crate::models::import_v2::AttemptOutcome::Succeeded
+                });
+                self.tasks.get_task(task_id).is_some_and(|task| {
+                    task.status == TaskStatus::Failed
+                        && exact_attempt
+                        && matches!(
+                            task.result.as_ref().and_then(|result| result.reference.as_ref()),
+                            Some(TaskResultReference::ImportPreview {
+                                session_id: bound_session,
+                                item_id: bound_item,
+                            }) if bound_session == &session_id && bound_item == &item.item_id
+                        )
+                })
+            };
             super::agent_workspace::AgentWorkspaceBuilder::cleanup_abandoned_leases(
                 context,
-                session_id,
+                &session_id,
                 &item.item_id,
                 |task_id| {
                     self.tasks.get_task(task_id).is_some_and(|task| {
                         !matches!(task.status, TaskStatus::Failed | TaskStatus::Cancelled)
+                            || recoverable_sealed_output(task_id)
                     })
                 },
             )?;
@@ -709,7 +803,7 @@ impl<'a> AgentCandidateService<'a> {
                 let exact_reference = matches!(
                     task.result.as_ref().and_then(|result| result.reference.as_ref()),
                     Some(TaskResultReference::ImportPreview { session_id: bound_session, item_id: bound_item })
-                        if bound_session == session_id && bound_item == &item.item_id
+                        if bound_session == &session_id && bound_item == &item.item_id
                 );
                 let exact_attempt = item.attempts.iter().any(|attempt| {
                     attempt.route == format!("agent_assistance/{task_id}")
@@ -722,18 +816,38 @@ impl<'a> AgentCandidateService<'a> {
                                     || warning == "AGENT_CANDIDATE_DISCARDED"
                             })
                 });
-                (task.status == TaskStatus::Succeeded
+                (matches!(task.status, TaskStatus::Succeeded | TaskStatus::Failed)
                     && task.task_type == TaskType::AgentRun
                     && exact_reference
                     && exact_attempt)
                     .then(|| (item.item_id.clone(), task_id.to_owned()))
             })
             .collect::<Vec<_>>();
+        let has_completed = !completed.is_empty();
         for (item_id, task_id) in completed {
-            if let Err(error) =
-                self.accept_staged_output_unchecked(context, session_id, &item_id, &task_id)
-            {
-                let latest = self.imports.load_session(context, self.files, session_id)?;
+            if should_cancel() {
+                return Err(BackendError::new(
+                    crate::errors::IMPORT_V2_CANCELLED,
+                    "Import recovery was cancelled.",
+                    true,
+                    false,
+                ));
+            }
+            let interrupted = self
+                .tasks
+                .get_task(&task_id)
+                .is_some_and(|task| task.status == TaskStatus::Failed);
+            if let Err(error) = self.accept_staged_output_unchecked(
+                context,
+                &session_id,
+                &item_id,
+                &task_id,
+                false,
+                interrupted,
+            ) {
+                let latest = self
+                    .imports
+                    .load_session(context, self.files, &session_id)?;
                 let rejection_persisted = latest
                     .items
                     .iter()
@@ -750,9 +864,18 @@ impl<'a> AgentCandidateService<'a> {
                 if !rejection_persisted {
                     return Err(error);
                 }
+            } else if interrupted {
+                self.tasks
+                    .recover_sealed_agent_completion(&task_id)
+                    .map_err(|message| candidate_error(&message))?;
             }
         }
-        let latest = self.imports.load_session(context, self.files, session_id)?;
+        let latest = if has_completed {
+            self.imports
+                .load_session(context, self.files, &session_id)?
+        } else {
+            session
+        };
         for item in &latest.items {
             let has_agent_attempt = item
                 .attempts
@@ -776,19 +899,27 @@ impl<'a> AgentCandidateService<'a> {
                 );
             if registered_candidate || terminal_without_candidate {
                 if let Some(task_id) = item.task_id.as_deref() {
-                    self.cleanup_task_workspace(context, session_id, &item.item_id, task_id)?;
+                    self.cleanup_task_workspace(context, &session_id, &item.item_id, task_id)?;
                 }
             }
         }
         Ok(latest)
     }
 
-    pub(crate) fn recover_completed_outputs_authorized(
+    pub(crate) fn recover_completed_outputs_from_session_with_cancel_authorized<F>(
         &self,
         permit: &ProjectWritePermit<'_>,
-        session_id: &str,
-    ) -> Result<crate::models::import_v2::ImportSession, BackendError> {
-        self.recover_completed_outputs_unchecked(permit.context(), session_id)
+        session: crate::models::import_v2::ImportSession,
+        should_cancel: F,
+    ) -> Result<crate::models::import_v2::ImportSession, BackendError>
+    where
+        F: FnMut() -> bool,
+    {
+        self.recover_completed_outputs_from_session_with_cancel_unchecked(
+            permit.context(),
+            session,
+            should_cancel,
+        )
     }
 
     #[cfg(debug_assertions)]

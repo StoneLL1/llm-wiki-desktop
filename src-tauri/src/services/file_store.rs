@@ -146,6 +146,10 @@ pub enum WriteMode {
 }
 
 impl FileStore {
+    pub(crate) fn observe_atomic_write(&self, path: &Path, bytes: usize) {
+        observe_file_write(path, bytes, true);
+    }
+
     #[cfg(feature = "performance-observers")]
     pub fn observe_project(&self, context: &ProjectContext) -> FileStoreObservation {
         let id = NEXT_FILE_STORE_OBSERVER_ID.fetch_add(1, Ordering::Relaxed);

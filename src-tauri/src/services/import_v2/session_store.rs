@@ -10,7 +10,7 @@ use crate::errors::{
 use crate::models::import_v2::{
     ImportCollectionChildRelation, ImportCollectionRelation, ImportInput, ImportItem,
     ImportItemStatus, ImportMediaAuthorization, ImportResourceMode, ImportSession,
-    ImportSessionStatus, IMPORT_V2_SCHEMA_VERSION,
+    ImportSessionOverview, ImportSessionStatus, IMPORT_V2_SCHEMA_VERSION,
 };
 use crate::models::paths::ProjectContext;
 use crate::services::import_v2::transaction::FileTransaction;
@@ -96,6 +96,45 @@ fn session_root(context: &ProjectContext, session_id: &str) -> Result<String, Ba
 }
 
 impl SessionStore {
+    pub fn read_overview(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+        session_id: &str,
+    ) -> Result<ImportSessionOverview, BackendError> {
+        validate_id(session_id)?;
+        let root = session_root(context, session_id)?;
+        let summary_path = format!("{root}/session.json");
+        if !file_store.exists(context, &summary_path) {
+            return Err(BackendError::new(
+                IMPORT_V2_SESSION_NOT_FOUND,
+                "Import session was not found.",
+                true,
+                false,
+            ));
+        }
+        let record: SessionRecord = file_store.read_json(context, &summary_path)?;
+        if record.schema_version != IMPORT_V2_SCHEMA_VERSION
+            || record.session_id != session_id
+            || record.project_id != context.project_id
+        {
+            return Err(invalid_session(
+                "Import session metadata does not match the current project.",
+            ));
+        }
+        Ok(ImportSessionOverview {
+            schema_version: record.schema_version,
+            session_id: record.session_id,
+            project_id: record.project_id,
+            status: record.status,
+            resource_mode: record.resource_mode,
+            created_at: record.created_at,
+            updated_at: record.updated_at,
+            discovery_task_id: record.discovery_task_id,
+            item_count: record.item_ids.len() as u64,
+        })
+    }
+
     pub(crate) fn ensure_accepts_new_items(session: &ImportSession) -> Result<(), BackendError> {
         if matches!(
             session.status,
@@ -578,6 +617,73 @@ impl SessionStore {
         let mut transaction = FileTransaction::new_for_project(&context.root);
         transaction.write_many_if_hash_matches_with_cancel(&writes, should_cancel)?;
         transaction.commit()
+    }
+
+    /// Publish recovery changes as one compare-and-swap transaction. Item
+    /// files and the coarse session record become visible together, while a
+    /// concurrent external edit fails closed.
+    pub(crate) fn write_recovery_cohort_if_unchanged_with_cancel<F>(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+        before_session: &ImportSession,
+        after_session: &ImportSession,
+        originals: &[ImportItem],
+        replacements: &[ImportItem],
+        mut should_cancel: F,
+    ) -> Result<(), BackendError>
+    where
+        F: FnMut() -> bool,
+    {
+        if before_session.session_id != after_session.session_id
+            || originals.len() != replacements.len()
+        {
+            return Err(invalid_session(
+                "Import recovery cohort does not match its snapshot.",
+            ));
+        }
+        let root = session_root(context, &after_session.session_id)?;
+        let mut writes = Vec::with_capacity(replacements.len() + 1);
+        for (before, after) in originals.iter().zip(replacements) {
+            if should_cancel() {
+                return Err(BackendError::new(
+                    crate::errors::IMPORT_V2_CANCELLED,
+                    "Import recovery was cancelled.",
+                    true,
+                    false,
+                ));
+            }
+            if before.item_id != after.item_id {
+                return Err(invalid_session("Import recovery item identity changed."));
+            }
+            let expected_bytes = serde_json::to_vec_pretty(before)
+                .map_err(|_| invalid_session("Import session item could not be serialized."))?;
+            let desired = serde_json::to_vec_pretty(after)
+                .map_err(|_| invalid_session("Import session item could not be serialized."))?;
+            writes.push((
+                context.resolve_project_path(&format!("{root}/items/{}.json", after.item_id))?,
+                desired,
+                format!("{:x}", Sha256::digest(expected_bytes)),
+            ));
+        }
+
+        let before_record = serde_json::to_vec_pretty(&SessionRecord::from(before_session))
+            .map_err(|_| invalid_session("Import session record could not be serialized."))?;
+        let after_record = serde_json::to_vec_pretty(&SessionRecord::from(after_session))
+            .map_err(|_| invalid_session("Import session record could not be serialized."))?;
+        writes.push((
+            context.resolve_project_path(&format!("{root}/session.json"))?,
+            after_record,
+            format!("{:x}", Sha256::digest(before_record)),
+        ));
+
+        let mut transaction = FileTransaction::new_for_project(&context.root);
+        transaction.write_many_if_hash_matches_with_cancel(&writes, should_cancel)?;
+        transaction.commit()?;
+        for (path, bytes, _) in &writes {
+            file_store.observe_atomic_write(path, bytes.len());
+        }
+        Ok(())
     }
 
     pub fn write_session_record(

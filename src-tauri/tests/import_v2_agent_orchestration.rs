@@ -69,6 +69,24 @@ fn commands_expose_accept_select_and_discard_without_direct_wiki_writes() {
 }
 
 #[test]
+fn agent_candidate_is_persisted_before_the_terminal_task_event() {
+    let assistance = include_str!("../src/services/import_v2/agent_assistance.rs");
+    let result_staged = assistance
+        .find(".seal_running_with_result(task_id")
+        .unwrap();
+    let candidate_hook = assistance.find("before_terminal(permit, current)").unwrap();
+    let terminal = assistance
+        .find(".complete_running_with_result(task_id, task_result)")
+        .unwrap();
+    assert!(result_staged < candidate_hook);
+    assert!(candidate_hook < terminal);
+
+    let command = include_str!("../src/commands/import_v2_agent_commands.rs");
+    assert!(command.contains("accept_staged_output_before_terminal_authorized"));
+    assert!(!command.contains("if let Err(error) = AgentCandidateService::new"));
+}
+
+#[test]
 fn policy_matrix_only_checks_explicit_local_agent_availability_and_budget() {
     let policy = AgentAssistancePolicy {
         max_attempts_per_item: 1,

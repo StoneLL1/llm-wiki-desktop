@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { importV2Api } from "../../services/importV2Api";
 import { importProjectKey, useImportStore } from "../../stores/importStore";
 import { useProjectStore } from "../../stores/projectStore";
+import { useTaskStore } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import type { AppView } from "../../stores/navigationStore";
 import type { ImportFrontendReadiness } from "../../types/importV2Presentation";
@@ -220,6 +221,25 @@ export function useImportSessionScope(
               projectRootPath: rootPath,
               sessionId: nextReadiness.unfinishedSessionId,
             });
+            if (cancelled || !isScopeCurrent(projectKey, epoch)) return;
+            void importV2Api
+              .startSessionRecovery({
+                projectId,
+                projectRootPath: rootPath,
+                sessionId: nextReadiness.unfinishedSessionId,
+              })
+              .then((task) => {
+                const taskStore = useTaskStore.getState();
+                taskStore.recordTaskFact(task);
+                if (!cancelled && isScopeCurrent(projectKey, epoch)) {
+                  taskStore.upsertTask(task);
+                }
+              })
+              .catch((error) => {
+                if (!cancelled && isScopeCurrent(projectKey, epoch)) {
+                  setReadinessWarning(importWorkflowErrorMessage(error));
+                }
+              });
           } catch (error) {
             if (cancelled || !isScopeCurrent(projectKey, epoch)) return;
             setReadinessWarning(importWorkflowErrorMessage(error));

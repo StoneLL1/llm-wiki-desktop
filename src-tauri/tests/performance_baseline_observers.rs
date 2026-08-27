@@ -51,7 +51,7 @@ fn absolute_observer_read_rejects_paths_outside_the_project() {
 }
 
 #[test]
-fn session_read_update_and_recovery_publish_exact_file_store_counts() {
+fn session_read_update_and_noop_recovery_publish_exact_file_store_counts() {
     for item_count in SESSION_FIXTURES {
         let root = tempfile::tempdir().unwrap();
         let context = ProjectContext::new("perf-baseline", root.path().to_path_buf());
@@ -67,9 +67,19 @@ fn session_read_update_and_recovery_publish_exact_file_store_counts() {
         session.items = (0..item_count).map(synthetic_item).collect();
         sessions.save(&context, &files, &session).unwrap();
 
+        let overview_observation = files.observe_project(&context);
+        let overview = service
+            .read_session_overview(&context, &files, "performance-session")
+            .unwrap();
+        assert_eq!(overview.item_count, item_count as u64);
+        let overview_snapshot = overview_observation.snapshot();
+        assert_eq!(overview_snapshot.read_ops, 1);
+        assert_eq!(overview_snapshot.write_ops, 0);
+        assert_eq!(overview_snapshot.atomic_replaces, 0);
+
         let read_observation = files.observe_project(&context);
-        let loaded = sessions
-            .load(&context, &files, "performance-session")
+        let loaded = service
+            .read_session(&context, &files, "performance-session")
             .unwrap();
         assert_eq!(loaded.items.len(), item_count);
         let read = read_observation.snapshot();
@@ -108,15 +118,87 @@ fn session_read_update_and_recovery_publish_exact_file_store_counts() {
         assert_eq!(recovered.items.len(), item_count);
         let recovery = recovery_observation.snapshot();
         assert_eq!(recovery.read_ops, item_count as u64 + 1);
-        assert_eq!(recovery.write_ops, item_count as u64 + 1);
-        assert_eq!(recovery.atomic_replaces, item_count as u64 + 1);
+        assert_eq!(recovery.write_ops, 0);
+        assert_eq!(recovery.atomic_replaces, 0);
         assert!(recovery.bytes_read > 0);
-        assert!(recovery.bytes_written > 0);
+        assert_eq!(recovery.bytes_written, 0);
         println!(
             "BATCH0_FILE_STORE session_recovery N={item_count} {}",
             serde_json::to_string(&recovery).unwrap()
         );
     }
+}
+
+#[test]
+fn recovery_writes_only_stale_items_and_the_session_record() {
+    let root = tempfile::tempdir().unwrap();
+    let context = ProjectContext::new("perf-dirty-recovery", root.path().to_path_buf());
+    let files = FileStore::default();
+    let sessions = SessionStore::default();
+    let service = ImportV2Service::default();
+    let tasks = TaskService::default();
+    let mut session = ImportSession::new(
+        "dirty-recovery-session",
+        "perf-dirty-recovery",
+        ImportResourceMode::Balanced,
+    );
+    session.items = (0..100).map(synthetic_item).collect();
+    for (index, item) in session.items.iter_mut().take(3).enumerate() {
+        item.task_id = Some(format!("missing-task-{index}"));
+    }
+    sessions.save(&context, &files, &session).unwrap();
+
+    let observation = files.observe_project(&context);
+    let recovered = service
+        .recover_session(&context, &files, &tasks, &session.session_id)
+        .unwrap();
+    assert!(recovered
+        .items
+        .iter()
+        .take(3)
+        .all(|item| item.task_id.is_none()));
+    let snapshot = observation.snapshot();
+    assert_eq!(snapshot.read_ops, 101);
+    assert_eq!(snapshot.write_ops, 4);
+    assert_eq!(snapshot.atomic_replaces, 4);
+}
+
+#[test]
+fn cancelled_recovery_does_not_publish_a_partial_session() {
+    let root = tempfile::tempdir().unwrap();
+    let context = ProjectContext::new("perf-cancelled-recovery", root.path().to_path_buf());
+    let files = FileStore::default();
+    let sessions = SessionStore::default();
+    let service = ImportV2Service::default();
+    let tasks = TaskService::default();
+    let mut session = ImportSession::new(
+        "cancelled-recovery-session",
+        "perf-cancelled-recovery",
+        ImportResourceMode::Balanced,
+    );
+    session.items = (0..100).map(synthetic_item).collect();
+    for (index, item) in session.items.iter_mut().take(10).enumerate() {
+        item.task_id = Some(format!("missing-task-{index}"));
+    }
+    sessions.save(&context, &files, &session).unwrap();
+
+    let mut checks = 0usize;
+    let error = service
+        .recover_session_with_cancel(&context, &files, &tasks, &session.session_id, || {
+            checks += 1;
+            checks >= 5
+        })
+        .unwrap_err();
+    assert_eq!(
+        error.code,
+        llm_wiki_desktop_lib::errors::IMPORT_V2_CANCELLED
+    );
+
+    let reopened = sessions
+        .load(&context, &files, &session.session_id)
+        .unwrap();
+    assert_eq!(reopened.items, session.items);
+    assert_eq!(reopened.updated_at, session.updated_at);
 }
 
 #[test]

@@ -596,6 +596,15 @@ export function useImportTaskCoordinator({
         || !isScopeCurrent(projectKey, current.sessionEpoch, patch.sessionId)
       ) return;
       const pending = pendingItemTasks.current.get(patch.batchId);
+      const recoveryTask = useTaskStore.getState().tasks.find(
+        (task) => task.id === patch.batchId
+          && task.operation?.kind === "import_recovery"
+          && task.operation.sessionId === patch.sessionId,
+      );
+      if (recoveryTask) {
+        applyOperationPatch(patch, projectKey, current.sessionEpoch);
+        return;
+      }
       if (pending?.operation) {
         applyOperationPatch(patch, pending.projectKey, pending.epoch);
         return;
@@ -669,6 +678,14 @@ export function useImportTaskCoordinator({
     }
     const current = useImportStore.getState();
     if (event.projectId !== projectId || current.projectKey !== projectKey || !current.session) return;
+    if (
+      isTerminalTaskEvent(event)
+      && task.operation?.kind === "import_recovery"
+      && task.operation.sessionId === current.session.sessionId
+    ) {
+      void refreshForScope(projectKey, current.sessionEpoch, current.session.sessionId).catch(() => undefined);
+      return;
+    }
     if (
       !settledOperationTaskIdsRef.current.has(event.taskId)
       && current.session.items.some((item) => item.taskId === event.taskId)

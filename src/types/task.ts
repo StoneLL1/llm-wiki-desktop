@@ -59,6 +59,9 @@ export type TaskOperation = {
 } | {
   kind: "import_commit";
   sessionId: string;
+} | {
+  kind: "import_recovery";
+  sessionId: string;
 };
 
 export interface TaskResult {
