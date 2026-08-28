@@ -66,7 +66,11 @@ impl ProcessRunner for NoAgents {
 
 impl ProcessRunner for InstalledCodex {
     fn find_executable(&self, command: &str) -> Option<PathBuf> {
-        (command == "codex").then(|| PathBuf::from("codex"))
+        (command == "codex")
+            .then(std::env::current_exe)
+            .transpose()
+            .ok()
+            .flatten()
     }
 
     fn run_with_timeout(
@@ -97,7 +101,11 @@ impl ProcessRunner for InstalledCodex {
 
 impl ProcessRunner for InstalledClaude {
     fn find_executable(&self, command: &str) -> Option<PathBuf> {
-        (command == "claude").then(|| PathBuf::from("claude"))
+        (command == "claude")
+            .then(std::env::current_exe)
+            .transpose()
+            .ok()
+            .flatten()
     }
 
     fn run_with_timeout(

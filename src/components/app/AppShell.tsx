@@ -126,14 +126,16 @@ export function AppShell() {
   ]);
 
   useEffect(() => {
-    let lastForegroundRefreshAt = Number.NEGATIVE_INFINITY;
+    let foregroundRefreshArmed = document.visibilityState === "hidden";
+    const armForegroundRefresh = () => {
+      foregroundRefreshArmed = true;
+    };
     const refreshActiveProjectGit = () => {
       if (document.visibilityState === "hidden") return;
-      const now = Date.now();
-      // WebView2 can deliver the visibility and native-window focus halves of
-      // one restore several hundred milliseconds apart. Keep that pair inside
-      // one refresh while still allowing a later, distinct foreground visit.
-      if (now - lastForegroundRefreshAt < 500) return;
+      // One background transition arms exactly one refresh. WebView2 may
+      // deliver visibility and focus halves arbitrarily far apart, so elapsed
+      // wall-clock time cannot safely identify a foreground cycle.
+      if (!foregroundRefreshArmed) return;
       const state = useProjectStore.getState();
       const project = state.currentProject;
       if (!project.projectId || !project.rootPath) return;
@@ -141,7 +143,7 @@ export function AppShell() {
       const scope = { projectId: project.projectId, rootPath: project.rootPath };
       const authorityIdentityKey = projectFactsAuthorityKey(state.authority);
       if (!projectFactsAuthorityMatches(scope, authorityIdentityKey)) return;
-      lastForegroundRefreshAt = now;
+      foregroundRefreshArmed = false;
       invalidateProjectFacts(
         scope,
         ["git"],
@@ -150,11 +152,17 @@ export function AppShell() {
       void ensureProjectFacts(scope, ["git"]).catch(() => undefined);
     };
     const refreshVisibleProjectGit = () => {
-      if (document.visibilityState === "visible") refreshActiveProjectGit();
+      if (document.visibilityState === "hidden") {
+        armForegroundRefresh();
+      } else {
+        refreshActiveProjectGit();
+      }
     };
+    window.addEventListener("blur", armForegroundRefresh);
     window.addEventListener("focus", refreshActiveProjectGit);
     document.addEventListener("visibilitychange", refreshVisibleProjectGit);
     return () => {
+      window.removeEventListener("blur", armForegroundRefresh);
       window.removeEventListener("focus", refreshActiveProjectGit);
       document.removeEventListener("visibilitychange", refreshVisibleProjectGit);
     };

@@ -72,6 +72,19 @@ const ALL_FACT_KINDS: readonly ProjectFactKind[] = ["git", "agents", "providers"
 const resourceControls = new Map<string, ResourceControl>();
 let activeProjectFactsKey: string | null = null;
 
+declare global {
+  interface Window {
+    __LLM_WIKI_PROJECT_FACTS_IPC_COUNTS__?: Record<string, number>;
+  }
+}
+
+const packagedProjectFactsObserverEnabled =
+  import.meta.env.VITE_PROJECT_FACTS_PERF_OBSERVER === "1";
+
+if (typeof window !== "undefined" && packagedProjectFactsObserverEnabled) {
+  window.__LLM_WIKI_PROJECT_FACTS_IPC_COUNTS__ ??= {};
+}
+
 const hasTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -233,12 +246,20 @@ function invokeFact(
     projectRootPath: scope.rootPath,
     forceRefresh,
   };
+  const recordPackagedInvoke = (command: string) => {
+    if (!packagedProjectFactsObserverEnabled || typeof window === "undefined") return;
+    const counts = window.__LLM_WIKI_PROJECT_FACTS_IPC_COUNTS__ ??= {};
+    counts[command] = (counts[command] ?? 0) + 1;
+  };
   switch (kind) {
     case "git":
+      recordPackagedInvoke("git_status");
       return invoke<GitRepositoryStatus>("git_status", { request });
     case "agents":
+      recordPackagedInvoke("detect_agents");
       return invoke<AgentInfo[]>("detect_agents", { request });
     case "providers":
+      recordPackagedInvoke("list_llm_providers");
       return invoke<ProviderStatus[]>("list_llm_providers", { request });
   }
 }
@@ -510,15 +531,6 @@ export function bindProjectFactsAuthority(
   const key = projectFactsKey(scope);
   const entry = touchEntry(scope);
   if (entry.authorityIdentityKey === authorityIdentityKey) return;
-  if (entry.authorityIdentityKey === null && authorityIdentityKey !== null) {
-    useProjectFactsStore.setState((state) => ({
-      entries: {
-        ...state.entries,
-        [key]: { ...state.entries[key], authorityIdentityKey },
-      },
-    }));
-    return;
-  }
 
   for (const kind of ALL_FACT_KINDS) {
     const control = resourceControls.get(requestKey(key, kind));

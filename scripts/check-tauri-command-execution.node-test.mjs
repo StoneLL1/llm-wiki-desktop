@@ -154,7 +154,8 @@ test("Project Facts commands use the named bounded worker lanes", async () => {
   )?.[0];
   assert.ok(providerBody, "list_llm_providers must remain an async command");
   assert.match(providerBody, /run_project_facts_provider/);
-  assert.match(providerBody, /require_external_ai_access/);
+  assert.match(providerBody, /with_external_ai_access/);
+  assert.match(providerBody, /LlmService::list_providers/);
   assert.match(providerBody, /status_with_secret/);
 });
 

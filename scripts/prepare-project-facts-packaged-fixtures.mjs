@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmod, mkdir, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
@@ -56,17 +56,94 @@ function runGit(args, options = {}) {
   return result;
 }
 
-function fixtureHash(files) {
+function fixtureHash(inventory, directories) {
   const hash = createHash("sha256");
-  for (const file of [...files].sort((left, right) =>
-    left.path < right.path ? -1 : left.path > right.path ? 1 : 0
-  )) {
+  for (const file of inventory) {
     hash.update(file.path);
     hash.update("\0");
-    hash.update(file.contents);
+    hash.update(file.sha256);
+    hash.update("\0");
+    hash.update(String(file.size));
+    hash.update("\0");
+    hash.update(String(file.executable));
     hash.update("\0");
   }
+  for (const directory of [...directories].sort()) {
+    hash.update(`native-git-3-pages/${normalized(directory)}/`);
+    hash.update("\0directory\0");
+  }
   return hash.digest("hex");
+}
+
+export async function collectProjectFactsFixtureInventory(root) {
+  const inventory = [];
+  const visit = async (directory, relativeDirectory = "") => {
+    const entries = await readdir(directory, { withFileTypes: true });
+    entries.sort((left, right) => left.name.localeCompare(right.name, "en"));
+    for (const entry of entries) {
+      const relativePath = normalized(path.join(relativeDirectory, entry.name));
+      if (entry.isDirectory() && entry.name === ".git") continue;
+      if (!relativeDirectory && entry.name === "fixture-manifest.json") continue;
+      const target = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(target, relativePath);
+        continue;
+      }
+      if (!entry.isFile()) {
+        throw new Error(`Fixture contains a symlink or special file: ${relativePath}`);
+      }
+      const [bytes, metadata] = await Promise.all([readFile(target), stat(target)]);
+      inventory.push({
+        path: relativePath,
+        size: bytes.length,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        executable: process.platform !== "win32" && (metadata.mode & 0o111) !== 0,
+      });
+    }
+  };
+  await visit(root);
+  return inventory.sort((left, right) => left.path.localeCompare(right.path, "en"));
+}
+
+export async function verifyProjectFactsPackagedFixtures(outputRoot, suppliedManifest) {
+  const manifest = suppliedManifest ?? JSON.parse(
+    await readFile(path.join(outputRoot, "fixture-manifest.json"), "utf8"),
+  );
+  if (manifest.schemaVersion !== 2 || !Array.isArray(manifest.fileInventory)) {
+    throw new Error("Fixture manifest must use the self-verifying schema version 2.");
+  }
+  const actualInventory = await collectProjectFactsFixtureInventory(outputRoot);
+  if (JSON.stringify(actualInventory) !== JSON.stringify(manifest.fileInventory)) {
+    throw new Error("Fixture files no longer match the manifest inventory.");
+  }
+  const actualHash = fixtureHash(actualInventory, manifest.native.requiredDirectories);
+  if (actualHash !== manifest.fixtureHash) {
+    throw new Error("Fixture aggregate hash no longer matches its inventory.");
+  }
+  const nativeRoot = path.join(outputRoot, "native-git-3-pages");
+  for (const directory of manifest.native.requiredDirectories) {
+    if (!(await stat(path.join(nativeRoot, directory))).isDirectory()) {
+      throw new Error(`Fixture directory is missing: ${directory}`);
+    }
+  }
+  const tree = runGit(["-C", nativeRoot, "rev-parse", "HEAD^{tree}"]).stdout.trim();
+  const tracked = runGit(["-C", nativeRoot, "ls-files"]).stdout
+    .trim().split(/\r?\n/u).filter(Boolean);
+  const branch = runGit(["-C", nativeRoot, "branch", "--show-current"]).stdout.trim();
+  if (tree !== manifest.native.gitTree
+      || tracked.length !== manifest.native.trackedFiles
+      || branch !== manifest.native.initialBranch) {
+    throw new Error("Native fixture Git identity no longer matches the manifest.");
+  }
+  for (const marker of [".git", ".app"]) {
+    try {
+      await stat(path.join(outputRoot, "markerless-control", marker));
+      throw new Error(`Markerless fixture unexpectedly contains ${marker}.`);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+  }
+  return manifest;
 }
 
 async function prepareNativeProject(root) {
@@ -184,20 +261,11 @@ export async function prepareProjectFactsPackagedFixtures(outputRoot) {
     const files = await prepareFakeAgents(path.join(outputRoot, directory), mode);
     fakeAgents.push({ directory, files, mode });
   }
-  const allFiles = [
-    ...native.files.map((file) => ({ ...file, path: `native-git-3-pages/${file.path}` })),
-    ...native.directories.map((directory) => ({
-      path: `native-git-3-pages/${normalized(directory)}/`,
-      contents: "directory",
-    })),
-    ...markerlessFiles.map((file) => ({ ...file, path: `markerless-control/${file.path}` })),
-    ...fakeAgents.flatMap(({ directory, files }) =>
-      files.map((file) => ({ ...file, path: `${directory}/${file.path}` }))
-    ),
-  ];
+  const fileInventory = await collectProjectFactsFixtureInventory(outputRoot);
   const manifest = {
-    schemaVersion: 1,
-    fixtureHash: fixtureHash(allFiles),
+    schemaVersion: 2,
+    fixtureHash: fixtureHash(fileInventory, native.directories),
+    fileInventory,
     native: {
       wikiPages: 3,
       supportFiles: SUPPORT_FILE_COUNT,
@@ -224,6 +292,7 @@ export async function prepareProjectFactsPackagedFixtures(outputRoot) {
     `${JSON.stringify(manifest, null, 2)}\n`,
     "utf8",
   );
+  await verifyProjectFactsPackagedFixtures(outputRoot, manifest);
   return manifest;
 }
 
