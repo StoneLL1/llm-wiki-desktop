@@ -26,29 +26,29 @@
     "list_llm_providers"
   ],
   "projectFactsBatch0Target": {
-    "status": "red",
+    "status": "green",
     "requiredExecution": "async",
     "reviewedCommandTotal": 205,
     "targetBlockingSyncCeiling": 130
   },
   "baseline": {
-    "status": "batch1_import_green",
+    "status": "project_facts_batch1_green",
     "total": 205,
-    "sync": 136,
-    "async": 69,
+    "sync": 133,
+    "async": 72,
     "importTotal": 60,
     "importSync": 0,
-    "blockingSync": 133,
-    "measuredAt": "2026-08-27",
-    "sourceCommit": "089516a7c9c3e24ec3efd80674e66a1ef1b9e49d"
+    "blockingSync": 130,
+    "measuredAt": "2026-08-28",
+    "sourceCommit": "bb03b3145ee342e572e1297148bb5a99b8720df2"
   },
-  "legacyBlockingSyncCeiling": 133,
+  "legacyBlockingSyncCeiling": 130,
   "commands": [
     {
       "command": "detect_agents",
       "module": "agent_commands",
       "classification": "ProcessOrMedia",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "Touches an external process, Agent, capability, OCR/ASR/media runner, shell integration, or application restart boundary."
     },
     {
@@ -132,7 +132,7 @@
       "command": "list_llm_providers",
       "module": "llm_commands",
       "classification": "BlockingRead",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
     },
     {
@@ -412,7 +412,7 @@
       "command": "git_status",
       "module": "git_commands",
       "classification": "BlockingRead",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
     },
     {

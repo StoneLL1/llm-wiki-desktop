@@ -1,4 +1,4 @@
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 use crate::app_state::AppState;
 use crate::errors::BackendError;
@@ -32,19 +32,27 @@ fn status_with_secret(
 }
 
 #[tauri::command]
-pub fn list_llm_providers(
-    state: State<'_, AppState>,
+pub async fn list_llm_providers(
+    app: AppHandle,
     request: ProviderProjectRequest,
 ) -> Result<Vec<ProviderStatus>, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state.require_external_ai_access(&context)?;
-    // Provider status is a live project-file + credential-store read. Keep
-    // force_refresh in the typed contract so future caching cannot ignore it.
-    let _force_refresh = request.force_refresh;
-    crate::services::LlmService::list_providers(&context)?
-        .into_iter()
-        .map(|config| status_with_secret(&context, &state.secret_service, config))
-        .collect()
+    let coordinator = app.state::<AppState>().blocking_work.clone();
+    coordinator
+        .run_project_facts_provider(move || {
+            let state = app.state::<AppState>();
+            let context =
+                state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+            state.require_external_ai_access(&context)?;
+            // Provider status is a live project-file + credential-store read.
+            // Keep force_refresh in the typed contract so future caching cannot
+            // ignore it.
+            let _force_refresh = request.force_refresh;
+            crate::services::LlmService::list_providers(&context)?
+                .into_iter()
+                .map(|config| status_with_secret(&context, &state.secret_service, config))
+                .collect()
+        })
+        .await
 }
 
 #[tauri::command]
