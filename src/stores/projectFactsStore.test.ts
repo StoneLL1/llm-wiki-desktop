@@ -20,6 +20,7 @@ import {
 
 const scopeA = { projectId: "project-a", rootPath: "D:/知识库/project-a" };
 const scopeB = { projectId: "project-b", rootPath: "D:/知识库/project-b" };
+const targetIt = process.env.LLM_WIKI_PROJECT_FACTS_TARGET === "1" ? it : it.skip;
 
 const installedAgent: AgentInfo = {
   kind: "claude",
@@ -184,24 +185,71 @@ describe("projectFactsStore", () => {
   it("starts a post-invalidation force request instead of joining an older force", async () => {
     const beforeMutation = deferred<ProviderStatus[]>();
     const afterMutation = deferred<ProviderStatus[]>();
+    let activeRequests = 0;
+    let maximumActiveRequests = 0;
     const freshProvider = {
       ...ollamaProvider,
       config: { ...ollamaProvider.config, model: "qwen3-fresh" },
     };
     invokeMock
-      .mockReturnValueOnce(beforeMutation.promise)
-      .mockReturnValueOnce(afterMutation.promise);
+      .mockImplementationOnce(() => {
+        activeRequests += 1;
+        maximumActiveRequests = Math.max(maximumActiveRequests, activeRequests);
+        return beforeMutation.promise.finally(() => {
+          activeRequests -= 1;
+        });
+      })
+      .mockImplementationOnce(() => {
+        activeRequests += 1;
+        maximumActiveRequests = Math.max(maximumActiveRequests, activeRequests);
+        return afterMutation.promise.finally(() => {
+          activeRequests -= 1;
+        });
+      });
 
     const oldRefresh = refreshProjectFacts(scopeA, ["providers"]);
     invalidateProjectFacts(scopeA, ["providers"], "provider_saved");
     const newRefresh = refreshProjectFacts(scopeA, ["providers"]);
+    expect(maximumActiveRequests).toBe(2);
     afterMutation.resolve([freshProvider]);
     await newRefresh;
     beforeMutation.resolve([ollamaProvider]);
     await oldRefresh;
 
     expect(invokeMock).toHaveBeenCalledTimes(2);
+    expect(activeRequests).toBe(0);
     expect(entryFor()?.providers.value).toEqual([freshProvider]);
+  });
+
+  targetIt("target: invalidate and force never overlap an active fact request", async () => {
+    const beforeMutation = deferred<ProviderStatus[]>();
+    const afterMutation = deferred<ProviderStatus[]>();
+    let activeRequests = 0;
+    let maximumActiveRequests = 0;
+    invokeMock
+      .mockImplementationOnce(() => {
+        activeRequests += 1;
+        maximumActiveRequests = Math.max(maximumActiveRequests, activeRequests);
+        return beforeMutation.promise.finally(() => {
+          activeRequests -= 1;
+        });
+      })
+      .mockImplementationOnce(() => {
+        activeRequests += 1;
+        maximumActiveRequests = Math.max(maximumActiveRequests, activeRequests);
+        return afterMutation.promise.finally(() => {
+          activeRequests -= 1;
+        });
+      });
+
+    const oldRefresh = refreshProjectFacts(scopeA, ["providers"]);
+    invalidateProjectFacts(scopeA, ["providers"], "provider_saved");
+    const newRefresh = refreshProjectFacts(scopeA, ["providers"]);
+    afterMutation.resolve([ollamaProvider]);
+    beforeMutation.resolve([ollamaProvider]);
+    await Promise.all([oldRefresh, newRefresh]);
+
+    expect(maximumActiveRequests).toBe(1);
   });
 
   it("reuses fresh values, then single-flights stale revalidation", async () => {

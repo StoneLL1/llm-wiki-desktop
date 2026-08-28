@@ -14,6 +14,7 @@ import type { PendingAction } from "../../types/backend";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 const originalMatchMedia = window.matchMedia;
+const targetIt = process.env.LLM_WIKI_PROJECT_FACTS_TARGET === "1" ? it : it.skip;
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
@@ -284,6 +285,21 @@ describe("AppShell first-screen agent detection", () => {
     useProjectStore.getState().setCurrentProject(defaultProject);
   });
 
+  it("records zero Project Facts requests when no project is open", async () => {
+    tauriWindow.__TAURI_INTERNALS__ = {};
+    useProjectStore.getState().setCurrentProject(defaultProject);
+
+    render(<AppShell />);
+    await act(async () => Promise.resolve());
+
+    const projectFactsCommands = new Set([
+      "git_status",
+      "detect_agents",
+      "list_llm_providers",
+    ]);
+    expect(invokeMock.mock.calls.filter(([command]) => projectFactsCommands.has(command))).toHaveLength(0);
+  });
+
   it("refreshes agentRoute when the dashboard mounts with an active project", async () => {
     tauriWindow.__TAURI_INTERNALS__ = {};
     useProjectStore.getState().setCurrentProject({
@@ -352,7 +368,7 @@ describe("AppShell first-screen agent detection", () => {
     });
   });
 
-  it("single-flights one revalidation per fact when the app window regains focus", async () => {
+  it("freezes the red baseline of refreshing all three facts on window focus", async () => {
     tauriWindow.__TAURI_INTERNALS__ = {};
     useProjectStore.getState().setCurrentProject({
       ...defaultProject,
@@ -384,6 +400,40 @@ describe("AppShell first-screen agent detection", () => {
       expect(invokeMock.mock.calls.filter(([command]) => command === "detect_agents")).toHaveLength(2);
       expect(invokeMock.mock.calls.filter(([command]) => command === "list_llm_providers")).toHaveLength(2);
     });
+  });
+
+  targetIt("target: refreshes only Git when the app window regains focus", async () => {
+    tauriWindow.__TAURI_INTERNALS__ = {};
+    useProjectStore.getState().setCurrentProject({
+      ...defaultProject,
+      projectId: "proj-focus-target",
+      rootPath: "/tmp/proj-focus-target",
+    });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "git_status") {
+        return Promise.resolve({
+          isRepository: false,
+          branch: null,
+          head: null,
+          hasChanges: false,
+        });
+      }
+      return Promise.resolve([]);
+    });
+    render(<AppShell />);
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(1);
+      expect(invokeMock.mock.calls.filter(([command]) => command === "detect_agents")).toHaveLength(1);
+      expect(invokeMock.mock.calls.filter(([command]) => command === "list_llm_providers")).toHaveLength(1);
+    });
+
+    fireEvent.focus(window);
+
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(2);
+    });
+    expect(invokeMock.mock.calls.filter(([command]) => command === "detect_agents")).toHaveLength(1);
+    expect(invokeMock.mock.calls.filter(([command]) => command === "list_llm_providers")).toHaveLength(1);
   });
 
   it("reprobes mounted observers after the project authority identity changes", async () => {

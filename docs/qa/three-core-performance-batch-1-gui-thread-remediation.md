@@ -6,7 +6,7 @@ Batch 1 moves the current Import command surface and its background synchronous 
 
 - `BlockingWorkCoordinator` is shared through `AppState`. Metadata I/O admits at most four workers, heavy I/O at most two, and project Git work at most one worker for each canonical project identity.
 - Admission is asynchronous. Cancellation is rechecked after admission and again on the worker before user code starts; a panic or join failure returns a typed `BackendError`, suppresses worker panic payloads, and leaves the lane usable.
-- The optional `LLM_WIKI_BLOCKING_TRACE_PATH` observer records JSONL spans containing only work class, caller/worker thread IDs, queue/run durations, outcome, and a sanitized error code. It has no project path, filename, URL, content, secret, or raw payload input.
+- The optional `LLM_WIKI_BLOCKING_TRACE_PATH` observer records JSONL spans containing only work class, a closed operation label, caller/worker thread IDs, queue/run durations, outcome, and a sanitized error category. It has no project path, filename, URL, content, secret, or raw payload input.
 - All 55 registered Import commands are explicitly classified and async. The two native network-async commands keep network waiting on the async path while their synchronous preflight/finalization phases use the coordinator; the remaining 53 registered wrappers move their complete synchronous command bodies into the coordinator.
 - Import agent assistance, capability installation/verification/activation, batch preparation/execution, file scan, migration, and commit background paths no longer execute synchronous filesystem/Git work directly on an async executor. Git mutations acquire project write authority before the per-canonical-project Git lane.
 

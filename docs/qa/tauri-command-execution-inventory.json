@@ -20,6 +20,17 @@
     "set_import_item_resolution_v2",
     "authorize_local_asr_v2"
   ],
+  "projectFactsP0Commands": [
+    "git_status",
+    "detect_agents",
+    "list_llm_providers"
+  ],
+  "projectFactsBatch0Target": {
+    "status": "red",
+    "requiredExecution": "async",
+    "reviewedCommandTotal": 205,
+    "targetBlockingSyncCeiling": 130
+  },
   "baseline": {
     "status": "batch1_import_green",
     "total": 205,
