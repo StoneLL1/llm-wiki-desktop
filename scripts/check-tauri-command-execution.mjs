@@ -7,14 +7,18 @@ const result = await inspectCommandExecution(repositoryRoot);
 assertInventoryComplete(result);
 
 const baseline = result.inventory.baseline;
+const currentSnapshot = result.inventory.currentSnapshot;
 for (const [key, value] of Object.entries(result.counts)) {
-  if (baseline[key] !== value) {
-    throw new Error(`Command execution baseline drift for ${key}: inventory=${baseline[key]} actual=${value}`);
+  if (currentSnapshot[key] !== value) {
+    throw new Error(`Command execution snapshot drift for ${key}: inventory=${currentSnapshot[key]} actual=${value}`);
   }
 }
 
 if (baseline.status !== "project_facts_batch1_green") {
   throw new Error(`Expected the Project Facts Batch 1 execution gate, received ${baseline.status}.`);
+}
+if (currentSnapshot.status !== "project_facts_batch4_green") {
+  throw new Error(`Expected the Project Facts Batch 4 execution snapshot, received ${currentSnapshot.status}.`);
 }
 if (result.counts.importSync !== 0) {
   throw new Error(`Synchronous registered Import commands remain: ${result.counts.importSync}`);
@@ -32,7 +36,7 @@ const projectFactsP0Sync = result.inventory.projectFactsP0Commands.filter((comma
   result.inventory.commands.some((entry) => entry.command === command && entry.currentExecution === "sync")
 ).length;
 process.stdout.write(`${JSON.stringify({
-  status: baseline.status,
+  status: currentSnapshot.status,
   projectFactsStatus: result.inventory.projectFactsBatch0Target.status,
   projectFactsP0Sync,
   ...result.counts,

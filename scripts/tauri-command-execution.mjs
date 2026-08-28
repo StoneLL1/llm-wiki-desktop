@@ -84,6 +84,13 @@ export async function inspectCommandExecution(repositoryRoot) {
   };
 }
 
+export function refreshInventorySnapshotCounts(snapshot, counts) {
+  return {
+    ...snapshot,
+    ...counts,
+  };
+}
+
 export function assertInventoryComplete(result) {
   const failures = [
     ["unclassified registered commands", result.missing],

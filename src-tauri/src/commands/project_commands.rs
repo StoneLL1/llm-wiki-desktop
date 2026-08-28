@@ -4,6 +4,7 @@ use chrono::{Duration, Utc};
 use tauri::{AppHandle, Manager, State};
 
 use crate::app_state::AppState;
+use crate::commands::runtime::run_blocking_named;
 use crate::errors::BackendError;
 use crate::models::layout::{CompatibleLayoutMapping, COMPATIBLE_LAYOUT_MAPPING_PATH};
 use crate::models::project::{
@@ -15,6 +16,7 @@ use crate::models::project::{
     StartProjectOpenAssessmentResult,
 };
 use crate::models::task::{TaskResult, TaskStatus, TaskType};
+use crate::services::{BlockingWorkClass, BlockingWorkOperation};
 use crate::tasks::task_model::LogLevel;
 use crate::utils::time_utils::now_rfc3339;
 
@@ -82,8 +84,21 @@ pub fn create_project(
 }
 
 #[tauri::command]
-pub fn open_project(
-    state: State<'_, AppState>,
+pub async fn open_project(
+    app: AppHandle,
+    request: OpenProjectRequest,
+) -> Result<OpenProjectResponse, BackendError> {
+    run_blocking_named(
+        app,
+        BlockingWorkClass::HeavyIo,
+        BlockingWorkOperation::OpenProject,
+        move |app| open_project_for_state(&app.state::<AppState>(), request),
+    )
+    .await
+}
+
+fn open_project_for_state(
+    state: &AppState,
     request: OpenProjectRequest,
 ) -> Result<OpenProjectResponse, BackendError> {
     let mut outcome = state.project_service.open_project(&request.path)?;
