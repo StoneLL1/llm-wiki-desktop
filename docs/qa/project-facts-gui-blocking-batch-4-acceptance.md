@@ -67,7 +67,7 @@ Raw evidence:
 
 ## Review and verification
 
-The one permitted final dual-review round was completed after implementation: the shared-context reviewer checked plan/architecture/security integration, and the fresh-context reviewer challenged attribution, fixture binding, cleanup, and missing-test claims. Valid findings were closed without starting another reviewer round. The resulting fixes include fail-closed credential denial, credential cleanup, explicit phase/process/focus evidence, dispatcher-versus-round-trip separation, all three residual commands, serialized activation, exact artifact/fixture binding, and spawned-process-tree accounting.
+Batch 4's stage review was completed after implementation: the shared-context reviewer checked plan/architecture/security integration, and the fresh-context reviewer challenged attribution, fixture binding, cleanup, and missing-test claims. Valid Batch 4 findings were closed without starting another reviewer round. The plan-level final dual-review remained reserved for Batch 5. The resulting Batch 4 fixes include fail-closed credential denial, credential cleanup, explicit phase/process/focus evidence, dispatcher-versus-round-trip separation, all three residual commands, serialized activation, exact artifact/fixture binding, and spawned-process-tree accounting.
 
 Verification summary:
 
