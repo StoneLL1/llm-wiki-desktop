@@ -19,11 +19,19 @@ import {
   observeProjectResources,
   registerProjectResource,
 } from "../stores/projectScope";
+import {
+  bindProjectFactsAuthority,
+  ensureProjectFacts,
+  projectFactsAuthorityKey,
+  resetProjectFactsStoreForTests,
+} from "../stores/projectFactsStore";
 
 const listenMock = vi.hoisted(() => vi.fn());
 const notifyTaskEventMock = vi.hoisted(() => vi.fn());
+const invokeMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("../services/notifications", () => ({
   invalidateNotificationPermissionEpoch: vi.fn(),
   notifyTaskEvent: notifyTaskEventMock,
@@ -41,6 +49,7 @@ const event: BackendEvent = {
 
 beforeEach(() => {
   listenMock.mockReset();
+  invokeMock.mockReset();
   notifyTaskEventMock.mockReset();
   listenMock.mockResolvedValue(vi.fn());
   clearPendingTaskEvents();
@@ -64,6 +73,7 @@ beforeEach(() => {
     taskOutputs: {},
   });
   useChatStore.getState().reset();
+  resetProjectFactsStoreForTests();
   Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
 });
 
@@ -115,6 +125,161 @@ describe("task event listener bridge", () => {
       listenMock.mock.calls.filter(([channel]) => channel === "task://stream-output"),
     ).toHaveLength(1);
     unmount();
+  });
+
+  it("invalidates and revalidates only Git for a matching project refresh", async () => {
+    const project = {
+      ...defaultProject,
+      projectId: "project-a",
+      rootPath: "D:/project-a",
+      inventoryState: "ready" as const,
+    };
+    const authority = {
+      projectId: project.projectId,
+      canonicalIdentityKey: "identity-a",
+      identityRevision: "identity-revision-a",
+      authorityRevision: "authority-revision-a",
+    };
+    useProjectStore.setState({ currentProject: project, authority: authority as never });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "git_status") {
+        return Promise.resolve({
+          isRepository: true,
+          branch: "main",
+          head: "head",
+          hasChanges: false,
+        });
+      }
+      return Promise.resolve([]);
+    });
+    bindProjectFactsAuthority(project, projectFactsAuthorityKey(authority));
+    await ensureProjectFacts(project, ["git"]);
+    renderHook(() => useTaskEvents());
+    await waitFor(() => {
+      expect(listenMock.mock.calls.find(
+        ([channel]) => channel === "project://refreshed",
+      )?.[1]).toBeTypeOf("function");
+    });
+    const refreshed = listenMock.mock.calls.find(
+      ([channel]) => channel === "project://refreshed",
+    )?.[1] as ((event: { payload: BackendEvent }) => void) | undefined;
+
+    act(() => {
+      refreshed?.({
+        payload: {
+          eventId: "project-refreshed",
+          eventType: "project_refreshed",
+          projectId: project.projectId,
+          taskId: null,
+          timestamp: "2026-08-28T00:00:00Z",
+          payload: project,
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(2);
+    });
+    expect(invokeMock.mock.calls.filter(([command]) => command === "detect_agents")).toHaveLength(0);
+    expect(invokeMock.mock.calls.filter(([command]) => command === "list_llm_providers")).toHaveLength(0);
+  });
+
+  it("rejects a project refresh before commit when root or authority revision drifted", async () => {
+    const project = {
+      ...defaultProject,
+      projectId: "project-a",
+      rootPath: "D:/project-a",
+      name: "Current",
+      inventoryState: "ready" as const,
+    };
+    const authority = {
+      projectId: project.projectId,
+      canonicalIdentityKey: "identity-a",
+      identityRevision: "identity-revision-a",
+      authorityRevision: "authority-revision-a",
+    };
+    useProjectStore.setState({ currentProject: project, authority: authority as never });
+    bindProjectFactsAuthority(project, projectFactsAuthorityKey(authority));
+    renderHook(() => useTaskEvents());
+
+    act(() => dispatchTaskEvent({
+      eventId: "wrong-root",
+      eventType: "project_refreshed",
+      projectId: project.projectId,
+      taskId: null,
+      timestamp: "2026-08-28T00:00:00Z",
+      payload: { ...project, rootPath: "D:/other", name: "Wrong root" },
+    }));
+    expect(useProjectStore.getState().currentProject).toBe(project);
+
+    useProjectStore.setState({
+      authority: { ...authority, authorityRevision: "authority-revision-b" } as never,
+    });
+    act(() => dispatchTaskEvent({
+      eventId: "stale-authority",
+      eventType: "project_refreshed",
+      projectId: project.projectId,
+      taskId: null,
+      timestamp: "2026-08-28T00:00:01Z",
+      payload: { ...project, name: "Stale authority" },
+    }));
+    expect(useProjectStore.getState().currentProject).toBe(project);
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("revalidates Git for terminal tasks only when affected paths prove a mutation", async () => {
+    const project = { ...defaultProject, projectId: "project-a", rootPath: "D:/project-a" };
+    const authority = {
+      projectId: project.projectId,
+      canonicalIdentityKey: "identity-a",
+      identityRevision: "identity-revision-a",
+      authorityRevision: "authority-revision-a",
+    };
+    useProjectStore.setState({ currentProject: project, authority: authority as never });
+    bindProjectFactsAuthority(project, projectFactsAuthorityKey(authority));
+    invokeMock.mockImplementation((command: string) => command === "git_status"
+      ? Promise.resolve({ isRepository: true, branch: "main", head: "head", hasChanges: false })
+      : Promise.resolve([]));
+    await ensureProjectFacts(project, ["git"]);
+    renderHook(() => useTaskEvents());
+    const task = {
+      id: "workflow-task",
+      taskType: "workflow",
+      projectId: project.projectId,
+      title: "Workflow",
+      status: "succeeded",
+      progress: null,
+      startedAt: "2026-08-28T00:00:00Z",
+      updatedAt: "2026-08-28T00:00:01Z",
+      completedAt: "2026-08-28T00:00:01Z",
+      cancellable: false,
+      logPath: null,
+      result: { summary: "changed", affectedPaths: ["wiki/page.md"] },
+      error: null,
+    } satisfies BackendTask;
+
+    act(() => dispatchTaskEvent({
+      eventId: "task-completed",
+      eventType: "task_completed",
+      projectId: project.projectId,
+      taskId: task.id,
+      timestamp: task.updatedAt,
+      payload: task,
+    }));
+    await waitFor(() => expect(
+      invokeMock.mock.calls.filter(([command]) => command === "git_status"),
+    ).toHaveLength(2));
+
+    act(() => dispatchTaskEvent({
+      eventId: "task-cancelled",
+      eventType: "task_cancelled",
+      projectId: project.projectId,
+      taskId: task.id,
+      timestamp: task.updatedAt,
+      payload: { ...task, status: "cancelled", result: null },
+    }));
+    await Promise.resolve();
+    expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(2);
   });
 
   it("records a background task fact without changing active-project presentation", async () => {

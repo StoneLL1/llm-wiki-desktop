@@ -247,6 +247,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       ) {
         return state;
       }
+      if (state.currentProject.agentRoute === agentRoute) return state;
       return {
         currentProject: { ...state.currentProject, agentRoute },
       };

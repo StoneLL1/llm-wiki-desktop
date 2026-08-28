@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { AiCapabilitiesWorkflow } from "../../hooks/useAiCapabilities";
@@ -49,7 +49,14 @@ export function useProviderWorkflow(
   const rootPath = project.rootPath;
   const projectKey = `${projectId}\0${rootPath}`;
   const latestProjectKey = useRef(projectKey);
+  const mounted = useRef(true);
   latestProjectKey.current = projectKey;
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const testEpoch = useRef(0);
   const refresh = capabilities.refresh;
 
@@ -61,9 +68,9 @@ export function useProviderWorkflow(
         await invoke("save_llm_provider", {
           request: { projectId, projectRootPath: rootPath, config },
         });
-        invalidateProjectFacts({ projectId, rootPath }, ["agents", "providers"], "provider_saved");
-        if (latestProjectKey.current === requestKey) {
-          await refresh(true);
+        invalidateProjectFacts({ projectId, rootPath }, ["providers"], "provider_saved");
+        if (mounted.current && latestProjectKey.current === requestKey) {
+          await refresh(true, ["providers"]);
         }
       } catch (error) {
         throw providerWorkflowError(error);
@@ -110,8 +117,8 @@ export function useProviderWorkflow(
           ["providers"],
           "provider_secret_saved",
         );
-        if (latestProjectKey.current === requestKey) {
-          await refresh(true);
+        if (mounted.current && latestProjectKey.current === requestKey) {
+          await refresh(true, ["providers"]);
         }
       } catch (error) {
         throw providerWorkflowError(error);
@@ -136,8 +143,8 @@ export function useProviderWorkflow(
           ["providers"],
           "provider_secret_deleted",
         );
-        if (latestProjectKey.current === requestKey) {
-          await refresh(true);
+        if (mounted.current && latestProjectKey.current === requestKey) {
+          await refresh(true, ["providers"]);
         }
       } catch (error) {
         throw providerWorkflowError(error);

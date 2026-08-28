@@ -2,7 +2,7 @@ import { useEffect, useMemo } from "react";
 
 import {
   ensureProjectFacts,
-  nextProjectFactsExpiryAt,
+  projectFactsAuthorityKey,
   projectFactsKey,
   useProjectFactsStore,
   type GitRepositoryStatus,
@@ -44,7 +44,7 @@ export function useProjectStatus(
     state.currentProject.projectId === projectId
       && state.currentProject.rootPath === rootPath
       && state.authority?.projectId === projectId
-      ? `${state.authority.canonicalIdentityKey}\0${state.authority.identityRevision}`
+      ? projectFactsAuthorityKey(state.authority)
       : null
   );
   const storedEntry = useProjectFactsStore((state) => state.entries[key] ?? null);
@@ -56,7 +56,6 @@ export function useProjectStatus(
   const staleSignature = requestedKinds
     .map((kind) => `${kind}:${entry?.[kind].status ?? "idle"}`)
     .join("|");
-  const expiryAt = nextProjectFactsExpiryAt(entry, requestedKinds);
 
   useEffect(() => {
     if (!enabled || !projectId || !rootPath || requestedKinds.length === 0) return;
@@ -78,16 +77,6 @@ export function useProjectStatus(
     }
     void ensureProjectFacts(scope, requestedKinds).catch(() => undefined);
   }, [enabled, entry, requestedKinds, scope, staleSignature]);
-
-  useEffect(() => {
-    if (!enabled) return;
-    if (expiryAt === null) return;
-    const delay = Math.max(1, expiryAt - Date.now() + 1);
-    const timeout = window.setTimeout(() => {
-      void ensureProjectFacts(scope, requestedKinds).catch(() => undefined);
-    }, delay);
-    return () => window.clearTimeout(timeout);
-  }, [enabled, expiryAt, requestedKinds, scope]);
 
   if (!enabled || !entry) return null;
   const hasKnownResult = requestedKinds.length > 0 && requestedKinds.every((kind) => {

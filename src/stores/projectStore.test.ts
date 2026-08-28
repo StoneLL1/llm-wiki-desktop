@@ -9,7 +9,6 @@ import type {
 } from "../types/project";
 
 const invokeMock = vi.hoisted(() => vi.fn());
-const targetIt = process.env.LLM_WIKI_PROJECT_FACTS_TARGET === "1" ? it : it.skip;
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
@@ -463,25 +462,7 @@ describe("projectStore bootstrap", () => {
     expect(useProjectStore.getState().currentProject).toEqual(projectB);
   });
 
-  it("freezes the red baseline of publishing a new project object for the same agent route", () => {
-    useProjectStore.getState().setCurrentProject(summary);
-    const before = useProjectStore.getState().currentProject;
-    let publications = 0;
-    const unsubscribe = useProjectStore.subscribe(() => {
-      publications += 1;
-    });
-
-    useProjectStore
-      .getState()
-      .setAgentRoute(summary.projectId, summary.rootPath, summary.agentRoute);
-
-    unsubscribe();
-    expect(publications).toBe(1);
-    expect(useProjectStore.getState().currentProject).not.toBe(before);
-    expect(useProjectStore.getState().currentProject).toEqual(before);
-  });
-
-  targetIt("target: equal agent routes do not publish a new project object", () => {
+  it("does not publish a new project object for an equal agent route", () => {
     useProjectStore.getState().setCurrentProject(summary);
     const before = useProjectStore.getState().currentProject;
     let publications = 0;

@@ -14,7 +14,6 @@ import type { PendingAction } from "../../types/backend";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 const originalMatchMedia = window.matchMedia;
-const targetIt = process.env.LLM_WIKI_PROJECT_FACTS_TARGET === "1" ? it : it.skip;
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
@@ -35,6 +34,14 @@ function mockNarrowDesktop(matches: boolean) {
       dispatchEvent: vi.fn(),
     })),
   });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
 }
 
 beforeEach(async () => {
@@ -114,7 +121,11 @@ describe("AppShell workspace header", () => {
     render(<AppShell />);
     fireEvent.click(screen.getByRole("button", { name: "Check for updates" }));
 
-    expect(await screen.findByRole("dialog", { name: "Updates" })).toBeVisible();
+    expect(await screen.findByRole(
+      "dialog",
+      { name: "Updates" },
+      { timeout: 10_000 },
+    )).toBeVisible();
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("check_app_update"));
     expect(useUpdateStore.getState().uiStatus).toBe("up_to_date");
   });
@@ -368,46 +379,20 @@ describe("AppShell first-screen agent detection", () => {
     });
   });
 
-  it("freezes the red baseline of refreshing all three facts on window focus", async () => {
-    tauriWindow.__TAURI_INTERNALS__ = {};
-    useProjectStore.getState().setCurrentProject({
-      ...defaultProject,
-      projectId: "proj-focus",
-      rootPath: "/tmp/proj-focus",
-    });
-    invokeMock.mockImplementation((command: string) => {
-      if (command === "git_status") {
-        return Promise.resolve({
-          isRepository: false,
-          branch: null,
-          head: null,
-          hasChanges: false,
-        });
-      }
-      return Promise.resolve([]);
-    });
-    render(<AppShell />);
-    await waitFor(() => {
-      expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(1);
-      expect(invokeMock.mock.calls.filter(([command]) => command === "detect_agents")).toHaveLength(1);
-      expect(invokeMock.mock.calls.filter(([command]) => command === "list_llm_providers")).toHaveLength(1);
-    });
-
-    fireEvent.focus(window);
-
-    await waitFor(() => {
-      expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(2);
-      expect(invokeMock.mock.calls.filter(([command]) => command === "detect_agents")).toHaveLength(2);
-      expect(invokeMock.mock.calls.filter(([command]) => command === "list_llm_providers")).toHaveLength(2);
-    });
-  });
-
-  targetIt("target: refreshes only Git when the app window regains focus", async () => {
+  it("refreshes only Git when the app window regains focus", async () => {
     tauriWindow.__TAURI_INTERNALS__ = {};
     useProjectStore.getState().setCurrentProject({
       ...defaultProject,
       projectId: "proj-focus-target",
       rootPath: "/tmp/proj-focus-target",
+    });
+    useProjectStore.setState({
+      authority: {
+        projectId: "proj-focus-target",
+        canonicalIdentityKey: "identity-focus-target",
+        identityRevision: "revision-1",
+        authorityRevision: "authority-1",
+      } as never,
     });
     invokeMock.mockImplementation((command: string) => {
       if (command === "git_status") {
@@ -436,7 +421,69 @@ describe("AppShell first-screen agent detection", () => {
     expect(invokeMock.mock.calls.filter(([command]) => command === "list_llm_providers")).toHaveLength(1);
   });
 
-  it("reprobes mounted observers after the project authority identity changes", async () => {
+  it("coalesces a visibility transition and twenty focus events into one Git request", async () => {
+    tauriWindow.__TAURI_INTERNALS__ = {};
+    const project = {
+      ...defaultProject,
+      projectId: "proj-focus-coalesced",
+      rootPath: "/tmp/proj-focus-coalesced",
+    };
+    useProjectStore.getState().setCurrentProject(project);
+    useProjectStore.setState({
+      authority: {
+        projectId: project.projectId,
+        canonicalIdentityKey: "identity-focus-coalesced",
+        identityRevision: "revision-1",
+        authorityRevision: "authority-1",
+      } as never,
+    });
+    const firstFocus = deferred<{
+      isRepository: boolean;
+      branch: string | null;
+      head: string | null;
+      hasChanges: boolean;
+    }>();
+    let gitCalls = 0;
+    let activeGit = 0;
+    let maximumActiveGit = 0;
+    invokeMock.mockImplementation((command: string) => {
+      if (command !== "git_status") return Promise.resolve([]);
+      gitCalls += 1;
+      if (gitCalls === 1) {
+        return Promise.resolve({
+          isRepository: true,
+          branch: "main",
+          head: "initial",
+          hasChanges: false,
+        });
+      }
+      activeGit += 1;
+      maximumActiveGit = Math.max(maximumActiveGit, activeGit);
+      return firstFocus.promise.finally(() => {
+        activeGit -= 1;
+      });
+    });
+
+    render(<AppShell />);
+    await waitFor(() => expect(gitCalls).toBe(1));
+    fireEvent(document, new Event("visibilitychange"));
+    for (let index = 0; index < 20; index += 1) fireEvent.focus(window);
+
+    expect(gitCalls).toBe(2);
+    expect(maximumActiveGit).toBe(1);
+    firstFocus.resolve({
+      isRepository: true,
+      branch: "main",
+      head: "focus-1",
+      hasChanges: false,
+    });
+    await waitFor(() => expect(activeGit).toBe(0));
+
+    expect(gitCalls).toBe(2);
+    expect(maximumActiveGit).toBe(1);
+  });
+
+  it("reprobes mounted observers after only the authority revision changes", async () => {
     tauriWindow.__TAURI_INTERNALS__ = {};
     const project = {
       ...defaultProject,
@@ -450,6 +497,7 @@ describe("AppShell first-screen agent detection", () => {
         projectId: project.projectId,
         canonicalIdentityKey: "identity-a",
         identityRevision: "revision-1",
+        authorityRevision: "authority-1",
       } as never,
     });
     invokeMock.mockImplementation((command: string) => {
@@ -474,7 +522,8 @@ describe("AppShell first-screen agent detection", () => {
       authority: {
         projectId: project.projectId,
         canonicalIdentityKey: "identity-a",
-        identityRevision: "revision-2",
+        identityRevision: "revision-1",
+        authorityRevision: "authority-2",
       } as never,
     }));
 

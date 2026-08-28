@@ -7,7 +7,10 @@ import {
   observeProjectResources,
   registerProjectResource,
 } from "../stores/projectScope";
-import { projectResourcesForBackendEvent } from "./projectResourceInvalidation";
+import {
+  gitFactsChangedForBackendEvent,
+  projectResourcesForBackendEvent,
+} from "./projectResourceInvalidation";
 
 const scope = { projectId: "project-a", rootPath: "D:/知识库" };
 
@@ -67,6 +70,25 @@ describe("project resource invalidation", () => {
     expect(projectResourcesForBackendEvent(terminalEvent("llm_request"))).toEqual([
       "chat-sessions",
     ]);
+  });
+
+  it("invalidates Git facts only when a terminal task reports real affected paths", () => {
+    const completed = terminalEvent("workflow");
+    completed.payload.result = { summary: "changed", affectedPaths: ["wiki/page.md"] };
+    expect(gitFactsChangedForBackendEvent(completed)).toBe(true);
+    expect(gitFactsChangedForBackendEvent({
+      ...completed,
+      eventType: "task_failed",
+    })).toBe(true);
+    expect(gitFactsChangedForBackendEvent({
+      ...completed,
+      eventType: "task_cancelled",
+      payload: { ...completed.payload, result: null },
+    })).toBe(false);
+    expect(gitFactsChangedForBackendEvent({
+      ...completed,
+      eventType: "task_updated",
+    })).toBe(false);
   });
 
   it("coalesces repeated invalidations during one in-flight refresh into one follow-up", async () => {

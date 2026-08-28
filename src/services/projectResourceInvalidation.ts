@@ -30,6 +30,16 @@ export function projectResourcesForBackendEvent(event: BackendEvent): ProjectRes
   }
 }
 
+export function gitFactsChangedForBackendEvent(event: BackendEvent): boolean {
+  if (![
+    "task_completed",
+    "task_failed",
+    "task_cancelled",
+  ].includes(event.eventType)) return false;
+  const task = asBackendTask(event.payload);
+  return (task?.result?.affectedPaths.length ?? 0) > 0;
+}
+
 function asBackendTask(value: unknown): BackendTask | null {
   if (!value || typeof value !== "object" || !("taskType" in value)) return null;
   return value as BackendTask;
