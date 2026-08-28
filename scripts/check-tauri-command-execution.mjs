@@ -13,8 +13,8 @@ for (const [key, value] of Object.entries(result.counts)) {
   }
 }
 
-if (baseline.status !== "batch1_import_green") {
-  throw new Error(`Expected the Batch 1 Import execution gate, received ${baseline.status}.`);
+if (baseline.status !== "project_facts_batch1_green") {
+  throw new Error(`Expected the Project Facts Batch 1 execution gate, received ${baseline.status}.`);
 }
 if (result.counts.importSync !== 0) {
   throw new Error(`Synchronous registered Import commands remain: ${result.counts.importSync}`);

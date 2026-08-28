@@ -40,6 +40,7 @@ impl Drop for BlockingPanicBoundary {
 pub enum BlockingWorkClass {
     MetadataIo,
     HeavyIo,
+    ProcessProbe,
     ProjectGit,
 }
 
@@ -48,6 +49,7 @@ impl BlockingWorkClass {
         match self {
             Self::MetadataIo => "metadata_io",
             Self::HeavyIo => "heavy_io",
+            Self::ProcessProbe => "process_probe",
             Self::ProjectGit => "project_git",
         }
     }
@@ -56,7 +58,8 @@ impl BlockingWorkClass {
         match self {
             Self::MetadataIo => 0,
             Self::HeavyIo => 1,
-            Self::ProjectGit => 2,
+            Self::ProcessProbe => 2,
+            Self::ProjectGit => 3,
         }
     }
 }
@@ -119,6 +122,7 @@ impl BlockingWorkClassStats {
 struct BlockingWorkLimits {
     metadata_io: usize,
     heavy_io: usize,
+    process_probe: usize,
 }
 
 impl Default for BlockingWorkLimits {
@@ -126,6 +130,7 @@ impl Default for BlockingWorkLimits {
         Self {
             metadata_io: 4,
             heavy_io: 2,
+            process_probe: 2,
         }
     }
 }
@@ -134,8 +139,9 @@ impl Default for BlockingWorkLimits {
 struct BlockingWorkInner {
     metadata_io: Arc<Semaphore>,
     heavy_io: Arc<Semaphore>,
+    process_probe: Arc<Semaphore>,
     project_git: Mutex<HashMap<String, Weak<Semaphore>>>,
-    stats: [BlockingWorkClassStats; 3],
+    stats: [BlockingWorkClassStats; 4],
 }
 
 #[derive(Debug, Clone)]
@@ -154,10 +160,12 @@ impl BlockingWorkCoordinator {
         install_sanitized_worker_panic_hook();
         assert!(limits.metadata_io > 0);
         assert!(limits.heavy_io > 0);
+        assert!(limits.process_probe > 0);
         Self {
             inner: Arc::new(BlockingWorkInner {
                 metadata_io: Arc::new(Semaphore::new(limits.metadata_io)),
                 heavy_io: Arc::new(Semaphore::new(limits.heavy_io)),
+                process_probe: Arc::new(Semaphore::new(limits.process_probe)),
                 project_git: Mutex::new(HashMap::new()),
                 stats: std::array::from_fn(|_| BlockingWorkClassStats::default()),
             }),
@@ -189,6 +197,68 @@ impl BlockingWorkCoordinator {
             self.semaphore(class),
             None,
             operation,
+        )
+        .await
+    }
+
+    pub(crate) async fn run_project_facts_agent<R, F>(
+        &self,
+        operation: F,
+    ) -> Result<R, BackendError>
+    where
+        R: Send + 'static,
+        F: FnOnce() -> Result<R, BackendError> + Send + 'static,
+    {
+        self.run_named(
+            BlockingWorkClass::ProcessProbe,
+            BlockingWorkOperation::ProjectFactsAgentDetection,
+            operation,
+        )
+        .await
+    }
+
+    pub(crate) async fn run_project_facts_provider<R, F>(
+        &self,
+        operation: F,
+    ) -> Result<R, BackendError>
+    where
+        R: Send + 'static,
+        F: FnOnce() -> Result<R, BackendError> + Send + 'static,
+    {
+        self.run_named(
+            BlockingWorkClass::HeavyIo,
+            BlockingWorkOperation::ProjectFactsProviderStatus,
+            operation,
+        )
+        .await
+    }
+
+    /// Resolve project authority/identity under MetadataIo, release that
+    /// permit, then wait for the canonical project Git lane. The token carries
+    /// the authority revision into the Git worker for drift revalidation.
+    pub(crate) async fn run_project_facts_git<T, R, M, G>(
+        &self,
+        metadata: M,
+        git: G,
+    ) -> Result<R, BackendError>
+    where
+        T: Send + 'static,
+        R: Send + 'static,
+        M: FnOnce() -> Result<(String, T), BackendError> + Send + 'static,
+        G: FnOnce(T) -> Result<R, BackendError> + Send + 'static,
+    {
+        let (canonical_identity, authority_token) = self
+            .run_named(
+                BlockingWorkClass::MetadataIo,
+                BlockingWorkOperation::ProjectFactsGitStatus,
+                metadata,
+            )
+            .await?;
+        self.run_project_git_named(
+            canonical_identity,
+            BlockingWorkOperation::ProjectFactsGitStatus,
+            None,
+            move || git(authority_token),
         )
         .await
     }
@@ -343,12 +413,14 @@ impl BlockingWorkCoordinator {
         result
     }
 
-    pub fn snapshot(&self) -> [BlockingWorkClassSnapshot; 3] {
+    pub fn snapshot(&self) -> [BlockingWorkClassSnapshot; 4] {
         [
             self.stats(BlockingWorkClass::MetadataIo)
                 .snapshot(BlockingWorkClass::MetadataIo),
             self.stats(BlockingWorkClass::HeavyIo)
                 .snapshot(BlockingWorkClass::HeavyIo),
+            self.stats(BlockingWorkClass::ProcessProbe)
+                .snapshot(BlockingWorkClass::ProcessProbe),
             self.stats(BlockingWorkClass::ProjectGit)
                 .snapshot(BlockingWorkClass::ProjectGit),
         ]
@@ -358,6 +430,7 @@ impl BlockingWorkCoordinator {
         match class {
             BlockingWorkClass::MetadataIo => Arc::clone(&self.inner.metadata_io),
             BlockingWorkClass::HeavyIo => Arc::clone(&self.inner.heavy_io),
+            BlockingWorkClass::ProcessProbe => Arc::clone(&self.inner.process_probe),
             BlockingWorkClass::ProjectGit => {
                 unreachable!("project Git work requires a canonical project identity")
             }
@@ -440,18 +513,34 @@ impl BlockingWorkCoordinator {
             let _panic_boundary = BlockingPanicBoundary::enter();
             let worker_started_at = Instant::now();
             let worker_thread = format!("{:?}", std::thread::current().id());
-            let result = operation();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
             let run_nanos = elapsed_nanos(worker_started_at);
-            write_perf_span(
-                class,
-                operation_label,
-                &caller_thread,
-                &worker_thread,
-                queue_wait_nanos,
-                run_nanos,
-                result.as_ref().err().map(|error| error.code.as_str()),
-            );
-            (result, run_nanos, false)
+            match result {
+                Ok(result) => {
+                    write_perf_span(
+                        class,
+                        operation_label,
+                        &caller_thread,
+                        &worker_thread,
+                        queue_wait_nanos,
+                        run_nanos,
+                        result.as_ref().err().map(|error| error.code.as_str()),
+                    );
+                    (result, run_nanos, false)
+                }
+                Err(payload) => {
+                    write_perf_span(
+                        class,
+                        operation_label,
+                        &caller_thread,
+                        &worker_thread,
+                        queue_wait_nanos,
+                        run_nanos,
+                        Some(BLOCKING_WORK_JOIN_FAILED),
+                    );
+                    std::panic::resume_unwind(payload)
+                }
+            }
         })
         .await;
 
@@ -645,7 +734,8 @@ fn update_max(value: &AtomicU64, candidate: u64) {
 mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use super::{
@@ -664,6 +754,7 @@ mod tests {
         let coordinator = BlockingWorkCoordinator::with_limits(BlockingWorkLimits {
             metadata_io: 2,
             heavy_io: 1,
+            process_probe: 2,
         });
         let current = Arc::new(AtomicUsize::new(0));
         let maximum = Arc::new(AtomicUsize::new(0));
@@ -692,6 +783,92 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn process_probe_admission_is_bounded_and_does_not_starve_metadata() {
+        let coordinator = BlockingWorkCoordinator::with_limits(BlockingWorkLimits {
+            metadata_io: 1,
+            heavy_io: 1,
+            process_probe: 2,
+        });
+        let current = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let mut probes = Vec::new();
+        for _ in 0..6 {
+            let coordinator = coordinator.clone();
+            let current = Arc::clone(&current);
+            let maximum = Arc::clone(&maximum);
+            probes.push(tokio::spawn(async move {
+                coordinator
+                    .run_project_facts_agent(move || {
+                        track_concurrency(&current, &maximum);
+                        std::thread::sleep(Duration::from_millis(30));
+                        current.fetch_sub(1, Ordering::SeqCst);
+                        Ok(())
+                    })
+                    .await
+            }));
+        }
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            coordinator.run(BlockingWorkClass::MetadataIo, || Ok(())),
+        )
+        .await
+        .expect("queued process probes must not consume MetadataIo admission")
+        .unwrap();
+
+        for probe in probes {
+            probe.await.unwrap().unwrap();
+        }
+        assert_eq!(maximum.load(Ordering::SeqCst), 2);
+        assert_eq!(coordinator.snapshot().len(), 4);
+        assert_eq!(
+            coordinator.snapshot()[2].class,
+            BlockingWorkClass::ProcessProbe
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn queued_process_probe_does_not_delay_a_metadata_worker() {
+        let coordinator = BlockingWorkCoordinator::with_limits(BlockingWorkLimits {
+            metadata_io: 1,
+            heavy_io: 1,
+            process_probe: 1,
+        });
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder = {
+            let coordinator = coordinator.clone();
+            tokio::spawn(async move {
+                coordinator
+                    .run_project_facts_agent(move || {
+                        entered_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        Ok(())
+                    })
+                    .await
+            })
+        };
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        let queued = {
+            let coordinator = coordinator.clone();
+            tokio::spawn(async move { coordinator.run_project_facts_agent(|| Ok(())).await })
+        };
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        let metadata_worker = coordinator
+            .run(BlockingWorkClass::MetadataIo, || {
+                Ok(std::thread::current().id())
+            })
+            .await
+            .unwrap();
+        assert_ne!(metadata_worker, std::thread::current().id());
+
+        release_tx.send(()).unwrap();
+        holder.await.unwrap().unwrap();
+        queued.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn worker_panic_is_typed_and_the_lane_remains_usable() {
         let coordinator = BlockingWorkCoordinator::default();
         let error = coordinator
@@ -710,6 +887,81 @@ mod tests {
             .unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn project_facts_command_core_runs_every_slow_stage_on_named_workers() {
+        let coordinator = BlockingWorkCoordinator::default();
+        let caller = std::thread::current().id();
+        let agent_worker = coordinator
+            .run_project_facts_agent(|| {
+                std::thread::sleep(Duration::from_millis(10));
+                Ok(std::thread::current().id())
+            })
+            .await
+            .unwrap();
+        let provider_worker = coordinator
+            .run_project_facts_provider(|| {
+                std::thread::sleep(Duration::from_millis(10));
+                Ok(std::thread::current().id())
+            })
+            .await
+            .unwrap();
+        let (metadata_worker, git_worker) = coordinator
+            .run_project_facts_git(
+                || {
+                    std::thread::sleep(Duration::from_millis(10));
+                    Ok(("project-a".into(), std::thread::current().id()))
+                },
+                |metadata_worker| {
+                    std::thread::sleep(Duration::from_millis(10));
+                    Ok((metadata_worker, std::thread::current().id()))
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_ne!(caller, agent_worker);
+        assert_ne!(caller, provider_worker);
+        assert_ne!(caller, metadata_worker);
+        assert_ne!(caller, git_worker);
+        let snapshot = coordinator.snapshot();
+        assert_eq!(snapshot[0].started, 1);
+        assert_eq!(snapshot[1].started, 1);
+        assert_eq!(snapshot[2].started, 1);
+        assert_eq!(snapshot[3].started, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn worker_panic_writes_a_named_anonymous_failure_span() {
+        static TRACE_ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _env_guard = TRACE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let directory = tempfile::tempdir().unwrap();
+        let trace_path = directory.path().join("panic-spans.jsonl");
+        std::env::set_var(super::BLOCKING_WORK_TRACE_PATH_ENV, &trace_path);
+
+        let coordinator = BlockingWorkCoordinator::default();
+        let error = coordinator
+            .run_project_facts_provider(|| -> Result<(), BackendError> {
+                panic!("private provider binding payload")
+            })
+            .await
+            .unwrap_err();
+        std::env::remove_var(super::BLOCKING_WORK_TRACE_PATH_ENV);
+
+        assert_eq!(error.code, super::BLOCKING_WORK_JOIN_FAILED);
+        let trace = fs::read_to_string(trace_path).unwrap();
+        let span = trace
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|span| span["operation"] == "project_facts_provider_status")
+            .expect("the panicking named operation must emit a span");
+        assert_eq!(span["class"], "heavy_io");
+        assert_eq!(span["outcome"], "error");
+        assert_eq!(span["errorCode"], super::BLOCKING_WORK_JOIN_FAILED);
+        assert!(!trace.contains("private provider binding payload"));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn project_git_lane_serializes_one_identity_and_allows_different_projects() {
         let coordinator = BlockingWorkCoordinator::default();
@@ -722,12 +974,17 @@ mod tests {
             let maximum = Arc::clone(&same_maximum);
             same_tasks.push(tokio::spawn(async move {
                 coordinator
-                    .run_project_git("project-a".into(), None, move || {
-                        track_concurrency(&current, &maximum);
-                        std::thread::sleep(Duration::from_millis(30));
-                        current.fetch_sub(1, Ordering::SeqCst);
-                        Ok(())
-                    })
+                    .run_project_git_named(
+                        "project-a".into(),
+                        BlockingWorkOperation::ProjectFactsGitStatus,
+                        None,
+                        move || {
+                            track_concurrency(&current, &maximum);
+                            std::thread::sleep(Duration::from_millis(30));
+                            current.fetch_sub(1, Ordering::SeqCst);
+                            Ok(())
+                        },
+                    )
                     .await
             }));
         }
@@ -745,12 +1002,17 @@ mod tests {
             let maximum = Arc::clone(&different_maximum);
             different_tasks.push(tokio::spawn(async move {
                 coordinator
-                    .run_project_git(project.into(), None, move || {
-                        track_concurrency(&current, &maximum);
-                        std::thread::sleep(Duration::from_millis(30));
-                        current.fetch_sub(1, Ordering::SeqCst);
-                        Ok(())
-                    })
+                    .run_project_git_named(
+                        project.into(),
+                        BlockingWorkOperation::ProjectFactsGitStatus,
+                        None,
+                        move || {
+                            track_concurrency(&current, &maximum);
+                            std::thread::sleep(Duration::from_millis(30));
+                            current.fetch_sub(1, Ordering::SeqCst);
+                            Ok(())
+                        },
+                    )
                     .await
             }));
         }
@@ -765,6 +1027,7 @@ mod tests {
         let coordinator = BlockingWorkCoordinator::with_limits(BlockingWorkLimits {
             metadata_io: 1,
             heavy_io: 1,
+            process_probe: 1,
         });
         let holder = {
             let coordinator = coordinator.clone();
