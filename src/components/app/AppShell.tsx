@@ -130,7 +130,10 @@ export function AppShell() {
     const refreshActiveProjectGit = () => {
       if (document.visibilityState === "hidden") return;
       const now = Date.now();
-      if (now - lastForegroundRefreshAt < 250) return;
+      // WebView2 can deliver the visibility and native-window focus halves of
+      // one restore several hundred milliseconds apart. Keep that pair inside
+      // one refresh while still allowing a later, distinct foreground visit.
+      if (now - lastForegroundRefreshAt < 500) return;
       const state = useProjectStore.getState();
       const project = state.currentProject;
       if (!project.projectId || !project.rootPath) return;
