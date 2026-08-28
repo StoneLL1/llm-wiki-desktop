@@ -2,10 +2,11 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { i18next } from "../../i18n";
+import { useTaskStore } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import type { ImportCompletion, ImportItem, ImportItemResolution, ImportSession } from "../../types/importV2";
 import type { AgentCandidateView } from "../../types/importV2Agent";
-import type { ImportFrontendReadiness, ImportHistoryPage } from "../../types/importV2Presentation";
+import type { ImportFrontendReadiness, ImportHistoryDetailPage, ImportHistoryPage } from "../../types/importV2Presentation";
 import type { ImportWorkflow } from "./useImportWorkflow";
 import { buildCandidateSelectionRequest, ImportView } from "./ImportView";
 import type { ImportCandidateDiffIntent } from "./ImportCandidateDiffDialog";
@@ -87,6 +88,7 @@ function workflow(overrides: Partial<ImportWorkflow> = {}): ImportWorkflow {
     getMigrationStatus: vi.fn(),
     resumeMigration: vi.fn(),
     listHistory: vi.fn().mockResolvedValue({ entries: [], legacyReadOnly: [], nextCursor: null, warnings: [] }),
+    loadHistoryDetail: vi.fn(),
     isConfirming: false,
     requestClipboard: vi.fn(),
     ...overrides,
@@ -419,19 +421,20 @@ describe("ImportView V2 composition", () => {
         updatedAt: null,
         completedAt: null,
         legacyReadOnly: false,
-        itemIds: [],
+        itemCount: 1,
+        committedCount: 1,
+        failedCount: 0,
+        sampleLabels: ["历史资料.md"],
         availableActions: ["update_wiki"],
       }],
       legacyReadOnly: [],
       nextCursor: null,
       warnings: [],
     };
-    const loadSession = vi.fn().mockResolvedValue({ ...session([]), sessionId: "session-history" });
     const loadCompletion = vi.fn().mockResolvedValue(savedCompletion);
     const updateWiki = vi.fn().mockResolvedValue(null);
     render(<ImportView workflow={workflow({
       listHistory: vi.fn().mockResolvedValue(historyPage),
-      loadSession,
       loadCompletion,
       updateWiki,
     })} />);
@@ -439,9 +442,139 @@ describe("ImportView V2 composition", () => {
     fireEvent.click(screen.getByRole("button", { name: /history/i }));
     fireEvent.click(await screen.findByRole("button", { name: /update wiki/i }));
 
-    await waitFor(() => expect(loadSession).toHaveBeenCalledWith("session-history", "batch-history"));
-    expect(loadCompletion).toHaveBeenCalledWith("session-history", "batch-history");
+    await waitFor(() => expect(loadCompletion).toHaveBeenCalledWith("session-history", "batch-history"));
     expect(updateWiki).toHaveBeenCalledWith(savedCompletion);
+  });
+
+  it("resolves a historical result from a later bounded detail page", async () => {
+    const entry: ImportHistoryPage["entries"][number] = {
+      id: "batch-paged-result",
+      title: "Paged historical import",
+      status: "completed",
+      sessionId: "session-paged-result",
+      batchId: "batch-paged-result",
+      taskId: null,
+      startedAt: null,
+      updatedAt: null,
+      completedAt: null,
+      legacyReadOnly: false,
+      itemCount: 51,
+      committedCount: 51,
+      failedCount: 0,
+      sampleLabels: ["first.md"],
+      availableActions: ["open_detail", "open_result"],
+    };
+    const firstPage: ImportHistoryDetailPage = {
+      entry,
+      items: [item("first.md", "completed")],
+      nextCursor: "after-50",
+      total: 51,
+    };
+    const previewItem = item("result-51.md", "preview_ready");
+    previewItem.status = "completed";
+    const secondPage: ImportHistoryDetailPage = {
+      entry,
+      items: [previewItem],
+      nextCursor: null,
+      total: 51,
+    };
+    const loadHistoryDetail = vi.fn()
+      .mockResolvedValueOnce(firstPage)
+      .mockResolvedValueOnce(secondPage);
+    const loadPreview = vi.fn().mockResolvedValue({
+      sessionId: "session-paged-result",
+      itemId: "result-51.md",
+      candidateId: null,
+      title: "result-51.md",
+      markdown: "# Result",
+      truncated: false,
+      totalBytes: 8,
+      sha256: "hash",
+    });
+    render(<ImportView workflow={workflow({
+      listHistory: vi.fn().mockResolvedValue({ entries: [entry], legacyReadOnly: [], nextCursor: null, warnings: [] }),
+      loadHistoryDetail,
+      loadPreview,
+    })} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /history/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /open result/i }));
+
+    await waitFor(() => expect(loadHistoryDetail).toHaveBeenNthCalledWith(2, "batch-paged-result", "after-50"));
+    await waitFor(() => expect(loadPreview).toHaveBeenCalledWith(expect.objectContaining({ itemId: "result-51.md" })));
+    expect(screen.queryByText(/result is no longer available/i)).not.toBeInTheDocument();
+  });
+
+  it("refreshes the first history page when the scoped rebuild task succeeds", async () => {
+    const previousTaskState = useTaskStore.getState();
+    useTaskStore.setState({
+      activeProjectId: "project-a",
+      activeProjectRootPath: "D:/wiki/project-a",
+      taskById: {},
+      taskFacts: {},
+      taskIdsByProject: {},
+      runningCountByProject: {},
+      tasks: [],
+      runningCount: 0,
+    });
+    const listHistory = vi.fn()
+      .mockResolvedValueOnce({
+        entries: [],
+        legacyReadOnly: [],
+        nextCursor: null,
+        warnings: [{ code: "IMPORT_V2_HISTORY_INDEX_REBUILD_REQUIRED", message: "Preparing history", evidencePath: ".app/import-history/index/manifest.json" }],
+      })
+      .mockResolvedValueOnce({
+        entries: [{
+          id: "rebuilt-entry",
+          title: "Rebuilt history",
+          status: "completed",
+          sessionId: "rebuilt-session",
+          batchId: "rebuilt-entry",
+          taskId: null,
+          startedAt: null,
+          updatedAt: null,
+          completedAt: null,
+          legacyReadOnly: false,
+          itemCount: 0,
+          committedCount: 0,
+          failedCount: 0,
+          sampleLabels: [],
+          availableActions: [],
+        }],
+        legacyReadOnly: [],
+        nextCursor: null,
+        warnings: [],
+      });
+    const view = render(<ImportView workflow={workflow({ listHistory })} />);
+    try {
+      fireEvent.click(screen.getByRole("button", { name: /history/i }));
+      await screen.findByText("Preparing history");
+
+      act(() => useTaskStore.getState().upsertTask({
+        id: "history-rebuild-success",
+        taskType: "import",
+        projectId: "project-a",
+        batchId: "history-rebuild-success",
+        operation: { kind: "import_history_index_rebuild" },
+        title: "Prepare import history",
+        status: "succeeded",
+        progress: { current: 100, total: null, label: "Preparing import history" },
+        startedAt: "2026-08-28T00:00:00Z",
+        updatedAt: "2026-08-28T00:01:00Z",
+        completedAt: "2026-08-28T00:01:00Z",
+        cancellable: true,
+        logPath: null,
+        result: null,
+        error: null,
+      }));
+
+      await waitFor(() => expect(listHistory).toHaveBeenCalledTimes(2));
+      expect(await screen.findByText("Rebuilt history")).toBeInTheDocument();
+    } finally {
+      view.unmount();
+      useTaskStore.setState(previousTaskState, true);
+    }
   });
 
   it("keeps mixed queue states actionable and selection keyboard accessible", () => {
@@ -536,7 +669,10 @@ describe("ImportView V2 composition", () => {
           updatedAt: null,
           completedAt: null,
           legacyReadOnly: false,
-          itemIds: [],
+          itemCount: 0,
+          committedCount: 0,
+          failedCount: 0,
+          sampleLabels: [],
           availableActions: [],
         }],
         legacyReadOnly: [],

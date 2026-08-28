@@ -729,6 +729,8 @@ pub fn run() {
             commands::import_v2_async_commands::get_import_workbench_preferences_v2,
             commands::import_v2_async_commands::save_import_workbench_preferences_v2,
             commands::import_v2_async_commands::list_import_history_v2,
+            commands::import_v2_async_commands::get_import_history_detail_v2,
+            commands::import_v2_async_commands::rebuild_import_history_index_v2,
             commands::import_v2_async_commands::get_import_capability_requirement_v2,
             commands::import_v2_async_commands::get_import_asr_enablement_plan_v2,
             commands::import_v2_async_commands::install_import_capability_v2,

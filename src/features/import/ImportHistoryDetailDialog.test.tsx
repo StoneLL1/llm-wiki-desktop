@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { i18next } from "../../i18n";
 import type { ImportItem, ImportSession } from "../../types/importV2";
-import type { ImportHistoryEntry } from "../../types/importV2Presentation";
+import type { ImportHistoryDetailPage, ImportHistoryEntry } from "../../types/importV2Presentation";
 import { ImportHistoryDetailDialog } from "./ImportHistoryDetailDialog";
 
 function item(overrides: Partial<ImportItem> = {}): ImportItem {
@@ -58,8 +58,18 @@ const entry: ImportHistoryEntry = {
   updatedAt: session.updatedAt,
   completedAt: session.updatedAt,
   legacyReadOnly: false,
-  itemIds: ["item-1"],
+  itemCount: 1,
+  committedCount: 1,
+  failedCount: 0,
+  sampleLabels: ["notes.md"],
   availableActions: ["open_result", "view_logs"],
+};
+
+const page: ImportHistoryDetailPage = {
+  entry,
+  items: session.items,
+  nextCursor: null,
+  total: 1,
 };
 
 beforeEach(async () => {
@@ -73,8 +83,7 @@ describe("ImportHistoryDetailDialog", () => {
     render(
       <ImportHistoryDetailDialog
         open
-        entry={entry}
-        session={session}
+        page={page}
         onClose={vi.fn()}
         onPreview={onPreview}
         canViewLogs={() => true}
@@ -92,8 +101,7 @@ describe("ImportHistoryDetailDialog", () => {
     render(
       <ImportHistoryDetailDialog
         open
-        entry={entry}
-        session={session}
+        page={page}
         onClose={vi.fn()}
         onPreview={vi.fn()}
         canViewLogs={() => false}
@@ -108,8 +116,7 @@ describe("ImportHistoryDetailDialog", () => {
     render(
       <ImportHistoryDetailDialog
         open
-        entry={entry}
-        session={session}
+        page={page}
         resultUnavailable
         onClose={vi.fn()}
         onPreview={vi.fn()}
@@ -125,8 +132,7 @@ describe("ImportHistoryDetailDialog", () => {
     render(
       <ImportHistoryDetailDialog
         open
-        entry={entry}
-        session={session}
+        page={page}
         onClose={vi.fn()}
         onPreview={vi.fn()}
         canViewLogs={() => false}

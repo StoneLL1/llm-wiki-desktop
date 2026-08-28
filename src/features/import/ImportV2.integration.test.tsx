@@ -107,6 +107,7 @@ function makeWorkflow(items: ImportItem[]): ImportWorkflow {
     getMigrationStatus: vi.fn(),
     resumeMigration: vi.fn(),
     listHistory: vi.fn().mockResolvedValue({ entries: [], legacyReadOnly: [], nextCursor: null, warnings: [] }),
+    loadHistoryDetail: vi.fn(),
     isConfirming: false,
     requestClipboard: vi.fn(),
   };

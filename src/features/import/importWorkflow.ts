@@ -14,6 +14,7 @@ import type {
   ImportCapabilityRequirement,
   ImportFrontendReadiness,
   ImportHistoryPage,
+  ImportHistoryDetailPage,
   ImportPreviewContent,
   ImportWorkbenchPreferences,
 } from "../../types/importV2Presentation";
@@ -161,6 +162,7 @@ export interface ImportWorkflow {
   getMigrationStatus: () => Promise<MigrationStatusSnapshot | null>;
   resumeMigration: (plan: MigrationPlan, confirmation: MigrationConfirmation) => Promise<BackendTask | null>;
   listHistory: (cursor?: string | null) => Promise<ImportHistoryPage | null>;
+  loadHistoryDetail: (batchId: string, cursor?: string | null) => Promise<ImportHistoryDetailPage | null>;
   loadWorkbenchPreferences?: () => Promise<ImportWorkbenchPreferences>;
   saveWorkbenchPreferences?: (preferences: ImportWorkbenchPreferences) => Promise<ImportWorkbenchPreferences>;
 }

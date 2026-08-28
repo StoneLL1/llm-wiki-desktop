@@ -66,6 +66,8 @@ const api = vi.hoisted(() => ({
   getMigrationStatus: vi.fn(),
   resumeMigration: vi.fn(),
   listHistory: vi.fn(),
+  getHistoryDetail: vi.fn(),
+  rebuildHistoryIndex: vi.fn(),
   getCompletion: vi.fn(),
 }));
 const tauriInvoke = vi.hoisted(() => vi.fn());
@@ -409,6 +411,10 @@ beforeEach(() => {
   api.getMigrationStatus.mockResolvedValue({ status: "dry_run_ready", planFingerprint: migrationConfirmation.planFingerprint, report: null });
   api.resumeMigration.mockResolvedValue(task("migration-resume-task", projectA.projectId, "queued"));
   api.listHistory.mockResolvedValue(history);
+  api.rebuildHistoryIndex.mockResolvedValue({
+    ...task("history-index-task", projectA.projectId, "running"),
+    operation: { kind: "import_history_index_rebuild" },
+  });
   api.getCompletion.mockResolvedValue(completion);
 });
 
@@ -2280,6 +2286,59 @@ describe("useImportWorkflow", () => {
     expect(api.resumeMigration).toHaveBeenCalledWith({ projectId: projectA.projectId, projectRootPath: projectA.rootPath, plan: preparation!.plan, confirmation });
     expect(api.listHistory).toHaveBeenCalledWith({ projectId: projectA.projectId, projectRootPath: projectA.rootPath, cursor: "cursor-1", limit: 50 });
     expect(useTaskStore.getState().tasks.map((entry) => entry.id)).toEqual(expect.arrayContaining(["migration-task", "migration-resume-task"]));
+  });
+
+  it("starts one observable history index task when paged history needs preparation", async () => {
+    api.listHistory.mockResolvedValueOnce({
+      entries: [],
+      legacyReadOnly: [],
+      nextCursor: null,
+      warnings: [{
+        code: "IMPORT_V2_HISTORY_INDEX_REBUILD_REQUIRED",
+        message: "Preparing history",
+        evidencePath: ".app/import-history/index/manifest.json",
+      }],
+    });
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.bootstrapState).toBe("ready"));
+
+    await act(async () => result.current.listHistory());
+
+    expect(api.rebuildHistoryIndex).toHaveBeenCalledWith({
+      projectId: projectA.projectId,
+      projectRootPath: projectA.rootPath,
+    });
+    expect(useTaskStore.getState().tasks).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: "history-index-task",
+        operation: { kind: "import_history_index_rebuild" },
+      }),
+    ]));
+  });
+
+  it("keeps bounded history readable when a restricted project cannot rebuild its index", async () => {
+    const fallback = {
+      entries: [],
+      legacyReadOnly: [],
+      nextCursor: null,
+      warnings: [{
+        code: "IMPORT_V2_HISTORY_INDEX_REBUILD_REQUIRED",
+        message: "Preparing history",
+        evidencePath: ".app/compat/import-history/index/manifest.json",
+      }],
+    };
+    api.listHistory.mockResolvedValueOnce(fallback);
+    api.rebuildHistoryIndex.mockRejectedValueOnce({
+      code: "PROJECT_READ_ONLY",
+      message: "Project is read-only",
+    });
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.bootstrapState).toBe("ready"));
+
+    const page = await act(async () => result.current.listHistory());
+
+    expect(page).toEqual(fallback);
+    expect(useToastStore.getState().toasts).toEqual([]);
   });
 
   it("opens the first imported Source without starting Compile", async () => {

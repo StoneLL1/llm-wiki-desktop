@@ -1,6 +1,8 @@
 use std::cell::Cell;
 use std::path::PathBuf;
 
+#[cfg(feature = "performance-observers")]
+use llm_wiki_desktop_lib::models::import_v2::ImportBatchResult;
 use llm_wiki_desktop_lib::models::import_v2::{
     ImportInput, ImportInputKind, ImportItem, ImportItemPageFilter, ImportResourceMode,
     ImportSession,
@@ -9,6 +11,8 @@ use llm_wiki_desktop_lib::models::import_v2_file::FileScanPolicy;
 use llm_wiki_desktop_lib::models::paths::ProjectContext;
 use llm_wiki_desktop_lib::models::task::TaskOperation;
 use llm_wiki_desktop_lib::services::import_v2::file_discovery::FileDiscoveryService;
+#[cfg(feature = "performance-observers")]
+use llm_wiki_desktop_lib::services::import_v2::HistoryStore;
 use llm_wiki_desktop_lib::services::import_v2::{ImportV2Service, SessionStore};
 use llm_wiki_desktop_lib::services::FileStore;
 use llm_wiki_desktop_lib::tasks::TaskService;
@@ -621,4 +625,88 @@ fn production_worker_job_carries_a_frozen_snapshot() {
         .next()
         .unwrap();
     assert!(worker_job.contains("snapshot: ImportWorkItemSnapshot"));
+}
+
+#[test]
+#[cfg(feature = "performance-observers")]
+fn history_page_one_reads_only_the_index_page_at_ten_thousand_batches() {
+    let root = tempfile::tempdir().unwrap();
+    let context = ProjectContext::new("history-scale", root.path().to_path_buf());
+    let files = FileStore::default();
+    let history = HistoryStore::default();
+    let history_root = root.path().join(".app/import-history");
+    std::fs::create_dir_all(&history_root).unwrap();
+    for index in 0..10_000 {
+        let batch = ImportBatchResult {
+            batch_id: format!("batch-{index:05}"),
+            session_id: format!("session-{index:05}"),
+            created_at: format!("2026-08-27T00:{:02}:{:02}Z", (index / 60) % 60, index % 60),
+            batch_task_id: None,
+            committed_count: 0,
+            failed_count: 0,
+            items: Vec::new(),
+            history_snapshot: None,
+            completion: None,
+        };
+        std::fs::write(
+            history_root.join(format!("batch-{index:05}.json")),
+            serde_json::to_vec(&batch).unwrap(),
+        )
+        .unwrap();
+    }
+    history.rebuild_index(&context, &files, || false).unwrap();
+
+    let observation = files.observe_project(&context);
+    let page = history.list_page(&context, &files, None, 50).unwrap();
+    let io = observation.snapshot();
+    assert_eq!(page.entries.len(), 50);
+    assert!(page.next_cursor.is_some());
+    assert!(
+        io.read_ops <= 2,
+        "page one must read only manifest + one index page: {io:?}"
+    );
+    assert_eq!(io.write_ops, 0);
+    let wire = serde_json::to_value(&page.entries[0]).unwrap();
+    assert!(wire.get("itemIds").is_none());
+}
+
+#[test]
+#[cfg(feature = "performance-observers")]
+fn history_detail_reads_only_the_requested_item_page() {
+    let root = tempfile::tempdir().unwrap();
+    let context = ProjectContext::new("history-detail-scale", root.path().to_path_buf());
+    let files = FileStore::default();
+    let history = HistoryStore::default();
+    let mut session = ImportSession::new(
+        "history-session",
+        "history-detail-scale",
+        ImportResourceMode::Balanced,
+    );
+    session.items = (0..10_000).map(synthetic_item).collect();
+    let batch = ImportBatchResult {
+        batch_id: "history-batch".into(),
+        session_id: session.session_id.clone(),
+        created_at: "2026-08-27T00:00:00Z".into(),
+        batch_task_id: None,
+        committed_count: 0,
+        failed_count: 0,
+        items: Vec::new(),
+        history_snapshot: Some(session),
+        completion: None,
+    };
+    history.begin_batch(&context, &files, &batch).unwrap();
+
+    let observation = files.observe_project(&context);
+    let page = history
+        .detail_page(&context, &files, "history-batch", None, 50)
+        .unwrap();
+    let io = observation.snapshot();
+    assert_eq!(page.items.len(), 50);
+    assert_eq!(page.total, 10_000);
+    assert!(page.next_cursor.is_some());
+    assert!(
+        io.read_ops <= 52,
+        "detail must read manifest + one order page + at most 50 snapshots: {io:?}"
+    );
+    assert_eq!(io.write_ops, 0);
 }

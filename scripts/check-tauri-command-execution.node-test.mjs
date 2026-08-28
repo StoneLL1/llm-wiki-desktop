@@ -43,7 +43,7 @@ test("the named P0 Import commands are classified as blocking work and execute a
 
 test("every registered Import command enters through an async boundary", async () => {
   const result = await inspectCommandExecution(repositoryRoot);
-  assert.equal(result.counts.importTotal, 58);
+  assert.equal(result.counts.importTotal, 60);
   assert.equal(result.counts.importSync, 0);
 });
 

@@ -48,11 +48,12 @@ use crate::models::import_v2_migration::{
 };
 use crate::models::import_v2_presentation::{
     GetImportAsrEnablementPlanV2Request, GetImportCapabilityRequirementV2Request,
-    GetImportFrontendReadinessV2Request, GetImportPreviewContentV2Request, ImportAsrEnablementPlan,
-    ImportCapabilityRequirement, ImportFrontendReadiness, ImportHistoryPage, ImportPreviewContent,
+    GetImportFrontendReadinessV2Request, GetImportHistoryDetailV2Request,
+    GetImportPreviewContentV2Request, ImportAsrEnablementPlan, ImportCapabilityRequirement,
+    ImportFrontendReadiness, ImportHistoryDetailPage, ImportHistoryPage, ImportPreviewContent,
     ImportWorkbenchPreferences, ImportWorkbenchPreferencesRequest,
     InstallImportCapabilityV2Request, ListImportHistoryV2Request,
-    SaveImportWorkbenchPreferencesRequest,
+    RebuildImportHistoryIndexV2Request, SaveImportWorkbenchPreferencesRequest,
 };
 use crate::models::import_v2_web::{
     AddImportCollectionItemsV2Request, AddImportUrlV2Request, AuthorizeBilibiliAsrV2Request,
@@ -491,6 +492,26 @@ pub async fn list_import_history_v2(
 ) -> Result<ImportHistoryPage, BackendError> {
     blocking!(app, BlockingWorkClass::HeavyIo, |_app, state| {
         presentation::list_import_history_v2(state, request)
+    })
+}
+
+#[tauri::command]
+pub async fn get_import_history_detail_v2(
+    app: AppHandle,
+    request: GetImportHistoryDetailV2Request,
+) -> Result<ImportHistoryDetailPage, BackendError> {
+    blocking!(app, BlockingWorkClass::MetadataIo, |_app, state| {
+        presentation::get_import_history_detail_v2(state, request)
+    })
+}
+
+#[tauri::command]
+pub async fn rebuild_import_history_index_v2(
+    app: AppHandle,
+    request: RebuildImportHistoryIndexV2Request,
+) -> Result<BackendTask, BackendError> {
+    blocking!(app, BlockingWorkClass::MetadataIo, |worker_app, state| {
+        presentation::rebuild_import_history_index_v2(worker_app.clone(), state, request)
     })
 }
 

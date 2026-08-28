@@ -62,6 +62,8 @@ export type TaskOperation = {
 } | {
   kind: "import_recovery";
   sessionId: string;
+} | {
+  kind: "import_history_index_rebuild";
 };
 
 export interface TaskResult {

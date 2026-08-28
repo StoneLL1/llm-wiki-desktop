@@ -12,6 +12,7 @@
   "p0Commands": [
     "get_import_frontend_readiness_v2",
     "list_import_history_v2",
+    "get_import_history_detail_v2",
     "get_import_session_v2",
     "get_import_history_session_v2",
     "confirm_import_session_v2",
@@ -21,10 +22,10 @@
   ],
   "baseline": {
     "status": "batch1_import_green",
-    "total": 203,
+    "total": 205,
     "sync": 136,
-    "async": 67,
-    "importTotal": 58,
+    "async": 69,
+    "importTotal": 60,
     "importSync": 0,
     "blockingSync": 133,
     "measuredAt": "2026-08-27",
@@ -815,6 +816,20 @@
       "classification": "BlockingRead",
       "currentExecution": "async",
       "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+    },
+    {
+      "command": "get_import_history_detail_v2",
+      "module": "import_v2_async_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "async",
+      "rationale": "Reads one bounded history item page from the derived history store through the shared metadata lane."
+    },
+    {
+      "command": "rebuild_import_history_index_v2",
+      "module": "import_v2_async_commands",
+      "classification": "LongTaskStart",
+      "currentExecution": "async",
+      "rationale": "Creates a cancellable durable task, then rebuilds derived history pages and item snapshots in the bounded heavy-I/O lane."
     },
     {
       "command": "get_import_capability_requirement_v2",

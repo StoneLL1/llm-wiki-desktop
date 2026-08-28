@@ -18,7 +18,7 @@ pub(crate) mod execution_control;
 pub mod file_discovery;
 pub mod file_router;
 pub mod generic_web_engine;
-pub(crate) mod history_reader;
+pub mod history_store;
 pub mod local_media_engine;
 pub mod markdown_normalizer;
 pub mod media_router;
@@ -53,6 +53,7 @@ pub mod wechat_web_engine;
 mod test_support;
 
 pub(crate) use commit::NewSourceTargetReservations;
+pub use history_store::HistoryStore;
 #[cfg(feature = "gui")]
 pub(crate) use orchestrator::{import_batch_operation_session_id, is_import_batch_operation_task};
 pub use orchestrator::{routes_for_format, ImportV2Service};

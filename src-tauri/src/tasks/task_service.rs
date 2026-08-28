@@ -345,6 +345,7 @@ pub struct TaskService {
     workflow_persistence_clock: Arc<WorkflowPersistenceClock>,
     workflow_history_revision: Arc<AtomicU64>,
     workflow_history_indices: Arc<RwLock<HashMap<WorkflowHistoryIndexKey, WorkflowHistoryIndex>>>,
+    import_history_task_creation_lock: Arc<Mutex<()>>,
     #[cfg(test)]
     injected_persistence_failures: Arc<Mutex<HashMap<String, usize>>>,
     #[cfg(test)]
@@ -374,6 +375,7 @@ impl Default for TaskService {
             workflow_persistence_clock: Arc::new(WorkflowPersistenceClock::default()),
             workflow_history_revision: Arc::new(AtomicU64::new(0)),
             workflow_history_indices: Arc::new(RwLock::new(HashMap::new())),
+            import_history_task_creation_lock: Arc::new(Mutex::new(())),
             #[cfg(test)]
             injected_persistence_failures: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(test)]
@@ -408,6 +410,7 @@ impl TaskService {
             workflow_persistence_clock: Arc::new(WorkflowPersistenceClock::default()),
             workflow_history_revision: Arc::new(AtomicU64::new(0)),
             workflow_history_indices: Arc::new(RwLock::new(HashMap::new())),
+            import_history_task_creation_lock: Arc::new(Mutex::new(())),
             #[cfg(test)]
             injected_persistence_failures: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(test)]
@@ -538,6 +541,62 @@ impl TaskService {
             None,
             Some(persistence_dir),
         )
+    }
+
+    pub fn create_project_import_history_index_task(
+        &self,
+        project_id: String,
+        project_root: PathBuf,
+        task_state_root: PathBuf,
+        title: String,
+    ) -> Result<BackendTask, String> {
+        self.create_task_internal(
+            TaskType::Import,
+            Some(project_id),
+            Some(project_root),
+            title,
+            true,
+            None,
+            Some(TaskOperation::ImportHistoryIndexRebuild),
+            true,
+            None,
+            Some(task_state_root),
+        )
+    }
+
+    pub fn get_or_create_project_import_history_index_task(
+        &self,
+        project_id: String,
+        project_root: PathBuf,
+        task_state_root: PathBuf,
+        title: String,
+    ) -> Result<(BackendTask, bool), String> {
+        let _guard = self
+            .import_history_task_creation_lock
+            .lock()
+            .map_err(|_| "Import history task creation lock is unavailable".to_string())?;
+        if let Some(task) = self
+            .list_tasks_for_root(&project_root, None)
+            .into_iter()
+            .find(|task| {
+                matches!(
+                    task.operation,
+                    Some(TaskOperation::ImportHistoryIndexRebuild)
+                ) && matches!(
+                    task.status,
+                    TaskStatus::Queued | TaskStatus::Running | TaskStatus::Cancelling
+                )
+            })
+        {
+            return Ok((task, false));
+        }
+        self.create_project_import_history_index_task(
+            project_id,
+            project_root,
+            task_state_root,
+            title,
+        )
+        .map(|task| (task, true))
     }
 
     pub fn create_project_import_commit_task(
@@ -6277,6 +6336,41 @@ mod tests {
             },
         );
         assert!(events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn concurrent_history_rebuild_requests_create_one_project_root_task() {
+        let root = tempfile::tempdir().unwrap();
+        let task_root = root.path().join(".app/tasks");
+        std::fs::create_dir_all(&task_root).unwrap();
+        let service = TaskService::default();
+        let barrier = Arc::new(Barrier::new(8));
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let service = service.clone();
+            let barrier = barrier.clone();
+            let project_root = root.path().to_path_buf();
+            let task_root = task_root.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                service
+                    .get_or_create_project_import_history_index_task(
+                        "history-project".into(),
+                        project_root,
+                        task_root,
+                        "Prepare import history".into(),
+                    )
+                    .unwrap()
+            }));
+        }
+        let outcomes = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        let task_id = outcomes[0].0.id.clone();
+        assert!(outcomes.iter().all(|(task, _)| task.id == task_id));
+        assert_eq!(outcomes.iter().filter(|(_, created)| *created).count(), 1);
+        assert_eq!(service.list_tasks_for_root(root.path(), None).len(), 1);
     }
 
     #[test]

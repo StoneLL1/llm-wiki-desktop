@@ -6,11 +6,11 @@ import { useImportStore } from "../../stores/importStore";
 import { selectTaskIdsForProject, useTaskStore } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import type { AgentCandidateView } from "../../types/importV2Agent";
-import type { ImportItem, ImportSession } from "../../types/importV2";
+import type { ImportItem } from "../../types/importV2";
 import {
   canOpenHistoricalResult,
   type ImportHistoryAction,
-  type ImportHistoryEntry,
+  type ImportHistoryDetailPage,
   type ImportHistoryPage,
   type ImportWorkbenchPreferences,
 } from "../../types/importV2Presentation";
@@ -65,9 +65,26 @@ function itemById(items: readonly ImportItem[], itemId: string | null): ImportIt
   return itemId ? items.find((item) => item.itemId === itemId) ?? null : null;
 }
 
+function backendErrorCode(error: unknown): string | null {
+  if (!error || typeof error !== "object" || !("code" in error)) return null;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" ? code : null;
+}
+
 export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: ImportViewProps) {
   const { t } = useTranslation();
   const taskIds = useTaskStore((state) => selectTaskIdsForProject(state, state.activeProjectId));
+  const historyRebuildSucceededRevision = useTaskStore((state) => {
+    const ids = selectTaskIdsForProject(state, state.activeProjectId);
+    let revision = "";
+    for (const id of ids) {
+      const task = state.taskById[id];
+      if (task?.operation?.kind === "import_history_index_rebuild" && task.status === "succeeded" && task.updatedAt > revision) {
+        revision = task.updatedAt;
+      }
+    }
+    return revision;
+  });
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
   const pushToast = useToastStore((state) => state.pushToast);
   const session = workflow.session;
@@ -90,12 +107,14 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
   const [openingHistoryEntryId, setOpeningHistoryEntryId] = useState<string | null>(null);
   const historyEntryBusyRef = useRef<string | null>(null);
-  const [historyDetail, setHistoryDetail] = useState<{ entry: ImportHistoryEntry; session: ImportSession } | null>(null);
+  const [historyDetail, setHistoryDetail] = useState<ImportHistoryDetailPage | null>(null);
+  const [historyDetailLoadingMore, setHistoryDetailLoadingMore] = useState(false);
   const [historyResultUnavailable, setHistoryResultUnavailable] = useState(false);
   const [historyPreviewIdentity, setHistoryPreviewIdentity] = useState<ImportPreviewIdentity | null>(null);
   const historyLoadLock = useRef(false);
   const historyPageOneInFlightRef = useRef<{ key: string; promise: Promise<void> } | null>(null);
   const historyStaleRef = useRef(true);
+  const historyRebuildSeenRef = useRef("");
   const historyRequestRef = useRef(0);
   const confirmingRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -202,6 +221,13 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
     historyStaleRef.current = true;
     if (activeSection === "history" && workflow.bootstrapState === "ready") void loadHistory();
   }, [activeSection, loadHistory, workflow.bootstrapState, workflow.completion?.batchId]);
+
+  useEffect(() => {
+    if (!historyRebuildSucceededRevision || historyRebuildSeenRef.current === historyRebuildSucceededRevision) return;
+    historyRebuildSeenRef.current = historyRebuildSucceededRevision;
+    historyStaleRef.current = true;
+    if (activeSection === "history" && workflow.bootstrapState === "ready") void loadHistory();
+  }, [activeSection, historyRebuildSucceededRevision, loadHistory, workflow.bootstrapState]);
 
   useEffect(() => {
     if (confirmingProjectKeyRef.current === workflow.projectKey && confirmingRef.current && !workflow.isConfirming) {
@@ -518,8 +544,15 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
         const warnings = new Map(current.warnings.concat(next.warnings).map((warning) => [`${warning.code}:${warning.evidencePath}`, warning]));
         return { ...next, entries: [...entries.values()], legacyReadOnly: [...legacyReadOnly.values()], warnings: [...warnings.values()] };
       });
-    } catch {
-      if (activeProjectKeyRef.current === requestProjectKey) pushToast("error", t("importV2.history.error"));
+    } catch (error) {
+      if (activeProjectKeyRef.current === requestProjectKey) {
+        if (backendErrorCode(error) === "IMPORT_V2_HISTORY_CURSOR_STALE") {
+          historyStaleRef.current = true;
+          await loadHistory();
+        } else {
+          pushToast("error", t("importV2.history.error"));
+        }
+      }
     } finally {
       if (activeProjectKeyRef.current === requestProjectKey) {
         historyLoadLock.current = false;
@@ -532,22 +565,32 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
     if (historyEntryBusyRef.current) return;
     const requestProjectKey = workflow.projectKey;
     const entry = history?.entries.find((candidate) => candidate.id === entryId);
-    if (!entry?.sessionId) return;
+    if (!entry?.sessionId || !entry.batchId) return;
     historyEntryBusyRef.current = entryId;
     setOpeningHistoryEntryId(entryId);
     setHistoryResultUnavailable(false);
     try {
-      const historicalSession = await workflow.loadSession(entry.sessionId, entry.batchId);
-      if (activeProjectKeyRef.current !== requestProjectKey) return;
-      if (!historicalSession) {
-        pushToast("info", t("importV2.history.resultUnavailable"));
+      if (action === "update_wiki") {
+        const completion = await workflow.loadCompletion(entry.sessionId, entry.batchId);
+        if (activeProjectKeyRef.current !== requestProjectKey) return;
+        if (completion) await workflow.updateWiki(completion);
+        else pushToast("info", t("importV2.history.resultUnavailable"));
         return;
       }
+      const detail = await workflow.loadHistoryDetail(entry.batchId);
+      if (activeProjectKeyRef.current !== requestProjectKey || !detail) return;
       if (action === "view_logs") {
         const currentTasks = useTaskStore.getState().tasks;
-        const taskId = [entry.taskId, ...entry.itemIds
-          .map((itemId) => historicalSession.items.find((item) => item.itemId === itemId)?.taskId)
-        ].find((candidate): candidate is string => Boolean(candidate) && currentTasks.some((task) => task.id === candidate));
+        let taskId = entry.taskId && currentTasks.some((task) => task.id === entry.taskId) ? entry.taskId : null;
+        let page: ImportHistoryDetailPage | null = detail;
+        while (!taskId && page) {
+          taskId = page.items.map((item) => item.taskId)
+            .find((candidate): candidate is string => Boolean(candidate) && currentTasks.some((task) => task.id === candidate)) ?? null;
+          page = !taskId && page.nextCursor
+            ? await workflow.loadHistoryDetail(entry.batchId, page.nextCursor)
+            : null;
+          if (activeProjectKeyRef.current !== requestProjectKey) return;
+        }
         if (taskId) {
           openTaskDrawer(taskId);
         } else {
@@ -555,28 +598,24 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
         }
         return;
       }
-      if (action === "update_wiki" && entry.batchId) {
-        const completion = await workflow.loadCompletion(entry.sessionId, entry.batchId);
-        if (activeProjectKeyRef.current !== requestProjectKey) return;
-        if (completion) {
-          await workflow.updateWiki(completion);
-        } else {
-          pushToast("info", t("importV2.history.resultUnavailable"));
-        }
-        return;
-      }
       if (action === "open_result") {
-        const previewItem = canOpenHistoricalResult(entry)
-          ? historicalSession.items.find((item) => entry.itemIds.includes(item.itemId) && item.status === "completed" && item.preview)
-          : undefined;
+        let page: ImportHistoryDetailPage | null = detail;
+        let previewItem: ImportItem | undefined;
+        while (canOpenHistoricalResult(entry) && page && !previewItem) {
+          previewItem = page.items.find((item) => item.status === "completed" && item.preview);
+          page = !previewItem && page.nextCursor
+            ? await workflow.loadHistoryDetail(entry.batchId, page.nextCursor)
+            : null;
+          if (activeProjectKeyRef.current !== requestProjectKey) return;
+        }
         if (previewItem) {
-          setHistoryPreviewIdentity({ sessionId: historicalSession.sessionId, itemId: previewItem.itemId, candidateId: null, historyBatchId: entry.batchId });
+          setHistoryPreviewIdentity({ sessionId: entry.sessionId, itemId: previewItem.itemId, candidateId: null, historyBatchId: entry.batchId });
           return;
         }
         pushToast("info", t("importV2.history.resultUnavailable"));
         setHistoryResultUnavailable(true);
       }
-      setHistoryDetail({ entry, session: historicalSession });
+      setHistoryDetail(detail);
     } finally {
       if (activeProjectKeyRef.current === requestProjectKey) {
         historyEntryBusyRef.current = null;
@@ -801,8 +840,28 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
       />
       <ImportHistoryDetailDialog
         open={Boolean(historyDetail)}
-        entry={historyDetail?.entry ?? null}
-        session={historyDetail?.session ?? null}
+        page={historyDetail}
+        loadingMore={historyDetailLoadingMore}
+        onLoadMore={async (cursor) => {
+          if (!historyDetail || historyDetailLoadingMore) return;
+          const requestProjectKey = workflow.projectKey;
+          setHistoryDetailLoadingMore(true);
+          try {
+            const next = await workflow.loadHistoryDetail(historyDetail.entry.id, cursor);
+            if (!next || activeProjectKeyRef.current !== requestProjectKey) return;
+            setHistoryDetail((current) => current ? {
+              ...next,
+              items: [...current.items, ...next.items.filter((item) => !current.items.some((existing) => existing.itemId === item.itemId))],
+            } : next);
+          } catch (error) {
+            if (activeProjectKeyRef.current === requestProjectKey && backendErrorCode(error) === "IMPORT_V2_HISTORY_DETAIL_CURSOR_STALE") {
+              const refreshed = await workflow.loadHistoryDetail(historyDetail.entry.id);
+              if (refreshed && activeProjectKeyRef.current === requestProjectKey) setHistoryDetail(refreshed);
+            }
+          } finally {
+            if (activeProjectKeyRef.current === requestProjectKey) setHistoryDetailLoadingMore(false);
+          }
+        }}
         resultUnavailable={historyResultUnavailable}
         onClose={() => {
           setHistoryDetail(null);
@@ -812,7 +871,7 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
           if (!historyDetail) return;
           setHistoryDetail(null);
           setHistoryResultUnavailable(false);
-          setHistoryPreviewIdentity({ sessionId: historyDetail.session.sessionId, itemId, candidateId: null, historyBatchId: historyDetail.entry.batchId });
+          setHistoryPreviewIdentity({ sessionId: historyDetail.entry.sessionId ?? "", itemId, candidateId: null, historyBatchId: historyDetail.entry.batchId });
         }}
         canViewLogs={(taskId) => taskIds.includes(taskId)}
         onViewLogs={(taskId) => {
