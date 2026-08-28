@@ -60,7 +60,10 @@ impl ProcessRunner for NoAgents {
 
 impl ProcessRunner for MutableCodex {
     fn find_executable(&self, command: &str) -> Option<PathBuf> {
-        (command == "codex").then(|| PathBuf::from("codex"))
+        (command == "codex").then(|| {
+            std::env::current_exe()
+                .expect("the workflow preparation test executable must be resolvable")
+        })
     }
 
     fn run_with_timeout(
