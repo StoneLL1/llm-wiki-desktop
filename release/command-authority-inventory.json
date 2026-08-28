@@ -773,6 +773,14 @@
       "projectScoped": true
     },
     {
+      "name": "get_import_history_detail_v2",
+      "source": "src-tauri/src/commands/import_v2_presentation_commands.rs",
+      "classifications": [
+        "read"
+      ],
+      "projectScoped": true
+    },
+    {
       "name": "get_import_history_session_v2",
       "source": "src-tauri/src/commands/import_v2_commands.rs",
       "classifications": [
@@ -1028,6 +1036,14 @@
       "projectScoped": true
     },
     {
+      "name": "list_import_session_items_v2",
+      "source": "src-tauri/src/commands/import_v2_commands.rs",
+      "classifications": [
+        "read"
+      ],
+      "projectScoped": true
+    },
+    {
       "name": "list_lint_history",
       "source": "src-tauri/src/commands/lint_commands.rs",
       "classifications": [
@@ -1259,6 +1275,15 @@
         "read"
       ],
       "projectScoped": true
+    },
+    {
+      "name": "rebuild_import_history_index_v2",
+      "source": "src-tauri/src/commands/import_v2_presentation_commands.rs",
+      "classifications": [
+        "mutation"
+      ],
+      "projectScoped": true,
+      "writeAuthority": "ProjectWritePermit"
     },
     {
       "name": "refresh_source",
