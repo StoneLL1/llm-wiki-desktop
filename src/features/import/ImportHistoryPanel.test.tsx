@@ -6,7 +6,7 @@ import type { ImportHistoryPage } from "../../types/importV2Presentation";
 import { ImportHistoryPanel } from "./ImportHistoryPanel";
 
 const page: ImportHistoryPage = {
-  entries: [{ id: "v2-1", title: "New import", status: "completed", sessionId: "session-1", batchId: "batch-1", taskId: null, startedAt: "2026-07-13T00:00:00Z", updatedAt: "2026-07-13T00:01:00Z", completedAt: "2026-07-13T00:01:00Z", legacyReadOnly: false, itemIds: ["item-1"], availableActions: ["open_result", "view_logs", "update_wiki"] }],
+  entries: [{ id: "v2-1", title: "New import", status: "completed", sessionId: "session-1", batchId: "batch-1", taskId: null, startedAt: "2026-07-13T00:00:00Z", updatedAt: "2026-07-13T00:01:00Z", completedAt: "2026-07-13T00:01:00Z", legacyReadOnly: false, itemCount: 1, committedCount: 1, failedCount: 0, sampleLabels: ["item-1"], availableActions: ["open_result", "view_logs", "update_wiki"] }],
   legacyReadOnly: [{ id: "legacy-1", title: "Old import", status: "completed", startedAt: null, updatedAt: null, completedAt: null, evidencePath: ".app/legacy-import.json", legacyReadOnly: true, availableActions: [], canRetry: false, canDelete: false, canReplaceSource: false }],
   nextCursor: "next-1",
   warnings: [],

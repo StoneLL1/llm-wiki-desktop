@@ -7,6 +7,7 @@ use crate::errors::BackendError;
 use crate::models::import_v2_migration::{
     LegacyHistoryEntry, LegacyHistoryView, LegacyHistoryWarning,
 };
+use crate::models::paths::ProjectContext;
 use crate::services::import_v2::transaction::{
     is_project_reparse_point, read_project_file_nofollow,
 };
@@ -44,7 +45,17 @@ impl LegacyHistoryAdapter {
         Self { limits }
     }
 
-    pub fn list(&self, project_root: &Path) -> Result<LegacyHistoryView, BackendError> {
+    pub fn list(&self, context: &ProjectContext) -> Result<LegacyHistoryView, BackendError> {
+        self.list_with_control(context, &mut || false, &mut || {})
+    }
+
+    pub fn list_with_control(
+        &self,
+        context: &ProjectContext,
+        is_cancelled: &mut impl FnMut() -> bool,
+        on_progress: &mut impl FnMut(),
+    ) -> Result<LegacyHistoryView, BackendError> {
+        let project_root = &context.root;
         let metadata = fs::symlink_metadata(project_root).map_err(|error| {
             BackendError::new("PROJECT_NOT_FOUND", error.to_string(), true, true)
         })?;
@@ -60,7 +71,19 @@ impl LegacyHistoryAdapter {
             ));
         }
         let mut paths = Vec::new();
-        for directory in [".app/tasks", ".app/import-history"] {
+        let app_state_root = context
+            .layout
+            .app_state_root
+            .as_deref()
+            .unwrap_or(".app/compat")
+            .trim_end_matches('/');
+        let history_root = format!("{app_state_root}/import-history");
+        let task_root = context
+            .layout
+            .task_state_root
+            .as_deref()
+            .unwrap_or(".app/compat/tasks");
+        for directory in [task_root, history_root.as_str()] {
             collect_json_paths(project_root, directory, &mut paths);
         }
         paths.sort();
@@ -68,11 +91,20 @@ impl LegacyHistoryAdapter {
         let mut view = LegacyHistoryView::default();
         let mut bytes_read = 0_u64;
         for (index, path) in paths.iter().enumerate() {
+            if is_cancelled() {
+                return Err(BackendError::new(
+                    crate::errors::IMPORT_V2_CANCELLED,
+                    "Import history index rebuild was cancelled.",
+                    true,
+                    false,
+                ));
+            }
             if index >= self.limits.max_files {
                 view.warnings.push(limit_warning("file count"));
                 break;
             }
             let relative = relative_path(project_root, path);
+            on_progress();
             let metadata = match fs::symlink_metadata(path) {
                 Ok(metadata) if metadata.is_file() => metadata,
                 _ => continue,
@@ -156,7 +188,15 @@ impl LegacyHistoryAdapter {
 }
 
 fn collect_json_paths(root: &Path, relative: &str, output: &mut Vec<PathBuf>) {
-    let path = root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let normalized = relative.replace('\\', "/");
+    if normalized.contains("/import-history/index/")
+        || normalized.contains("/import-history/working/")
+        || normalized.ends_with("/import-history/index")
+        || normalized.ends_with("/import-history/working")
+    {
+        return;
+    }
+    let path = root.join(normalized.replace('/', std::path::MAIN_SEPARATOR_STR));
     let Ok(metadata) = fs::symlink_metadata(&path) else {
         return;
     };

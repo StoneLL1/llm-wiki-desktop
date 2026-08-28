@@ -62,6 +62,7 @@ import type {
   GetImportAsrEnablementPlanV2Request,
   GetImportCapabilityRequirementV2Request,
   GetImportFrontendReadinessV2Request,
+  GetImportHistoryDetailV2Request,
   GetImportRestrictedContentStatusV2Request,
   GetImportPreviewContentV2Request,
   ImportCapabilityRequirement,
@@ -69,12 +70,14 @@ import type {
   ImportFrontendReadiness,
   ImportRestrictedContentStatus,
   ImportHistoryPage,
+  ImportHistoryDetailPage,
   ImportPreviewContent,
   ImportWorkbenchPreferences,
   ImportWorkbenchPreferencesRequest,
   InstallImportCapabilityV2Request,
   ListImportHistoryV2Request,
   RevokeImportLoginV2Request,
+  RebuildImportHistoryIndexV2Request,
   SaveImportWorkbenchPreferencesRequest,
   StartImportAgentAssistanceV2Request,
 } from "./importV2Presentation";
@@ -132,6 +135,8 @@ export interface ImportV2CommandNames {
   readonly saveWorkbenchPreferences: "save_import_workbench_preferences_v2";
   readonly getRestrictedContentStatus: "get_import_restricted_content_status_v2";
   readonly listHistory: "list_import_history_v2";
+  readonly getHistoryDetail: "get_import_history_detail_v2";
+  readonly rebuildHistoryIndex: "rebuild_import_history_index_v2";
   readonly authorizePrivateTarget: "authorize_import_private_target_v2";
   readonly beginLogin: "begin_import_login_v2";
   readonly completeLogin: "complete_import_login_v2";
@@ -192,6 +197,8 @@ export interface ImportV2Api {
   readonly saveWorkbenchPreferences: (request: SaveImportWorkbenchPreferencesRequest) => Promise<ImportWorkbenchPreferences>;
   readonly getRestrictedContentStatus: (request: GetImportRestrictedContentStatusV2Request) => Promise<ImportRestrictedContentStatus>;
   readonly listHistory: (request: ListImportHistoryV2Request) => Promise<ImportHistoryPage>;
+  readonly getHistoryDetail: (request: GetImportHistoryDetailV2Request) => Promise<ImportHistoryDetailPage>;
+  readonly rebuildHistoryIndex: (request: RebuildImportHistoryIndexV2Request) => Promise<BackendTask>;
   readonly authorizePrivateTarget: (request: AuthorizeImportPrivateTargetV2Request) => Promise<string>;
   readonly beginLogin: (request: BeginImportLoginV2Request) => Promise<ConnectorSessionRef>;
   readonly completeLogin: (request: CompleteImportLoginV2Request) => Promise<CompleteImportLoginResult>;

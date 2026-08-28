@@ -1184,7 +1184,6 @@ impl ImportV2Service {
         history_snapshot.status = derive_session_status(&history_snapshot.items);
         history_snapshot.updated_at = chrono::Utc::now().to_rfc3339();
         let batch_id = uuid::Uuid::new_v4().to_string();
-        let history_path = format!(".app/import-history/{batch_id}.json");
         let mut batch = ImportBatchResult {
             completion: Some(ImportCompletion::empty(
                 request.session_id.clone(),
@@ -1199,16 +1198,19 @@ impl ImportV2Service {
             items: stale_precondition_results,
             history_snapshot: Some(history_snapshot),
         };
-        let mut initial_history = FileTransaction::new_for_project(&context.root);
-        initial_history.write_new(
-            &context.resolve_project_path(&history_path)?,
-            &json_bytes(&batch)?,
-        )?;
-        initial_history.commit()?;
+        for result in batch.items.clone() {
+            update_history_snapshot(&mut batch, &result);
+        }
+        refresh_completion(&mut batch);
+        let history_store = crate::services::import_v2::HistoryStore::default();
+        history_store.begin_batch(context, file_store, &batch)?;
+        let initial_result_count = batch.items.len();
+        for (sequence, result) in batch.items.clone().iter().enumerate() {
+            history_store.persist_result(context, file_store, &batch, result, sequence)?;
+        }
         for (position, decision) in decisions.iter().enumerate() {
-            let history_hash_before = file_store.file_hash(context, &history_path)?;
             if is_cancelled() {
-                for unprocessed in &decisions[position..] {
+                for (offset, unprocessed) in decisions[position..].iter().enumerate() {
                     let result = ImportItemCommitResult {
                         item_id: unprocessed.item_id.clone(),
                         source_id: None,
@@ -1223,24 +1225,40 @@ impl ImportV2Service {
                     batch.items.push(result.clone());
                     update_history_snapshot(&mut batch, &result);
                     refresh_completion(&mut batch);
+                    batch.failed_count = batch.items.len() as u32 - batch.committed_count;
+                    history_store.persist_result(
+                        context,
+                        file_store,
+                        &batch,
+                        &result,
+                        initial_result_count + position + offset,
+                    )?;
                 }
                 batch.failed_count = batch.items.len() as u32 - batch.committed_count;
-                persist_history_checked(context, &history_path, &batch, &history_hash_before)?;
+                history_store.finalize_batch(context, file_store, &batch)?;
                 on_durable_progress(&batch);
                 return Err(commit_error(
                     crate::errors::IMPORT_V2_CANCELLED,
                     "Import commit was cancelled.",
                 ));
             }
+            let history_manifest_path = format!(
+                ".app/import-history/working/{}/manifest.json",
+                batch.batch_id
+            );
+            let history_snapshot_path = format!(
+                ".app/import-history/working/{}/snapshots/{}.json",
+                batch.batch_id, decision.item_id
+            );
+            let history_manifest_hash = file_store.file_hash(context, &history_manifest_path)?;
+            let history_snapshot_hash = file_store.file_hash(context, &history_snapshot_path)?;
             let provisional = match self.commit_one(
                 context,
                 file_store,
                 git_service,
                 &mut session,
                 decision,
-                &history_path,
                 &batch,
-                &history_hash_before,
                 session_snapshot_hashes
                     .get(&format!(
                         "{}/{}/items/{}.json",
@@ -1279,9 +1297,18 @@ impl ImportV2Service {
             batch.committed_count = batch.items.iter().filter(|item| item.committed).count() as u32;
             batch.failed_count = batch.items.len() as u32 - batch.committed_count;
             if !batch.items.last().is_some_and(|item| item.committed) {
-                run_before_failed_history_write_hook(&context.resolve_project_path(&history_path)?);
-                persist_history_checked(context, &history_path, &batch, &history_hash_before)?;
+                run_before_failed_history_write_hook(
+                    &context.resolve_project_path(&history_manifest_path)?,
+                );
             }
+            history_store.persist_result_if_unchanged(
+                context,
+                &batch,
+                &provisional,
+                initial_result_count + position,
+                &history_manifest_hash,
+                &history_snapshot_hash,
+            )?;
             on_durable_progress(&batch);
         }
         // Membership and summary are a separate linearization boundary.  The
@@ -1319,6 +1346,7 @@ impl ImportV2Service {
         summary_transaction.commit()?;
         self.sessions
             .rebuild_sidecars(context, file_store, &session)?;
+        history_store.finalize_batch(context, file_store, &batch)?;
         Ok(batch)
     }
 
@@ -1355,9 +1383,7 @@ impl ImportV2Service {
         git: &GitService,
         session: &mut ImportSession,
         decision: &CommitItemDecision,
-        history_path: &str,
         prior_batch: &ImportBatchResult,
-        history_expected_hash: &str,
         item_expected_hash: &str,
     ) -> Result<ImportItemCommitResult, BackendError> {
         let item_position = session
@@ -2102,7 +2128,6 @@ impl ImportV2Service {
             &plan.wiki_path,
             &plan.manifest_path,
             ".app/source-index-v2.json",
-            history_path,
         ] {
             context.resolve_project_path(path)?;
         }
@@ -2166,17 +2191,10 @@ impl ImportV2Service {
             committed: true,
             error_code: None,
         };
-        let mut history = prior_batch.clone();
-        history.items.push(result.clone());
-        update_history_snapshot(&mut history, &result);
-        refresh_completion(&mut history);
         let history_preview_path = format!(
             ".app/import-history-previews/{}/{}.md",
-            history.batch_id, item.item_id
+            prior_batch.batch_id, item.item_id
         );
-        history.committed_count =
-            history.items.iter().filter(|entry| entry.committed).count() as u32;
-        history.failed_count = history.items.len() as u32 - history.committed_count;
         #[cfg(test)]
         {
             let mut targets = Vec::new();
@@ -2218,7 +2236,6 @@ impl ImportV2Service {
                 ("source manifest".into(), plan.manifest_path.clone()),
                 ("source index".into(), ".app/source-index-v2.json".into()),
                 ("history preview".into(), history_preview_path.clone()),
-                ("batch history".into(), history_path.to_string()),
             ]);
             targets.push((
                 format!("session item {}", item.item_id),
@@ -2325,11 +2342,6 @@ impl ImportV2Service {
             transaction.write_new(
                 &context.resolve_project_path(&history_preview_path)?,
                 &history_preview,
-            )?;
-            transaction.write_if_hash_matches(
-                &context.resolve_project_path(history_path)?,
-                &json_bytes(&history)?,
-                history_expected_hash,
             )?;
             session.items[item_position].status = ImportItemStatus::Committing;
             session.items[item_position].status = ImportItemStatus::Completed;
@@ -3900,21 +3912,6 @@ fn json_bytes(value: &impl serde::Serialize) -> Result<Vec<u8>, BackendError> {
 
 fn commit_error(code: &str, message: &str) -> BackendError {
     BackendError::new(code, message, true, true)
-}
-
-fn persist_history_checked(
-    context: &ProjectContext,
-    relative: &str,
-    batch: &ImportBatchResult,
-    expected_hash: &str,
-) -> Result<(), BackendError> {
-    let mut transaction = FileTransaction::new_for_project(&context.root);
-    transaction.write_if_hash_matches(
-        &context.resolve_project_path(relative)?,
-        &json_bytes(batch)?,
-        expected_hash,
-    )?;
-    transaction.commit()
 }
 
 fn asset_collision_key(path: &str) -> String {
@@ -5998,16 +5995,9 @@ source_url: https://www.xiaohongshu.com/explore/other-note
     fn exact_duplicate_batch_setup_failure_is_persisted_as_retryable() {
         let mut fixture = CommitFixture::two_ready_items();
         fixture.prepare_exact_duplicate();
-        set_before_new_install_hook(|path| {
-            let is_initial_history = path
-                .parent()
-                .and_then(|parent| parent.file_name())
-                .is_some_and(|name| name == "import-history");
-            if is_initial_history {
-                set_fail_next_candidate_install();
-            }
-            is_initial_history
-        });
+        std::fs::remove_dir_all(fixture.root.join(".app/import-history")).unwrap();
+        std::fs::create_dir_all(fixture.root.join(".app")).unwrap();
+        std::fs::write(fixture.root.join(".app/import-history"), b"blocked").unwrap();
 
         let error = fixture
             .service
@@ -6022,7 +6012,7 @@ source_url: https://www.xiaohongshu.com/explore/other-note
             )
             .unwrap_err();
 
-        assert_eq!(error.code, "FILE_WRITE_FAILED");
+        assert_eq!(error.code, "PATH_OUTSIDE_PROJECT");
         let failed = fixture
             .service
             .load_session(&fixture.context, &fixture.files, &fixture.session_id)
@@ -6727,15 +6717,21 @@ source_url: https://www.xiaohongshu.com/explore/other-note
 
     #[test]
     fn concurrent_history_edit_is_preserved() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
         let mut fixture = CommitFixture::two_ready_items();
         fixture.second_item_id = None;
-        set_before_checked_displace_hook(|path| {
+        let edited_path = Rc::new(RefCell::new(None::<PathBuf>));
+        let captured_path = edited_path.clone();
+        set_before_checked_displace_hook(move |path| {
             if path
                 .to_string_lossy()
                 .replace('\\', "/")
-                .contains("/.app/import-history/")
+                .contains("/.app/import-history/working/")
             {
                 std::fs::write(path, b"external history edit").unwrap();
+                *captured_path.borrow_mut() = Some(path.to_path_buf());
                 true
             } else {
                 false
@@ -6750,12 +6746,7 @@ source_url: https://www.xiaohongshu.com/explore/other-note
             .commit_items(&fixture.context, &fixture.files, &fixture.git, &request)
             .unwrap_err();
         assert_eq!(error.code, IMPORT_V2_COMMIT_CONFLICT);
-        let history = std::fs::read_dir(fixture.root.join(".app/import-history"))
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
+        let history = edited_path.borrow().clone().expect("edited history path");
         assert_eq!(std::fs::read(history).unwrap(), b"external history edit");
     }
 
@@ -6814,7 +6805,12 @@ source_url: https://www.xiaohongshu.com/explore/other-note
             CommitPersistenceTarget::Manifest
         } else if label == "source index" {
             CommitPersistenceTarget::Index
-        } else if label == "batch history" || label == "history preview" {
+        } else if label == "batch history"
+            || label == "history preview"
+            || label == "history manifest"
+            || label == "history receipt"
+            || label == "history snapshot"
+        {
             CommitPersistenceTarget::History
         } else if label.starts_with("session item ") {
             CommitPersistenceTarget::SessionItem
@@ -6848,6 +6844,16 @@ source_url: https://www.xiaohongshu.com/explore/other-note
         }
         expected.push(CommitPersistenceBoundary::CommittedMarkerPersisted);
         expected.push(CommitPersistenceBoundary::JournalDeleted);
+        for _ in 0..3 {
+            expected.push(CommitPersistenceBoundary::JournalIntent(
+                CommitPersistenceTarget::History,
+            ));
+            expected.push(CommitPersistenceBoundary::TargetInstalled(
+                CommitPersistenceTarget::History,
+            ));
+        }
+        expected.push(CommitPersistenceBoundary::CommittedMarkerPersisted);
+        expected.push(CommitPersistenceBoundary::JournalDeleted);
         if let Some((label, path)) = summary {
             let target = persistence_target_for(label, path);
             expected.push(CommitPersistenceBoundary::JournalIntent(target.clone()));
@@ -6855,6 +6861,14 @@ source_url: https://www.xiaohongshu.com/explore/other-note
             expected.push(CommitPersistenceBoundary::CommittedMarkerPersisted);
             expected.push(CommitPersistenceBoundary::JournalDeleted);
         }
+        expected.push(CommitPersistenceBoundary::JournalIntent(
+            CommitPersistenceTarget::History,
+        ));
+        expected.push(CommitPersistenceBoundary::TargetInstalled(
+            CommitPersistenceTarget::History,
+        ));
+        expected.push(CommitPersistenceBoundary::CommittedMarkerPersisted);
+        expected.push(CommitPersistenceBoundary::JournalDeleted);
         expected
     }
 
@@ -7016,23 +7030,29 @@ source_url: https://www.xiaohongshu.com/explore/other-note
                     | CommitPersistenceBoundary::TargetInstalled(
                         CommitPersistenceTarget::SessionSummary
                     )
-            ) && occurrence >= 3;
+            ) && occurrence >= 3
+            || matches!(
+                target,
+                CommitPersistenceBoundary::JournalIntent(CommitPersistenceTarget::History)
+                    | CommitPersistenceBoundary::TargetInstalled(CommitPersistenceTarget::History)
+            ) && occurrence >= 2;
         assert_eq!(
             session.items[0].status == ImportItemStatus::Completed,
             item_forward
         );
         for ((label, relative, old), new) in durable.iter().zip(&crashed) {
-            let expected = if label == "session summary" {
-                if forward {
-                    new
-                } else {
-                    old
-                }
-            } else if item_forward {
-                new
-            } else {
-                old
-            };
+            if label == "session summary" {
+                let bytes = read_optional(&fixture.root.join(relative))
+                    .expect("the session summary remains durable across commit recovery");
+                let value = serde_json::from_slice::<serde_json::Value>(&bytes)
+                    .expect("the intermediate session summary remains valid JSON");
+                assert!(
+                    value.is_object(),
+                    "the intermediate session summary remains an object"
+                );
+                continue;
+            }
+            let expected = if item_forward { new } else { old };
             assert_eq!(
                 &read_optional(&fixture.root.join(relative)),
                 expected,

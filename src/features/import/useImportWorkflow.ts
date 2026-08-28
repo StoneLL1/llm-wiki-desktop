@@ -1097,6 +1097,7 @@ export function useImportWorkflow(
     getMigrationStatus,
     resumeMigration,
     listHistory,
+    loadHistoryDetail,
   } = useImportSupportingActions({
     projectId,
     rootPath,
@@ -1201,6 +1202,7 @@ export function useImportWorkflow(
     getMigrationStatus,
     resumeMigration,
     listHistory,
+    loadHistoryDetail,
     loadWorkbenchPreferences,
     saveWorkbenchPreferences,
   };

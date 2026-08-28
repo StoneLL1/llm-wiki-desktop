@@ -31,6 +31,7 @@ type SupportingActions = Pick<ImportWorkflow,
   | "getMigrationStatus"
   | "resumeMigration"
   | "listHistory"
+  | "loadHistoryDetail"
 >;
 
 interface ImportSupportingActionsOptions {
@@ -400,6 +401,34 @@ export function useImportSupportingActions({
         cursor,
         limit: 50,
       });
+      if (cursor === null && page.warnings.some((warning) => warning.code === "IMPORT_V2_HISTORY_INDEX_REBUILD_REQUIRED")) {
+        try {
+          const task = await importV2Api.rebuildHistoryIndex({ projectId, projectRootPath: rootPath });
+          if (!isProjectCurrent(projectKey)) return null;
+          selectedTaskUpsert(task);
+        } catch {
+          // Restricted/read-only projects retain the bounded compatibility
+          // page and rebuild warning instead of turning a readable history
+          // response into a fatal error.
+        }
+      }
+      return isProjectCurrent(projectKey) ? page : null;
+    } catch (error) {
+      if (isProjectCurrent(projectKey)) showError(error);
+      throw error;
+    }
+  }, [isProjectCurrent, projectId, projectKey, rootPath, selectedTaskUpsert, showError]);
+
+  const loadHistoryDetail = useCallback(async (batchId: string, cursor: string | null = null) => {
+    if (!isProjectCurrent(projectKey)) return null;
+    try {
+      const page = await importV2Api.getHistoryDetail({
+        projectId,
+        projectRootPath: rootPath,
+        batchId,
+        cursor,
+        limit: 50,
+      });
       return isProjectCurrent(projectKey) ? page : null;
     } catch (error) {
       if (isProjectCurrent(projectKey)) showError(error);
@@ -425,5 +454,6 @@ export function useImportSupportingActions({
     getMigrationStatus,
     resumeMigration,
     listHistory,
+    loadHistoryDetail,
   };
 }

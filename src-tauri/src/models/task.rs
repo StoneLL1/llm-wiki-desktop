@@ -42,7 +42,8 @@ impl BackendTask {
             Some(
                 TaskOperation::CapabilityInstall { .. }
                 | TaskOperation::ImportCommit { .. }
-                | TaskOperation::ImportRecovery { .. },
+                | TaskOperation::ImportRecovery { .. }
+                | TaskOperation::ImportHistoryIndexRebuild,
             ) => None,
             None => self
                 .batch_id
@@ -121,6 +122,7 @@ pub enum TaskOperation {
     ImportRecovery {
         session_id: String,
     },
+    ImportHistoryIndexRebuild,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
