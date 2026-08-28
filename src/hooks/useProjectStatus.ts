@@ -1,6 +1,7 @@
 import { useEffect, useMemo } from "react";
 
 import {
+  bindProjectFactsAuthority,
   ensureProjectFacts,
   projectFactsAuthorityKey,
   projectFactsKey,
@@ -48,8 +49,9 @@ export function useProjectStatus(
       : null
   );
   const storedEntry = useProjectFactsStore((state) => state.entries[key] ?? null);
-  const authorityMatches = !storedEntry
-    || storedEntry.authorityIdentityKey === authorityIdentityKey;
+  const authorityMatches = authorityIdentityKey === null
+    ? !storedEntry || storedEntry.authorityIdentityKey === null
+    : storedEntry?.authorityIdentityKey === authorityIdentityKey;
   const entry = storedEntry && authorityMatches
     ? storedEntry
     : null;
@@ -65,6 +67,12 @@ export function useProjectStatus(
   );
 
   useEffect(() => {
+    if (!enabled || !projectId || !rootPath || authorityIdentityKey === null) return;
+    if (storedEntry || authorityMatches) return;
+    bindProjectFactsAuthority(scope, authorityIdentityKey);
+  }, [authorityIdentityKey, authorityMatches, enabled, projectId, rootPath, scope, storedEntry]);
+
+  useEffect(() => {
     if (!enabled || !projectId || !rootPath || requestedKinds.length === 0) return;
     if (!authorityMatches) return;
     void ensureProjectFacts(scope, requestedKinds).catch(() => undefined);
@@ -75,12 +83,13 @@ export function useProjectStatus(
       !enabled
       || !projectId
       || !rootPath
+      || !authorityMatches
       || staleKinds.length === 0
     ) {
       return;
     }
     void ensureProjectFacts(scope, staleKinds).catch(() => undefined);
-  }, [enabled, scope, staleKinds]);
+  }, [authorityMatches, enabled, scope, staleKinds]);
 
   if (!enabled || !entry) return null;
   const hasKnownResult = requestedKinds.length > 0 && requestedKinds.every((kind) => {

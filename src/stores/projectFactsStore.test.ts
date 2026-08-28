@@ -357,6 +357,30 @@ describe("projectFactsStore", () => {
     expect(entryFor()?.providers).toMatchObject({ status: "ready", value: [] });
   });
 
+  it("supersedes an unbound request when the first authority arrives", async () => {
+    const unbound = deferred<ProviderStatus[]>();
+    const current = deferred<ProviderStatus[]>();
+    invokeMock
+      .mockReturnValueOnce(unbound.promise)
+      .mockReturnValueOnce(current.promise);
+    const request = ensureProjectFacts(scopeA, ["providers"]);
+
+    bindProjectFactsAuthority(
+      scopeA,
+      "identity-a\0identity-revision-a\0authority-a",
+    );
+    unbound.resolve([ollamaProvider]);
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(2));
+    expect(entryFor()?.providers.value).toBeNull();
+
+    current.resolve([]);
+    await request;
+    expect(entryFor()).toMatchObject({
+      authorityIdentityKey: "identity-a\0identity-revision-a\0authority-a",
+      providers: { status: "ready", value: [] },
+    });
+  });
+
   it("does not revive a pruned active control when a stale invalidation arrives", async () => {
     const oldest = deferred<AgentInfo[]>();
     invokeMock.mockReturnValueOnce(oldest.promise).mockResolvedValue([]);

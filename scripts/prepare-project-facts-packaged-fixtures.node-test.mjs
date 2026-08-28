@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
-import { prepareProjectFactsPackagedFixtures } from "./prepare-project-facts-packaged-fixtures.mjs";
+import {
+  prepareProjectFactsPackagedFixtures,
+  verifyProjectFactsPackagedFixtures,
+} from "./prepare-project-facts-packaged-fixtures.mjs";
 
 test("prepares deterministic native, markerless, and fake-Agent fixtures", async () => {
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "llm-wiki-project-facts-"));
@@ -15,10 +18,10 @@ test("prepares deterministic native, markerless, and fake-Agent fixtures", async
     assert.equal(manifest.native.wikiPages, 3);
     assert.equal(manifest.native.supportFiles, 240);
     assert.equal(manifest.native.trackedFiles, 251);
-    assert.equal(
-      manifest.fixtureHash,
-      "8a7bda6d4daab3b1a29a8242ae5953a39ad318a541917919fdfe1861ea3e6818",
-    );
+    assert.equal(manifest.schemaVersion, 2);
+    assert.equal(manifest.fileInventory.length, 281);
+    assert.match(manifest.fixtureHash, /^[0-9a-f]{64}$/u);
+    await verifyProjectFactsPackagedFixtures(outputRoot, manifest);
     assert.equal(manifest.markerless.markdownFiles, 3);
     await assert.rejects(stat(path.join(outputRoot, "markerless-control", ".git")));
     await assert.rejects(stat(path.join(outputRoot, "markerless-control", ".app")));
@@ -81,6 +84,15 @@ test("prepares deterministic native, markerless, and fake-Agent fixtures", async
     assert.match(
       await readFile(path.join(outputRoot, "fake-agent-slow-bin", wrapperName), "utf8"),
       /fake-agent\.mjs["']? slow/u,
+    );
+    await writeFile(
+      path.join(outputRoot, "fake-agent-slow-bin", "fake-agent.mjs"),
+      "tampered\n",
+      "utf8",
+    );
+    await assert.rejects(
+      verifyProjectFactsPackagedFixtures(outputRoot, manifest),
+      /no longer match/u,
     );
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });

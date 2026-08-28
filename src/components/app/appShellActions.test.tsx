@@ -405,7 +405,6 @@ describe("AppShell first-screen agent detection", () => {
       }
       return Promise.resolve([]);
     });
-    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
     render(<AppShell />);
     await waitFor(() => {
       expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(1);
@@ -413,7 +412,7 @@ describe("AppShell first-screen agent detection", () => {
       expect(invokeMock.mock.calls.filter(([command]) => command === "list_llm_providers")).toHaveLength(1);
     });
 
-    now.mockReturnValue(31_001);
+    fireEvent.blur(window);
     fireEvent.focus(window);
 
     await waitFor(() => {
@@ -421,7 +420,6 @@ describe("AppShell first-screen agent detection", () => {
     });
     expect(invokeMock.mock.calls.filter(([command]) => command === "detect_agents")).toHaveLength(1);
     expect(invokeMock.mock.calls.filter(([command]) => command === "list_llm_providers")).toHaveLength(1);
-    now.mockRestore();
   });
 
   it("coalesces a visibility transition and twenty focus events into one Git request", async () => {
@@ -469,7 +467,7 @@ describe("AppShell first-screen agent detection", () => {
 
     render(<AppShell />);
     await waitFor(() => expect(gitCalls).toBe(1));
-    fireEvent(document, new Event("visibilitychange"));
+    fireEvent.blur(window);
     for (let index = 0; index < 20; index += 1) fireEvent.focus(window);
 
     expect(gitCalls).toBe(2);
@@ -486,7 +484,7 @@ describe("AppShell first-screen agent detection", () => {
     expect(maximumActiveGit).toBe(1);
   });
 
-  it("coalesces a delayed WebView visibility/focus pair from one native restore", async () => {
+  it("coalesces a delayed focus pair until another background cycle", async () => {
     tauriWindow.__TAURI_INTERNALS__ = {};
     const project = {
       ...defaultProject,
@@ -511,23 +509,23 @@ describe("AppShell first-screen agent detection", () => {
       })
       : Promise.resolve([]));
     const now = vi.spyOn(Date, "now");
-
     render(<AppShell />);
     await waitFor(() => {
       expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(1);
     });
 
     now.mockReturnValue(1_000);
-    fireEvent(document, new Event("visibilitychange"));
+    fireEvent.blur(window);
+    fireEvent.focus(window);
     await waitFor(() => {
       expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(2);
     });
-    now.mockReturnValue(1_300);
+    now.mockReturnValue(1_600);
     fireEvent.focus(window);
     await act(async () => Promise.resolve());
     expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(2);
 
-    now.mockReturnValue(1_600);
+    fireEvent.blur(window);
     fireEvent.focus(window);
     await waitFor(() => {
       expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(3);

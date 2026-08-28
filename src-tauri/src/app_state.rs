@@ -673,13 +673,26 @@ impl AppState {
     /// current trusted authority after layout, identity, and health are
     /// re-evaluated under the same transition lock used by Workflows.
     pub fn require_external_ai_access(&self, context: &ProjectContext) -> Result<(), BackendError> {
+        self.with_external_ai_access(context, |_| Ok(()))
+    }
+
+    /// Performs one bounded, synchronous external-AI status read while the
+    /// project authority transition remains linearized. This is intentionally
+    /// narrower than an execution lease: callers may inspect project provider
+    /// configuration and credential presence, but may not retain the context
+    /// or launch external work after the closure returns.
+    pub(crate) fn with_external_ai_access<T>(
+        &self,
+        context: &ProjectContext,
+        run: impl FnOnce(&ProjectContext) -> Result<T, BackendError>,
+    ) -> Result<T, BackendError> {
         let transition_lane = self.project_trust_transition.lane(&context.root)?;
         let _transition = transition_lane
             .lock()
             .map_err(|_| trust_transition_locked())?;
         let authority = self.resolve_external_ai_authority_locked(context)?;
         if authority.allows_external_ai() {
-            return Ok(());
+            return run(&authority.authority.context);
         }
         Err(BackendError::new(
             "PROJECT_EXTERNAL_AI_REQUIRES_TRUST",
@@ -2896,6 +2909,47 @@ mod project_registry_tests {
 
         state.require_external_ai_access(&context).unwrap();
 
+        cleanup_paths(&[&project, &config]);
+    }
+
+    #[test]
+    fn external_ai_status_read_serializes_with_trust_revocation() {
+        let (state, config) = state_with_temp_config("external-ai-revoke-race-config");
+        let project = strict_native_project("external-ai-revoke-race");
+        let context = state
+            .project_registry
+            .register_trusted_native("project-a", &project)
+            .unwrap();
+        let state = Arc::new(state);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let read_state = Arc::clone(&state);
+        let read_context = context.clone();
+        let reader = std::thread::spawn(move || {
+            read_state.with_external_ai_access(&read_context, |_| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+        });
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        let revoke_state = Arc::clone(&state);
+        let revoke_root = project.clone();
+        let (revoked_tx, revoked_rx) = mpsc::channel();
+        let revoker = std::thread::spawn(move || {
+            let result = revoke_state.revoke_project_trust("project-a", &revoke_root);
+            revoked_tx.send(result).unwrap();
+        });
+        assert!(
+            revoked_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "revoke must wait until the credential-status transaction finishes"
+        );
+
+        release_tx.send(()).unwrap();
+        reader.join().unwrap().unwrap();
+        revoked_rx.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+        revoker.join().unwrap();
         cleanup_paths(&[&project, &config]);
     }
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 
 import {
+  bindProjectFactsAuthority,
   ensureProjectFacts,
   projectFactsAuthorityKey,
   projectFactsKey,
@@ -61,8 +62,9 @@ export function useAiCapabilities(
       : null
   );
   const storedEntry = useProjectFactsStore((state) => state.entries[projectKey] ?? null);
-  const authorityMatches = !storedEntry
-    || storedEntry.authorityIdentityKey === authorityIdentityKey;
+  const authorityMatches = authorityIdentityKey === null
+    ? !storedEntry || storedEntry.authorityIdentityKey === null
+    : storedEntry?.authorityIdentityKey === authorityIdentityKey;
   const entry = storedEntry && authorityMatches
     ? storedEntry
     : null;
@@ -79,10 +81,16 @@ export function useAiCapabilities(
     forceRefresh = false,
     kinds: readonly ProjectFactKind[] = CAPABILITY_FACTS,
   ) => {
+    if (!authorityMatches) return Promise.resolve();
     return forceRefresh
       ? refreshProjectFacts(scope, kinds)
       : ensureProjectFacts(scope, kinds);
-  }, [scope]);
+  }, [authorityMatches, scope]);
+
+  useEffect(() => {
+    if (authorityIdentityKey === null || storedEntry || authorityMatches) return;
+    bindProjectFactsAuthority(scope, authorityIdentityKey);
+  }, [authorityIdentityKey, authorityMatches, scope, storedEntry]);
 
   useEffect(() => {
     if (!authorityMatches) return;
@@ -90,6 +98,7 @@ export function useAiCapabilities(
   }, [authorityMatches, scope]);
 
   useEffect(() => {
+    if (!authorityMatches) return;
     if (
       entry?.agents.status !== "idle"
       && entry?.agents.status !== "stale"
@@ -97,15 +106,15 @@ export function useAiCapabilities(
       && entry?.providers.status !== "stale"
     ) return;
     void ensureProjectFacts(scope, CAPABILITY_FACTS).catch(() => undefined);
-  }, [entry?.agents.status, entry?.providers.status, scope]);
+  }, [authorityMatches, entry?.agents.status, entry?.providers.status, scope]);
 
   useEffect(() => {
     const wasVisible = visibleRef.current;
     visibleRef.current = refreshWhenVisible;
-    if (refreshWhenVisible && !wasVisible) {
+    if (authorityMatches && refreshWhenVisible && !wasVisible) {
       void ensureProjectFacts(scope, CAPABILITY_FACTS).catch(() => undefined);
     }
-  }, [refreshWhenVisible, scope]);
+  }, [authorityMatches, refreshWhenVisible, scope]);
 
   useEffect(() => {
     if (!entry) return;

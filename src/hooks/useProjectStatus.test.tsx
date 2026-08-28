@@ -8,6 +8,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 import {
   bindProjectFactsAuthority,
   ensureProjectFacts,
+  invalidateProjectFacts,
   resetProjectFactsStoreForTests,
 } from "../stores/projectFactsStore";
 import { defaultProject, useProjectStore } from "../stores/projectStore";
@@ -94,6 +95,30 @@ describe("useProjectStatus", () => {
     const { result } = renderHook(() =>
       useProjectStatus(projectId, rootPath, true, ["agents"]),
     );
+
+    expect(result.current).toBeNull();
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not refresh a stale entry owned by another authority", async () => {
+    const scope = { projectId, rootPath };
+    bindProjectFactsAuthority(scope, "identity-a\0revision-1\0authority-1");
+    invokeMock.mockResolvedValue([]);
+    await ensureProjectFacts(scope, ["agents"]);
+    invalidateProjectFacts(scope, ["agents"], "authority_transition");
+    useProjectStore.setState({
+      authority: {
+        projectId,
+        canonicalIdentityKey: "identity-a",
+        identityRevision: "revision-1",
+        authorityRevision: "authority-2",
+      } as never,
+    });
+
+    const { result } = renderHook(() =>
+      useProjectStatus(projectId, rootPath, true, ["agents"]),
+    );
+    await act(async () => Promise.resolve());
 
     expect(result.current).toBeNull();
     expect(invokeMock).toHaveBeenCalledTimes(1);

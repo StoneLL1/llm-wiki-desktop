@@ -5,6 +5,9 @@ import path from "node:path";
 import process from "node:process";
 import { performance } from "node:perf_hooks";
 
+import { verifyProjectFactsPackagedFixtures } from "./prepare-project-facts-packaged-fixtures.mjs";
+import { verifyProjectFactsPackagedProvenance } from "./project-facts-packaged-provenance.mjs";
+
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 const args = new Map();
 for (let index = 2; index < process.argv.length; index += 2) {
@@ -254,16 +257,10 @@ async function readBlockingSpans(tracePath) {
 
 async function installInvokeObserver(client) {
   await client.evaluate(`(() => {
-    if (window.__batch4InvokeObserverInstalled) return true;
-    const internals = window.__TAURI_INTERNALS__;
-    if (!internals || typeof internals.invoke !== 'function') throw new Error('Tauri invoke is unavailable.');
-    const original = internals.invoke.bind(internals);
-    window.__batch4InvokeCounts = {};
-    internals.invoke = (command, payload, options) => {
-      window.__batch4InvokeCounts[command] = (window.__batch4InvokeCounts[command] ?? 0) + 1;
-      return original(command, payload, options);
-    };
-    window.__batch4InvokeObserverInstalled = true;
+    if (!window.__LLM_WIKI_PROJECT_FACTS_IPC_COUNTS__
+        || typeof window.__LLM_WIKI_PROJECT_FACTS_IPC_COUNTS__ !== 'object') {
+      throw new Error('The packaged Project Facts IPC observer is unavailable.');
+    }
     return true;
   })()`);
 }
@@ -272,7 +269,9 @@ async function phaseSnapshot(client, tracePath, label) {
   const spans = await readBlockingSpans(tracePath);
   const operationCounts = {};
   for (const span of spans) operationCounts[span.operation] = (operationCounts[span.operation] ?? 0) + 1;
-  const ipcCounts = await client.evaluate(`({ ...(window.__batch4InvokeCounts ?? {}) })`);
+  const ipcCounts = await client.evaluate(
+    `({ ...(window.__LLM_WIKI_PROJECT_FACTS_IPC_COUNTS__ ?? {}) })`,
+  );
   return { label, spanCount: spans.length, operationCounts, ipcCounts };
 }
 
@@ -607,6 +606,9 @@ async function main() {
   if (process.platform !== "win32") throw new Error("This installed acceptance harness requires Windows.");
   const exe = required("--exe");
   const installer = required("--installer");
+  const builtExe = required("--built-exe");
+  const provenancePath = required("--provenance");
+  const sourceRepository = required("--source-repository");
   const sourceCommit = requiredText("--source-commit");
   const expectedVersion = requiredText("--expected-version");
   const fixtureRoot = required("--fixture-root");
@@ -629,6 +631,20 @@ async function main() {
   const originalFixtureSettings = await readFile(fixtureSettings);
   await stat(exe);
   await stat(installer);
+  await stat(builtExe);
+  const provenance = JSON.parse(await readFile(provenancePath, "utf8"));
+  const artifactBinding = await verifyProjectFactsPackagedProvenance({
+    provenance,
+    repository: sourceRepository,
+    sourceCommit,
+    installer,
+    builtExecutable: builtExe,
+    installedExecutable: exe,
+    expectedVersion,
+  });
+  const manifestBytes = await readFile(path.join(fixtureRoot, "fixture-manifest.json"));
+  const fixtureManifest = JSON.parse(manifestBytes.toString("utf8"));
+  await verifyProjectFactsPackagedFixtures(fixtureRoot, fixtureManifest);
   await requireAbsent("output", output);
   await requireAbsent("trace", trace);
   await requireAbsent("app data", appData);
@@ -769,10 +785,16 @@ async function main() {
       "project_facts_agent_detection",
       "project_facts_provider_status",
     ];
+    const projectFactsCommands = ["git_status", "detect_agents", "list_llm_providers"];
     for (const phaseIndex of [1, 2]) {
       for (const operation of projectFactsOperations) {
         if (phaseDelta(phases[0].operationCounts, phases[phaseIndex].operationCounts, operation) !== 0) {
           throw new Error(`No-project phase ran ${operation}.`);
+        }
+      }
+      for (const command of projectFactsCommands) {
+        if (phaseDelta(phases[0].ipcCounts, phases[phaseIndex].ipcCounts, command) !== 0) {
+          throw new Error(`No-project phase invoked ${command}.`);
         }
       }
     }
@@ -784,6 +806,11 @@ async function main() {
           throw new Error(`${label} ran ${operation}.`);
         }
       }
+      for (const command of projectFactsCommands) {
+        if (phaseDelta(explicitPhase.ipcCounts, phase.ipcCounts, command) !== 0) {
+          throw new Error(`${label} invoked ${command}.`);
+        }
+      }
     }
     const afterRoutes = phases.find((phase) => phase.label === "after_routes");
     const afterFocus = phases.find((phase) => phase.label === "after_focus");
@@ -793,9 +820,16 @@ async function main() {
       "project_facts_git_status",
     );
     if (focusGit > 10) throw new Error(`Focus Git invocation count was ${focusGit}.`);
+    const focusGitIpc = phaseDelta(afterRoutes.ipcCounts, afterFocus.ipcCounts, "git_status");
+    if (focusGitIpc > 10) throw new Error(`Focus Git IPC count was ${focusGitIpc}.`);
     for (const operation of ["project_facts_agent_detection", "project_facts_provider_status"]) {
       if (phaseDelta(afterRoutes.operationCounts, afterFocus.operationCounts, operation) !== 0) {
         throw new Error(`Focus unexpectedly ran ${operation}.`);
+      }
+    }
+    for (const command of ["detect_agents", "list_llm_providers"]) {
+      if (phaseDelta(afterRoutes.ipcCounts, afterFocus.ipcCounts, command) !== 0) {
+        throw new Error(`Focus unexpectedly invoked ${command}.`);
       }
     }
     for (const scenario of [noProjectDrag, projectDrag]) {
@@ -821,7 +855,6 @@ async function main() {
     if (lifecycle.probeProcessCount < 1 || lifecycle.maximumProbeObservedLifetimeMs > 4_000) {
       throw new Error(`Fake-Agent process lifetime failed: ${JSON.stringify(lifecycle)}`);
     }
-    const manifestBytes = await readFile(path.join(fixtureRoot, "fixture-manifest.json"));
     const environment = await systemEvidence(exe);
     if (environment.productVersion !== expectedVersion || environment.fileVersion !== expectedVersion) {
       throw new Error(`Installed binary version mismatch: ${JSON.stringify(environment)}`);
@@ -832,17 +865,21 @@ async function main() {
       measuredAt: new Date().toISOString(),
       artifact: {
         sourceCommit,
+        sourceTree: artifactBinding.sourceTree,
         expectedVersion,
         installer,
-        installerSha256: createHash("sha256").update(await readFile(installer)).digest("hex"),
+        installerSha256: artifactBinding.installerEvidence.sha256,
+        builtExe,
+        builtExeSha256: artifactBinding.builtEvidence.sha256,
         exe,
-        installedExeSha256: createHash("sha256").update(await readFile(exe)).digest("hex"),
+        installedExeSha256: artifactBinding.installedEvidence.sha256,
+        provenance: provenancePath,
         environment,
       },
       fixture: {
         root: fixtureRoot,
         manifestSha256: createHash("sha256").update(manifestBytes).digest("hex"),
-        manifest: JSON.parse(manifestBytes.toString("utf8")),
+        manifest: fixtureManifest,
       },
       scenarios: {
         noProject,
