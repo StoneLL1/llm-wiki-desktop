@@ -268,11 +268,16 @@ async function installInvokeObserver(client) {
 async function phaseSnapshot(client, tracePath, label) {
   const spans = await readBlockingSpans(tracePath);
   const operationCounts = {};
-  for (const span of spans) operationCounts[span.operation] = (operationCounts[span.operation] ?? 0) + 1;
+  const operationClassCounts = {};
+  for (const span of spans) {
+    operationCounts[span.operation] = (operationCounts[span.operation] ?? 0) + 1;
+    const operationClass = `${span.operation}:${span.class}`;
+    operationClassCounts[operationClass] = (operationClassCounts[operationClass] ?? 0) + 1;
+  }
   const ipcCounts = await client.evaluate(
     `({ ...(window.__LLM_WIKI_PROJECT_FACTS_IPC_COUNTS__ ?? {}) })`,
   );
-  return { label, spanCount: spans.length, operationCounts, ipcCounts };
+  return { label, spanCount: spans.length, operationCounts, operationClassCounts, ipcCounts };
 }
 
 function phaseDelta(before, after, command) {
@@ -814,14 +819,23 @@ async function main() {
     }
     const afterRoutes = phases.find((phase) => phase.label === "after_routes");
     const afterFocus = phases.find((phase) => phase.label === "after_focus");
-    const focusGit = phaseDelta(
-      afterRoutes.operationCounts,
-      afterFocus.operationCounts,
-      "project_facts_git_status",
-    );
-    if (focusGit > 10) throw new Error(`Focus Git invocation count was ${focusGit}.`);
     const focusGitIpc = phaseDelta(afterRoutes.ipcCounts, afterFocus.ipcCounts, "git_status");
     if (focusGitIpc > 10) throw new Error(`Focus Git IPC count was ${focusGitIpc}.`);
+    // One git_status IPC intentionally emits two blocking-work spans: authority
+    // resolution on MetadataIo and the repository read on ProjectGit. Count
+    // each stage separately so the trace assertion does not double-count one
+    // frontend refresh as two Git Facts invocations.
+    for (const workClass of ["metadata_io", "project_git"]) {
+      const operationClass = `project_facts_git_status:${workClass}`;
+      const focusGitStages = phaseDelta(
+        afterRoutes.operationClassCounts,
+        afterFocus.operationClassCounts,
+        operationClass,
+      );
+      if (focusGitStages > 10) {
+        throw new Error(`Focus Git ${workClass} stage count was ${focusGitStages}.`);
+      }
+    }
     for (const operation of ["project_facts_agent_detection", "project_facts_provider_status"]) {
       if (phaseDelta(afterRoutes.operationCounts, afterFocus.operationCounts, operation) !== 0) {
         throw new Error(`Focus unexpectedly ran ${operation}.`);
