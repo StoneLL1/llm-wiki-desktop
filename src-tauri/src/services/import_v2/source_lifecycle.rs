@@ -193,7 +193,8 @@ impl ImportV2Service {
         kind: SourceCandidateKind,
         cancellation: &CancellationToken,
     ) -> Result<SourceCandidateSummary, BackendError> {
-        let _guard = self.mutation_lock.lock().map_err(|_| source_busy())?;
+        let project_locks = self.project_locks(context)?;
+        let _guard = self.lock_project(&project_locks);
         FileTransaction::reconcile_project(&context.root)?;
         let loaded = load_source(context, files, &request.source_id)?;
         if loaded.current_hash != request.expected_markdown_hash {
@@ -445,7 +446,8 @@ impl ImportV2Service {
         engine_version: Option<String>,
         candidate_markdown: String,
     ) -> Result<SourceCandidateSummary, BackendError> {
-        let _guard = self.mutation_lock.lock().map_err(|_| source_busy())?;
+        let project_locks = self.project_locks(context)?;
+        let _guard = self.lock_project(&project_locks);
         FileTransaction::reconcile_project(&context.root)?;
         let loaded = load_source(context, files, &input.source_id)?;
         if digest(input.current_markdown.as_bytes()) != input.markdown_hash {
@@ -517,7 +519,8 @@ impl ImportV2Service {
         candidate_id: &str,
         task_id: &str,
     ) -> Result<(), BackendError> {
-        let _guard = self.mutation_lock.lock().map_err(|_| source_busy())?;
+        let project_locks = self.project_locks(context)?;
+        let _guard = self.lock_project(&project_locks);
         let candidate = load_candidate(context, files, source_id, candidate_id)?;
         if candidate.kind != SourceCandidateKind::AiOrganize
             || candidate
@@ -546,7 +549,8 @@ impl ImportV2Service {
         source_id: &str,
         candidate_id: &str,
     ) -> Result<(), BackendError> {
-        let _guard = self.mutation_lock.lock().map_err(|_| source_busy())?;
+        let project_locks = self.project_locks(context)?;
+        let _guard = self.lock_project(&project_locks);
         FileTransaction::reconcile_project(&context.root)?;
         let candidate = load_candidate(context, files, source_id, candidate_id)?;
         let path = candidate_path(&candidate.source_id, &candidate.candidate_id);
@@ -600,7 +604,8 @@ impl ImportV2Service {
         git: &GitService,
         request: &ApplySourceCandidateRequest,
     ) -> Result<SourceMutationResult, BackendError> {
-        let _guard = self.mutation_lock.lock().map_err(|_| source_busy())?;
+        let project_locks = self.project_locks(context)?;
+        let _guard = self.lock_project(&project_locks);
         FileTransaction::reconcile_project(&context.root)?;
         let loaded = load_source(context, files, &request.source_id)?;
         let candidate = load_candidate(context, files, &request.source_id, &request.candidate_id)?;
@@ -688,7 +693,8 @@ impl ImportV2Service {
         version_id: &str,
         expected_markdown_hash: &str,
     ) -> Result<SourceMutationResult, BackendError> {
-        let _guard = self.mutation_lock.lock().map_err(|_| source_busy())?;
+        let project_locks = self.project_locks(context)?;
+        let _guard = self.lock_project(&project_locks);
         FileTransaction::reconcile_project(&context.root)?;
         let loaded = load_source(context, files, source_id)?;
         if loaded.current_hash != expected_markdown_hash {
@@ -743,7 +749,8 @@ impl ImportV2Service {
         git: &GitService,
         request: &crate::models::source::MoveSourceRequest,
     ) -> Result<SourceMutationResult, BackendError> {
-        let _guard = self.mutation_lock.lock().map_err(|_| source_busy())?;
+        let project_locks = self.project_locks(context)?;
+        let _guard = self.lock_project(&project_locks);
         FileTransaction::reconcile_project(&context.root)?;
         let loaded = load_source(context, files, &request.source_id)?;
         let preview = build_move_preview(context, files, &loaded, &request.new_wiki_path)?;
@@ -778,7 +785,8 @@ impl ImportV2Service {
                 true,
             ));
         }
-        let _guard = self.mutation_lock.lock().map_err(|_| source_busy())?;
+        let project_locks = self.project_locks(context)?;
+        let _guard = self.lock_project(&project_locks);
         FileTransaction::reconcile_project(&context.root)?;
         let loaded = load_source(context, files, &request.source_id)?;
         let preview = build_delete_preview(context, files, &loaded)?;
@@ -3204,15 +3212,6 @@ fn source_changed(current_hash: &str) -> BackendError {
         true,
     )
     .with_details(serde_json::json!({ "currentHash": current_hash }))
-}
-
-fn source_busy() -> BackendError {
-    BackendError::new(
-        "SOURCE_BUSY",
-        "Another Source mutation is currently running.",
-        true,
-        false,
-    )
 }
 
 fn source_action_unavailable() -> BackendError {

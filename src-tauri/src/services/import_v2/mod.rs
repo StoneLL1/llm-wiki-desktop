@@ -20,6 +20,7 @@ pub mod file_router;
 pub mod generic_web_engine;
 pub mod history_store;
 pub mod local_media_engine;
+pub(crate) mod lock_registry;
 pub mod markdown_normalizer;
 pub mod media_router;
 pub mod migration;

@@ -57,7 +57,8 @@ pub fn scan_import_v2_migration(
     request: ScanImportV2MigrationRequest,
 ) -> Result<LegacyInventory, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let _guard = state.import_v2_service.acquire_migration_lock()?;
+    let project_locks = state.import_v2_service.project_locks(&context)?;
+    let _guard = state.import_v2_service.lock_project(&project_locks);
     state
         .import_v2_service
         .preflight_migration_locked(&context)?;
@@ -69,7 +70,8 @@ pub fn plan_import_v2_migration(
     request: PlanImportV2MigrationRequest,
 ) -> Result<MigrationPreparation, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let _guard = state.import_v2_service.acquire_migration_lock()?;
+    let project_locks = state.import_v2_service.project_locks(&context)?;
+    let _guard = state.import_v2_service.lock_project(&project_locks);
     state
         .import_v2_service
         .preflight_migration_locked(&context)?;
@@ -81,7 +83,8 @@ pub fn get_import_v2_migration_status(
     request: GetImportV2MigrationStatusRequest,
 ) -> Result<MigrationStatusSnapshot, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let _guard = state.import_v2_service.acquire_migration_lock()?;
+    let project_locks = state.import_v2_service.project_locks(&context)?;
+    let _guard = state.import_v2_service.lock_project(&project_locks);
     state
         .import_v2_service
         .preflight_migration_locked(&context)?;
@@ -97,16 +100,20 @@ pub fn apply_import_v2_migration(
         &request.project_id,
         &request.project_root_path,
         |_permit, context| {
-            let _guard = state.import_v2_service.acquire_migration_lock()?;
-            state
-                .import_v2_service
-                .preflight_migration_locked(context)?;
+            let task_root = {
+                let project_locks = state.import_v2_service.project_locks(context)?;
+                let _guard = state.import_v2_service.lock_project(&project_locks);
+                state
+                    .import_v2_service
+                    .preflight_migration_locked(context)?;
+                context.root.clone()
+            };
             state
                 .task_service
                 .create_project_task(
                     TaskType::Import,
                     request.project_id.clone(),
-                    context.root.clone(),
+                    task_root,
                     "Apply Import V2 migration".into(),
                     true,
                 )
@@ -134,16 +141,20 @@ pub fn resume_import_v2_migration(
         &request.project_id,
         &request.project_root_path,
         |_permit, context| {
-            let _guard = state.import_v2_service.acquire_migration_lock()?;
-            state
-                .import_v2_service
-                .preflight_migration_locked(context)?;
+            let task_root = {
+                let project_locks = state.import_v2_service.project_locks(context)?;
+                let _guard = state.import_v2_service.lock_project(&project_locks);
+                state
+                    .import_v2_service
+                    .preflight_migration_locked(context)?;
+                context.root.clone()
+            };
             state
                 .task_service
                 .create_project_task(
                     TaskType::Import,
                     request.project_id.clone(),
-                    context.root.clone(),
+                    task_root,
                     "Resume Import V2 migration".into(),
                     true,
                 )

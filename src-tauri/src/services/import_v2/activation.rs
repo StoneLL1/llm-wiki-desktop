@@ -45,7 +45,8 @@ impl ImportV2ActivationService {
         release_version: &str,
         confirmation: ActivationConfirmation,
     ) -> Result<ActivationResult, BackendError> {
-        let _guard = core.acquire_migration_lock()?;
+        let project_locks = core.project_locks(context)?;
+        let _guard = core.lock_project(&project_locks);
         core.preflight_migration_locked(context)?;
         if release_version.trim().is_empty() {
             return Err(BackendError::new(

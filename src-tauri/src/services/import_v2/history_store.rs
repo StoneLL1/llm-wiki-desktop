@@ -135,67 +135,36 @@ impl HistoryStore {
         transaction: &mut FileTransaction,
         batch: &ImportBatchResult,
         result: &ImportItemCommitResult,
+        item: &ImportItem,
         sequence: usize,
+        committed_count: u32,
+        failed_count: u32,
         manifest_expected_hash: &str,
         snapshot_expected_hash: &str,
     ) -> Result<(), BackendError> {
         validate_id(&batch.batch_id)?;
         validate_id(&result.item_id)?;
         let root = working_root(context, &batch.batch_id)?;
-        let item = batch
-            .history_snapshot
-            .as_ref()
-            .and_then(|snapshot| {
-                snapshot
-                    .items
-                    .iter()
-                    .find(|item| item.item_id == result.item_id)
-            })
-            .cloned()
-            .ok_or_else(|| history_error("The historical item snapshot is missing."))?;
-        let manifest = HistoryWorkingManifest {
-            schema_version: HISTORY_SCHEMA_VERSION,
-            revision: (batch.items.len() as u64).saturating_add(1),
-            entry: entry_from_batch(batch),
-            detail_page_count: detail_page_count(
-                batch
-                    .history_snapshot
-                    .as_ref()
-                    .map_or(0, |snapshot| snapshot.items.len()),
-            ),
-            resource_mode: batch
-                .history_snapshot
-                .as_ref()
-                .map(|snapshot| snapshot.resource_mode.clone())
-                .unwrap_or(ImportResourceMode::Balanced),
-        };
-        let receipt = HistoryItemReceipt {
-            schema_version: HISTORY_SCHEMA_VERSION,
-            batch_id: batch.batch_id.clone(),
-            sequence: sequence as u64,
-            result: result.clone(),
-            recorded_at: chrono::Utc::now().to_rfc3339(),
-        };
-        let snapshot = HistoryItemSnapshot {
-            schema_version: HISTORY_SCHEMA_VERSION,
-            batch_id: batch.batch_id.clone(),
-            item,
-        };
+        if item.item_id != result.item_id {
+            return Err(history_error("The historical item snapshot is invalid."));
+        }
+        let (receipt, snapshot, manifest) =
+            staged_result_payloads(batch, result, item, sequence, committed_count, failed_count)?;
         transaction.write_new(
             &context.resolve_project_path(&format!(
                 "{root}/results/{sequence:08}-{}.json",
                 result.item_id
             ))?,
-            &json_bytes(&receipt)?,
+            &receipt,
         )?;
         transaction.write_if_hash_matches(
             &context.resolve_project_path(&format!("{root}/snapshots/{}.json", result.item_id))?,
-            &json_bytes(&snapshot)?,
+            &snapshot,
             snapshot_expected_hash,
         )?;
         transaction.write_if_hash_matches(
             &context.resolve_project_path(&format!("{root}/manifest.json"))?,
-            &json_bytes(&manifest)?,
+            &manifest,
             manifest_expected_hash,
         )
     }
@@ -206,6 +175,7 @@ impl HistoryStore {
         files: &FileStore,
         batch: &ImportBatchResult,
         result: &ImportItemCommitResult,
+        item: &ImportItem,
         sequence: usize,
     ) -> Result<(), BackendError> {
         let root = working_root(context, &batch.batch_id)?;
@@ -219,7 +189,10 @@ impl HistoryStore {
             &mut transaction,
             batch,
             result,
+            item,
             sequence,
+            batch.committed_count,
+            batch.failed_count,
             &manifest_hash,
             &snapshot_hash,
         )?;
@@ -231,7 +204,10 @@ impl HistoryStore {
         context: &ProjectContext,
         batch: &ImportBatchResult,
         result: &ImportItemCommitResult,
+        item: &ImportItem,
         sequence: usize,
+        committed_count: u32,
+        failed_count: u32,
         manifest_expected_hash: &str,
         snapshot_expected_hash: &str,
     ) -> Result<(), BackendError> {
@@ -241,7 +217,10 @@ impl HistoryStore {
             &mut transaction,
             batch,
             result,
+            item,
             sequence,
+            committed_count,
+            failed_count,
             manifest_expected_hash,
             snapshot_expected_hash,
         )?;
@@ -263,6 +242,19 @@ impl HistoryStore {
         )?;
         transaction.commit()?;
         self.upsert_index_entry(context, files, entry_from_batch(batch))
+    }
+
+    pub(crate) fn load_compatibility_batch(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        batch_id: &str,
+    ) -> Result<ImportBatchResult, BackendError> {
+        validate_id(batch_id)?;
+        files.read_json(
+            context,
+            &format!("{}/{}.json", history_root(context)?, batch_id),
+        )
     }
 
     pub fn list_page(
@@ -890,22 +882,23 @@ impl ImportV2Service {
         context: &ProjectContext,
         files: &FileStore,
         is_cancelled: impl FnMut() -> bool,
-        on_progress: impl FnMut(u64),
+        mut on_progress: impl FnMut(u64),
     ) -> Result<(), BackendError> {
-        let _guard = self.mutation_lock.lock().map_err(|_| {
-            BackendError::new(
-                crate::errors::IMPORT_V2_COMMIT_FAILED,
-                "Import history mutation lock is unavailable.",
-                true,
-                false,
+        let project_locks = self.project_locks(context)?;
+        let mut progress_updates = Vec::new();
+        let result = {
+            let _guard = self.lock_project(&project_locks);
+            HistoryStore::default().rebuild_index_with_progress(
+                context,
+                files,
+                is_cancelled,
+                |current| progress_updates.push(current),
             )
-        })?;
-        HistoryStore::default().rebuild_index_with_progress(
-            context,
-            files,
-            is_cancelled,
-            on_progress,
-        )
+        };
+        for current in progress_updates {
+            on_progress(current);
+        }
+        result
     }
 }
 
@@ -963,6 +956,128 @@ fn entry_from_batch(batch: &ImportBatchResult) -> ImportHistoryEntry {
         available_actions,
         snapshot_available: snapshot.is_some(),
     }
+}
+
+fn entry_from_batch_progress(
+    batch: &ImportBatchResult,
+    result: &ImportItemCommitResult,
+    processed_count: usize,
+    committed_count: u32,
+    failed_count: u32,
+) -> ImportHistoryEntry {
+    let snapshot = batch.history_snapshot.as_ref();
+    let sample_labels = snapshot
+        .into_iter()
+        .flat_map(|session| session.items.iter().take(2))
+        .map(|item| item.input.display_name.clone())
+        .collect::<Vec<_>>();
+    let item_count = snapshot.map_or(processed_count, |session| session.items.len()) as u64;
+    let recorded_cancelled = batch
+        .items
+        .iter()
+        .take(processed_count)
+        .filter(|item| item.error_code.as_deref() == Some(crate::errors::IMPORT_V2_CANCELLED))
+        .count();
+    let cancelled_count = recorded_cancelled
+        + usize::from(
+            batch.items.len() < processed_count
+                && result.error_code.as_deref() == Some(crate::errors::IMPORT_V2_CANCELLED),
+        );
+    let status = if processed_count < item_count as usize {
+        "processing"
+    } else if failed_count == 0 && committed_count == processed_count as u32 {
+        "completed"
+    } else if committed_count > 0 {
+        "partially_committed"
+    } else if cancelled_count == processed_count {
+        "cancelled"
+    } else {
+        "failed"
+    };
+    let mut available_actions = Vec::new();
+    if item_count > 0 && snapshot.is_some() {
+        available_actions.push(ImportHistoryAction::OpenDetail);
+        available_actions.push(ImportHistoryAction::OpenResult);
+    }
+    if batch.batch_task_id.is_some() {
+        available_actions.push(ImportHistoryAction::ViewLogs);
+    }
+    let title = match sample_labels.as_slice() {
+        [name] => format!("Import: {name}"),
+        [first, second] => format!("Import: {first}, {second}"),
+        _ => format!(
+            "Import batch {}",
+            batch.batch_id.chars().take(8).collect::<String>()
+        ),
+    };
+    let updated_at = snapshot.map(|session| session.updated_at.clone());
+    ImportHistoryEntry {
+        id: batch.batch_id.clone(),
+        title,
+        status: status.into(),
+        session_id: Some(batch.session_id.clone()),
+        batch_id: Some(batch.batch_id.clone()),
+        task_id: batch.batch_task_id.clone(),
+        started_at: (!batch.created_at.is_empty()).then(|| batch.created_at.clone()),
+        updated_at: updated_at.clone(),
+        completed_at: (status != "processing").then_some(updated_at).flatten(),
+        legacy_read_only: false,
+        item_count,
+        committed_count: u64::from(committed_count),
+        failed_count: u64::from(failed_count),
+        sample_labels,
+        available_actions,
+        snapshot_available: snapshot.is_some(),
+    }
+}
+
+fn staged_result_payloads(
+    batch: &ImportBatchResult,
+    result: &ImportItemCommitResult,
+    item: &ImportItem,
+    sequence: usize,
+    committed_count: u32,
+    failed_count: u32,
+) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), BackendError> {
+    let manifest = HistoryWorkingManifest {
+        schema_version: HISTORY_SCHEMA_VERSION,
+        revision: (sequence as u64).saturating_add(2),
+        entry: entry_from_batch_progress(
+            batch,
+            result,
+            sequence.saturating_add(1),
+            committed_count,
+            failed_count,
+        ),
+        detail_page_count: detail_page_count(
+            batch
+                .history_snapshot
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.items.len()),
+        ),
+        resource_mode: batch
+            .history_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.resource_mode.clone())
+            .unwrap_or(ImportResourceMode::Balanced),
+    };
+    let receipt = HistoryItemReceipt {
+        schema_version: HISTORY_SCHEMA_VERSION,
+        batch_id: batch.batch_id.clone(),
+        sequence: sequence as u64,
+        result: result.clone(),
+        recorded_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let snapshot = HistoryItemSnapshot {
+        schema_version: HISTORY_SCHEMA_VERSION,
+        batch_id: batch.batch_id.clone(),
+        item: item.clone(),
+    };
+    Ok((
+        json_bytes(&receipt)?,
+        json_bytes(&snapshot)?,
+        json_bytes(&manifest)?,
+    ))
 }
 
 fn history_status(batch: &ImportBatchResult) -> &'static str {
@@ -1308,6 +1423,105 @@ mod tests {
         assert_eq!(page.entries.len(), 1);
         assert_eq!(page.entries[0].id, "batch-working");
         assert_eq!(page.entries[0].status, "processing");
+    }
+
+    #[test]
+    fn terminal_cancelled_receipt_rebuilds_as_cancelled_before_finalization() {
+        let root = tempfile::tempdir().unwrap();
+        let context = ProjectContext::new("cancelled-working", root.path().to_path_buf());
+        let files = FileStore::default();
+        let history = HistoryStore::default();
+        let mut snapshot = ImportSession::new(
+            "session-cancelled",
+            "cancelled-working",
+            ImportResourceMode::Balanced,
+        );
+        snapshot.items = vec![queued_item(0)];
+        let result = ImportItemCommitResult {
+            item_id: "item-0".into(),
+            source_id: None,
+            version_id: None,
+            wiki_path: None,
+            content_hash: None,
+            disposition: None,
+            warnings: Vec::new(),
+            committed: false,
+            error_code: Some(crate::errors::IMPORT_V2_CANCELLED.into()),
+        };
+        let batch = ImportBatchResult {
+            batch_id: "batch-cancelled".into(),
+            session_id: snapshot.session_id.clone(),
+            created_at: "2026-08-28T00:00:00Z".into(),
+            batch_task_id: None,
+            committed_count: 0,
+            failed_count: 1,
+            items: Vec::new(),
+            history_snapshot: Some(snapshot.clone()),
+            completion: None,
+        };
+
+        history.begin_batch(&context, &files, &batch).unwrap();
+        history
+            .persist_result(&context, &files, &batch, &result, &snapshot.items[0], 0)
+            .unwrap();
+        history.rebuild_index(&context, &files, || false).unwrap();
+
+        let page = history.list_page(&context, &files, None, 50).unwrap();
+        assert_eq!(page.entries[0].status, "cancelled");
+        assert!(!root
+            .path()
+            .join(".app/import-history/batch-cancelled.json")
+            .exists());
+    }
+
+    #[test]
+    fn staged_history_receipt_bytes_scale_linearly_with_selected_items() {
+        let mut totals = Vec::new();
+        for item_count in [100_usize, 1_000, 10_000] {
+            let mut snapshot = ImportSession::new(
+                "session-linear",
+                "history-linear",
+                ImportResourceMode::Balanced,
+            );
+            snapshot.items = (0..item_count).map(queued_item).collect();
+            let item = snapshot.items[0].clone();
+            let result = ImportItemCommitResult {
+                item_id: item.item_id.clone(),
+                source_id: None,
+                version_id: None,
+                wiki_path: None,
+                content_hash: None,
+                disposition: None,
+                warnings: Vec::new(),
+                committed: false,
+                error_code: Some(crate::errors::IMPORT_V2_CANCELLED.into()),
+            };
+            let batch = ImportBatchResult {
+                batch_id: "batch-linear".into(),
+                session_id: snapshot.session_id.clone(),
+                created_at: "2026-08-28T00:00:00Z".into(),
+                batch_task_id: None,
+                committed_count: 0,
+                failed_count: 1,
+                items: Vec::new(),
+                history_snapshot: Some(snapshot),
+                completion: None,
+            };
+            let payloads = staged_result_payloads(&batch, &result, &item, 0, 0, 1).unwrap();
+            let bytes_per_item = payloads.0.len() + payloads.1.len() + payloads.2.len();
+            let total = bytes_per_item * item_count;
+            println!(
+                "BATCH8_HISTORY_BYTES D={item_count} bytes_per_item={bytes_per_item} total={total}"
+            );
+            totals.push((item_count, bytes_per_item, total));
+        }
+        let min_payload = totals.iter().map(|(_, bytes, _)| *bytes).min().unwrap();
+        let max_payload = totals.iter().map(|(_, bytes, _)| *bytes).max().unwrap();
+        assert!(max_payload <= min_payload.saturating_mul(2), "{totals:?}");
+        assert!(totals.windows(2).all(|pair| {
+            let expected_ratio = pair[1].0 / pair[0].0;
+            pair[1].2 <= pair[0].2.saturating_mul(expected_ratio + 1)
+        }));
     }
 
     #[test]
