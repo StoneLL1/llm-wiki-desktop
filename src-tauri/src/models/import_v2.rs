@@ -915,6 +915,33 @@ pub struct ImportMediaAuthorization {
     pub language: Option<String>,
 }
 
+/// Immutable execution facts captured when an Import worker claims an item.
+/// Canonical item/session JSON remains authoritative; workers must discard
+/// results when `expected_item_revision` or the durable task claim changes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportItemAuthorizationSnapshot {
+    pub local_ocr_authorized: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asr_profile: Option<ImportAsrProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recognition_language: Option<String>,
+    pub local_asr_authorized: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportWorkItemSnapshot {
+    pub item_id: String,
+    pub expected_item_revision: u64,
+    pub input: ImportInput,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_subtitle: Option<String>,
+    pub media_authorization: ImportItemAuthorizationSnapshot,
+    pub authenticated_retry: bool,
+    pub resource_mode: ImportResourceMode,
+}
+
 impl ImportSession {
     pub fn new(session_id: &str, project_id: &str, resource_mode: ImportResourceMode) -> Self {
         let now = chrono::Utc::now().to_rfc3339();

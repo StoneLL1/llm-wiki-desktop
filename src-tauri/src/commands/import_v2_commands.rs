@@ -12,8 +12,9 @@ use crate::errors::{
 use crate::models::import_v2::{
     CommitImportSessionRequest, ImportBatchResult, ImportCompletion, ImportInput, ImportItem,
     ImportItemPage, ImportItemPageFilter, ImportItemResolution, ImportItemStatus,
-    ImportRecoveryAction, ImportResourceMode, ImportSession, ImportSessionOverview,
-    ImportSessionPatchCounts, ImportSessionPatchEvent, ImportThreeWayMergeContext,
+    ImportRecoveryAction, ImportResolutionKind, ImportResourceMode, ImportSession,
+    ImportSessionOverview, ImportSessionPatchCounts, ImportSessionPatchEvent,
+    ImportThreeWayMergeContext, ImportWorkItemSnapshot,
 };
 use crate::models::paths::ProjectContext;
 use crate::models::task::{BackendTask, TaskResult, TaskResultReference, TaskStatus, TaskType};
@@ -24,7 +25,7 @@ use crate::services::import_v2::execution_control::{
 };
 use crate::services::import_v2::session_store::item_is_snapshot_committable;
 use crate::services::import_v2::{
-    import_batch_operation_session_id, is_import_batch_operation_task,
+    import_batch_operation_session_id, is_import_batch_operation_task, NewSourceTargetReservations,
 };
 use crate::services::BlockingWorkClass;
 use crate::tasks::task_model::LogLevel;
@@ -36,6 +37,7 @@ static IMPORT_WORK_QUEUE: OnceLock<Mutex<VecDeque<ImportWorkerJob>>> = OnceLock:
 static ACTIVE_IMPORT_WORKERS: AtomicUsize = AtomicUsize::new(0);
 static IMPORT_WORKER_LIMIT: AtomicUsize = AtomicUsize::new(DEFAULT_IMPORT_WORKER_LIMIT);
 
+#[derive(Clone)]
 struct ImportWorkerJob {
     app: AppHandle,
     project_id: String,
@@ -43,6 +45,8 @@ struct ImportWorkerJob {
     session_id: String,
     item_id: String,
     task_id: String,
+    snapshot: ImportWorkItemSnapshot,
+    target_reservations: Arc<Mutex<NewSourceTargetReservations>>,
     recovery_action: Option<ImportRecoveryAction>,
     batch_operation: Option<BatchOperationJob>,
 }
@@ -51,6 +55,8 @@ struct ImportWorkerJob {
 struct BatchOperationJob {
     state: Arc<Mutex<BatchOperationState>>,
     pending_items: Arc<Mutex<HashMap<String, ImportItem>>>,
+    duplicate_item_ids: Arc<Mutex<Vec<String>>>,
+    remaining_workers: Arc<AtomicUsize>,
 }
 
 macro_rules! request {
@@ -827,7 +833,7 @@ pub(crate) fn start_import_items_for_state(
         .iter()
         .map(|(item_id, task)| (item_id.clone(), task.id.clone()))
         .collect::<Vec<_>>();
-    let bind_result = if let Some(expected_items) = expected_items {
+    let snapshot_result = if let Some(expected_items) = expected_items {
         state
             .import_v2_service
             .bind_item_task_ids_if_unchanged_authorized(
@@ -846,14 +852,17 @@ pub(crate) fn start_import_items_for_state(
             &bindings,
         )
     };
-    if let Err(error) = bind_result {
-        for (_, task) in &prepared {
-            let _ = state
-                .task_service
-                .discard_unstarted_tasks(std::slice::from_ref(&task.id));
+    let snapshots = match snapshot_result {
+        Ok(snapshots) => snapshots,
+        Err(error) => {
+            for (_, task) in &prepared {
+                let _ = state
+                    .task_service
+                    .discard_unstarted_tasks(std::slice::from_ref(&task.id));
+            }
+            return Err(error);
         }
-        return Err(error);
-    }
+    };
     for replaced_task_id in replaced_waiting_task_ids {
         if state
             .task_service
@@ -870,7 +879,17 @@ pub(crate) fn start_import_items_for_state(
         .unwrap_or(DEFAULT_IMPORT_WORKER_LIMIT);
     let mut tasks = Vec::with_capacity(prepared.len());
     let mut jobs = Vec::with_capacity(prepared.len());
+    let mut snapshots = snapshots
+        .into_iter()
+        .map(|snapshot| (snapshot.item_id.clone(), snapshot))
+        .collect::<HashMap<_, _>>();
+    let target_reservations = state
+        .import_v2_service
+        .target_reservations_for_session(&session)?;
     for (item_id, task) in prepared {
+        let snapshot = snapshots
+            .remove(&item_id)
+            .ok_or_else(|| task_error("Import worker snapshot was not prepared."))?;
         jobs.push(ImportWorkerJob {
             app: app.clone(),
             project_id: request.project_id.clone(),
@@ -878,6 +897,8 @@ pub(crate) fn start_import_items_for_state(
             session_id: request.session_id.clone(),
             item_id,
             task_id: task.id.clone(),
+            snapshot,
+            target_reservations: Arc::clone(&target_reservations),
             recovery_action: recovery_action.clone(),
             batch_operation: None,
         });
@@ -975,8 +996,8 @@ pub(crate) fn start_import_batch_for_state(
                                 )
                             },
                         );
-                        let replaced_task_ids = match preparation {
-                            Ok(task_ids) => task_ids,
+                        let preparation = match preparation {
+                            Ok(preparation) => preparation,
                             Err(error) if error.code == crate::errors::IMPORT_V2_CANCELLED => {
                                 let _ =
                                     state.task_service.finalize_cancellation(&operation_task_id);
@@ -987,7 +1008,7 @@ pub(crate) fn start_import_batch_for_state(
                                 return;
                             }
                         };
-                        for replaced_task_id in replaced_task_ids {
+                        for replaced_task_id in preparation.replaced_task_ids {
                             if state
                                 .task_service
                                 .get_task(&replaced_task_id)
@@ -1029,11 +1050,23 @@ pub(crate) fn start_import_batch_for_state(
                                 request.item_ids.len() as u64,
                             ))),
                             pending_items: Arc::new(Mutex::new(HashMap::new())),
+                            duplicate_item_ids: Arc::new(Mutex::new(Vec::new())),
+                            remaining_workers: Arc::new(AtomicUsize::new(request.item_ids.len())),
                         };
+                        let target_reservations = preparation.target_reservations;
+                        let mut snapshots = preparation
+                            .snapshots
+                            .into_iter()
+                            .map(|snapshot| (snapshot.item_id.clone(), snapshot))
+                            .collect::<HashMap<_, _>>();
                         let jobs = request
                             .item_ids
                             .into_iter()
                             .map(|item_id| ImportWorkerJob {
+                                snapshot: snapshots
+                                    .remove(&item_id)
+                                    .expect("validated batch item has a worker snapshot"),
+                                target_reservations: Arc::clone(&target_reservations),
                                 app: background_app.clone(),
                                 project_id: request.project_id.clone(),
                                 project_root_path: request.project_root_path.clone(),
@@ -1185,6 +1218,7 @@ fn schedule_import_workers() {
                                 );
                             }
                         }
+                        finish_batch_duplicate_cohort_if_drained(&job);
                     }
                     Ok(())
                 })
@@ -1221,10 +1255,10 @@ fn run_import_worker_job(job: &ImportWorkerJob) {
                         .cancel_task(&job.task_id)
                         .map_err(|error| task_error(&error))?;
                 }
-                return Ok(());
+                return Ok(false);
             }
             let execution = state.begin_project_external_task(&context, &job.task_id)?;
-            if job.batch_operation.is_some() {
+            let processed_item = if job.batch_operation.is_some() {
                 state
                     .import_v2_service
                     .run_item_with_recovery_in_batch_authorized(
@@ -1232,20 +1266,40 @@ fn run_import_worker_job(job: &ImportWorkerJob) {
                         &state.file_store,
                         &state.task_service,
                         &job.session_id,
-                        &job.item_id,
                         &job.task_id,
+                        job.snapshot.clone(),
+                        &job.target_reservations,
                         job.recovery_action.as_ref(),
-                    )?;
+                    )?
             } else {
                 state.import_v2_service.run_item_with_recovery_authorized(
                     &execution,
                     &state.file_store,
                     &state.task_service,
                     &job.session_id,
-                    &job.item_id,
                     &job.task_id,
+                    job.snapshot.clone(),
+                    &job.target_reservations,
                     job.recovery_action.as_ref(),
-                )?;
+                )?
+            };
+            let deferred_exact_duplicate = job.batch_operation.is_some()
+                && processed_item
+                    .preview
+                    .as_ref()
+                    .and_then(|preview| preview.resolution.as_ref())
+                    .is_some_and(|resolution| {
+                        resolution.kind == ImportResolutionKind::ExactDuplicate
+                    });
+            if deferred_exact_duplicate {
+                if let Some(operation) = &job.batch_operation {
+                    operation
+                        .duplicate_item_ids
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(job.item_id.clone());
+                }
+                return Ok(true);
             }
             state.require_current_execution_epoch(&context, &execution)?;
             let restricted_content_acknowledged = state
@@ -1255,50 +1309,54 @@ fn run_import_worker_job(job: &ImportWorkerJob) {
                 .task_service
                 .get_cancellation_token(&job.task_id)
                 .unwrap_or_default();
-            let duplicate_batch = state.with_current_project_write_access(
-                &job.project_id,
-                &job.project_root_path,
-                |_permit, write_context| {
-                    let canonical_project_identity =
-                        crate::services::project_identity(&write_context.root)
-                            .map_err(|error| {
-                                BackendError::new("PROJECT_IDENTITY_FAILED", error, true, false)
-                            })?
-                            .canonical_identity_key;
-                    state.blocking_work.run_project_git_blocking(
-                        canonical_project_identity,
-                        Some(&git_cancellation),
-                        || {
-                            state
-                                .import_v2_service
-                                .finalize_exact_duplicate_cancellable_authorized(
-                                    &execution,
-                                    &state.file_store,
-                                    &state.git_service,
-                                    &job.session_id,
-                                    &job.item_id,
-                                    &job.task_id,
-                                    restricted_content_acknowledged,
-                                    || state.task_service.is_cancelled(&job.task_id),
-                                    || {
-                                        if job.batch_operation.is_some() {
-                                            Ok(())
-                                        } else {
-                                            state
-                                                .task_service
-                                                .transition_status(
-                                                    &job.task_id,
-                                                    TaskStatus::Running,
-                                                )
-                                                .map(|_| ())
-                                                .map_err(|error| task_error(&error))
-                                        }
-                                    },
-                                )
-                        },
-                    )
-                },
-            )?;
+            let duplicate_batch = if job.batch_operation.is_some() {
+                None
+            } else {
+                state.with_current_project_write_access(
+                    &job.project_id,
+                    &job.project_root_path,
+                    |_permit, write_context| {
+                        let canonical_project_identity =
+                            crate::services::project_identity(&write_context.root)
+                                .map_err(|error| {
+                                    BackendError::new("PROJECT_IDENTITY_FAILED", error, true, false)
+                                })?
+                                .canonical_identity_key;
+                        state.blocking_work.run_project_git_blocking(
+                            canonical_project_identity,
+                            Some(&git_cancellation),
+                            || {
+                                state
+                                    .import_v2_service
+                                    .finalize_exact_duplicate_cancellable_authorized(
+                                        &execution,
+                                        &state.file_store,
+                                        &state.git_service,
+                                        &job.session_id,
+                                        &job.item_id,
+                                        &job.task_id,
+                                        restricted_content_acknowledged,
+                                        || state.task_service.is_cancelled(&job.task_id),
+                                        || {
+                                            if job.batch_operation.is_some() {
+                                                Ok(())
+                                            } else {
+                                                state
+                                                    .task_service
+                                                    .transition_status(
+                                                        &job.task_id,
+                                                        TaskStatus::Running,
+                                                    )
+                                                    .map(|_| ())
+                                                    .map_err(|error| task_error(&error))
+                                            }
+                                        },
+                                    )
+                            },
+                        )
+                    },
+                )?
+            };
             if let Some(batch) = duplicate_batch {
                 if job.batch_operation.is_none() {
                     state
@@ -1323,11 +1381,12 @@ fn run_import_worker_job(job: &ImportWorkerJob) {
                         .map_err(|error| task_error(&error))?;
                 }
             }
-            Ok(())
+            Ok(false)
         });
     if let Some(_) = job.batch_operation {
         let outcome = match result {
-            Ok(()) => classify_batch_item_outcome(&state, job),
+            Ok(true) => return,
+            Ok(false) => classify_batch_item_outcome(&state, job),
             Err(error) if error.code == crate::errors::IMPORT_V2_CANCELLED => {
                 let _ = state.with_current_project_write_access(
                     &job.project_id,
@@ -1348,6 +1407,119 @@ fn run_import_worker_job(job: &ImportWorkerJob) {
         finish_batch_worker(&state, job, outcome);
     } else if let Err(error) = result {
         fail_task_unless_cancelled(&state, &job.task_id, error);
+    }
+}
+
+fn finish_batch_duplicate_cohort_if_drained(job: &ImportWorkerJob) {
+    let Some(operation) = &job.batch_operation else {
+        return;
+    };
+    if operation.remaining_workers.fetch_sub(1, Ordering::AcqRel) != 1 {
+        return;
+    }
+    let duplicate_item_ids = std::mem::take(
+        &mut *operation
+            .duplicate_item_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    if duplicate_item_ids.is_empty() {
+        return;
+    }
+    let state = job.app.state::<AppState>();
+    let result =
+        (|| -> Result<Option<crate::models::import_v2::ImportBatchResult>, BackendError> {
+            let context = state.resolve_project_context(&job.project_id, &job.project_root_path)?;
+            let execution = state.begin_project_external_task(&context, &job.task_id)?;
+            state.require_current_execution_epoch(&context, &execution)?;
+            let restricted_content_acknowledged = state
+                .file_store
+                .exists(&context, RESTRICTED_CONTENT_ACK_PATH);
+            let cancellation = state
+                .task_service
+                .get_cancellation_token(&job.task_id)
+                .unwrap_or_default();
+            state.with_current_project_write_access(
+                &job.project_id,
+                &job.project_root_path,
+                |_permit, write_context| {
+                    let canonical_project_identity =
+                        crate::services::project_identity(&write_context.root)
+                            .map_err(|error| {
+                                BackendError::new("PROJECT_IDENTITY_FAILED", error, true, false)
+                            })?
+                            .canonical_identity_key;
+                    state.blocking_work.run_project_git_blocking(
+                        canonical_project_identity,
+                        Some(&cancellation),
+                        || {
+                            state
+                                .import_v2_service
+                                .finalize_exact_duplicate_cohort_cancellable_authorized(
+                                    &execution,
+                                    &state.file_store,
+                                    &state.git_service,
+                                    &job.session_id,
+                                    &duplicate_item_ids,
+                                    &job.task_id,
+                                    restricted_content_acknowledged,
+                                    || state.task_service.is_cancelled(&job.task_id),
+                                )
+                        },
+                    )
+                },
+            )
+        })();
+
+    for item_id in duplicate_item_ids {
+        let mut duplicate_job = job.clone();
+        duplicate_job.item_id = item_id;
+        let outcome = match &result {
+            Ok(batch) => match batch.as_ref().and_then(|batch| {
+                batch
+                    .items
+                    .iter()
+                    .find(|item| item.item_id == duplicate_job.item_id)
+            }) {
+                Some(item) if item.committed => classify_batch_item_outcome(&state, &duplicate_job),
+                Some(item)
+                    if item.error_code.as_deref() == Some(crate::errors::IMPORT_V2_CANCELLED) =>
+                {
+                    let _ = state.with_current_project_write_access(
+                        &job.project_id,
+                        &job.project_root_path,
+                        |permit, _context| {
+                            state.import_v2_service.cancel_batch_item_authorized(
+                                permit,
+                                &state.file_store,
+                                &job.session_id,
+                                &duplicate_job.item_id,
+                            )
+                        },
+                    );
+                    classify_batch_item_outcome(&state, &duplicate_job)
+                }
+                Some(_) => ImportItemRunOutcome::Failed,
+                None => classify_batch_item_outcome(&state, &duplicate_job),
+            },
+            Err(error) if error.code == crate::errors::IMPORT_V2_CANCELLED => {
+                let _ = state.with_current_project_write_access(
+                    &job.project_id,
+                    &job.project_root_path,
+                    |permit, _context| {
+                        state.import_v2_service.cancel_batch_item_authorized(
+                            permit,
+                            &state.file_store,
+                            &job.session_id,
+                            &duplicate_job.item_id,
+                        )
+                    },
+                );
+                ImportItemRunOutcome::Cancelled
+            }
+            Err(_) => classify_batch_item_outcome(&state, &duplicate_job),
+        };
+        finish_batch_worker(&state, &duplicate_job, outcome);
     }
 }
 
