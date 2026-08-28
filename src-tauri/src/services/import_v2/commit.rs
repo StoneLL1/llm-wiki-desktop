@@ -311,12 +311,9 @@ impl ImportV2Service {
                 "This resolution is not valid for an edited current Source.",
             ));
         }
-        let _guard = self.mutation_lock.lock().map_err(|_| {
-            commit_error(
-                IMPORT_V2_COMMIT_FAILED,
-                "Import commit lock is unavailable.",
-            )
-        })?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         FileTransaction::reconcile_project(&context.root)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         let item_position = session
@@ -382,12 +379,9 @@ impl ImportV2Service {
                 "Manual merge Markdown is empty or exceeds the supported size.",
             ));
         }
-        let _guard = self.mutation_lock.lock().map_err(|_| {
-            commit_error(
-                IMPORT_V2_COMMIT_FAILED,
-                "Import commit lock is unavailable.",
-            )
-        })?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         FileTransaction::reconcile_project(&context.root)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         let item_position = session
@@ -845,20 +839,25 @@ impl ImportV2Service {
             decisions,
         };
         run_before_exact_duplicate_commit_hook();
-        let durable_progress = std::cell::RefCell::new(None);
+        let durable_batch_id = std::cell::RefCell::new(None);
         let batch = match self.commit_items_cancellable_with_progress(
             context,
             file_store,
             git_service,
             &request,
             &cancelled,
-            |batch| *durable_progress.borrow_mut() = Some(batch.clone()),
+            |batch| *durable_batch_id.borrow_mut() = Some(batch.batch_id.clone()),
             Some(&preconditions),
             || Ok(()),
         ) {
             Ok(batch) => batch,
             Err(error) if error.code == crate::errors::IMPORT_V2_CANCELLED => {
-                return Ok(durable_progress.into_inner());
+                let Some(batch_id) = durable_batch_id.into_inner() else {
+                    return Ok(None);
+                };
+                return crate::services::import_v2::HistoryStore::default()
+                    .load_compatibility_batch(context, file_store, &batch_id)
+                    .map(Some);
             }
             Err(error) => {
                 self.record_exact_duplicate_commit_failures(
@@ -907,12 +906,9 @@ impl ImportV2Service {
         if failures.is_empty() {
             return Ok(());
         }
-        let _guard = self.mutation_lock.lock().map_err(|_| {
-            commit_error(
-                IMPORT_V2_COMMIT_FAILED,
-                "Import commit lock is unavailable.",
-            )
-        })?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         FileTransaction::reconcile_project(&context.root)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         let mut changed = false;
@@ -1042,12 +1038,46 @@ impl ImportV2Service {
         git_service: &GitService,
         request: &CommitImportSessionRequest,
         is_cancelled: impl Fn() -> bool,
-        mut on_durable_progress: impl FnMut(&ImportBatchResult),
+        on_durable_progress: impl FnMut(&ImportBatchResult),
         exact_duplicate_preconditions: Option<
             &std::collections::HashMap<String, ExactDuplicateFinalizationFingerprint>,
         >,
         before_locked_commit: impl FnOnce() -> Result<(), BackendError>,
     ) -> Result<ImportBatchResult, BackendError> {
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(&request.session_id)?;
+        self.commit_items_cancellable_with_progress_locked(
+            context,
+            file_store,
+            git_service,
+            request,
+            is_cancelled,
+            on_durable_progress,
+            exact_duplicate_preconditions,
+            before_locked_commit,
+            &project_locks,
+            &session_lock,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn commit_items_cancellable_with_progress_locked(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+        git_service: &GitService,
+        request: &CommitImportSessionRequest,
+        is_cancelled: impl Fn() -> bool,
+        mut on_durable_progress: impl FnMut(&ImportBatchResult),
+        exact_duplicate_preconditions: Option<
+            &std::collections::HashMap<String, ExactDuplicateFinalizationFingerprint>,
+        >,
+        before_locked_commit: impl FnOnce() -> Result<(), BackendError>,
+        project_locks: &crate::services::import_v2::lock_registry::ProjectImportLocks,
+        session_lock: &std::sync::Arc<std::sync::Mutex<()>>,
+    ) -> Result<ImportBatchResult, BackendError> {
+        let mut project_guard = self.lock_project(project_locks);
+        let mut session_guard = self.lock_session(session_lock);
         let asserted_root = Path::new(&request.project_root_path)
             .canonicalize()
             .map_err(|_| {
@@ -1068,12 +1098,6 @@ impl ImportV2Service {
                 "Import commit project context does not match.",
             ));
         }
-        let _guard = self.mutation_lock.lock().map_err(|_| {
-            commit_error(
-                IMPORT_V2_COMMIT_FAILED,
-                "Import commit lock is unavailable.",
-            )
-        })?;
         FileTransaction::reconcile_project(&context.root)?;
         SourceRegistry::migrate_project_v3(context, file_store)?;
         let mut session = self
@@ -1111,27 +1135,51 @@ impl ImportV2Service {
                 ))
             }
         };
-        // These hashes protect the same item bytes that supplied the working
-        // snapshot below.  Do not recalculate a "current" hash inside
-        // `commit_one`: that would bless a newer external edit while writing
-        // an older in-memory item.
-        let session_snapshot_hashes = self
-            .sessions
-            .serialized_writes(context, &session)?
-            .into_iter()
-            .map(|(path, bytes)| (path, format!("{:x}", Sha256::digest(&bytes))))
-            .collect::<std::collections::HashMap<_, _>>();
+        let session_item_positions = index_session_items(&session)?;
+        // Hash only the selected item snapshots. These hashes protect the
+        // exact bytes used by commit planning; recalculating from disk inside
+        // `commit_one` would bless a newer external edit while writing an
+        // older in-memory item.
+        let import_state_root = context.layout.import_state_root.as_deref().ok_or_else(|| {
+            commit_error(
+                IMPORT_V2_STATE_INVALID,
+                "Import state is unavailable for this project layout.",
+            )
+        })?;
+        let item_snapshot_hashes = decisions
+            .iter()
+            .map(|decision| {
+                let position = session_item_positions
+                    .get(&decision.item_id)
+                    .copied()
+                    .ok_or_else(|| {
+                        commit_error(
+                            IMPORT_V2_STATE_INVALID,
+                            "Import item was not found for commit.",
+                        )
+                    })?;
+                Ok((
+                    decision.item_id.clone(),
+                    focused_item_hash(&session.items[position])?,
+                ))
+            })
+            .collect::<Result<std::collections::HashMap<_, _>, BackendError>>()?;
+        let session_summary_path =
+            format!("{import_state_root}/{}/session.json", request.session_id);
+        let expected_summary_hash = file_store.file_hash(context, &session_summary_path)?;
         let history_decisions = decisions.clone();
         let mut stale_precondition_results = Vec::new();
         if let Some(preconditions) = exact_duplicate_preconditions {
             if preconditions.len() == 1 {
                 let (item_id, fingerprint) = preconditions.iter().next().unwrap();
-                let valid = session.items.iter().any(|item| {
-                    item.item_id == *item_id
-                        && item.status == ImportItemStatus::PreviewReady
-                        && item.task_id == fingerprint.task_id
-                        && item.preview.as_ref() == Some(&fingerprint.preview)
-                });
+                let valid = session_item_positions
+                    .get(item_id)
+                    .map(|position| &session.items[*position])
+                    .is_some_and(|item| {
+                        item.status == ImportItemStatus::PreviewReady
+                            && item.task_id == fingerprint.task_id
+                            && item.preview.as_ref() == Some(&fingerprint.preview)
+                    });
                 if !valid {
                     return Err(stale_resolution_error());
                 }
@@ -1140,12 +1188,14 @@ impl ImportV2Service {
                     let valid = preconditions
                         .get(&decision.item_id)
                         .is_some_and(|fingerprint| {
-                            session.items.iter().any(|item| {
-                                item.item_id == decision.item_id
-                                    && item.status == ImportItemStatus::PreviewReady
-                                    && item.task_id == fingerprint.task_id
-                                    && item.preview.as_ref() == Some(&fingerprint.preview)
-                            })
+                            session_item_positions
+                                .get(&decision.item_id)
+                                .map(|position| &session.items[*position])
+                                .is_some_and(|item| {
+                                    item.status == ImportItemStatus::PreviewReady
+                                        && item.task_id == fingerprint.task_id
+                                        && item.preview.as_ref() == Some(&fingerprint.preview)
+                                })
                         });
                     if !valid {
                         stale_precondition_results.push(ImportItemCommitResult {
@@ -1166,48 +1216,86 @@ impl ImportV2Service {
         }
         before_locked_commit()?;
         if !decisions.is_empty() {
-            validate_complete_decision_set(&session, &decisions)?;
+            validate_complete_decision_set(&session, &decisions, &session_item_positions)?;
         } else if stale_precondition_results.is_empty() {
-            validate_complete_decision_set(&session, &decisions)?;
+            validate_complete_decision_set(&session, &decisions, &session_item_positions)?;
         }
-        let mut history_snapshot = session.clone();
-        history_snapshot.items = history_decisions
+        let history_item_ids = history_decisions
+            .iter()
+            .map(|decision| decision.item_id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let history_items = history_decisions
             .iter()
             .filter_map(|decision| {
-                session
-                    .items
-                    .iter()
-                    .find(|item| item.item_id == decision.item_id)
-                    .cloned()
+                session_item_positions
+                    .get(&decision.item_id)
+                    .map(|position| session.items[*position].clone())
             })
-            .collect();
-        history_snapshot.status = derive_session_status(&history_snapshot.items);
-        history_snapshot.updated_at = chrono::Utc::now().to_rfc3339();
+            .collect::<Vec<_>>();
+        let history_snapshot = ImportSession {
+            schema_version: session.schema_version,
+            session_id: session.session_id.clone(),
+            project_id: session.project_id.clone(),
+            status: derive_session_status(&history_items),
+            resource_mode: session.resource_mode.clone(),
+            created_at: session.created_at.clone(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            discovery_task_id: session.discovery_task_id.clone(),
+            media_authorizations: session
+                .media_authorizations
+                .iter()
+                .filter(|authorization| history_item_ids.contains(authorization.item_id.as_str()))
+                .cloned()
+                .collect(),
+            collection_relations: session
+                .collection_relations
+                .iter()
+                .filter_map(|relation| {
+                    let mut relation = relation.clone();
+                    relation
+                        .child_item_ids
+                        .retain(|item_id| history_item_ids.contains(item_id.as_str()));
+                    relation
+                        .children
+                        .retain(|child| history_item_ids.contains(child.item_id.as_str()));
+                    (!relation.child_item_ids.is_empty() || !relation.children.is_empty())
+                        .then_some(relation)
+                })
+                .collect(),
+            items: history_items,
+        };
         let batch_id = uuid::Uuid::new_v4().to_string();
         let mut batch = ImportBatchResult {
-            completion: Some(ImportCompletion::empty(
-                request.session_id.clone(),
-                batch_id.clone(),
-            )),
+            completion: Some(ImportCompletion::empty(&request.session_id, &batch_id)),
             batch_id,
             session_id: request.session_id.clone(),
             created_at: chrono::Utc::now().to_rfc3339(),
             batch_task_id: request.batch_task_id.clone(),
             committed_count: 0,
-            failed_count: stale_precondition_results.len() as u32,
-            items: stale_precondition_results,
+            failed_count: 0,
+            items: Vec::with_capacity(history_decisions.len()),
             history_snapshot: Some(history_snapshot),
         };
-        for result in batch.items.clone() {
-            update_history_snapshot(&mut batch, &result);
-        }
-        refresh_completion(&mut batch);
+        let history_item_positions = index_session_items(
+            batch
+                .history_snapshot
+                .as_ref()
+                .expect("commit history snapshot is initialized"),
+        )?;
         let history_store = crate::services::import_v2::HistoryStore::default();
         history_store.begin_batch(context, file_store, &batch)?;
-        let initial_result_count = batch.items.len();
-        for (sequence, result) in batch.items.clone().iter().enumerate() {
-            history_store.persist_result(context, file_store, &batch, result, sequence)?;
+        for (sequence, result) in stale_precondition_results.into_iter().enumerate() {
+            record_batch_result(&mut batch, &history_item_positions, result.clone())?;
+            let item = history_item(&batch, &history_item_positions, &result.item_id)?;
+            history_store.persist_result(context, file_store, &batch, &result, item, sequence)?;
+            let update = durable_progress_delta(&batch);
+            drop(session_guard);
+            drop(project_guard);
+            on_durable_progress(&update);
+            project_guard = self.lock_project(project_locks);
+            session_guard = self.lock_session(session_lock);
         }
+        let initial_result_count = batch.items.len();
         for (position, decision) in decisions.iter().enumerate() {
             if is_cancelled() {
                 for (offset, unprocessed) in decisions[position..].iter().enumerate() {
@@ -1222,21 +1310,24 @@ impl ImportV2Service {
                         committed: false,
                         error_code: Some(crate::errors::IMPORT_V2_CANCELLED.into()),
                     };
-                    batch.items.push(result.clone());
-                    update_history_snapshot(&mut batch, &result);
-                    refresh_completion(&mut batch);
-                    batch.failed_count = batch.items.len() as u32 - batch.committed_count;
+                    record_batch_result(&mut batch, &history_item_positions, result.clone())?;
                     history_store.persist_result(
                         context,
                         file_store,
                         &batch,
                         &result,
+                        history_item(&batch, &history_item_positions, &result.item_id)?,
                         initial_result_count + position + offset,
                     )?;
+                    let update = durable_progress_delta(&batch);
+                    drop(session_guard);
+                    drop(project_guard);
+                    on_durable_progress(&update);
+                    project_guard = self.lock_project(project_locks);
+                    session_guard = self.lock_session(session_lock);
                 }
-                batch.failed_count = batch.items.len() as u32 - batch.committed_count;
+                finalize_history_snapshot(&mut batch);
                 history_store.finalize_batch(context, file_store, &batch)?;
-                on_durable_progress(&batch);
                 return Err(commit_error(
                     crate::errors::IMPORT_V2_CANCELLED,
                     "Import commit was cancelled.",
@@ -1257,26 +1348,25 @@ impl ImportV2Service {
                 file_store,
                 git_service,
                 &mut session,
-                decision,
-                &batch,
-                session_snapshot_hashes
-                    .get(&format!(
-                        "{}/{}/items/{}.json",
-                        context.layout.import_state_root.as_deref().ok_or_else(|| {
-                            commit_error(
-                                IMPORT_V2_STATE_INVALID,
-                                "Import state is unavailable for this project layout.",
-                            )
-                        })?,
-                        request.session_id,
-                        decision.item_id
-                    ))
+                *session_item_positions
+                    .get(&decision.item_id)
                     .ok_or_else(|| {
                         commit_error(
-                            IMPORT_V2_COMMIT_CONFLICT,
-                            "Import item changed before commit.",
+                            IMPORT_V2_STATE_INVALID,
+                            "Import item was not found for commit.",
                         )
                     })?,
+                decision,
+                &batch,
+                initial_result_count + position,
+                &history_manifest_hash,
+                &history_snapshot_hash,
+                item_snapshot_hashes.get(&decision.item_id).ok_or_else(|| {
+                    commit_error(
+                        IMPORT_V2_COMMIT_CONFLICT,
+                        "Import item changed before commit.",
+                    )
+                })?,
             ) {
                 Ok(result) => result,
                 Err(error) => ImportItemCommitResult {
@@ -1291,25 +1381,29 @@ impl ImportV2Service {
                     error_code: Some(error.code),
                 },
             };
-            batch.items.push(provisional.clone());
-            update_history_snapshot(&mut batch, &provisional);
-            refresh_completion(&mut batch);
-            batch.committed_count = batch.items.iter().filter(|item| item.committed).count() as u32;
-            batch.failed_count = batch.items.len() as u32 - batch.committed_count;
-            if !batch.items.last().is_some_and(|item| item.committed) {
+            record_batch_result(&mut batch, &history_item_positions, provisional.clone())?;
+            if !provisional.committed {
                 run_before_failed_history_write_hook(
                     &context.resolve_project_path(&history_manifest_path)?,
                 );
+                history_store.persist_result_if_unchanged(
+                    context,
+                    &batch,
+                    &provisional,
+                    history_item(&batch, &history_item_positions, &provisional.item_id)?,
+                    initial_result_count + position,
+                    batch.committed_count,
+                    batch.failed_count,
+                    &history_manifest_hash,
+                    &history_snapshot_hash,
+                )?;
             }
-            history_store.persist_result_if_unchanged(
-                context,
-                &batch,
-                &provisional,
-                initial_result_count + position,
-                &history_manifest_hash,
-                &history_snapshot_hash,
-            )?;
-            on_durable_progress(&batch);
+            let update = durable_progress_delta(&batch);
+            drop(session_guard);
+            drop(project_guard);
+            on_durable_progress(&update);
+            project_guard = self.lock_project(project_locks);
+            session_guard = self.lock_session(session_lock);
         }
         // Membership and summary are a separate linearization boundary.  The
         // per-item transactions above intentionally never rewrite unrelated
@@ -1317,35 +1411,15 @@ impl ImportV2Service {
         // rather than clobber it; completed item facts/history remain durable.
         session.status = derive_session_status(&session.items);
         session.updated_at = chrono::Utc::now().to_rfc3339();
-        let summary_write = self
-            .sessions
-            .serialized_writes(context, &session)?
-            .into_iter()
-            .find(|(path, _)| path.ends_with("/session.json"))
-            .ok_or_else(|| {
-                commit_error(
-                    IMPORT_V2_COMMIT_FAILED,
-                    "Import session summary is missing.",
-                )
-            })?;
-        let expected_summary_hash =
-            session_snapshot_hashes
-                .get(&summary_write.0)
-                .ok_or_else(|| {
-                    commit_error(
-                        IMPORT_V2_COMMIT_CONFLICT,
-                        "Import session changed during commit.",
-                    )
-                })?;
+        finalize_history_snapshot(&mut batch);
+        let summary_write = self.sessions.serialized_summary(context, &session)?;
         let mut summary_transaction = FileTransaction::new_for_project(&context.root);
         summary_transaction.write_if_hash_matches(
             &context.resolve_project_path(&summary_write.0)?,
             &summary_write.1,
-            expected_summary_hash,
+            &expected_summary_hash,
         )?;
         summary_transaction.commit()?;
-        self.sessions
-            .rebuild_sidecars(context, file_store, &session)?;
         history_store.finalize_batch(context, file_store, &batch)?;
         Ok(batch)
     }
@@ -1382,21 +1456,21 @@ impl ImportV2Service {
         files: &FileStore,
         git: &GitService,
         session: &mut ImportSession,
+        item_position: usize,
         decision: &CommitItemDecision,
         prior_batch: &ImportBatchResult,
+        history_sequence: usize,
+        history_manifest_expected_hash: &str,
+        history_snapshot_expected_hash: &str,
         item_expected_hash: &str,
     ) -> Result<ImportItemCommitResult, BackendError> {
-        let item_position = session
-            .items
-            .iter()
-            .position(|item| item.item_id == decision.item_id)
-            .ok_or_else(|| {
-                commit_error(
-                    IMPORT_V2_STATE_INVALID,
-                    "Import item was not found for commit.",
-                )
-            })?;
         let item = session.items[item_position].clone();
+        if item.item_id != decision.item_id {
+            return Err(commit_error(
+                IMPORT_V2_STATE_INVALID,
+                "Import decision index does not match the session item.",
+            ));
+        }
         if !item.selected
             || !matches!(
                 item.status,
@@ -2251,6 +2325,27 @@ impl ImportV2Service {
                 ),
             ));
             targets.push((
+                "history receipt".into(),
+                format!(
+                    ".app/import-history/working/{}/results/{history_sequence:08}-{}.json",
+                    prior_batch.batch_id, item.item_id
+                ),
+            ));
+            targets.push((
+                "history snapshot".into(),
+                format!(
+                    ".app/import-history/working/{}/snapshots/{}.json",
+                    prior_batch.batch_id, item.item_id
+                ),
+            ));
+            targets.push((
+                "history manifest".into(),
+                format!(
+                    ".app/import-history/working/{}/manifest.json",
+                    prior_batch.batch_id
+                ),
+            ));
+            targets.push((
                 "session summary".into(),
                 format!(
                     "{}/{}/session.json",
@@ -2377,12 +2472,28 @@ impl ImportV2Service {
                 &item,
                 &session.items[item_position],
             )?;
+            crate::services::import_v2::HistoryStore::default().stage_result(
+                context,
+                &mut transaction,
+                prior_batch,
+                &result,
+                &session.items[item_position],
+                history_sequence,
+                prior_batch.committed_count.saturating_add(1),
+                prior_batch.failed_count,
+                history_manifest_expected_hash,
+                history_snapshot_expected_hash,
+            )?;
             Ok(())
         })();
         if let Err(error) = write_result {
+            session.items[item_position] = item;
             return Err(transaction.rollback_after(error));
         }
-        transaction.commit()?;
+        if let Err(error) = transaction.commit() {
+            session.items[item_position] = item;
+            return Err(error);
+        }
         for (path, bytes) in sidecar_observer_writes {
             files.observe_atomic_write(&path, bytes);
         }
@@ -2581,15 +2692,30 @@ fn prepare_url_source_evidence(
     Ok((format!("{stem}.{}", prepared.extension), prepared.bytes))
 }
 
-fn update_history_snapshot(batch: &mut ImportBatchResult, result: &ImportItemCommitResult) {
-    let Some(snapshot) = batch.history_snapshot.as_mut() else {
-        return;
-    };
-    if let Some(item) = snapshot
-        .items
-        .iter_mut()
-        .find(|item| item.item_id == result.item_id)
-    {
+fn record_batch_result(
+    batch: &mut ImportBatchResult,
+    history_item_positions: &std::collections::HashMap<String, usize>,
+    result: ImportItemCommitResult,
+) -> Result<(), BackendError> {
+    #[cfg(feature = "performance-observers")]
+    COMMIT_INCREMENTAL_RESULT_UPDATES.with(|count| count.set(count.get().saturating_add(1)));
+    let input_label = if let Some(snapshot) = batch.history_snapshot.as_mut() {
+        let position = history_item_positions
+            .get(&result.item_id)
+            .copied()
+            .ok_or_else(|| {
+                commit_error(
+                    IMPORT_V2_STATE_INVALID,
+                    "Import history item was not found for commit.",
+                )
+            })?;
+        let item = &mut snapshot.items[position];
+        if item.item_id != result.item_id {
+            return Err(commit_error(
+                IMPORT_V2_STATE_INVALID,
+                "Import history item index is invalid.",
+            ));
+        }
         item.status = if result.committed {
             ImportItemStatus::Completed
         } else if result.error_code.as_deref() == Some(crate::errors::IMPORT_V2_CANCELLED) {
@@ -2602,9 +2728,59 @@ fn update_history_snapshot(batch: &mut ImportBatchResult, result: &ImportItemCom
             .error_code
             .as_deref()
             .map(ImportIssue::for_commit_code);
+        item.input.display_name.clone()
+    } else {
+        "Import item".into()
+    };
+    if result.committed {
+        batch.committed_count = batch.committed_count.saturating_add(1);
+    } else {
+        batch.failed_count = batch.failed_count.saturating_add(1);
     }
-    snapshot.status = derive_session_status(&snapshot.items);
-    snapshot.updated_at = chrono::Utc::now().to_rfc3339();
+    update_completion_for_result(
+        batch
+            .completion
+            .as_mut()
+            .expect("commit completion is initialized"),
+        &result,
+        input_label,
+    );
+    batch.items.push(result);
+    Ok(())
+}
+
+fn history_item<'a>(
+    batch: &'a ImportBatchResult,
+    history_item_positions: &std::collections::HashMap<String, usize>,
+    item_id: &str,
+) -> Result<&'a ImportItem, BackendError> {
+    let position = history_item_positions
+        .get(item_id)
+        .copied()
+        .ok_or_else(|| {
+            commit_error(
+                IMPORT_V2_STATE_INVALID,
+                "Import history item was not found for commit.",
+            )
+        })?;
+    batch
+        .history_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.items.get(position))
+        .filter(|item| item.item_id == item_id)
+        .ok_or_else(|| {
+            commit_error(
+                IMPORT_V2_STATE_INVALID,
+                "Import history item index is invalid.",
+            )
+        })
+}
+
+fn finalize_history_snapshot(batch: &mut ImportBatchResult) {
+    if let Some(snapshot) = batch.history_snapshot.as_mut() {
+        snapshot.status = derive_session_status(&snapshot.items);
+        snapshot.updated_at = chrono::Utc::now().to_rfc3339();
+    }
 }
 
 fn completion_warning(code: &str, title: &str) -> UserIssue {
@@ -2617,84 +2793,87 @@ fn completion_warning(code: &str, title: &str) -> UserIssue {
     }
 }
 
-fn refresh_completion(batch: &mut ImportBatchResult) {
-    let mut completion = ImportCompletion::empty(&batch.session_id, &batch.batch_id);
-    for result in &batch.items {
-        completion.warnings.extend(result.warnings.clone());
-        if !result.committed {
-            let code = result
-                .error_code
-                .clone()
-                .unwrap_or_else(|| IMPORT_V2_COMMIT_FAILED.into());
-            let input_label = batch
-                .history_snapshot
-                .as_ref()
-                .and_then(|snapshot| {
-                    snapshot
-                        .items
-                        .iter()
-                        .find(|item| item.item_id == result.item_id)
-                })
-                .map(|item| item.input.display_name.clone())
-                .unwrap_or_else(|| "Import item".into());
-            completion.failures.push(ItemFailure {
-                item_id: result.item_id.clone(),
-                input_label,
-                issue: UserIssue {
-                    title: "This item could not be imported.".into(),
-                    data_safety: "Other successfully imported Sources were kept.".into(),
-                    primary_action: Some(ImportPrimaryAction::Retry),
-                    detail: Some(ImportIssueDiagnostics {
-                        technical_code: Some(code.clone()),
-                        ..ImportIssueDiagnostics::default()
-                    }),
-                    code,
-                },
-            });
-            continue;
-        }
-        let Some(source_id) = result.source_id.clone() else {
-            continue;
-        };
-        let Some(version_id) = result.version_id.clone() else {
-            continue;
-        };
-        let Some(content_hash) = result.content_hash.clone() else {
-            continue;
-        };
-        match result.disposition.as_ref() {
-            Some(ImportCommitDisposition::NewSource) => {
-                if let Some(wiki_path) = result.wiki_path.clone() {
-                    completion.new_sources.push(SourceVersionChange {
-                        source_id,
-                        version_id,
-                        wiki_path,
-                        content_hash,
-                    });
-                }
-            }
-            Some(ImportCommitDisposition::UpdatedSource) => {
-                if let Some(wiki_path) = result.wiki_path.clone() {
-                    completion.updated_sources.push(SourceVersionChange {
-                        source_id,
-                        version_id,
-                        wiki_path,
-                        content_hash,
-                    });
-                }
-            }
-            Some(ImportCommitDisposition::DuplicateSkipped) => {
-                completion.duplicate_skips.push(DuplicateResult {
-                    item_id: result.item_id.clone(),
+fn durable_progress_delta(batch: &ImportBatchResult) -> ImportBatchResult {
+    ImportBatchResult {
+        batch_id: batch.batch_id.clone(),
+        session_id: batch.session_id.clone(),
+        created_at: batch.created_at.clone(),
+        batch_task_id: batch.batch_task_id.clone(),
+        committed_count: batch.committed_count,
+        failed_count: batch.failed_count,
+        items: batch.items.last().cloned().into_iter().collect(),
+        history_snapshot: None,
+        completion: None,
+    }
+}
+
+fn update_completion_for_result(
+    completion: &mut ImportCompletion,
+    result: &ImportItemCommitResult,
+    input_label: String,
+) {
+    completion.warnings.extend(result.warnings.clone());
+    if !result.committed {
+        let code = result
+            .error_code
+            .clone()
+            .unwrap_or_else(|| IMPORT_V2_COMMIT_FAILED.into());
+        completion.failures.push(ItemFailure {
+            item_id: result.item_id.clone(),
+            input_label,
+            issue: UserIssue {
+                title: "This item could not be imported.".into(),
+                data_safety: "Other successfully imported Sources were kept.".into(),
+                primary_action: Some(ImportPrimaryAction::Retry),
+                detail: Some(ImportIssueDiagnostics {
+                    technical_code: Some(code.clone()),
+                    ..ImportIssueDiagnostics::default()
+                }),
+                code,
+            },
+        });
+        return;
+    }
+    let Some(source_id) = result.source_id.clone() else {
+        return;
+    };
+    let Some(version_id) = result.version_id.clone() else {
+        return;
+    };
+    let Some(content_hash) = result.content_hash.clone() else {
+        return;
+    };
+    match result.disposition.as_ref() {
+        Some(ImportCommitDisposition::NewSource) => {
+            if let Some(wiki_path) = result.wiki_path.clone() {
+                completion.new_sources.push(SourceVersionChange {
                     source_id,
                     version_id,
+                    wiki_path,
                     content_hash,
                 });
             }
-            Some(ImportCommitDisposition::KeptCurrent) | None => {}
         }
+        Some(ImportCommitDisposition::UpdatedSource) => {
+            if let Some(wiki_path) = result.wiki_path.clone() {
+                completion.updated_sources.push(SourceVersionChange {
+                    source_id,
+                    version_id,
+                    wiki_path,
+                    content_hash,
+                });
+            }
+        }
+        Some(ImportCommitDisposition::DuplicateSkipped) => {
+            completion.duplicate_skips.push(DuplicateResult {
+                item_id: result.item_id.clone(),
+                source_id,
+                version_id,
+                content_hash,
+            });
+        }
+        Some(ImportCommitDisposition::KeptCurrent) | None => {}
     }
-    batch.completion = Some(completion);
 }
 
 #[cfg_attr(not(any(feature = "gui", test)), allow(dead_code))]
@@ -3679,6 +3858,7 @@ fn snapshot_commit_decisions(session: &ImportSession) -> Vec<CommitItemDecision>
 fn validate_complete_decision_set(
     session: &crate::models::import_v2::ImportSession,
     decisions: &[CommitItemDecision],
+    item_positions: &std::collections::HashMap<String, usize>,
 ) -> Result<(), BackendError> {
     if decisions.is_empty() {
         return Err(commit_error(
@@ -3695,7 +3875,7 @@ fn validate_complete_decision_set(
             ));
         }
         let item =
-            find_session_item_for_decision(&session.items, &decision.item_id).ok_or_else(|| {
+            indexed_session_item(session, item_positions, &decision.item_id).ok_or_else(|| {
                 commit_error(
                     IMPORT_V2_STATE_INVALID,
                     "Import item was not found for commit.",
@@ -3733,20 +3913,56 @@ fn validate_complete_decision_set(
     Ok(())
 }
 
+fn indexed_session_item<'a>(
+    session: &'a ImportSession,
+    item_positions: &std::collections::HashMap<String, usize>,
+    item_id: &str,
+) -> Option<&'a ImportItem> {
+    #[cfg(feature = "performance-observers")]
+    COMMIT_LOOKUP_COMPARISONS.with(|count| count.set(count.get().saturating_add(1)));
+    item_positions
+        .get(item_id)
+        .and_then(|position| session.items.get(*position))
+        .filter(|item| item.item_id == item_id)
+}
+
+fn focused_item_hash(item: &ImportItem) -> Result<String, BackendError> {
+    let bytes = serde_json::to_vec_pretty(item).map_err(|_| {
+        commit_error(
+            IMPORT_V2_COMMIT_FAILED,
+            "Import item could not be serialized.",
+        )
+    })?;
+    #[cfg(feature = "performance-observers")]
+    {
+        COMMIT_HASHED_ITEM_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+        COMMIT_HASHED_ITEM_BYTES
+            .with(|count| count.set(count.get().saturating_add(bytes.len() as u64)));
+    }
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn index_session_items(
+    session: &ImportSession,
+) -> Result<std::collections::HashMap<String, usize>, BackendError> {
+    let mut positions = std::collections::HashMap::with_capacity(session.items.len());
+    for (position, item) in session.items.iter().enumerate() {
+        if positions.insert(item.item_id.clone(), position).is_some() {
+            return Err(commit_error(
+                IMPORT_V2_STATE_INVALID,
+                "Import session item identifiers must be unique.",
+            ));
+        }
+    }
+    Ok(positions)
+}
+
 #[cfg(feature = "performance-observers")]
 thread_local! {
     static COMMIT_LOOKUP_COMPARISONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-fn find_session_item_for_decision<'a>(
-    items: &'a [ImportItem],
-    decision_item_id: &str,
-) -> Option<&'a ImportItem> {
-    items.iter().find(|item| {
-        #[cfg(feature = "performance-observers")]
-        COMMIT_LOOKUP_COMPARISONS.with(|count| count.set(count.get() + 1));
-        item.item_id == decision_item_id
-    })
+    static COMMIT_HASHED_ITEM_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static COMMIT_HASHED_ITEM_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static COMMIT_INCREMENTAL_RESULT_UPDATES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 fn verified_artifact(
@@ -3963,7 +4179,7 @@ mod tests {
         ArtifactKind, CommitImportSessionRequest, CommitItemDecision, ImportArtifact,
         ImportBatchResult, ImportInput, ImportInputKind, ImportItemCommitResult,
         ImportItemResolution, ImportItemStatus, ImportRecoveryAction, ImportResolutionKind,
-        ImportResourceMode, ImportStage, MediaSaveMode,
+        ImportResourceMode, ImportSession, ImportStage, MediaSaveMode,
     };
     use crate::models::paths::ProjectContext;
     use crate::models::task::TaskType;
@@ -3991,7 +4207,7 @@ mod tests {
 
     #[cfg(feature = "performance-observers")]
     #[test]
-    fn batch_zero_decision_lookup_counter_records_current_quadratic_shape() {
+    fn batch_eight_decision_lookup_counter_is_linear() {
         for decision_count in [100usize, 1_000, 10_000] {
             let items = (0..decision_count)
                 .map(|index| {
@@ -4008,19 +4224,73 @@ mod tests {
                     )
                 })
                 .collect::<Vec<_>>();
+            let mut session = ImportSession::new(
+                "linear-lookup",
+                "linear-lookup",
+                ImportResourceMode::Balanced,
+            );
+            session.items = items;
+            let positions = super::index_session_items(&session).unwrap();
             super::COMMIT_LOOKUP_COMPARISONS.with(|count| count.set(0));
+            super::COMMIT_HASHED_ITEM_COUNT.with(|count| count.set(0));
+            super::COMMIT_HASHED_ITEM_BYTES.with(|count| count.set(0));
             for index in 0..decision_count {
-                assert!(
-                    super::find_session_item_for_decision(&items, &format!("item-{index}"))
-                        .is_some()
-                );
+                let item =
+                    super::indexed_session_item(&session, &positions, &format!("item-{index}"))
+                        .unwrap();
+                assert!(!super::focused_item_hash(item).unwrap().is_empty());
             }
             let comparisons = super::COMMIT_LOOKUP_COMPARISONS.with(std::cell::Cell::get);
+            let hashed_items = super::COMMIT_HASHED_ITEM_COUNT.with(std::cell::Cell::get);
+            let hashed_bytes = super::COMMIT_HASHED_ITEM_BYTES.with(std::cell::Cell::get);
+            assert_eq!(comparisons, decision_count as u64);
+            assert_eq!(hashed_items, decision_count as u64);
+
+            let mut batch = ImportBatchResult {
+                batch_id: "linear-batch".into(),
+                session_id: session.session_id.clone(),
+                created_at: "2026-08-28T00:00:00Z".into(),
+                batch_task_id: None,
+                committed_count: 0,
+                failed_count: 0,
+                items: Vec::with_capacity(decision_count),
+                history_snapshot: Some(session),
+                completion: Some(crate::models::import_v2::ImportCompletion::empty(
+                    "linear-lookup",
+                    "linear-batch",
+                )),
+            };
+            super::COMMIT_INCREMENTAL_RESULT_UPDATES.with(|count| count.set(0));
+            for index in 0..decision_count {
+                super::record_batch_result(
+                    &mut batch,
+                    &positions,
+                    ImportItemCommitResult {
+                        item_id: format!("item-{index}"),
+                        source_id: None,
+                        version_id: None,
+                        wiki_path: None,
+                        content_hash: None,
+                        disposition: None,
+                        warnings: Vec::new(),
+                        committed: false,
+                        error_code: Some(IMPORT_V2_COMMIT_FAILED.into()),
+                    },
+                )
+                .unwrap();
+            }
+            let result_updates =
+                super::COMMIT_INCREMENTAL_RESULT_UPDATES.with(std::cell::Cell::get);
+            assert_eq!(result_updates, decision_count as u64);
+            assert_eq!(batch.failed_count, decision_count as u32);
+            assert_eq!(batch.items.len(), decision_count);
             assert_eq!(
-                comparisons,
-                (decision_count as u64 * (decision_count as u64 + 1)) / 2
+                batch.completion.as_ref().unwrap().failures.len(),
+                decision_count
             );
-            println!("BATCH0_COMMIT_LOOKUP D={decision_count} comparisons={comparisons}");
+            println!(
+                "BATCH8_COMMIT_CONTROL D={decision_count} probes={comparisons} hashed_items={hashed_items} hashed_bytes={hashed_bytes} counter_updates={result_updates}"
+            );
         }
     }
     use crate::services::import_v2::transaction::{
@@ -4843,7 +5113,96 @@ source_url: https://www.xiaohongshu.com/explore/other-note
             Some(crate::errors::IMPORT_V2_CANCELLED)
         );
         assert_eq!((batch.committed_count, batch.failed_count), (1, 1));
-        assert_eq!(durable_progress.into_inner(), vec![(1, 1, 0), (2, 1, 1)]);
+        assert_eq!(durable_progress.into_inner(), vec![(1, 1, 0), (1, 1, 1)]);
+    }
+
+    #[test]
+    fn durable_progress_callbacks_run_after_commit_locks_are_released() {
+        let fixture = CommitFixture::two_ready_items();
+        let request = fixture.request(vec![CommitItemDecision {
+            item_id: fixture.first_item_id.clone(),
+            resolution: None,
+        }]);
+        let callback_count = std::cell::Cell::new(0usize);
+
+        fixture
+            .service
+            .commit_items_cancellable_with_progress(
+                &fixture.context,
+                &fixture.files,
+                &fixture.git,
+                &request,
+                || false,
+                |_| {
+                    let project_locks = fixture.service.project_locks(&fixture.context).unwrap();
+                    {
+                        let _project_guard = project_locks
+                            .project()
+                            .try_lock()
+                            .expect("durable callback must run outside the project lock");
+                    }
+                    let session_lock = project_locks.session(&fixture.session_id).unwrap();
+                    {
+                        let _session_guard = session_lock
+                            .try_lock()
+                            .expect("durable callback must run outside the session lock");
+                    }
+                    callback_count.set(callback_count.get() + 1);
+                },
+                None,
+                || Ok(()),
+            )
+            .unwrap();
+
+        assert_eq!(callback_count.get(), 1);
+    }
+
+    #[test]
+    fn same_project_commit_contender_waits_for_the_active_focused_boundary() {
+        let fixture = CommitFixture::two_ready_items();
+        let request = fixture.request(vec![CommitItemDecision {
+            item_id: fixture.first_item_id.clone(),
+            resolution: None,
+        }]);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let holder_request = request.clone();
+        let holder_barrier = std::sync::Arc::clone(&barrier);
+        std::thread::scope(|scope| {
+            let holder = scope.spawn(|| {
+                fixture.service.commit_items_cancellable_with_progress(
+                    &fixture.context,
+                    &fixture.files,
+                    &fixture.git,
+                    &holder_request,
+                    || false,
+                    |_| {},
+                    None,
+                    || {
+                        holder_barrier.wait();
+                        std::thread::sleep(std::time::Duration::from_millis(120));
+                        Ok(())
+                    },
+                )
+            });
+
+            barrier.wait();
+            let started = std::time::Instant::now();
+            let contender = fixture.service.commit_items_cancellable(
+                &fixture.context,
+                &fixture.files,
+                &fixture.git,
+                &request,
+                || false,
+            );
+            let elapsed = started.elapsed();
+            let _ = holder.join().unwrap();
+
+            assert!(
+                elapsed >= std::time::Duration::from_millis(80),
+                "same-project commit contender bypassed the active boundary: {elapsed:?}"
+            );
+            assert!(contender.is_err());
+        });
     }
 
     #[test]
@@ -5396,6 +5755,12 @@ source_url: https://www.xiaohongshu.com/explore/other-note
         let batch = fixture.commit_with(None);
         assert_eq!(batch.committed_count, 0);
         assert_eq!(batch.failed_count, 1);
+        let reopened = fixture
+            .service
+            .sessions
+            .load(&fixture.context, &fixture.files, &fixture.session_id)
+            .unwrap();
+        assert_ne!(reopened.items[0].status, ImportItemStatus::Completed);
         assert!(!fixture.root.join("raw").exists());
         assert!(!fixture.root.join("wiki").exists());
         assert!(!fixture.root.join(".app/sources").exists());
@@ -6826,10 +7191,13 @@ source_url: https://www.xiaohongshu.com/explore/other-note
     ) -> Vec<CommitPersistenceBoundary> {
         let mut expected = Vec::with_capacity(targets.len() * 2 + 4);
         let summary = targets.iter().find(|(label, _)| label == "session summary");
-        for (label, path) in targets
-            .iter()
-            .filter(|(label, _)| label != "session summary")
-        {
+        for (label, path) in targets.iter().filter(|(label, _)| {
+            label != "session summary"
+                && !matches!(
+                    label.as_str(),
+                    "history receipt" | "history snapshot" | "history manifest"
+                )
+        }) {
             let target = persistence_target_for(label, path);
             expected.push(CommitPersistenceBoundary::JournalIntent(target.clone()));
             expected.push(CommitPersistenceBoundary::TargetInstalled(target));
@@ -6842,9 +7210,12 @@ source_url: https://www.xiaohongshu.com/explore/other-note
                 CommitPersistenceTarget::SessionSummary,
             ));
         }
-        expected.push(CommitPersistenceBoundary::CommittedMarkerPersisted);
-        expected.push(CommitPersistenceBoundary::JournalDeleted);
-        for _ in 0..3 {
+        for _ in targets.iter().filter(|(label, _)| {
+            matches!(
+                label.as_str(),
+                "history receipt" | "history snapshot" | "history manifest"
+            )
+        }) {
             expected.push(CommitPersistenceBoundary::JournalIntent(
                 CommitPersistenceTarget::History,
             ));
@@ -7035,7 +7406,7 @@ source_url: https://www.xiaohongshu.com/explore/other-note
                 target,
                 CommitPersistenceBoundary::JournalIntent(CommitPersistenceTarget::History)
                     | CommitPersistenceBoundary::TargetInstalled(CommitPersistenceTarget::History)
-            ) && occurrence >= 2;
+            ) && occurrence >= 5;
         assert_eq!(
             session.items[0].status == ImportItemStatus::Completed,
             item_forward

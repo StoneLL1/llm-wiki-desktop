@@ -202,22 +202,33 @@ fn cancelled_recovery_does_not_publish_a_partial_session() {
 }
 
 #[test]
-fn import_mutation_lock_observer_records_real_contention_wait() {
+fn same_project_commit_lane_serializes_contenders_and_records_wait() {
     let service = Arc::new(ImportV2Service::default());
+    let root = tempfile::tempdir().unwrap();
+    let context = ProjectContext::new("lock-observer", root.path().to_path_buf());
     let observation = service.observe_lock_waits();
     let barrier = Arc::new(Barrier::new(2));
 
     let holder_service = Arc::clone(&service);
     let holder_barrier = Arc::clone(&barrier);
+    let holder_context = context.clone();
     let holder = std::thread::spawn(move || {
-        holder_service
-            .hold_mutation_lock_for_observation(Duration::from_millis(100), Some(&holder_barrier));
+        holder_service.hold_project_lock_for_observation(
+            &holder_context,
+            Duration::from_millis(100),
+            Some(&holder_barrier),
+        );
     });
 
     barrier.wait();
     let contender_service = Arc::clone(&service);
+    let contender_context = context.clone();
     let contender = std::thread::spawn(move || {
-        contender_service.hold_mutation_lock_for_observation(Duration::ZERO, None);
+        contender_service.hold_project_lock_for_observation(
+            &contender_context,
+            Duration::ZERO,
+            None,
+        );
     });
 
     holder.join().unwrap();
@@ -231,4 +242,108 @@ fn import_mutation_lock_observer_records_real_contention_wait() {
         "BATCH0_LOCK_WAIT {}",
         serde_json::to_string(&snapshot).unwrap()
     );
+}
+
+#[test]
+fn import_project_locks_do_not_block_an_unrelated_canonical_project() {
+    let service = Arc::new(ImportV2Service::default());
+    let root_a = tempfile::tempdir().unwrap();
+    let root_b = tempfile::tempdir().unwrap();
+    let context_a = ProjectContext::new("project-a", root_a.path().to_path_buf());
+    let context_b = ProjectContext::new("project-b", root_b.path().to_path_buf());
+    let files = FileStore::default();
+    let sessions = SessionStore::default();
+    let mut session_b = ImportSession::new(
+        "project-b-session",
+        "project-b",
+        ImportResourceMode::Balanced,
+    );
+    session_b.items = vec![synthetic_item(0)];
+    sessions.save(&context_b, &files, &session_b).unwrap();
+    let lock_observation = service.observe_lock_waits();
+    let barrier = Arc::new(Barrier::new(2));
+
+    let holder_service = Arc::clone(&service);
+    let holder_barrier = Arc::clone(&barrier);
+    let holder = std::thread::spawn(move || {
+        holder_service.hold_project_lock_for_observation(
+            &context_a,
+            Duration::from_millis(300),
+            Some(&holder_barrier),
+        );
+    });
+
+    barrier.wait();
+    let overview_started = std::time::Instant::now();
+    let overview = service
+        .read_session_overview(&context_b, &files, "project-b-session")
+        .unwrap();
+    let overview_elapsed = overview_started.elapsed();
+    let worker_started = std::time::Instant::now();
+    let item = service
+        .set_item_selected(&context_b, &files, "project-b-session", "item-0", false)
+        .unwrap();
+    let worker_elapsed = worker_started.elapsed();
+    holder.join().unwrap();
+    let lock_waits = lock_observation.snapshot();
+
+    assert!(
+        overview_elapsed < Duration::from_millis(250),
+        "project B overview waited for unrelated project A: {overview_elapsed:?}"
+    );
+    assert!(
+        worker_elapsed < Duration::from_millis(250),
+        "project B worker waited for unrelated project A: {worker_elapsed:?}"
+    );
+    assert_eq!(lock_waits.waits_over_50_ms, 0, "{lock_waits:?}");
+    assert_eq!(overview.item_count, 1);
+    assert!(!item.selected);
+    println!(
+        "BATCH8_CROSS_PROJECT_WAIT_NANOS overview={} worker={}",
+        overview_elapsed.as_nanos(),
+        worker_elapsed.as_nanos()
+    );
+}
+
+#[test]
+fn same_session_concurrent_item_updates_preserve_both_revisions() {
+    let root = tempfile::tempdir().unwrap();
+    let context = ProjectContext::new("session-linearization", root.path().to_path_buf());
+    let files = Arc::new(FileStore::default());
+    let service = Arc::new(ImportV2Service::default());
+    let sessions = SessionStore::default();
+    let mut session = ImportSession::new(
+        "shared-session",
+        "session-linearization",
+        ImportResourceMode::Balanced,
+    );
+    session.items = vec![synthetic_item(0), synthetic_item(1)];
+    sessions.save(&context, &files, &session).unwrap();
+
+    let mut workers = Vec::new();
+    for item_id in ["item-0", "item-1"] {
+        let worker_service = Arc::clone(&service);
+        let worker_files = Arc::clone(&files);
+        let worker_context = context.clone();
+        workers.push(std::thread::spawn(move || {
+            worker_service
+                .set_item_selected(
+                    &worker_context,
+                    &worker_files,
+                    "shared-session",
+                    item_id,
+                    false,
+                )
+                .unwrap()
+        }));
+    }
+    let updated = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect::<Vec<_>>();
+
+    let reopened = sessions.load(&context, &files, "shared-session").unwrap();
+    assert!(reopened.items.iter().all(|item| !item.selected));
+    assert!(reopened.items.iter().all(|item| item.item_revision == 1));
+    assert!(updated.iter().all(|item| item.item_revision == 1));
 }

@@ -33,6 +33,7 @@ use crate::services::import_v2::generic_web_engine::GenericWebEngine;
 use crate::services::import_v2::local_media_engine::{
     NativeMediaCompanionEngine, NativeSubtitleEngine,
 };
+use crate::services::import_v2::lock_registry::{ImportLockRegistry, ProjectImportLocks};
 use crate::services::import_v2::native_file_engine::{
     NativeCsvPackageEngine, NativeFileEngine, NativeStructuredFileEngine,
 };
@@ -86,7 +87,7 @@ pub struct ImportV2Service {
     pub(super) sessions: SessionStore,
     pub(super) engines: EngineRegistry,
     quality: QualityGate,
-    pub(super) mutation_lock: Mutex<()>,
+    pub(super) lock_registry: ImportLockRegistry,
     agent_candidate_action_lock: Mutex<()>,
     #[cfg_attr(not(feature = "gui"), allow(dead_code))]
     source_ai_active: Mutex<HashSet<String>>,
@@ -241,7 +242,9 @@ impl ImportV2Service {
                 true,
             ));
         }
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         let item = session
@@ -341,7 +344,7 @@ impl ImportV2Service {
             sessions: SessionStore::default(),
             engines,
             quality: QualityGate::default(),
-            mutation_lock: Mutex::new(()),
+            lock_registry: ImportLockRegistry::default(),
             agent_candidate_action_lock: Mutex::new(()),
             source_ai_active: Mutex::new(HashSet::new()),
             web_targets,
@@ -354,16 +357,23 @@ impl ImportV2Service {
 
     pub(crate) fn target_reservations_for_session(
         &self,
+        context: &ProjectContext,
         session: &ImportSession,
     ) -> Result<Arc<Mutex<crate::services::import_v2::NewSourceTargetReservations>>, BackendError>
     {
+        let project_identity = crate::services::project_identity(&context.root)
+            .map_err(|error| BackendError::new("PROJECT_IDENTITY_FAILED", error, true, false))?;
+        let registry_key = format!(
+            "{}:{}",
+            project_identity.canonical_identity_key, session.session_id
+        );
         let mut registry = self
             .target_reservation_registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         registry.retain(|_, reservations| reservations.strong_count() > 0);
         if let Some(reservations) = registry
-            .get(&session.session_id)
+            .get(&registry_key)
             .and_then(std::sync::Weak::upgrade)
         {
             reservations
@@ -375,7 +385,7 @@ impl ImportV2Service {
         let reservations = Arc::new(Mutex::new(
             crate::services::import_v2::NewSourceTargetReservations::from_session(session)?,
         ));
-        registry.insert(session.session_id.clone(), Arc::downgrade(&reservations));
+        registry.insert(registry_key, Arc::downgrade(&reservations));
         Ok(reservations)
     }
 
@@ -390,14 +400,37 @@ impl ImportV2Service {
     }
 
     #[cfg(feature = "performance-observers")]
-    pub fn hold_mutation_lock_for_observation(
+    pub fn hold_project_lock_for_observation(
         &self,
+        context: &ProjectContext,
         duration: std::time::Duration,
         acquired: Option<&std::sync::Barrier>,
     ) {
-        let _guard = self
-            .lock()
-            .expect("synthetic observer lock must be available");
+        let project_locks = self
+            .project_locks(context)
+            .expect("synthetic project lock must be available");
+        let _guard = self.lock_project(&project_locks);
+        if let Some(acquired) = acquired {
+            acquired.wait();
+        }
+        std::thread::sleep(duration);
+    }
+
+    #[cfg(feature = "performance-observers")]
+    pub fn hold_session_lock_for_observation(
+        &self,
+        context: &ProjectContext,
+        session_id: &str,
+        duration: std::time::Duration,
+        acquired: Option<&std::sync::Barrier>,
+    ) {
+        let project_locks = self
+            .project_locks(context)
+            .expect("synthetic project lock must be available");
+        let session_lock = project_locks
+            .session(session_id)
+            .expect("synthetic session lock must be available");
+        let _guard = self.lock_session(&session_lock);
         if let Some(acquired) = acquired {
             acquired.wait();
         }
@@ -568,7 +601,9 @@ impl ImportV2Service {
         item_ids: &[String],
         account_summary: Option<&str>,
     ) -> Result<ImportSession, BackendError> {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         if item_ids.is_empty() {
@@ -621,7 +656,9 @@ impl ImportV2Service {
         session_id: &str,
         item_ids: &[String],
     ) -> Result<ImportSession, BackendError> {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         for item in session
@@ -696,38 +733,37 @@ impl ImportV2Service {
         session_id: &str,
         item_id: &str,
     ) -> Result<ImportItem, BackendError> {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let task_to_cancel = {
+            let _guard = self.lock_session(&session_lock);
+            self.preflight_locked(context)?;
+            let session = self.sessions.load(context, files, session_id)?;
+            let item = session
+                .items
+                .iter()
+                .find(|item| item.item_id == item_id)
+                .ok_or_else(item_not_found)?;
+            validate_item_can_skip(item)?;
+            item.task_id.clone().filter(|task_id| {
+                !is_batch_operation_task(tasks, task_id)
+                    && tasks.get_task(task_id).is_some_and(|task| {
+                        !matches!(
+                            task.status,
+                            TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Cancelled
+                        )
+                    })
+            })
+        };
+        if let Some(task_id) = task_to_cancel {
+            task_call(tasks.cancel_task(&task_id))?;
+        }
+
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         let item = find_item_mut(&mut session, item_id)?;
-        if !matches!(
-            item.status,
-            ImportItemStatus::Queued
-                | ImportItemStatus::WaitingCapability
-                | ImportItemStatus::WaitingLogin
-                | ImportItemStatus::PreviewReady
-                | ImportItemStatus::NeedsMerge
-                | ImportItemStatus::Failed
-        ) {
-            return Err(BackendError::new(
-                IMPORT_V2_STATE_INVALID,
-                "Only queued, waiting, ready, or failed import items can be skipped.",
-                false,
-                true,
-            ));
-        }
-        if let Some(task_id) = item.task_id.as_deref() {
-            if !is_batch_operation_task(tasks, task_id)
-                && tasks.get_task(task_id).is_some_and(|task| {
-                    !matches!(
-                        task.status,
-                        TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Cancelled
-                    )
-                })
-            {
-                task_call(tasks.cancel_task(task_id))?;
-            }
-        }
+        validate_item_can_skip(item)?;
         transition_item(item, ImportItemStatus::Skipped)?;
         item.selected = false;
         item.task_id = None;
@@ -755,7 +791,8 @@ impl ImportV2Service {
         files: &FileStore,
         mode: ImportResourceMode,
     ) -> Result<ImportSession, BackendError> {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let _guard = self.lock_project(&project_locks);
         self.preflight_locked(context)?;
         if let Some(session_id) = self.find_unfinished_session(context, files)? {
             return self.sessions.load(context, files, &session_id);
@@ -769,7 +806,9 @@ impl ImportV2Service {
         session_id: &str,
         inputs: Vec<ImportInput>,
     ) -> Result<ImportSession, BackendError> {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         self.sessions.add_inputs(context, files, session_id, inputs)
     }
@@ -795,7 +834,9 @@ impl ImportV2Service {
         platform: String,
         title: String,
     ) -> Result<ImportSession, BackendError> {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         self.sessions.add_collection_inputs(
             context, files, session_id, inputs, source_url, platform, title,
@@ -814,7 +855,9 @@ impl ImportV2Service {
         display_name: &str,
         content: &str,
     ) -> Result<ImportSession, BackendError> {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let session = self.sessions.load(context, files, session_id)?;
         SessionStore::ensure_accepts_new_items(&session)?;
@@ -891,7 +934,9 @@ impl ImportV2Service {
         files: &FileStore,
         session_id: &str,
     ) -> Result<ImportSession, BackendError> {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         if crate::services::import_v2::commit::backfill_missing_new_source_wiki_targets(
@@ -960,7 +1005,9 @@ impl ImportV2Service {
         files: &FileStore,
         session_id: &str,
     ) -> Result<(), BackendError> {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let session = self.sessions.load(context, files, session_id)?;
         SessionStore::ensure_accepts_new_items(&session)
@@ -973,7 +1020,9 @@ impl ImportV2Service {
         session_id: &str,
         task_id: Option<String>,
     ) -> Result<ImportSession, BackendError> {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         if task_id.is_some() {
@@ -995,7 +1044,9 @@ impl ImportV2Service {
         session_id: &str,
         bindings: &[(String, String)],
     ) -> Result<Vec<ImportWorkItemSnapshot>, BackendError> {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         let index = session
@@ -1169,7 +1220,9 @@ impl ImportV2Service {
         if should_cancel() {
             return Err(cancelled_error());
         }
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         if should_cancel() {
@@ -1232,7 +1285,7 @@ impl ImportV2Service {
             .cloned()
             .map(|item_id| (item_id, task_id.to_string()))
             .collect::<Vec<_>>();
-        let target_reservations = self.target_reservations_for_session(&session)?;
+        let target_reservations = self.target_reservations_for_session(context, &session)?;
         let snapshots = self.bind_item_task_ids_from_snapshot_with_cancel(
             context,
             files,
@@ -1269,36 +1322,20 @@ impl ImportV2Service {
                 true,
             ));
         }
-        let _guard = self.lock()?;
-        self.preflight_locked(context)?;
-        let mut session = self.sessions.load(context, files, session_id)?;
-        let index = session
-            .items
-            .iter()
-            .enumerate()
-            .map(|(position, item)| (item.item_id.clone(), position))
-            .collect::<HashMap<_, _>>();
-        let mut unique = HashSet::with_capacity(item_ids.len());
-        for item_id in item_ids {
-            if !unique.insert(item_id.as_str()) {
-                return Err(task_error("Import item ids must be unique."));
-            }
-            let Some(position) = index.get(item_id) else {
-                return Err(item_not_found());
-            };
-            if !is_batch_claimable(&session.items[*position]) {
-                return Err(task_error(
-                    "Import item is already claimed by another operation.",
-                ));
-            }
-        }
-
-        let source_label = (item_ids.len() == 1).then(|| {
-            session.items[*index.get(&item_ids[0]).expect("validated item")]
-                .input
-                .display_name
-                .clone()
-        });
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let source_label = {
+            let _guard = self.lock_session(&session_lock);
+            self.preflight_locked(context)?;
+            let session = self.sessions.load(context, files, session_id)?;
+            let index = validate_batch_claims(&session, item_ids)?;
+            (item_ids.len() == 1).then(|| {
+                session.items[*index.get(&item_ids[0]).expect("validated item")]
+                    .input
+                    .display_name
+                    .clone()
+            })
+        };
         let title = source_label
             .as_ref()
             .map(|label| format!("Import {label}"))
@@ -1319,14 +1356,21 @@ impl ImportV2Service {
             .cloned()
             .map(|item_id| (item_id, task.id.clone()))
             .collect::<Vec<_>>();
-        if let Err(error) = self.bind_item_task_ids_from_snapshot(
-            context,
-            files,
-            session_id,
-            &mut session,
-            &index,
-            &bindings,
-        ) {
+        let bind_result = (|| {
+            let _guard = self.lock_session(&session_lock);
+            self.preflight_locked(context)?;
+            let mut session = self.sessions.load(context, files, session_id)?;
+            let index = validate_batch_claims(&session, item_ids)?;
+            self.bind_item_task_ids_from_snapshot(
+                context,
+                files,
+                session_id,
+                &mut session,
+                &index,
+                &bindings,
+            )
+        })();
+        if let Err(error) = bind_result {
             let _ = tasks.set_error(&task.id, error.clone());
             let _ = tasks.transition_status(&task.id, TaskStatus::Failed);
             return Err(error);
@@ -1587,7 +1631,9 @@ impl ImportV2Service {
         preview: crate::models::import_v2::ImportPreviewArtifact,
         explicit_merge_current_hash: Option<&str>,
     ) -> Result<ImportItem, BackendError> {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         let item_position = session
@@ -1680,7 +1726,9 @@ impl ImportV2Service {
         task_id: &str,
         deterministic_preview: Option<crate::models::import_v2::ImportPreviewArtifact>,
     ) -> Result<ImportItem, BackendError> {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         let item_position = session
@@ -1987,7 +2035,9 @@ impl ImportV2Service {
     where
         F: FnMut() -> bool,
     {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(permit.context())?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(permit.context())?;
         let mut session = self.sessions.load(permit.context(), files, session_id)?;
         if should_cancel() {
@@ -2456,39 +2506,44 @@ impl ImportV2Service {
         F: FnMut() -> bool,
         P: FnMut(u64, u64),
     {
-        let _guard = self.lock()?;
-        self.preflight_locked(context)?;
-        let needs_index_rebuild = matches!(
-            self.sessions
-                .read_overview(context, files, session_id)?
-                .index_state,
-            crate::models::import_v2::ImportSessionIndexState::RebuildRequired
-        );
-        let mut session = self.sessions.load(context, files, session_id)?;
-        let before_session = session.clone();
-        let mut staging_to_reconcile = Vec::new();
-        let total_items = session.items.len() as u64;
-        let progress_stride = (total_items.saturating_add(99) / 100).max(1);
-        for (position, item) in session.items.iter_mut().enumerate() {
-            if should_cancel() {
-                return Err(BackendError::new(
-                    crate::errors::IMPORT_V2_CANCELLED,
-                    "Import recovery was cancelled.",
-                    true,
-                    false,
-                ));
-            }
-            for attempt in &mut item.attempts {
-                let Some(task_id) = attempt
-                    .route
-                    .strip_prefix("agent_assistance/")
-                    .filter(|_| attempt.completed_at.is_none())
-                    .map(str::to_owned)
-                else {
-                    continue;
-                };
-                let task = tasks.get_task(&task_id);
-                let sealed_agent_output = task.as_ref().is_some_and(|task| {
+        let mut progress_updates = Vec::new();
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let result = {
+            let _guard = self.lock_session(&session_lock);
+            (|| {
+                self.preflight_locked(context)?;
+                let needs_index_rebuild = matches!(
+                    self.sessions
+                        .read_overview(context, files, session_id)?
+                        .index_state,
+                    crate::models::import_v2::ImportSessionIndexState::RebuildRequired
+                );
+                let mut session = self.sessions.load(context, files, session_id)?;
+                let before_session = session.clone();
+                let mut staging_to_reconcile = Vec::new();
+                let total_items = session.items.len() as u64;
+                let progress_stride = (total_items.saturating_add(99) / 100).max(1);
+                for (position, item) in session.items.iter_mut().enumerate() {
+                    if should_cancel() {
+                        return Err(BackendError::new(
+                            crate::errors::IMPORT_V2_CANCELLED,
+                            "Import recovery was cancelled.",
+                            true,
+                            false,
+                        ));
+                    }
+                    for attempt in &mut item.attempts {
+                        let Some(task_id) = attempt
+                            .route
+                            .strip_prefix("agent_assistance/")
+                            .filter(|_| attempt.completed_at.is_none())
+                            .map(str::to_owned)
+                        else {
+                            continue;
+                        };
+                        let task = tasks.get_task(&task_id);
+                        let sealed_agent_output = task.as_ref().is_some_and(|task| {
                     task.status == TaskStatus::Failed
                         && task.task_type == TaskType::AgentRun
                         && matches!(
@@ -2499,71 +2554,74 @@ impl ImportV2Service {
                             }) if bound_session == session_id && bound_item == &item.item_id
                         )
                 });
-                let task_status = task.map(|task| task.status);
-                if matches!(
-                    task_status,
-                    Some(
-                        TaskStatus::Queued
-                            | TaskStatus::Running
-                            | TaskStatus::WaitingForConfirmation
-                            | TaskStatus::Cancelling
-                    )
-                ) {
-                    continue;
-                }
-                attempt.completed_at = Some(chrono::Utc::now().to_rfc3339());
-                match task_status {
-                    Some(TaskStatus::Succeeded) => {
-                        attempt.outcome = AttemptOutcome::Succeeded;
-                        attempt.warnings.clear();
+                        let task_status = task.map(|task| task.status);
+                        if matches!(
+                            task_status,
+                            Some(
+                                TaskStatus::Queued
+                                    | TaskStatus::Running
+                                    | TaskStatus::WaitingForConfirmation
+                                    | TaskStatus::Cancelling
+                            )
+                        ) {
+                            continue;
+                        }
+                        attempt.completed_at = Some(chrono::Utc::now().to_rfc3339());
+                        match task_status {
+                            Some(TaskStatus::Succeeded) => {
+                                attempt.outcome = AttemptOutcome::Succeeded;
+                                attempt.warnings.clear();
+                            }
+                            Some(TaskStatus::Cancelled) => {
+                                attempt.outcome = AttemptOutcome::Cancelled;
+                                attempt.warnings = vec![
+                                    "Agent assistance was cancelled before recovery completed."
+                                        .into(),
+                                ];
+                            }
+                            _ if sealed_agent_output => {
+                                attempt.outcome = AttemptOutcome::Succeeded;
+                                attempt.warnings.clear();
+                            }
+                            _ => {
+                                attempt.outcome = AttemptOutcome::Failed;
+                                attempt.warnings = vec![
+                                    "Interrupted Agent assistance was closed during recovery."
+                                        .into(),
+                                ];
+                            }
+                        }
                     }
-                    Some(TaskStatus::Cancelled) => {
-                        attempt.outcome = AttemptOutcome::Cancelled;
-                        attempt.warnings = vec![
-                            "Agent assistance was cancelled before recovery completed.".into(),
-                        ];
+                    if item.status == ImportItemStatus::Queued {
+                        let recovered_status = item
+                            .task_id
+                            .as_deref()
+                            .and_then(|id| tasks.get_task(id))
+                            .map(|task| task.status);
+                        if matches!(
+                            recovered_status,
+                            Some(TaskStatus::Failed | TaskStatus::Cancelled) | None
+                        ) {
+                            // A pre-bound queued task can be persisted before its
+                            // worker claims the item. If that task was interrupted,
+                            // release the stale identity so the normal retry path
+                            // can bind a fresh task after restart.
+                            item.task_id = None;
+                            item.progress = None;
+                        }
                     }
-                    _ if sealed_agent_output => {
-                        attempt.outcome = AttemptOutcome::Succeeded;
-                        attempt.warnings.clear();
-                    }
-                    _ => {
-                        attempt.outcome = AttemptOutcome::Failed;
-                        attempt.warnings =
-                            vec!["Interrupted Agent assistance was closed during recovery.".into()];
-                    }
-                }
-            }
-            if item.status == ImportItemStatus::Queued {
-                let recovered_status = item
-                    .task_id
-                    .as_deref()
-                    .and_then(|id| tasks.get_task(id))
-                    .map(|task| task.status);
-                if matches!(
-                    recovered_status,
-                    Some(TaskStatus::Failed | TaskStatus::Cancelled) | None
-                ) {
-                    // A pre-bound queued task can be persisted before its
-                    // worker claims the item. If that task was interrupted,
-                    // release the stale identity so the normal retry path
-                    // can bind a fresh task after restart.
-                    item.task_id = None;
-                    item.progress = None;
-                }
-            }
-            if matches!(
-                item.status,
-                ImportItemStatus::WaitingCapability
-                    | ImportItemStatus::WaitingLogin
-                    | ImportItemStatus::WaitingAuthorization
-            ) {
-                let recovered_status = item
-                    .task_id
-                    .as_deref()
-                    .and_then(|id| tasks.get_task(id))
-                    .map(|task| task.status);
-                match recovered_status {
+                    if matches!(
+                        item.status,
+                        ImportItemStatus::WaitingCapability
+                            | ImportItemStatus::WaitingLogin
+                            | ImportItemStatus::WaitingAuthorization
+                    ) {
+                        let recovered_status = item
+                            .task_id
+                            .as_deref()
+                            .and_then(|id| tasks.get_task(id))
+                            .map(|task| task.status);
+                        match recovered_status {
                     Some(TaskStatus::Cancelled)
                         if !item
                             .task_id
@@ -2609,79 +2667,94 @@ impl ImportV2Service {
                         | TaskStatus::Interrupted,
                     ) => {}
                 }
-            }
-            if matches!(
-                item.status,
-                ImportItemStatus::Inspecting
-                    | ImportItemStatus::Extracting
-                    | ImportItemStatus::Validating
-            ) {
-                let recovered_status = item
-                    .task_id
-                    .as_deref()
-                    .and_then(|id| tasks.get_task(id))
-                    .map(|task| task.status);
-                if recovered_status == Some(TaskStatus::Cancelled) {
-                    let staging = context.resolve_project_path(&item_staging_relative_path(
-                        context,
-                        session_id,
-                        &item.item_id,
-                    )?)?;
-                    staging_to_reconcile.push(staging);
-                    transition_item(item, ImportItemStatus::Cancelled)?;
-                    item.task_id = None;
-                    item.progress = None;
-                    continue;
+                    }
+                    if matches!(
+                        item.status,
+                        ImportItemStatus::Inspecting
+                            | ImportItemStatus::Extracting
+                            | ImportItemStatus::Validating
+                    ) {
+                        let recovered_status = item
+                            .task_id
+                            .as_deref()
+                            .and_then(|id| tasks.get_task(id))
+                            .map(|task| task.status);
+                        if recovered_status == Some(TaskStatus::Cancelled) {
+                            let staging = context.resolve_project_path(
+                                &item_staging_relative_path(context, session_id, &item.item_id)?,
+                            )?;
+                            staging_to_reconcile.push(staging);
+                            transition_item(item, ImportItemStatus::Cancelled)?;
+                            item.task_id = None;
+                            item.progress = None;
+                            continue;
+                        }
+                        let interrupted = recovered_status.is_none_or(|status| {
+                            matches!(
+                                status,
+                                TaskStatus::Failed
+                                    | TaskStatus::Succeeded
+                                    | TaskStatus::Interrupted
+                            )
+                        });
+                        if interrupted {
+                            let staging = context.resolve_project_path(
+                                &item_staging_relative_path(context, session_id, &item.item_id)?,
+                            )?;
+                            staging_to_reconcile.push(staging);
+                            transition_item(item, ImportItemStatus::Paused)?;
+                            item.task_id = None;
+                            item.progress = None;
+                            item.issue = Some(ImportIssue {
+                                code: "TASK_PAUSED".into(),
+                                message:
+                                    "Import was paused after the app stopped and can continue."
+                                        .into(),
+                                stage: ImportStage::Extract,
+                                retryable: true,
+                                user_action_required: false,
+                                recovery_actions: vec![
+                                    crate::models::import_v2::ImportRecoveryAction::Retry,
+                                    crate::models::import_v2::ImportRecoveryAction::ViewLog,
+                                ],
+                                available_actions: Vec::new(),
+                                subtitle_candidates: Vec::new(),
+                            });
+                        }
+                    }
+                    let completed = position as u64 + 1;
+                    if completed == total_items || completed % progress_stride == 0 {
+                        progress_updates.push((completed, total_items));
+                    }
                 }
-                let interrupted = recovered_status.is_none_or(|status| {
-                    matches!(
-                        status,
-                        TaskStatus::Failed | TaskStatus::Succeeded | TaskStatus::Interrupted
-                    )
-                });
-                if interrupted {
-                    let staging = context.resolve_project_path(&item_staging_relative_path(
-                        context,
-                        session_id,
-                        &item.item_id,
-                    )?)?;
-                    staging_to_reconcile.push(staging);
-                    transition_item(item, ImportItemStatus::Paused)?;
-                    item.task_id = None;
-                    item.progress = None;
-                    item.issue = Some(ImportIssue {
-                        code: "TASK_PAUSED".into(),
-                        message: "Import was paused after the app stopped and can continue.".into(),
-                        stage: ImportStage::Extract,
-                        retryable: true,
-                        user_action_required: false,
-                        recovery_actions: vec![
-                            crate::models::import_v2::ImportRecoveryAction::Retry,
-                            crate::models::import_v2::ImportRecoveryAction::ViewLog,
-                        ],
-                        available_actions: Vec::new(),
-                        subtitle_candidates: Vec::new(),
+                session.status = derive_session_status(&session.items);
+                let mut originals = Vec::new();
+                let mut replacements = Vec::new();
+                for (before, after) in before_session.items.iter().zip(&session.items) {
+                    if before != after {
+                        originals.push(before.clone());
+                        replacements.push(after.clone());
+                    }
+                }
+                let session_record_changed =
+                    before_session.status != session.status || !originals.is_empty();
+                if !session_record_changed {
+                    if needs_index_rebuild {
+                        if should_cancel() {
+                            return Err(BackendError::new(
+                                crate::errors::IMPORT_V2_CANCELLED,
+                                "Import recovery was cancelled.",
+                                true,
+                                false,
+                            ));
+                        }
+                        self.sessions.rebuild_sidecars(context, files, &session)?;
+                    }
+                    return Ok(ImportSessionRecovery {
+                        session,
+                        changed_items: Vec::new(),
                     });
                 }
-            }
-            let completed = position as u64 + 1;
-            if completed == total_items || completed % progress_stride == 0 {
-                on_progress(completed, total_items);
-            }
-        }
-        session.status = derive_session_status(&session.items);
-        let mut originals = Vec::new();
-        let mut replacements = Vec::new();
-        for (before, after) in before_session.items.iter().zip(&session.items) {
-            if before != after {
-                originals.push(before.clone());
-                replacements.push(after.clone());
-            }
-        }
-        let session_record_changed =
-            before_session.status != session.status || !originals.is_empty();
-        if !session_record_changed {
-            if needs_index_rebuild {
                 if should_cancel() {
                     return Err(BackendError::new(
                         crate::errors::IMPORT_V2_CANCELLED,
@@ -2690,41 +2763,32 @@ impl ImportV2Service {
                         false,
                     ));
                 }
-                self.sessions.rebuild_sidecars(context, files, &session)?;
-            }
-            return Ok(ImportSessionRecovery {
-                session,
-                changed_items: Vec::new(),
-            });
-        }
-        if should_cancel() {
-            return Err(BackendError::new(
-                crate::errors::IMPORT_V2_CANCELLED,
-                "Import recovery was cancelled.",
-                true,
-                false,
-            ));
-        }
-        session.updated_at = chrono::Utc::now().to_rfc3339();
-        self.sessions
-            .write_recovery_cohort_if_unchanged_with_cancel(
-                context,
-                files,
-                &before_session,
-                &session,
-                &originals,
-                &replacements,
-                should_cancel,
-            )?;
-        for staging in staging_to_reconcile {
-            crate::services::import_v2::media_router::recover_item_staging_temporary_workspaces(
+                session.updated_at = chrono::Utc::now().to_rfc3339();
+                self.sessions
+                    .write_recovery_cohort_if_unchanged_with_cancel(
+                        context,
+                        files,
+                        &before_session,
+                        &session,
+                        &originals,
+                        &replacements,
+                        should_cancel,
+                    )?;
+                for staging in staging_to_reconcile {
+                    crate::services::import_v2::media_router::recover_item_staging_temporary_workspaces(
                 &staging,
             )?;
+                }
+                Ok(ImportSessionRecovery {
+                    session,
+                    changed_items: replacements,
+                })
+            })()
+        };
+        for (completed, total) in progress_updates {
+            on_progress(completed, total);
         }
-        Ok(ImportSessionRecovery {
-            session,
-            changed_items: replacements,
-        })
+        result
     }
     pub fn register_engine(&self, engine: Arc<dyn ImportEngine>) -> Result<(), BackendError> {
         self.engines.register(engine)
@@ -2777,7 +2841,9 @@ impl ImportV2Service {
         item_id: &str,
         selected: bool,
     ) -> Result<ImportItem, BackendError> {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         find_item_mut(&mut session, item_id)?.selected = selected;
@@ -2817,7 +2883,9 @@ impl ImportV2Service {
                 true,
             ));
         }
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         let item = find_item_mut(&mut session, item_id)?;
@@ -2986,7 +3054,7 @@ impl ImportV2Service {
             )?
             .pop()
             .ok_or_else(item_not_found)?;
-        let target_reservations = self.target_reservations_for_session(&session)?;
+        let target_reservations = self.target_reservations_for_session(context, &session)?;
         self.run_work_item_snapshot_mode(
             context,
             files,
@@ -5249,7 +5317,9 @@ impl ImportV2Service {
     where
         F: FnOnce(&mut ImportItem) -> Result<(), BackendError>,
     {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut item = self
             .sessions
@@ -5316,7 +5386,9 @@ impl ImportV2Service {
         F: FnOnce(&mut ImportItem) -> Result<(), BackendError>,
         H: FnOnce(&ImportItem) -> Result<(), BackendError>,
     {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let before = self
             .sessions
@@ -5355,7 +5427,9 @@ impl ImportV2Service {
     where
         F: FnOnce(&mut ImportItem) -> Result<(), BackendError>,
     {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         let item_position = session
@@ -5373,15 +5447,32 @@ impl ImportV2Service {
         persist_derived(&self.sessions, context, files, session)?;
         Ok(item)
     }
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, ()>, BackendError> {
-        // This lock serializes durable filesystem transactions; it does not
+    pub(crate) fn project_locks(
+        &self,
+        context: &ProjectContext,
+    ) -> Result<Arc<ProjectImportLocks>, BackendError> {
+        self.lock_registry.project(context)
+    }
+
+    pub(crate) fn lock_project<'a>(
+        &self,
+        locks: &'a ProjectImportLocks,
+    ) -> std::sync::MutexGuard<'a, ()> {
+        self.lock_observed(locks.project())
+    }
+
+    pub(super) fn lock_session<'a>(&self, lock: &'a Mutex<()>) -> std::sync::MutexGuard<'a, ()> {
+        self.lock_observed(lock)
+    }
+
+    fn lock_observed<'a>(&self, lock: &'a Mutex<()>) -> std::sync::MutexGuard<'a, ()> {
+        // These locks serialize durable filesystem transactions; they do not
         // protect an in-memory invariant. FileTransaction rolls back during
         // unwind, so recovering a poisoned guard keeps later imports usable
         // after a worker panic without exposing a half-applied cohort.
         #[cfg(feature = "performance-observers")]
         let wait_started = std::time::Instant::now();
-        let guard = self
-            .mutation_lock
+        let guard = lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(feature = "performance-observers")]
@@ -5404,7 +5495,7 @@ impl ImportV2Service {
                     u64::from(wait >= std::time::Duration::from_millis(50));
             }
         }
-        Ok(guard)
+        guard
     }
 
     pub(crate) fn with_agent_candidate_action_lock<T>(
@@ -5451,12 +5542,6 @@ impl ImportV2Service {
 
     fn preflight_locked(&self, context: &ProjectContext) -> Result<(), BackendError> {
         FileTransaction::reconcile_project(&context.root)
-    }
-
-    pub(crate) fn acquire_migration_lock(
-        &self,
-    ) -> Result<std::sync::MutexGuard<'_, ()>, BackendError> {
-        self.lock()
     }
 
     pub(crate) fn preflight_migration_locked(
@@ -6446,6 +6531,28 @@ fn item_not_found() -> BackendError {
         false,
     )
 }
+
+fn validate_item_can_skip(item: &ImportItem) -> Result<(), BackendError> {
+    if matches!(
+        item.status,
+        ImportItemStatus::Queued
+            | ImportItemStatus::WaitingCapability
+            | ImportItemStatus::WaitingLogin
+            | ImportItemStatus::PreviewReady
+            | ImportItemStatus::NeedsMerge
+            | ImportItemStatus::Failed
+    ) {
+        Ok(())
+    } else {
+        Err(BackendError::new(
+            IMPORT_V2_STATE_INVALID,
+            "Only queued, waiting, ready, or failed import items can be skipped.",
+            false,
+            true,
+        ))
+    }
+}
+
 fn work_item_stale_error() -> BackendError {
     BackendError::new(
         IMPORT_V2_WORK_ITEM_STALE,
@@ -6548,6 +6655,33 @@ fn is_batch_claimable(item: &ImportItem) -> bool {
             | ImportItemStatus::Paused
             | ImportItemStatus::PreviewReady
     )
+}
+
+fn validate_batch_claims(
+    session: &ImportSession,
+    item_ids: &[String],
+) -> Result<HashMap<String, usize>, BackendError> {
+    let index = session
+        .items
+        .iter()
+        .enumerate()
+        .map(|(position, item)| (item.item_id.clone(), position))
+        .collect::<HashMap<_, _>>();
+    let mut unique = HashSet::with_capacity(item_ids.len());
+    for item_id in item_ids {
+        if !unique.insert(item_id.as_str()) {
+            return Err(task_error("Import item ids must be unique."));
+        }
+        let Some(position) = index.get(item_id) else {
+            return Err(item_not_found());
+        };
+        if !is_batch_claimable(&session.items[*position]) {
+            return Err(task_error(
+                "Import item is already claimed by another operation.",
+            ));
+        }
+    }
+    Ok(index)
 }
 
 fn item_staging_relative_path(
@@ -6861,14 +6995,15 @@ mod tests {
     #[test]
     fn a_panicked_mutation_does_not_disable_later_imports() {
         let service = ImportV2Service::default();
+        let (context, root) = test_context("mutation-lock-panic-recovery");
+        let project_locks = service.project_locks(&context).unwrap();
         let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = service.mutation_lock.lock().unwrap();
+            let _guard = project_locks.project().lock().unwrap();
             panic!("simulated mutation panic");
         }));
         assert!(poisoned.is_err());
-        assert!(service.mutation_lock.is_poisoned());
+        assert!(project_locks.project().is_poisoned());
 
-        let (context, root) = test_context("mutation-lock-panic-recovery");
         let session = service
             .create_session(
                 &context,
@@ -7996,7 +8131,7 @@ mod tests {
             .unwrap();
         let reservations = fixture
             .service
-            .target_reservations_for_session(&canonical)
+            .target_reservations_for_session(&fixture.context, &canonical)
             .unwrap();
         let worker_revision = Cell::new(snapshot.expected_item_revision);
 
@@ -8031,11 +8166,11 @@ mod tests {
 
         let first = fixture
             .service
-            .target_reservations_for_session(&session)
+            .target_reservations_for_session(&fixture.context, &session)
             .unwrap();
         let second = fixture
             .service
-            .target_reservations_for_session(&session)
+            .target_reservations_for_session(&fixture.context, &session)
             .unwrap();
 
         assert!(Arc::ptr_eq(&first, &second));

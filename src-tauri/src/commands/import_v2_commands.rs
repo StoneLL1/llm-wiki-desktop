@@ -885,7 +885,7 @@ pub(crate) fn start_import_items_for_state(
         .collect::<HashMap<_, _>>();
     let target_reservations = state
         .import_v2_service
-        .target_reservations_for_session(&session)?;
+        .target_reservations_for_session(context, &session)?;
     for (item_id, task) in prepared {
         let snapshot = snapshots
             .remove(&item_id)

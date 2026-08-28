@@ -92,7 +92,8 @@ impl MigrationService {
         cancellation: &CancellationToken,
     ) -> Result<MigrationApplyResult, BackendError> {
         plan.validate()?;
-        let _guard = core.acquire_migration_lock()?;
+        let project_locks = core.project_locks(context)?;
+        let _guard = core.lock_project(&project_locks);
         core.preflight_migration_locked(context)?;
 
         if cancellation.is_cancelled() {
