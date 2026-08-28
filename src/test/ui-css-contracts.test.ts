@@ -173,7 +173,7 @@ describe("responsive UI CSS contracts", () => {
     expect(css).toContain(".import-v2-queue__paging");
     expect(css).toMatch(/\.import-v2-methods\s*\{[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/s);
     expect(css).toMatch(/@media \(max-width: 820px\)[\s\S]*\.import-v2-methods\s*\{[^}]*grid-template-columns:\s*1fr/s);
-    expect(css).toMatch(/\.import-v2-queue__list\s*\{[^}]*overflow:\s*hidden/s);
+    expect(css).toMatch(/\.import-v2-queue__list\s*\{[^}]*overflow-y:\s*auto/s);
   });
 
   it("defines launch metadata and generated project path styles", () => {

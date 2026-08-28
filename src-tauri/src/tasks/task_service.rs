@@ -35,7 +35,7 @@ use crate::utils::path_safety::{
 use crate::utils::safe_project_dir::remove_project_file;
 
 const PERSISTED_TASK_SCHEMA_VERSION: u32 = 2;
-const WORKFLOW_PROGRESS_PERSISTENCE_WINDOW: Duration = Duration::from_millis(250);
+const TASK_PROGRESS_PERSISTENCE_WINDOW: Duration = Duration::from_millis(500);
 
 #[derive(Default)]
 struct WorkflowPersistenceLane {
@@ -1522,7 +1522,7 @@ impl TaskService {
             .read()
             .expect("lock poisoned")
             .get(id)
-            .is_some_and(|entry| entry.workflow.is_some())
+            .is_some()
             .then(|| self.workflow_persistence_lane(id))
     }
 
@@ -1614,7 +1614,7 @@ impl TaskService {
                 persistence_dir.is_some()
                     && lane.last_observational_write_ms.is_none_or(|last| {
                         now_ms.saturating_sub(last)
-                            >= u64::try_from(WORKFLOW_PROGRESS_PERSISTENCE_WINDOW.as_millis())
+                            >= u64::try_from(TASK_PROGRESS_PERSISTENCE_WINDOW.as_millis())
                                 .unwrap_or(u64::MAX)
                     })
             }
@@ -1658,7 +1658,7 @@ impl TaskService {
                         lane.trailing_flush_generation =
                             lane.trailing_flush_generation.saturating_add(1);
                         trailing_flush = Some((
-                            WORKFLOW_PROGRESS_PERSISTENCE_WINDOW,
+                            TASK_PROGRESS_PERSISTENCE_WINDOW,
                             lane.trailing_flush_generation,
                         ));
                     }
@@ -1684,8 +1684,8 @@ impl TaskService {
             lane.pending_observational_revision = Some(revision);
             if !lane.trailing_flush_scheduled {
                 lane.trailing_flush_scheduled = true;
-                let window_ms = u64::try_from(WORKFLOW_PROGRESS_PERSISTENCE_WINDOW.as_millis())
-                    .unwrap_or(u64::MAX);
+                let window_ms =
+                    u64::try_from(TASK_PROGRESS_PERSISTENCE_WINDOW.as_millis()).unwrap_or(u64::MAX);
                 let elapsed_ms = lane
                     .last_observational_write_ms
                     .map(|last| now_ms.saturating_sub(last))
@@ -2593,6 +2593,8 @@ impl TaskService {
         id: &str,
         new_status: TaskStatus,
     ) -> Result<BackendTask, String> {
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
         let mut tasks = self.tasks.write().expect("lock poisoned");
         let entry = tasks
             .get_mut(id)
@@ -2600,6 +2602,7 @@ impl TaskService {
 
         validate_transition(&entry.task.status, &new_status)?;
 
+        let previous = entry.task.clone();
         entry.task.status = new_status.clone();
         entry.task.updated_at = Utc::now().to_rfc3339();
 
@@ -2628,9 +2631,13 @@ impl TaskService {
         };
 
         drop(tasks);
-        self.emit(event_type, pid.clone(), Some(tid.clone()), task.clone());
-
-        self.persist_current_task(&tid)?;
+        if let Err(error) = self.persist_current_task_with_lane(&tid, Some(&mut lane)) {
+            if let Some(entry) = self.tasks.write().expect("lock poisoned").get_mut(&tid) {
+                entry.task = previous;
+            }
+            return Err(error);
+        }
+        self.emit(event_type, pid, Some(tid), task.clone());
 
         Ok(task)
     }
@@ -2642,10 +2649,34 @@ impl TaskService {
         total: Option<u64>,
         label: Option<String>,
     ) -> Result<BackendTask, String> {
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
+        let project_root = self
+            .task_roots
+            .read()
+            .expect("lock poisoned")
+            .get(id)
+            .cloned();
+        let persistence_dir = self
+            .task_persistence_dirs
+            .read()
+            .expect("lock poisoned")
+            .get(id)
+            .cloned();
         let mut tasks = self.tasks.write().expect("lock poisoned");
         let entry = tasks
             .get_mut(id)
             .ok_or_else(|| format!("Task not found: {}", id))?;
+
+        if matches!(
+            entry.task.status,
+            TaskStatus::Succeeded
+                | TaskStatus::Failed
+                | TaskStatus::Cancelled
+                | TaskStatus::Interrupted
+        ) {
+            return Ok(entry.task.clone());
+        }
 
         entry.task.progress = Some(TaskProgress {
             current,
@@ -2657,11 +2688,98 @@ impl TaskService {
         let task = entry.task.clone();
         let pid = task.project_id.clone();
         let tid = task.id.clone();
+        lane.next_revision = lane.next_revision.saturating_add(1);
+        let revision = lane.next_revision;
 
         drop(tasks);
+        let now_ms = self.workflow_persistence_clock.now_ms();
+        let should_persist = persistence_dir.is_some()
+            && lane.last_observational_write_ms.is_none_or(|last| {
+                now_ms.saturating_sub(last)
+                    >= u64::try_from(TASK_PROGRESS_PERSISTENCE_WINDOW.as_millis())
+                        .unwrap_or(u64::MAX)
+            });
+        let mut trailing_flush = None;
+        if should_persist {
+            let persisted = self
+                .tasks
+                .read()
+                .expect("lock poisoned")
+                .get(id)
+                .map(|entry| PersistedTaskEntry {
+                    schema_version: PERSISTED_TASK_SCHEMA_VERSION,
+                    task: entry.task.clone(),
+                    log_lines: entry.log_lines.clone(),
+                    activities: entry.activities.clone(),
+                    workflow: entry.workflow.clone(),
+                })
+                .ok_or_else(|| format!("Task disappeared during persistence: {id}"))?;
+            let project_root = project_root
+                .as_deref()
+                .ok_or_else(|| format!("Persistent task has no project root: {id}"))?;
+            let tasks_dir = persistence_dir
+                .as_deref()
+                .expect("persistence was required only with a task-state root");
+            match self.write_persisted_task_snapshot(project_root, tasks_dir, id, &persisted) {
+                Ok(path) => {
+                    lane.persisted_revision = revision;
+                    lane.last_observational_write_ms = Some(now_ms);
+                    lane.pending_observational_revision = None;
+                    lane.trailing_flush_scheduled = false;
+                    lane.trailing_flush_generation =
+                        lane.trailing_flush_generation.saturating_add(1);
+                    lane.pending_error = None;
+                    if let Some(entry) = self.tasks.write().expect("lock poisoned").get_mut(id) {
+                        entry.persisted_path = Some(path);
+                    }
+                }
+                Err(error) => {
+                    // Progress remains a live observation. A later progress
+                    // flush or any status/result/log barrier retries the
+                    // newest complete task snapshot before it is published.
+                    lane.pending_error = Some(error);
+                    lane.pending_observational_revision = Some(revision);
+                    if !lane.trailing_flush_scheduled {
+                        lane.trailing_flush_scheduled = true;
+                        lane.trailing_flush_generation =
+                            lane.trailing_flush_generation.saturating_add(1);
+                        trailing_flush = Some((
+                            TASK_PROGRESS_PERSISTENCE_WINDOW,
+                            lane.trailing_flush_generation,
+                        ));
+                    }
+                }
+            }
+        } else if persistence_dir.is_none() {
+            lane.persisted_revision = revision;
+            lane.pending_observational_revision = None;
+            lane.trailing_flush_scheduled = false;
+            lane.trailing_flush_generation = lane.trailing_flush_generation.saturating_add(1);
+            lane.pending_error = None;
+        } else {
+            lane.pending_observational_revision = Some(revision);
+            if !lane.trailing_flush_scheduled {
+                lane.trailing_flush_scheduled = true;
+                let window_ms =
+                    u64::try_from(TASK_PROGRESS_PERSISTENCE_WINDOW.as_millis()).unwrap_or(u64::MAX);
+                let elapsed_ms = lane
+                    .last_observational_write_ms
+                    .map(|last| now_ms.saturating_sub(last))
+                    .unwrap_or_default();
+                lane.trailing_flush_generation = lane.trailing_flush_generation.saturating_add(1);
+                trailing_flush = Some((
+                    Duration::from_millis(window_ms.saturating_sub(elapsed_ms)),
+                    lane.trailing_flush_generation,
+                ));
+            }
+        }
+
         use crate::models::task::BackendEventType::TaskUpdated;
         self.emit(TaskUpdated, pid, Some(tid), task.clone());
-        self.persist_current_task(id)?;
+        drop(lane);
+        if let Some((delay, generation)) = trailing_flush {
+            self.schedule_workflow_progress_flush(id.to_string(), delay, generation);
+        }
 
         Ok(task)
     }
@@ -2821,6 +2939,8 @@ impl TaskService {
         &self,
         id: &str,
     ) -> Result<(BackendTask, TaskStatus), String> {
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
         let mut tasks = self.tasks.write().expect("lock poisoned");
         let entry = tasks
             .get_mut(id)
@@ -2856,7 +2976,7 @@ impl TaskService {
         let pid = task.project_id.clone();
         let tid = task.id.clone();
         drop(tasks);
-        self.persist_current_task(id)?;
+        self.persist_current_task_with_lane(id, Some(&mut lane))?;
         let event_type = if next_status == TaskStatus::Cancelled {
             crate::models::task::BackendEventType::TaskCancelled
         } else {
@@ -2892,23 +3012,31 @@ impl TaskService {
     }
 
     pub fn set_result(&self, id: &str, result: TaskResult) -> Result<BackendTask, String> {
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
         let mut tasks = self.tasks.write().expect("lock poisoned");
         let entry = tasks
             .get_mut(id)
             .ok_or_else(|| format!("Task not found: {}", id))?;
+        let previous = entry.task.clone();
         entry.task.result = Some(result);
         entry.task.updated_at = Utc::now().to_rfc3339();
         let task = entry.task.clone();
         let pid = task.project_id.clone();
         let tid = task.id.clone();
         drop(tasks);
+        if let Err(error) = self.persist_current_task_with_lane(id, Some(&mut lane)) {
+            if let Some(entry) = self.tasks.write().expect("lock poisoned").get_mut(id) {
+                entry.task = previous;
+            }
+            return Err(error);
+        }
         self.emit(
             crate::models::task::BackendEventType::TaskUpdated,
             pid,
             Some(tid),
             task.clone(),
         );
-        self.persist_current_task(id)?;
         Ok(task)
     }
 
@@ -2921,6 +3049,8 @@ impl TaskService {
         id: &str,
         result: TaskResult,
     ) -> Result<BackendTask, String> {
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
         let mut tasks = self.tasks.write().expect("lock poisoned");
         let entry = tasks
             .get_mut(id)
@@ -2938,13 +3068,11 @@ impl TaskService {
         let pid = task.project_id.clone();
         let tid = task.id.clone();
         drop(tasks);
-        if let Err(error) = self.persist_current_task(id) {
+        if let Err(error) = self.persist_current_task_with_lane(id, Some(&mut lane)) {
             let mut tasks = self.tasks.write().expect("lock poisoned");
             if let Some(entry) = tasks.get_mut(id) {
                 entry.task = previous;
             }
-            drop(tasks);
-            let _ = self.persist_current_task(id);
             return Err(error);
         }
         self.emit(
@@ -2965,6 +3093,8 @@ impl TaskService {
         id: &str,
         result: TaskResult,
     ) -> Result<BackendTask, String> {
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
         let mut tasks = self.tasks.write().expect("lock poisoned");
         let entry = tasks
             .get_mut(id)
@@ -2978,13 +3108,11 @@ impl TaskService {
         entry.task.updated_at = Utc::now().to_rfc3339();
         let task = entry.task.clone();
         drop(tasks);
-        if let Err(error) = self.persist_current_task(id) {
+        if let Err(error) = self.persist_current_task_with_lane(id, Some(&mut lane)) {
             let mut tasks = self.tasks.write().expect("lock poisoned");
             if let Some(entry) = tasks.get_mut(id) {
                 entry.task = previous;
             }
-            drop(tasks);
-            let _ = self.persist_current_task(id);
             return Err(error);
         }
         Ok(task)
@@ -2993,6 +3121,8 @@ impl TaskService {
     /// Correct a task that crashed after its sealed result and successful
     /// Import attempt were durable but before the terminal status was written.
     pub(crate) fn recover_sealed_agent_completion(&self, id: &str) -> Result<BackendTask, String> {
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
         let mut tasks = self.tasks.write().expect("lock poisoned");
         let entry = tasks
             .get_mut(id)
@@ -3015,13 +3145,11 @@ impl TaskService {
         let pid = task.project_id.clone();
         let tid = task.id.clone();
         drop(tasks);
-        if let Err(error) = self.persist_current_task(id) {
+        if let Err(error) = self.persist_current_task_with_lane(id, Some(&mut lane)) {
             let mut tasks = self.tasks.write().expect("lock poisoned");
             if let Some(entry) = tasks.get_mut(id) {
                 entry.task = previous;
             }
-            drop(tasks);
-            let _ = self.persist_current_task(id);
             return Err(error);
         }
         self.emit(
@@ -3053,6 +3181,8 @@ impl TaskService {
             return Err("Operation failure status and error must agree".into());
         }
 
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
         let mut tasks = self.tasks.write().expect("lock poisoned");
         let entry = tasks
             .get_mut(id)
@@ -3083,13 +3213,11 @@ impl TaskService {
         let tid = task.id.clone();
         drop(tasks);
 
-        if let Err(error) = self.persist_current_task(id) {
+        if let Err(error) = self.persist_current_task_with_lane(id, Some(&mut lane)) {
             let mut tasks = self.tasks.write().expect("lock poisoned");
             if let Some(entry) = tasks.get_mut(id) {
                 entry.task = previous;
             }
-            drop(tasks);
-            let _ = self.persist_current_task(id);
             return Err(error);
         }
         let event_type = match task.status {
@@ -3577,11 +3705,23 @@ impl TaskService {
             .get(id)
             .cloned();
         let Some(project_root) = project_root else {
+            if let Some(lane) = lane.as_mut() {
+                lane.pending_observational_revision = None;
+                lane.trailing_flush_scheduled = false;
+                lane.trailing_flush_generation = lane.trailing_flush_generation.saturating_add(1);
+                lane.pending_error = None;
+            }
             return Ok(());
         };
         let tasks = self.tasks.read().expect("lock poisoned");
         let persistence = self.task_persistence_dirs.read().expect("lock poisoned");
         let Some(dir) = persistence.get(id) else {
+            if let Some(lane) = lane.as_mut() {
+                lane.pending_observational_revision = None;
+                lane.trailing_flush_scheduled = false;
+                lane.trailing_flush_generation = lane.trailing_flush_generation.saturating_add(1);
+                lane.pending_error = None;
+            }
             return Ok(());
         };
         let entry = tasks
@@ -4198,6 +4338,224 @@ mod tests {
     }
 
     #[test]
+    fn import_progress_persistence_is_bounded_to_two_hz_without_hiding_live_events() {
+        let project = tempfile::tempdir().unwrap();
+        let tasks_root = project.path().join(".app/tasks");
+        let (service, events) = make_service();
+        let task = service
+            .create_project_import_operation_task(
+                "progress-budget".into(),
+                project.path().to_path_buf(),
+                tasks_root,
+                "Import 10k fixture".into(),
+                "session-progress".into(),
+                10_000,
+                None,
+            )
+            .unwrap();
+        service
+            .transition_status(&task.id, TaskStatus::Running)
+            .unwrap();
+        service.reset_workflow_progress_persistence_window(&task.id);
+        events.lock().unwrap().clear();
+        reset_task_costs();
+
+        for current in 1..=600 {
+            service
+                .update_progress(
+                    &task.id,
+                    current,
+                    Some(600),
+                    Some(format!("item-{current}")),
+                )
+                .unwrap();
+            service.advance_workflow_persistence_clock(Duration::from_millis(100));
+        }
+
+        let (persistence_writes, event_emissions) = task_costs();
+        assert_eq!(
+            persistence_writes, 120,
+            "60 seconds of 10 Hz Import progress must persist exactly at the 2 Hz boundary"
+        );
+        assert_eq!(event_emissions, 600);
+        assert_eq!(events.lock().unwrap().len(), 600);
+    }
+
+    #[test]
+    fn import_progress_trailing_flush_bounds_idle_crash_loss_to_one_window() {
+        let project = tempfile::tempdir().unwrap();
+        let tasks_root = project.path().join(".app/tasks");
+        let (service, _) = make_service();
+        let task = service
+            .create_project_import_operation_task(
+                "progress-trailing-flush".into(),
+                project.path().to_path_buf(),
+                tasks_root.clone(),
+                "Import trailing flush".into(),
+                "session-trailing".into(),
+                2,
+                None,
+            )
+            .unwrap();
+        service
+            .transition_status(&task.id, TaskStatus::Running)
+            .unwrap();
+        service
+            .update_progress(&task.id, 1, Some(2), Some("first".into()))
+            .unwrap();
+        service
+            .update_progress(&task.id, 2, Some(2), Some("latest".into()))
+            .unwrap();
+
+        service.wait_for_trailing_flush(&task.id, Duration::from_secs(2));
+
+        let restarted = TaskService::default();
+        restarted
+            .recover_tasks_from(project.path(), &tasks_root, None)
+            .unwrap();
+        let recovered = restarted.get_task(&task.id).unwrap();
+        assert_eq!(recovered.status, TaskStatus::Failed);
+        let progress = recovered.progress.unwrap();
+        assert_eq!(progress.current, 2);
+        assert_eq!(progress.label.as_deref(), Some("latest"));
+    }
+
+    #[test]
+    fn import_finish_barrier_is_durable_before_publication_and_rolls_back_on_failure() {
+        let project = tempfile::tempdir().unwrap();
+        let tasks_root = project.path().join(".app/tasks");
+        let (service, events) = make_service();
+        let task = service
+            .create_project_import_operation_task(
+                "terminal-barrier".into(),
+                project.path().to_path_buf(),
+                tasks_root.clone(),
+                "Import terminal barrier".into(),
+                "session-terminal".into(),
+                1,
+                None,
+            )
+            .unwrap();
+        service
+            .transition_status(&task.id, TaskStatus::Running)
+            .unwrap();
+        service.reset_workflow_progress_persistence_window(&task.id);
+        service
+            .update_progress(&task.id, 41, Some(100), Some("first".into()))
+            .unwrap();
+        service
+            .update_progress(&task.id, 42, Some(100), Some("latest".into()))
+            .unwrap();
+        events.lock().unwrap().clear();
+        service.inject_task_persistence_failures(&task.id, 1);
+
+        let result = TaskResult {
+            summary: "complete".into(),
+            affected_paths: vec!["wiki/final.md".into()],
+            reference: None,
+            pending_action: None,
+        };
+        assert!(service
+            .finish_running_operation(&task.id, result.clone(), TaskStatus::Succeeded, None,)
+            .is_err());
+        assert_eq!(
+            service.get_task(&task.id).unwrap().status,
+            TaskStatus::Running
+        );
+        assert!(service.get_task(&task.id).unwrap().result.is_none());
+        assert!(events.lock().unwrap().is_empty());
+
+        let completed = service
+            .finish_running_operation(&task.id, result, TaskStatus::Succeeded, None)
+            .unwrap();
+        assert_eq!(completed.status, TaskStatus::Succeeded);
+        assert_eq!(events.lock().unwrap().len(), 1);
+        assert_eq!(
+            events.lock().unwrap()[0].event_type,
+            BackendEventType::TaskCompleted
+        );
+
+        let json = std::fs::read_to_string(tasks_root.join(format!("{}.json", task.id))).unwrap();
+        let (persisted, _, _, _) = parse_persisted_task(&json, &task.id).unwrap();
+        assert_eq!(persisted.status, TaskStatus::Succeeded);
+        assert_eq!(persisted.progress.unwrap().current, 42);
+        assert_eq!(persisted.result.unwrap().summary, "complete");
+    }
+
+    #[test]
+    fn paused_import_progress_writer_serializes_before_the_finish_barrier() {
+        let project = tempfile::tempdir().unwrap();
+        let tasks_root = project.path().join(".app/tasks");
+        let service = TaskService::default();
+        let task = service
+            .create_project_import_operation_task(
+                "progress-finish-race".into(),
+                project.path().to_path_buf(),
+                tasks_root.clone(),
+                "Import progress finish race".into(),
+                "session-finish-race".into(),
+                1,
+                None,
+            )
+            .unwrap();
+        service
+            .transition_status(&task.id, TaskStatus::Running)
+            .unwrap();
+        service.reset_workflow_progress_persistence_window(&task.id);
+        let (writer_gate, writer_entered) = service.gate_next_persistence_write(&task.id);
+        let progress_service = service.clone();
+        let progress_id = task.id.clone();
+        let progress = std::thread::spawn(move || {
+            progress_service.update_progress(
+                &progress_id,
+                1,
+                Some(1),
+                Some("latest-progress".into()),
+            )
+        });
+        writer_entered
+            .recv_timeout(Duration::from_secs(2))
+            .expect("Import progress writer did not reach the deterministic gate");
+
+        let (finish_started_tx, finish_started_rx) = std::sync::mpsc::channel();
+        let (finish_done_tx, finish_done_rx) = std::sync::mpsc::channel();
+        let finish_service = service.clone();
+        let finish_id = task.id.clone();
+        let finish = std::thread::spawn(move || {
+            finish_started_tx.send(()).unwrap();
+            let result = finish_service.finish_running_operation(
+                &finish_id,
+                TaskResult {
+                    summary: "complete".into(),
+                    affected_paths: Vec::new(),
+                    reference: None,
+                    pending_action: None,
+                },
+                TaskStatus::Succeeded,
+                None,
+            );
+            finish_done_tx.send(()).unwrap();
+            result
+        });
+        finish_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert!(finish_done_rx.try_recv().is_err());
+
+        writer_gate.release();
+        progress.join().unwrap().unwrap();
+        let completed = finish.join().unwrap().unwrap();
+        finish_done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(completed.status, TaskStatus::Succeeded);
+
+        let json = std::fs::read_to_string(tasks_root.join(format!("{}.json", task.id))).unwrap();
+        let (persisted, _, _, _) = parse_persisted_task(&json, &task.id).unwrap();
+        assert_eq!(persisted.status, TaskStatus::Succeeded);
+        assert_eq!(persisted.progress.unwrap().current, 1);
+        assert_eq!(service.persistence_writer_metrics(&task.id), (1, 0));
+    }
+
+    #[test]
     fn final_worker_and_cancel_request_never_leave_an_operation_cancelling() {
         for _ in 0..32 {
             let service = Arc::new(TaskService::default());
@@ -4622,7 +4980,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_progress_uses_the_250ms_window_and_stage_barrier_flushes_latest_snapshot() {
+    fn workflow_progress_uses_the_500ms_window_and_stage_barrier_flushes_latest_snapshot() {
         let root = tempfile::tempdir().unwrap();
         let (service, _) = make_service();
         let run = created_workflow(
@@ -4652,8 +5010,8 @@ mod tests {
 
         let progress_writes = task_costs().0;
         assert!(
-            progress_writes <= 41,
-            "10 seconds of progress exceeded the 250ms persistence budget: {progress_writes}"
+            progress_writes <= 21,
+            "10 seconds of progress exceeded the 500ms persistence budget: {progress_writes}"
         );
         service
             .complete_workflow_stage(&run.task_id, "read")
