@@ -10,7 +10,10 @@ import { useModalDialog } from "../../hooks/useModalDialog";
 import { useNavigationStore } from "../../stores/navigationStore";
 import {
   bindProjectFactsAuthority,
+  ensureProjectFacts,
   invalidateProjectFacts,
+  projectFactsAuthorityKey,
+  projectFactsAuthorityMatches,
   projectFactsKey,
   pruneProjectFacts,
 } from "../../stores/projectFactsStore";
@@ -111,30 +114,47 @@ export function AppShell() {
       projectId: currentProject.projectId,
       rootPath: currentProject.rootPath,
     };
-    const authorityIdentityKey = authority
-      ? `${authority.canonicalIdentityKey}\0${authority.identityRevision}`
-      : null;
+    const authorityIdentityKey = authority ? projectFactsAuthorityKey(authority) : null;
     bindProjectFactsAuthority(scope, authorityIdentityKey);
     pruneProjectFacts(projectFactsKey(scope));
   }, [
     authority?.canonicalIdentityKey,
     authority?.identityRevision,
+    authority?.authorityRevision,
     currentProject.projectId,
     currentProject.rootPath,
   ]);
 
   useEffect(() => {
-    const invalidateActiveProjectFacts = () => {
-      const project = useProjectStore.getState().currentProject;
+    let lastForegroundRefreshAt = Number.NEGATIVE_INFINITY;
+    const refreshActiveProjectGit = () => {
+      if (document.visibilityState === "hidden") return;
+      const now = Date.now();
+      if (now - lastForegroundRefreshAt < 250) return;
+      const state = useProjectStore.getState();
+      const project = state.currentProject;
       if (!project.projectId || !project.rootPath) return;
+      if (state.authority?.projectId !== project.projectId) return;
+      const scope = { projectId: project.projectId, rootPath: project.rootPath };
+      const authorityIdentityKey = projectFactsAuthorityKey(state.authority);
+      if (!projectFactsAuthorityMatches(scope, authorityIdentityKey)) return;
+      lastForegroundRefreshAt = now;
       invalidateProjectFacts(
-        { projectId: project.projectId, rootPath: project.rootPath },
-        ["git", "agents", "providers"],
+        scope,
+        ["git"],
         "window_focus",
       );
+      void ensureProjectFacts(scope, ["git"]).catch(() => undefined);
     };
-    window.addEventListener("focus", invalidateActiveProjectFacts);
-    return () => window.removeEventListener("focus", invalidateActiveProjectFacts);
+    const refreshVisibleProjectGit = () => {
+      if (document.visibilityState === "visible") refreshActiveProjectGit();
+    };
+    window.addEventListener("focus", refreshActiveProjectGit);
+    document.addEventListener("visibilitychange", refreshVisibleProjectGit);
+    return () => {
+      window.removeEventListener("focus", refreshActiveProjectGit);
+      document.removeEventListener("visibilitychange", refreshVisibleProjectGit);
+    };
   }, []);
 
   useEffect(() => {

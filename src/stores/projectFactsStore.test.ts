@@ -20,7 +20,6 @@ import {
 
 const scopeA = { projectId: "project-a", rootPath: "D:/知识库/project-a" };
 const scopeB = { projectId: "project-b", rootPath: "D:/知识库/project-b" };
-const targetIt = process.env.LLM_WIKI_PROJECT_FACTS_TARGET === "1" ? it : it.skip;
 
 const installedAgent: AgentInfo = {
   kind: "claude",
@@ -85,7 +84,8 @@ describe("projectFactsStore", () => {
     });
   });
 
-  it("keeps resource failures independent and retries failed resources", async () => {
+  it("keeps failures independent and retries after deterministic backoff", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
     let gitAttempts = 0;
     invokeMock.mockImplementation((command: string) => {
       if (command === "git_status") {
@@ -111,11 +111,40 @@ describe("projectFactsStore", () => {
     expect(entryFor()?.providers.value).toEqual([ollamaProvider]);
 
     await ensureProjectFacts(scopeA, ["git"]);
+    expect(gitAttempts).toBe(1);
+
+    now.mockReturnValue(6_001);
+    await ensureProjectFacts(scopeA, ["git"]);
     expect(gitAttempts).toBe(2);
     expect(entryFor()?.git).toMatchObject({
       status: "ready",
       value: expect.objectContaining({ branch: "main" }),
     });
+    now.mockRestore();
+  });
+
+  it("lets an explicit force bypass error backoff without overlapping", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    invokeMock
+      .mockRejectedValueOnce(new Error("agent unavailable"))
+      .mockResolvedValueOnce([installedAgent]);
+
+    await ensureProjectFacts(scopeA, ["agents"]);
+    await ensureProjectFacts(scopeA, ["agents"]);
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+
+    await refreshProjectFacts(scopeA, ["agents"]);
+
+    expect(invokeMock).toHaveBeenCalledTimes(2);
+    expect(invokeMock).toHaveBeenLastCalledWith("detect_agents", {
+      request: {
+        projectId: scopeA.projectId,
+        projectRootPath: scopeA.rootPath,
+        forceRefresh: true,
+      },
+    });
+    expect(entryFor()?.agents.value).toEqual([installedAgent]);
+    now.mockRestore();
   });
 
   it("isolates pending project A results from project B", async () => {
@@ -151,11 +180,11 @@ describe("projectFactsStore", () => {
     const currentRequest = ensureProjectFacts(scopeA, ["agents"]);
 
     staleAgentsA.resolve([installedAgent]);
-    await staleRequest;
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(3));
     expect(entryFor(scopeA)?.agents.value).toBeNull();
 
     currentAgentsA.resolve([]);
-    await currentRequest;
+    await Promise.all([staleRequest, currentRequest]);
     expect(entryFor(scopeA)?.agents.value).toEqual([]);
     expect(invokeMock).toHaveBeenCalledTimes(3);
   });
@@ -168,9 +197,10 @@ describe("projectFactsStore", () => {
       .mockResolvedValueOnce([forcedAgent]);
 
     const first = ensureProjectFacts(scopeA, ["agents"]);
-    await refreshProjectFacts(scopeA, ["agents"]);
+    const refresh = refreshProjectFacts(scopeA, ["agents"]);
     ordinary.resolve([installedAgent]);
-    await first;
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(2));
+    await Promise.all([first, refresh]);
 
     expect(invokeMock).toHaveBeenNthCalledWith(2, "detect_agents", {
       request: {
@@ -182,15 +212,11 @@ describe("projectFactsStore", () => {
     expect(entryFor()?.agents.value).toEqual([forcedAgent]);
   });
 
-  it("starts a post-invalidation force request instead of joining an older force", async () => {
+  it("coalesces invalidate and force behind one active fact request", async () => {
     const beforeMutation = deferred<ProviderStatus[]>();
     const afterMutation = deferred<ProviderStatus[]>();
     let activeRequests = 0;
     let maximumActiveRequests = 0;
-    const freshProvider = {
-      ...ollamaProvider,
-      config: { ...ollamaProvider.config, model: "qwen3-fresh" },
-    };
     invokeMock
       .mockImplementationOnce(() => {
         activeRequests += 1;
@@ -210,46 +236,13 @@ describe("projectFactsStore", () => {
     const oldRefresh = refreshProjectFacts(scopeA, ["providers"]);
     invalidateProjectFacts(scopeA, ["providers"], "provider_saved");
     const newRefresh = refreshProjectFacts(scopeA, ["providers"]);
-    expect(maximumActiveRequests).toBe(2);
-    afterMutation.resolve([freshProvider]);
-    await newRefresh;
     beforeMutation.resolve([ollamaProvider]);
-    await oldRefresh;
-
-    expect(invokeMock).toHaveBeenCalledTimes(2);
-    expect(activeRequests).toBe(0);
-    expect(entryFor()?.providers.value).toEqual([freshProvider]);
-  });
-
-  targetIt("target: invalidate and force never overlap an active fact request", async () => {
-    const beforeMutation = deferred<ProviderStatus[]>();
-    const afterMutation = deferred<ProviderStatus[]>();
-    let activeRequests = 0;
-    let maximumActiveRequests = 0;
-    invokeMock
-      .mockImplementationOnce(() => {
-        activeRequests += 1;
-        maximumActiveRequests = Math.max(maximumActiveRequests, activeRequests);
-        return beforeMutation.promise.finally(() => {
-          activeRequests -= 1;
-        });
-      })
-      .mockImplementationOnce(() => {
-        activeRequests += 1;
-        maximumActiveRequests = Math.max(maximumActiveRequests, activeRequests);
-        return afterMutation.promise.finally(() => {
-          activeRequests -= 1;
-        });
-      });
-
-    const oldRefresh = refreshProjectFacts(scopeA, ["providers"]);
-    invalidateProjectFacts(scopeA, ["providers"], "provider_saved");
-    const newRefresh = refreshProjectFacts(scopeA, ["providers"]);
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(2));
     afterMutation.resolve([ollamaProvider]);
-    beforeMutation.resolve([ollamaProvider]);
     await Promise.all([oldRefresh, newRefresh]);
 
     expect(maximumActiveRequests).toBe(1);
+    expect(invokeMock).toHaveBeenCalledTimes(2);
   });
 
   it("reuses fresh values, then single-flights stale revalidation", async () => {
@@ -263,6 +256,25 @@ describe("projectFactsStore", () => {
     const second = ensureProjectFacts(scopeA, ["agents"]);
     await Promise.all([first, second]);
     expect(invokeMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the last successful value visible during stale revalidation", async () => {
+    const revalidation = deferred<AgentInfo[]>();
+    invokeMock
+      .mockResolvedValueOnce([installedAgent])
+      .mockReturnValueOnce(revalidation.promise);
+    await ensureProjectFacts(scopeA, ["agents"]);
+
+    invalidateProjectFacts(scopeA, ["agents"], "agent_saved");
+    const refresh = refreshProjectFacts(scopeA, ["agents"]);
+
+    expect(entryFor()?.agents).toMatchObject({
+      status: "stale",
+      value: [installedAgent],
+    });
+    revalidation.resolve([]);
+    await refresh;
+    expect(entryFor()?.agents).toMatchObject({ status: "ready", value: [] });
   });
 
   it("revalidates after the centralized TTL expires", async () => {
@@ -292,6 +304,27 @@ describe("projectFactsStore", () => {
     );
   });
 
+  it("retains an active pruned control until it settles, then reclaims it", async () => {
+    const oldest = deferred<AgentInfo[]>();
+    invokeMock
+      .mockReturnValueOnce(oldest.promise)
+      .mockResolvedValue([]);
+    const scopes = ["a", "b", "c", "d"].map((suffix) => ({
+      projectId: `project-${suffix}`,
+      rootPath: `D:/wiki/${suffix}`,
+    }));
+
+    const oldestRequest = ensureProjectFacts(scopes[0], ["agents"]);
+    for (const scope of scopes.slice(1)) await ensureProjectFacts(scope, ["agents"]);
+    expect(entryFor(scopes[0])).toBeDefined();
+
+    oldest.resolve([installedAgent]);
+    await oldestRequest;
+
+    expect(entryFor(scopes[0])).toBeUndefined();
+    expect(Object.keys(useProjectFactsStore.getState().entries)).toHaveLength(3);
+  });
+
   it("clears sensitive facts when an authority identity changes", async () => {
     invokeMock.mockResolvedValue([ollamaProvider]);
     bindProjectFactsAuthority(scopeA, "identity-a\0revision-1");
@@ -303,5 +336,42 @@ describe("projectFactsStore", () => {
       status: "idle",
       value: null,
     });
+  });
+
+  it("rejects a late response when only the authority revision changes", async () => {
+    const stale = deferred<ProviderStatus[]>();
+    const current = deferred<ProviderStatus[]>();
+    invokeMock
+      .mockReturnValueOnce(stale.promise)
+      .mockReturnValueOnce(current.promise);
+    bindProjectFactsAuthority(scopeA, "identity-a\0identity-revision-a\0authority-a");
+    const request = ensureProjectFacts(scopeA, ["providers"]);
+
+    bindProjectFactsAuthority(scopeA, "identity-a\0identity-revision-a\0authority-b");
+    stale.resolve([ollamaProvider]);
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(2));
+    expect(entryFor()?.providers.value).toBeNull();
+
+    current.resolve([]);
+    await request;
+    expect(entryFor()?.providers).toMatchObject({ status: "ready", value: [] });
+  });
+
+  it("does not revive a pruned active control when a stale invalidation arrives", async () => {
+    const oldest = deferred<AgentInfo[]>();
+    invokeMock.mockReturnValueOnce(oldest.promise).mockResolvedValue([]);
+    const scopes = ["a", "b", "c", "d"].map((suffix) => ({
+      projectId: `project-${suffix}`,
+      rootPath: `D:/wiki/${suffix}`,
+    }));
+    const request = ensureProjectFacts(scopes[0], ["agents"]);
+    for (const scope of scopes.slice(1)) await ensureProjectFacts(scope, ["agents"]);
+
+    invalidateProjectFacts(scopes[0], ["agents"], "late_owner_callback");
+    oldest.resolve([installedAgent]);
+    await request;
+
+    expect(entryFor(scopes[0])).toBeUndefined();
+    expect(invokeMock).toHaveBeenCalledTimes(4);
   });
 });

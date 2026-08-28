@@ -43,7 +43,7 @@ const status: ProviderStatus = {
   secretMask: null,
 };
 
-let refresh: ReturnType<typeof vi.fn<(forceRefresh?: boolean) => Promise<void>>>;
+let refresh: ReturnType<typeof vi.fn<AiCapabilitiesWorkflow["refresh"]>>;
 let capabilities: AiCapabilitiesWorkflow;
 
 beforeEach(() => {
@@ -103,7 +103,7 @@ describe("useProviderWorkflow", () => {
       },
     });
     expect(refresh).toHaveBeenCalledTimes(1);
-    expect(refresh).toHaveBeenCalledWith(true);
+    expect(refresh).toHaveBeenCalledWith(true, ["providers"]);
     expect(result.current.providers).toEqual([status]);
   });
 
@@ -139,9 +139,22 @@ describe("useProviderWorkflow", () => {
         secret: null,
       },
     });
-    expect(refresh).toHaveBeenNthCalledWith(1, true);
-    expect(refresh).toHaveBeenNthCalledWith(2, true);
+    expect(refresh).toHaveBeenNthCalledWith(1, true, ["providers"]);
+    expect(refresh).toHaveBeenNthCalledWith(2, true, ["providers"]);
     expect(result.current).not.toHaveProperty("secret");
+  });
+
+  it("does not refresh after the owning workflow unmounts during a mutation", async () => {
+    let resolve!: (value: void) => void;
+    invokeMock.mockReturnValue(new Promise<void>((next) => { resolve = next; }));
+    const mounted = renderHook(() => useProviderWorkflow(project, capabilities));
+    const pending = mounted.result.current.saveProvider(config);
+    mounted.unmount();
+
+    resolve();
+    await act(async () => pending);
+
+    expect(refresh).not.toHaveBeenCalled();
   });
 
   it("invalidates only the owning project's provider facts after a bound secret change", async () => {
@@ -163,7 +176,7 @@ describe("useProviderWorkflow", () => {
     const entries = useProjectFactsStore.getState().entries;
     expect(entries[projectFactsKey(project)]?.providers.status).toBe("stale");
     expect(entries[projectFactsKey(projectB)]?.providers.status).toBe("ready");
-    expect(refresh).toHaveBeenCalledWith(true);
+    expect(refresh).toHaveBeenCalledWith(true, ["providers"]);
   });
 
   it("does not refresh or expose a failed mutation as raw user copy", async () => {

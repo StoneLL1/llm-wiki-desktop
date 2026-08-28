@@ -15,7 +15,6 @@ import { useProjectStatus } from "./useProjectStatus";
 
 const projectId = "project-a";
 const rootPath = "D:/知识库/project-a";
-const targetIt = process.env.LLM_WIKI_PROJECT_FACTS_TARGET === "1" ? it : it.skip;
 
 beforeEach(() => {
   invokeMock.mockReset();
@@ -60,42 +59,7 @@ describe("useProjectStatus", () => {
     expect(invokeMock.mock.calls.map(([command]) => command)).toEqual(["detect_agents"]);
   });
 
-  it("freezes the red baseline of periodic requests over 60 idle seconds", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(1_000);
-    invokeMock.mockResolvedValue([]);
-    renderHook(() => useProjectStatus(projectId, rootPath, true, ["agents"]));
-    await act(async () => Promise.resolve());
-    expect(invokeMock).toHaveBeenCalledTimes(1);
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(60_100);
-    });
-
-    expect(invokeMock).toHaveBeenCalledTimes(3);
-  });
-
-  it("freezes the red baseline of Git polling over 60 idle seconds", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(1_000);
-    invokeMock.mockResolvedValue({
-      isRepository: true,
-      branch: "main",
-      head: "fixture-head",
-      hasChanges: false,
-    });
-    renderHook(() => useProjectStatus(projectId, rootPath, true, ["git"]));
-    await act(async () => Promise.resolve());
-    expect(invokeMock).toHaveBeenCalledTimes(1);
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(60_100);
-    });
-
-    expect(invokeMock).toHaveBeenCalledTimes(13);
-  });
-
-  targetIt("target: does not poll Git after 60 idle seconds", async () => {
+  it("does not poll Git after 60 idle seconds", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_000);
     invokeMock.mockResolvedValue({

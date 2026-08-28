@@ -2,10 +2,11 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 
 import {
   ensureProjectFacts,
-  nextProjectFactsExpiryAt,
+  projectFactsAuthorityKey,
   projectFactsKey,
   refreshProjectFacts,
   useProjectFactsStore,
+  type ProjectFactKind,
 } from "../stores/projectFactsStore";
 import { useProjectStore } from "../stores/projectStore";
 import type { AgentInfo } from "../types/agent";
@@ -16,7 +17,10 @@ export interface AiCapabilitiesWorkflow {
   agents: AgentInfo[];
   providers: ProviderStatus[];
   refreshing: boolean;
-  refresh: (forceRefresh?: boolean) => Promise<void>;
+  refresh: (
+    forceRefresh?: boolean,
+    kinds?: readonly ProjectFactKind[],
+  ) => Promise<void>;
 }
 
 const EMPTY_AGENTS: AgentInfo[] = [];
@@ -53,7 +57,7 @@ export function useAiCapabilities(
     state.currentProject.projectId === projectId
       && state.currentProject.rootPath === rootPath
       && state.authority?.projectId === projectId
-      ? `${state.authority.canonicalIdentityKey}\0${state.authority.identityRevision}`
+      ? projectFactsAuthorityKey(state.authority)
       : null
   );
   const storedEntry = useProjectFactsStore((state) => state.entries[projectKey] ?? null);
@@ -66,16 +70,18 @@ export function useAiCapabilities(
   const visibleRef = useRef(refreshWhenVisible);
   const agents = entry?.agents.value ?? EMPTY_AGENTS;
   const providers = entry?.providers.value ?? EMPTY_PROVIDERS;
-  const expiryAt = nextProjectFactsExpiryAt(entry, CAPABILITY_FACTS);
   const refreshing = entry?.agents.status === "loading"
     || entry?.agents.status === "stale"
     || entry?.providers.status === "loading"
     || entry?.providers.status === "stale";
 
-  const refresh = useCallback((forceRefresh = false) => {
+  const refresh = useCallback((
+    forceRefresh = false,
+    kinds: readonly ProjectFactKind[] = CAPABILITY_FACTS,
+  ) => {
     return forceRefresh
-      ? refreshProjectFacts(scope, CAPABILITY_FACTS)
-      : ensureProjectFacts(scope, CAPABILITY_FACTS);
+      ? refreshProjectFacts(scope, kinds)
+      : ensureProjectFacts(scope, kinds);
   }, [scope]);
 
   useEffect(() => {
@@ -92,15 +98,6 @@ export function useAiCapabilities(
     ) return;
     void ensureProjectFacts(scope, CAPABILITY_FACTS).catch(() => undefined);
   }, [entry?.agents.status, entry?.providers.status, scope]);
-
-  useEffect(() => {
-    if (expiryAt === null) return;
-    const delay = Math.max(1, expiryAt - Date.now() + 1);
-    const timeout = window.setTimeout(() => {
-      void ensureProjectFacts(scope, CAPABILITY_FACTS).catch(() => undefined);
-    }, delay);
-    return () => window.clearTimeout(timeout);
-  }, [expiryAt, scope]);
 
   useEffect(() => {
     const wasVisible = visibleRef.current;

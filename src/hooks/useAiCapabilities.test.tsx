@@ -26,7 +26,6 @@ const projectB: ProjectSummary = {
   name: "Project B",
   rootPath: "D:/知识库/project-b",
 };
-const targetIt = process.env.LLM_WIKI_PROJECT_FACTS_TARGET === "1" ? it : it.skip;
 
 const installedAgent: AgentInfo = {
   kind: "claude",
@@ -80,27 +79,7 @@ afterEach(() => {
 });
 
 describe("useAiCapabilities", () => {
-  it("freezes the red baseline of Agent and Provider polling over 60 idle seconds", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(1_000);
-    invokeMock.mockResolvedValue([]);
-
-    renderHook(() => useAiCapabilities(projectA, false));
-    await act(async () => Promise.resolve());
-    expect(invokeMock.mock.calls.map(([command]) => command)).toEqual([
-      "detect_agents",
-      "list_llm_providers",
-    ]);
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(60_100);
-    });
-
-    expect(invokeMock.mock.calls.filter(([command]) => command === "detect_agents")).toHaveLength(3);
-    expect(invokeMock.mock.calls.filter(([command]) => command === "list_llm_providers")).toHaveLength(3);
-  });
-
-  targetIt("target: does not poll Agent or Provider after 60 idle seconds", async () => {
+  it("does not poll Agent or Provider after 60 idle seconds", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_000);
     invokeMock.mockResolvedValue([]);
@@ -252,13 +231,13 @@ describe("useAiCapabilities", () => {
       .mockResolvedValueOnce([provider("ollama", true, false)]);
     const { result } = renderHook(() => useAiCapabilities(projectA, false));
 
-    await act(async () => result.current.refresh(true));
-    await waitFor(() => expect(result.current.providers).toEqual([provider("ollama", true, false)]));
+    const refresh = result.current.refresh(true);
     act(() => {
       firstAgents.resolve([installedAgent]);
       firstProviders.resolve([]);
     });
-    await act(async () => Promise.all([firstAgents.promise, firstProviders.promise]));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(4));
+    await act(async () => refresh);
 
     expect(result.current.agents).toEqual([]);
     expect(result.current.providers).toEqual([provider("ollama", true, false)]);
