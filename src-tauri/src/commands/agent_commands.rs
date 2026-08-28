@@ -55,7 +55,6 @@ pub fn set_default_agent(
             let config = state
                 .settings_service
                 .save_agent_default(context, request.agent)?;
-            state.agent_service.invalidate_workflow_route_cache();
             Ok(config)
         },
     )

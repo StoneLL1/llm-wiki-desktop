@@ -8,7 +8,7 @@ use crate::models::layout::{
     inspect_native_layout, resolve_layout, NativeLayoutState, ProjectLayoutConfidence,
 };
 use crate::models::paths::ProjectContext;
-use crate::models::project::{ProjectFilesystemAccess, ProjectTrustKind};
+use crate::models::project::{ProjectFilesystemAccess, ProjectHealth, ProjectTrustKind};
 use crate::models::workflow::{
     WorkflowFilesystemAccess, WorkflowGitState, WorkflowKind, WorkflowPersistenceMode,
     WorkflowProjectTrust,
@@ -236,6 +236,18 @@ pub struct ResolvedProjectAuthority {
     pub canonical_identity_key: Option<String>,
     pub identity_revision: Option<String>,
     pub authority_revision: String,
+}
+
+struct ResolvedExternalAiAuthority {
+    authority: ResolvedProjectAuthority,
+    health: ProjectHealth,
+    trusted: bool,
+}
+
+impl ResolvedExternalAiAuthority {
+    fn allows_external_ai(&self) -> bool {
+        self.trusted && self.health == ProjectHealth::Healthy
+    }
 }
 
 #[derive(Default)]
@@ -661,23 +673,20 @@ impl AppState {
     /// current trusted authority after layout, identity, and health are
     /// re-evaluated under the same transition lock used by Workflows.
     pub fn require_external_ai_access(&self, context: &ProjectContext) -> Result<(), BackendError> {
-        self.with_workflow_access(context, |access| {
-            let health = self
-                .project_assessment_service
-                .inspect_current(context.root.to_string_lossy().as_ref())?
-                .health;
-            if access.trust == WorkflowProjectTrust::Trusted
-                && health == crate::models::project::ProjectHealth::Healthy
-            {
-                return Ok(());
-            }
-            Err(BackendError::new(
-                "PROJECT_EXTERNAL_AI_REQUIRES_TRUST",
-                "Trust this knowledge base before sending its content to an external AI or Agent.",
-                true,
-                true,
-            ))
-        })
+        let transition_lane = self.project_trust_transition.lane(&context.root)?;
+        let _transition = transition_lane
+            .lock()
+            .map_err(|_| trust_transition_locked())?;
+        let authority = self.resolve_external_ai_authority_locked(context)?;
+        if authority.allows_external_ai() {
+            return Ok(());
+        }
+        Err(BackendError::new(
+            "PROJECT_EXTERNAL_AI_REQUIRES_TRUST",
+            "Trust this knowledge base before sending its content to an external AI or Agent.",
+            true,
+            true,
+        ))
     }
 
     /// Issues an epoch-bound permit immediately before a workflow starts an
@@ -1188,42 +1197,9 @@ impl AppState {
         &self,
         context: &ProjectContext,
     ) -> Result<crate::services::WorkflowAccessSnapshot, BackendError> {
-        let mut authority = self
-            .project_registry
-            .resolve_authority(&context.project_id, &context.root)?;
-        if authority.trust == ProjectTrustAuthority::TrustedCompatible {
-            let durable_trust_is_current = matches!(
-                self.project_service
-                    .restore_project_trust(&authority.context.root),
-                Ok(Some(ProjectTrustKind::Compatible))
-            );
-            if !durable_trust_is_current {
-                self.project_registry
-                    .revoke_trust(&context.project_id, &context.root)?;
-                self.task_service
-                    .rebind_workflows_for_root(&context.root, None)
-                    .map_err(|message| {
-                        BackendError::new("WORKFLOW_PERSISTENCE_REBIND_FAILED", message, true, true)
-                    })?;
-                authority = self
-                    .project_registry
-                    .resolve_authority(&context.project_id, &context.root)?;
-            }
-        }
-        // Recovery is readable-only until an explicit repair flow completes.
-        // Do not let a previously trusted registry record keep workflow, Git,
-        // or external-AI mutation access alive after the on-disk app state has
-        // become unhealthy.
-        let health = self
-            .project_assessment_service
-            .inspect_current(authority.context.root.to_string_lossy().as_ref())?
-            .health;
-        let trusted = authority.trust != ProjectTrustAuthority::Untrusted
-            && !matches!(
-                health,
-                crate::models::project::ProjectHealth::Recovery
-                    | crate::models::project::ProjectHealth::Repairable
-            );
+        let resolved = self.resolve_external_ai_authority_locked(context)?;
+        let authority = resolved.authority;
+        let trusted = resolved.trusted;
         let filesystem_access = self
             .project_service
             .filesystem_access(&authority.context, trusted);
@@ -1257,6 +1233,48 @@ impl AppState {
                 WorkflowGitState::Clean
             },
             authority_revision: authority.authority_revision,
+        })
+    }
+
+    fn resolve_external_ai_authority_locked(
+        &self,
+        context: &ProjectContext,
+    ) -> Result<ResolvedExternalAiAuthority, BackendError> {
+        let mut authority = self
+            .project_registry
+            .resolve_authority(&context.project_id, &context.root)?;
+        if authority.trust == ProjectTrustAuthority::TrustedCompatible {
+            let durable_trust_is_current = matches!(
+                self.project_service
+                    .restore_project_trust(&authority.context.root),
+                Ok(Some(ProjectTrustKind::Compatible))
+            );
+            if !durable_trust_is_current {
+                self.project_registry
+                    .revoke_trust(&context.project_id, &context.root)?;
+                self.task_service
+                    .rebind_workflows_for_root(&context.root, None)
+                    .map_err(|message| {
+                        BackendError::new("WORKFLOW_PERSISTENCE_REBIND_FAILED", message, true, true)
+                    })?;
+                authority = self
+                    .project_registry
+                    .resolve_authority(&context.project_id, &context.root)?;
+            }
+        }
+        // Recovery is readable-only until an explicit repair flow completes.
+        // Do not let a previously trusted registry record keep workflow, Git,
+        // or external-AI mutation access alive after the on-disk app state has
+        // become unhealthy.
+        let health = self
+            .project_assessment_service
+            .inspect_current_health(authority.context.root.to_string_lossy().as_ref())?;
+        let trusted = authority.trust != ProjectTrustAuthority::Untrusted
+            && !matches!(health, ProjectHealth::Recovery | ProjectHealth::Repairable);
+        Ok(ResolvedExternalAiAuthority {
+            authority,
+            health,
+            trusted,
         })
     }
 
@@ -1628,7 +1646,8 @@ mod project_registry_tests {
         WorkflowStageStatus, WorkflowStartOutcome,
     };
     use crate::services::{
-        workflow_stages, EnqueueWorkflow, ProjectAssessmentService, ProjectService, WorkflowRunner,
+        workflow_stages, EnqueueWorkflow, GitService, ProjectAssessmentService, ProjectService,
+        WorkflowRunner,
     };
 
     #[cfg(windows)]
@@ -2086,7 +2105,7 @@ mod project_registry_tests {
     }
 
     #[test]
-    fn another_instance_observes_durable_compatible_revocation_before_workflow_access() {
+    fn another_instance_observes_durable_compatible_revocation_before_external_ai_access() {
         let config = temp_project("cross-instance-revoke-config");
         let project = compatible_project("cross-instance-revoke");
         let first = AppState {
@@ -2117,8 +2136,12 @@ mod project_registry_tests {
         );
 
         first.revoke_project_trust("project-a", &project).unwrap();
+        let error = second
+            .require_external_ai_access(&second_context)
+            .unwrap_err();
         let access = second.resolve_workflow_access(&second_context).unwrap();
 
+        assert_eq!(error.code, "PROJECT_EXTERNAL_AI_REQUIRES_TRUST");
         assert_eq!(access.trust, WorkflowProjectTrust::Untrusted);
         assert_eq!(access.filesystem_access, WorkflowFilesystemAccess::ReadOnly);
         cleanup_paths(&[&project, &config]);
@@ -2837,6 +2860,73 @@ mod project_registry_tests {
     }
 
     #[test]
+    fn external_ai_access_assesses_health_once_without_starting_git() {
+        let (state, config) = state_with_temp_config("external-ai-minimal-config");
+        let project = strict_native_project("external-ai-minimal");
+        // An incomplete marker would make any accidental Workflow/Git access
+        // fail after starting Git, while the external-AI trust decision should
+        // depend only on current identity, trust, and project health.
+        fs::create_dir(project.join(".git")).unwrap();
+        let context = state
+            .project_registry
+            .register_trusted_native("project-a", &project)
+            .unwrap();
+        ProjectAssessmentService::reset_phase_trace_for_test();
+        GitService::reset_process_attempts_for_test();
+
+        state.require_external_ai_access(&context).unwrap();
+
+        assert_eq!(
+            ProjectAssessmentService::take_phase_trace_for_test(),
+            vec!["collision"]
+        );
+        assert_eq!(GitService::process_attempts_for_test(), 0);
+        cleanup_paths(&[&project, &config]);
+    }
+
+    #[test]
+    fn external_ai_status_access_preserves_read_only_semantics() {
+        let (state, config) = state_with_temp_config("external-ai-read-only-config");
+        let project = strict_native_project("external-ai-read-only");
+        let context = state
+            .project_registry
+            .register_trusted_native("project-a", &project)
+            .unwrap();
+        state.project_service.force_read_only_for_test(&project);
+
+        state.require_external_ai_access(&context).unwrap();
+
+        cleanup_paths(&[&project, &config]);
+    }
+
+    #[test]
+    fn external_ai_access_denies_same_path_after_directory_identity_drift() {
+        let (state, config) = state_with_temp_config("external-ai-identity-drift-config");
+        let project = strict_native_project("external-ai-identity-drift");
+        let displaced = project.with_extension("displaced");
+        let context = state
+            .project_registry
+            .register_trusted_native("project-a", &project)
+            .unwrap();
+        fs::rename(&project, &displaced).unwrap();
+        let replacement = strict_native_project("external-ai-identity-replacement");
+        fs::rename(&replacement, &project).unwrap();
+
+        let error = state.require_external_ai_access(&context).unwrap_err();
+
+        assert_eq!(error.code, "PROJECT_EXTERNAL_AI_REQUIRES_TRUST");
+        assert_eq!(
+            state
+                .project_registry
+                .resolve_authority("project-a", &project)
+                .unwrap()
+                .trust,
+            ProjectTrustAuthority::Untrusted
+        );
+        cleanup_paths(&[&project, &displaced, &config]);
+    }
+
+    #[test]
     fn recovery_state_revokes_external_ai_access_even_for_a_trusted_native_project() {
         let (state, config) = state_with_temp_config("external-ai-recovery-config");
         let project = strict_native_project("external-ai-recovery");
@@ -2847,6 +2937,22 @@ mod project_registry_tests {
         fs::write(project.join(".app/graph-cache.json"), "{ invalid").unwrap();
 
         let error = state.require_external_ai_access(&context).unwrap_err();
+        assert_eq!(error.code, "PROJECT_EXTERNAL_AI_REQUIRES_TRUST");
+        cleanup_paths(&[&project, &config]);
+    }
+
+    #[test]
+    fn repairable_state_revokes_external_ai_access_even_for_a_trusted_native_project() {
+        let (state, config) = state_with_temp_config("external-ai-repairable-config");
+        let project = strict_native_project("external-ai-repairable");
+        let context = state
+            .project_registry
+            .register_trusted_native("project-a", &project)
+            .unwrap();
+        fs::remove_dir_all(project.join("skills")).unwrap();
+
+        let error = state.require_external_ai_access(&context).unwrap_err();
+
         assert_eq!(error.code, "PROJECT_EXTERNAL_AI_REQUIRES_TRUST");
         cleanup_paths(&[&project, &config]);
     }

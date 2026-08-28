@@ -65,6 +65,10 @@ struct MutateDuringLaunchProbe {
     target: PathBuf,
 }
 
+fn attested_test_executable() -> PathBuf {
+    std::env::current_exe().expect("the workflow health test executable must be resolvable")
+}
+
 impl ProcessRunner for NoAgents {
     fn find_executable(&self, _command: &str) -> Option<PathBuf> {
         None
@@ -95,7 +99,7 @@ impl ProcessRunner for NoAgents {
 
 impl ProcessRunner for SuccessfulCodex {
     fn find_executable(&self, command: &str) -> Option<PathBuf> {
-        (command == "codex").then(|| PathBuf::from("codex"))
+        (command == "codex").then(attested_test_executable)
     }
 
     fn run_with_timeout(
@@ -132,7 +136,7 @@ impl ProcessRunner for SuccessfulCodex {
 
 impl ProcessRunner for SuccessfulClaude {
     fn find_executable(&self, command: &str) -> Option<PathBuf> {
-        (command == "claude").then(|| PathBuf::from("claude"))
+        (command == "claude").then(attested_test_executable)
     }
 
     fn run_with_timeout(
@@ -173,7 +177,7 @@ impl ProcessRunner for SuccessfulClaude {
 
 impl ProcessRunner for DriftingCodex {
     fn find_executable(&self, command: &str) -> Option<PathBuf> {
-        (command == "codex").then(|| PathBuf::from("codex"))
+        (command == "codex").then(attested_test_executable)
     }
 
     fn run_with_timeout(
@@ -262,7 +266,7 @@ impl ProcessRunner for RetargetedCodex {
 
 impl ProcessRunner for CancelDuringLaunchProbe {
     fn find_executable(&self, command: &str) -> Option<PathBuf> {
-        (command == "codex").then(|| PathBuf::from("codex"))
+        (command == "codex").then(attested_test_executable)
     }
 
     fn run_with_timeout(
@@ -300,7 +304,7 @@ impl ProcessRunner for CancelDuringLaunchProbe {
 
 impl ProcessRunner for MutateDuringLaunchProbe {
     fn find_executable(&self, command: &str) -> Option<PathBuf> {
-        (command == "codex").then(|| PathBuf::from("codex"))
+        (command == "codex").then(attested_test_executable)
     }
 
     fn run_with_timeout(

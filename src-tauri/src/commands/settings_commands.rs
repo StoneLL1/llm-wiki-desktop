@@ -42,13 +42,24 @@ pub fn save_settings(
         &request.project_id,
         &request.project_root_path,
         |_permit, context| {
+            let previous = state.settings_service.read_settings(context)?;
             let settings = state
                 .settings_service
                 .save_settings(context, &request.settings)?;
-            state.agent_service.invalidate_workflow_route_cache();
+            if agent_probe_settings_changed(&previous, &settings) {
+                state.agent_service.invalidate_workflow_route_cache();
+            }
             Ok(settings)
         },
     )
+}
+
+fn agent_probe_settings_changed(previous: &Settings, current: &Settings) -> bool {
+    let mut previous = previous.clone();
+    let mut current = current.clone();
+    previous.agent_default = None;
+    current.agent_default = None;
+    previous != current
 }
 
 #[tauri::command]
@@ -131,4 +142,29 @@ pub fn revoke_all_chat_convenience_authorizations(
     state
         .settings_service
         .revoke_all_chat_convenience_authorizations()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::agent_probe_settings_changed;
+    use crate::models::agent::AgentKind;
+    use crate::models::settings::Settings;
+
+    #[test]
+    fn default_only_settings_change_preserves_shared_agent_probe_facts() {
+        let previous = Settings::default();
+        let mut current = previous.clone();
+        current.agent_default = Some(AgentKind::Claude);
+
+        assert!(!agent_probe_settings_changed(&previous, &current));
+    }
+
+    #[test]
+    fn non_default_settings_change_invalidates_shared_agent_probe_facts() {
+        let previous = Settings::default();
+        let mut current = previous.clone();
+        current.agent_task_timeout_secs += 1;
+
+        assert!(agent_probe_settings_changed(&previous, &current));
+    }
 }
