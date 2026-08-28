@@ -53,9 +53,16 @@ export function useProjectStatus(
   const entry = storedEntry && authorityMatches
     ? storedEntry
     : null;
-  const staleSignature = requestedKinds
-    .map((kind) => `${kind}:${entry?.[kind].status ?? "idle"}`)
-    .join("|");
+  const staleKindsKey = requestedKinds
+    .filter((kind) => {
+      const status = entry?.[kind].status;
+      return status === undefined || status === "idle" || status === "stale";
+    })
+    .join(",");
+  const staleKinds = useMemo(
+    () => staleKindsKey ? staleKindsKey.split(",") as ProjectFactKind[] : [],
+    [staleKindsKey],
+  );
 
   useEffect(() => {
     if (!enabled || !projectId || !rootPath || requestedKinds.length === 0) return;
@@ -68,15 +75,12 @@ export function useProjectStatus(
       !enabled
       || !projectId
       || !rootPath
-      || !requestedKinds.some((kind) => {
-        const status = entry?.[kind].status;
-        return status === "idle" || status === "stale";
-      })
+      || staleKinds.length === 0
     ) {
       return;
     }
-    void ensureProjectFacts(scope, requestedKinds).catch(() => undefined);
-  }, [enabled, entry, requestedKinds, scope, staleSignature]);
+    void ensureProjectFacts(scope, staleKinds).catch(() => undefined);
+  }, [enabled, scope, staleKinds]);
 
   if (!enabled || !entry) return null;
   const hasKnownResult = requestedKinds.length > 0 && requestedKinds.every((kind) => {
