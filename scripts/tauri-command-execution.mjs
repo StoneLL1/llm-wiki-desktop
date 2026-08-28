@@ -97,3 +97,39 @@ export function assertInventoryComplete(result) {
   if (failures.length === 0) return;
   throw new Error(failures.map(([label, entries]) => `${label}: ${JSON.stringify(entries)}`).join("\n"));
 }
+
+export function assertProjectFactsP0Target(result) {
+  const target = result.inventory.projectFactsBatch0Target;
+  const commands = result.inventory.projectFactsP0Commands;
+  if (!target || !Array.isArray(commands)) {
+    throw new Error("Project Facts P0 target metadata is missing from the command inventory.");
+  }
+  if (result.counts.total !== target.reviewedCommandTotal) {
+    throw new Error(
+      `Project Facts reviewed command total drifted: reviewed=${target.reviewedCommandTotal} actual=${result.counts.total}`,
+    );
+  }
+
+  const byName = new Map(result.inventory.commands.map((entry) => [entry.command, entry]));
+  const signatures = new Map(result.registered.map((entry) => [entry.command, entry]));
+  for (const command of commands) {
+    const entry = byName.get(command);
+    if (!entry) throw new Error(`Project Facts P0 command is missing from inventory: ${command}`);
+    if (entry.classification === "PureMemory") {
+      throw new Error(`Project Facts P0 command was misclassified as PureMemory: ${command}`);
+    }
+    if (!signatures.has(command)) {
+      throw new Error(`Project Facts P0 command is not registered: ${command}`);
+    }
+    if (entry.currentExecution !== target.requiredExecution) {
+      throw new Error(
+        `Project Facts P0 command must execute ${target.requiredExecution}: ${command} is ${entry.currentExecution}`,
+      );
+    }
+  }
+  if (result.counts.blockingSync > target.targetBlockingSyncCeiling) {
+    throw new Error(
+      `Project Facts blocking-sync target not met: ceiling=${target.targetBlockingSyncCeiling} actual=${result.counts.blockingSync}`,
+    );
+  }
+}

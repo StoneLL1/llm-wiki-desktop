@@ -28,4 +28,12 @@ if (result.counts.blockingSync > result.inventory.legacyBlockingSyncCeiling) {
   );
 }
 
-process.stdout.write(`${JSON.stringify({ status: baseline.status, ...result.counts })}\n`);
+const projectFactsP0Sync = result.inventory.projectFactsP0Commands.filter((command) =>
+  result.inventory.commands.some((entry) => entry.command === command && entry.currentExecution === "sync")
+).length;
+process.stdout.write(`${JSON.stringify({
+  status: baseline.status,
+  projectFactsStatus: result.inventory.projectFactsBatch0Target.status,
+  projectFactsP0Sync,
+  ...result.counts,
+})}\n`);

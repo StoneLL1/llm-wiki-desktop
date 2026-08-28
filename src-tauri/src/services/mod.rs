@@ -26,7 +26,9 @@ mod workflow_service;
 pub use agent_service::{
     AgentInvocation, AgentProbeTarget, AgentService, ProcessRunner, SystemProcessRunner,
 };
-pub use blocking_work::{BlockingWorkClass, BlockingWorkClassSnapshot, BlockingWorkCoordinator};
+pub use blocking_work::{
+    BlockingWorkClass, BlockingWorkClassSnapshot, BlockingWorkCoordinator, BlockingWorkOperation,
+};
 pub use bookmark_service::BookmarkService;
 pub use chat_convenience_service::{
     audit_changed_paths, classify_chat_intent, CandidateChange, ChangedFile,

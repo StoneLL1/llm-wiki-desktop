@@ -62,6 +62,25 @@ impl BlockingWorkClass {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockingWorkOperation {
+    Unspecified,
+    ProjectFactsGitStatus,
+    ProjectFactsAgentDetection,
+    ProjectFactsProviderStatus,
+}
+
+impl BlockingWorkOperation {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::ProjectFactsGitStatus => "project_facts_git_status",
+            Self::ProjectFactsAgentDetection => "project_facts_agent_detection",
+            Self::ProjectFactsProviderStatus => "project_facts_provider_status",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockingWorkClassSnapshot {
     pub class: BlockingWorkClass,
     pub started: u64,
@@ -150,8 +169,28 @@ impl BlockingWorkCoordinator {
         R: Send + 'static,
         F: FnOnce() -> Result<R, BackendError> + Send + 'static,
     {
-        self.run_with_admission(class, self.semaphore(class), None, operation)
+        self.run_named(class, BlockingWorkOperation::Unspecified, operation)
             .await
+    }
+
+    pub async fn run_named<R, F>(
+        &self,
+        class: BlockingWorkClass,
+        operation_label: BlockingWorkOperation,
+        operation: F,
+    ) -> Result<R, BackendError>
+    where
+        R: Send + 'static,
+        F: FnOnce() -> Result<R, BackendError> + Send + 'static,
+    {
+        self.run_with_admission(
+            class,
+            operation_label,
+            self.semaphore(class),
+            None,
+            operation,
+        )
+        .await
     }
 
     pub async fn run_cancellable<R, F>(
@@ -164,8 +203,34 @@ impl BlockingWorkCoordinator {
         R: Send + 'static,
         F: FnOnce() -> Result<R, BackendError> + Send + 'static,
     {
-        self.run_with_admission(class, self.semaphore(class), Some(cancellation), operation)
-            .await
+        self.run_cancellable_named(
+            class,
+            BlockingWorkOperation::Unspecified,
+            cancellation,
+            operation,
+        )
+        .await
+    }
+
+    pub async fn run_cancellable_named<R, F>(
+        &self,
+        class: BlockingWorkClass,
+        operation_label: BlockingWorkOperation,
+        cancellation: CancellationToken,
+        operation: F,
+    ) -> Result<R, BackendError>
+    where
+        R: Send + 'static,
+        F: FnOnce() -> Result<R, BackendError> + Send + 'static,
+    {
+        self.run_with_admission(
+            class,
+            operation_label,
+            self.semaphore(class),
+            Some(cancellation),
+            operation,
+        )
+        .await
     }
 
     pub async fn run_project_git<R, F>(
@@ -178,9 +243,30 @@ impl BlockingWorkCoordinator {
         R: Send + 'static,
         F: FnOnce() -> Result<R, BackendError> + Send + 'static,
     {
+        self.run_project_git_named(
+            canonical_project_identity,
+            BlockingWorkOperation::Unspecified,
+            cancellation,
+            operation,
+        )
+        .await
+    }
+
+    pub async fn run_project_git_named<R, F>(
+        &self,
+        canonical_project_identity: String,
+        operation_label: BlockingWorkOperation,
+        cancellation: Option<CancellationToken>,
+        operation: F,
+    ) -> Result<R, BackendError>
+    where
+        R: Send + 'static,
+        F: FnOnce() -> Result<R, BackendError> + Send + 'static,
+    {
         let semaphore = self.project_git_semaphore(canonical_project_identity);
         self.run_with_admission(
             BlockingWorkClass::ProjectGit,
+            operation_label,
             semaphore,
             cancellation,
             operation,
@@ -194,6 +280,24 @@ impl BlockingWorkCoordinator {
     pub(crate) fn run_project_git_blocking<R, F>(
         &self,
         canonical_project_identity: String,
+        cancellation: Option<&CancellationToken>,
+        operation: F,
+    ) -> Result<R, BackendError>
+    where
+        F: FnOnce() -> Result<R, BackendError>,
+    {
+        self.run_project_git_blocking_named(
+            canonical_project_identity,
+            BlockingWorkOperation::Unspecified,
+            cancellation,
+            operation,
+        )
+    }
+
+    pub(crate) fn run_project_git_blocking_named<R, F>(
+        &self,
+        canonical_project_identity: String,
+        operation_label: BlockingWorkOperation,
         cancellation: Option<&CancellationToken>,
         operation: F,
     ) -> Result<R, BackendError>
@@ -229,6 +333,7 @@ impl BlockingWorkCoordinator {
         };
         write_perf_span(
             class,
+            operation_label,
             &thread,
             &thread,
             queue_wait_nanos,
@@ -284,6 +389,7 @@ impl BlockingWorkCoordinator {
     async fn run_with_admission<R, F>(
         &self,
         class: BlockingWorkClass,
+        operation_label: BlockingWorkOperation,
         semaphore: Arc<Semaphore>,
         cancellation: Option<CancellationToken>,
         operation: F,
@@ -338,6 +444,7 @@ impl BlockingWorkCoordinator {
             let run_nanos = elapsed_nanos(worker_started_at);
             write_perf_span(
                 class,
+                operation_label,
                 &caller_thread,
                 &worker_thread,
                 queue_wait_nanos,
@@ -399,6 +506,7 @@ fn blocking_work_cancelled() -> BackendError {
 
 fn write_perf_span(
     class: BlockingWorkClass,
+    operation: BlockingWorkOperation,
     caller_thread: &str,
     worker_thread: &str,
     queue_wait_nanos: u64,
@@ -411,6 +519,7 @@ fn write_perf_span(
     append_perf_span(
         Path::new(&path),
         class,
+        operation,
         caller_thread,
         worker_thread,
         queue_wait_nanos,
@@ -423,6 +532,7 @@ fn write_perf_span(
 fn append_perf_span(
     path: &Path,
     class: BlockingWorkClass,
+    operation: BlockingWorkOperation,
     caller_thread: &str,
     worker_thread: &str,
     queue_wait_nanos: u64,
@@ -437,6 +547,7 @@ fn append_perf_span(
     let error_code = error_code.map(sanitize_error_code);
     let payload = serde_json::json!({
         "class": class.as_str(),
+        "operation": operation.as_str(),
         "callerThread": caller_thread,
         "workerThread": worker_thread,
         "queueWaitNanos": queue_wait_nanos,
@@ -450,14 +561,9 @@ fn append_perf_span(
 }
 
 fn sanitize_error_code(value: &str) -> &str {
-    if !value.is_empty()
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
-    {
-        value
-    } else {
-        "UNCLASSIFIED_ERROR"
+    match value {
+        "BLOCKING_WORK_CANCELLED" | "BLOCKING_WORK_JOIN_FAILED" | "BLOCKING_WORK_PANIC" => value,
+        _ => "OTHER_ERROR",
     }
 }
 
@@ -542,7 +648,9 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::{BlockingWorkClass, BlockingWorkCoordinator, BlockingWorkLimits};
+    use super::{
+        BlockingWorkClass, BlockingWorkCoordinator, BlockingWorkLimits, BlockingWorkOperation,
+    };
     use crate::errors::BackendError;
     use crate::tasks::task_model::CancellationToken;
 
@@ -727,6 +835,7 @@ mod tests {
         super::append_perf_span(
             &trace_path,
             BlockingWorkClass::HeavyIo,
+            BlockingWorkOperation::ProjectFactsProviderStatus,
             "ThreadId(1)",
             "ThreadId(2)",
             17,
@@ -737,10 +846,52 @@ mod tests {
         let trace = fs::read_to_string(trace_path).unwrap();
         let value: serde_json::Value = serde_json::from_str(trace.trim()).unwrap();
         assert_eq!(value["class"], "heavy_io");
+        assert_eq!(value["operation"], "project_facts_provider_status");
         assert_eq!(value["callerThread"], "ThreadId(1)");
         assert_eq!(value["workerThread"], "ThreadId(2)");
-        assert_eq!(value["errorCode"], "UNCLASSIFIED_ERROR");
+        assert_eq!(value["errorCode"], "OTHER_ERROR");
+        let keys = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            [
+                "callerThread",
+                "class",
+                "errorCode",
+                "operation",
+                "outcome",
+                "queueWaitNanos",
+                "runNanos",
+                "workerThread",
+            ]
+        );
         assert!(!trace.contains("secret-source"));
         assert!(!trace.contains("private"));
+        assert_eq!(super::sanitize_error_code("SK_LIVE_ABC123"), "OTHER_ERROR");
+    }
+
+    #[test]
+    fn project_facts_operation_labels_are_closed_and_path_free() {
+        let labels = [
+            BlockingWorkOperation::ProjectFactsGitStatus.as_str(),
+            BlockingWorkOperation::ProjectFactsAgentDetection.as_str(),
+            BlockingWorkOperation::ProjectFactsProviderStatus.as_str(),
+        ];
+
+        assert_eq!(
+            labels,
+            [
+                "project_facts_git_status",
+                "project_facts_agent_detection",
+                "project_facts_provider_status",
+            ]
+        );
+        assert!(labels.iter().all(|label| !label.contains('\\')));
+        assert!(labels.iter().all(|label| !label.contains('/')));
+        assert!(labels.iter().all(|label| !label.contains("secret")));
     }
 }

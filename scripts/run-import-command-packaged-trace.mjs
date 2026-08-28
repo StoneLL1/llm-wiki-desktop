@@ -222,6 +222,7 @@ async function main() {
       "callerThread",
       "class",
       "errorCode",
+      "operation",
       "outcome",
       "queueWaitNanos",
       "runNanos",

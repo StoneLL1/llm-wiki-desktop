@@ -3,7 +3,11 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 
-import { assertInventoryComplete, inspectCommandExecution } from "./tauri-command-execution.mjs";
+import {
+  assertInventoryComplete,
+  assertProjectFactsP0Target,
+  inspectCommandExecution,
+} from "./tauri-command-execution.mjs";
 
 const repositoryRoot = path.join(import.meta.dirname, "..");
 
@@ -39,6 +43,36 @@ test("the named P0 Import commands are classified as blocking work and execute a
     assert.equal(signatures.has(command), true);
     assert.equal(entry.currentExecution, "async");
   }
+});
+
+test("Batch 0 freezes the Project Facts P0 commands as an explicit red target", async () => {
+  const result = await inspectCommandExecution(repositoryRoot);
+  const target = result.inventory.projectFactsBatch0Target;
+  assert.deepEqual(result.inventory.projectFactsP0Commands, [
+    "git_status",
+    "detect_agents",
+    "list_llm_providers",
+  ]);
+  assert.deepEqual(target, {
+    status: "red",
+    requiredExecution: "async",
+    reviewedCommandTotal: 205,
+    targetBlockingSyncCeiling: 130,
+  });
+  assert.equal(result.counts.total, target.reviewedCommandTotal);
+  assert.equal(result.counts.blockingSync, 133);
+
+  const byName = new Map(result.inventory.commands.map((entry) => [entry.command, entry]));
+  for (const command of result.inventory.projectFactsP0Commands) {
+    const entry = byName.get(command);
+    assert.ok(entry, `missing Project Facts P0 command ${command}`);
+    assert.notEqual(entry.classification, "PureMemory");
+    assert.equal(entry.currentExecution, "sync");
+  }
+  assert.throws(
+    () => assertProjectFactsP0Target(result),
+    /Project Facts P0 command must execute async/,
+  );
 });
 
 test("every registered Import command enters through an async boundary", async () => {
