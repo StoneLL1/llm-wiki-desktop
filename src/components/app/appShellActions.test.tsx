@@ -483,6 +483,55 @@ describe("AppShell first-screen agent detection", () => {
     expect(maximumActiveGit).toBe(1);
   });
 
+  it("coalesces a delayed WebView visibility/focus pair from one native restore", async () => {
+    tauriWindow.__TAURI_INTERNALS__ = {};
+    const project = {
+      ...defaultProject,
+      projectId: "proj-focus-delayed-pair",
+      rootPath: "/tmp/proj-focus-delayed-pair",
+    };
+    useProjectStore.getState().setCurrentProject(project);
+    useProjectStore.setState({
+      authority: {
+        projectId: project.projectId,
+        canonicalIdentityKey: "identity-focus-delayed-pair",
+        identityRevision: "revision-1",
+        authorityRevision: "authority-1",
+      } as never,
+    });
+    invokeMock.mockImplementation((command: string) => command === "git_status"
+      ? Promise.resolve({
+        isRepository: true,
+        branch: "main",
+        head: "focus-delayed-pair",
+        hasChanges: false,
+      })
+      : Promise.resolve([]));
+    const now = vi.spyOn(Date, "now");
+
+    render(<AppShell />);
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(1);
+    });
+
+    now.mockReturnValue(1_000);
+    fireEvent(document, new Event("visibilitychange"));
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(2);
+    });
+    now.mockReturnValue(1_300);
+    fireEvent.focus(window);
+    await act(async () => Promise.resolve());
+    expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(2);
+
+    now.mockReturnValue(1_600);
+    fireEvent.focus(window);
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(3);
+    });
+    now.mockRestore();
+  });
+
   it("reprobes mounted observers after only the authority revision changes", async () => {
     tauriWindow.__TAURI_INTERNALS__ = {};
     const project = {

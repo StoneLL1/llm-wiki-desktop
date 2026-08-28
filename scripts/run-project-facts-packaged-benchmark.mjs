@@ -93,26 +93,26 @@ class CdpClient {
     throw new Error(`No packaged WebView page was available at ${endpoint}.`);
   }
 
-  command(method, params = {}) {
+  command(method, params = {}, timeoutMs = 30_000) {
     return new Promise((resolve, reject) => {
       const id = ++this.nextId;
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`${method} timed out.`));
-      }, 30_000);
+      }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       this.socket.send(JSON.stringify({ id, method, params }));
     });
   }
 
-  async evaluate(expression) {
+  async evaluate(expression, timeoutMs = 30_000) {
     for (let attempt = 0; attempt < 5; attempt += 1) {
       try {
         const response = await this.command("Runtime.evaluate", {
           expression,
           awaitPromise: true,
           returnByValue: true,
-        });
+        }, timeoutMs);
         if (response.exceptionDetails) {
           throw new Error(response.exceptionDetails.exception?.description ?? response.exceptionDetails.text);
         }
@@ -423,7 +423,7 @@ async function sampleWebView(client, durationMs, moveWindow, processId) {
     cancelAnimationFrame(frame);
     observer.disconnect();
     return { frameGaps, longTasks, inputToPaint };
-  })()`);
+  })()`, durationMs + 30_000);
   const processSampling = sampleProcessTree(processId, durationMs);
   const movement = moveWindow
     ? waitForChild(startNativeWindowMovement(processId, durationMs), durationMs + 10_000)
@@ -719,13 +719,10 @@ async function main() {
     pendingSecretRequest = secretRequest;
     const storedProvider = await measureCommand(client, "store_provider_secret", secretRequest);
     const providersNormal = await measureCommand(client, "list_llm_providers", { ...scope, forceRefresh: true });
-    const deletedProvider = await measureCommand(client, "delete_provider_secret", secretRequest);
-    if (!deletedProvider.lastError) pendingSecretRequest = null;
-    if (storedProvider.lastError || providersNormal.lastError || deletedProvider.lastError) {
+    if (storedProvider.lastError || providersNormal.lastError) {
       throw new Error(`Temporary provider credential lifecycle failed: ${JSON.stringify({
         store: storedProvider.lastError,
         list: providersNormal.lastError,
-        delete: deletedProvider.lastError,
       })}`);
     }
     const normalHasSecret = providersNormal.lastValue?.some((provider) => provider.hasSecret) ?? false;
@@ -735,6 +732,11 @@ async function main() {
     await rm(credentialDenialMarker, { force: true });
     if (providersDenied.lastError?.code !== "SECRET_BACKEND_FAILED") {
       throw new Error(`Credential denial scenario returned ${JSON.stringify(providersDenied.lastError)}.`);
+    }
+    const deletedProvider = await measureCommand(client, "delete_provider_secret", secretRequest);
+    if (!deletedProvider.lastError) pendingSecretRequest = null;
+    if (deletedProvider.lastError) {
+      throw new Error(`Temporary provider credential cleanup failed: ${JSON.stringify(deletedProvider.lastError)}.`);
     }
     phases.push(await phaseSnapshot(client, trace, "after_explicit_commands"));
     const projectIdle = await sampleWebView(client, idleMs, false, appProcessId);
@@ -762,30 +764,38 @@ async function main() {
     })) {
       if (measurement.lastError) throw new Error(`${name} failed: ${JSON.stringify(measurement.lastError)}`);
     }
-    const noProjectFactsCommands = ["git_status", "detect_agents", "list_llm_providers"];
+    const projectFactsOperations = [
+      "project_facts_git_status",
+      "project_facts_agent_detection",
+      "project_facts_provider_status",
+    ];
     for (const phaseIndex of [1, 2]) {
-      for (const command of noProjectFactsCommands) {
-        if (phaseDelta(phases[0].ipcCounts, phases[phaseIndex].ipcCounts, command) !== 0) {
-          throw new Error(`No-project phase invoked ${command}.`);
+      for (const operation of projectFactsOperations) {
+        if (phaseDelta(phases[0].operationCounts, phases[phaseIndex].operationCounts, operation) !== 0) {
+          throw new Error(`No-project phase ran ${operation}.`);
         }
       }
     }
     const explicitPhase = phases.find((phase) => phase.label === "after_explicit_commands");
     for (const label of ["after_project_idle", "after_project_drag"]) {
       const phase = phases.find((candidate) => candidate.label === label);
-      for (const command of noProjectFactsCommands) {
-        if (phaseDelta(explicitPhase.ipcCounts, phase.ipcCounts, command) !== 0) {
-          throw new Error(`${label} invoked ${command}.`);
+      for (const operation of projectFactsOperations) {
+        if (phaseDelta(explicitPhase.operationCounts, phase.operationCounts, operation) !== 0) {
+          throw new Error(`${label} ran ${operation}.`);
         }
       }
     }
     const afterRoutes = phases.find((phase) => phase.label === "after_routes");
     const afterFocus = phases.find((phase) => phase.label === "after_focus");
-    const focusGit = phaseDelta(afterRoutes.ipcCounts, afterFocus.ipcCounts, "git_status");
-    if (focusGit < 1 || focusGit > 10) throw new Error(`Focus Git invocation count was ${focusGit}.`);
-    for (const command of ["detect_agents", "list_llm_providers"]) {
-      if (phaseDelta(afterRoutes.ipcCounts, afterFocus.ipcCounts, command) !== 0) {
-        throw new Error(`Focus unexpectedly invoked ${command}.`);
+    const focusGit = phaseDelta(
+      afterRoutes.operationCounts,
+      afterFocus.operationCounts,
+      "project_facts_git_status",
+    );
+    if (focusGit > 10) throw new Error(`Focus Git invocation count was ${focusGit}.`);
+    for (const operation of ["project_facts_agent_detection", "project_facts_provider_status"]) {
+      if (phaseDelta(afterRoutes.operationCounts, afterFocus.operationCounts, operation) !== 0) {
+        throw new Error(`Focus unexpectedly ran ${operation}.`);
       }
     }
     for (const scenario of [noProjectDrag, projectDrag]) {
