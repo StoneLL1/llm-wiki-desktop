@@ -6,6 +6,8 @@ use crate::models::llm::{LlmProviderKind, ProviderCredentialBinding};
 use crate::models::paths::ProjectContext;
 
 const SERVICE_NAME: &str = "LLM Wiki Desktop";
+#[cfg(feature = "performance-observers")]
+const SECRET_DENIAL_MARKER_ENV: &str = "LLM_WIKI_PERF_SECRET_DENIAL_MARKER";
 
 #[derive(Clone, Default)]
 pub struct SecretService {
@@ -118,6 +120,17 @@ impl SecretService {
                 .expect("secret lock poisoned")
                 .get(valid_account(account)?)
                 .cloned());
+        }
+        #[cfg(feature = "performance-observers")]
+        if std::env::var_os(SECRET_DENIAL_MARKER_ENV)
+            .is_some_and(|path| std::path::Path::new(&path).is_file())
+        {
+            return Err(BackendError::new(
+                "SECRET_BACKEND_FAILED",
+                "Credential access was denied by the packaged performance fixture.",
+                true,
+                true,
+            ));
         }
         match keyring_account(valid_account(account)?)?.get_password() {
             Ok(secret) => Ok(Some(secret)),

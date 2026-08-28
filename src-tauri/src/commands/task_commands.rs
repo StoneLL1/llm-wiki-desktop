@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 use crate::app_state::AppState;
 use crate::errors::BackendError;
@@ -236,11 +236,16 @@ fn require_task_project(state: &AppState, request: &TaskByIdRequest) -> Result<(
 /// projects recover from the backend-derived layout root; memory-only projects
 /// neither bind nor create project app state.
 #[tauri::command]
-pub fn set_active_project(
-    state: State<'_, AppState>,
+pub async fn set_active_project(
+    app: AppHandle,
     request: SetActiveProjectRequest,
 ) -> Result<SetActiveProjectResult, BackendError> {
-    set_active_project_for_state(&state, request)
+    let coordinator = app.state::<AppState>().blocking_work.clone();
+    coordinator
+        .run_project_activation(move || {
+            set_active_project_for_state(&app.state::<AppState>(), request)
+        })
+        .await
 }
 
 fn set_active_project_for_state(

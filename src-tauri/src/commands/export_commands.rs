@@ -4,6 +4,7 @@ use std::process::Command;
 use tauri::{AppHandle, Manager, State};
 
 use crate::app_state::{AppState, ProjectWriteRootKind};
+use crate::commands::runtime::run_blocking_named;
 use crate::errors::BackendError;
 use crate::models::agent::{AgentDetectionState, AgentKind};
 use crate::models::compile::CompileRoutePreference;
@@ -17,7 +18,9 @@ use crate::models::export::{
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::paths::ProjectContext;
 use crate::models::task::{BackendTask, TaskResult, TaskStatus, TaskType};
-use crate::services::{AgentService, ExportService, LlmService, WriteMode};
+use crate::services::{
+    AgentService, BlockingWorkClass, BlockingWorkOperation, ExportService, LlmService, WriteMode,
+};
 use crate::tasks::task_model::LogLevel;
 use crate::utils::private_directory::{create_private_directory, ensure_private_directory};
 
@@ -447,15 +450,25 @@ async fn run_export(
 
 /// List prior export records (newest first).
 #[tauri::command]
-pub fn list_exports(
-    state: State<'_, AppState>,
+pub async fn list_exports(
+    app: AppHandle,
     request: ListExportsRequest,
 ) -> Result<Vec<ExportRecord>, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let bookmark_ids = state.bookmark_service.export_record_ids(&context)?;
-    state
-        .export_service
-        .list_records_with_bookmarks(&context, &bookmark_ids)
+    run_blocking_named(
+        app,
+        BlockingWorkClass::MetadataIo,
+        BlockingWorkOperation::ListExports,
+        move |app| {
+            let state = app.state::<AppState>();
+            let context =
+                state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+            let bookmark_ids = state.bookmark_service.export_record_ids(&context)?;
+            state
+                .export_service
+                .list_records_with_bookmarks(&context, &bookmark_ids)
+        },
+    )
+    .await
 }
 
 #[tauri::command]

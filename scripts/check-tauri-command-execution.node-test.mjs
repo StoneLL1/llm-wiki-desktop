@@ -7,9 +7,28 @@ import {
   assertInventoryComplete,
   assertProjectFactsP0Target,
   inspectCommandExecution,
+  refreshInventorySnapshotCounts,
 } from "./tauri-command-execution.mjs";
 
 const repositoryRoot = path.join(import.meta.dirname, "..");
+
+test("inventory regeneration preserves the reviewed current-snapshot binding", () => {
+  const currentSnapshot = {
+    status: "project_facts_batch4_green",
+    measuredAt: "2026-08-29",
+    sourceCommit: "CONTAINING_COMMIT",
+    total: 1,
+    sync: 1,
+  };
+  assert.deepEqual(
+    refreshInventorySnapshotCounts(currentSnapshot, { total: 205, sync: 130 }),
+    {
+      ...currentSnapshot,
+      total: 205,
+      sync: 130,
+    },
+  );
+});
 
 test("every registered Tauri command has one explicit execution classification", async () => {
   const result = await inspectCommandExecution(repositoryRoot);
@@ -23,16 +42,18 @@ test("Batch 1 keeps the explicit execution ledger synchronized with the register
     path.join(repositoryRoot, "scripts", "check-tauri-command-execution.mjs"),
     "utf8",
   );
-  assert.deepEqual(result.counts, result.inventory.baseline.counts ?? {
-    total: result.inventory.baseline.total,
-    sync: result.inventory.baseline.sync,
-    async: result.inventory.baseline.async,
-    importTotal: result.inventory.baseline.importTotal,
-    importSync: result.inventory.baseline.importSync,
-    blockingSync: result.inventory.baseline.blockingSync,
+  assert.deepEqual(result.counts, {
+    total: result.inventory.currentSnapshot.total,
+    sync: result.inventory.currentSnapshot.sync,
+    async: result.inventory.currentSnapshot.async,
+    importTotal: result.inventory.currentSnapshot.importTotal,
+    importSync: result.inventory.currentSnapshot.importSync,
+    blockingSync: result.inventory.currentSnapshot.blockingSync,
   });
   assert.equal(result.inventory.baseline.status, "project_facts_batch1_green");
-  assert.match(gateSource, /baseline\.status !== "project_facts_batch1_green"/);
+  assert.equal(result.inventory.currentSnapshot.status, "project_facts_batch4_green");
+  assert.equal(result.inventory.currentSnapshot.sourceCommit, "CONTAINING_COMMIT");
+  assert.match(gateSource, /currentSnapshot\.status !== "project_facts_batch4_green"/);
   assert.equal(result.inventory.legacyBlockingSyncCeiling, 130);
   assert.ok(result.counts.blockingSync <= result.inventory.legacyBlockingSyncCeiling);
 });
@@ -65,7 +86,7 @@ test("Batch 1 closes the Project Facts P0 async execution target", async () => {
     targetBlockingSyncCeiling: 130,
   });
   assert.equal(result.counts.total, target.reviewedCommandTotal);
-  assert.equal(result.counts.blockingSync, 130);
+  assert.ok(result.counts.blockingSync <= target.targetBlockingSyncCeiling);
 
   const byName = new Map(result.inventory.commands.map((entry) => [entry.command, entry]));
   for (const command of result.inventory.projectFactsP0Commands) {
@@ -135,6 +156,38 @@ test("Project Facts commands use the named bounded worker lanes", async () => {
   assert.match(providerBody, /run_project_facts_provider/);
   assert.match(providerBody, /require_external_ai_access/);
   assert.match(providerBody, /status_with_secret/);
+});
+
+test("Batch 4 offloads the evidenced project-open residual commands", async () => {
+  const result = await inspectCommandExecution(repositoryRoot);
+  const byName = new Map(result.inventory.commands.map((entry) => [entry.command, entry]));
+  for (const command of ["open_project", "set_active_project", "list_exports"]) {
+    assert.equal(byName.get(command)?.currentExecution, "async");
+  }
+
+  const taskSource = await readFile(
+    path.join(repositoryRoot, "src-tauri", "src", "commands", "task_commands.rs"),
+    "utf8",
+  );
+  assert.match(taskSource, /pub async fn set_active_project[\s\S]*?run_project_activation/);
+
+  const projectSource = await readFile(
+    path.join(repositoryRoot, "src-tauri", "src", "commands", "project_commands.rs"),
+    "utf8",
+  );
+  assert.match(projectSource, /pub async fn open_project[\s\S]*?BlockingWorkClass::HeavyIo[\s\S]*?BlockingWorkOperation::OpenProject/);
+
+  const exportSource = await readFile(
+    path.join(repositoryRoot, "src-tauri", "src", "commands", "export_commands.rs"),
+    "utf8",
+  );
+  assert.match(exportSource, /pub async fn list_exports[\s\S]*?BlockingWorkClass::MetadataIo[\s\S]*?BlockingWorkOperation::ListExports/);
+  assert.deepEqual(result.inventory.projectFactsBatch4Target, {
+    status: "green",
+    residualCommands: ["open_project", "set_active_project", "list_exports"],
+    targetBlockingSyncCeiling: 127,
+  });
+  assert.equal(result.counts.blockingSync, 127);
 });
 
 test("every registered Import command enters through an async boundary", async () => {

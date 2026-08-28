@@ -31,6 +31,15 @@
     "reviewedCommandTotal": 205,
     "targetBlockingSyncCeiling": 130
   },
+  "projectFactsBatch4Target": {
+    "status": "green",
+    "residualCommands": [
+      "open_project",
+      "set_active_project",
+      "list_exports"
+    ],
+    "targetBlockingSyncCeiling": 127
+  },
   "baseline": {
     "status": "project_facts_batch1_green",
     "total": 205,
@@ -41,6 +50,17 @@
     "blockingSync": 130,
     "measuredAt": "2026-08-28",
     "sourceCommit": "bb03b3145ee342e572e1297148bb5a99b8720df2"
+  },
+  "currentSnapshot": {
+    "status": "project_facts_batch4_green",
+    "total": 205,
+    "sync": 130,
+    "async": 75,
+    "importTotal": 60,
+    "importSync": 0,
+    "blockingSync": 127,
+    "measuredAt": "2026-08-29",
+    "sourceCommit": "CONTAINING_COMMIT"
   },
   "legacyBlockingSyncCeiling": 130,
   "commands": [
@@ -342,7 +362,7 @@
       "command": "open_project",
       "module": "project_commands",
       "classification": "BlockingRead",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
     },
     {
@@ -916,7 +936,7 @@
       "command": "set_active_project",
       "module": "task_commands",
       "classification": "BlockingMutation",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
     },
     {
@@ -1448,7 +1468,7 @@
       "command": "list_exports",
       "module": "export_commands",
       "classification": "BlockingRead",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
     },
     {

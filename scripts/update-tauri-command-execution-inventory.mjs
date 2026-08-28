@@ -4,6 +4,7 @@ import path from "node:path";
 import {
   commandSignature,
   loadCommandInventory,
+  refreshInventorySnapshotCounts,
   registeredCommands,
 } from "./tauri-command-execution.mjs";
 
@@ -43,12 +44,7 @@ const counts = {
 };
 
 inventory.commands = commands;
-inventory.baseline = {
-  status: "batch1_import_green",
-  ...counts,
-  measuredAt: "2026-08-27",
-  sourceCommit: "089516a7c9c3e24ec3efd80674e66a1ef1b9e49d",
-};
+inventory.currentSnapshot = refreshInventorySnapshotCounts(inventory.currentSnapshot, counts);
 
 await writeFile(inventoryPath, `${JSON.stringify(inventory, null, 2)}\n`, "utf8");
-process.stdout.write(`${JSON.stringify(inventory.baseline)}\n`);
+process.stdout.write(`${JSON.stringify(inventory.currentSnapshot)}\n`);

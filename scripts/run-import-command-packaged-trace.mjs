@@ -221,6 +221,7 @@ async function main() {
     const allowedTraceKeys = [
       "callerThread",
       "class",
+      "dispatchNanos",
       "errorCode",
       "operation",
       "outcome",

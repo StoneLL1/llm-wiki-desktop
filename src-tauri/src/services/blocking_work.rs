@@ -70,6 +70,9 @@ pub enum BlockingWorkOperation {
     ProjectFactsGitStatus,
     ProjectFactsAgentDetection,
     ProjectFactsProviderStatus,
+    OpenProject,
+    SetActiveProject,
+    ListExports,
 }
 
 impl BlockingWorkOperation {
@@ -79,6 +82,9 @@ impl BlockingWorkOperation {
             Self::ProjectFactsGitStatus => "project_facts_git_status",
             Self::ProjectFactsAgentDetection => "project_facts_agent_detection",
             Self::ProjectFactsProviderStatus => "project_facts_provider_status",
+            Self::OpenProject => "open_project",
+            Self::SetActiveProject => "set_active_project",
+            Self::ListExports => "list_exports",
         }
     }
 }
@@ -140,6 +146,7 @@ struct BlockingWorkInner {
     metadata_io: Arc<Semaphore>,
     heavy_io: Arc<Semaphore>,
     process_probe: Arc<Semaphore>,
+    project_activation: Arc<Semaphore>,
     project_git: Mutex<HashMap<String, Weak<Semaphore>>>,
     stats: [BlockingWorkClassStats; 4],
 }
@@ -166,6 +173,7 @@ impl BlockingWorkCoordinator {
                 metadata_io: Arc::new(Semaphore::new(limits.metadata_io)),
                 heavy_io: Arc::new(Semaphore::new(limits.heavy_io)),
                 process_probe: Arc::new(Semaphore::new(limits.process_probe)),
+                project_activation: Arc::new(Semaphore::new(1)),
                 project_git: Mutex::new(HashMap::new()),
                 stats: std::array::from_fn(|_| BlockingWorkClassStats::default()),
             }),
@@ -228,6 +236,25 @@ impl BlockingWorkCoordinator {
         self.run_named(
             BlockingWorkClass::HeavyIo,
             BlockingWorkOperation::ProjectFactsProviderStatus,
+            operation,
+        )
+        .await
+    }
+
+    /// Serializes the app-global active-project binding while keeping its
+    /// filesystem and recovery work off the GUI command thread. A shared
+    /// HeavyIo permit would allow an older activation to finish after a newer
+    /// request and restore stale TaskService state.
+    pub(crate) async fn run_project_activation<R, F>(&self, operation: F) -> Result<R, BackendError>
+    where
+        R: Send + 'static,
+        F: FnOnce() -> Result<R, BackendError> + Send + 'static,
+    {
+        self.run_with_admission(
+            BlockingWorkClass::HeavyIo,
+            BlockingWorkOperation::SetActiveProject,
+            Arc::clone(&self.inner.project_activation),
+            None,
             operation,
         )
         .await
@@ -407,6 +434,7 @@ impl BlockingWorkCoordinator {
             &thread,
             &thread,
             queue_wait_nanos,
+            0,
             run_nanos,
             result.as_ref().err().map(|error| error.code.as_str()),
         );
@@ -496,7 +524,10 @@ impl BlockingWorkCoordinator {
         let caller_thread = format!("{:?}", std::thread::current().id());
         let cancellation_for_worker = cancellation.clone();
         let stats_inner = Arc::clone(&self.inner);
-        let joined = tokio::task::spawn_blocking(move || {
+        let dispatch_nanos = Arc::new(AtomicU64::new(0));
+        let dispatch_nanos_for_worker = Arc::clone(&dispatch_nanos);
+        let dispatch_started_at = Instant::now();
+        let worker = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             if cancellation_for_worker
                 .as_ref()
@@ -523,6 +554,7 @@ impl BlockingWorkCoordinator {
                         &caller_thread,
                         &worker_thread,
                         queue_wait_nanos,
+                        dispatch_nanos_for_worker.load(Ordering::Acquire),
                         run_nanos,
                         result.as_ref().err().map(|error| error.code.as_str()),
                     );
@@ -535,14 +567,16 @@ impl BlockingWorkCoordinator {
                         &caller_thread,
                         &worker_thread,
                         queue_wait_nanos,
+                        dispatch_nanos_for_worker.load(Ordering::Acquire),
                         run_nanos,
                         Some(BLOCKING_WORK_JOIN_FAILED),
                     );
                     std::panic::resume_unwind(payload)
                 }
             }
-        })
-        .await;
+        });
+        dispatch_nanos.store(elapsed_nanos(dispatch_started_at), Ordering::Release);
+        let joined = worker.await;
 
         match joined {
             Ok((Ok(value), run_nanos, false)) => {
@@ -599,6 +633,7 @@ fn write_perf_span(
     caller_thread: &str,
     worker_thread: &str,
     queue_wait_nanos: u64,
+    dispatch_nanos: u64,
     run_nanos: u64,
     error_code: Option<&str>,
 ) {
@@ -612,6 +647,7 @@ fn write_perf_span(
         caller_thread,
         worker_thread,
         queue_wait_nanos,
+        dispatch_nanos,
         run_nanos,
         error_code,
     );
@@ -625,6 +661,7 @@ fn append_perf_span(
     caller_thread: &str,
     worker_thread: &str,
     queue_wait_nanos: u64,
+    dispatch_nanos: u64,
     run_nanos: u64,
     error_code: Option<&str>,
 ) {
@@ -640,6 +677,7 @@ fn append_perf_span(
         "callerThread": caller_thread,
         "workerThread": worker_thread,
         "queueWaitNanos": queue_wait_nanos,
+        "dispatchNanos": dispatch_nanos,
         "runNanos": run_nanos,
         "outcome": if error_code.is_some() { "error" } else { "success" },
         "errorCode": error_code,
@@ -1022,6 +1060,60 @@ mod tests {
         assert_eq!(different_maximum.load(Ordering::SeqCst), 2);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn project_activation_lane_preserves_request_order_across_projects() {
+        let coordinator = BlockingWorkCoordinator::default();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let order = Arc::new(Mutex::new(Vec::new()));
+
+        let holder = {
+            let coordinator = coordinator.clone();
+            tokio::spawn(async move {
+                coordinator
+                    .run_project_activation(move || {
+                        entered_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        Ok(())
+                    })
+                    .await
+            })
+        };
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        let project_a = {
+            let coordinator = coordinator.clone();
+            let order = Arc::clone(&order);
+            tokio::spawn(async move {
+                coordinator
+                    .run_project_activation(move || {
+                        order.lock().unwrap().push("project-a");
+                        Ok(())
+                    })
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        let project_b = {
+            let coordinator = coordinator.clone();
+            let order = Arc::clone(&order);
+            tokio::spawn(async move {
+                coordinator
+                    .run_project_activation(move || {
+                        order.lock().unwrap().push("project-b");
+                        Ok(())
+                    })
+                    .await
+            })
+        };
+
+        release_tx.send(()).unwrap();
+        holder.await.unwrap().unwrap();
+        project_a.await.unwrap().unwrap();
+        project_b.await.unwrap().unwrap();
+        assert_eq!(*order.lock().unwrap(), ["project-a", "project-b"]);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn queued_cancellation_never_starts_the_operation() {
         let coordinator = BlockingWorkCoordinator::with_limits(BlockingWorkLimits {
@@ -1102,6 +1194,7 @@ mod tests {
             "ThreadId(1)",
             "ThreadId(2)",
             17,
+            19,
             23,
             Some(private_payload),
         );
@@ -1124,6 +1217,7 @@ mod tests {
             [
                 "callerThread",
                 "class",
+                "dispatchNanos",
                 "errorCode",
                 "operation",
                 "outcome",
@@ -1138,11 +1232,14 @@ mod tests {
     }
 
     #[test]
-    fn project_facts_operation_labels_are_closed_and_path_free() {
+    fn measured_operation_labels_are_closed_and_path_free() {
         let labels = [
             BlockingWorkOperation::ProjectFactsGitStatus.as_str(),
             BlockingWorkOperation::ProjectFactsAgentDetection.as_str(),
             BlockingWorkOperation::ProjectFactsProviderStatus.as_str(),
+            BlockingWorkOperation::OpenProject.as_str(),
+            BlockingWorkOperation::SetActiveProject.as_str(),
+            BlockingWorkOperation::ListExports.as_str(),
         ];
 
         assert_eq!(
@@ -1151,6 +1248,9 @@ mod tests {
                 "project_facts_git_status",
                 "project_facts_agent_detection",
                 "project_facts_provider_status",
+                "open_project",
+                "set_active_project",
+                "list_exports",
             ]
         );
         assert!(labels.iter().all(|label| !label.contains('\\')));
