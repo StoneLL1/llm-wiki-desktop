@@ -527,3 +527,98 @@ fn batch_binding_rejects_invalid_cohort_without_partially_claiming_items() {
         .unwrap();
     assert!(reopened.items.iter().all(|item| item.task_id.is_none()));
 }
+
+#[test]
+#[cfg(feature = "performance-observers")]
+fn batch_worker_preparation_builds_one_frozen_snapshot_per_item_with_near_linear_io() {
+    let mut observed = Vec::new();
+    for item_count in SCALE_FIXTURES {
+        let root = tempfile::tempdir().unwrap();
+        let context = ProjectContext::new(
+            format!("worker-scale-{item_count}"),
+            root.path().to_path_buf(),
+        );
+        let files = FileStore::default();
+        let service = ImportV2Service::default();
+        let tasks = TaskService::default();
+        let session = service
+            .create_session(&context, &files, ImportResourceMode::Balanced)
+            .unwrap();
+        let session = service
+            .add_inputs(
+                &context,
+                &files,
+                &session.session_id,
+                (0..item_count)
+                    .map(|index| synthetic_item(index).input)
+                    .collect(),
+            )
+            .unwrap();
+        let item_ids = session
+            .items
+            .iter()
+            .map(|item| item.item_id.clone())
+            .collect::<Vec<_>>();
+        let operation = service
+            .create_batch_operation_task(&context, &files, &tasks, &session.session_id, &item_ids)
+            .unwrap();
+
+        let observer = files.observe_project(&context);
+        let preparation = service
+            .prepare_batch_operation(
+                &context,
+                &files,
+                &tasks,
+                &session.session_id,
+                &operation.id,
+                &item_ids,
+                || false,
+            )
+            .unwrap();
+        let io = observer.snapshot();
+
+        assert!(preparation.replaced_task_ids.is_empty());
+        assert_eq!(preparation.snapshots.len(), item_count);
+        assert!(preparation.snapshots.iter().all(|snapshot| {
+            snapshot.expected_item_revision > 0
+                && snapshot.resource_mode == ImportResourceMode::Balanced
+        }));
+        let control_ops = io.read_ops.saturating_add(io.write_ops);
+        assert!(
+            control_ops <= (item_count as u64).saturating_mul(4).saturating_add(16),
+            "worker preparation must stay within a fixed per-item I/O budget: N={item_count}, {io:?}"
+        );
+        println!(
+            "batch6_worker_control_plane item_count={item_count} read_ops={} write_ops={} control_ops={control_ops}",
+            io.read_ops, io.write_ops
+        );
+        observed.push((item_count, control_ops));
+    }
+
+    for window in observed.windows(2) {
+        let (smaller_n, smaller_ops) = window[0];
+        let (larger_n, larger_ops) = window[1];
+        assert_eq!(larger_n, smaller_n * 10);
+        assert!(
+            larger_ops <= smaller_ops.saturating_mul(15),
+            "10x worker cohort must not approach quadratic control-plane growth: {observed:?}"
+        );
+    }
+}
+
+#[test]
+fn production_worker_job_carries_a_frozen_snapshot() {
+    let commands = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/commands/import_v2_commands.rs"
+    ))
+    .unwrap();
+    let worker_job = commands
+        .split("struct ImportWorkerJob")
+        .nth(1)
+        .unwrap()
+        .split("struct BatchOperationJob")
+        .next()
+        .unwrap();
+    assert!(worker_job.contains("snapshot: ImportWorkItemSnapshot"));
+}

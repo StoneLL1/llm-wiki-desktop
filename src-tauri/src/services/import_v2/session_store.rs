@@ -20,6 +20,21 @@ use crate::models::paths::ProjectContext;
 use crate::services::import_v2::transaction::FileTransaction;
 use crate::services::FileStore;
 
+#[cfg(feature = "performance-observers")]
+thread_local! {
+    static FULL_SESSION_LOADS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(feature = "performance-observers")]
+pub(crate) fn reset_full_session_load_observer() {
+    FULL_SESSION_LOADS.with(|loads| loads.set(0));
+}
+
+#[cfg(feature = "performance-observers")]
+pub(crate) fn observed_full_session_loads() -> u64 {
+    FULL_SESSION_LOADS.with(std::cell::Cell::get)
+}
+
 #[derive(Default)]
 pub struct SessionStore;
 
@@ -1098,6 +1113,8 @@ impl SessionStore {
         file_store: &FileStore,
         session_id: &str,
     ) -> Result<ImportSession, BackendError> {
+        #[cfg(feature = "performance-observers")]
+        FULL_SESSION_LOADS.with(|loads| loads.set(loads.get().saturating_add(1)));
         validate_id(session_id)?;
         let root = session_root(context, session_id)?;
         let summary_path = format!("{root}/session.json");
