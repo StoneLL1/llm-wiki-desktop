@@ -405,6 +405,7 @@ describe("AppShell first-screen agent detection", () => {
       }
       return Promise.resolve([]);
     });
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
     render(<AppShell />);
     await waitFor(() => {
       expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(1);
@@ -412,6 +413,7 @@ describe("AppShell first-screen agent detection", () => {
       expect(invokeMock.mock.calls.filter(([command]) => command === "list_llm_providers")).toHaveLength(1);
     });
 
+    now.mockReturnValue(31_001);
     fireEvent.focus(window);
 
     await waitFor(() => {
@@ -419,6 +421,7 @@ describe("AppShell first-screen agent detection", () => {
     });
     expect(invokeMock.mock.calls.filter(([command]) => command === "detect_agents")).toHaveLength(1);
     expect(invokeMock.mock.calls.filter(([command]) => command === "list_llm_providers")).toHaveLength(1);
+    now.mockRestore();
   });
 
   it("coalesces a visibility transition and twenty focus events into one Git request", async () => {
