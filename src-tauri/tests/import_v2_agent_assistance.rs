@@ -41,15 +41,17 @@ impl ImportAgentToolExecutor for RecordingExecutor {
 #[test]
 fn threat_corpus_denies_injected_authority_secret_echo_and_executables() {
     let root = tempfile::tempdir().unwrap();
-    let workspace = root
+    let item_staging_root = root
         .path()
-        .join(".app/import-sessions/session-a/items/item-a/staging/agent/workspace-a");
+        .join(".app/import-sessions/session-a/items/item-a/staging");
+    let workspace = item_staging_root.join("agent/workspace-a");
     std::fs::create_dir_all(workspace.join("output")).unwrap();
     let context = ImportAgentToolTaskContext {
         task_id: "task-a".into(),
         project_id: "project-a".into(),
         session_id: "session-a".into(),
         item_id: "item-a".into(),
+        item_staging_root,
         workspace_root: workspace,
         grants: vec![
             AgentToolGrant::RunDeterministicRoute,

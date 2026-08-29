@@ -77,6 +77,34 @@ pub fn add_import_url_v2(
     state: State<'_, AppState>,
     request: AddImportUrlV2Request,
 ) -> Result<ImportSession, BackendError> {
+    if crate::commands::import_v2_commands::is_temporary_preview_session(&request.session_id) {
+        let context = crate::commands::import_v2_commands::import_session_context(
+            &state,
+            &request.project_id,
+            &request.project_root_path,
+            &request.session_id,
+        )?;
+        let target = UrlPolicy.normalize_for_session(&request.url)?;
+        let target = upgrade_trusted_platform_page_to_https(target)?;
+        let reference = state.import_v2_service.store_web_target(&target)?;
+        let result = state.import_v2_service.add_temporary_preview_inputs(
+            &context,
+            &state.file_store,
+            &request.session_id,
+            vec![ImportInput {
+                kind: ImportInputKind::Url,
+                display_name: target.public.host.clone(),
+                locator: reference.clone(),
+                normalized_locator: Some(target.public.public_url),
+                source_identity: None,
+                media_save_mode: request.media_save_mode.clone(),
+            }],
+        );
+        if result.is_err() {
+            let _ = state.import_v2_service.delete_web_target(&reference);
+        }
+        return result;
+    }
     state.with_current_project_write_access(
         &request.project_id,
         &request.project_root_path,

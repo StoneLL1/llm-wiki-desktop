@@ -53,7 +53,12 @@ impl BackendTask {
     }
 
     pub(crate) fn is_import_operation(&self) -> bool {
-        self.import_operation_session_id().is_some()
+        self.task_type == TaskType::Import
+            && (self.operation.is_some()
+                || self
+                    .batch_id
+                    .as_deref()
+                    .is_some_and(|value| value.starts_with(LEGACY_IMPORT_OPERATION_PREFIX)))
     }
 
     pub(crate) fn is_import_commit(&self) -> bool {

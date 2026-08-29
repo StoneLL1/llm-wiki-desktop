@@ -71,6 +71,7 @@ pub struct ImportAgentToolTaskContext {
     pub project_id: String,
     pub session_id: String,
     pub item_id: String,
+    pub item_staging_root: PathBuf,
     pub workspace_root: PathBuf,
     pub grants: Vec<AgentToolGrant>,
     pub input_hashes: Vec<String>,
@@ -221,12 +222,34 @@ fn validate_context(context: &ImportAgentToolTaskContext) -> Result<(), BackendE
             "Agent tool identity is invalid.",
         ));
     }
-    let normalized = context.workspace_root.to_string_lossy().replace('\\', "/");
-    let expected = format!(
-        "/.app/import-sessions/{}/items/{}/staging/agent/",
-        context.session_id, context.item_id
-    );
-    if !normalized.contains(&expected) || !context.workspace_root.is_dir() {
+    let agent_root = context.item_staging_root.join("agent");
+    let staging_matches_identity = context
+        .item_staging_root
+        .file_name()
+        .is_some_and(|value| value == "staging")
+        && context
+            .item_staging_root
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|value| value == context.item_id.as_str())
+        && context
+            .item_staging_root
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .is_some_and(|value| value == "items")
+        && context
+            .item_staging_root
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .is_some_and(|value| value == context.session_id.as_str());
+    if !staging_matches_identity
+        || !context.workspace_root.starts_with(&agent_root)
+        || context.workspace_root == agent_root
+        || !context.workspace_root.is_dir()
+    {
         return Err(tool_error(
             "IMPORT_AGENT_TOOL_SCOPE_DENIED",
             "Agent tool workspace is not bound to this item.",

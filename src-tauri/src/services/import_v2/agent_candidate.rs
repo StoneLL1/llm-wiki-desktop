@@ -163,7 +163,7 @@ impl<'a> AgentCandidateService<'a> {
         let workspace = output_dir
             .parent()
             .ok_or_else(|| candidate_error("Agent workspace is invalid."))?;
-        validate_workspace_identity(workspace, session_id, item_id)?;
+        validate_workspace_identity(context, workspace, session_id, item_id)?;
 
         let bundle: AgentTaskBundle =
             read_json_limited(&workspace.join("task.json"), MAX_MANIFEST_BYTES)?;
@@ -232,10 +232,11 @@ impl<'a> AgentCandidateService<'a> {
         self.ensure_not_cancelled(task_id)?;
         let candidate_id =
             hash_bytes(format!("{task_id}:{source_hash}:{}", manifest.markdown_sha256).as_bytes());
-        let candidate_root_relative = candidate_root_path(session_id, item_id, &candidate_id)?;
+        let candidate_root_relative =
+            candidate_root_path(context, session_id, item_id, &candidate_id)?;
         let candidate_artifact_prefix = candidate_artifact_prefix(&candidate_id)?;
         let candidate_root = context.resolve_project_path(&candidate_root_relative)?;
-        let record_relative = candidate_record_path(session_id, item_id, &candidate_id)?;
+        let record_relative = candidate_record_path(context, session_id, item_id, &candidate_id)?;
         if candidate_root.exists() && !self.files.exists(context, &record_relative) {
             reject_links_between(&context.root, &candidate_root)?;
             let metadata = fs::symlink_metadata(&candidate_root).map_err(io_error)?;
@@ -302,8 +303,12 @@ impl<'a> AgentCandidateService<'a> {
             .as_ref()
             .is_some_and(|current| current != &baseline_markdown);
         let unified_diff = GitService::diff_candidate_files(context, &baseline_path, &agent_path)?;
-        let audit_path =
-            format!(".app/import-sessions/{session_id}/items/{item_id}/agent-audit/{task_id}.json");
+        let audit_file = format!("{task_id}.json");
+        let audit_path = context.layout.import_paths()?.item_child(
+            session_id,
+            item_id,
+            &["agent-audit", &audit_file],
+        )?;
         let mut audit: AgentAuditRecord =
             self.files.read_json(context, &audit_path).map_err(|_| {
                 candidate_error("Agent candidate provenance audit is missing or invalid.")
@@ -441,7 +446,7 @@ impl<'a> AgentCandidateService<'a> {
         item_id: &str,
         candidate_id: &str,
     ) -> Result<(AgentCandidate, AgentCandidateDiff), BackendError> {
-        let relative = candidate_record_path(session_id, item_id, candidate_id)?;
+        let relative = candidate_record_path(context, session_id, item_id, candidate_id)?;
         let stored: StoredAgentCandidate = self.files.read_json(context, &relative)?;
         Ok((stored.candidate, stored.diff))
     }
@@ -546,7 +551,7 @@ impl<'a> AgentCandidateService<'a> {
                 "Candidate is no longer bound to this import item task.",
             ));
         }
-        let root_relative = candidate_root_path(session_id, item_id, candidate_id)?;
+        let root_relative = candidate_root_path(context, session_id, item_id, candidate_id)?;
         let artifact_prefix = candidate_artifact_prefix(candidate_id)?;
         let root = context.resolve_project_path(&root_relative)?;
         reject_links_between(&context.root, &root)?;
@@ -692,7 +697,7 @@ impl<'a> AgentCandidateService<'a> {
             &stored.candidate.task_id,
             stored.deterministic_preview,
         )?;
-        let root_relative = candidate_root_path(session_id, item_id, candidate_id)?;
+        let root_relative = candidate_root_path(context, session_id, item_id, candidate_id)?;
         let root = context.resolve_project_path(&root_relative)?;
         reject_links_between(&context.root, &root)?;
         fs::remove_dir_all(&root).map_err(io_error)?;
@@ -938,7 +943,7 @@ impl<'a> AgentCandidateService<'a> {
         item_id: &str,
         candidate_id: &str,
     ) -> Result<StoredAgentCandidate, BackendError> {
-        let relative = candidate_record_path(session_id, item_id, candidate_id)?;
+        let relative = candidate_record_path(context, session_id, item_id, candidate_id)?;
         self.files.read_json(context, &relative)
     }
 
@@ -959,8 +964,12 @@ impl<'a> AgentCandidateService<'a> {
         item_id: &str,
         task_id: &str,
     ) -> Result<(), BackendError> {
-        let audit_path =
-            format!(".app/import-sessions/{session_id}/items/{item_id}/agent-audit/{task_id}.json");
+        let audit_file = format!("{task_id}.json");
+        let audit_path = context.layout.import_paths()?.item_child(
+            session_id,
+            item_id,
+            &["agent-audit", &audit_file],
+        )?;
         if !self.files.exists(context, &audit_path) {
             return Ok(());
         }
@@ -1025,6 +1034,7 @@ fn strip_candidate_prefix(path: &str, root: &str) -> Result<String, BackendError
 }
 
 fn candidate_record_path(
+    context: &ProjectContext,
     session_id: &str,
     item_id: &str,
     candidate_id: &str,
@@ -1038,17 +1048,20 @@ fn candidate_record_path(
             return Err(candidate_error("Candidate identity is invalid."));
         }
     }
-    Ok(format!(
-        ".app/import-sessions/{session_id}/items/{item_id}/staging/agent-candidates/{candidate_id}/candidate.json"
-    ))
+    context.layout.import_paths()?.item_staging_child(
+        session_id,
+        item_id,
+        &["agent-candidates", candidate_id, "candidate.json"],
+    )
 }
 
 fn candidate_root_path(
+    context: &ProjectContext,
     session_id: &str,
     item_id: &str,
     candidate_id: &str,
 ) -> Result<String, BackendError> {
-    let record = candidate_record_path(session_id, item_id, candidate_id)?;
+    let record = candidate_record_path(context, session_id, item_id, candidate_id)?;
     Ok(record.trim_end_matches("/candidate.json").into())
 }
 
@@ -1225,7 +1238,10 @@ fn registry_markdown_views(
     let Some(pointer) = pointer else {
         return Ok((None, None));
     };
-    let manifest_path = format!(".app/sources/{}.json", pointer.source_id);
+    let manifest_path = context
+        .layout
+        .source_paths()?
+        .manifest(&pointer.source_id)?;
     if !files.exists(context, &manifest_path) {
         return Ok((None, None));
     }
@@ -1379,13 +1395,20 @@ fn safe_project_directory(
 }
 
 fn validate_workspace_identity(
+    context: &ProjectContext,
     workspace: &Path,
     session_id: &str,
     item_id: &str,
 ) -> Result<(), BackendError> {
-    let normalized = workspace.to_string_lossy().replace('\\', "/");
-    let marker = format!("/.app/import-sessions/{session_id}/items/{item_id}/staging/agent/");
-    if !normalized.contains(&marker) {
+    let agent_root = context.resolve_project_path(
+        &context
+            .layout
+            .import_paths()?
+            .item_staging_child(session_id, item_id, &["agent"])?,
+    )?
+    .canonicalize()
+    .map_err(io_error)?;
+    if !workspace.starts_with(&agent_root) || workspace == agent_root {
         return Err(candidate_error("Workspace belongs to another item."));
     }
     Ok(())

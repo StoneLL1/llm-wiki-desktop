@@ -58,6 +58,8 @@ function overview(itemCount: number): ImportSessionOverview {
     statusCounts: { queued: itemCount, inspecting: 0, waitingCapability: 0, waitingLogin: 0, waitingAuthorization: 0, extracting: 0, validating: 0, previewReady: 0, needsMerge: 0, committing: 0, completed: 0, paused: 0, cancelled: 0, skipped: 0, failed: 0 },
     selection: { selected: 0, newSources: 0, updates: 0, warnings: 0, pending: 0, restricted: 0 },
     indexState: "ready",
+    recoveryRequired: false,
+    recoveryReasons: [],
   };
 }
 

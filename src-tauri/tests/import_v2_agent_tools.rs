@@ -31,14 +31,15 @@ impl ImportAgentToolExecutor for FakeExecutor {
 }
 
 fn context(root: &std::path::Path, grants: Vec<AgentToolGrant>) -> ImportAgentToolTaskContext {
-    let workspace =
-        root.join(".app/import-sessions/session-a/items/item-a/staging/agent/workspace-a");
+    let item_staging_root = root.join(".app/import-sessions/session-a/items/item-a/staging");
+    let workspace = item_staging_root.join("agent/workspace-a");
     std::fs::create_dir_all(workspace.join("output")).unwrap();
     ImportAgentToolTaskContext {
         task_id: "task-a".into(),
         project_id: "project-a".into(),
         session_id: "session-a".into(),
         item_id: "item-a".into(),
+        item_staging_root,
         workspace_root: workspace,
         grants,
         input_hashes: vec!["input-hash".into()],

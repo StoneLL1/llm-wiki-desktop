@@ -142,10 +142,18 @@ impl<'a> AgentAssistanceService<'a> {
 
         let task = self
             .tasks
-            .create_project_task(
+            .create_project_task_at(
                 TaskType::AgentRun,
                 context.project_id.clone(),
                 context.root.clone(),
+                context.resolve_project_path(
+                    context.layout.task_state_root.as_deref().ok_or_else(|| {
+                        assistance_error(
+                            "IMPORT_AGENT_TASK_FAILED",
+                            "Import task persistence is unavailable for this project.",
+                        )
+                    })?,
+                )?,
                 format!("Agent assistance for {}", item.input.display_name),
                 true,
             )
@@ -207,8 +215,12 @@ impl<'a> AgentAssistanceService<'a> {
     where
         F: FnOnce(&ProjectWritePermit<'_>, &ProjectContext) -> Result<(), BackendError>,
     {
-        let audit_path =
-            format!(".app/import-sessions/{session_id}/items/{item_id}/agent-audit/{task_id}.json");
+        let audit_file = format!("{task_id}.json");
+        let audit_path = context.layout.import_paths()?.item_child(
+            session_id,
+            item_id,
+            &["agent-audit", &audit_file],
+        )?;
         if self.tasks.is_cancelled(task_id) {
             let _ = self.with_current_write(state, execution, context, |_permit, current| {
                 self.imports.finish_agent_assistance_attempt_unchecked(

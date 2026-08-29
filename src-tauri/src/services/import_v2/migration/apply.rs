@@ -146,7 +146,7 @@ impl MigrationService {
 
         let index_path = context.resolve_project_path(V2_INDEX_PATH)?;
         let report_path = context.resolve_project_path(REPORT_PATH)?;
-        let mut transaction = FileTransaction::new_for_project(&context.root);
+        let mut transaction = FileTransaction::new_for_context(context)?;
         if current_fingerprint == MISSING_FINGERPRINT {
             transaction.write_new(&index_path, &index_bytes)?;
         } else {
@@ -177,7 +177,7 @@ impl MigrationService {
         confirmation: MigrationConfirmation,
         cancellation: &CancellationToken,
     ) -> Result<MigrationApplyResult, BackendError> {
-        FileTransaction::reconcile_project(&context.root)?;
+        FileTransaction::reconcile_context(context)?;
         self.apply_metadata(core, git, context, plan, confirmation, cancellation)
     }
 

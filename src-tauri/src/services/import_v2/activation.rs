@@ -127,7 +127,7 @@ impl ImportV2ActivationService {
             BackendError::new("JSON_SERIALIZE_FAILED", error.to_string(), false, true)
         })?;
         let path = context.resolve_project_path(ACTIVATION_PATH)?;
-        let mut transaction = FileTransaction::new_for_project(&context.root);
+        let mut transaction = FileTransaction::new_for_context(context)?;
         transaction.write_new(&path, &bytes)?;
         transaction.commit()?;
         Ok(ActivationResult { record, checkpoint })

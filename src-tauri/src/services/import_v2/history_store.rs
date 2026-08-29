@@ -183,7 +183,7 @@ impl HistoryStore {
         let snapshot_path = format!("{root}/snapshots/{}.json", result.item_id);
         let manifest_hash = files.file_hash(context, &manifest_path)?;
         let snapshot_hash = files.file_hash(context, &snapshot_path)?;
-        let mut transaction = FileTransaction::new_for_project(&context.root);
+        let mut transaction = FileTransaction::new_for_context(context)?;
         self.stage_result(
             context,
             &mut transaction,
@@ -211,7 +211,7 @@ impl HistoryStore {
         manifest_expected_hash: &str,
         snapshot_expected_hash: &str,
     ) -> Result<(), BackendError> {
-        let mut transaction = FileTransaction::new_for_project(&context.root);
+        let mut transaction = FileTransaction::new_for_context(context)?;
         self.stage_result(
             context,
             &mut transaction,
@@ -235,7 +235,7 @@ impl HistoryStore {
     ) -> Result<(), BackendError> {
         validate_id(&batch.batch_id)?;
         let compatibility_path = format!("{}/{}.json", history_root(context)?, batch.batch_id);
-        let mut transaction = FileTransaction::new_for_project(&context.root);
+        let mut transaction = FileTransaction::new_for_context(context)?;
         transaction.write_new(
             &context.resolve_project_path(&compatibility_path)?,
             &json_bytes(batch)?,
@@ -1160,13 +1160,7 @@ fn validate_working_manifest(
 }
 
 fn history_root(context: &ProjectContext) -> Result<String, BackendError> {
-    let app_state_root = context
-        .layout
-        .app_state_root
-        .as_deref()
-        .unwrap_or(".app/compat")
-        .trim_end_matches('/');
-    Ok(format!("{app_state_root}/import-history"))
+    Ok(context.layout.import_paths()?.history_root())
 }
 
 fn working_root(context: &ProjectContext, batch_id: &str) -> Result<String, BackendError> {

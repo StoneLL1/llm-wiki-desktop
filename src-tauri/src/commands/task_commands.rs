@@ -271,6 +271,22 @@ fn set_active_project_for_state(
             let (result, next_runs) = state.with_workflow_access(&context, |access| {
                 activate_project_with_access(state, &context, access)
             })?;
+            if result.persistence == WorkflowPersistenceMode::Persistent {
+                state.with_current_project_write_access(
+                    &context.project_id,
+                    context.root.to_string_lossy().as_ref(),
+                    |permit, _context| {
+                        state
+                            .import_v2_service
+                            .recover_unfinished_session_on_open_authorized(
+                                permit,
+                                &state.file_store,
+                                &state.task_service,
+                            )?;
+                        Ok(())
+                    },
+                )?;
+            }
             for next in next_runs {
                 state.workflow_service.dispatch_claimed_run_with_settings(
                     &state.task_service,
@@ -547,6 +563,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::models::import_v2::{
+        ImportInput, ImportInputKind, ImportItem, ImportItemStatus, ImportResourceMode,
+    };
     use crate::models::project::ProjectTrustKind;
     use crate::models::workflow::{
         HealthCheckMode, WorkflowExecutionOptions, WorkflowFilesystemAccess, WorkflowGitState,
@@ -762,6 +781,85 @@ mod tests {
         assert_eq!(result.persistence, WorkflowPersistenceMode::Persistent);
         assert_eq!(result.persistence_reason, None);
         assert!(result.tasks.iter().any(|task| task.id == expected.id));
+    }
+
+    #[test]
+    fn project_open_reconciles_interrupted_import_before_import_view_mounts() {
+        let project = native_project();
+        let state = AppState::default();
+        let context = state
+            .project_registry
+            .register("project-a", project.path())
+            .unwrap()
+            .with_resolved_layout()
+            .unwrap();
+        let session = state
+            .import_v2_service
+            .create_session(&context, &state.file_store, ImportResourceMode::Balanced)
+            .unwrap();
+        let session = state
+            .import_v2_service
+            .add_inputs(
+                &context,
+                &state.file_store,
+                &session.session_id,
+                vec![ImportInput {
+                    kind: ImportInputKind::File,
+                    display_name: "interrupted.md".into(),
+                    locator: project
+                        .path()
+                        .join("interrupted.md")
+                        .to_string_lossy()
+                        .into(),
+                    normalized_locator: None,
+                    source_identity: None,
+                    media_save_mode: Default::default(),
+                }],
+            )
+            .unwrap();
+        let task = state
+            .task_service
+            .create_project_task(
+                TaskType::Import,
+                context.project_id.clone(),
+                context.root.clone(),
+                "Interrupted Import".into(),
+                true,
+            )
+            .unwrap();
+        state
+            .task_service
+            .transition_status(&task.id, TaskStatus::Running)
+            .unwrap();
+        let mut item: ImportItem = session.items[0].clone();
+        item.status = ImportItemStatus::Inspecting;
+        item.task_id = Some(task.id.clone());
+        let item_path = context
+            .layout
+            .import_paths()
+            .unwrap()
+            .item_record(&session.session_id, &item.item_id)
+            .unwrap();
+        state
+            .file_store
+            .write_json_atomic(&context, &item_path, &item)
+            .unwrap();
+
+        set_active_project_for_state(
+            &state,
+            SetActiveProjectRequest {
+                project_id: Some(context.project_id.clone()),
+                root_path: Some(context.root.to_string_lossy().into()),
+            },
+        )
+        .unwrap();
+
+        let reopened = state
+            .import_v2_service
+            .read_session(&context, &state.file_store, &session.session_id)
+            .unwrap();
+        assert_eq!(reopened.items[0].status, ImportItemStatus::Paused);
+        assert!(reopened.items[0].task_id.is_none());
     }
 
     #[test]

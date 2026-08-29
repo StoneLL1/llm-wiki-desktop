@@ -48,6 +48,17 @@ pub enum ImportSessionStatus {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportRecoveryReason {
+    StaleInFlightItem,
+    InterruptedTask,
+    IncompleteJournal,
+    PartialRemoteDownload,
+    PartialCapabilityDownload,
+    ResidualStaging,
+}
+
 /// Small, read-only control record for foreground session discovery. Batch 4
 /// can extend this DTO with revisioned counts without changing the full
 /// session read contract.
@@ -71,6 +82,10 @@ pub struct ImportSessionOverview {
     pub status_counts: ImportSessionStatusCounts,
     pub selection: ImportSelectionSummary,
     pub index_state: ImportSessionIndexState,
+    #[serde(default)]
+    pub recovery_required: bool,
+    #[serde(default)]
+    pub recovery_reasons: Vec<ImportRecoveryReason>,
     #[serde(default)]
     pub action_groups: Vec<ImportSessionActionGroup>,
     #[serde(default)]
@@ -465,7 +480,11 @@ impl ImportItemStatus {
                     Inspecting | NeedsMerge | Committing | Skipped | Cancelled
                 )
                 | (NeedsMerge, PreviewReady | Committing | Skipped | Cancelled)
-                | (Committing, Completed | Failed)
+                // A process can stop after the durable commit intent is
+                // published but before the item terminal state is visible.
+                // Reconciliation may safely restore the pre-commit preview
+                // after the transaction journal has been reconciled.
+                | (Committing, PreviewReady | NeedsMerge | Completed | Failed)
                 | (Paused, Inspecting | Extracting | Cancelled)
                 | (Cancelled | Skipped, Inspecting)
                 | (Failed, Inspecting | Skipped | Cancelled)

@@ -315,7 +315,7 @@ fn package_fixture(suffix: &str) -> Fixture {
         ],
     };
     SourceRegistry::validate_manifest_contract(&manifest).unwrap();
-    let manifest_path = manifest_path(&source_id);
+    let manifest_path = manifest_path(&context, &source_id).unwrap();
     write(&root, &manifest_path, pretty_json(&manifest).unwrap());
     let pointer = SourcePointer {
         source_id: source_id.clone(),
@@ -506,12 +506,23 @@ fn generic_wiki_operations_reject_source_namespace_and_package_members() {
         "SOURCE_DEDICATED_ACTION_REQUIRED"
     );
     assert_eq!(
-        reject_generic_source_create("wiki/concepts/fake.md", Some("source"), None)
-            .unwrap_err()
-            .code,
+        reject_generic_source_create(
+            &fixture.context,
+            "wiki/concepts/fake.md",
+            Some("source"),
+            None,
+        )
+        .unwrap_err()
+        .code,
         "SOURCE_DEDICATED_ACTION_REQUIRED"
     );
-    assert!(reject_generic_source_create("wiki/concepts/normal.md", Some("concept"), None).is_ok());
+    assert!(reject_generic_source_create(
+        &fixture.context,
+        "wiki/concepts/normal.md",
+        Some("concept"),
+        None,
+    )
+    .is_ok());
     fs::remove_dir_all(fixture.root).unwrap();
 }
 

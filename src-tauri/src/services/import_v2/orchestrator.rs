@@ -303,6 +303,32 @@ impl ImportV2Service {
         self.sessions.find_unfinished_session(context, files)
     }
 
+    /// Project-open reconciliation is intentionally bounded to the single
+    /// active unfinished Import session. It only reconciles durable state and
+    /// maps interrupted work to resumable facts; it never restarts expensive
+    /// extraction, OCR, ASR, or network work.
+    pub(crate) fn recover_unfinished_session_on_open_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        tasks: &TaskService,
+    ) -> Result<Option<String>, BackendError> {
+        let context = permit.context();
+        FileTransaction::reconcile_context(context)?;
+        let Some(session_id) = self.find_unfinished_session(context, files)? else {
+            return Ok(None);
+        };
+        self.recover_session_report_with_cancel_authorized(
+            permit,
+            files,
+            tasks,
+            &session_id,
+            || false,
+            |_, _| {},
+        )?;
+        Ok(Some(session_id))
+    }
+
     pub fn with_secret_service(secrets: SecretService) -> Self {
         let engines = EngineRegistry::default();
         let web_targets = Arc::new(WebTargetStore::new(secrets));
@@ -974,7 +1000,7 @@ impl ImportV2Service {
         );
         let path = context.resolve_project_path(&relative)?;
         let bytes = content.as_bytes();
-        let mut transaction = FileTransaction::new_for_project(&context.root);
+        let mut transaction = FileTransaction::new_for_context(context)?;
         transaction.write_new(&path, bytes)?;
         transaction.commit()?;
         let canonical_path = path.canonicalize().map_err(|error| {
@@ -2052,6 +2078,48 @@ impl ImportV2Service {
         self.create_session_unchecked(permit.context(), files, mode)
     }
 
+    /// Application-temp preview facade. The command layer supplies an
+    /// isolated native-layout context whose root is never the project root.
+    pub(crate) fn create_temporary_preview_session(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        mode: ImportResourceMode,
+    ) -> Result<ImportSession, BackendError> {
+        self.create_session_unchecked(context, files, mode)
+    }
+
+    pub(crate) fn add_temporary_preview_inputs(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        inputs: Vec<ImportInput>,
+    ) -> Result<ImportSession, BackendError> {
+        self.add_inputs_unchecked(context, files, session_id, inputs)
+    }
+
+    pub(crate) fn add_temporary_preview_text(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        display_name: &str,
+        content: &str,
+    ) -> Result<ImportSession, BackendError> {
+        self.add_text_input_unchecked(context, files, session_id, display_name, content)
+    }
+
+    pub(crate) fn bind_temporary_preview_tasks(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        bindings: &[(String, String)],
+    ) -> Result<Vec<ImportWorkItemSnapshot>, BackendError> {
+        self.bind_item_task_ids_unchecked(context, files, session_id, bindings)
+    }
+
     pub(crate) fn create_batch_operation_task_authorized(
         &self,
         permit: &ProjectWritePermit<'_>,
@@ -2762,7 +2830,11 @@ impl ImportV2Service {
                             .map(|task| task.status);
                         if matches!(
                             recovered_status,
-                            Some(TaskStatus::Failed | TaskStatus::Cancelled) | None
+                            Some(
+                                TaskStatus::Failed
+                                    | TaskStatus::Cancelled
+                                    | TaskStatus::Interrupted
+                            ) | None
                         ) {
                             // A pre-bound queued task can be persisted before its
                             // worker claims the item. If that task was interrupted,
@@ -2882,6 +2954,44 @@ impl ImportV2Service {
                                 available_actions: Vec::new(),
                                 subtitle_candidates: Vec::new(),
                             });
+                        }
+                    }
+                    if item.status == ImportItemStatus::Committing {
+                        // `preflight_locked` reconciles the durable journal
+                        // before loading the session. If the transaction had
+                        // reached its terminal item write, the loaded state is
+                        // already Completed. A surviving Committing state
+                        // therefore represents a rolled-back/incomplete commit
+                        // and must return to its durable preview.
+                        let recovered_status = item
+                            .task_id
+                            .as_deref()
+                            .and_then(|id| tasks.get_task(id))
+                            .map(|task| task.status);
+                        if recovered_status.is_none_or(|status| {
+                            matches!(
+                                status,
+                                TaskStatus::Failed
+                                    | TaskStatus::Succeeded
+                                    | TaskStatus::Interrupted
+                                    | TaskStatus::Cancelled
+                            )
+                        }) {
+                            let next = if item.preview.as_ref().is_some_and(|preview| {
+                                preview.resolution.as_ref().is_some_and(|resolution| {
+                                    resolution.kind
+                                        == crate::models::import_v2::ImportResolutionKind::NeedsThreeWayMerge
+                                        && resolution.default_resolution.is_none()
+                                })
+                            }) {
+                                ImportItemStatus::NeedsMerge
+                            } else {
+                                ImportItemStatus::PreviewReady
+                            };
+                            transition_item(item, next)?;
+                            item.task_id = None;
+                            item.progress = None;
+                            item.issue = None;
                         }
                     }
                     let completed = position as u64 + 1;
@@ -3138,6 +3248,28 @@ impl ImportV2Service {
             task_id,
             snapshot,
             target_reservations,
+            recovery_action,
+            true,
+        )
+    }
+
+    pub(crate) fn run_temporary_preview_item(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+        recovery_action: Option<&ImportRecoveryAction>,
+    ) -> Result<ImportItem, BackendError> {
+        self.run_item_with_recovery_mode(
+            context,
+            files,
+            tasks,
+            session_id,
+            item_id,
+            task_id,
             recovery_action,
             true,
         )
@@ -5703,7 +5835,7 @@ impl ImportV2Service {
     }
 
     fn preflight_locked(&self, context: &ProjectContext) -> Result<(), BackendError> {
-        FileTransaction::reconcile_project(&context.root)
+        FileTransaction::reconcile_context(context)
     }
 
     pub(crate) fn preflight_migration_locked(
@@ -6851,25 +6983,17 @@ fn item_staging_relative_path(
     session_id: &str,
     item_id: &str,
 ) -> Result<String, BackendError> {
-    Ok(format!(
-        "{}/items/{item_id}/staging",
-        session_relative_root(context, session_id)?
-    ))
+    context
+        .layout
+        .import_paths()?
+        .item_staging(session_id, item_id)
 }
 
 fn session_relative_root(
     context: &ProjectContext,
     session_id: &str,
 ) -> Result<String, BackendError> {
-    let root = context.layout.import_state_root.as_deref().ok_or_else(|| {
-        BackendError::new(
-            IMPORT_V2_STATE_INVALID,
-            "Import state is unavailable for this project layout.",
-            true,
-            false,
-        )
-    })?;
-    Ok(format!("{root}/{session_id}"))
+    context.layout.import_paths()?.session_root(session_id)
 }
 
 fn web_result_marks_restricted_content(staging: &Path, metadata_path: Option<&str>) -> bool {
@@ -8217,6 +8341,19 @@ mod tests {
                 .unwrap();
             (session, item, task)
         }
+        fn create_import_operation_task(&self, session: &ImportSession) -> BackendTask {
+            self.tasks
+                .create_project_import_operation_task(
+                    self.context.project_id.clone(),
+                    self.root.clone(),
+                    import_operation_task_state_root(&self.context).unwrap(),
+                    "Fixture import operation".into(),
+                    session.session_id.clone(),
+                    session.items.len() as u64,
+                    None,
+                )
+                .unwrap()
+        }
         fn reopen(&self) -> ImportSession {
             let sessions = std::fs::read_dir(self.context.app_dir.join("import-sessions")).unwrap();
             let session_id = sessions
@@ -9459,7 +9596,8 @@ mod tests {
     #[test]
     fn recovery_releases_interrupted_prebound_queued_item() {
         let fixture = OrchestratorFixture::new("prebind-recovery");
-        let (session, item, task) = fixture.seed_one_item();
+        let (session, item, _legacy_task) = fixture.seed_one_item();
+        let task = fixture.create_import_operation_task(&session);
         fixture
             .service
             .bind_item_task_ids(
@@ -9474,7 +9612,7 @@ mod tests {
         recovered_tasks.recover_tasks(&fixture.root).unwrap();
         assert_eq!(
             recovered_tasks.get_task(&task.id).unwrap().status,
-            TaskStatus::Failed
+            TaskStatus::Interrupted
         );
 
         let recovered = ImportV2Service::default()
@@ -9487,6 +9625,27 @@ mod tests {
             .unwrap();
         assert_eq!(recovered.items[0].status, ImportItemStatus::Queued);
         assert!(recovered.items[0].task_id.is_none());
+        let retry = recovered_tasks
+            .create_project_task(
+                TaskType::Import,
+                fixture.context.project_id.clone(),
+                fixture.root.clone(),
+                "Retry queued import".into(),
+                true,
+            )
+            .unwrap();
+        ImportV2Service::default()
+            .bind_item_task_ids(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &[(item.item_id, retry.id.clone())],
+            )
+            .unwrap();
+        let rebound = ImportV2Service::default()
+            .read_session(&fixture.context, &fixture.files, &session.session_id)
+            .unwrap();
+        assert_eq!(rebound.items[0].task_id.as_deref(), Some(retry.id.as_str()));
     }
 
     #[test]
@@ -9562,7 +9721,8 @@ mod tests {
             ImportItemStatus::Validating,
         ] {
             let fixture = OrchestratorFixture::new(&format!("recovery-{status:?}"));
-            let (session, item, task) = fixture.seed_one_item();
+            let (session, item, _legacy_task) = fixture.seed_one_item();
+            let task = fixture.create_import_operation_task(&session);
             fixture
                 .tasks
                 .transition_status(&task.id, TaskStatus::Running)
@@ -9597,7 +9757,7 @@ mod tests {
             recovered_tasks.recover_tasks(&fixture.root).unwrap();
             assert_eq!(
                 recovered_tasks.get_task(&task.id).unwrap().status,
-                TaskStatus::Failed
+                TaskStatus::Interrupted
             );
             let restarted = ImportV2Service::default();
             let reconciled = restarted
@@ -9644,6 +9804,68 @@ mod tests {
                 ImportItemStatus::PreviewReady
             );
         }
+    }
+
+    #[test]
+    fn restart_restores_interrupted_commit_to_durable_preview() {
+        let fixture = OrchestratorFixture::new("commit-recovery");
+        fixture
+            .service
+            .register_engine(Arc::new(FixtureEngine::success(fixture.root.clone())))
+            .unwrap();
+        let (session, item, preview_task) = fixture.seed_one_item();
+        let preview = fixture
+            .service
+            .run_item(
+                &fixture.context,
+                &fixture.files,
+                &fixture.tasks,
+                &session.session_id,
+                &item.item_id,
+                &preview_task.id,
+            )
+            .unwrap();
+        assert_eq!(preview.status, ImportItemStatus::PreviewReady);
+        let commit_task = fixture
+            .tasks
+            .create_project_import_commit_task(
+                fixture.context.project_id.clone(),
+                fixture.root.clone(),
+                fixture.root.join(".app/tasks"),
+                "Interrupted commit".into(),
+                session.session_id.clone(),
+            )
+            .unwrap();
+        fixture
+            .tasks
+            .transition_status(&commit_task.id, TaskStatus::Running)
+            .unwrap();
+        let mut persisted = fixture.reopen();
+        persisted.items[0].status = ImportItemStatus::Committing;
+        persisted.items[0].task_id = Some(commit_task.id.clone());
+        fixture
+            .service
+            .sessions
+            .save(&fixture.context, &fixture.files, &persisted)
+            .unwrap();
+
+        let recovered_tasks = TaskService::default();
+        recovered_tasks.recover_tasks(&fixture.root).unwrap();
+        assert_eq!(
+            recovered_tasks.get_task(&commit_task.id).unwrap().status,
+            TaskStatus::Interrupted
+        );
+        let recovered = ImportV2Service::default()
+            .recover_session(
+                &fixture.context,
+                &fixture.files,
+                &recovered_tasks,
+                &session.session_id,
+            )
+            .unwrap();
+        assert_eq!(recovered.items[0].status, ImportItemStatus::PreviewReady);
+        assert!(recovered.items[0].task_id.is_none());
+        assert!(recovered.items[0].preview.is_some());
     }
 
     #[test]
