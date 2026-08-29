@@ -46,6 +46,9 @@ use crate::services::import_v2::capability_runtime::CapabilityRuntimeStatus;
 use crate::services::import_v2::migration::{
     LegacyHistoryAdapter, MigrationService, REQUIRED_IMPORT_V2_CONTRACT,
 };
+use crate::services::import_v2::runner_confinement::{
+    capability_installation_mutations_enabled, require_capability_installation_confinement,
+};
 use crate::services::BlockingWorkClass;
 use crate::services::{app_capability_acknowledgement_version, project_identity};
 use crate::tasks::task_model::LogLevel;
@@ -919,8 +922,12 @@ pub fn get_import_capability_requirement_v2(
         .into_iter()
         .any(|status| status.capability_id == capability_id && status.available);
     let catalog = catalog_entry(capability_id, &requirement.target_triple);
-    let unavailable_reason_code = (!available && catalog.is_none()).then(|| {
-        if catalog_availability() == CapabilityCatalogAvailability::CatalogUnavailable {
+    let confinement_ready = capability_installation_mutations_enabled();
+    let installable = !available && catalog.is_some() && confinement_ready;
+    let unavailable_reason_code = (!available).then(|| {
+        if catalog.is_some() && !confinement_ready {
+            "runtime_confinement_unavailable"
+        } else if catalog_availability() == CapabilityCatalogAvailability::CatalogUnavailable {
             "catalog_unavailable"
         } else {
             "signed_release_unavailable"
@@ -932,12 +939,18 @@ pub fn get_import_capability_requirement_v2(
         requirement,
         route: route.into(),
         available,
-        installable: !available && catalog.is_some(),
+        installable,
         compressed_bytes: catalog.as_ref().map(|entry| entry.compressed_bytes),
         installed_bytes: catalog.as_ref().map(|entry| entry.installed_bytes),
         model_bytes: catalog.as_ref().and_then(|entry| entry.model_bytes),
         license: Some(license.into()),
-        fallback: (!available && catalog.is_none()).then_some("This source build has no signed capability artifact for the current target. Release CI must publish the target pack and catalog entry before installation can be enabled.".into()),
+        fallback: (!available).then(|| {
+            if catalog.is_some() && !confinement_ready {
+                "Capability installation remains read-only until runner confinement is verified on every release target.".into()
+            } else {
+                "This source build has no signed capability artifact for the current target. Release CI must publish the target pack and catalog entry before installation can be enabled.".into()
+            }
+        }),
         unavailable_reason_code,
         requirement_revision,
     })
@@ -1055,6 +1068,7 @@ pub fn install_import_capability_v2(
             "Capability installation requires explicit confirmation.",
         ));
     }
+    require_capability_installation_confinement()?;
     let entry = catalog_entry(&request.capability_id, &target_triple()).ok_or_else(|| {
         presentation_error(
             "IMPORT_V2_CAPABILITY_INSTALL_UNAVAILABLE",
@@ -1203,6 +1217,7 @@ pub fn install_import_capability_v2_legacy(
             "Capability installation requires explicit confirmation.",
         ));
     }
+    require_capability_installation_confinement()?;
     let target = target_triple();
     let entry = catalog_entry(&request.capability_id, &target).ok_or_else(|| {
         presentation_error(
@@ -1950,7 +1965,8 @@ fn build_asr_profile_plan(
         .find(|status| status.capability_id == spec.capability_id && status.route == "media.asr");
     let available = runtime.is_some_and(|status| status.available);
     let catalog = catalog_entry(spec.capability_id, target);
-    let installable = !available && catalog.is_some();
+    let installable =
+        !available && catalog.is_some() && capability_installation_mutations_enabled();
     let component_available = available;
     let dependency = |kind, name: &str, source: &str, license: &str| ImportAsrDependency {
         kind,
@@ -1993,7 +2009,9 @@ fn build_asr_profile_plan(
             .max(1)
     });
     let unavailable_reason_code = (!available).then(|| {
-        if installable {
+        if catalog.is_some() && !capability_installation_mutations_enabled() {
+            "runtime_confinement_unavailable".into()
+        } else if installable {
             "not_installed".into()
         } else if catalog_availability() == CapabilityCatalogAvailability::CatalogUnavailable {
             "catalog_unavailable".into()

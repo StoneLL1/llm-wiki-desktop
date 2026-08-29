@@ -2447,6 +2447,7 @@
   "importV2.capability.state.installing": "正在安装能力包",
   "importV2.capability.state.health_check_failed": "已安装文件未通过运行时健康检查",
   "importV2.capability.state.catalog_unavailable": "此开发构建未包含可分发的能力目录。",
+  "importV2.capability.state.runtime_confinement_unavailable": "在所有发布目标完成 runner 权限隔离验证前，能力包安装保持只读。",
   "importV2.capability.unavailable": "当前平台不支持此能力包。",
   "importV2.capability.installedState": "已可用",
   "importV2.common.loading": "处理中",
