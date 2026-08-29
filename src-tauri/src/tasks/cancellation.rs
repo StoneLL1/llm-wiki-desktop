@@ -39,6 +39,26 @@ impl CancellationRegistry {
             .unwrap_or(false)
     }
 
+    pub fn pause(&self, task_id: &str) -> bool {
+        let tokens = self.tokens.read().expect("lock poisoned");
+        if let Some(token) = tokens.get(task_id) {
+            token.request_pause();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn reset(&self, task_id: &str) -> bool {
+        let tokens = self.tokens.read().expect("lock poisoned");
+        if let Some(token) = tokens.get(task_id) {
+            token.reset();
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn remove(&self, task_id: &str) {
         let mut tokens = self.tokens.write().expect("lock poisoned");
         tokens.remove(task_id);
@@ -98,5 +118,18 @@ mod tests {
 
         token1.cancel();
         assert!(token2.is_cancelled());
+    }
+
+    #[test]
+    fn pause_and_reset_are_distinct_from_terminal_cancellation() {
+        let registry = CancellationRegistry::new();
+        let token = registry.register("task-paused");
+
+        assert!(registry.pause("task-paused"));
+        assert!(token.is_cancelled());
+        assert!(token.is_pause_requested());
+        assert!(registry.reset("task-paused"));
+        assert!(!token.is_cancelled());
+        assert!(!token.is_pause_requested());
     }
 }

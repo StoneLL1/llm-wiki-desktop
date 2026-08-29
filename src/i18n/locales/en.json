@@ -1345,6 +1345,7 @@
   "task.type.export": "Export",
   "task.type.sourceAiOrganize": "Source AI Organize",
   "task.type.projectInventory": "Project inventory",
+  "task.type.capabilityInstall": "Capability installation",
   "task.type.workflow": "Workflow",
   "notification.taskCompleted.title": "Task completed",
   "notification.taskCompleted.body": "{{title}} finished successfully.",

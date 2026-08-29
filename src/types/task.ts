@@ -9,6 +9,7 @@ export type TaskType =
   | "export"
   | "source_ai_organize"
   | "project_inventory"
+  | "capability_install"
   | "workflow";
 
 export type TaskStatus =
@@ -59,6 +60,12 @@ export type TaskOperation = {
   itemId: string;
   capabilityId: string;
   requirementRevision: string;
+} | {
+  kind: "app_capability_install";
+  capabilityId: string;
+  version: string;
+  targetTriple: string;
+  archiveIdentity: string;
 } | {
   kind: "import_commit";
   sessionId: string;
@@ -222,6 +229,7 @@ export const TASK_TYPE_LABELS: Record<TaskType, string> = {
   export: "task.type.export",
   source_ai_organize: "task.type.sourceAiOrganize",
   project_inventory: "task.type.projectInventory",
+  capability_install: "task.type.capabilityInstall",
   workflow: "task.type.workflow",
 };
 

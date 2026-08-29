@@ -984,24 +984,8 @@
         "mutation",
         "network"
       ],
-      "projectScoped": true,
-      "writeAuthority": "ProjectWritePermit",
-      "authorityPaths": [
-        {
-          "function": "install_import_capability_v2",
-          "authority": "ProjectWritePermit",
-          "requiredCalls": [
-            "start_import_items_for_state"
-          ]
-        },
-        {
-          "function": "install_import_capability_v2",
-          "authority": "ProjectExecutionLease",
-          "requiredCalls": [
-            "begin_project_external_task"
-          ]
-        }
-      ]
+      "projectScoped": false,
+      "writeAuthority": "AppCapabilityCoordinator"
     },
     {
       "name": "list_chat_sessions",
@@ -2015,6 +1999,58 @@
       ],
       "projectScoped": true,
       "writeAuthority": "ProjectWritePermit"
+    },
+    {
+      "name": "cancel_app_capability_install_v1",
+      "source": "src-tauri/src/commands/app_capability_commands.rs",
+      "classifications": ["mutation"],
+      "projectScoped": false,
+      "writeAuthority": "AppCapabilityCoordinator"
+    },
+    {
+      "name": "get_app_capability_task_activities_v1",
+      "source": "src-tauri/src/commands/app_capability_commands.rs",
+      "classifications": ["read"],
+      "projectScoped": false
+    },
+    {
+      "name": "get_app_capability_task_logs_v1",
+      "source": "src-tauri/src/commands/app_capability_commands.rs",
+      "classifications": ["read"],
+      "projectScoped": false
+    },
+    {
+      "name": "install_app_capability_v1",
+      "source": "src-tauri/src/commands/app_capability_commands.rs",
+      "classifications": ["mutation", "network"],
+      "projectScoped": false,
+      "writeAuthority": "AppCapabilityCoordinator"
+    },
+    {
+      "name": "list_app_capabilities_v1",
+      "source": "src-tauri/src/commands/app_capability_commands.rs",
+      "classifications": ["read"],
+      "projectScoped": false
+    },
+    {
+      "name": "list_app_tasks_v1",
+      "source": "src-tauri/src/commands/app_capability_commands.rs",
+      "classifications": ["read"],
+      "projectScoped": false
+    },
+    {
+      "name": "pause_app_capability_install_v1",
+      "source": "src-tauri/src/commands/app_capability_commands.rs",
+      "classifications": ["mutation"],
+      "projectScoped": false,
+      "writeAuthority": "AppCapabilityCoordinator"
+    },
+    {
+      "name": "resume_app_capability_install_v1",
+      "source": "src-tauri/src/commands/app_capability_commands.rs",
+      "classifications": ["mutation", "network"],
+      "projectScoped": false,
+      "writeAuthority": "AppCapabilityCoordinator"
     }
   ],
   "serviceAuthorityContracts": [

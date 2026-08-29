@@ -181,7 +181,7 @@ async function refreshTaskPersistence(
   ) {
     return;
   }
-  const { recoverTasksForProject } = await import("./taskStore");
+  const { recoverTasksForProject } = await import("../services/taskRecovery");
   await recoverTasksForProject(project.projectId, project.rootPath);
 }
 

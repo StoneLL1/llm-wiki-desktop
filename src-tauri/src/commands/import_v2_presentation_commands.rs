@@ -11,6 +11,10 @@ use crate::commands::import_v2_commands::{
     start_import_items_for_state, StartImportItemsV2Request,
 };
 use crate::errors::BackendError;
+use crate::models::app_capability::{
+    AppCapabilityContinuation, AppCapabilityContinuationState, InstallAppCapabilityV1Request,
+    APP_CAPABILITY_CONTINUATION_SCHEMA_VERSION,
+};
 use crate::models::import_v2::{
     ArtifactKind, ImportAsrProfile, ImportInputKind, ImportItem, ImportItemStatus,
     ImportRecoveryAction, ImportResolutionKind, ImportResourceMode, ImportSession,
@@ -43,6 +47,7 @@ use crate::services::import_v2::migration::{
     LegacyHistoryAdapter, MigrationService, REQUIRED_IMPORT_V2_CONTRACT,
 };
 use crate::services::BlockingWorkClass;
+use crate::services::{app_capability_acknowledgement_version, project_identity};
 use crate::tasks::task_model::LogLevel;
 
 pub fn get_import_workbench_preferences_v2(
@@ -1038,7 +1043,156 @@ pub fn get_import_asr_enablement_plan_v2(
     })
 }
 
+#[allow(dead_code)]
 pub fn install_import_capability_v2(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: InstallImportCapabilityV2Request,
+) -> Result<BackendTask, BackendError> {
+    if !request.acknowledge_install {
+        return Err(presentation_error(
+            "IMPORT_V2_CAPABILITY_CONFIRMATION_REQUIRED",
+            "Capability installation requires explicit confirmation.",
+        ));
+    }
+    let entry = catalog_entry(&request.capability_id, &target_triple()).ok_or_else(|| {
+        presentation_error(
+            "IMPORT_V2_CAPABILITY_INSTALL_UNAVAILABLE",
+            "No signed capability release is available for this target.",
+        )
+    })?;
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let session =
+        state
+            .import_v2_service
+            .load_session(&context, &state.file_store, &request.session_id)?;
+    let item = session
+        .items
+        .iter()
+        .find(|item| item.item_id == request.item_id)
+        .ok_or_else(|| {
+            presentation_error("IMPORT_V2_ITEM_NOT_FOUND", "Import item was not found.")
+        })?;
+    let asr_choice_allowed = item.issue.as_ref().is_some_and(|issue| {
+        issue
+            .recovery_actions
+            .contains(&ImportRecoveryAction::AuthorizeLocalAsr)
+            || issue
+                .recovery_actions
+                .contains(&ImportRecoveryAction::InstallMediaCapability)
+    }) && matches!(
+        request.capability_id.as_str(),
+        "asr-sensevoice-small" | "asr-whisper"
+    );
+    if asr_choice_allowed {
+        let profile = request.asr_profile.as_ref().ok_or_else(|| {
+            presentation_error(
+                "IMPORT_V2_ASR_SELECTION_REQUIRED",
+                "Select an ASR profile before installing its capability.",
+            )
+        })?;
+        let expected = match profile {
+            ImportAsrProfile::Fast | ImportAsrProfile::Balanced => "asr-sensevoice-small",
+            ImportAsrProfile::Accurate => "asr-whisper",
+        };
+        if request.capability_id != expected {
+            return Err(presentation_error(
+                "IMPORT_V2_CAPABILITY_MISMATCH",
+                "The requested ASR capability does not match the selected profile.",
+            ));
+        }
+    } else if request.asr_profile.is_some() || request.recognition_language.is_some() {
+        return Err(presentation_error(
+            "IMPORT_V2_CAPABILITY_MISMATCH",
+            "ASR options are valid only for an item waiting for local recognition.",
+        ));
+    }
+    let required_capability = capability_for_item(item);
+    if required_capability.is_none() && !asr_choice_allowed {
+        return Err(presentation_error(
+            "IMPORT_V2_CAPABILITY_NOT_REQUIRED",
+            "This import item does not currently require a capability pack.",
+        ));
+    }
+    if required_capability.is_some_and(|(expected, _, _)| request.capability_id != expected)
+        && !asr_choice_allowed
+    {
+        return Err(presentation_error(
+            "IMPORT_V2_CAPABILITY_MISMATCH",
+            "The requested capability does not match this import item.",
+        ));
+    }
+    let route = required_capability
+        .map(|(_, route, _)| route)
+        .unwrap_or("media.asr");
+    let current_revision = capability_requirement_revision(item, &request.capability_id, route);
+    if request.requirement_revision != current_revision {
+        return Err(presentation_error(
+            "IMPORT_V2_CAPABILITY_REQUIREMENT_STALE",
+            "The import item capability requirement changed. Reload it before installing.",
+        ));
+    }
+    let authority = state
+        .project_registry
+        .resolve_authority(&request.project_id, &context.root)?;
+    let identity = project_identity(&context.root)
+        .map_err(|message| presentation_error("PROJECT_IDENTITY_UNAVAILABLE", &message))?;
+    let continuation =
+        state
+            .app_capability_coordinator
+            .register_continuation(AppCapabilityContinuation {
+                schema_version: APP_CAPABILITY_CONTINUATION_SCHEMA_VERSION,
+                continuation_id: uuid::Uuid::new_v4().to_string(),
+                capability_id: request.capability_id.clone(),
+                project_id: request.project_id.clone(),
+                project_root_path: context.root.to_string_lossy().into_owned(),
+                canonical_identity_key: identity.canonical_identity_key,
+                identity_revision: identity.identity_revision,
+                authority_revision: authority.authority_revision,
+                session_id: request.session_id.clone(),
+                item_id: request.item_id.clone(),
+                requirement_revision: current_revision,
+                requested_route: route.to_owned(),
+                recovery_action: if request.asr_profile.is_some() {
+                    Some(ImportRecoveryAction::AuthorizeLocalAsr)
+                } else if request.capability_id == "ocr-cjk-accurate" {
+                    Some(ImportRecoveryAction::EnableOcr)
+                } else {
+                    None
+                },
+                asr_profile: request.asr_profile.clone(),
+                recognition_language: request.recognition_language.clone(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                state: AppCapabilityContinuationState::Registered,
+                task_id: None,
+                detail_code: None,
+            })?;
+    let install_request = InstallAppCapabilityV1Request {
+        capability_id: entry.capability_id.clone(),
+        expected_version: entry.version.clone(),
+        acknowledgement_version: app_capability_acknowledgement_version(&entry),
+    };
+    let task = match crate::commands::app_capability_commands::begin_app_capability_install_for_continuation(
+        app,
+        &state,
+        install_request,
+        &continuation.continuation_id,
+    ) {
+        Ok(task) => task,
+        Err(error) => {
+            let _ = state.app_capability_coordinator.update_continuation_state(
+                &continuation.continuation_id,
+                AppCapabilityContinuationState::Registered,
+                Some(error.code.clone()),
+            );
+            return Err(error);
+        }
+    };
+    Ok(task)
+}
+
+#[allow(dead_code)]
+pub fn install_import_capability_v2_legacy(
     app: AppHandle,
     state: State<'_, AppState>,
     request: InstallImportCapabilityV2Request,
@@ -1495,6 +1649,117 @@ fn finish_capability_install_error(state: &AppState, task_id: &str, error: Backe
             .task_service
             .transition_status(task_id, TaskStatus::Failed);
     }
+}
+
+pub(crate) fn resume_import_capability_continuation(
+    app: AppHandle,
+    state: &AppState,
+    continuation: &AppCapabilityContinuation,
+    token: &crate::tasks::task_model::CancellationToken,
+) -> Result<bool, BackendError> {
+    let Some(active_root) = state.task_service.current_project_root() else {
+        return Ok(false);
+    };
+    let expected_root = PathBuf::from(&continuation.project_root_path);
+    let active_root = active_root.canonicalize().map_err(|_| {
+        presentation_error("PROJECT_CONTEXT_MISMATCH", "Project is no longer active.")
+    })?;
+    let expected_root = expected_root
+        .canonicalize()
+        .map_err(|_| presentation_error("PROJECT_CONTEXT_MISMATCH", "Project is unavailable."))?;
+    if active_root != expected_root {
+        return Ok(false);
+    }
+    let authority = state
+        .project_registry
+        .resolve_authority(&continuation.project_id, &expected_root)?;
+    let identity = project_identity(&expected_root)
+        .map_err(|message| presentation_error("PROJECT_IDENTITY_UNAVAILABLE", &message))?;
+    if authority.authority_revision != continuation.authority_revision
+        || identity.canonical_identity_key != continuation.canonical_identity_key
+        || identity.identity_revision != continuation.identity_revision
+    {
+        return Ok(false);
+    }
+    let context =
+        state.resolve_project_context(&continuation.project_id, &continuation.project_root_path)?;
+    let session = state.import_v2_service.load_session(
+        &context,
+        &state.file_store,
+        &continuation.session_id,
+    )?;
+    let item = session
+        .items
+        .iter()
+        .find(|item| item.item_id == continuation.item_id)
+        .cloned()
+        .ok_or_else(|| {
+            presentation_error("IMPORT_V2_ITEM_NOT_FOUND", "Import item was not found.")
+        })?;
+    if item.status != ImportItemStatus::WaitingCapability
+        || capability_requirement_revision(
+            &item,
+            &continuation.capability_id,
+            &continuation.requested_route,
+        ) != continuation.requirement_revision
+    {
+        return Ok(false);
+    }
+    if let Some(profile) = continuation.asr_profile.clone() {
+        let state_handle = app.state::<AppState>();
+        crate::commands::import_v2_web_commands::authorize_local_asr(
+            &state_handle,
+            AuthorizeLocalAsrV2Request {
+                project_id: continuation.project_id.clone(),
+                project_root_path: continuation.project_root_path.clone(),
+                session_id: continuation.session_id.clone(),
+                item_id: continuation.item_id.clone(),
+                profile,
+                language: continuation.recognition_language.clone(),
+            },
+            Some(&item),
+        )?;
+    }
+    state.with_current_project_write_access(
+        &continuation.project_id,
+        &continuation.project_root_path,
+        |permit, context| {
+            let session = state.import_v2_service.load_session(
+                context,
+                &state.file_store,
+                &continuation.session_id,
+            )?;
+            let expected_item = session
+                .items
+                .iter()
+                .find(|item| item.item_id == continuation.item_id)
+                .cloned()
+                .ok_or_else(|| {
+                    presentation_error("IMPORT_V2_ITEM_NOT_FOUND", "Import item was not found.")
+                })?;
+            if token.is_cancelled() {
+                return Err(presentation_error(
+                    "TASK_CANCELLED",
+                    "Capability installation was stopped before import continuation.",
+                ));
+            }
+            start_import_items_for_state(
+                app.clone(),
+                state,
+                permit,
+                StartImportItemsV2Request {
+                    project_id: continuation.project_id.clone(),
+                    project_root_path: continuation.project_root_path.clone(),
+                    session_id: continuation.session_id.clone(),
+                    item_ids: vec![continuation.item_id.clone()],
+                    recovery_action: continuation.recovery_action.clone(),
+                },
+                Some(std::slice::from_ref(&expected_item)),
+                Some(token),
+            )?;
+            Ok(true)
+        },
+    )
 }
 
 fn read_staging_markdown(
@@ -2166,6 +2431,7 @@ mod tests {
             capability_id: "browser-runtime-lite".into(),
             route: "web.zhihu.content".into(),
             available: false,
+            healthy_version: None,
             reason: Some("not installed".into()),
         }];
         let platforms = platform_readiness(&routes, &capabilities);
@@ -2188,6 +2454,7 @@ mod tests {
             capability_id: "asr-sensevoice-small".into(),
             route: "media.asr".into(),
             available: true,
+            healthy_version: Some("1.0.0".into()),
             reason: None,
         }];
         let abilities = ability_readiness(&routes, &capabilities);

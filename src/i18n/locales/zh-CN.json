@@ -1209,6 +1209,7 @@
   "task.type.export": "导出",
   "task.type.sourceAiOrganize": "Source AI 整理",
   "task.type.projectInventory": "项目盘点",
+  "task.type.capabilityInstall": "能力包安装",
   "task.type.workflow": "工作流",
   "import.dropZone": "将文件拖到此处或点击选择。",
   "import.summary.files": "{{count}} 个文件",

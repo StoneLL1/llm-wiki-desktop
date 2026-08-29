@@ -10,11 +10,11 @@ import {
   fetchTaskById,
   fetchTasks,
   handleTaskEvent,
-  recoverTasksForProject,
   selectProjectTaskById,
   selectTaskIdsForProject,
   useTaskStore,
 } from "./taskStore";
+import { recoverAppTasks, recoverTasksForProject } from "../services/taskRecovery";
 import { defaultProject, useProjectStore } from "./projectStore";
 
 function task(id: string, projectId: string): BackendTask {
@@ -42,6 +42,21 @@ function succeededTask(id: string, projectId: string): BackendTask {
     updatedAt: "2026-06-21T00:01:00Z",
     completedAt: "2026-06-21T00:01:00Z",
     cancellable: false,
+  };
+}
+
+function globalCapabilityTask(id: string): BackendTask {
+  return {
+    ...task(id, "project-a"),
+    taskType: "capability_install",
+    projectId: null,
+    operation: {
+      kind: "app_capability_install",
+      capabilityId: "ocr-cjk-accurate",
+      version: "1.0.0",
+      targetTriple: "x86_64-pc-windows-msvc",
+      archiveIdentity: "archive-a",
+    },
   };
 }
 
@@ -221,6 +236,87 @@ describe("recoverTasksForProject", () => {
     unsubscribe();
     expect(publications).toBe(1);
     expect(useTaskStore.getState().tasks).toHaveLength(100);
+  });
+
+  it("shows app-global tasks with the selected project and excludes other projects", async () => {
+    useTaskStore.getState().recordTaskFact(task("task-a", "project-a"));
+    invokeMock
+      .mockResolvedValueOnce({
+        tasks: [task("task-b", "project-b")],
+        persistence: "persistent",
+      })
+      .mockResolvedValueOnce([globalCapabilityTask("global-install")]);
+
+    await recoverTasksForProject("project-b", "D:/project-b");
+
+    expect(useTaskStore.getState().tasks.map((item) => item.id)).toEqual([
+      "global-install",
+      "task-b",
+    ]);
+    expect(selectTaskIdsForProject(useTaskStore.getState(), "project-b")).toEqual(["task-b"]);
+    expect(selectTaskIdsForProject(useTaskStore.getState(), "project-a")).toEqual(["task-a"]);
+  });
+
+  it("does not let a late global-task snapshot overwrite a newer project recovery", async () => {
+    let resolveFirstGlobal!: (tasks: BackendTask[]) => void;
+    const firstGlobal = new Promise<BackendTask[]>((resolve) => {
+      resolveFirstGlobal = resolve;
+    });
+    let globalCalls = 0;
+    invokeMock.mockImplementation((command: string, args?: { request?: { projectId?: string } }) => {
+      if (command === "set_active_project") {
+        const projectId = args?.request?.projectId ?? "unknown";
+        return Promise.resolve({
+          tasks: [task(`task-${projectId}`, projectId)],
+          persistence: "persistent",
+        });
+      }
+      if (command === "list_app_tasks_v1") {
+        globalCalls += 1;
+        return globalCalls === 1
+          ? firstGlobal
+          : Promise.resolve([globalCapabilityTask("global-current")]);
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const firstRecovery = recoverTasksForProject("project-a", "D:/project-a");
+    await vi.waitFor(() => expect(globalCalls).toBe(1));
+    await recoverTasksForProject("project-b", "D:/project-b");
+    resolveFirstGlobal([globalCapabilityTask("global-stale")]);
+    await firstRecovery;
+
+    expect(useTaskStore.getState().activeProjectId).toBe("project-b");
+    expect(useTaskStore.getState().tasks.map((item) => item.id)).toEqual([
+      "global-current",
+      "task-project-b",
+    ]);
+  });
+
+  it("does not let no-project app recovery overwrite a newly selected project", async () => {
+    let resolveAppTasks!: (tasks: BackendTask[]) => void;
+    const appTasks = new Promise<BackendTask[]>((resolve) => {
+      resolveAppTasks = resolve;
+    });
+    useTaskStore.setState({ activeProjectId: null, activeProjectRootPath: null, tasks: [] });
+    invokeMock
+      .mockReturnValueOnce(appTasks)
+      .mockResolvedValueOnce({
+        tasks: [task("task-project-b", "project-b")],
+        persistence: "persistent",
+      })
+      .mockResolvedValueOnce([globalCapabilityTask("global-current")]);
+
+    const appRecovery = recoverAppTasks();
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("list_app_tasks_v1"));
+    await recoverTasksForProject("project-b", "D:/project-b");
+    resolveAppTasks([globalCapabilityTask("global-stale")]);
+    await appRecovery;
+
+    expect(useTaskStore.getState().tasks.map((item) => item.id)).toEqual([
+      "global-current",
+      "task-project-b",
+    ]);
   });
 
   it("does not publish a semantically identical task snapshot twice", () => {
