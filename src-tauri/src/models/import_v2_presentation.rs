@@ -279,6 +279,7 @@ pub struct ImportCapabilityRequirement {
     pub model_bytes: Option<u64>,
     pub license: Option<String>,
     pub fallback: Option<String>,
+    pub unavailable_reason_code: Option<String>,
     pub requirement_revision: String,
 }
 

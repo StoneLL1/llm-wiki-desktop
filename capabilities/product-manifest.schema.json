@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/StoneLL1/llm-wiki-desktop/blob/master/capabilities/product-manifest.schema.json",
+  "title": "LLM Wiki Desktop product capability manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "supportedTargets", "surface", "definitions"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schemaVersion": { "const": 1 },
+    "supportedTargets": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/stableId" }
+    },
+    "surface": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["routes", "formats", "platformContentTypes", "recoveryActions", "asrProfiles", "ocrProfiles"],
+      "properties": {
+        "routes": { "$ref": "#/$defs/stableIdList" },
+        "formats": { "$ref": "#/$defs/stableIdList" },
+        "platformContentTypes": { "$ref": "#/$defs/stableIdList" },
+        "recoveryActions": { "$ref": "#/$defs/stableIdList" },
+        "asrProfiles": { "$ref": "#/$defs/stableIdList" },
+        "ocrProfiles": { "$ref": "#/$defs/stableIdList" }
+      }
+    },
+    "definitions": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/definition" }
+    }
+  },
+  "$defs": {
+    "stableId": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "stableIdList": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/stableId" }
+    },
+    "definition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capabilityId", "nameKey", "category", "purposeKey", "routes", "formats",
+        "protocolVersion", "distributionTier", "supportedTargets", "licensePolicy",
+        "sizeSources", "recoveryActions", "profiles", "installation", "runtime",
+        "qualification", "release"
+      ],
+      "properties": {
+        "capabilityId": { "$ref": "#/$defs/stableId" },
+        "nameKey": { "type": "string", "pattern": "^importV2\\.capabilityName\\." },
+        "category": { "enum": ["core", "documents", "web", "ocr", "media_asr"] },
+        "purposeKey": { "type": "string", "pattern": "^importV2\\.capabilityPurpose\\." },
+        "routes": { "$ref": "#/$defs/stableIdList" },
+        "formats": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["extensions", "platformContentTypes"],
+          "properties": {
+            "extensions": { "$ref": "#/$defs/stableIdList" },
+            "platformContentTypes": { "$ref": "#/$defs/stableIdList" }
+          }
+        },
+        "protocolVersion": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+        "distributionTier": { "enum": ["built_in", "published", "experimental", "unsupported"] },
+        "supportedTargets": { "$ref": "#/$defs/stableIdList" },
+        "licensePolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["expression", "thirdPartyNotices"],
+          "properties": {
+            "expression": { "type": "string", "minLength": 1 },
+            "thirdPartyNotices": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+          }
+        },
+        "sizeSources": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["compressedBytes", "installedBytes", "modelBytes"],
+          "properties": {
+            "compressedBytes": { "type": ["string", "null"] },
+            "installedBytes": { "type": ["string", "null"] },
+            "modelBytes": { "type": ["string", "null"] }
+          }
+        },
+        "recoveryActions": { "$ref": "#/$defs/stableIdList" },
+        "profiles": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["asr", "ocr"],
+          "properties": {
+            "asr": { "$ref": "#/$defs/stableIdList" },
+            "ocr": { "$ref": "#/$defs/stableIdList" }
+          }
+        },
+        "installation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["proactive", "updates"],
+          "properties": {
+            "proactive": { "type": "boolean" },
+            "updates": { "type": "boolean" }
+          }
+        },
+        "runtime": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["network", "subprocess", "filesystem"],
+          "properties": {
+            "network": { "type": "boolean" },
+            "subprocess": { "type": "boolean" },
+            "filesystem": { "$ref": "#/$defs/stableIdList" }
+          }
+        },
+        "qualification": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "entrypoint"],
+          "properties": {
+            "status": { "enum": ["implemented", "planned_batch_8", "not_applicable"] },
+            "entrypoint": { "type": ["string", "null"] }
+          }
+        },
+        "release": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["stagingStatus", "stagingScript", "owner"],
+          "properties": {
+            "stagingStatus": { "enum": ["implemented", "planned_batch_8", "not_applicable"] },
+            "stagingScript": { "type": ["string", "null"] },
+            "owner": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    }
+  }
+}

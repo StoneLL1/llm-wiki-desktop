@@ -9,6 +9,7 @@ import {
   expectedRedlineStates,
   repositoryRoot,
 } from "./check-final-four-redlines.mjs";
+import { PRODUCT_MANIFEST } from "./verify-product-capabilities.mjs";
 
 test("each final-four release blocker has a deterministic owner and expected state", () => {
   const declared = expectedRedlineStates(repositoryRoot);
@@ -52,19 +53,12 @@ test("the strict checker can turn every owned contract green", async (context) =
     await fs.mkdir(path.dirname(target), { recursive: true });
     await fs.writeFile(target, contents);
   };
-  const targets = [
-    "aarch64-apple-darwin",
-    "x86_64-apple-darwin",
-    "x86_64-pc-windows-msvc",
-    "x86_64-unknown-linux-gnu",
-  ];
-  const packs = [
-    "asr-sensevoice-small",
-    "browser-runtime",
-    "browser-runtime-lite",
-    "media-metadata",
-    "ocr-cjk-accurate",
-  ];
+  const targets = PRODUCT_MANIFEST.supportedTargets;
+  const definitions = PRODUCT_MANIFEST.definitions
+    .filter((definition) => definition.distributionTier === "published");
+  const packs = definitions.map((definition) => definition.capabilityId);
+  const licenses = new Map(definitions.map((definition) => [definition.capabilityId, definition.licensePolicy.expression]));
+  await write("capabilities/product-manifest.json", JSON.stringify(PRODUCT_MANIFEST));
   await write("capabilities/install-catalog.json", JSON.stringify({
     schemaVersion: 1,
     entries: targets.flatMap((targetTriple) => packs.map((capabilityId) => ({
@@ -76,7 +70,7 @@ test("the strict checker can turn every owned contract green", async (context) =
       manifestSha256: "b".repeat(64),
       compressedBytes: 1,
       installedBytes: 2,
-      license: "MIT",
+      license: licenses.get(capabilityId),
     }))),
   }));
   await write("capabilities/trusted-keys.json", JSON.stringify({ release: "c".repeat(64) }));

@@ -21,6 +21,7 @@ const requirement: ImportCapabilityRequirement = {
   modelBytes: null,
   license: "Apache-2.0",
   fallback: "Install the signed pack from a release, then retry.",
+  unavailableReasonCode: null,
   requirementRevision: "ab".repeat(32),
 };
 
@@ -58,5 +59,11 @@ describe("ImportCapabilityDialog", () => {
 
     expect(screen.getByRole("button", { name: /install capability/i })).toBeDisabled();
     expect(screen.getByText(/signed pack from a release/i)).toBeInTheDocument();
+  });
+
+  it("labels a development build with an empty catalog explicitly", () => {
+    render(<ImportCapabilityDialog open requirement={{ ...requirement, installable: false, unavailableReasonCode: "catalog_unavailable" }} onInstall={vi.fn()} onCancel={vi.fn()} />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent(/development build.*catalog/i);
   });
 });

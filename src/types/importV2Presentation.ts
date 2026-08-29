@@ -175,6 +175,7 @@ export interface ImportCapabilityRequirement {
   modelBytes: number | null;
   license: string | null;
   fallback: string | null;
+  unavailableReasonCode: string | null;
   requirementRevision: string;
 }
 

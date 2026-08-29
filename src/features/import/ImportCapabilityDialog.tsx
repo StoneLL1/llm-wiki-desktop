@@ -68,7 +68,12 @@ export function ImportCapabilityDialog({ open, requirement, sessionId, itemId, o
   const task = capabilityTasks.find((candidate) => candidate.id === startedTaskId)
     ?? [...capabilityTasks].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]
     ?? null;
-  const state = capabilityInstallState(task, requirement.installable, requirement.available);
+  const state = capabilityInstallState(
+    task,
+    requirement.installable,
+    requirement.available,
+    requirement.unavailableReasonCode,
+  );
   const taskError = task?.error ? normalizeBackendError(task.error, {
     defaultSummaryKey: "backendError.summary.importCapabilityUnavailable",
     defaultActionKind: "retry",
@@ -127,9 +132,9 @@ export function ImportCapabilityDialog({ open, requirement, sessionId, itemId, o
           </details>
           {requirement.fallback ? <p className="mt-3 rounded-[var(--radius-md)] border border-[var(--border-subtle)] px-3 py-2 text-[11px] text-[var(--text-muted)]"><strong>{t("importV2.capability.fallback")}:</strong> {requirement.fallback}</p> : null}
           {state.kind === "installed" ? <p className="mt-3 flex items-center gap-1.5 text-[var(--success-text)]" role="status"><Check size={14} aria-hidden="true" />{t("importV2.capability.installedState")}</p> : null}
-          {!requirement.installable ? <p className="mt-3 text-[11px] text-[var(--warning-text)]" role="alert">{t("importV2.capability.unavailable")}</p> : null}
-          {!["installed", "signed_release_unavailable"].includes(state.kind) ? <label className="mt-3 flex items-start gap-2 rounded-[var(--radius-md)] border border-[var(--border-subtle)] px-3 py-2"><input type="checkbox" aria-label={t("importV2.capability.installAck")} checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} disabled={busy} /><span>{t("importV2.capability.installAck")}</span></label> : null}
-          {!["not_installed", "signed_release_unavailable", "installed"].includes(state.kind) ? (
+          {!requirement.installable ? <p className="mt-3 text-[11px] text-[var(--warning-text)]" role="alert">{state.kind === "catalog_unavailable" ? t("importV2.capability.state.catalog_unavailable") : t("importV2.capability.unavailable")}</p> : null}
+          {!["installed", "catalog_unavailable", "signed_release_unavailable"].includes(state.kind) ? <label className="mt-3 flex items-start gap-2 rounded-[var(--radius-md)] border border-[var(--border-subtle)] px-3 py-2"><input type="checkbox" aria-label={t("importV2.capability.installAck")} checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} disabled={busy} /><span>{t("importV2.capability.installAck")}</span></label> : null}
+          {!["not_installed", "catalog_unavailable", "signed_release_unavailable", "installed"].includes(state.kind) ? (
             <div className="mt-3" role="status">
               <div className="flex items-center justify-between gap-3 text-[11px]">
                 <span>{t(`importV2.capability.state.${state.kind}`)}</span>
