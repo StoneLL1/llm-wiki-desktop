@@ -21,11 +21,11 @@ test("inventory regeneration preserves the reviewed current-snapshot binding", (
     sync: 1,
   };
   assert.deepEqual(
-    refreshInventorySnapshotCounts(currentSnapshot, { total: 205, sync: 130 }),
+    refreshInventorySnapshotCounts(currentSnapshot, { total: 213, sync: 133 }),
     {
       ...currentSnapshot,
-      total: 205,
-      sync: 130,
+      total: 213,
+      sync: 133,
     },
   );
 });
@@ -82,7 +82,7 @@ test("Batch 1 closes the Project Facts P0 async execution target", async () => {
   assert.deepEqual(target, {
     status: "green",
     requiredExecution: "async",
-    reviewedCommandTotal: 205,
+    reviewedCommandTotal: 213,
     targetBlockingSyncCeiling: 130,
   });
   assert.equal(result.counts.total, target.reviewedCommandTotal);

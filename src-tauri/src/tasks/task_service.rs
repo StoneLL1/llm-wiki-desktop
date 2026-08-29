@@ -851,6 +851,38 @@ impl TaskService {
         )
     }
 
+    /// Create an application-scoped capability task. Its persistence root is
+    /// owned by the application data directory and is deliberately unrelated
+    /// to the currently active knowledge base.
+    pub fn create_app_capability_install_task(
+        &self,
+        app_task_root: PathBuf,
+        title: String,
+        capability_id: String,
+        version: String,
+        target_triple: String,
+        archive_identity: String,
+    ) -> Result<BackendTask, String> {
+        let persistence_dir = app_task_root.join("tasks");
+        self.create_task_internal(
+            TaskType::CapabilityInstall,
+            None,
+            Some(app_task_root),
+            title,
+            true,
+            None,
+            Some(TaskOperation::AppCapabilityInstall {
+                capability_id,
+                version,
+                target_triple,
+                archive_identity,
+            }),
+            true,
+            None,
+            Some(persistence_dir),
+        )
+    }
+
     pub fn create_workflow_task(
         &self,
         project_id: String,
@@ -1012,6 +1044,42 @@ impl TaskService {
             .collect::<Vec<_>>();
         list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         list
+    }
+
+    pub fn list_app_tasks(&self, status_filter: Option<TaskStatus>) -> Vec<BackendTask> {
+        let tasks = self.tasks.read().expect("lock poisoned");
+        let mut list = tasks
+            .values()
+            .filter(|entry| {
+                entry.task.project_id.is_none()
+                    && entry.task.task_type == TaskType::CapabilityInstall
+                    && status_filter
+                        .as_ref()
+                        .map(|status| &entry.task.status == status)
+                        .unwrap_or(true)
+            })
+            .map(|entry| entry.task.clone())
+            .collect::<Vec<_>>();
+        list.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        list
+    }
+
+    pub fn recover_app_tasks(&self, app_task_root: &Path) -> Result<Vec<BackendTask>, String> {
+        std::fs::create_dir_all(app_task_root)
+            .map_err(|error| format!("Failed to create app task root: {error}"))?;
+        let recovered =
+            self.recover_tasks_from(app_task_root, &app_task_root.join("tasks"), None)?;
+        if recovered.iter().any(|task| {
+            task.project_id.is_some()
+                || task.task_type != TaskType::CapabilityInstall
+                || !matches!(
+                    task.operation,
+                    Some(TaskOperation::AppCapabilityInstall { .. })
+                )
+        }) {
+            return Err("App task persistence contains a non-global task".into());
+        }
+        Ok(recovered)
     }
 
     pub fn get_workflow_run(&self, id: &str) -> Option<WorkflowRun> {
@@ -3014,6 +3082,209 @@ impl TaskService {
             .map(|(task, _)| task)
     }
 
+    pub fn request_app_task_pause(
+        &self,
+        id: &str,
+        expected_revision: &str,
+    ) -> Result<BackendTask, String> {
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
+        let mut tasks = self.tasks.write().expect("lock poisoned");
+        let entry = tasks
+            .get_mut(id)
+            .ok_or_else(|| format!("Task not found: {id}"))?;
+        require_app_capability_task_revision(&entry.task, expected_revision)?;
+        if entry.task.status == TaskStatus::Interrupted {
+            return Ok(entry.task.clone());
+        }
+        if !matches!(entry.task.status, TaskStatus::Queued | TaskStatus::Running) {
+            return Err(format!(
+                "Task cannot be paused from its current state: {id}"
+            ));
+        }
+        let previous = entry.task.clone();
+        entry.cancellation.request_pause();
+        if entry.task.status == TaskStatus::Queued {
+            entry.task.status = TaskStatus::Interrupted;
+            entry.task.completed_at = Some(Utc::now().to_rfc3339());
+        }
+        entry.task.updated_at = Utc::now().to_rfc3339();
+        let task = entry.task.clone();
+        let pid = task.project_id.clone();
+        let tid = task.id.clone();
+        drop(tasks);
+        if let Err(error) = self.persist_current_task_with_lane(id, Some(&mut lane)) {
+            if let Some(entry) = self.tasks.write().expect("lock poisoned").get_mut(id) {
+                entry.task = previous;
+                entry.cancellation.reset();
+            }
+            return Err(error);
+        }
+        self.emit(
+            crate::models::task::BackendEventType::TaskUpdated,
+            pid,
+            Some(tid),
+            task.clone(),
+        );
+        Ok(task)
+    }
+
+    pub fn finalize_app_task_pause(&self, id: &str) -> Result<BackendTask, String> {
+        let token = self
+            .get_cancellation_token(id)
+            .ok_or_else(|| format!("Task has no cancellation signal: {id}"))?;
+        if !token.is_pause_requested() {
+            return Err(format!("Task pause was not requested: {id}"));
+        }
+        let task = self
+            .get_task(id)
+            .ok_or_else(|| format!("Task not found: {id}"))?;
+        if task.status == TaskStatus::Interrupted {
+            return Ok(task);
+        }
+        self.transition_status(id, TaskStatus::Interrupted)
+    }
+
+    pub fn resume_app_task(
+        &self,
+        id: &str,
+        expected_revision: &str,
+    ) -> Result<BackendTask, String> {
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
+        let mut tasks = self.tasks.write().expect("lock poisoned");
+        let entry = tasks
+            .get_mut(id)
+            .ok_or_else(|| format!("Task not found: {id}"))?;
+        require_app_capability_task_revision(&entry.task, expected_revision)?;
+        if entry.task.status != TaskStatus::Interrupted {
+            return Err(format!(
+                "Task is not a paused application capability install: {id}"
+            ));
+        }
+        let previous = entry.task.clone();
+        entry.cancellation.reset();
+        entry.task.status = TaskStatus::Queued;
+        entry.task.error = None;
+        entry.task.completed_at = None;
+        entry.task.updated_at = Utc::now().to_rfc3339();
+        let task = entry.task.clone();
+        let pid = task.project_id.clone();
+        let tid = task.id.clone();
+        drop(tasks);
+        if let Err(error) = self.persist_current_task_with_lane(id, Some(&mut lane)) {
+            if let Some(entry) = self.tasks.write().expect("lock poisoned").get_mut(id) {
+                entry.task = previous;
+                entry.cancellation.request_pause();
+            }
+            return Err(error);
+        }
+        self.emit(
+            crate::models::task::BackendEventType::TaskUpdated,
+            pid,
+            Some(tid),
+            task.clone(),
+        );
+        Ok(task)
+    }
+
+    pub fn cancel_paused_app_task(
+        &self,
+        id: &str,
+        expected_revision: &str,
+    ) -> Result<BackendTask, String> {
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
+        let mut tasks = self.tasks.write().expect("lock poisoned");
+        let entry = tasks
+            .get_mut(id)
+            .ok_or_else(|| format!("Task not found: {id}"))?;
+        require_app_capability_task_revision(&entry.task, expected_revision)?;
+        if entry.task.status != TaskStatus::Interrupted {
+            return Err(format!(
+                "Task is not a paused application capability install: {id}"
+            ));
+        }
+        let previous = entry.task.clone();
+        entry.cancellation.cancel();
+        entry.task.status = TaskStatus::Cancelled;
+        let now = Utc::now().to_rfc3339();
+        entry.task.updated_at = now.clone();
+        entry.task.completed_at = Some(now);
+        let task = entry.task.clone();
+        let pid = task.project_id.clone();
+        let tid = task.id.clone();
+        drop(tasks);
+        if let Err(error) = self.persist_current_task_with_lane(id, Some(&mut lane)) {
+            if let Some(entry) = self.tasks.write().expect("lock poisoned").get_mut(id) {
+                entry.task = previous;
+                entry.cancellation.request_pause();
+            }
+            return Err(error);
+        }
+        self.emit(
+            crate::models::task::BackendEventType::TaskCancelled,
+            pid,
+            Some(tid),
+            task.clone(),
+        );
+        Ok(task)
+    }
+
+    pub fn request_app_task_cancel(
+        &self,
+        id: &str,
+        expected_revision: &str,
+    ) -> Result<BackendTask, String> {
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
+        let mut tasks = self.tasks.write().expect("lock poisoned");
+        let entry = tasks
+            .get_mut(id)
+            .ok_or_else(|| format!("Task not found: {id}"))?;
+        require_app_capability_task_revision(&entry.task, expected_revision)?;
+        if matches!(
+            entry.task.status,
+            TaskStatus::Succeeded
+                | TaskStatus::Failed
+                | TaskStatus::Cancelled
+                | TaskStatus::Interrupted
+        ) {
+            return Ok(entry.task.clone());
+        }
+        let previous = entry.task.clone();
+        entry.cancellation.cancel();
+        let next_status = if entry.task.status == TaskStatus::Queued {
+            TaskStatus::Cancelled
+        } else {
+            TaskStatus::Cancelling
+        };
+        entry.task.status = next_status.clone();
+        let now = Utc::now().to_rfc3339();
+        entry.task.updated_at = now.clone();
+        if next_status == TaskStatus::Cancelled {
+            entry.task.completed_at = Some(now);
+        }
+        let task = entry.task.clone();
+        let pid = task.project_id.clone();
+        let tid = task.id.clone();
+        drop(tasks);
+        if let Err(error) = self.persist_current_task_with_lane(id, Some(&mut lane)) {
+            if let Some(entry) = self.tasks.write().expect("lock poisoned").get_mut(id) {
+                entry.task = previous;
+                entry.cancellation.reset();
+            }
+            return Err(error);
+        }
+        let event_type = if next_status == TaskStatus::Cancelled {
+            crate::models::task::BackendEventType::TaskCancelled
+        } else {
+            crate::models::task::BackendEventType::TaskUpdated
+        };
+        self.emit(event_type, pid, Some(tid), task.clone());
+        Ok(task)
+    }
+
     /// Atomic cancellation request plus the status observed before the
     /// request. Domain coordinators use the previous status to distinguish an
     /// active worker (which must finish cleanup) from an already-drained
@@ -3940,6 +4211,7 @@ impl TaskService {
                                         task.operation.as_ref(),
                                         Some(
                                             crate::models::task::TaskOperation::CapabilityInstall { .. }
+                                                | crate::models::task::TaskOperation::AppCapabilityInstall { .. }
                                         )
                                     );
                                     task.status = if recoverable_interruption {
@@ -4168,6 +4440,28 @@ fn remove_persisted_task_snapshot(
 fn require_current_stage(workflow: &WorkflowExecutionState, stage_id: &str) -> Result<(), String> {
     if workflow.current_stage_id.as_deref() != Some(stage_id) {
         return Err(format!("Workflow stage is not current: {stage_id}"));
+    }
+    Ok(())
+}
+
+fn require_app_capability_task_revision(
+    task: &BackendTask,
+    expected_revision: &str,
+) -> Result<(), String> {
+    if task.task_type != TaskType::CapabilityInstall
+        || !matches!(
+            task.operation.as_ref(),
+            Some(TaskOperation::AppCapabilityInstall { .. })
+        )
+        || task.project_id.is_some()
+    {
+        return Err(format!(
+            "Task is not an application capability install: {}",
+            task.id
+        ));
+    }
+    if task.updated_at != expected_revision {
+        return Err(format!("Task revision is stale: {}", task.id));
     }
     Ok(())
 }

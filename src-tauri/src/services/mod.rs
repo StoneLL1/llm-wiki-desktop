@@ -1,4 +1,5 @@
 mod agent_service;
+mod app_capability_coordinator;
 mod blocking_work;
 mod bookmark_service;
 mod chat_convenience_service;
@@ -25,6 +26,10 @@ mod workflow_service;
 
 pub use agent_service::{
     AgentInvocation, AgentProbeTarget, AgentService, ProcessRunner, SystemProcessRunner,
+};
+pub use app_capability_coordinator::{
+    app_capability_acknowledgement_version, app_capability_archive_identity,
+    AppCapabilityCoordinator,
 };
 pub use blocking_work::{
     BlockingWorkClass, BlockingWorkClassSnapshot, BlockingWorkCoordinator, BlockingWorkOperation,

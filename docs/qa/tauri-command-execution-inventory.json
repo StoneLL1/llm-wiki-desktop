@@ -28,7 +28,7 @@
   "projectFactsBatch0Target": {
     "status": "green",
     "requiredExecution": "async",
-    "reviewedCommandTotal": 205,
+    "reviewedCommandTotal": 213,
     "targetBlockingSyncCeiling": 130
   },
   "projectFactsBatch4Target": {
@@ -53,13 +53,13 @@
   },
   "currentSnapshot": {
     "status": "project_facts_batch4_green",
-    "total": 205,
-    "sync": 130,
-    "async": 75,
+    "total": 213,
+    "sync": 133,
+    "async": 80,
     "importTotal": 60,
     "importSync": 0,
     "blockingSync": 127,
-    "measuredAt": "2026-08-29",
+    "measuredAt": "2026-08-30",
     "sourceCommit": "CONTAINING_COMMIT"
   },
   "legacyBlockingSyncCeiling": 130,
@@ -70,6 +70,62 @@
       "classification": "ProcessOrMedia",
       "currentExecution": "async",
       "rationale": "Touches an external process, Agent, capability, OCR/ASR/media runner, shell integration, or application restart boundary."
+    },
+    {
+      "command": "list_app_capabilities_v1",
+      "module": "app_capability_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "async",
+      "rationale": "Builds the application capability snapshot from catalog, runtime, task, and installation facts on the bounded metadata worker."
+    },
+    {
+      "command": "list_app_tasks_v1",
+      "module": "app_capability_commands",
+      "classification": "PureMemory",
+      "currentExecution": "sync",
+      "rationale": "Returns the bounded in-memory application-global task registry without filesystem, network, or process work."
+    },
+    {
+      "command": "get_app_capability_task_logs_v1",
+      "module": "app_capability_commands",
+      "classification": "PureMemory",
+      "currentExecution": "sync",
+      "rationale": "Returns already-loaded bounded log lines for one application-global task."
+    },
+    {
+      "command": "get_app_capability_task_activities_v1",
+      "module": "app_capability_commands",
+      "classification": "PureMemory",
+      "currentExecution": "sync",
+      "rationale": "Returns already-loaded bounded activity records for one application-global task."
+    },
+    {
+      "command": "install_app_capability_v1",
+      "module": "app_capability_commands",
+      "classification": "LongTaskStart",
+      "currentExecution": "async",
+      "rationale": "Creates or joins one persisted application-global install task on the bounded heavy-I/O worker and returns its identity."
+    },
+    {
+      "command": "pause_app_capability_install_v1",
+      "module": "app_capability_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "async",
+      "rationale": "Atomically persists a revision-checked application-global pause request on the bounded heavy-I/O worker."
+    },
+    {
+      "command": "resume_app_capability_install_v1",
+      "module": "app_capability_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "async",
+      "rationale": "Atomically persists a revision-checked resume and restarts the application-global worker from its durable partial."
+    },
+    {
+      "command": "cancel_app_capability_install_v1",
+      "module": "app_capability_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "async",
+      "rationale": "Atomically cancels an application-global install and performs bounded durable partial cleanup."
     },
     {
       "command": "get_update_state",

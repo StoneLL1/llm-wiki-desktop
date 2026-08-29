@@ -6,12 +6,10 @@ import type {
   TaskActivity,
   StreamDelta,
   LogLine,
-  SetActiveProjectResult,
   TaskProjectPersistenceReason,
 } from "../types/task";
 import type { WorkflowPersistenceMode } from "../types/workflow";
 import { isTerminalStatus } from "../types/task";
-import { useProjectStore } from "./projectStore";
 import {
   isBackendTaskSnapshot,
   isProgressOnlyTaskSnapshot,
@@ -173,15 +171,17 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       : resolvedTasks;
     const activeKey = taskProjectKey(state.activeProjectId);
     let taskIdsByProject = normalized.taskIdsByProject;
-    const nextIds = nextTasks.map((task) => task.id);
+    const projectTasks = nextTasks.filter((task) => task.projectId === state.activeProjectId);
+    const nextIds = projectTasks.map((task) => task.id);
     const currentIds = taskIdsByProject[activeKey] ?? [];
     if (currentIds.length !== nextIds.length || currentIds.some((id, index) => id !== nextIds[index])) {
       taskIdsByProject = { ...taskIdsByProject, [activeKey]: nextIds };
     }
     const nextRunningCount = countRunning(nextTasks);
-    const runningCountByProject = normalized.runningCountByProject[activeKey] === nextRunningCount
+    const projectRunningCount = countRunning(projectTasks);
+    const runningCountByProject = normalized.runningCountByProject[activeKey] === projectRunningCount
       ? normalized.runningCountByProject
-      : { ...normalized.runningCountByProject, [activeKey]: nextRunningCount };
+      : { ...normalized.runningCountByProject, [activeKey]: projectRunningCount };
     if (
       nextTasks === state.tasks
       && !normalized.changed
@@ -223,7 +223,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       );
       const resolvedTask = normalized.taskById[task.id] ?? task;
       const idx = state.tasks.findIndex((t) => t.id === task.id);
-      if (resolvedTask.projectId !== state.activeProjectId && idx < 0) {
+      if (resolvedTask.projectId !== null && resolvedTask.projectId !== state.activeProjectId && idx < 0) {
         if (!normalized.changed) return state;
         return {
           taskById: normalized.taskById,
@@ -260,7 +260,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       const incomingById = new Map(
         incoming
           .map((task) => normalized.taskById[task.id] ?? task)
-          .filter((task) => task.projectId === state.activeProjectId)
+          .filter((task) => task.projectId === null || task.projectId === state.activeProjectId)
           .map((task) => [task.id, task]),
       );
       const tasks = state.tasks.map((task) => {
@@ -279,7 +279,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         runningCountByProject: normalized.runningCountByProject,
         taskFacts: normalized.taskById,
         tasks: tasksChanged ? tasks : state.tasks,
-        runningCount: normalized.runningCountByProject[taskProjectKey(state.activeProjectId)] ?? 0,
+        runningCount: countRunning(tasks),
       };
     }),
   appendLog: (taskId, line) =>
@@ -334,7 +334,7 @@ export function handleTaskEvent(event: BackendEvent): void {
     return;
   }
   useTaskStore.setState((state) => {
-    if (!state.activeProjectId || event.projectId !== state.activeProjectId) return state;
+    if (event.projectId !== null && (!state.activeProjectId || event.projectId !== state.activeProjectId)) return state;
     return applyBackendEvent(state, event);
   });
 }
@@ -499,8 +499,7 @@ const hasTauri = (): boolean =>
 
 export async function fetchTasks(projectId: string, rootPath: string): Promise<void> {
   if (!hasTauri()) return;
-  const { invoke } = await import("@tauri-apps/api/core");
-  const tasks = await invoke<BackendTask[]>("list_tasks", {
+  const tasks = await invokeCommand<BackendTask[]>("list_tasks", {
     request: { projectId, projectRootPath: rootPath, statusFilter: null },
   });
   const state = useTaskStore.getState();
@@ -512,6 +511,14 @@ export async function fetchTasks(projectId: string, rootPath: string): Promise<v
 
 export async function cancelTaskRequest(taskId: string): Promise<void> {
   if (!hasTauri()) return;
+  const selectedTask = useTaskStore.getState().taskById[taskId]
+    ?? useTaskStore.getState().tasks.find((task) => task.id === taskId);
+  if (selectedTask?.projectId === null && selectedTask.taskType === "capability_install") {
+    const { cancelAppCapabilityTask } = await import("../services/appTaskClient");
+    const task = await cancelAppCapabilityTask(selectedTask);
+    useTaskStore.getState().upsertTask(task);
+    return;
+  }
   const { activeProjectId: projectId, activeProjectRootPath: projectRootPath } = useTaskStore.getState();
   if (!projectId || !projectRootPath) return;
   const task = await invokeCommand<BackendTask>("cancel_task", {
@@ -524,10 +531,11 @@ export async function cancelTaskRequest(taskId: string): Promise<void> {
 
 export async function fetchTaskById(taskId: string): Promise<BackendTask | null> {
   if (!hasTauri()) return null;
+  const cached = useTaskStore.getState().taskById[taskId];
+  if (cached?.projectId === null) return cached;
   const { activeProjectId: projectId, activeProjectRootPath: projectRootPath } = useTaskStore.getState();
   if (!projectId || !projectRootPath) return null;
-  const { invoke } = await import("@tauri-apps/api/core");
-  const task = await invoke<BackendTask | null>("get_task", {
+  const task = await invokeCommand<BackendTask | null>("get_task", {
     request: { taskId, projectId, projectRootPath },
   });
   const current = useTaskStore.getState();
@@ -538,10 +546,16 @@ export async function fetchTaskById(taskId: string): Promise<BackendTask | null>
 
 export async function fetchTaskLogs(taskId: string): Promise<void> {
   if (!hasTauri()) return;
+  const globalTask = useTaskStore.getState().taskById[taskId];
+  if (globalTask?.projectId === null && globalTask.taskType === "capability_install") {
+    const { getAppCapabilityTaskLogs } = await import("../services/appTaskClient");
+    const lines = await getAppCapabilityTaskLogs(globalTask);
+    useTaskStore.getState().setLogs(taskId, lines);
+    return;
+  }
   const { activeProjectId: projectId, activeProjectRootPath: projectRootPath } = useTaskStore.getState();
   if (!projectId || !projectRootPath) return;
-  const { invoke } = await import("@tauri-apps/api/core");
-  const lines = await invoke<LogLine[]>("get_task_logs", {
+  const lines = await invokeCommand<LogLine[]>("get_task_logs", {
     request: { taskId, projectId, projectRootPath },
   });
   const current = useTaskStore.getState();
@@ -551,10 +565,16 @@ export async function fetchTaskLogs(taskId: string): Promise<void> {
 
 export async function fetchTaskActivities(taskId: string): Promise<void> {
   if (!hasTauri()) return;
+  const globalTask = useTaskStore.getState().taskById[taskId];
+  if (globalTask?.projectId === null && globalTask.taskType === "capability_install") {
+    const { getAppCapabilityTaskActivities } = await import("../services/appTaskClient");
+    const activities = await getAppCapabilityTaskActivities(globalTask);
+    useTaskStore.getState().setActivities(taskId, Array.isArray(activities) ? activities : []);
+    return;
+  }
   const { activeProjectId: projectId, activeProjectRootPath: projectRootPath } = useTaskStore.getState();
   if (!projectId || !projectRootPath) return;
-  const { invoke } = await import("@tauri-apps/api/core");
-  const activities = await invoke<TaskActivity[]>("get_task_activities", {
+  const activities = await invokeCommand<TaskActivity[]>("get_task_activities", {
     request: { taskId, projectId, projectRootPath },
   });
   const current = useTaskStore.getState();
@@ -566,69 +586,11 @@ export async function removeCompletedTasks(): Promise<void> {
   if (!hasTauri()) return;
   const { activeProjectId, activeProjectRootPath } = useTaskStore.getState();
   if (!activeProjectId || !activeProjectRootPath) return;
-  const { invoke } = await import("@tauri-apps/api/core");
-  await invoke<number>("remove_completed_tasks", {
+  await invokeCommand<number>("remove_completed_tasks", {
     request: { projectId: activeProjectId, projectRootPath: activeProjectRootPath },
   });
   await fetchTasks(activeProjectId, activeProjectRootPath);
 }
-
-export async function recoverTasksForProject(projectId: string, rootPath: string): Promise<void> {
-  if (!hasTauri()) return;
-  const recoveryId = ++recoveryEpoch;
-  useTaskStore.setState({
-    activeProjectId: projectId,
-    activeProjectRootPath: rootPath,
-    tasks: [],
-    logs: {},
-    activities: {},
-    taskOutputs: {},
-    selectedTaskId: null,
-    drawerOpen: false,
-    runningCount: 0,
-    tasksHydrated: false,
-    projectPersistence: null,
-    projectPersistenceReason: null,
-  });
-  useProjectStore.getState().setTaskPersistence(projectId, rootPath, null, null);
-  const { invoke } = await import("@tauri-apps/api/core");
-  try {
-    const result = await invoke<SetActiveProjectResult>("set_active_project", {
-      request: { projectId, rootPath },
-    });
-    const state = useTaskStore.getState();
-    if (
-      recoveryId !== recoveryEpoch ||
-      state.activeProjectId !== projectId ||
-      state.activeProjectRootPath !== rootPath
-    ) return;
-    useTaskStore.setState({
-      projectPersistence: result.persistence,
-      projectPersistenceReason: result.persistenceReason ?? null,
-    });
-    useProjectStore.getState().setTaskPersistence(
-      projectId,
-      rootPath,
-      result.persistence,
-      result.persistenceReason ?? null,
-    );
-    useTaskStore.getState().setTasks(result.tasks);
-  } finally {
-    // Unknown task cards are only dismissible after the project task registry
-    // has had a chance to hydrate; otherwise a restart race can hide a live
-    // batch before its task snapshot arrives.
-    const state = useTaskStore.getState();
-    if (
-      recoveryId === recoveryEpoch &&
-      state.activeProjectId === projectId &&
-      state.activeProjectRootPath === rootPath
-    ) {
-      useTaskStore.setState({ tasksHydrated: true });
-    }
-  }
-}
-
-let recoveryEpoch = 0;
 
 export function selectTaskById(state: TaskState, taskId: string | null | undefined): BackendTask | null {
   if (!taskId) return null;
@@ -661,11 +623,8 @@ export function selectTasksForProject(state: TaskState, projectId: string | null
 
 export function selectTaskIdsForProject(state: TaskState, projectId: string | null): readonly string[] {
   const indexed = state.taskIdsByProject[taskProjectKey(projectId)] ?? EMPTY_TASK_IDS;
-  const legacyTasks = state.activeProjectId === projectId
-    ? state.tasks
-    : indexed.length === 0
-      ? state.tasks.filter((task) => task.projectId === projectId)
-      : [];
+  if (state.activeProjectId !== projectId && indexed.length > 0) return indexed;
+  const legacyTasks = state.tasks.filter((task) => task.projectId === projectId);
   const legacyTasksMatchIndex = indexed.length === legacyTasks.length
     && indexed.every((taskId, index) => taskId === legacyTasks[index]?.id);
   if (legacyTasksMatchIndex) return indexed;
@@ -681,7 +640,6 @@ export function selectTaskIdsForProject(state: TaskState, projectId: string | nu
 }
 
 export function selectRunningCountForProject(state: TaskState, projectId: string | null): number {
-  if (state.activeProjectId === projectId) return state.runningCount;
   return state.runningCountByProject[taskProjectKey(projectId)] ?? 0;
 }
 

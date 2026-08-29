@@ -16,7 +16,6 @@ import {
 } from "../services/taskEventDispatcher";
 import {
   handleTaskEvent,
-  recoverTasksForProject,
 } from "../stores/taskStore";
 import {
   ensureProjectFacts,
@@ -186,12 +185,15 @@ export function useTaskEvents(): void {
 
   // Recover persisted tasks whenever the active project root changes.
   useEffect(() => {
-    if (currentProject.rootPath) {
-      recoverTasksForProject(currentProject.projectId, currentProject.rootPath).catch((error) => {
+    void import("../services/taskRecovery").then(({ recoverAppTasks, recoverTasksForProject }) => {
+      if (!currentProject.rootPath) return recoverAppTasks();
+      return recoverTasksForProject(currentProject.projectId, currentProject.rootPath);
+    }).catch((error) => {
+      if (currentProject.rootPath) {
         pushToast("error", i18next.t("task.recoverError", {
           message: translateBackendError(error, i18next.t.bind(i18next)),
         }));
-      });
-    }
+      }
+    });
   }, [currentProject.projectId, currentProject.rootPath, pushToast]);
 }

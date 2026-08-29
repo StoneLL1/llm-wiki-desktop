@@ -172,6 +172,7 @@ impl ProjectWriteRootKind {
 
 #[derive(Default)]
 pub struct AppState {
+    pub app_capability_coordinator: crate::services::AppCapabilityCoordinator,
     pub blocking_work: BlockingWorkCoordinator,
     pub project_registry: ProjectRegistry,
     pub project_service: ProjectService,
@@ -2948,7 +2949,10 @@ mod project_registry_tests {
 
         release_tx.send(()).unwrap();
         reader.join().unwrap().unwrap();
-        revoked_rx.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+        revoked_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
         revoker.join().unwrap();
         cleanup_paths(&[&project, &config]);
     }

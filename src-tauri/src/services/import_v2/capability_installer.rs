@@ -231,14 +231,16 @@ pub async fn install_catalog_entry(
     )
     .await?;
     if token.is_cancelled() {
-        let paths_for_cleanup = paths.clone();
-        blocking_work
-            .run(BlockingWorkClass::HeavyIo, move || {
-                remove_partial(&paths_for_cleanup);
-                Ok(())
-            })
-            .await?;
-        return Err(cancelled());
+        if !token.is_pause_requested() {
+            let paths_for_cleanup = paths.clone();
+            blocking_work
+                .run(BlockingWorkClass::HeavyIo, move || {
+                    remove_partial(&paths_for_cleanup);
+                    Ok(())
+                })
+                .await?;
+        }
+        return Err(stopped(token));
     }
     progress(
         CapabilityInstallPhase::Verifying,
@@ -266,8 +268,10 @@ pub async fn install_catalog_entry(
                 &install_token,
             )?;
             if install_token.is_cancelled() {
-                remove_partial(&paths);
-                return Err(cancelled());
+                if !install_token.is_pause_requested() {
+                    remove_partial(&paths);
+                }
+                return Err(stopped(&install_token));
             }
             let staged_version = staging_root
                 .join(&install_entry.capability_id)
@@ -340,6 +344,18 @@ pub async fn install_catalog_entry(
             })
         })
         .await
+}
+
+pub fn discard_catalog_partial(
+    install_root: &Path,
+    entry: &CapabilityCatalogEntry,
+) -> Result<(), BackendError> {
+    let install_root = install_root
+        .canonicalize()
+        .map_err(|_| install_error("Capability install directory cannot be resolved."))?;
+    let paths = partial_paths(&install_root, entry)?;
+    remove_partial(&paths);
+    Ok(())
 }
 
 pub struct CapabilityInstallOutcome {
@@ -577,8 +593,10 @@ async fn download_archive_inner(
     loop {
         let next = loop {
             if token.is_cancelled() {
-                remove_partial_background(blocking_work, paths).await?;
-                return Err(cancelled());
+                if !token.is_pause_requested() {
+                    remove_partial_background(blocking_work, paths).await?;
+                }
+                return Err(stopped(token));
             }
             match tokio::time::timeout(Duration::from_millis(250), stream.next()).await {
                 Ok(next) => break next,
@@ -685,7 +703,7 @@ async fn send_cancellable(
             }
             _ = tokio::time::sleep(Duration::from_millis(100)) => {
                 if token.is_cancelled() {
-                    return Err(cancelled());
+                    return Err(stopped(token));
                 }
             }
         }
@@ -909,8 +927,8 @@ fn hash_prefix_cancellable(
     let mut remaining = expected_bytes;
     let mut buffer = [0_u8; IO_BUFFER_BYTES];
     while remaining > 0 {
-        if token.is_some_and(CancellationToken::is_cancelled) {
-            return Err(cancelled());
+        if let Some(token) = token.filter(|token| token.is_cancelled()) {
+            return Err(stopped(token));
         }
         let take = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
         let read = file
@@ -1277,8 +1295,8 @@ fn extract_and_verify_with_keys_cancellable(
     }
     let mut installed = 0_u64;
     for index in 0..archive.len() {
-        if token.is_some_and(CancellationToken::is_cancelled) {
-            return Err(cancelled());
+        if let Some(token) = token.filter(|token| token.is_cancelled()) {
+            return Err(stopped(token));
         }
         let mut file = archive
             .by_index(index)
@@ -1322,8 +1340,8 @@ fn extract_and_verify_with_keys_cancellable(
         let mut written = 0_u64;
         let mut buffer = [0_u8; IO_BUFFER_BYTES];
         loop {
-            if token.is_some_and(CancellationToken::is_cancelled) {
-                return Err(cancelled());
+            if let Some(token) = token.filter(|token| token.is_cancelled()) {
+                return Err(stopped(token));
             }
             let read = file
                 .read(&mut buffer)
@@ -1476,8 +1494,8 @@ fn hash_reader_cancellable(
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; IO_BUFFER_BYTES];
     loop {
-        if token.is_some_and(CancellationToken::is_cancelled) {
-            return Err(cancelled());
+        if let Some(token) = token.filter(|token| token.is_cancelled()) {
+            return Err(stopped(token));
         }
         let read = file
             .read(&mut buffer)
@@ -1705,6 +1723,19 @@ fn cancelled() -> BackendError {
         true,
         true,
     )
+}
+
+fn stopped(token: &CancellationToken) -> BackendError {
+    if token.is_pause_requested() {
+        BackendError::new(
+            "APP_CAPABILITY_INSTALL_PAUSED",
+            "Capability installation was paused and can be resumed.",
+            true,
+            false,
+        )
+    } else {
+        cancelled()
+    }
 }
 
 #[cfg(test)]

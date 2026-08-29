@@ -503,6 +503,10 @@ pub fn run() {
                 .map_err(startup_backend_error)?;
             if let Ok(app_data) = app.path().app_local_data_dir() {
                 let install_root = app_data.join("installed-capabilities");
+                state
+                    .app_capability_coordinator
+                    .initialize(&app_data.join("capability-control"), &state.task_service)
+                    .map_err(startup_backend_error)?;
                 #[cfg(debug_assertions)]
                 {
                     let development_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -618,6 +622,14 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::agent_commands::detect_agents,
+            commands::app_capability_commands::list_app_capabilities_v1,
+            commands::app_capability_commands::list_app_tasks_v1,
+            commands::app_capability_commands::get_app_capability_task_logs_v1,
+            commands::app_capability_commands::get_app_capability_task_activities_v1,
+            commands::app_capability_commands::install_app_capability_v1,
+            commands::app_capability_commands::pause_app_capability_install_v1,
+            commands::app_capability_commands::resume_app_capability_install_v1,
+            commands::app_capability_commands::cancel_app_capability_install_v1,
             commands::update_commands::get_update_state,
             commands::update_commands::get_global_update_preferences,
             commands::update_commands::save_global_update_preferences,

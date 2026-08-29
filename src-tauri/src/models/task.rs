@@ -44,6 +44,7 @@ impl BackendTask {
             }
             Some(
                 TaskOperation::CapabilityInstall { .. }
+                | TaskOperation::AppCapabilityInstall { .. }
                 | TaskOperation::ImportCommit { .. }
                 | TaskOperation::ImportRecovery { .. }
                 | TaskOperation::ImportHistoryIndexRebuild,
@@ -90,6 +91,7 @@ pub enum TaskType {
     SourceAiOrganize,
     ProjectInventory,
     Workflow,
+    CapabilityInstall,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -126,6 +128,12 @@ pub enum TaskOperation {
         item_id: String,
         capability_id: String,
         requirement_revision: String,
+    },
+    AppCapabilityInstall {
+        capability_id: String,
+        version: String,
+        target_triple: String,
+        archive_identity: String,
     },
     ImportCommit {
         session_id: String,

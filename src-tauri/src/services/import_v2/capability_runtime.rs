@@ -24,6 +24,8 @@ pub struct CapabilityRuntimeStatus {
     pub capability_id: String,
     pub route: String,
     pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub healthy_version: Option<String>,
     pub reason: Option<String>,
 }
 
@@ -136,6 +138,7 @@ impl ImportCapabilityRuntime {
                 accepted_license_expressions: spec.licenses.iter().map(|v| (*v).into()).collect(),
             };
             let result = manager.resolve(&requirement).and_then(|pack| {
+                let healthy_version = pack.manifest.version.clone();
                 let browser_pack = (spec.id == "browser-runtime").then(|| pack.clone());
                 if spec.id == "office-oxide"
                     && !CapabilitySnapshot::from_installation(
@@ -172,12 +175,14 @@ impl ImportCapabilityRuntime {
                         )
                     })? = Some(pack);
                 }
-                Ok(())
+                Ok(healthy_version)
             });
+            let healthy_version = result.as_ref().ok().cloned();
             statuses.push(CapabilityRuntimeStatus {
                 capability_id: spec.id.into(),
                 route: spec.route.into(),
                 available: result.is_ok(),
+                healthy_version,
                 reason: result.err().map(safe_reason),
             });
         }
@@ -237,6 +242,7 @@ impl ImportCapabilityRuntime {
         route: &str,
         service: &ImportV2Service,
     ) -> Result<(), BackendError> {
+        let healthy_version = pack.manifest.version.clone();
         let spec = PACK_SPECS
             .iter()
             .find(|spec| spec.id == capability_id && spec.route == route)
@@ -273,6 +279,7 @@ impl ImportCapabilityRuntime {
                 .find(|status| status.capability_id == capability_id && status.route == route)
             {
                 status.available = true;
+                status.healthy_version = Some(healthy_version);
                 status.reason = None;
             }
         }
@@ -526,6 +533,7 @@ mod tests {
             capability_id: id.into(),
             route: route.into(),
             available,
+            healthy_version: available.then(|| "1.0.0".into()),
             reason: (!available).then(|| "missing".into()),
         };
         let merged = merge_development_statuses(
