@@ -57,6 +57,8 @@ mod test_support;
 pub(crate) use commit::NewSourceTargetReservations;
 pub use history_store::HistoryStore;
 #[cfg(feature = "gui")]
+pub(crate) use orchestrator::AcceptedImportOperation;
+#[cfg(feature = "gui")]
 pub(crate) use orchestrator::{import_batch_operation_session_id, is_import_batch_operation_task};
 pub use orchestrator::{routes_for_format, ImportV2Service};
 #[cfg(feature = "performance-observers")]

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::models::task::TaskProgress;
+use crate::models::task::{TaskProgress, TaskStatus};
 
 pub const IMPORT_V2_SCHEMA_VERSION: u32 = 2;
 
@@ -68,8 +68,70 @@ pub struct ImportSessionOverview {
     pub selection_revision: u64,
     pub confirmation_digest: String,
     pub counts: ImportSessionCounts,
+    pub status_counts: ImportSessionStatusCounts,
     pub selection: ImportSelectionSummary,
     pub index_state: ImportSessionIndexState,
+    #[serde(default)]
+    pub action_groups: Vec<ImportSessionActionGroup>,
+    #[serde(default)]
+    pub unresolved_count: u64,
+    #[serde(default)]
+    pub remaining_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_task: Option<ImportOperationTaskSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSessionStatusCounts {
+    pub queued: u64,
+    pub inspecting: u64,
+    pub waiting_capability: u64,
+    pub waiting_login: u64,
+    pub waiting_authorization: u64,
+    pub extracting: u64,
+    pub validating: u64,
+    pub preview_ready: u64,
+    pub needs_merge: u64,
+    pub committing: u64,
+    pub completed: u64,
+    pub paused: u64,
+    pub cancelled: u64,
+    pub skipped: u64,
+    pub failed: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportSessionActionGroupKind {
+    Login,
+    Ocr,
+    Asr,
+    Capability,
+    Conflict,
+    Resume,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSessionActionGroup {
+    pub group_key: String,
+    pub kind: ImportSessionActionGroupKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_id: Option<String>,
+    pub item_count: u64,
+    pub item_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportOperationTaskSummary {
+    pub task_id: String,
+    pub status: TaskStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<TaskProgress>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -7,9 +7,9 @@ use uuid::Uuid;
 
 use crate::app_state::AppState;
 use crate::errors::BackendError;
-use crate::models::import_v2::ImportSession;
+use crate::models::import_v2::{ImportSession, ImportSessionOverview};
 use crate::models::import_v2_file::{FileScanPolicy, FileScanResult, ImportScanIdentity};
-use crate::models::task::{BackendTask, TaskResult, TaskStatus, TaskType};
+use crate::models::task::{BackendTask, TaskResult, TaskResultReference, TaskStatus, TaskType};
 use crate::services::import_v2::capability_runtime::CapabilityRuntimeStatus;
 use crate::services::import_v2::file_discovery::FileDiscoveryService;
 use crate::services::import_v2::scan_confirmation::{
@@ -24,6 +24,32 @@ const DISCOVERY_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(100);
 fn import_scan_confirmation_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn recover_claimed_scan_operation(
+    state: &AppState,
+    session: &ImportSession,
+) -> Option<crate::services::import_v2::AcceptedImportOperation> {
+    let mut tasks = state
+        .task_service
+        .list_tasks(None)
+        .into_iter()
+        .filter(|task| {
+            task.status == TaskStatus::Queued
+                && task.import_operation_session_id() == Some(session.session_id.as_str())
+        })
+        .collect::<Vec<_>>();
+    tasks.sort_by(|left, right| right.started_at.cmp(&left.started_at));
+    tasks.into_iter().find_map(|task| {
+        let item_ids = session
+            .items
+            .iter()
+            .filter(|item| item.task_id.as_deref() == Some(task.id.as_str()))
+            .map(|item| item.item_id.clone())
+            .collect::<Vec<_>>();
+        (!item_ids.is_empty())
+            .then_some(crate::services::import_v2::AcceptedImportOperation { task, item_ids })
+    })
 }
 
 fn import_scan_path(
@@ -84,7 +110,12 @@ pub struct AcceptImportScanV2Request {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcceptImportScanV2Result {
-    pub session: ImportSession,
+    pub session_id: String,
+    pub semantic_revision: u64,
+    pub accepted_item_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_task: Option<BackendTask>,
+    pub overview: ImportSessionOverview,
     pub scan: FileScanResult,
 }
 
@@ -220,6 +251,8 @@ pub fn start_add_import_paths_v2(
                 });
             let skipped = scan.skipped.len();
             let added = plan.inputs.len();
+            let aggregate_confirmation_pending = plan.aggregate_confirmation_pending;
+            let item_confirmation_pending = plan.item_confirmation_pending;
             let summary = if plan.aggregate_confirmation_pending {
                 format!(
                     "Found {} files ({} bytes, about {} outputs); confirmation is required before adding them.",
@@ -243,17 +276,60 @@ pub fn start_add_import_paths_v2(
                         Some("Discovery complete".into()),
                     );
                     let scan_path = import_scan_path(context, &request.session_id, &task_id)?;
-                    state
-                        .file_store
-                        .write_json_atomic(context, &scan_path, &scan)?;
-                    if !plan.inputs.is_empty() {
-                        state.import_v2_service.add_inputs_authorized(
+                    let mut accepted_operation = if plan.inputs.is_empty() {
+                        None
+                    } else {
+                        state.import_v2_service.accept_scan_inputs_with_operation_authorized(
+                            permit,
+                            &state.file_store,
+                            &state.task_service,
+                            &request.session_id,
+                            plan.inputs,
+                        )?
+                    };
+                    if accepted_operation.is_none() {
+                        let claimed_session = state.import_v2_service.load_session(
+                            context,
+                            &state.file_store,
+                            &request.session_id,
+                        )?;
+                        accepted_operation = recover_claimed_scan_operation(&state, &claimed_session);
+                    }
+                    if !aggregate_confirmation_pending && !item_confirmation_pending {
+                        mark_scan_accepted(&mut scan, chrono::Utc::now().to_rfc3339());
+                        state.import_v2_service.set_discovery_task_id_authorized(
                             permit,
                             &state.file_store,
                             &request.session_id,
-                            plan.inputs,
+                            None,
                         )?;
                     }
+                    state
+                        .file_store
+                        .write_json_atomic(context, &scan_path, &scan)?;
+                    let operation_reference = if let Some(operation) = accepted_operation {
+                        let item_count = operation.item_ids.len() as u64;
+                        let operation_task = crate::commands::import_v2_commands::dispatch_claimed_import_batch_for_state(
+                            app.clone(),
+                            &state,
+                            permit,
+                            crate::commands::import_v2_commands::StartImportBatchV2Request {
+                                project_id: request.project_id.clone(),
+                                project_root_path: request.project_root_path.clone(),
+                                session_id: request.session_id.clone(),
+                                item_ids: operation.item_ids,
+                                recovery_action: None,
+                            },
+                            operation.task,
+                        )?;
+                        Some(TaskResultReference::ImportOperation {
+                            session_id: request.session_id.clone(),
+                            task_id: operation_task.id,
+                            item_count,
+                        })
+                    } else {
+                        None
+                    };
                     state
                         .task_service
                         .append_log(&task_id, LogLevel::Info, summary.clone())
@@ -265,7 +341,7 @@ pub fn start_add_import_paths_v2(
                             TaskResult {
                                 summary,
                                 affected_paths: vec![scan_path],
-                                reference: None,
+                                reference: operation_reference,
                                 pending_action: None,
                             },
                         )
@@ -320,6 +396,7 @@ pub fn get_import_scan_result_v2(
 }
 
 pub fn accept_import_scan_v2(
+    app: AppHandle,
     state: State<'_, AppState>,
     request: AcceptImportScanV2Request,
 ) -> Result<AcceptImportScanV2Result, BackendError> {
@@ -357,14 +434,18 @@ pub fn accept_import_scan_v2(
                 &current,
             )?;
             let mut fully_accepted = matches!(acceptance, SavedScanAcceptance::AlreadyAccepted);
+            let mut accepted_operation = None;
             if let SavedScanAcceptance::Ready(plan) = acceptance {
                 if !plan.inputs.is_empty() {
-                    state.import_v2_service.add_inputs_authorized(
-                        permit,
-                        &state.file_store,
-                        &request.session_id,
-                        plan.inputs,
-                    )?;
+                    accepted_operation = state
+                        .import_v2_service
+                        .accept_scan_inputs_with_operation_authorized(
+                            permit,
+                            &state.file_store,
+                            &state.task_service,
+                            &request.session_id,
+                            plan.inputs,
+                        )?;
                 }
                 let now = chrono::Utc::now().to_rfc3339();
                 if plan.mark_aggregate_confirmed {
@@ -375,6 +456,14 @@ pub fn accept_import_scan_v2(
                     fully_accepted = true;
                 }
                 state.file_store.write_json_atomic(context, &path, &scan)?;
+            }
+            if accepted_operation.is_none() {
+                let claimed_session = state.import_v2_service.load_session(
+                    context,
+                    &state.file_store,
+                    &request.session_id,
+                )?;
+                accepted_operation = recover_claimed_scan_operation(&state, &claimed_session);
             }
             let session = if fully_accepted {
                 state.import_v2_service.set_discovery_task_id_authorized(
@@ -390,7 +479,44 @@ pub fn accept_import_scan_v2(
                     &request.session_id,
                 )?
             };
-            Ok(AcceptImportScanV2Result { session, scan })
+            let accepted_item_count = accepted_operation
+                .as_ref()
+                .map_or(0, |operation| operation.item_ids.len() as u64);
+            let operation_task = if let Some(operation) = accepted_operation {
+                Some(
+                    crate::commands::import_v2_commands::dispatch_claimed_import_batch_for_state(
+                        app.clone(),
+                        &state,
+                        permit,
+                        crate::commands::import_v2_commands::StartImportBatchV2Request {
+                            project_id: request.project_id.clone(),
+                            project_root_path: request.project_root_path.clone(),
+                            session_id: request.session_id.clone(),
+                            item_ids: operation.item_ids,
+                            recovery_action: None,
+                        },
+                        operation.task,
+                    )?,
+                )
+            } else {
+                None
+            };
+            let overview = state.import_v2_service.read_session_overview(
+                context,
+                &state.file_store,
+                &request.session_id,
+            )?;
+            let overview = crate::commands::import_v2_commands::enrich_import_session_overview(
+                &state, context, overview,
+            )?;
+            Ok(AcceptImportScanV2Result {
+                session_id: session.session_id,
+                semantic_revision: overview.semantic_revision,
+                accepted_item_count,
+                operation_task,
+                overview,
+                scan,
+            })
         },
     )
 }

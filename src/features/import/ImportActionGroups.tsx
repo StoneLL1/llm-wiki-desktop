@@ -1,71 +1,23 @@
-import { KeyRound, LoaderCircle, LogIn, Mic2, PackagePlus, Play, ScanText } from "lucide-react";
-import { useMemo } from "react";
+import { GitMerge, KeyRound, LoaderCircle, LogIn, Mic2, PackagePlus, Play, ScanText } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import type { ImportItem } from "../../types/importV2";
+import type { ImportSessionActionGroup, ImportSessionActionGroupKind } from "../../types/importV2";
 import { capabilityDisplayName } from "./importCapabilityPresentation";
-import { importPlatformForLocator } from "./importLocator";
-import { presentImportItem, type ImportItemAction } from "./importStatusPresentation";
+import type { ImportItemAction } from "./importStatusPresentation";
 
-export type ImportActionGroupKind = "login" | "ocr" | "asr" | "capability" | "resume";
+export type ImportActionGroupKind = ImportSessionActionGroupKind;
 
-export interface ImportActionGroup {
-  groupKey: string;
-  kind: ImportActionGroupKind;
-  subjectId: string | null;
-  itemIds: readonly string[];
+export interface ImportActionGroup extends ImportSessionActionGroup {
   action: ImportItemAction;
 }
 
-function capabilityIdForItem(item: ImportItem): string {
-  const actions = item.issue?.recoveryActions ?? [];
-  if (actions.includes("install_browser_capability")) return "browser-runtime";
-  if (actions.includes("install_media_capability")) return "asr-sensevoice-small";
-  if (actions.includes("install_ocr_capability")) return "ocr-cjk-accurate";
-  return "document-standard";
-}
-
-export function buildImportActionGroups(items: readonly ImportItem[]): ImportActionGroup[] {
-  const groups = new Map<string, ImportActionGroup>();
-  for (const item of items) {
-    const presentation = presentImportItem(item);
-    const group = (() => {
-      if (item.status === "paused") {
-        return { kind: "resume" as const, action: "retry" as const, subjectId: null };
-      }
-      switch (presentation.primaryAction) {
-        case "begin_login": {
-          const locator = item.input.normalizedLocator ?? item.input.locator;
-          return {
-            kind: "login" as const,
-            action: "begin_login" as const,
-            subjectId: importPlatformForLocator(locator),
-          };
-        }
-        case "enable_ocr":
-          return { kind: "ocr" as const, action: "enable_ocr" as const, subjectId: null };
-        case "authorize_local_asr":
-          return { kind: "asr" as const, action: "authorize_local_asr" as const, subjectId: null };
-        case "view_capability":
-          return {
-            kind: "capability" as const,
-            action: "view_capability" as const,
-            subjectId: capabilityIdForItem(item),
-          };
-        default:
-          return null;
-      }
-    })();
-    if (!group) continue;
-    const groupKey = `${group.kind}:${group.subjectId ?? "all"}`;
-    const current = groups.get(groupKey);
-    groups.set(groupKey, {
-      ...group,
-      groupKey,
-      itemIds: [...(current?.itemIds ?? []), item.itemId],
-    });
-  }
-  return [...groups.values()];
+function actionForGroup(kind: ImportActionGroupKind): ImportItemAction {
+  if (kind === "login") return "begin_login";
+  if (kind === "ocr") return "enable_ocr";
+  if (kind === "asr") return "authorize_local_asr";
+  if (kind === "capability") return "view_capability";
+  if (kind === "conflict") return "resolve_merge";
+  return "retry";
 }
 
 const GROUP_ICONS = {
@@ -73,22 +25,23 @@ const GROUP_ICONS = {
   ocr: ScanText,
   asr: Mic2,
   capability: PackagePlus,
+  conflict: GitMerge,
   resume: Play,
 } satisfies Record<ImportActionGroupKind, typeof KeyRound>;
 
 export interface ImportActionGroupsProps {
-  items: readonly ImportItem[];
+  groups: readonly ImportSessionActionGroup[];
   pendingItemIds?: ReadonlySet<string>;
   onRun: (group: ImportActionGroup) => void;
 }
 
 export function ImportActionGroups({
-  items,
+  groups: overviewGroups,
   pendingItemIds = new Set<string>(),
   onRun,
 }: ImportActionGroupsProps) {
   const { t } = useTranslation();
-  const groups = useMemo(() => buildImportActionGroups(items), [items]);
+  const groups = overviewGroups.map((group) => ({ ...group, action: actionForGroup(group.kind) }));
   if (groups.length === 0) return null;
 
   return (
@@ -112,7 +65,7 @@ export function ImportActionGroups({
               <div className="min-w-0 flex-1">
                 <strong>
                   {subject ? `${subject} · ` : ""}
-                  {t(`importV2.actionGroups.${group.kind}.title`, { count: group.itemIds.length })}
+                  {t(`importV2.actionGroups.${group.kind}.title`, { count: group.itemCount })}
                 </strong>
                 <span>{t(`importV2.actionGroups.${group.kind}.description`)}</span>
               </div>

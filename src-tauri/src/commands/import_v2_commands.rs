@@ -12,8 +12,8 @@ use crate::errors::{
 use crate::models::import_v2::{
     CommitImportSessionRequest, ImportBatchResult, ImportCompletion, ImportInput, ImportItem,
     ImportItemPage, ImportItemPageFilter, ImportItemResolution, ImportItemStatus,
-    ImportRecoveryAction, ImportResolutionKind, ImportResourceMode, ImportSession,
-    ImportSessionOverview, ImportSessionPatchCounts, ImportSessionPatchEvent,
+    ImportOperationTaskSummary, ImportRecoveryAction, ImportResolutionKind, ImportResourceMode,
+    ImportSession, ImportSessionOverview, ImportSessionPatchCounts, ImportSessionPatchEvent,
     ImportThreeWayMergeContext, ImportWorkItemSnapshot,
 };
 use crate::models::paths::ProjectContext;
@@ -211,9 +211,44 @@ pub fn get_import_session_overview_v2(
     request: GetImportSessionV2Request,
 ) -> Result<ImportSessionOverview, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state
+    let overview = state.import_v2_service.read_session_overview(
+        &context,
+        &state.file_store,
+        &request.session_id,
+    )?;
+    enrich_import_session_overview(&state, &context, overview)
+}
+
+pub(crate) fn enrich_import_session_overview(
+    state: &AppState,
+    context: &ProjectContext,
+    mut overview: ImportSessionOverview,
+) -> Result<ImportSessionOverview, BackendError> {
+    overview.next_cursor = state
         .import_v2_service
-        .read_session_overview(&context, &state.file_store, &request.session_id)
+        .list_session_items(
+            context,
+            &state.file_store,
+            &overview.session_id,
+            ImportItemPageFilter::All,
+            None,
+            200,
+        )?
+        .next_cursor;
+    overview.operation_task = state
+        .task_service
+        .list_tasks(None)
+        .into_iter()
+        .find(|task| {
+            task.project_id.as_deref() == Some(context.project_id.as_str())
+                && import_batch_operation_session_id(task) == Some(overview.session_id.as_str())
+        })
+        .map(|task| ImportOperationTaskSummary {
+            task_id: task.id,
+            status: task.status,
+            progress: task.progress,
+        });
+    Ok(overview)
 }
 
 pub fn list_import_session_items_v2(
@@ -926,7 +961,6 @@ pub(crate) fn start_import_batch_for_state(
     permit: &ProjectWritePermit<'_>,
     request: StartImportBatchV2Request,
 ) -> Result<BackendTask, BackendError> {
-    let context = permit.context();
     let task = state
         .import_v2_service
         .create_batch_operation_task_authorized(
@@ -936,6 +970,17 @@ pub(crate) fn start_import_batch_for_state(
             &request.session_id,
             &request.item_ids,
         )?;
+    dispatch_claimed_import_batch_for_state(app, state, permit, request, task)
+}
+
+pub(crate) fn dispatch_claimed_import_batch_for_state(
+    app: AppHandle,
+    state: &AppState,
+    permit: &ProjectWritePermit<'_>,
+    request: StartImportBatchV2Request,
+    task: BackendTask,
+) -> Result<BackendTask, BackendError> {
+    let context = permit.context();
     let running_task = match state
         .task_service
         .transition_status(&task.id, TaskStatus::Running)
@@ -1144,6 +1189,23 @@ fn enqueue_import_jobs(jobs: Vec<ImportWorkerJob>, worker_limit: usize) {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .extend(jobs);
     schedule_import_workers();
+}
+
+fn take_queued_import_jobs(task_id: &str) -> Vec<ImportWorkerJob> {
+    let mut queue = import_work_queue()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut retained = VecDeque::with_capacity(queue.len());
+    let mut removed = Vec::new();
+    while let Some(job) = queue.pop_front() {
+        if job.task_id == task_id {
+            removed.push(job);
+        } else {
+            retained.push_back(job);
+        }
+    }
+    *queue = retained;
+    removed
 }
 
 fn schedule_import_workers() {
@@ -1405,8 +1467,23 @@ fn run_import_worker_job(job: &ImportWorkerJob) {
             Err(_) => classify_batch_item_outcome(&state, job),
         };
         finish_batch_worker(&state, job, outcome);
-    } else if let Err(error) = result {
-        fail_task_unless_cancelled(&state, &job.task_id, error);
+    } else {
+        if let Err(error) = result {
+            fail_task_unless_cancelled(&state, &job.task_id, error);
+        }
+        let _ = state.with_current_project_write_access(
+            &job.project_id,
+            &job.project_root_path,
+            |permit, _context| {
+                state
+                    .import_v2_service
+                    .refresh_session_action_groups_authorized(
+                        permit,
+                        &state.file_store,
+                        &job.session_id,
+                    )
+            },
+        );
     }
 }
 
@@ -1629,6 +1706,28 @@ fn finish_batch_worker(state: &AppState, job: &ImportWorkerJob, outcome: ImportI
     if completed != total {
         return;
     }
+    let projection_result = state.with_current_project_write_access(
+        &job.project_id,
+        &job.project_root_path,
+        |permit, _context| {
+            state
+                .import_v2_service
+                .refresh_session_action_groups_authorized(
+                    permit,
+                    &state.file_store,
+                    &job.session_id,
+                )
+        },
+    );
+    if let Err(error) = projection_result {
+        let _ = control.log(
+            LogLevel::Error,
+            format!(
+                "Import action projection could not be finalized: {}",
+                error.message
+            ),
+        );
+    }
     let _ = control.flush_progress(total, total, "Import batch complete".into());
     let (terminal_status, terminal_error) = if summary.systemic_errors > 0 {
         (
@@ -1759,7 +1858,35 @@ pub(crate) fn cancel_import_operation_for_state(
         .task_service
         .request_cancel_with_previous_status(&task.id)?;
     if previous_status != TaskStatus::WaitingForConfirmation {
-        return Ok(requested);
+        if allow_project_cleanup {
+            let removed = take_queued_import_jobs(&task.id);
+            if !removed.is_empty() {
+                let item_ids = removed
+                    .iter()
+                    .map(|job| job.item_id.clone())
+                    .collect::<Vec<_>>();
+                if let Err(error) = state
+                    .import_v2_service
+                    .cancel_batch_item_cohort_for_task_authorized(
+                        permit,
+                        &state.file_store,
+                        session_id,
+                        &task.id,
+                        &item_ids,
+                    )
+                {
+                    enqueue_import_jobs(
+                        removed,
+                        IMPORT_WORKER_LIMIT.load(Ordering::Acquire).max(1),
+                    );
+                    return Err(error.message);
+                }
+                for job in &removed {
+                    finish_batch_worker(state, job, ImportItemRunOutcome::Cancelled);
+                }
+            }
+        }
+        return Ok(state.task_service.get_task(&task.id).unwrap_or(requested));
     }
     if !allow_project_cleanup {
         return state.task_service.finalize_cancellation(&task.id);

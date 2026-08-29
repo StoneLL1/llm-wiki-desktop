@@ -305,6 +305,46 @@ fn active_pointer_and_legacy_rebuild_keep_foreground_reads_bounded() {
 }
 
 #[test]
+fn older_control_schema_requires_an_explicit_projection_rebuild() {
+    let root = tempfile::tempdir().unwrap();
+    let context = ProjectContext::new("old-control", root.path().to_path_buf());
+    let store = SessionStore::default();
+    let files = FileStore::default();
+    let mut session = ImportSession::new(
+        "old-control-session",
+        "old-control",
+        ImportResourceMode::Balanced,
+    );
+    session.items = vec![synthetic_item(0)];
+    store.save(&context, &files, &session).unwrap();
+
+    let state_path = root
+        .path()
+        .join(".app/import-sessions/old-control-session/state.json");
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    state["schemaVersion"] = serde_json::json!(1);
+    std::fs::write(&state_path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+
+    let old = store
+        .read_overview(&context, &files, &session.session_id)
+        .unwrap();
+    assert_eq!(
+        old.index_state,
+        llm_wiki_desktop_lib::models::import_v2::ImportSessionIndexState::RebuildRequired
+    );
+    store.rebuild_sidecars(&context, &files, &session).unwrap();
+    let rebuilt = store
+        .read_overview(&context, &files, &session.session_id)
+        .unwrap();
+    assert_eq!(
+        rebuilt.index_state,
+        llm_wiki_desktop_lib::models::import_v2::ImportSessionIndexState::Ready
+    );
+    assert_eq!(rebuilt.status_counts.queued, 1);
+}
+
+#[test]
 fn session_update_contract_uses_incremental_item_persistence() {
     let source = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -321,40 +361,43 @@ fn session_update_contract_uses_incremental_item_persistence() {
     assert!(!update.contains("self.save(context, file_store, &session)?"));
 }
 
-#[test]
-fn batch_cohort_uses_one_operation_task_and_binds_ten_thousand_items() {
+fn assert_scan_acceptance_owns_complete_cohort(item_count: usize) {
     let root = tempfile::tempdir().unwrap();
-    let context = ProjectContext::new("scale", root.path().to_path_buf());
+    let context = ProjectContext::new(
+        format!("scan-acceptance-{item_count}"),
+        root.path().to_path_buf(),
+    );
     let files = FileStore::default();
     let service = ImportV2Service::default();
     let tasks = TaskService::default();
     let session = service
         .create_session(&context, &files, ImportResourceMode::Balanced)
         .unwrap();
-    let inputs = (0..10_000)
+    let inputs = (0..item_count)
         .map(|index| synthetic_item(index).input)
         .collect::<Vec<_>>();
-    let session = service
-        .add_inputs(&context, &files, &session.session_id, inputs)
-        .unwrap();
-    let ids = session
-        .items
-        .iter()
-        .map(|item| item.item_id.clone())
-        .collect::<Vec<_>>();
-    let operation = service
-        .begin_batch_operation(&context, &files, &tasks, &session.session_id, &ids)
-        .unwrap();
+    let (operation, item_ids) = service
+        .accept_scan_inputs_with_operation(&context, &files, &tasks, &session.session_id, inputs)
+        .unwrap()
+        .expect("non-empty scan must create one operation");
 
     assert_eq!(tasks.list_tasks(None).len(), 1);
+    assert_eq!(item_ids.len(), item_count);
     assert_eq!(operation.batch_id.as_deref(), Some(operation.id.as_str()));
-    assert_eq!(operation.title, "Import 10000 sources");
+    assert_eq!(
+        operation.title,
+        if item_count == 1 {
+            "Import 0.md".to_string()
+        } else {
+            format!("Import {item_count} sources")
+        }
+    );
     assert_eq!(
         operation.operation,
         Some(TaskOperation::ImportBatch {
             session_id: session.session_id.clone(),
-            item_count: 10_000,
-            source_label: None,
+            item_count: item_count as u64,
+            source_label: (item_count == 1).then(|| "0.md".into()),
         })
     );
     let rebound = service
@@ -364,6 +407,18 @@ fn batch_cohort_uses_one_operation_task_and_binds_ten_thousand_items() {
         .items
         .iter()
         .all(|item| item.task_id.as_deref() == Some(operation.id.as_str())));
+}
+
+#[test]
+fn scan_acceptance_uses_one_operation_across_paging_and_confirmation_boundaries() {
+    for item_count in [1, 200, 201, 600, 1_000, 1_001] {
+        assert_scan_acceptance_owns_complete_cohort(item_count);
+    }
+}
+
+#[test]
+fn scan_acceptance_binds_ten_thousand_items_to_one_operation() {
+    assert_scan_acceptance_owns_complete_cohort(10_000);
 }
 
 #[test]

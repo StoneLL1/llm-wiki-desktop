@@ -1,6 +1,4 @@
 use llm_wiki_desktop_lib::models::import_v2::{ImportIssue, ImportRecoveryAction, ImportStage};
-use llm_wiki_desktop_lib::models::task::TaskType;
-use llm_wiki_desktop_lib::tasks::TaskService;
 
 #[test]
 fn stable_file_issues_expose_deterministic_recovery() {
@@ -49,7 +47,39 @@ fn issue_contract_is_camel_case_and_actions_are_snake_case() {
 }
 
 #[test]
-fn batch_a_expected_red_legacy_start_creates_a_task_per_requested_item() {
+fn batch_one_scan_acceptance_owns_operation_creation_and_dispatch() {
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/commands/import_v2_file_commands.rs"
+    ))
+    .unwrap();
+    let accept = source
+        .split("pub fn accept_import_scan_v2")
+        .nth(1)
+        .expect("saved scan acceptance must remain a named command boundary");
+    let accept = accept
+        .split("pub fn discard_import_scan_v2")
+        .next()
+        .unwrap();
+    assert!(accept.contains("accept_scan_inputs_with_operation_authorized"));
+    assert!(accept.contains("dispatch_claimed_import_batch_for_state"));
+    assert!(accept.contains("recover_claimed_scan_operation"));
+    assert!(!accept.contains("add_inputs_authorized"));
+
+    let ordinary = source
+        .split("pub fn start_add_import_paths_v2")
+        .nth(1)
+        .expect("ordinary discovery must remain a named command boundary")
+        .split("pub fn get_import_scan_result_v2")
+        .next()
+        .unwrap();
+    assert!(ordinary.contains("accept_scan_inputs_with_operation_authorized"));
+    assert!(ordinary.contains("TaskResultReference::ImportOperation"));
+    assert!(ordinary.contains("recover_claimed_scan_operation"));
+}
+
+#[test]
+fn batch_one_legacy_item_start_remains_bounded_compatibility_only() {
     let source = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/commands/import_v2_commands.rs"
@@ -58,37 +88,15 @@ fn batch_a_expected_red_legacy_start_creates_a_task_per_requested_item() {
     let start = source
         .split("pub(crate) fn start_import_items_for_state")
         .nth(1)
-        .expect("legacy start boundary must remain visible until Batch E");
-    let start = start.split("#[tauri::command]").next().unwrap();
-    assert!(start.contains("prepare_all("));
-    assert!(start.contains("create_project_task_with_batch("));
-    assert!(start.contains("Result<Vec<BackendTask>, BackendError>"));
-}
+        .expect("legacy compatibility boundary must remain explicit");
+    let start = start.split("pub fn start_import_batch_v2").next().unwrap();
+    assert!(start.contains("IMPORT_BATCH_COMMAND_REQUIRED"));
+    assert!(start.contains("request.item_ids.len() > 200"));
 
-#[test]
-fn batch_a_expected_red_task_service_creates_one_backend_task_per_item_at_scale() {
-    for count in [100usize, 1_000, 10_000] {
-        let root = tempfile::tempdir().unwrap();
-        let service = TaskService::default();
-        let mut task_ids = Vec::with_capacity(count);
-        for index in 0..count {
-            let task = service
-                .create_project_task_with_batch(
-                    TaskType::Import,
-                    "batch-a".into(),
-                    root.path().to_path_buf(),
-                    format!("Import fixture-{index}"),
-                    true,
-                    format!("batch-a-{count}"),
-                )
-                .unwrap();
-            task_ids.push(task.id);
-        }
-        assert_eq!(
-            task_ids.len(),
-            count,
-            "current BackendTask baseline for {count} items"
-        );
-        assert_eq!(service.list_tasks(None).len(), count);
-    }
+    let cancel = source
+        .split("pub(crate) fn cancel_import_operation_for_state")
+        .nth(1)
+        .expect("operation cancellation must remain a named boundary");
+    assert!(cancel.contains("take_queued_import_jobs"));
+    assert!(cancel.contains("cancel_batch_item_cohort_for_task_authorized"));
 }

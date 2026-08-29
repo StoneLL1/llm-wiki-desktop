@@ -105,7 +105,11 @@ export interface AcceptImportScanV2Request extends GetImportScanResultV2Request 
 }
 
 export interface AcceptImportScanV2Result {
-  session: import("./importV2").ImportSession;
+  sessionId: string;
+  semanticRevision: number;
+  acceptedItemCount: number;
+  operationTask?: import("./task").BackendTask | null;
+  overview: import("./importV2").ImportSessionOverview;
   scan: FileScanResult;
 }
 

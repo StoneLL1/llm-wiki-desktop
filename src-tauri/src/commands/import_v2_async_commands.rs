@@ -380,8 +380,8 @@ pub async fn accept_import_scan_v2(
     app: AppHandle,
     request: AcceptImportScanV2Request,
 ) -> Result<AcceptImportScanV2Result, BackendError> {
-    blocking!(app, BlockingWorkClass::HeavyIo, |_app, state| {
-        file::accept_import_scan_v2(state, request)
+    blocking!(app, BlockingWorkClass::HeavyIo, |worker_app, state| {
+        file::accept_import_scan_v2(worker_app.clone(), state, request)
     })
 }
 
