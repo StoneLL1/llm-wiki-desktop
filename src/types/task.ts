@@ -78,6 +78,11 @@ export type TaskResultReference = {
   sessionId: string;
   itemId: string;
 } | {
+  type: "import_operation";
+  sessionId: string;
+  taskId: string;
+  itemCount: number;
+} | {
   type: "import_v2_session_preview";
   sessionId: string;
   batchId?: string | null;

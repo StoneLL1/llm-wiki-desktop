@@ -17,7 +17,6 @@ import { mergeImportItemTask } from "./importTaskProgress";
 interface PendingPathTask {
   projectKey: string;
   epoch: number;
-  existingItemIds: ReadonlySet<string>;
   mutationKey: string;
 }
 
@@ -75,7 +74,6 @@ export interface ImportTaskCoordinator {
   discoveryTaskUnavailable: boolean;
   beginPendingItems: (itemIds: readonly string[], requestKey: string, epoch: number) => string[];
   endPendingItems: (itemIds: readonly string[], requestKey: string, epoch: number) => void;
-  startNewQueuedItems: (requestKey: string, epoch: number, before: ReadonlySet<string>) => Promise<void>;
   trackStartedItems: (
     tasks: readonly BackendTask[],
     itemIds: readonly string[],
@@ -442,35 +440,6 @@ export function useImportTaskCoordinator({
     requestTaskReconciliation();
   }, [applyOperationPatch, consumeTaskCompletion, endPendingItems, isScopeCurrent, projectId, recordItemBatch, refreshForScope, registerItemTasks, requestTaskReconciliation, rootPath, selectedTasksUpsert, settleItemTask, syncItemTask]);
 
-  const startNewQueuedItems = useCallback(async (
-    requestKey: string,
-    epoch: number,
-    before: ReadonlySet<string>,
-  ) => {
-    if (!isScopeCurrent(requestKey, epoch)) return;
-    const current = useImportStore.getState();
-    if (!current.session) return;
-    const itemIds = Object.values(current.itemById)
-      .filter((item) => !before.has(item.itemId) && item.status === "queued")
-      .map((item) => item.itemId);
-    if (itemIds.length === 0) return;
-    const acceptedIds = beginPendingItems(itemIds, requestKey, epoch);
-    if (acceptedIds.length === 0) return;
-    nextSessionMutationRevision();
-    try {
-      const task = await importV2Api.startBatch({
-        projectId,
-        projectRootPath: rootPath,
-        sessionId: current.session.sessionId,
-        itemIds: acceptedIds,
-      });
-      trackStartedItems([task], acceptedIds, requestKey, epoch, current.session.sessionId);
-    } catch (error) {
-      endPendingItems(acceptedIds, requestKey, epoch);
-      throw error;
-    }
-  }, [beginPendingItems, endPendingItems, isScopeCurrent, nextSessionMutationRevision, projectId, rootPath, trackStartedItems]);
-
   const settlePathTask = useCallback((task: BackendTask): boolean => {
     const pending = pendingPathTasks.current.get(task.id);
     if (!pending || !isSettledImportTask(task)) return false;
@@ -478,7 +447,6 @@ export function useImportTaskCoordinator({
     useImportStore.getState().endMutation(pending.mutationKey);
     if (task.status === "succeeded") {
       void refreshForScope(pending.projectKey, pending.epoch)
-        .then(() => startNewQueuedItems(pending.projectKey, pending.epoch, pending.existingItemIds))
         .catch((error) => {
           if (isScopeCurrent(pending.projectKey, pending.epoch)) {
             pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error) }));
@@ -493,7 +461,7 @@ export function useImportTaskCoordinator({
       pending.settleQueue();
     }
     return true;
-  }, [isScopeCurrent, loadDiscoveryScan, pushToast, refreshForScope, startNewQueuedItems, t]);
+  }, [isScopeCurrent, loadDiscoveryScan, pushToast, refreshForScope, t]);
 
   const settleConfirmationTask = useCallback((task: BackendTask, pending: PendingScopedTask) => {
     pendingConfirmationTasks.current.delete(task.id);
@@ -724,12 +692,11 @@ export function useImportTaskCoordinator({
     if (!current.session || !taskId || !confirmationToken || current.projectKey !== projectKey) return;
     const epoch = current.sessionEpoch;
     const sessionId = current.session.sessionId;
-    const existingItemIds = new Set(current.knownItemIds);
     const mutationKey = `add-paths:${projectKey}:${epoch}:accept:${taskId}`;
     nextSessionMutationRevision();
     current.beginMutation(mutationKey);
     try {
-      const nextSession = await importV2Api.acceptScan({
+      const result = await importV2Api.acceptScan({
         projectId,
         projectRootPath: rootPath,
         sessionId,
@@ -741,14 +708,14 @@ export function useImportTaskCoordinator({
         ...(sourcePaths && sourcePaths.length > 0 ? { sourcePaths: [...sourcePaths] } : {}),
       });
       if (!isScopeCurrent(projectKey, epoch, sessionId)) return;
-      useImportStore.getState().replaceSession(projectKey, nextSession.session, epoch);
-      if (nextSession.scan.acceptedAt) {
+      if (result.operationTask) useTaskStore.getState().upsertTask(result.operationTask);
+      await refreshForScope(projectKey, epoch, sessionId);
+      if (result.scan.acceptedAt) {
         setDiscoveryTaskId(null);
         setDiscoveryScan(null);
       } else {
-        setDiscoveryScan(nextSession.scan);
+        setDiscoveryScan(result.scan);
       }
-      await startNewQueuedItems(projectKey, epoch, existingItemIds);
     } catch (error) {
       if (isScopeCurrent(projectKey, epoch, sessionId)) {
         pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error) }));
@@ -757,7 +724,7 @@ export function useImportTaskCoordinator({
     } finally {
       useImportStore.getState().endMutation(mutationKey);
     }
-  }, [discoveryScan, discoveryTaskId, isScopeCurrent, nextSessionMutationRevision, projectId, projectKey, pushToast, rootPath, startNewQueuedItems, t]);
+  }, [discoveryScan, discoveryTaskId, isScopeCurrent, nextSessionMutationRevision, projectId, projectKey, pushToast, refreshForScope, rootPath, t]);
 
   const dismissDiscovery = useCallback(async () => {
     const current = useImportStore.getState();
@@ -867,7 +834,6 @@ export function useImportTaskCoordinator({
     void trackPathTask(task, {
       projectKey,
       epoch: sessionEpoch,
-      existingItemIds: new Set(useImportStore.getState().knownItemIds),
       mutationKey,
     });
   }, [projectId, projectKey, session, sessionEpoch, taskList, trackPathTask]);
@@ -909,7 +875,6 @@ export function useImportTaskCoordinator({
     discoveryTaskUnavailable,
     beginPendingItems,
     endPendingItems,
-    startNewQueuedItems,
     trackStartedItems,
     trackPathTask,
     trackConfirmationTask,

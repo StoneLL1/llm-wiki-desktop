@@ -151,11 +151,6 @@ fn expected_red_evidence_is_unique_valid_json_and_keeps_green_targets_visible() 
             true,
         ),
         (
-            "import_v2_file_orchestration.rs",
-            "batch_a_expected_red_task_service_creates_one_backend_task_per_item_at_scale",
-            true,
-        ),
-        (
             "../../src/features/import/importScaleContract.test.ts",
             "records one frontend store publication per terminal item under the current path",
             false,

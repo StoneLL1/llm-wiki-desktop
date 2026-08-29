@@ -206,6 +206,11 @@ function overviewFor(value: ImportSession) {
     },
     selection: { selected: ready, newSources: ready, updates: 0, warnings: 0, pending: 0, restricted: value.items.filter((entry) => entry.selected && entry.restrictedContent).length },
     indexState: "ready" as const,
+    actionGroups: [],
+    unresolvedCount: 0,
+    remainingCount: value.items.filter((entry) => entry.status !== "completed" && entry.status !== "skipped").length,
+    operationTask: null,
+    nextCursor: null,
   };
 }
 
@@ -325,7 +330,11 @@ beforeEach(() => {
   });
   api.cancelItem.mockResolvedValue(session(projectA.projectId));
   api.acceptScan.mockResolvedValue({
-    session: session(projectA.projectId),
+    sessionId: `session-${projectA.projectId}`,
+    semanticRevision: 1,
+    acceptedItemCount: 0,
+    operationTask: null,
+    overview: overviewFor(session(projectA.projectId)),
     scan: {
       files: [],
       skipped: [],
@@ -540,9 +549,6 @@ describe("useImportWorkflow", () => {
     api.getSession
       .mockResolvedValueOnce(session(projectA.projectId, [firstDiscovered]))
       .mockResolvedValueOnce(session(projectA.projectId, [firstDiscovered, secondDiscovered]));
-    api.startBatch
-      .mockResolvedValueOnce(task("first-discovered-task"))
-      .mockResolvedValueOnce(task("second-discovered-task"));
     const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
 
     await waitFor(() => expect(result.current.bootstrapState).toBe("ready"));
@@ -565,9 +571,6 @@ describe("useImportWorkflow", () => {
       payload: firstCompleted,
     }));
     await waitFor(() => expect(api.addPaths).toHaveBeenCalledTimes(2));
-    expect(api.startBatch).toHaveBeenNthCalledWith(1, expect.objectContaining({
-      itemIds: ["first-discovered.md"],
-    }));
     const secondCompleted = task("scan-second", projectA.projectId, "succeeded");
     useTaskStore.getState().upsertTask(secondCompleted);
     await act(async () => notifyTaskEventListeners({
@@ -579,10 +582,7 @@ describe("useImportWorkflow", () => {
       payload: secondCompleted,
     }));
     await act(async () => additions);
-    await waitFor(() => expect(api.startBatch).toHaveBeenCalledTimes(2));
-    expect(api.startBatch).toHaveBeenNthCalledWith(2, expect.objectContaining({
-      itemIds: ["second-discovered.md"],
-    }));
+    expect(api.startBatch).not.toHaveBeenCalled();
 
     expect(api.addPaths).toHaveBeenCalledTimes(2);
     expect(api.addPaths).toHaveBeenNthCalledWith(1, expect.objectContaining({
@@ -1083,6 +1083,13 @@ describe("useImportWorkflow", () => {
   it("accepts the saved aggregate scan without rescanning source paths", async () => {
     const scanTask = task("aggregate-scan");
     const queued = item("accepted.md", "queued");
+    const operation = {
+      ...task("aggregate-operation", projectA.projectId, "running"),
+      batchId: "aggregate-operation",
+      operation: { kind: "import_batch" as const, sessionId: `session-${projectA.projectId}`, itemCount: 1 },
+    };
+    queued.taskId = operation.id;
+    const acceptedSession = session(projectA.projectId, [queued]);
     api.addPaths.mockResolvedValue(scanTask);
     const aggregateScan = {
       files: [],
@@ -1098,9 +1105,15 @@ describe("useImportWorkflow", () => {
       confirmationToken: "aggregate-token",
     };
     api.getScanResult.mockResolvedValue(aggregateScan);
-    api.getSession.mockResolvedValue(session(projectA.projectId));
+    api.getSession
+      .mockResolvedValueOnce(session(projectA.projectId))
+      .mockResolvedValue(acceptedSession);
     api.acceptScan.mockResolvedValue({
-      session: session(projectA.projectId, [queued]),
+      sessionId: acceptedSession.sessionId,
+      semanticRevision: 1,
+      acceptedItemCount: 1,
+      operationTask: operation,
+      overview: overviewFor(acceptedSession),
       scan: { ...aggregateScan, acceptedAt: "2026-08-06T00:00:01Z" },
     });
     const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
@@ -1129,7 +1142,11 @@ describe("useImportWorkflow", () => {
       acknowledgeAggregate: true,
     });
     expect(api.addPaths).toHaveBeenCalledTimes(1);
-    expect(api.startBatch).toHaveBeenCalledWith(expect.objectContaining({ itemIds: [queued.itemId] }));
+    expect(api.startBatch).not.toHaveBeenCalled();
+    expect(useTaskStore.getState().taskById[operation.id]).toMatchObject({
+      id: operation.id,
+      operation: { kind: "import_batch", itemCount: 1 },
+    });
   });
 
   it("keeps large spreadsheets pending after aggregate acceptance and acknowledges them separately", async () => {
@@ -1173,14 +1190,27 @@ describe("useImportWorkflow", () => {
     };
     api.addPaths.mockResolvedValue(scanTask);
     api.getScanResult.mockResolvedValue(aggregateScan);
-    api.getSession.mockResolvedValue(session(projectA.projectId));
+    const safeSession = session(projectA.projectId, [safe]);
+    const completeSession = session(projectA.projectId, [safe, risky]);
+    api.getSession
+      .mockResolvedValueOnce(session(projectA.projectId))
+      .mockResolvedValueOnce(safeSession)
+      .mockResolvedValue(completeSession);
     api.acceptScan
       .mockResolvedValueOnce({
-        session: session(projectA.projectId, [safe]),
+        sessionId: safeSession.sessionId,
+        semanticRevision: 1,
+        acceptedItemCount: 1,
+        operationTask: task("safe-operation", projectA.projectId, "running"),
+        overview: overviewFor(safeSession),
         scan: { ...aggregateScan, aggregateConfirmedAt: "2026-08-06T00:00:01Z" },
       })
       .mockResolvedValueOnce({
-        session: session(projectA.projectId, [safe, risky]),
+        sessionId: completeSession.sessionId,
+        semanticRevision: 2,
+        acceptedItemCount: 1,
+        operationTask: task("risky-operation", projectA.projectId, "running"),
+        overview: overviewFor(completeSession),
         scan: {
           ...aggregateScan,
           aggregateConfirmedAt: "2026-08-06T00:00:01Z",
@@ -1221,19 +1251,35 @@ describe("useImportWorkflow", () => {
 
   it("adds a selected Markdown file when the terminal task snapshot arrives without an event", async () => {
     const scanQueued = task("markdown-scan");
+    const operation = {
+      ...task("markdown-operation", projectA.projectId, "running"),
+      batchId: "markdown-operation",
+      operation: { kind: "import_batch" as const, sessionId: `session-${projectA.projectId}`, itemCount: 1 },
+    };
     const scanSucceeded = {
       ...scanQueued,
       status: "succeeded" as const,
-      result: { summary: "Added 1 file; skipped 0.", affectedPaths: ["scan.json"] },
+      result: {
+        summary: "Added 1 file; skipped 0.",
+        affectedPaths: ["scan.json"],
+        reference: {
+          type: "import_operation" as const,
+          sessionId: `session-${projectA.projectId}`,
+          taskId: operation.id,
+          itemCount: 1,
+        },
+      },
     };
     let listTasksCalls = 0;
     tauriInvoke.mockImplementation(async (command: string) => {
       if (command !== "list_tasks") return [];
       listTasksCalls += 1;
-      return [listTasksCalls === 1 ? scanQueued : scanSucceeded];
+      return listTasksCalls === 1 ? [scanQueued] : [scanSucceeded, operation];
     });
     api.addPaths.mockResolvedValue(scanQueued);
-    api.getSession.mockResolvedValue(session(projectA.projectId, [item("notes.md")]));
+    const discovered = item("notes.md");
+    discovered.taskId = operation.id;
+    api.getSession.mockResolvedValue(session(projectA.projectId, [discovered]));
 
     const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
     await waitFor(() => expect(result.current.bootstrapState).toBe("ready"));
@@ -1246,12 +1292,8 @@ describe("useImportWorkflow", () => {
     await waitFor(() => expect(listTasksCalls).toBeGreaterThanOrEqual(2), { timeout: 2_000 });
     await act(async () => addition);
     await waitFor(() => expect(result.current.session?.items.map((entry) => entry.input.displayName)).toEqual(["notes.md"]), { timeout: 2_000 });
-    expect(api.startBatch).toHaveBeenCalledWith({
-      projectId: projectA.projectId,
-      projectRootPath: projectA.rootPath,
-      sessionId: "session-project-a",
-      itemIds: ["notes.md"],
-    });
+    expect(api.startBatch).not.toHaveBeenCalled();
+    expect(useTaskStore.getState().taskById[operation.id]).toMatchObject({ id: operation.id });
   });
 
   it("does not merge an individual retry into a previously active batch", async () => {
@@ -1373,20 +1415,38 @@ describe("useImportWorkflow", () => {
 
   it("settles and continues a persisted discovery task from its recovered task snapshot", async () => {
     const recoveredSession = { ...session(projectA.projectId), sessionId: "session-recover", discoveryTaskId: "scan-task" };
-    const discoveredSession = { ...recoveredSession, items: [item("notes.md")] };
+    const operation = {
+      ...task("recovered-operation", projectA.projectId, "running"),
+      batchId: "recovered-operation",
+      operation: { kind: "import_batch" as const, sessionId: "session-recover", itemCount: 1 },
+    };
+    const discovered = item("notes.md");
+    discovered.taskId = operation.id;
+    const discoveredSession = { ...recoveredSession, items: [discovered] };
     api.getReadiness.mockResolvedValue({ ...readiness, unfinishedSessionId: "session-recover" });
     api.getSession.mockResolvedValueOnce(recoveredSession).mockResolvedValue(discoveredSession);
-    useTaskStore.getState().upsertTask(task("scan-task", projectA.projectId, "succeeded"));
+    useTaskStore.getState().upsertTasks([
+      {
+        ...task("scan-task", projectA.projectId, "succeeded"),
+        result: {
+          summary: "Added 1 file; skipped 0.",
+          affectedPaths: ["scan.json"],
+          reference: {
+            type: "import_operation",
+            sessionId: "session-recover",
+            taskId: operation.id,
+            itemCount: 1,
+          },
+        },
+      },
+      operation,
+    ]);
 
     const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
 
     await waitFor(() => expect(result.current.session?.items.map((entry) => entry.itemId)).toEqual(["notes.md"]));
-    await waitFor(() => expect(api.startBatch).toHaveBeenCalledWith({
-      projectId: projectA.projectId,
-      projectRootPath: projectA.rootPath,
-      sessionId: "session-recover",
-      itemIds: ["notes.md"],
-    }));
+    expect(api.startBatch).not.toHaveBeenCalled();
+    expect(result.current.session?.items[0].taskId).toBe(operation.id);
   });
 
   it("passes a selected recovery route through retry and persists skip as a session update", async () => {

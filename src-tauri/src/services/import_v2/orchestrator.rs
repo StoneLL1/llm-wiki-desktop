@@ -116,6 +116,12 @@ pub struct BatchOperationPreparation {
         Arc<Mutex<crate::services::import_v2::NewSourceTargetReservations>>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct AcceptedImportOperation {
+    pub task: BackendTask,
+    pub item_ids: Vec<String>,
+}
+
 fn work_item_snapshots(
     session: &ImportSession,
     item_ids: &[String],
@@ -725,6 +731,49 @@ impl ImportV2Service {
         })
     }
 
+    fn cancel_batch_item_cohort_for_task_unchecked(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        task_id: &str,
+        item_ids: &[String],
+    ) -> Result<Vec<ImportItem>, BackendError> {
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
+        self.preflight_locked(context)?;
+        let session = self.sessions.load(context, files, session_id)?;
+        let requested = item_ids.iter().map(String::as_str).collect::<HashSet<_>>();
+        let originals = session
+            .items
+            .iter()
+            .filter(|item| {
+                requested.contains(item.item_id.as_str())
+                    && item.task_id.as_deref() == Some(task_id)
+                    && !matches!(
+                        item.status,
+                        ImportItemStatus::Completed | ImportItemStatus::Committing
+                    )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut replacements = originals.clone();
+        for item in &mut replacements {
+            transition_item(item, ImportItemStatus::Cancelled)?;
+            item.task_id = None;
+            item.progress = None;
+        }
+        self.sessions.write_item_cohort_if_unchanged(
+            context,
+            files,
+            session_id,
+            &originals,
+            &replacements,
+        )?;
+        Ok(replacements)
+    }
+
     fn skip_item_unchecked(
         &self,
         context: &ProjectContext,
@@ -811,6 +860,52 @@ impl ImportV2Service {
         let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         self.sessions.add_inputs(context, files, session_id, inputs)
+    }
+
+    fn accept_scan_inputs_with_operation_unchecked(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        inputs: Vec<ImportInput>,
+    ) -> Result<Option<AcceptedImportOperation>, BackendError> {
+        if inputs.is_empty() {
+            return Ok(None);
+        }
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
+        self.preflight_locked(context)?;
+        let session = self.sessions.load(context, files, session_id)?;
+        SessionStore::ensure_accepts_new_items(&session)?;
+        let source_label = (inputs.len() == 1).then(|| inputs[0].display_name.clone());
+        let title = source_label
+            .as_ref()
+            .map(|label| format!("Import {label}"))
+            .unwrap_or_else(|| format!("Import {} sources", inputs.len()));
+        let task = tasks
+            .create_project_import_operation_task(
+                context.project_id.clone(),
+                context.root.clone(),
+                import_operation_task_state_root(context)?,
+                title,
+                session_id.to_string(),
+                inputs.len() as u64,
+                source_label,
+            )
+            .map_err(|error| task_error(&error))?;
+        match self
+            .sessions
+            .add_inputs_claimed(context, files, session_id, inputs, &task.id)
+        {
+            Ok((_session, item_ids)) => Ok(Some(AcceptedImportOperation { task, item_ids })),
+            Err(error) => {
+                let _ = tasks.set_error(&task.id, error.clone());
+                let _ = tasks.transition_status(&task.id, TaskStatus::Failed);
+                Err(error)
+            }
+        }
     }
 
     pub fn completed_collection_fingerprints(
@@ -972,6 +1067,16 @@ impl ImportV2Service {
         session_id: &str,
     ) -> Result<ImportSessionOverview, BackendError> {
         self.sessions.read_overview(context, files, session_id)
+    }
+
+    pub(crate) fn refresh_session_action_groups_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        session_id: &str,
+    ) -> Result<(), BackendError> {
+        self.sessions
+            .refresh_action_groups_if_dirty(permit.context(), files, session_id)
     }
 
     pub fn list_session_items(
@@ -1900,6 +2005,33 @@ impl ImportV2Service {
         self.cancel_batch_item_unchecked(permit.context(), files, session_id, item_id)
     }
 
+    pub(crate) fn cancel_batch_item_cohort_for_task_authorized(
+        &self,
+        permit: &ProjectTaskMutationPermit<'_>,
+        files: &FileStore,
+        session_id: &str,
+        task_id: &str,
+        item_ids: &[String],
+    ) -> Result<Vec<ImportItem>, BackendError> {
+        if permit.workflow_access().persistence
+            != crate::models::workflow::WorkflowPersistenceMode::Persistent
+        {
+            return Err(BackendError::new(
+                "PROJECT_TASK_PERSISTENCE_REVOKED",
+                "Project task persistence is no longer available.",
+                true,
+                false,
+            ));
+        }
+        self.cancel_batch_item_cohort_for_task_unchecked(
+            permit.context(),
+            files,
+            session_id,
+            task_id,
+            item_ids,
+        )
+    }
+
     pub(crate) fn skip_item_authorized(
         &self,
         permit: &ProjectWritePermit<'_>,
@@ -1969,6 +2101,23 @@ impl ImportV2Service {
         inputs: Vec<ImportInput>,
     ) -> Result<ImportSession, BackendError> {
         self.add_inputs_unchecked(permit.context(), files, session_id, inputs)
+    }
+
+    pub(crate) fn accept_scan_inputs_with_operation_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        inputs: Vec<ImportInput>,
+    ) -> Result<Option<AcceptedImportOperation>, BackendError> {
+        self.accept_scan_inputs_with_operation_unchecked(
+            permit.context(),
+            files,
+            tasks,
+            session_id,
+            inputs,
+        )
     }
 
     pub(crate) fn add_collection_inputs_authorized(
@@ -2290,6 +2439,19 @@ impl ImportV2Service {
         inputs: Vec<ImportInput>,
     ) -> Result<ImportSession, BackendError> {
         self.add_inputs_unchecked(context, files, session_id, inputs)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn accept_scan_inputs_with_operation(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        inputs: Vec<ImportInput>,
+    ) -> Result<Option<(BackendTask, Vec<String>)>, BackendError> {
+        self.accept_scan_inputs_with_operation_unchecked(context, files, tasks, session_id, inputs)
+            .map(|operation| operation.map(|operation| (operation.task, operation.item_ids)))
     }
 
     #[cfg(debug_assertions)]

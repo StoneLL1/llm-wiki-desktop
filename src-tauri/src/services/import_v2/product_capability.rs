@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 
 use serde::Deserialize;
 
@@ -378,6 +379,63 @@ impl ProductCapabilityManifest {
     }
 }
 
+/// Resolve recovery UI facts from the frozen product definitions. Callers may
+/// provide the failed route to disambiguate capabilities sharing one recovery
+/// action (for example the lightweight and full browser runtimes).
+pub(crate) fn capability_id_for_recovery_action(
+    recovery_action: &str,
+    route: Option<&str>,
+) -> Option<&'static str> {
+    static MANIFEST: OnceLock<ProductCapabilityManifest> = OnceLock::new();
+    let manifest = MANIFEST.get_or_init(|| {
+        ProductCapabilityManifest::embedded()
+            .expect("the embedded product capability manifest is build-validated")
+    });
+    let eligible = || {
+        manifest.definitions.iter().filter(|definition| {
+            definition.distribution_tier == "published"
+                && definition
+                    .recovery_actions
+                    .iter()
+                    .any(|candidate| candidate == recovery_action)
+        })
+    };
+    let candidates = eligible().collect::<Vec<_>>();
+    let route_matches = route.map(|route| {
+        candidates
+            .iter()
+            .copied()
+            .filter(|definition| definition.routes.iter().any(|candidate| candidate == route))
+            .collect::<Vec<_>>()
+    });
+    let candidates = route_matches
+        .as_ref()
+        .filter(|matches| !matches.is_empty())
+        .unwrap_or(&candidates);
+    if candidates.len() == 1 {
+        return Some(candidates[0].capability_id.as_str());
+    }
+    // Local ASR starts with the product's balanced profile. Resolve that
+    // default from the manifest instead of relying on definition order.
+    if route == Some("media.asr") {
+        let balanced = candidates
+            .iter()
+            .copied()
+            .filter(|definition| {
+                definition
+                    .profiles
+                    .asr
+                    .iter()
+                    .any(|profile| profile == "balanced")
+            })
+            .collect::<Vec<_>>();
+        if balanced.len() == 1 {
+            return Some(balanced[0].capability_id.as_str());
+        }
+    }
+    None
+}
+
 fn validate_catalog_release_identity(
     entry: &ProductCatalogEntry,
     definition: &ProductCapabilityDefinition,
@@ -497,6 +555,18 @@ mod tests {
         assert_eq!(
             manifest.expected_release_entry_count(),
             manifest.published_definitions().count() * REQUIRED_TARGETS.len()
+        );
+    }
+
+    #[test]
+    fn recovery_capability_resolution_is_manifest_exact_and_fails_closed() {
+        assert_eq!(
+            capability_id_for_recovery_action("install_media_capability", Some("media.asr")),
+            Some("asr-sensevoice-small")
+        );
+        assert_eq!(
+            capability_id_for_recovery_action("install_capability", None),
+            None
         );
     }
 }

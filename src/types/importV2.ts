@@ -1,4 +1,4 @@
-import type { TaskProgress } from "./task";
+import type { TaskProgress, TaskStatus } from "./task";
 import type { AgentRecoveryAction } from "./importV2Agent";
 
 export type {
@@ -258,7 +258,11 @@ export interface ImportSession { schemaVersion: 2; sessionId: string; projectId:
 export type ImportSessionIndexState = "ready" | "rebuild_required";
 export interface ImportSessionCounts { all: number; active: number; ready: number; needsAction: number; failed: number; completed: number; waiting: number; processed: number; cancelled: number; }
 export interface ImportSelectionSummary { selected: number; newSources: number; updates: number; warnings: number; pending: number; restricted: number; }
-export interface ImportSessionOverview { schemaVersion: 2; sessionId: string; projectId: string; status: ImportSessionStatus; resourceMode: ImportResourceMode; createdAt: string; updatedAt: string; discoveryTaskId?: string | null; itemCount: number; semanticRevision: number; selectionRevision: number; confirmationDigest: string; counts: ImportSessionCounts; selection: ImportSelectionSummary; indexState: ImportSessionIndexState; }
+export type ImportSessionActionGroupKind = "login" | "ocr" | "asr" | "capability" | "conflict" | "resume";
+export interface ImportSessionActionGroup { groupKey: string; kind: ImportSessionActionGroupKind; subjectId?: string | null; itemCount: number; itemIds: string[]; }
+export interface ImportSessionStatusCounts { queued: number; inspecting: number; waitingCapability: number; waitingLogin: number; waitingAuthorization: number; extracting: number; validating: number; previewReady: number; needsMerge: number; committing: number; completed: number; paused: number; cancelled: number; skipped: number; failed: number; }
+export interface ImportOperationTaskSummary { taskId: string; status: TaskStatus; progress?: TaskProgress | null; }
+export interface ImportSessionOverview { schemaVersion: 2; sessionId: string; projectId: string; status: ImportSessionStatus; resourceMode: ImportResourceMode; createdAt: string; updatedAt: string; discoveryTaskId?: string | null; itemCount: number; semanticRevision: number; selectionRevision: number; confirmationDigest: string; counts: ImportSessionCounts; statusCounts: ImportSessionStatusCounts; selection: ImportSelectionSummary; indexState: ImportSessionIndexState; actionGroups?: ImportSessionActionGroup[]; unresolvedCount?: number; remainingCount?: number; operationTask?: ImportOperationTaskSummary | null; nextCursor?: string | null; }
 export type ImportItemPageFilter = "all" | "active" | "ready" | "needs_action" | "failed" | "completed";
 export interface ImportItemPage { sessionId: string; snapshotRevision: number; items: ImportItem[]; nextCursor?: string | null; total: number; }
 

@@ -12,9 +12,10 @@ use crate::errors::{
 use crate::models::import_v2::{
     ImportCollectionChildRelation, ImportCollectionRelation, ImportInput, ImportItem,
     ImportItemPage, ImportItemPageFilter, ImportItemStatus, ImportMediaAuthorization,
-    ImportResourceMode, ImportSelectionSummary, ImportSession, ImportSessionCounts,
-    ImportSessionIndexState, ImportSessionOverview, ImportSessionStatus, QualityLevel,
-    IMPORT_V2_SCHEMA_VERSION,
+    ImportRecoveryAction, ImportResourceMode, ImportSelectionSummary, ImportSession,
+    ImportSessionActionGroup, ImportSessionActionGroupKind, ImportSessionCounts,
+    ImportSessionIndexState, ImportSessionOverview, ImportSessionStatus, ImportSessionStatusCounts,
+    QualityLevel, IMPORT_V2_SCHEMA_VERSION,
 };
 use crate::models::paths::ProjectContext;
 use crate::services::import_v2::transaction::FileTransaction;
@@ -63,7 +64,7 @@ struct SessionRecord {
     item_ids: Vec<String>,
 }
 
-const SESSION_CONTROL_SCHEMA_VERSION: u32 = 1;
+const SESSION_CONTROL_SCHEMA_VERSION: u32 = 2;
 const ACTIVE_SESSION_SCHEMA_VERSION: u32 = 1;
 const ORDER_PAGE_SCHEMA_VERSION: u32 = 1;
 const ORDER_PAGE_SIZE: usize = 256;
@@ -87,27 +88,11 @@ struct SessionControlRecord {
     item_count: u64,
     counts: ImportSessionCounts,
     selection: ImportSelectionSummary,
-    status_counts: ImportItemStatusCounts,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ImportItemStatusCounts {
-    queued: u64,
-    inspecting: u64,
-    waiting_capability: u64,
-    waiting_login: u64,
-    waiting_authorization: u64,
-    extracting: u64,
-    validating: u64,
-    preview_ready: u64,
-    needs_merge: u64,
-    committing: u64,
-    completed: u64,
-    paused: u64,
-    cancelled: u64,
-    skipped: u64,
-    failed: u64,
+    status_counts: ImportSessionStatusCounts,
+    #[serde(default)]
+    action_groups: Vec<ImportSessionActionGroup>,
+    #[serde(default)]
+    action_groups_dirty: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -350,16 +335,162 @@ fn counts_and_selection(items: &[ImportItem]) -> (ImportSessionCounts, ImportSel
     (counts, selection)
 }
 
-fn status_counts(items: &[ImportItem]) -> ImportItemStatusCounts {
-    let mut counts = ImportItemStatusCounts::default();
+fn status_counts(items: &[ImportItem]) -> ImportSessionStatusCounts {
+    let mut counts = ImportSessionStatusCounts::default();
     for item in items {
         apply_status_count(&mut counts, &item.status, 1, 0);
     }
     counts
 }
 
+fn import_platform_for_locator(locator: &str) -> String {
+    let host = url::Url::parse(locator)
+        .ok()
+        .and_then(|value| value.host_str().map(str::to_ascii_lowercase));
+    let Some(host) = host else {
+        return "connector".into();
+    };
+    let host_or_subdomain = |root: &str| host == root || host.ends_with(&format!(".{root}"));
+    if host == "mp.weixin.qq.com" {
+        "wechat"
+    } else if host_or_subdomain("zhihu.com") {
+        "zhihu"
+    } else if host_or_subdomain("bilibili.com") || host == "b23.tv" {
+        "bilibili"
+    } else if host_or_subdomain("xiaohongshu.com")
+        || host_or_subdomain("xhslink.com")
+        || host_or_subdomain("xhslink.cn")
+    {
+        "xiaohongshu"
+    } else if host_or_subdomain("douyin.com") || host_or_subdomain("iesdouyin.com") {
+        "douyin"
+    } else if host_or_subdomain("x.com") || host_or_subdomain("twitter.com") {
+        "x"
+    } else {
+        "connector"
+    }
+    .into()
+}
+
+fn action_group_identity(
+    item: &ImportItem,
+) -> Option<(ImportSessionActionGroupKind, Option<String>)> {
+    if item.status == ImportItemStatus::Paused {
+        return Some((ImportSessionActionGroupKind::Resume, None));
+    }
+    if item.status == ImportItemStatus::NeedsMerge
+        && item
+            .preview
+            .as_ref()
+            .and_then(|preview| preview.resolution.as_ref())
+            .and_then(|resolution| resolution.default_resolution.as_ref())
+            .is_none()
+    {
+        return Some((ImportSessionActionGroupKind::Conflict, None));
+    }
+    let issue = item.issue.as_ref()?;
+    if item.status == ImportItemStatus::WaitingLogin
+        && issue
+            .recovery_actions
+            .contains(&ImportRecoveryAction::BeginLogin)
+    {
+        let locator = item
+            .input
+            .normalized_locator
+            .as_deref()
+            .unwrap_or(&item.input.locator);
+        return Some((
+            ImportSessionActionGroupKind::Login,
+            Some(import_platform_for_locator(locator)),
+        ));
+    }
+    if item.status == ImportItemStatus::WaitingAuthorization {
+        if issue
+            .recovery_actions
+            .contains(&ImportRecoveryAction::AuthorizeLocalAsr)
+        {
+            return Some((ImportSessionActionGroupKind::Asr, None));
+        }
+        if issue
+            .recovery_actions
+            .contains(&ImportRecoveryAction::EnableOcr)
+        {
+            return Some((ImportSessionActionGroupKind::Ocr, None));
+        }
+    }
+    if item.status == ImportItemStatus::WaitingCapability {
+        let (_, action_name) = [
+            (
+                ImportRecoveryAction::InstallBrowserCapability,
+                "install_browser_capability",
+            ),
+            (
+                ImportRecoveryAction::InstallOcrCapability,
+                "install_ocr_capability",
+            ),
+            (
+                ImportRecoveryAction::InstallMediaCapability,
+                "install_media_capability",
+            ),
+            (
+                ImportRecoveryAction::InstallCapability,
+                "install_capability",
+            ),
+        ]
+        .into_iter()
+        .find(|(action, _)| issue.recovery_actions.contains(action))?;
+        let route = item.attempts.last().map(|attempt| attempt.route.as_str());
+        let capability_id =
+            super::product_capability::capability_id_for_recovery_action(action_name, route)?;
+        return Some((
+            ImportSessionActionGroupKind::Capability,
+            Some(capability_id.into()),
+        ));
+    }
+    None
+}
+
+fn action_group_key(kind: &ImportSessionActionGroupKind, subject_id: Option<&str>) -> String {
+    let kind = match kind {
+        ImportSessionActionGroupKind::Login => "login",
+        ImportSessionActionGroupKind::Ocr => "ocr",
+        ImportSessionActionGroupKind::Asr => "asr",
+        ImportSessionActionGroupKind::Capability => "capability",
+        ImportSessionActionGroupKind::Conflict => "conflict",
+        ImportSessionActionGroupKind::Resume => "resume",
+    };
+    format!("{kind}:{}", subject_id.unwrap_or("all"))
+}
+
+fn action_groups(items: &[ImportItem]) -> Vec<ImportSessionActionGroup> {
+    let mut groups = HashMap::<String, ImportSessionActionGroup>::new();
+    for item in items {
+        let Some((kind, subject_id)) = action_group_identity(item) else {
+            continue;
+        };
+        let key = action_group_key(&kind, subject_id.as_deref());
+        let group = groups
+            .entry(key.clone())
+            .or_insert_with(|| ImportSessionActionGroup {
+                group_key: key,
+                kind,
+                subject_id,
+                item_count: 0,
+                item_ids: Vec::new(),
+            });
+        group.item_ids.push(item.item_id.clone());
+        group.item_count = group.item_ids.len() as u64;
+    }
+    let mut groups = groups.into_values().collect::<Vec<_>>();
+    for group in &mut groups {
+        group.item_ids.sort();
+    }
+    groups.sort_by(|left, right| left.group_key.cmp(&right.group_key));
+    groups
+}
+
 fn apply_status_count(
-    counts: &mut ImportItemStatusCounts,
+    counts: &mut ImportSessionStatusCounts,
     status: &ImportItemStatus,
     after: u64,
     before: u64,
@@ -423,6 +554,8 @@ fn control_from_session(session: &ImportSession, revision: u64) -> SessionContro
         counts,
         selection,
         status_counts: status_counts(&session.items),
+        action_groups: action_groups(&session.items),
+        action_groups_dirty: false,
     }
 }
 
@@ -441,6 +574,12 @@ fn pointer_from_control(
 }
 
 fn overview_from_control(control: SessionControlRecord) -> ImportSessionOverview {
+    let unresolved_count = control.selection.pending;
+    let remaining_count = control.item_count.saturating_sub(
+        control.status_counts.completed
+            + control.status_counts.skipped
+            + control.status_counts.cancelled,
+    );
     ImportSessionOverview {
         schema_version: IMPORT_V2_SCHEMA_VERSION,
         session_id: control.session_id,
@@ -455,8 +594,14 @@ fn overview_from_control(control: SessionControlRecord) -> ImportSessionOverview
         selection_revision: control.selection_revision,
         confirmation_digest: control.confirmation_digest,
         counts: control.counts,
+        status_counts: control.status_counts,
         selection: control.selection,
         index_state: ImportSessionIndexState::Ready,
+        action_groups: control.action_groups,
+        unresolved_count,
+        remaining_count,
+        operation_task: None,
+        next_cursor: None,
     }
 }
 
@@ -560,6 +705,8 @@ impl SessionStore {
             );
             apply_status_count(&mut after_control.status_counts, &before.status, 0, 1);
             apply_status_count(&mut after_control.status_counts, &after.status, 1, 0);
+            after_control.action_groups_dirty |=
+                action_group_identity(before) != action_group_identity(after);
             selection_changed |= selection_projection_changed(before_projection, after_projection);
         }
         if selection_changed {
@@ -650,6 +797,23 @@ impl SessionStore {
             .map(|control| control.semantic_revision.saturating_add(1))
             .unwrap_or(1);
         self.write_sidecars(context, file_store, session, previous_revision)
+    }
+
+    /// Rebuild the full-session action projection once at an operation boundary.
+    /// Item transitions only mark this projection dirty so a 10k cohort does not
+    /// rewrite an ever-growing vector of item ids for every worker completion.
+    pub fn refresh_action_groups_if_dirty(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+        session_id: &str,
+    ) -> Result<(), BackendError> {
+        let control = self.read_control(context, file_store, session_id)?;
+        if !control.action_groups_dirty {
+            return Ok(());
+        }
+        let session = self.load(context, file_store, session_id)?;
+        self.rebuild_sidecars(context, file_store, &session)
     }
 
     pub fn find_unfinished_session(
@@ -869,8 +1033,14 @@ impl SessionStore {
                 all: record.item_ids.len() as u64,
                 ..ImportSessionCounts::default()
             },
+            status_counts: ImportSessionStatusCounts::default(),
             selection: ImportSelectionSummary::default(),
             index_state: ImportSessionIndexState::RebuildRequired,
+            action_groups: Vec::new(),
+            unresolved_count: 0,
+            remaining_count: record.item_ids.len() as u64,
+            operation_task: None,
+            next_cursor: None,
         })
     }
 
@@ -1228,6 +1398,35 @@ impl SessionStore {
         Ok(session)
     }
 
+    pub(crate) fn add_inputs_claimed(
+        &self,
+        context: &ProjectContext,
+        file_store: &FileStore,
+        session_id: &str,
+        inputs: Vec<ImportInput>,
+        task_id: &str,
+    ) -> Result<(ImportSession, Vec<String>), BackendError> {
+        let mut session = self.load(context, file_store, session_id)?;
+        Self::ensure_accepts_new_items(&session)?;
+        let inputs = inputs
+            .into_iter()
+            .map(public_import_input)
+            .collect::<Result<Vec<_>, _>>()?;
+        let new_items = inputs
+            .into_iter()
+            .map(|input| {
+                let mut item = ImportItem::queued(&uuid::Uuid::new_v4().to_string(), input);
+                item.task_id = Some(task_id.to_string());
+                item
+            })
+            .collect::<Vec<_>>();
+        let item_ids = new_items.iter().map(|item| item.item_id.clone()).collect();
+        session.items.extend(new_items.clone());
+        session.updated_at = chrono::Utc::now().to_rfc3339();
+        self.add_items(context, file_store, &session, &new_items)?;
+        Ok((session, item_ids))
+    }
+
     pub fn add_collection_inputs(
         &self,
         context: &ProjectContext,
@@ -1466,6 +1665,8 @@ impl SessionStore {
         );
         apply_status_count(&mut after_control.status_counts, &before.status, 0, 1);
         apply_status_count(&mut after_control.status_counts, &after.status, 1, 0);
+        after_control.action_groups_dirty |=
+            action_group_identity(&before) != action_group_identity(&after);
         if selection_projection_changed(before_projection, after_projection) {
             after_control.selection_revision = before_control.selection_revision.saturating_add(1);
         }
@@ -1944,7 +2145,9 @@ fn sensitive_query_key(key: &str) -> bool {
 mod tests {
     use crate::errors::{IMPORT_V2_SESSION_INVALID, IMPORT_V2_STATE_INVALID};
     use crate::models::import_v2::{
-        ImportInput, ImportInputKind, ImportResourceMode, ImportSessionStatus, MediaSaveMode,
+        AttemptOutcome, AttemptRecord, ImportInput, ImportInputKind, ImportIssue,
+        ImportItemPageFilter, ImportItemStatus, ImportRecoveryAction, ImportResourceMode,
+        ImportSessionActionGroupKind, ImportSessionStatus, ImportStage, MediaSaveMode,
     };
     use crate::services::import_v2::test_support::{test_context, test_file_input};
     use crate::services::FileStore;
@@ -2326,5 +2529,124 @@ mod tests {
         let reopened = store.load(&context, &files, &session.session_id).unwrap();
         assert!(reopened.items.iter().all(|item| item.task_id.is_none()));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn overview_aggregates_full_session_actions_independently_from_page_filters() {
+        let (context, root) = test_context("session-action-groups");
+        let files = FileStore::default();
+        let store = SessionStore::default();
+        let session = store
+            .create(&context, &files, ImportResourceMode::Balanced)
+            .unwrap();
+        let mut session = store
+            .add_inputs(
+                &context,
+                &files,
+                &session.session_id,
+                (0..6)
+                    .map(|index| test_file_input(&format!("action-{index}.pdf")))
+                    .collect(),
+            )
+            .unwrap();
+
+        session.items[0].status = ImportItemStatus::WaitingLogin;
+        session.items[0].input.kind = ImportInputKind::Url;
+        session.items[0].input.locator = "https://www.zhihu.com/question/1".into();
+        session.items[0].input.normalized_locator = Some(session.items[0].input.locator.clone());
+        session.items[0].issue = Some(ImportIssue::for_web_code(
+            "IMPORT_WEB_LOGIN_REQUIRED",
+            ImportStage::Extract,
+        ));
+
+        session.items[1].status = ImportItemStatus::WaitingAuthorization;
+        session.items[1].issue = Some(issue_with_action(ImportRecoveryAction::EnableOcr));
+        session.items[2].status = ImportItemStatus::WaitingAuthorization;
+        session.items[2].issue = Some(issue_with_action(ImportRecoveryAction::AuthorizeLocalAsr));
+
+        session.items[3].status = ImportItemStatus::WaitingCapability;
+        session.items[3].issue = Some(issue_with_action(ImportRecoveryAction::InstallCapability));
+        session.items[3].attempts.push(AttemptRecord {
+            route: "pack.markitdown".into(),
+            engine_id: "fixture".into(),
+            engine_version: "1".into(),
+            stage: ImportStage::Extract,
+            started_at: "2026-08-29T00:00:00Z".into(),
+            completed_at: Some("2026-08-29T00:00:01Z".into()),
+            outcome: AttemptOutcome::Failed,
+            error_code: Some("IMPORT_FILE_CAPABILITY_MISSING".into()),
+            warnings: Vec::new(),
+        });
+        session.items[4].status = ImportItemStatus::NeedsMerge;
+        session.items[5].status = ImportItemStatus::Paused;
+        store.save(&context, &files, &session).unwrap();
+
+        let before = store
+            .read_overview(&context, &files, &session.session_id)
+            .unwrap();
+        assert_eq!(before.remaining_count, 6);
+        assert_eq!(before.unresolved_count, 6);
+        assert_eq!(before.action_groups.len(), 6);
+        assert!(before.action_groups.iter().any(|group| {
+            group.kind == ImportSessionActionGroupKind::Login
+                && group.subject_id.as_deref() == Some("zhihu")
+        }));
+        assert!(before.action_groups.iter().any(|group| {
+            group.kind == ImportSessionActionGroupKind::Capability
+                && group.subject_id.as_deref() == Some("document-standard")
+        }));
+        for filter in [
+            ImportItemPageFilter::All,
+            ImportItemPageFilter::Active,
+            ImportItemPageFilter::NeedsAction,
+            ImportItemPageFilter::Failed,
+        ] {
+            let _ = store
+                .list_items(&context, &files, &session.session_id, filter, None, 1)
+                .unwrap();
+        }
+        let after = store
+            .read_overview(&context, &files, &session.session_id)
+            .unwrap();
+        assert_eq!(after.semantic_revision, before.semantic_revision);
+        assert_eq!(after.counts, before.counts);
+        assert_eq!(after.action_groups, before.action_groups);
+
+        let mut completed = session.items[0].clone();
+        completed.status = ImportItemStatus::Completed;
+        completed.issue = None;
+        store
+            .write_item(&context, &files, &session.session_id, &completed)
+            .unwrap();
+        let during_operation = store
+            .read_overview(&context, &files, &session.session_id)
+            .unwrap();
+        assert_eq!(during_operation.status_counts.completed, 1);
+        assert_eq!(during_operation.action_groups, before.action_groups);
+        store
+            .refresh_action_groups_if_dirty(&context, &files, &session.session_id)
+            .unwrap();
+        let finalized = store
+            .read_overview(&context, &files, &session.session_id)
+            .unwrap();
+        assert_eq!(finalized.action_groups.len(), 5);
+        assert!(!finalized
+            .action_groups
+            .iter()
+            .any(|group| group.kind == ImportSessionActionGroupKind::Login));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn issue_with_action(action: ImportRecoveryAction) -> ImportIssue {
+        ImportIssue {
+            code: "FIXTURE_ACTION_REQUIRED".into(),
+            message: "Action required".into(),
+            stage: ImportStage::Extract,
+            retryable: true,
+            user_action_required: true,
+            recovery_actions: vec![action],
+            available_actions: Vec::new(),
+            subtitle_candidates: Vec::new(),
+        }
     }
 }

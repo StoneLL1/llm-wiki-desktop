@@ -125,7 +125,7 @@ pub enum TaskOperation {
     ImportHistoryIndexRebuild,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskProgress {
     pub current: u64,
@@ -154,6 +154,11 @@ pub enum TaskResultReference {
     ImportPreview {
         session_id: String,
         item_id: String,
+    },
+    ImportOperation {
+        session_id: String,
+        task_id: String,
+        item_count: u64,
     },
     ImportV2SessionPreview {
         session_id: String,
@@ -477,6 +482,20 @@ mod tests {
                 completion: None,
             }
         );
+    }
+
+    #[test]
+    fn import_operation_reference_returns_the_backend_owned_cohort() {
+        let reference = TaskResultReference::ImportOperation {
+            session_id: "session-1".into(),
+            task_id: "operation-1".into(),
+            item_count: 1_001,
+        };
+        let value = serde_json::to_value(&reference).unwrap();
+        assert_eq!(value["type"], json!("import_operation"));
+        assert_eq!(value["sessionId"], json!("session-1"));
+        assert_eq!(value["taskId"], json!("operation-1"));
+        assert_eq!(value["itemCount"], json!(1_001));
     }
 
     #[test]

@@ -5,6 +5,7 @@ import importTaskCoordinatorSource from "./useImportTaskCoordinator.ts?raw";
 import importBatchControllerSource from "./useImportBatchController.ts?raw";
 import importViewSource from "./ImportView.tsx?raw";
 import importWorkflowSource from "./useImportWorkflow.ts?raw";
+import importActionGroupsSource from "./ImportActionGroups.tsx?raw";
 import { importProjectKey, useImportStore } from "../../stores/importStore";
 import type { ImportItem, ImportSession } from "../../types/importV2";
 
@@ -71,6 +72,26 @@ describe("Batch F Import scale contract", () => {
     expect(importViewSource).toContain("onSetItemSelected={handleQueueSelection}");
     expect(importViewSource).toContain("onAction={handleQueueAction}");
     expect(importWorkflowSource).toContain("loadMoreRequestRef");
+  });
+
+  it("keeps discovery work scope and action groups independent from the loaded page window", () => {
+    expect(importTaskCoordinatorSource).not.toContain("startNewQueuedItems");
+    expect(importTaskCoordinatorSource).not.toContain("Object.values(current.itemById)");
+    expect(importActionGroupsSource).toContain("groups: readonly ImportSessionActionGroup[]");
+    expect(importActionGroupsSource).not.toContain("capabilityIdForItem");
+    const startItemsBoundary = importWorkflowSource
+      .split("const startItems = useCallback")[1]
+      .split("const retryItem = useCallback")[0];
+    const asrGroupBoundary = importWorkflowSource
+      .split("const authorizeLocalAsrGroup = useCallback")[1]
+      .split("const authorizeLocalAsr = useCallback")[0];
+    const ocrGroupBoundary = importWorkflowSource
+      .split("const authorizeLocalOcrGroup = useCallback")[1]
+      .split("const authorizeLocalOcr = useCallback")[0];
+    expect(startItemsBoundary).not.toContain("knownItemIds");
+    expect(asrGroupBoundary).not.toContain("knownItemIds");
+    expect(ocrGroupBoundary).not.toContain("knownItemIds");
+    expect(importWorkflowSource).toContain('item.status === "queued" && !item.taskId');
   });
 
 });

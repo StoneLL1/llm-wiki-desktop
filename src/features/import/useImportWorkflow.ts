@@ -192,7 +192,6 @@ export function useImportWorkflow(
     discoveryTaskUnavailable,
     beginPendingItems,
     endPendingItems,
-    startNewQueuedItems,
     trackStartedItems,
     trackPathTask,
     trackConfirmationTask,
@@ -216,6 +215,32 @@ export function useImportWorkflow(
     refreshForScope,
     recordItemBatch,
   });
+
+  const startReturnedQueuedItems = useCallback(async (
+    nextSession: ImportSession,
+    requestKey: string,
+    epoch: number,
+  ) => {
+    if (!isScopeCurrent(requestKey, epoch, nextSession.sessionId)) return;
+    const itemIds = nextSession.items
+      .filter((item) => item.status === "queued" && !item.taskId)
+      .map((item) => item.itemId);
+    const acceptedIds = beginPendingItems(itemIds, requestKey, epoch);
+    if (acceptedIds.length === 0) return;
+    nextSessionMutationRevision();
+    try {
+      const task = await importV2Api.startBatch({
+        projectId,
+        projectRootPath: rootPath,
+        sessionId: nextSession.sessionId,
+        itemIds: acceptedIds,
+      });
+      trackStartedItems([task], acceptedIds, requestKey, epoch, nextSession.sessionId);
+    } catch (error) {
+      endPendingItems(acceptedIds, requestKey, epoch);
+      throw error;
+    }
+  }, [beginPendingItems, endPendingItems, isScopeCurrent, nextSessionMutationRevision, projectId, rootPath, trackStartedItems]);
 
   const reconcileMutationSession = useCallback(async (
     nextSession: ImportSession,
@@ -295,7 +320,6 @@ export function useImportWorkflow(
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey) return;
     const epoch = current.sessionEpoch;
-    const existingItemIds = new Set(current.knownItemIds);
     const mutationKey = `add-paths:${projectKey}:${epoch}:${++sourceAdditionRevisionRef.current}`;
     nextSessionMutationRevision();
     current.beginMutation(mutationKey);
@@ -309,7 +333,7 @@ export function useImportWorkflow(
         ...(largeDataConfirmed ? { largeDataConfirmed: true } : {}),
       });
       taskStarted = true;
-      await trackPathTask(task, { projectKey, epoch, existingItemIds, mutationKey });
+      await trackPathTask(task, { projectKey, epoch, mutationKey });
     } catch (error) {
       if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
       throw error;
@@ -324,7 +348,6 @@ export function useImportWorkflow(
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey) return;
     const epoch = current.sessionEpoch;
-    const existingItemIds = new Set(current.knownItemIds);
     const mutationKey = `add-text:${projectKey}:${epoch}`;
     if (current.mutationKeys.has(mutationKey)) return;
     const mutationRevision = nextSessionMutationRevision();
@@ -344,7 +367,7 @@ export function useImportWorkflow(
         mutationRevision,
         current.session.sessionId,
       )) {
-        await startNewQueuedItems(projectKey, epoch, existingItemIds);
+        await startReturnedQueuedItems(nextSession, projectKey, epoch);
       }
     } catch (error) {
       if (isScopeCurrent(projectKey, epoch)) {
@@ -364,7 +387,7 @@ export function useImportWorkflow(
     pushToast,
     reconcileMutationSession,
     rootPath,
-    startNewQueuedItems,
+    startReturnedQueuedItems,
     t,
   ]);
 
@@ -373,7 +396,6 @@ export function useImportWorkflow(
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey) return;
     const epoch = current.sessionEpoch;
-    const existingItemIds = new Set(current.knownItemIds);
     const mutationKey = `add-url:${projectKey}:${epoch}`;
     if (current.mutationKeys.has(mutationKey)) return;
     const mutationRevision = nextSessionMutationRevision();
@@ -408,7 +430,7 @@ export function useImportWorkflow(
         mutationRevision,
         current.session.sessionId,
       )) {
-        await startNewQueuedItems(projectKey, epoch, existingItemIds);
+        await startReturnedQueuedItems(nextSession, projectKey, epoch);
       }
     } catch (error) {
       if (isScopeCurrent(projectKey, epoch)) pushToast("error", t("importV2.workflow.error", { message: errorMessage(error) }));
@@ -416,7 +438,7 @@ export function useImportWorkflow(
     } finally {
       useImportStore.getState().endMutation(mutationKey);
     }
-  }), [enqueueSourceAddition, ensureActiveSession, isScopeCurrent, nextSessionMutationRevision, projectId, projectKey, pushToast, reconcileMutationSession, rootPath, startNewQueuedItems, t]);
+  }), [enqueueSourceAddition, ensureActiveSession, isScopeCurrent, nextSessionMutationRevision, projectId, projectKey, pushToast, reconcileMutationSession, rootPath, startReturnedQueuedItems, t]);
 
   const confirmCollection = useCallback(async (itemRefs: readonly string[]) => {
     const current = useImportStore.getState();
@@ -424,7 +446,6 @@ export function useImportWorkflow(
     const refs = [...new Set(itemRefs)];
     if (!pending || refs.length === 0 || !current.session || current.projectKey !== projectKey) return;
     const epoch = current.sessionEpoch;
-    const existingItemIds = new Set(current.knownItemIds);
     const mutationKey = `add-collection:${projectKey}:${epoch}`;
     if (current.mutationKeys.has(mutationKey)) return;
     const mutationRevision = nextSessionMutationRevision();
@@ -446,7 +467,7 @@ export function useImportWorkflow(
         current.session.sessionId,
       )) {
         setPendingCollection(null);
-        await startNewQueuedItems(projectKey, epoch, existingItemIds);
+        await startReturnedQueuedItems(nextSession, projectKey, epoch);
       }
     } catch (error) {
       if (isScopeCurrent(projectKey, epoch)) {
@@ -456,7 +477,7 @@ export function useImportWorkflow(
     } finally {
       useImportStore.getState().endMutation(mutationKey);
     }
-  }, [isScopeCurrent, nextSessionMutationRevision, pendingCollection, projectId, projectKey, pushToast, reconcileMutationSession, rootPath, startNewQueuedItems, t]);
+  }, [isScopeCurrent, nextSessionMutationRevision, pendingCollection, projectId, projectKey, pushToast, reconcileMutationSession, rootPath, startReturnedQueuedItems, t]);
 
   const loadCollectionPage = useCallback(async (loadAll = false) => {
     const current = useImportStore.getState();
@@ -526,7 +547,7 @@ export function useImportWorkflow(
   const startItems = useCallback(async (itemIds: readonly string[], recoveryAction: ImportRecoveryAction | null = null) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey) return;
-    const ids = [...new Set(itemIds)].filter((id) => current.knownItemIds.has(id));
+    const ids = [...new Set(itemIds)];
     if (ids.length === 0) return;
     const epoch = current.sessionEpoch;
     const acceptedIds = beginPendingItems(ids, projectKey, epoch);
@@ -632,8 +653,7 @@ export function useImportWorkflow(
   const authorizeLocalAsrGroup = useCallback(async (itemIds: readonly string[], options: AsrAuthorizationOptions) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey) return;
-    const ids = [...new Set(itemIds)].filter((itemId) =>
-      current.knownItemIds.has(itemId));
+    const ids = [...new Set(itemIds)];
     if (ids.length === 0) return;
     const epoch = current.sessionEpoch;
     nextSessionMutationRevision();
@@ -665,8 +685,7 @@ export function useImportWorkflow(
   const authorizeLocalOcrGroup = useCallback(async (itemIds: readonly string[]) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey) return;
-    const ids = [...new Set(itemIds)].filter((itemId) =>
-      current.knownItemIds.has(itemId));
+    const ids = [...new Set(itemIds)];
     if (ids.length === 0) return;
     const epoch = current.sessionEpoch;
     nextSessionMutationRevision();

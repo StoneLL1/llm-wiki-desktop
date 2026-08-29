@@ -501,7 +501,9 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
   }, [actionRequest, clearActionRequest]);
 
   async function handleActionGroup(group: ImportActionGroup) {
-    const firstItemId = group.itemIds[0];
+    const loadedItems = useImportStore.getState().itemById;
+    const firstItemId = group.itemIds.find((itemId) => Boolean(loadedItems[itemId]))
+      ?? group.itemIds[0];
     if (!firstItemId) return;
     switch (group.kind) {
       case "login":
@@ -522,6 +524,9 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
         return;
       case "resume":
         await workflow.startItems(group.itemIds, "retry");
+        return;
+      case "conflict":
+        await handleAction("resolve_merge", firstItemId);
         return;
     }
   }
@@ -743,7 +748,7 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
               confirmingLargeData={workflow.isAddingPaths}
             />
             <ImportActionGroups
-              items={session?.items ?? []}
+              groups={workflow.overview?.actionGroups ?? []}
               pendingItemIds={pendingItemIds}
               onRun={(group) => {
                 void handleActionGroup(group).catch(() => undefined);
