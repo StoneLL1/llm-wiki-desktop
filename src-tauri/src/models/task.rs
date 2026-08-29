@@ -39,6 +39,9 @@ impl BackendTask {
         }
         match self.operation.as_ref() {
             Some(TaskOperation::ImportBatch { session_id, .. }) => Some(session_id.as_str()),
+            Some(TaskOperation::ImportCollectionDiscovery { session_id }) => {
+                Some(session_id.as_str())
+            }
             Some(
                 TaskOperation::CapabilityInstall { .. }
                 | TaskOperation::ImportCommit { .. }
@@ -115,6 +118,9 @@ pub enum TaskOperation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_label: Option<String>,
     },
+    ImportCollectionDiscovery {
+        session_id: String,
+    },
     CapabilityInstall {
         session_id: String,
         item_id: String,
@@ -171,6 +177,11 @@ pub enum TaskResultReference {
         batch_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         completion: Option<crate::models::import_v2::ImportCompletion>,
+    },
+    ImportCollectionPreview {
+        session_id: String,
+        collection_ref: String,
+        preview: crate::models::import_v2_web::ImportCollectionPreview,
     },
     Compile {
         result: crate::models::compile::CompileResult,

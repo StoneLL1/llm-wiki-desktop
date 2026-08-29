@@ -12,7 +12,7 @@ export interface AddImportUrlV2Request { projectId: string; projectRootPath: str
 export interface DiscoverImportCollectionV2Request { projectId: string; projectRootPath: string; sessionId: string; url: string; }
 export interface ImportCollectionItemPreview { itemRef: string; title: string; publicUrl: string; }
 export interface ImportCollectionPage { discoveredTotal: number; loadedCount: number; hasMore: boolean; nextCursor: string | null; items: ImportCollectionItemPreview[]; }
-export interface ImportCollectionPreview extends ImportCollectionPage { collectionRef: string; sourceUrl: string; platform: string; title: string; totalDurationSeconds: number | null; estimatedLoginCount: number; estimatedAsrCount: number; }
+export interface ImportCollectionPreview extends ImportCollectionPage { taskId: string; collectionRef: string; sourceUrl: string; platform: string; title: string; totalDurationSeconds: number | null; estimatedLoginCount: number; estimatedAsrCount: number; }
 export interface LoadImportCollectionPageV2Request { projectId: string; projectRootPath: string; sessionId: string; collectionRef: string; cursor: string; loadAll?: boolean; }
 export interface AddImportCollectionItemsV2Request { projectId: string; projectRootPath: string; sessionId: string; collectionRef: string; itemRefs: string[]; mediaSaveMode?: MediaSaveMode; }
 export interface RemoteMediaRetentionRequest { projectId: string; projectRootPath: string; sessionId: string; itemId: string; }

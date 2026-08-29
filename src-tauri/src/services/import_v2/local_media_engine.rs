@@ -7,14 +7,15 @@ use crate::errors::{BackendError, IMPORT_V2_CANCELLED, IMPORT_V2_ENGINE_OUTPUT_I
 use crate::models::import_v2::{ImportInput, ImportInputKind};
 use crate::models::import_v2_file::FileFormat;
 use crate::services::import_v2::engine::{
-    EngineContinuation, EngineDescriptor, EngineRequest, EngineResult, ImportEngine,
+    EngineContinuation, EngineDescriptor, EngineProgress, EngineProgressReporter, EngineRequest,
+    EngineResult, ImportEngine,
 };
 use crate::services::import_v2::markdown_normalizer::{decode_text, normalize_markdown};
 use crate::services::import_v2::media_router::{
     MediaInput, MediaKind, MediaRouter, SubtitleCandidate, SubtitleKind,
 };
 use crate::services::import_v2::native_file_engine::{
-    resolve_inside, resolve_source, safe_read_source,
+    copy_verified_source_streaming, resolve_inside, resolve_source, safe_read_source,
 };
 use crate::services::import_v2::subtitle::render_subtitle_markdown;
 use crate::tasks::task_model::CancellationToken;
@@ -41,21 +42,27 @@ impl ImportEngine for NativeSubtitleEngine {
         cancellation: &CancellationToken,
     ) -> Result<EngineResult, BackendError> {
         let prepared = prepare_input(request, cancellation)?;
-        let format = detect_format(&prepared.source, &prepared.source_bytes)?;
+        let identity = request
+            .input
+            .source_identity
+            .as_ref()
+            .ok_or_else(|| invalid("The selected source must be scanned again."))?;
+        let source_bytes = safe_read_source(&prepared.source, identity)?;
+        let format = detect_format(&prepared.source)?;
         let extension = subtitle_extension(format).ok_or_else(|| {
             invalid("The selected file does not contain a supported subtitle format.")
         })?;
-        let transcript = render_subtitle_markdown(&prepared.source_bytes, extension)
-            .ok_or_else(subtitle_unavailable)?;
-        let transcript_evidence = prepared.source_bytes.clone();
+        let transcript =
+            render_subtitle_markdown(&source_bytes, extension).ok_or_else(subtitle_unavailable)?;
         stage_transcript_candidate(
             request,
             cancellation,
             prepared,
+            &source_bytes,
             &transcript,
             extension,
             "standalone",
-            &transcript_evidence,
+            &source_bytes,
         )
     }
 }
@@ -81,8 +88,17 @@ impl ImportEngine for NativeMediaCompanionEngine {
         request: &EngineRequest,
         cancellation: &CancellationToken,
     ) -> Result<EngineResult, BackendError> {
+        self.execute_with_progress(request, cancellation, &|_| Ok(()))
+    }
+
+    fn execute_with_progress(
+        &self,
+        request: &EngineRequest,
+        cancellation: &CancellationToken,
+        report_progress: &EngineProgressReporter<'_>,
+    ) -> Result<EngineResult, BackendError> {
         let prepared = prepare_input(request, cancellation)?;
-        let media_format = detect_format(&prepared.source, &prepared.source_bytes)?;
+        let media_format = detect_format(&prepared.source)?;
         let kind = match media_format.content_kind() {
             crate::models::import_v2_file::FileContentKind::Audio => MediaKind::Audio,
             crate::models::import_v2_file::FileContentKind::Video => MediaKind::Video,
@@ -133,14 +149,20 @@ impl ImportEngine for NativeMediaCompanionEngine {
         // capability performs an extraction-only embedded-track probe before
         // ASR authorization; the companion transcript is staged as a fallback
         // and is selected only when that probe reports no embedded track.
-        stage_local_asr_candidate(request, cancellation, prepared, kind, selected.as_ref())
+        stage_local_asr_candidate(
+            request,
+            cancellation,
+            prepared,
+            kind,
+            selected.as_ref(),
+            report_progress,
+        )
     }
 }
 
 struct PreparedInput {
     source: PathBuf,
     staging: PathBuf,
-    source_bytes: Vec<u8>,
 }
 
 struct CompanionCandidate {
@@ -183,16 +205,23 @@ fn prepare_input(
         .source_identity
         .as_ref()
         .ok_or_else(|| invalid("The selected source must be scanned again."))?;
-    let source_bytes = safe_read_source(&source, identity)?;
-    Ok(PreparedInput {
-        source,
-        staging,
-        source_bytes,
-    })
+    let metadata = std::fs::symlink_metadata(&source)
+        .map_err(|_| invalid("The selected source could not be inspected."))?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() != identity.size_bytes
+        || source.canonicalize().ok().as_deref() != Some(Path::new(&identity.canonical_path))
+    {
+        return Err(invalid(
+            "The selected source changed and must be scanned again.",
+        ));
+    }
+    Ok(PreparedInput { source, staging })
 }
 
-fn detect_format(path: &Path, bytes: &[u8]) -> Result<FileFormat, BackendError> {
-    crate::services::import_v2::file_discovery::identify_file(path, &bytes[..bytes.len().min(8192)])
+fn detect_format(path: &Path) -> Result<FileFormat, BackendError> {
+    let prefix = crate::services::import_v2::file_discovery::read_file_prefix(path)?;
+    crate::services::import_v2::file_discovery::identify_file(path, &prefix)
         .map(|(format, _)| format)
 }
 
@@ -315,6 +344,7 @@ fn stage_transcript_candidate(
     request: &EngineRequest,
     cancellation: &CancellationToken,
     prepared: PreparedInput,
+    source_bytes: &[u8],
     transcript: &str,
     extension: &str,
     origin: &str,
@@ -349,7 +379,7 @@ fn stage_transcript_candidate(
         transcript_origin: origin,
         transcript_format: extension,
     };
-    std::fs::write(prepared.staging.join("source.bin"), &prepared.source_bytes)
+    std::fs::write(prepared.staging.join("source.bin"), source_bytes)
         .and_then(|_| std::fs::write(prepared.staging.join("document.md"), markdown.as_bytes()))
         .and_then(|_| std::fs::write(prepared.staging.join(&evidence_path), transcript_evidence))
         .and_then(|_| {
@@ -386,6 +416,7 @@ fn stage_local_asr_candidate(
     prepared: PreparedInput,
     kind: MediaKind,
     companion_fallback: Option<&CompanionCandidate>,
+    report_progress: &EngineProgressReporter<'_>,
 ) -> Result<EngineResult, BackendError> {
     if cancellation.is_cancelled() {
         return Err(cancelled());
@@ -411,8 +442,26 @@ fn stage_local_asr_candidate(
         relative_path: &request.input.display_name,
     })
     .map_err(|_| invalid("The local media metadata could not be staged."))?;
-    std::fs::write(prepared.staging.join("source.bin"), &prepared.source_bytes)
-        .and_then(|_| std::fs::write(&temporary_file, &prepared.source_bytes))
+    let identity = request
+        .input
+        .source_identity
+        .as_ref()
+        .ok_or_else(|| invalid("The selected source must be scanned again."))?;
+    let source_snapshot = prepared.staging.join("source.bin");
+    copy_verified_source_streaming(
+        &prepared.source,
+        identity,
+        &source_snapshot,
+        cancellation,
+        |current, total| {
+            report_progress(EngineProgress {
+                current,
+                total: Some(total),
+                label: "media.staging".into(),
+            })
+        },
+    )?;
+    crate::services::import_v2::media_router::link_or_copy(&source_snapshot, &temporary_file)
         .and_then(|_| {
             std::fs::write(
                 prepared.staging.join("document.md"),

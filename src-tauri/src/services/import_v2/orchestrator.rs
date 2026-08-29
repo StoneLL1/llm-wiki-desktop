@@ -516,6 +516,33 @@ impl ImportV2Service {
         self.web_targets
             .store_collection(project_id, session_id, source_url, platform, title, items)
     }
+    #[allow(clippy::too_many_arguments)]
+    pub fn store_web_collection_durable(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        task_id: &str,
+        project_id: &str,
+        session_id: &str,
+        source_url: String,
+        platform: String,
+        title: String,
+        items: Vec<(
+            String,
+            crate::services::import_v2::url_policy::SessionWebTarget,
+            String,
+        )>,
+    ) -> Result<
+        (
+            String,
+            crate::services::import_v2::web_target_store::CollectionPage,
+        ),
+        BackendError,
+    > {
+        self.web_targets.store_collection_durable(
+            context, files, task_id, project_id, session_id, source_url, platform, title, items,
+        )
+    }
     pub fn load_web_collection_page(
         &self,
         collection_ref: &str,
@@ -525,6 +552,32 @@ impl ImportV2Service {
         load_all: bool,
     ) -> Result<crate::services::import_v2::web_target_store::CollectionPage, BackendError> {
         self.web_targets.load_collection_page(
+            collection_ref,
+            project_id,
+            session_id,
+            cursor,
+            load_all,
+        )
+    }
+    pub fn load_web_collection_page_durable(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        collection_ref: &str,
+        project_id: &str,
+        session_id: &str,
+        cursor: &str,
+        load_all: bool,
+    ) -> Result<
+        (
+            crate::services::import_v2::web_target_store::CollectionPage,
+            String,
+        ),
+        BackendError,
+    > {
+        self.web_targets.load_collection_page_durable(
+            context,
+            files,
             collection_ref,
             project_id,
             session_id,
@@ -547,8 +600,36 @@ impl ImportV2Service {
             selected_item_refs,
         )
     }
+    pub fn resolve_web_collection_selection_durable(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        collection_ref: &str,
+        project_id: &str,
+        session_id: &str,
+        selected_item_refs: &[String],
+    ) -> Result<crate::services::import_v2::web_target_store::CollectionSelection, BackendError>
+    {
+        self.web_targets.resolve_collection_selection_durable(
+            context,
+            files,
+            collection_ref,
+            project_id,
+            session_id,
+            selected_item_refs,
+        )
+    }
     pub fn delete_web_collection(&self, collection_ref: &str) -> Result<(), BackendError> {
         self.web_targets.delete_collection(collection_ref)
+    }
+    pub fn delete_web_collection_durable(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        collection_ref: &str,
+    ) -> Result<(), BackendError> {
+        self.web_targets
+            .delete_collection_durable(context, files, collection_ref)
     }
     pub fn authorize_private_target(
         &self,
@@ -2097,6 +2178,21 @@ impl ImportV2Service {
         inputs: Vec<ImportInput>,
     ) -> Result<ImportSession, BackendError> {
         self.add_inputs_unchecked(context, files, session_id, inputs)
+    }
+
+    pub(crate) fn add_temporary_preview_collection_inputs(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        inputs: Vec<crate::services::import_v2::session_store::CollectionImportInput>,
+        source_url: String,
+        platform: String,
+        title: String,
+    ) -> Result<ImportSession, BackendError> {
+        self.add_collection_inputs_unchecked(
+            context, files, session_id, inputs, source_url, platform, title,
+        )
     }
 
     pub(crate) fn add_temporary_preview_text(
@@ -5271,6 +5367,9 @@ impl ImportV2Service {
             },
         )?;
         remove_clipboard_session_input(context, session_id, &item.input);
+        if item.input.kind == ImportInputKind::Url {
+            let _ = self.web_targets.delete(&item.input.locator);
+        }
         if !batch_operation
             && tasks
                 .get_task(task_id)

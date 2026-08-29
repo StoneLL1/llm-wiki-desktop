@@ -1,6 +1,8 @@
 use crate::{
     app_state::AppState,
-    commands::import_v2_commands::{start_import_batch_for_state, StartImportBatchV2Request},
+    commands::import_v2_commands::{
+        import_session_context, start_import_batch_for_state, StartImportBatchV2Request,
+    },
     errors::BackendError,
     models::{
         import_v2::{
@@ -15,7 +17,7 @@ use crate::{
             LoadImportCollectionPageV2Request, RemoteMediaRetentionPlan,
             RemoteMediaRetentionRequest,
         },
-        task::BackendTask,
+        task::{BackendTask, TaskResult, TaskResultReference, TaskStatus},
     },
     services::import_v2::{
         connector_session::ConnectorSessionRef,
@@ -33,6 +35,11 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use tauri::{AppHandle, Manager, State};
+
+fn collection_task_error(message: &str) -> BackendError {
+    BackendError::new("IMPORT_WEB_COLLECTION_TASK_FAILED", message, true, false)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoginRequest {
@@ -140,38 +147,114 @@ pub async fn discover_import_collection_v2(
     let coordinator = app.state::<AppState>().blocking_work.clone();
     let preflight_app = app.clone();
     let preflight_request = request.clone();
-    let Some((context, execution, target, allowed_host_suffixes)) = coordinator
-        .run(crate::services::BlockingWorkClass::HeavyIo, move || {
-            let state = preflight_app.state::<AppState>();
-            let context = state.resolve_project_context(
-                &preflight_request.project_id,
-                &preflight_request.project_root_path,
-            )?;
-            state.import_v2_service.load_session(
-                &context,
-                &state.file_store,
-                &preflight_request.session_id,
-            )?;
-            let execution = state.begin_project_external_execution(
-                &context,
-                &format!("collection-discovery:{}", preflight_request.session_id),
-            )?;
-            let target = UrlPolicy.normalize_for_session(&preflight_request.url)?;
-            if !looks_like_collection_url(&target.public.public_url) {
-                return Ok(None);
-            }
-            let allowed_host_suffixes =
-                trusted_platform_page_host_suffixes(&target.public.public_url)
-                    .iter()
-                    .map(|suffix| (*suffix).into())
-                    .collect();
-            Ok(Some((context, execution, target, allowed_host_suffixes)))
-        })
-        .await?
+    let Some((context, authority_context, execution, target, allowed_host_suffixes, task)) =
+        coordinator
+            .run(crate::services::BlockingWorkClass::HeavyIo, move || {
+                let state = preflight_app.state::<AppState>();
+                let authority_context = state.resolve_project_context(
+                    &preflight_request.project_id,
+                    &preflight_request.project_root_path,
+                )?;
+                let context = import_session_context(
+                    &state,
+                    &preflight_request.project_id,
+                    &preflight_request.project_root_path,
+                    &preflight_request.session_id,
+                )?;
+                state.import_v2_service.load_session(
+                    &context,
+                    &state.file_store,
+                    &preflight_request.session_id,
+                )?;
+                let target = UrlPolicy.normalize_for_session(&preflight_request.url)?;
+                if !looks_like_collection_url(&target.public.public_url) {
+                    return Ok(None);
+                }
+                let task = if context.root != authority_context.root {
+                    state
+                        .task_service
+                        .create_memory_import_collection_task(
+                            preflight_request.project_id.clone(),
+                            authority_context.root.clone(),
+                            "Discover import collection".into(),
+                            preflight_request.session_id.clone(),
+                        )
+                        .map_err(|message| collection_task_error(&message))?
+                } else {
+                    state.with_current_project_write_access(
+                        &preflight_request.project_id,
+                        &preflight_request.project_root_path,
+                        |_permit, context| {
+                            let task_state_root = context
+                                .layout
+                                .task_state_root
+                                .as_deref()
+                                .ok_or_else(|| {
+                                    collection_task_error(
+                                        "Collection task persistence is unavailable.",
+                                    )
+                                })
+                                .and_then(|relative| context.resolve_project_path(relative))?;
+                            state
+                                .task_service
+                                .create_project_import_collection_task(
+                                    preflight_request.project_id.clone(),
+                                    context.root.clone(),
+                                    task_state_root,
+                                    "Discover import collection".into(),
+                                    preflight_request.session_id.clone(),
+                                )
+                                .map_err(|message| collection_task_error(&message))
+                        },
+                    )?
+                };
+                state
+                    .task_service
+                    .transition_status(&task.id, TaskStatus::Running)
+                    .map_err(|message| collection_task_error(&message))?;
+                let execution =
+                    match state.begin_project_external_task(&authority_context, &task.id) {
+                        Ok(execution) => execution,
+                        Err(error) => {
+                            let _ = state.task_service.finish_running_operation(
+                                &task.id,
+                                TaskResult {
+                                    summary: "Collection discovery could not start".into(),
+                                    affected_paths: Vec::new(),
+                                    reference: None,
+                                    pending_action: None,
+                                },
+                                TaskStatus::Failed,
+                                Some(error.clone()),
+                            );
+                            return Err(error);
+                        }
+                    };
+                let allowed_host_suffixes =
+                    trusted_platform_page_host_suffixes(&target.public.public_url)
+                        .iter()
+                        .map(|suffix| (*suffix).into())
+                        .collect();
+                Ok(Some((
+                    context,
+                    authority_context,
+                    execution,
+                    target,
+                    allowed_host_suffixes,
+                    task,
+                )))
+            })
+            .await?
     else {
         return Ok(None);
     };
-    let artifact = WebFetchService
+    let task_id = task.id.clone();
+    let fetch_tasks = app.state::<AppState>().task_service.clone();
+    let progress_tasks = fetch_tasks.clone();
+    let progress_task_id = task_id.clone();
+    let cancel_tasks = fetch_tasks.clone();
+    let cancel_task_id = task_id.clone();
+    let artifact = match WebFetchService
         .fetch(
             target.clone(),
             &UrlPolicy,
@@ -186,11 +269,37 @@ pub async fn discover_import_collection_v2(
             },
             None,
             "collection-discovery",
-            |_| {},
-            || false,
+            move |progress| {
+                let _ = progress_tasks.update_progress(
+                    &progress_task_id,
+                    progress.downloaded_bytes,
+                    progress.total_bytes,
+                    Some("collection.downloading".into()),
+                );
+            },
+            move || cancel_tasks.is_cancelled(&cancel_task_id),
         )
-        .await?;
-    coordinator
+        .await
+    {
+        Ok(artifact) => artifact,
+        Err(error) => {
+            let _ = fetch_tasks.finish_running_operation(
+                &task_id,
+                TaskResult {
+                    summary: "Collection discovery failed".into(),
+                    affected_paths: Vec::new(),
+                    reference: None,
+                    pending_action: None,
+                },
+                TaskStatus::Failed,
+                Some(error.clone()),
+            );
+            return Err(error);
+        }
+    };
+    let finish_tasks = app.state::<AppState>().task_service.clone();
+    let finish_task_id = task_id.clone();
+    let result = coordinator
         .run(crate::services::BlockingWorkClass::HeavyIo, move || {
             let state = app.state::<AppState>();
             let platform = Platform::from_url(&artifact.final_public_url).ok_or_else(|| {
@@ -205,6 +314,20 @@ pub async fn discover_import_collection_v2(
             let Some(collection) =
                 extract_platform_collection(platform, &html, &artifact.final_public_url)
             else {
+                state
+                    .task_service
+                    .finish_running_operation(
+                        &task.id,
+                        TaskResult {
+                            summary: "No collection entries were found".into(),
+                            affected_paths: Vec::new(),
+                            reference: None,
+                            pending_action: None,
+                        },
+                        TaskStatus::Succeeded,
+                        None,
+                    )
+                    .map_err(|message| collection_task_error(&message))?;
                 return Ok(None);
             };
             let known = state.import_v2_service.completed_collection_fingerprints(
@@ -236,85 +359,198 @@ pub async fn discover_import_collection_v2(
                 estimated_asr_count += usize::from(item.estimated_asr_required);
                 pending_items.push((item.title, child, item.discovery_fingerprint));
             }
-            state.require_current_execution_epoch(&context, &execution)?;
-            let (collection_ref, page) = state.with_current_project_write_access(
-                &request.project_id,
-                &request.project_root_path,
-                |_permit, _context| {
-                    state.import_v2_service.store_web_collection(
-                        &request.project_id,
-                        &request.session_id,
-                        target.public.public_url.clone(),
-                        collection.platform.clone(),
-                        collection.title.clone(),
-                        pending_items,
-                    )
-                },
-            )?;
+            state.require_current_execution_epoch(&authority_context, &execution)?;
+            let (collection_ref, page) = if context.root != authority_context.root {
+                state.import_v2_service.store_web_collection_durable(
+                    &context,
+                    &state.file_store,
+                    &task.id,
+                    &request.project_id,
+                    &request.session_id,
+                    target.public.public_url.clone(),
+                    collection.platform.clone(),
+                    collection.title.clone(),
+                    pending_items,
+                )?
+            } else {
+                state.with_current_project_write_access(
+                    &request.project_id,
+                    &request.project_root_path,
+                    |_permit, _context| {
+                        state.import_v2_service.store_web_collection_durable(
+                            _context,
+                            &state.file_store,
+                            &task.id,
+                            &request.project_id,
+                            &request.session_id,
+                            target.public.public_url.clone(),
+                            collection.platform.clone(),
+                            collection.title.clone(),
+                            pending_items,
+                        )
+                    },
+                )?
+            };
             let items = page
                 .items
-                .into_iter()
+                .iter()
                 .map(|item| ImportCollectionItemPreview {
-                    item_ref: item.item_ref,
-                    title: item.title,
-                    public_url: item.public_url,
+                    item_ref: item.item_ref.clone(),
+                    title: item.title.clone(),
+                    public_url: item.public_url.clone(),
                 })
-                .collect();
-            Ok(Some(ImportCollectionPreview {
-                collection_ref,
-                source_url: target.public.public_url,
-                platform: collection.platform,
-                title: collection.title,
+                .collect::<Vec<_>>();
+            let preview = ImportCollectionPreview {
+                task_id: task.id.clone(),
+                collection_ref: collection_ref.clone(),
+                source_url: target.public.public_url.clone(),
+                platform: collection.platform.clone(),
+                title: collection.title.clone(),
                 total_duration_seconds,
                 estimated_login_count,
                 estimated_asr_count,
                 discovered_total: page.discovered_total,
                 loaded_count: page.loaded_count,
                 has_more: page.has_more,
-                next_cursor: page.next_cursor,
+                next_cursor: page.next_cursor.clone(),
                 items,
-            }))
+            };
+            let finished = match state.task_service.finish_running_operation(
+                &task.id,
+                TaskResult {
+                    summary: format!("Discovered {} collection entries", page.discovered_total),
+                    affected_paths: Vec::new(),
+                    reference: Some(TaskResultReference::ImportCollectionPreview {
+                        session_id: request.session_id.clone(),
+                        collection_ref: collection_ref.clone(),
+                        preview: preview.clone(),
+                    }),
+                    pending_action: None,
+                },
+                TaskStatus::WaitingForConfirmation,
+                None,
+            ) {
+                Ok(finished) => finished,
+                Err(message) => {
+                    let _ = state.import_v2_service.delete_web_collection_durable(
+                        &context,
+                        &state.file_store,
+                        &collection_ref,
+                    );
+                    return Err(collection_task_error(&message));
+                }
+            };
+            if finished.status == TaskStatus::Cancelled {
+                let _ = state.import_v2_service.delete_web_collection_durable(
+                    &context,
+                    &state.file_store,
+                    &collection_ref,
+                );
+                return Err(collection_task_error("Collection discovery was cancelled."));
+            }
+            Ok(Some(preview))
         })
-        .await
+        .await;
+    if let Err(error) = &result {
+        let _ = finish_tasks.finish_running_operation(
+            &finish_task_id,
+            TaskResult {
+                summary: "Collection discovery failed".into(),
+                affected_paths: Vec::new(),
+                reference: None,
+                pending_action: None,
+            },
+            TaskStatus::Failed,
+            Some(error.clone()),
+        );
+    }
+    result
 }
 
 pub fn load_import_collection_page_v2(
     state: State<'_, AppState>,
     request: LoadImportCollectionPageV2Request,
 ) -> Result<ImportCollectionPage, BackendError> {
+    let authority_context =
+        state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let context = import_session_context(
+        &state,
+        &request.project_id,
+        &request.project_root_path,
+        &request.session_id,
+    )?;
+    if context.root != authority_context.root {
+        return load_import_collection_page_for_context(&state, &context, &request);
+    }
     state.with_current_project_write_access(
         &request.project_id,
         &request.project_root_path,
-        |_permit, context| {
-            state.import_v2_service.load_session(
-                context,
-                &state.file_store,
-                &request.session_id,
-            )?;
-            let page = state.import_v2_service.load_web_collection_page(
-                &request.collection_ref,
-                &request.project_id,
-                &request.session_id,
-                &request.cursor,
-                request.load_all,
-            )?;
-            Ok(ImportCollectionPage {
-                items: page
-                    .items
-                    .into_iter()
-                    .map(|item| ImportCollectionItemPreview {
-                        item_ref: item.item_ref,
-                        title: item.title,
-                        public_url: item.public_url,
-                    })
-                    .collect(),
-                discovered_total: page.discovered_total,
-                loaded_count: page.loaded_count,
-                has_more: page.has_more,
-                next_cursor: page.next_cursor,
-            })
-        },
+        |_permit, context| load_import_collection_page_for_context(&state, context, &request),
     )
+}
+
+fn load_import_collection_page_for_context(
+    state: &AppState,
+    context: &crate::models::paths::ProjectContext,
+    request: &LoadImportCollectionPageV2Request,
+) -> Result<ImportCollectionPage, BackendError> {
+    state
+        .import_v2_service
+        .load_session(context, &state.file_store, &request.session_id)?;
+    let (page, task_id) = state.import_v2_service.load_web_collection_page_durable(
+        context,
+        &state.file_store,
+        &request.collection_ref,
+        &request.project_id,
+        &request.session_id,
+        &request.cursor,
+        request.load_all,
+    )?;
+    let _ = state.task_service.update_progress(
+        &task_id,
+        page.loaded_count as u64,
+        Some(page.discovered_total as u64),
+        Some("collection.loading".into()),
+    );
+    let public_page = ImportCollectionPage {
+        items: page
+            .items
+            .into_iter()
+            .map(|item| ImportCollectionItemPreview {
+                item_ref: item.item_ref,
+                title: item.title,
+                public_url: item.public_url,
+            })
+            .collect(),
+        discovered_total: page.discovered_total,
+        loaded_count: page.loaded_count,
+        has_more: page.has_more,
+        next_cursor: page.next_cursor,
+    };
+    let mut task_result = state
+        .task_service
+        .get_task(&task_id)
+        .and_then(|task| task.result)
+        .ok_or_else(|| collection_task_error("Collection task result is unavailable."))?;
+    match task_result.reference.as_mut() {
+        Some(TaskResultReference::ImportCollectionPreview {
+            collection_ref,
+            preview,
+            ..
+        }) if collection_ref == &request.collection_ref => {
+            preview.items = public_page.items.clone();
+            preview.discovered_total = public_page.discovered_total;
+            preview.loaded_count = public_page.loaded_count;
+            preview.has_more = public_page.has_more;
+            preview.next_cursor.clone_from(&public_page.next_cursor);
+        }
+        _ => return Err(collection_task_error("Collection task binding is invalid.")),
+    }
+    state
+        .task_service
+        .set_result(&task_id, task_result)
+        .map_err(|error| collection_task_error(&error))?;
+    Ok(public_page)
 }
 
 pub fn add_import_collection_items_v2(
@@ -338,49 +574,60 @@ pub fn add_import_collection_items_v2(
             true,
         ));
     }
-    state.with_current_project_write_access(
+    let authority_context =
+        state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let session_context = import_session_context(
+        &state,
         &request.project_id,
         &request.project_root_path,
-        |permit, context| {
-            state.import_v2_service.load_session(
+        &request.session_id,
+    )?;
+    let add = |permit: Option<&crate::app_state::ProjectWritePermit<'_>>,
+               context: &crate::models::paths::ProjectContext|
+     -> Result<ImportSession, BackendError> {
+        state
+            .import_v2_service
+            .load_session(context, &state.file_store, &request.session_id)?;
+        let selection = state
+            .import_v2_service
+            .resolve_web_collection_selection_durable(
                 context,
                 &state.file_store,
-                &request.session_id,
-            )?;
-            let selection = state.import_v2_service.resolve_web_collection_selection(
                 &request.collection_ref,
                 &request.project_id,
                 &request.session_id,
                 &request.item_refs,
             )?;
-            let mut stored_refs = Vec::with_capacity(selection.targets.len());
-            let mut inputs = Vec::with_capacity(selection.targets.len());
-            for selected in selection.targets {
-                let target = selected.target;
-                match state.import_v2_service.store_web_target(&target) {
-                    Ok(item_ref) => {
-                        stored_refs.push(item_ref.clone());
-                        inputs.push(CollectionImportInput {
-                            input: ImportInput {
-                                kind: ImportInputKind::Url,
-                                display_name: target.public.host,
-                                locator: item_ref,
-                                normalized_locator: Some(target.public.public_url),
-                                source_identity: None,
-                                media_save_mode: request.media_save_mode.clone(),
-                            },
-                            discovery_fingerprint: selected.discovery_fingerprint,
-                        });
+        let collection_task_id = selection.task_id.clone();
+        let mut stored_refs = Vec::with_capacity(selection.targets.len());
+        let mut inputs = Vec::with_capacity(selection.targets.len());
+        for selected in selection.targets {
+            let target = selected.target;
+            match state.import_v2_service.store_web_target(&target) {
+                Ok(item_ref) => {
+                    stored_refs.push(item_ref.clone());
+                    inputs.push(CollectionImportInput {
+                        input: ImportInput {
+                            kind: ImportInputKind::Url,
+                            display_name: target.public.host,
+                            locator: item_ref,
+                            normalized_locator: Some(target.public.public_url),
+                            source_identity: None,
+                            media_save_mode: request.media_save_mode.clone(),
+                        },
+                        discovery_fingerprint: selected.discovery_fingerprint,
+                    });
+                }
+                Err(error) => {
+                    for item_ref in stored_refs {
+                        let _ = state.import_v2_service.delete_web_target(&item_ref);
                     }
-                    Err(error) => {
-                        for item_ref in stored_refs {
-                            let _ = state.import_v2_service.delete_web_target(&item_ref);
-                        }
-                        return Err(error);
-                    }
+                    return Err(error);
                 }
             }
-            let result = state.import_v2_service.add_collection_inputs_authorized(
+        }
+        let result = match permit {
+            Some(permit) => state.import_v2_service.add_collection_inputs_authorized(
                 permit,
                 &state.file_store,
                 &request.session_id,
@@ -388,32 +635,91 @@ pub fn add_import_collection_items_v2(
                 selection.source_url,
                 selection.platform,
                 selection.title,
-            );
-            let session = match result {
-                Ok(session) => session,
-                Err(error) => {
-                    for item_ref in stored_refs {
-                        let _ = state.import_v2_service.delete_web_target(&item_ref);
-                    }
-                    return Err(error);
-                }
-            };
-            let used_refs = session
-                .items
-                .iter()
-                .map(|item| item.input.locator.as_str())
-                .collect::<HashSet<_>>();
-            for item_ref in stored_refs {
-                if !used_refs.contains(item_ref.as_str()) {
+            ),
+            None => state
+                .import_v2_service
+                .add_temporary_preview_collection_inputs(
+                    context,
+                    &state.file_store,
+                    &request.session_id,
+                    inputs,
+                    selection.source_url,
+                    selection.platform,
+                    selection.title,
+                ),
+        };
+        let session = match result {
+            Ok(session) => session,
+            Err(error) => {
+                for item_ref in stored_refs {
                     let _ = state.import_v2_service.delete_web_target(&item_ref);
                 }
+                return Err(error);
             }
-            state
-                .import_v2_service
-                .delete_web_collection(&request.collection_ref)?;
-            Ok(session)
-        },
-    )
+        };
+        let used_refs = session
+            .items
+            .iter()
+            .map(|item| item.input.locator.as_str())
+            .collect::<HashSet<_>>();
+        for item_ref in stored_refs {
+            if !used_refs.contains(item_ref.as_str()) {
+                let _ = state.import_v2_service.delete_web_target(&item_ref);
+            }
+        }
+        if let Some(task_id) = collection_task_id.as_deref() {
+            let task = state.task_service.get_task(task_id).ok_or_else(|| {
+                collection_task_error("Collection discovery task is unavailable.")
+            })?;
+            if task.status == TaskStatus::WaitingForConfirmation {
+                state
+                    .task_service
+                    .transition_status(task_id, TaskStatus::Running)
+                    .map_err(|message| collection_task_error(&message))?;
+            } else if task.status != TaskStatus::Running {
+                return Err(collection_task_error(
+                    "Collection discovery task is no longer selectable.",
+                ));
+            }
+            let finished = state
+                .task_service
+                .finish_running_operation(
+                    task_id,
+                    TaskResult {
+                        summary: format!("Added {} collection entries", request.item_refs.len()),
+                        affected_paths: Vec::new(),
+                        reference: None,
+                        pending_action: None,
+                    },
+                    TaskStatus::Succeeded,
+                    None,
+                )
+                .map_err(|message| collection_task_error(&message))?;
+            if finished.status == TaskStatus::Cancelled {
+                let _ = state.import_v2_service.delete_web_collection_durable(
+                    context,
+                    &state.file_store,
+                    &request.collection_ref,
+                );
+                return Err(collection_task_error("Collection selection was cancelled."));
+            }
+        }
+        state.import_v2_service.delete_web_collection_durable(
+            context,
+            &state.file_store,
+            &request.collection_ref,
+        )?;
+        Ok(session)
+    };
+    if session_context.root != authority_context.root {
+        add(None, &session_context)
+    } else {
+        state.with_current_project_write_access(
+            &request.project_id,
+            &request.project_root_path,
+            |permit, context| add(Some(permit), context),
+        )
+    }
 }
 
 pub fn get_remote_media_retention_plan_v2(

@@ -464,6 +464,29 @@ describe("useImportWorkflow", () => {
     expect(result.current.session?.sessionId).toBe("session-project-a");
   });
 
+  it("restores a durable collection confirmation handed off by the import view", async () => {
+    const preview = {
+      taskId: "collection-task",
+      collectionRef: "import-web-collection:durable",
+      sourceUrl: "https://space.bilibili.com/42",
+      platform: "bilibili",
+      title: "Durable collection",
+      totalDurationSeconds: null,
+      estimatedLoginCount: 0,
+      estimatedAsrCount: 55,
+      discoveredTotal: 55,
+      loadedCount: 55,
+      hasMore: false,
+      nextCursor: null,
+      items: [{ itemRef: "item-54", title: "Entry 54", publicUrl: "https://example.com/54" }],
+    };
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+
+    act(() => result.current.restoreCollection?.(preview));
+    await waitFor(() => expect(result.current.collectionPreview?.loadedCount).toBe(55));
+    expect(result.current.collectionPreview?.items[0]?.itemRef).toBe("item-54");
+  });
+
   it("creates a new session before adding after the previous session completed", async () => {
     const ended = {
       ...session(projectA.projectId, [item("done.md", "completed")]),

@@ -2512,6 +2512,9 @@ impl ImportV2Service {
             files.observe_atomic_write(&path, bytes);
         }
         remove_committed_clipboard_input(context, &session.session_id, &item.input);
+        if item.input.kind == ImportInputKind::Url {
+            let _ = self.web_targets.delete(&item.input.locator);
+        }
         Ok(result)
     }
 }

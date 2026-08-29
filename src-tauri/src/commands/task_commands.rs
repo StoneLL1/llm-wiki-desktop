@@ -3,7 +3,9 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::app_state::AppState;
 use crate::errors::BackendError;
-use crate::models::task::{BackendTask, TaskActivity, TaskStatus, TaskType};
+use crate::models::task::{
+    BackendTask, TaskActivity, TaskOperation, TaskResultReference, TaskStatus, TaskType,
+};
 use crate::models::workflow::{
     WorkflowFilesystemAccess, WorkflowPersistenceMode, WorkflowProjectTrust, WorkflowRunPage,
 };
@@ -139,6 +141,46 @@ pub fn cancel_task(
             .ok_or_else(|| BackendError::new("TASK_NOT_FOUND", "Task not found.", false, false));
     }
     let task = state.task_service.get_task(&request.task_id);
+    if let Some(task) = task.as_ref().filter(|task| {
+        matches!(
+            task.operation.as_ref(),
+            Some(TaskOperation::ImportCollectionDiscovery { .. })
+        )
+    }) {
+        let session_id = match task.operation.as_ref() {
+            Some(TaskOperation::ImportCollectionDiscovery { session_id }) => session_id,
+            _ => unreachable!("collection task predicate was checked"),
+        };
+        let session_context = crate::commands::import_v2_commands::import_session_context(
+            &state,
+            &request.project_id,
+            &request.project_root_path,
+            session_id,
+        )?;
+        return state.with_current_project_task_access(
+            &request.project_id,
+            &request.project_root_path,
+            |_permit| {
+                if let Some(TaskResultReference::ImportCollectionPreview {
+                    collection_ref, ..
+                }) = task
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.reference.as_ref())
+                {
+                    state.import_v2_service.delete_web_collection_durable(
+                        &session_context,
+                        &state.file_store,
+                        collection_ref,
+                    )?;
+                }
+                state
+                    .task_service
+                    .cancel_task(&request.task_id)
+                    .map_err(|msg| BackendError::new("TASK_CANCEL_FAILED", &msg, true, false))
+            },
+        );
+    }
     if let Some(task) = task
         .as_ref()
         .filter(|task| is_import_batch_operation_task(task))

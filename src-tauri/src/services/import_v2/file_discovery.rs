@@ -20,6 +20,11 @@ const LARGE_DATA_BYTES: u64 = 8 * 1024 * 1024;
 const LARGE_DATA_ROWS: u64 = 10_000;
 const LARGE_DATA_ROWS_PER_FILE: u64 = 5_000;
 const LARGE_DATA_OUTPUT_FILES: u32 = 2_000;
+const IMAGE_MAX_BYTES: u64 = 512 * 1024 * 1024;
+const AUDIO_MAX_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const VIDEO_MAX_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+const MEDIA_CONFIRMATION_BYTES: u64 = 64 * 1024 * 1024;
+const MEDIA_WORKING_SPACE_RESERVE_BYTES: u64 = 256 * 1024 * 1024;
 pub const DISCOVERY_BATCH_SIZE: usize = 128;
 
 #[derive(Default)]
@@ -193,17 +198,6 @@ impl FileDiscoveryService {
                 );
                 continue;
             }
-            if metadata.len() > policy.max_file_bytes {
-                skip(
-                    &mut result,
-                    &path,
-                    relative,
-                    FileSkipReason::FileTooLarge,
-                    format!("File is larger than {} bytes.", policy.max_file_bytes),
-                );
-                continue;
-            }
-            enforce_file_count_limit(result.files.len(), policy.max_files)?;
             let prefix = read_prefix(&path)?;
             let (format, identity) = match identify_file(&path, &prefix) {
                 Ok(value) => value,
@@ -218,6 +212,41 @@ impl FileDiscoveryService {
                     continue;
                 }
             };
+            let format_limit = format_size_limit(format, policy.max_file_bytes);
+            if metadata.len() > format_limit {
+                skip(
+                    &mut result,
+                    &path,
+                    relative,
+                    FileSkipReason::FileTooLarge,
+                    format!(
+                        "{} input requires {} bytes but this format is limited to {} bytes.",
+                        content_kind_label(format.content_kind()),
+                        metadata.len(),
+                        format_limit
+                    ),
+                );
+                continue;
+            }
+            if let Some((required, available)) =
+                media_disk_requirement(format.content_kind(), metadata.len(), &context.root)
+            {
+                if available < required {
+                    skip(
+                        &mut result,
+                        &path,
+                        relative,
+                        FileSkipReason::InsufficientDisk,
+                        format!(
+                            "This {} requires about {} bytes of working space; {} bytes are available.",
+                            content_kind_label(format.content_kind()),
+                            required,
+                            available
+                        ),
+                    );
+                    continue;
+                }
+            }
             let Some(source_path) = path.to_str().map(str::to_owned) else {
                 skip(
                     &mut result,
@@ -239,6 +268,7 @@ impl FileDiscoveryService {
                 );
                 continue;
             };
+            enforce_file_count_limit(result.files.len(), policy.max_files)?;
             let file = DiscoveredFile {
                 source_path,
                 relative_path: relative.unwrap_or_else(|| display_name.clone()),
@@ -247,7 +277,7 @@ impl FileDiscoveryService {
                 content_kind: format.content_kind(),
                 size_bytes: metadata.len(),
                 identity,
-                source_identity: source_identity(&canonical, &metadata)?,
+                source_identity: source_identity(&canonical, &metadata, &is_cancelled)?,
                 large_data: estimate_large_data(&path, format, metadata.len())?,
             };
             result.files.push(file.clone());
@@ -274,7 +304,7 @@ impl FileDiscoveryService {
             ));
         }
         let canonical = fs::canonicalize(&path).map_err(io_error)?;
-        let current = source_identity(&canonical, &metadata)?;
+        let current = source_identity(&canonical, &metadata, &|| false)?;
         if current != file.source_identity {
             return Err(error(
                 "IMPORT_SCAN_SOURCE_CHANGED",
@@ -347,8 +377,15 @@ pub fn new_import_inputs(
         .collect()
 }
 
-fn source_identity(path: &Path, metadata: &fs::Metadata) -> Result<SourceIdentity, BackendError> {
-    let bytes = fs::read(path).map_err(io_error)?;
+fn source_identity<C>(
+    path: &Path,
+    metadata: &fs::Metadata,
+    is_cancelled: &C,
+) -> Result<SourceIdentity, BackendError>
+where
+    C: Fn() -> bool,
+{
+    let (sha256, magic) = stream_file_hashes(path, metadata.len(), is_cancelled)?;
     let modified_nanos = metadata.modified().ok().and_then(|value| {
         value
             .duration_since(std::time::UNIX_EPOCH)
@@ -360,8 +397,8 @@ fn source_identity(path: &Path, metadata: &fs::Metadata) -> Result<SourceIdentit
         size_bytes: metadata.len(),
         modified_nanos,
         file_id: file_id(metadata),
-        sha256: format!("{:x}", Sha256::digest(&bytes)),
-        magic: magic_fingerprint(&bytes),
+        sha256,
+        magic,
     })
 }
 
@@ -370,6 +407,83 @@ fn magic_fingerprint(bytes: &[u8]) -> String {
         "{:x}",
         Sha256::digest(&bytes[..bytes.len().min(PREFIX_BYTES as usize)])
     )
+}
+
+fn stream_file_hashes<C>(
+    path: &Path,
+    expected_len: u64,
+    is_cancelled: &C,
+) -> Result<(String, String), BackendError>
+where
+    C: Fn() -> bool,
+{
+    let mut file = File::open(path).map_err(io_error)?;
+    let mut full = Sha256::new();
+    let mut prefix = Vec::with_capacity(PREFIX_BYTES as usize);
+    let mut buffer = [0_u8; 1024 * 1024];
+    let mut read_total = 0_u64;
+    loop {
+        if is_cancelled() {
+            return Err(error(
+                "IMPORT_FILE_SCAN_CANCELLED",
+                "File discovery was cancelled.",
+            ));
+        }
+        let read = file.read(&mut buffer).map_err(io_error)?;
+        if read == 0 {
+            break;
+        }
+        read_total = read_total.saturating_add(read as u64);
+        full.update(&buffer[..read]);
+        if prefix.len() < PREFIX_BYTES as usize {
+            let remaining = PREFIX_BYTES as usize - prefix.len();
+            prefix.extend_from_slice(&buffer[..read.min(remaining)]);
+        }
+    }
+    if read_total != expected_len {
+        return Err(error(
+            "IMPORT_SCAN_SOURCE_CHANGED",
+            "A source changed while its identity was being recorded. Scan it again.",
+        ));
+    }
+    Ok((format!("{:x}", full.finalize()), magic_fingerprint(&prefix)))
+}
+
+fn format_size_limit(format: FileFormat, document_limit: u64) -> u64 {
+    match format.content_kind() {
+        crate::models::import_v2_file::FileContentKind::Document
+        | crate::models::import_v2_file::FileContentKind::Subtitle => document_limit,
+        crate::models::import_v2_file::FileContentKind::Image => IMAGE_MAX_BYTES,
+        crate::models::import_v2_file::FileContentKind::Audio => AUDIO_MAX_BYTES,
+        crate::models::import_v2_file::FileContentKind::Video => VIDEO_MAX_BYTES,
+    }
+}
+
+fn content_kind_label(kind: crate::models::import_v2_file::FileContentKind) -> &'static str {
+    match kind {
+        crate::models::import_v2_file::FileContentKind::Document => "Document",
+        crate::models::import_v2_file::FileContentKind::Image => "Image",
+        crate::models::import_v2_file::FileContentKind::Audio => "Audio",
+        crate::models::import_v2_file::FileContentKind::Video => "Video",
+        crate::models::import_v2_file::FileContentKind::Subtitle => "Subtitle",
+    }
+}
+
+fn media_disk_requirement(
+    kind: crate::models::import_v2_file::FileContentKind,
+    source_bytes: u64,
+    project_root: &Path,
+) -> Option<(u64, u64)> {
+    let multiplier = match kind {
+        crate::models::import_v2_file::FileContentKind::Audio => 2,
+        crate::models::import_v2_file::FileContentKind::Video => 3,
+        _ => return None,
+    };
+    let required = source_bytes
+        .saturating_mul(multiplier)
+        .saturating_add(MEDIA_WORKING_SPACE_RESERVE_BYTES);
+    crate::services::import_v2::remote_media_retention::available_disk_bytes(project_root)
+        .map(|available| (required, available))
 }
 
 #[cfg(unix)]
@@ -429,8 +543,7 @@ fn identify_binary(
         return Ok(magic(FileFormat::Tiff, "tiff", "image/tiff"));
     }
     if prefix.starts_with(b"GIF87a") || prefix.starts_with(b"GIF89a") {
-        let bytes = fs::read(path).map_err(io_error)?;
-        if is_animated_gif(&bytes) {
+        if is_animated_gif_file(path)? {
             return Ok(magic(FileFormat::AnimatedGif, "animated-gif", "image/gif"));
         }
         return Err(error(
@@ -580,18 +693,38 @@ fn identify_ole(
     path: &Path,
     extension: &str,
 ) -> Result<(FileFormat, FileDetectionMethod), BackendError> {
-    let bytes = fs::read(path).map_err(io_error)?;
-    let format = if contains_ascii_case_insensitive(&bytes, b"workbook")
-        || contains_utf16le_ascii(&bytes, "Workbook")
-    {
+    let format = if file_contains_any_case_insensitive(
+        path,
+        &[
+            b"workbook",
+            &"Workbook"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        ],
+    )? {
         Some(FileFormat::Xls)
-    } else if contains_ascii_case_insensitive(&bytes, b"powerpoint document")
-        || contains_utf16le_ascii(&bytes, "PowerPoint Document")
-    {
+    } else if file_contains_any_case_insensitive(
+        path,
+        &[
+            b"powerpoint document",
+            &"PowerPoint Document"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        ],
+    )? {
         Some(FileFormat::Ppt)
-    } else if contains_ascii_case_insensitive(&bytes, b"worddocument")
-        || contains_utf16le_ascii(&bytes, "WordDocument")
-    {
+    } else if file_contains_any_case_insensitive(
+        path,
+        &[
+            b"worddocument",
+            &"WordDocument"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        ],
+    )? {
         Some(FileFormat::Doc)
     } else {
         None
@@ -607,6 +740,32 @@ fn identify_ole(
             "IMPORT_FILE_AMBIGUOUS_OLE",
             "The legacy Office container type could not be identified safely.",
         )),
+    }
+}
+
+fn file_contains_any_case_insensitive(
+    path: &Path,
+    needles: &[&[u8]],
+) -> Result<bool, BackendError> {
+    let mut file = File::open(path).map_err(io_error)?;
+    let overlap = needles.iter().map(|needle| needle.len()).max().unwrap_or(1) - 1;
+    let mut carry = Vec::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(io_error)?;
+        if read == 0 {
+            return Ok(false);
+        }
+        carry.extend_from_slice(&buffer[..read]);
+        if needles
+            .iter()
+            .any(|needle| contains_ascii_case_insensitive(&carry, needle))
+        {
+            return Ok(true);
+        }
+        if carry.len() > overlap {
+            carry.drain(..carry.len() - overlap);
+        }
     }
 }
 
@@ -809,11 +968,6 @@ fn looks_like_adts(prefix: &[u8]) -> bool {
     prefix.len() >= 2 && prefix[0] == 0xff && prefix[1] & 0xf6 == 0xf0
 }
 
-fn is_animated_gif(prefix: &[u8]) -> bool {
-    prefix.iter().filter(|byte| **byte == 0x2c).take(2).count() > 1
-        || contains_ascii(prefix, b"NETSCAPE2.0")
-}
-
 fn contains_ascii(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
@@ -826,27 +980,30 @@ fn contains_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
-fn contains_utf16le_ascii(haystack: &[u8], needle: &str) -> bool {
-    let bytes = needle
-        .encode_utf16()
-        .flat_map(u16::to_le_bytes)
-        .collect::<Vec<_>>();
-    contains_ascii(haystack, &bytes)
-}
-
 fn estimate_large_data(
     path: &Path,
     format: FileFormat,
     size_bytes: u64,
 ) -> Result<Option<LargeDataEstimate>, BackendError> {
     match format {
+        format
+            if matches!(
+                format.content_kind(),
+                crate::models::import_v2_file::FileContentKind::Audio
+                    | crate::models::import_v2_file::FileContentKind::Video
+            ) && size_bytes > MEDIA_CONFIRMATION_BYTES =>
+        {
+            Ok(Some(LargeDataEstimate {
+                row_count: 0,
+                sheet_count: None,
+                estimated_output_files: 1,
+                total_bytes: size_bytes,
+                requires_confirmation: true,
+                estimate_complete: false,
+            }))
+        }
         FileFormat::Csv => {
-            let row_count = fs::read(path)
-                .map_err(io_error)?
-                .iter()
-                .filter(|byte| **byte == b'\n')
-                .count() as u64
-                + 1;
+            let row_count = count_byte_streaming(path, b'\n')?.saturating_add(1);
             let requires_confirmation =
                 size_bytes >= LARGE_DATA_BYTES || row_count >= LARGE_DATA_ROWS;
             Ok(Some(LargeDataEstimate {
@@ -947,6 +1104,48 @@ fn read_prefix(path: &Path) -> Result<Vec<u8>, BackendError> {
         .map_err(io_error)?;
     Ok(bytes)
 }
+
+pub(crate) fn read_file_prefix(path: &Path) -> Result<Vec<u8>, BackendError> {
+    read_prefix(path)
+}
+
+fn count_byte_streaming(path: &Path, needle: u8) -> Result<u64, BackendError> {
+    let mut file = File::open(path).map_err(io_error)?;
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut count = 0_u64;
+    loop {
+        let read = file.read(&mut buffer).map_err(io_error)?;
+        if read == 0 {
+            return Ok(count);
+        }
+        count = count.saturating_add(
+            buffer[..read]
+                .iter()
+                .filter(|byte| **byte == needle)
+                .count() as u64,
+        );
+    }
+}
+
+fn is_animated_gif_file(path: &Path) -> Result<bool, BackendError> {
+    let mut file = File::open(path).map_err(io_error)?;
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut frames = 0_u8;
+    loop {
+        let read = file.read(&mut buffer).map_err(io_error)?;
+        if read == 0 {
+            return Ok(false);
+        }
+        for byte in &buffer[..read] {
+            if *byte == 0x2c {
+                frames = frames.saturating_add(1);
+                if frames >= 2 {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+}
 fn relative_string(path: &Path, root: &Path) -> Option<String> {
     path.strip_prefix(root)
         .ok()
@@ -1020,7 +1219,11 @@ fn is_ignored_directory(path: &Path) -> bool {
 
 #[cfg(test)]
 mod batch9_portable_path_tests {
-    use super::{normalize_locator, path_key, relative_string};
+    use super::{
+        format_size_limit, normalize_locator, path_key, relative_string, AUDIO_MAX_BYTES,
+        IMAGE_MAX_BYTES, VIDEO_MAX_BYTES,
+    };
+    use crate::models::import_v2_file::FileFormat;
     use std::path::Path;
 
     #[test]
@@ -1045,6 +1248,23 @@ mod batch9_portable_path_tests {
             )
             .as_deref(),
             Some("子目录/研究笔记.md")
+        );
+    }
+
+    #[test]
+    fn media_hard_limits_cannot_be_raised_by_the_document_policy() {
+        let untrusted_policy_limit = 100 * 1024 * 1024 * 1024;
+        assert_eq!(
+            format_size_limit(FileFormat::Png, untrusted_policy_limit),
+            IMAGE_MAX_BYTES
+        );
+        assert_eq!(
+            format_size_limit(FileFormat::Mp3, untrusted_policy_limit),
+            AUDIO_MAX_BYTES
+        );
+        assert_eq!(
+            format_size_limit(FileFormat::Mp4, untrusted_policy_limit),
+            VIDEO_MAX_BYTES
         );
     }
 }

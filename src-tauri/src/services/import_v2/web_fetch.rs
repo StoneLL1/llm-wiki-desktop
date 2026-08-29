@@ -4,6 +4,7 @@ use crate::{
 };
 use futures_util::{Stream, StreamExt};
 use reqwest::{header, redirect::Policy, Client, StatusCode};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     future::Future,
@@ -11,7 +12,7 @@ use std::{
     path::Path,
     time::{Duration, Instant},
 };
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WebFetchContent {
@@ -76,6 +77,25 @@ pub struct WebFetchProgress {
     pub total_bytes: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebFetchResume {
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    pub partial_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebFetchCheckpoint {
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    pub partial_sha256: String,
+    pub range_supported: bool,
+}
+
 #[derive(Default)]
 pub struct WebFetchService;
 impl WebFetchService {
@@ -94,7 +114,17 @@ impl WebFetchService {
         C: Fn() -> bool,
     {
         self.fetch_inner(
-            target, policy, limits, grant, item_id, None, progress, cancelled,
+            target,
+            policy,
+            limits,
+            grant,
+            item_id,
+            None,
+            None,
+            None,
+            progress,
+            |_| Ok(()),
+            cancelled,
         )
         .await
     }
@@ -121,13 +151,150 @@ impl WebFetchService {
             grant,
             item_id,
             Some(destination),
+            None,
+            None,
             progress,
+            |_| Ok(()),
             cancelled,
         )
         .await
     }
 
-    async fn fetch_inner<F, C>(
+    #[allow(clippy::too_many_arguments)]
+    pub async fn fetch_to_file_resumable<F, K, C>(
+        &self,
+        target: SessionWebTarget,
+        policy: &UrlPolicy,
+        limits: &WebFetchPolicy,
+        grant: Option<&PrivateTargetGrant>,
+        item_id: &str,
+        destination: &Path,
+        resume: Option<&WebFetchResume>,
+        mut progress: F,
+        checkpoint: K,
+        cancelled: C,
+    ) -> Result<WebFetchArtifact, BackendError>
+    where
+        F: FnMut(WebFetchProgress),
+        K: FnMut(WebFetchCheckpoint) -> Result<(), BackendError>,
+        C: Fn() -> bool,
+    {
+        if let Some(resume) = resume.filter(|resume| {
+            resume.total_bytes == Some(resume.downloaded_bytes) && resume.downloaded_bytes > 0
+        }) {
+            let (length, sha256, _) = hash_existing_partial(destination)?;
+            if length != resume.downloaded_bytes
+                || !sha256.eq_ignore_ascii_case(&resume.partial_sha256)
+            {
+                return Err(err(
+                    "IMPORT_WEB_PARTIAL_INVALID",
+                    "The completed remote-media partial failed identity verification.",
+                    true,
+                ));
+            }
+            progress(WebFetchProgress {
+                downloaded_bytes: length,
+                total_bytes: Some(length),
+            });
+            return Ok(WebFetchArtifact {
+                bytes: Vec::new(),
+                byte_len: length,
+                final_public_url: target.public.public_url.clone(),
+                final_session_target: target,
+                content_type: "application/octet-stream".into(),
+                sanitized_headers: BTreeMap::new(),
+                redirects: Vec::new(),
+                elapsed_ms: 0,
+            });
+        }
+        self.fetch_inner(
+            target,
+            policy,
+            limits,
+            grant,
+            item_id,
+            Some(destination),
+            resume,
+            None,
+            progress,
+            checkpoint,
+            cancelled,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn fetch_to_open_file_resumable<F, K, C>(
+        &self,
+        target: SessionWebTarget,
+        policy: &UrlPolicy,
+        limits: &WebFetchPolicy,
+        grant: Option<&PrivateTargetGrant>,
+        item_id: &str,
+        destination: std::fs::File,
+        resume: Option<&WebFetchResume>,
+        mut progress: F,
+        checkpoint: K,
+        cancelled: C,
+    ) -> Result<WebFetchArtifact, BackendError>
+    where
+        F: FnMut(WebFetchProgress),
+        K: FnMut(WebFetchCheckpoint) -> Result<(), BackendError>,
+        C: Fn() -> bool,
+    {
+        if let Some(resume) = resume.filter(|resume| {
+            resume.total_bytes == Some(resume.downloaded_bytes) && resume.downloaded_bytes > 0
+        }) {
+            let (length, sha256, _) =
+                hash_existing_partial_file(destination.try_clone().map_err(|_| {
+                    err(
+                        "IMPORT_WEB_PARTIAL_INVALID",
+                        "The completed remote-media partial could not be inspected.",
+                        true,
+                    )
+                })?)?;
+            if length != resume.downloaded_bytes
+                || !sha256.eq_ignore_ascii_case(&resume.partial_sha256)
+            {
+                return Err(err(
+                    "IMPORT_WEB_PARTIAL_INVALID",
+                    "The completed remote-media partial failed identity verification.",
+                    true,
+                ));
+            }
+            progress(WebFetchProgress {
+                downloaded_bytes: length,
+                total_bytes: Some(length),
+            });
+            return Ok(WebFetchArtifact {
+                bytes: Vec::new(),
+                byte_len: length,
+                final_public_url: target.public.public_url.clone(),
+                final_session_target: target,
+                content_type: "application/octet-stream".into(),
+                sanitized_headers: BTreeMap::new(),
+                redirects: Vec::new(),
+                elapsed_ms: 0,
+            });
+        }
+        self.fetch_inner(
+            target,
+            policy,
+            limits,
+            grant,
+            item_id,
+            None,
+            resume,
+            Some(destination),
+            progress,
+            checkpoint,
+            cancelled,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn fetch_inner<F, K, C>(
         &self,
         mut target: SessionWebTarget,
         policy: &UrlPolicy,
@@ -135,11 +302,15 @@ impl WebFetchService {
         grant: Option<&PrivateTargetGrant>,
         item_id: &str,
         destination: Option<&Path>,
+        resume: Option<&WebFetchResume>,
+        mut opened_destination: Option<std::fs::File>,
         mut progress: F,
+        mut checkpoint: K,
         cancelled: C,
     ) -> Result<WebFetchArtifact, BackendError>
     where
         F: FnMut(WebFetchProgress),
+        K: FnMut(WebFetchCheckpoint) -> Result<(), BackendError>,
         C: Fn() -> bool,
     {
         let started = Instant::now();
@@ -209,6 +380,13 @@ impl WebFetchService {
             if let Some(referer) = limits.referer.as_deref() {
                 request = request.header(header::REFERER, referer);
             }
+            if let Some(resume) = resume.filter(|resume| resume.downloaded_bytes > 0) {
+                request =
+                    request.header(header::RANGE, format!("bytes={}-", resume.downloaded_bytes));
+                if let Some(if_range) = resume.etag.as_deref().or(resume.last_modified.as_deref()) {
+                    request = request.header(header::IF_RANGE, if_range);
+                }
+            }
             let response = await_or_cancel(request.send(), &cancelled)
                 .await?
                 .map_err(|_| {
@@ -257,6 +435,7 @@ impl WebFetchService {
                     response.status().is_server_error(),
                 ));
             }
+            let response_status = response.status();
             let content_type = response
                 .headers()
                 .get(header::CONTENT_TYPE)
@@ -301,43 +480,177 @@ impl WebFetchService {
                     false,
                 ));
             }
-            if response
-                .content_length()
-                .is_some_and(|length| length > limits.max_response_bytes)
+            let response_etag = response
+                .headers()
+                .get(header::ETAG)
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value.chars().take(512).collect::<String>());
+            let response_last_modified = response
+                .headers()
+                .get(header::LAST_MODIFIED)
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value.chars().take(512).collect::<String>());
+            let content_range = response
+                .headers()
+                .get(header::CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_content_range);
+            let requested_offset = resume.map_or(0, |resume| resume.downloaded_bytes);
+            if response_status == StatusCode::PARTIAL_CONTENT
+                && content_range
+                    .is_none_or(|range| range.end < range.start || range.start != requested_offset)
             {
+                return Err(err(
+                    "IMPORT_WEB_PARTIAL_INVALID",
+                    "The remote service returned an invalid or unexpected byte range.",
+                    true,
+                ));
+            }
+            let can_resume = requested_offset > 0
+                && response_status == StatusCode::PARTIAL_CONTENT
+                && content_range.is_some_and(|range| range.start == requested_offset)
+                && resume.is_some_and(|resume| {
+                    (resume.etag.is_some() || resume.last_modified.is_some())
+                        && resume
+                            .etag
+                            .as_ref()
+                            .is_none_or(|expected| response_etag.as_ref() == Some(expected))
+                        && resume.last_modified.as_ref().is_none_or(|expected| {
+                            response_last_modified.as_ref() == Some(expected)
+                        })
+                        && resume.total_bytes.is_none_or(|expected| {
+                            content_range.and_then(|range| range.total) == Some(expected)
+                        })
+                });
+            if requested_offset > 0 && response_status == StatusCode::PARTIAL_CONTENT && !can_resume
+            {
+                return Err(err(
+                    "IMPORT_WEB_PARTIAL_IDENTITY_CHANGED",
+                    "The remote media changed while a saved partial was being resumed.",
+                    true,
+                ));
+            }
+            let resumed_from = if can_resume { requested_offset } else { 0 };
+            let total_bytes = content_range.and_then(|range| range.total).or_else(|| {
+                response
+                    .content_length()
+                    .map(|length| length.saturating_add(resumed_from))
+            });
+            let expected_response_bytes =
+                content_range.map(|range| range.end.saturating_sub(range.start).saturating_add(1));
+            if expected_response_bytes.is_some_and(|expected| {
+                response
+                    .content_length()
+                    .is_some_and(|length| length != expected)
+            }) {
+                return Err(err(
+                    "IMPORT_WEB_PARTIAL_INVALID",
+                    "The remote service returned a byte range with an inconsistent length.",
+                    true,
+                ));
+            }
+            if total_bytes.is_some_and(|length| length > limits.max_response_bytes) {
                 return Err(err(
                     "IMPORT_V2_RESPONSE_TOO_LARGE",
                     "Response exceeded the configured byte limit.",
                     false,
                 ));
             }
-            let total_bytes = response.content_length();
             progress(WebFetchProgress {
-                downloaded_bytes: 0,
+                downloaded_bytes: resumed_from,
                 total_bytes,
             });
-            let mut headers = BTreeMap::new();
+            let mut headers: BTreeMap<String, String> = BTreeMap::new();
             for name in [
                 header::CONTENT_TYPE,
                 header::CONTENT_LANGUAGE,
                 header::LAST_MODIFIED,
+                header::ETAG,
+                header::ACCEPT_RANGES,
             ] {
                 if let Some(v) = response.headers().get(&name).and_then(|v| v.to_str().ok()) {
                     headers.insert(name.as_str().into(), v.chars().take(512).collect());
                 }
             }
             let mut bytes = Vec::new();
-            let mut destination_file = match destination {
-                Some(path) => Some(tokio::fs::File::create(path).await.map_err(|_| {
-                    err(
-                        "IMPORT_V2_FETCH_FAILED",
-                        "The response destination could not be created.",
+            let mut hasher = Sha256::new();
+            if resumed_from > 0 {
+                let (length, sha256, seeded) = match opened_destination.as_ref() {
+                    Some(file) => hash_existing_partial_file(file.try_clone().map_err(|_| {
+                        err(
+                            "IMPORT_WEB_PARTIAL_INVALID",
+                            "The saved remote-media partial could not be inspected.",
+                            true,
+                        )
+                    })?)?,
+                    None => {
+                        let path = destination.ok_or_else(|| {
+                            err(
+                                "IMPORT_WEB_PARTIAL_INVALID",
+                                "A resumable fetch requires a durable partial file.",
+                                true,
+                            )
+                        })?;
+                        hash_existing_partial(path)?
+                    }
+                };
+                let expected = resume.expect("positive offset requires resume facts");
+                if length != expected.downloaded_bytes
+                    || !sha256.eq_ignore_ascii_case(&expected.partial_sha256)
+                {
+                    return Err(err(
+                        "IMPORT_WEB_PARTIAL_INVALID",
+                        "The saved remote-media partial failed identity verification.",
                         true,
-                    )
-                })?),
-                None => None,
+                    ));
+                }
+                hasher = seeded;
+            }
+            let mut destination_file = match opened_destination.take() {
+                Some(file) => {
+                    if resumed_from == 0 {
+                        file.set_len(0).map_err(|_| {
+                            err(
+                                "IMPORT_V2_FETCH_FAILED",
+                                "The response destination could not be truncated.",
+                                true,
+                            )
+                        })?;
+                    }
+                    let mut file = tokio::fs::File::from_std(file);
+                    file.seek(std::io::SeekFrom::Start(resumed_from))
+                        .await
+                        .map_err(|_| {
+                            err(
+                                "IMPORT_V2_FETCH_FAILED",
+                                "The response destination could not be positioned.",
+                                true,
+                            )
+                        })?;
+                    Some(file)
+                }
+                None => match destination {
+                    Some(path) => Some(
+                        tokio::fs::OpenOptions::new()
+                            .create(true)
+                            .write(true)
+                            .append(resumed_from > 0)
+                            .truncate(resumed_from == 0)
+                            .open(path)
+                            .await
+                            .map_err(|_| {
+                                err(
+                                    "IMPORT_V2_FETCH_FAILED",
+                                    "The response destination could not be created.",
+                                    true,
+                                )
+                            })?,
+                    ),
+                    None => None,
+                },
             };
-            let mut downloaded = 0u64;
+            let mut downloaded = resumed_from;
+            let mut response_bytes = 0_u64;
             let mut stream = response.bytes_stream();
             while let Some(chunk) = next_stream_item_or_cancel(&mut stream, &cancelled).await? {
                 let chunk = chunk
@@ -350,6 +663,15 @@ impl WebFetchService {
                     ));
                 }
                 downloaded += chunk.len() as u64;
+                response_bytes = response_bytes.saturating_add(chunk.len() as u64);
+                if expected_response_bytes.is_some_and(|expected| response_bytes > expected) {
+                    return Err(err(
+                        "IMPORT_WEB_PARTIAL_INVALID",
+                        "The remote service returned more bytes than its declared range.",
+                        true,
+                    ));
+                }
+                hasher.update(&chunk);
                 if let Some(file) = destination_file.as_mut() {
                     file.write_all(&chunk).await.map_err(|_| {
                         err(
@@ -365,6 +687,17 @@ impl WebFetchService {
                     downloaded_bytes: downloaded,
                     total_bytes,
                 });
+                checkpoint(WebFetchCheckpoint {
+                    downloaded_bytes: downloaded,
+                    total_bytes,
+                    etag: response_etag.clone(),
+                    last_modified: response_last_modified.clone(),
+                    partial_sha256: format!("{:x}", hasher.clone().finalize()),
+                    range_supported: response_status == StatusCode::PARTIAL_CONTENT
+                        || headers
+                            .get(header::ACCEPT_RANGES.as_str())
+                            .is_some_and(|value| value.eq_ignore_ascii_case("bytes")),
+                })?;
             }
             if let Some(file) = destination_file.as_mut() {
                 file.flush().await.map_err(|_| {
@@ -374,6 +707,15 @@ impl WebFetchService {
                         true,
                     )
                 })?;
+            }
+            if expected_response_bytes.is_some_and(|expected| response_bytes != expected)
+                || total_bytes.is_some_and(|total| downloaded != total)
+            {
+                return Err(err(
+                    "IMPORT_WEB_PARTIAL_INCOMPLETE",
+                    "The remote media response ended before the declared byte range was complete.",
+                    true,
+                ));
             }
             return Ok(WebFetchArtifact {
                 bytes,
@@ -392,6 +734,66 @@ impl WebFetchService {
             false,
         ))
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ContentRange {
+    start: u64,
+    end: u64,
+    total: Option<u64>,
+}
+
+fn parse_content_range(value: &str) -> Option<ContentRange> {
+    let value = value.trim().strip_prefix("bytes ")?;
+    let (range, total) = value.split_once('/')?;
+    let (start, end) = range.split_once('-')?;
+    Some(ContentRange {
+        start: start.parse().ok()?,
+        end: end.parse().ok()?,
+        total: (total != "*").then(|| total.parse().ok()).flatten(),
+    })
+}
+
+fn hash_existing_partial(path: &Path) -> Result<(u64, String, Sha256), BackendError> {
+    let file = std::fs::File::open(path).map_err(|_| {
+        err(
+            "IMPORT_WEB_PARTIAL_INVALID",
+            "The saved remote-media partial could not be read.",
+            true,
+        )
+    })?;
+    hash_existing_partial_file(file)
+}
+
+fn hash_existing_partial_file(
+    mut file: std::fs::File,
+) -> Result<(u64, String, Sha256), BackendError> {
+    use std::io::{Read, Seek};
+    file.seek(std::io::SeekFrom::Start(0)).map_err(|_| {
+        err(
+            "IMPORT_WEB_PARTIAL_INVALID",
+            "The saved remote-media partial could not be positioned.",
+            true,
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+    let mut length = 0_u64;
+    loop {
+        let read = file.read(&mut buffer).map_err(|_| {
+            err(
+                "IMPORT_WEB_PARTIAL_INVALID",
+                "The saved remote-media partial could not be verified.",
+                true,
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        length = length.saturating_add(read as u64);
+        hasher.update(&buffer[..read]);
+    }
+    Ok((length, format!("{:x}", hasher.clone().finalize()), hasher))
 }
 
 async fn next_stream_item_or_cancel<S, C>(
