@@ -62,6 +62,8 @@ function createdSessionOverview(session: ImportSession): ImportSessionOverview {
       restricted: selected.filter((item) => item.restrictedContent).length,
     },
     indexState: "ready",
+    recoveryRequired: false,
+    recoveryReasons: [],
   };
 }
 
@@ -313,7 +315,7 @@ export function useImportSessionScope(
             );
             if (cancelled || !isScopeCurrent(projectKey, epoch)) return;
             useImportStore.getState().attachSessionWindow(projectKey, overview, page, epoch);
-            if (overview.indexState === "rebuild_required") {
+            if (overview.recoveryRequired || overview.indexState === "rebuild_required") {
               setIsSyncingSession(true);
               void importV2Api
                 .startSessionRecovery({

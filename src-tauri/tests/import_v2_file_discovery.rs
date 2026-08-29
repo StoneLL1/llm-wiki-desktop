@@ -714,3 +714,40 @@ fn skips_symlinks_before_following_them() {
         FileSkipReason::SymlinkOrReparsePoint
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn reports_non_utf8_paths_as_typed_visible_skips() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let input = temp.path().join("input");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(&input).unwrap();
+    let invalid_name =
+        OsString::from_vec(vec![b'n', b'o', b't', b'e', b'-', 0xff, b'.', b'm', b'd']);
+    fs::write(input.join(invalid_name), "# note").unwrap();
+
+    let result = FileDiscoveryService::default()
+        .scan(
+            &context(&project),
+            &[input],
+            FileScanPolicy::default(),
+            |_| {},
+            || false,
+        )
+        .unwrap();
+
+    assert!(result.files.is_empty());
+    let skipped = result
+        .skipped
+        .iter()
+        .find(|entry| entry.reason == FileSkipReason::InvalidPath)
+        .expect("the unsupported path must remain visible as a typed skip");
+    assert!(skipped
+        .detail
+        .as_deref()
+        .is_some_and(|detail| detail.contains("UTF-8")));
+}

@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, SystemTime};
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
@@ -12,9 +14,9 @@ use crate::errors::{
 use crate::models::import_v2::{
     CommitImportSessionRequest, ImportBatchResult, ImportCompletion, ImportInput, ImportItem,
     ImportItemPage, ImportItemPageFilter, ImportItemResolution, ImportItemStatus,
-    ImportOperationTaskSummary, ImportRecoveryAction, ImportResolutionKind, ImportResourceMode,
-    ImportSession, ImportSessionOverview, ImportSessionPatchCounts, ImportSessionPatchEvent,
-    ImportThreeWayMergeContext, ImportWorkItemSnapshot,
+    ImportOperationTaskSummary, ImportRecoveryAction, ImportRecoveryReason, ImportResolutionKind,
+    ImportResourceMode, ImportSession, ImportSessionOverview, ImportSessionPatchCounts,
+    ImportSessionPatchEvent, ImportThreeWayMergeContext, ImportWorkItemSnapshot,
 };
 use crate::models::paths::ProjectContext;
 use crate::models::task::{BackendTask, TaskResult, TaskResultReference, TaskStatus, TaskType};
@@ -49,6 +51,212 @@ struct ImportWorkerJob {
     target_reservations: Arc<Mutex<NewSourceTargetReservations>>,
     recovery_action: Option<ImportRecoveryAction>,
     batch_operation: Option<BatchOperationJob>,
+    preview_only: bool,
+}
+
+#[derive(Clone)]
+struct TemporaryPreviewWorkspace {
+    project_id: String,
+    project_root: PathBuf,
+    context: ProjectContext,
+    last_access: SystemTime,
+}
+
+static TEMPORARY_PREVIEW_WORKSPACES: OnceLock<Mutex<HashMap<String, TemporaryPreviewWorkspace>>> =
+    OnceLock::new();
+
+fn temporary_preview_workspaces() -> &'static Mutex<HashMap<String, TemporaryPreviewWorkspace>> {
+    TEMPORARY_PREVIEW_WORKSPACES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn preview_authority_error(error: &BackendError) -> bool {
+    matches!(
+        error.code.as_str(),
+        "PROJECT_WRITE_REQUIRES_TRUST"
+            | "PROJECT_WRITE_READ_ONLY"
+            | "PROJECT_WRITE_STATE_UNAVAILABLE"
+    )
+}
+
+fn create_temporary_preview_context(
+    project_id: &str,
+    _project_root: &Path,
+) -> Result<ProjectContext, BackendError> {
+    let app_temp_root = std::env::temp_dir().join("llm-wiki-desktop");
+    std::fs::create_dir_all(&app_temp_root).map_err(|error| {
+        BackendError::new(
+            "IMPORT_PREVIEW_TEMP_UNAVAILABLE",
+            error.to_string(),
+            true,
+            false,
+        )
+    })?;
+    ensure_private_preview_directory(&app_temp_root)?;
+    let preview_root = app_temp_root.join("import-preview");
+    std::fs::create_dir_all(&preview_root).map_err(|error| {
+        BackendError::new(
+            "IMPORT_PREVIEW_TEMP_UNAVAILABLE",
+            error.to_string(),
+            true,
+            false,
+        )
+    })?;
+    ensure_private_preview_directory(&preview_root)?;
+    cleanup_orphaned_temporary_preview_workspaces(&preview_root);
+    let root = preview_root.join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir(&root).map_err(|error| {
+        BackendError::new(
+            "IMPORT_PREVIEW_TEMP_UNAVAILABLE",
+            error.to_string(),
+            true,
+            false,
+        )
+    })?;
+    ensure_private_preview_directory(&root)?;
+    Ok(ProjectContext::new(project_id.to_string(), root))
+}
+
+fn ensure_private_preview_directory(path: &Path) -> Result<(), BackendError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        BackendError::new(
+            "IMPORT_PREVIEW_TEMP_UNAVAILABLE",
+            error.to_string(),
+            true,
+            false,
+        )
+    })?;
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || crate::services::import_v2::transaction::is_project_reparse_point(&metadata)
+    {
+        return Err(BackendError::new(
+            "IMPORT_PREVIEW_TEMP_UNSAFE",
+            "The application preview directory is not a private regular directory.",
+            false,
+            true,
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(
+            |error| {
+                BackendError::new(
+                    "IMPORT_PREVIEW_TEMP_UNAVAILABLE",
+                    error.to_string(),
+                    true,
+                    false,
+                )
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn cleanup_orphaned_temporary_preview_workspaces(preview_root: &Path) {
+    const MAX_ENTRIES: usize = 128;
+    const MIN_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+    let now = SystemTime::now();
+    let mut expired = Vec::new();
+    let active = {
+        let mut workspaces = temporary_preview_workspaces()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        workspaces.retain(|_, workspace| {
+            let keep = now
+                .duration_since(workspace.last_access)
+                .map_or(true, |age| age < MIN_AGE);
+            if !keep {
+                expired.push(workspace.context.root.clone());
+            }
+            keep
+        });
+        workspaces
+            .values()
+            .map(|workspace| workspace.context.root.clone())
+            .collect::<HashSet<_>>()
+    };
+    for path in expired {
+        if path.parent() == Some(preview_root) {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+    let Ok(entries) = std::fs::read_dir(preview_root) else {
+        return;
+    };
+    for entry in entries.flatten().take(MAX_ENTRIES) {
+        let path = entry.path();
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() || active.contains(&path) {
+            continue;
+        }
+        let old_enough = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+            .is_some_and(|age| age >= MIN_AGE);
+        if old_enough && path.parent() == Some(preview_root) {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
+
+pub(crate) fn import_session_context(
+    state: &AppState,
+    project_id: &str,
+    project_root_path: &str,
+    session_id: &str,
+) -> Result<ProjectContext, BackendError> {
+    let project_context = state.resolve_project_context(project_id, project_root_path)?;
+    let mut workspaces = temporary_preview_workspaces()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(workspace) = workspaces.get_mut(session_id) {
+        if workspace.project_id != project_id || workspace.project_root != project_context.root {
+            return Err(BackendError::new(
+                "IMPORT_PREVIEW_SCOPE_INVALID",
+                "The temporary preview does not belong to the current project authority.",
+                false,
+                true,
+            ));
+        }
+        workspace.last_access = SystemTime::now();
+        return Ok(workspace.context.clone());
+    }
+    Ok(project_context)
+}
+
+fn release_temporary_preview_workspace(session_id: &str) {
+    let workspace = temporary_preview_workspaces()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(session_id);
+    let Some(workspace) = workspace else {
+        return;
+    };
+    let root = workspace.context.root;
+    let safe_name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| Uuid::parse_str(name).is_ok());
+    let expected_parent = root
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        == Some("import-preview");
+    if safe_name && expected_parent {
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+pub(crate) fn is_temporary_preview_session(session_id: &str) -> bool {
+    temporary_preview_workspaces()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains_key(session_id)
 }
 
 #[derive(Clone)]
@@ -184,23 +392,56 @@ pub fn create_import_session_v2(
     state: State<'_, AppState>,
     request: CreateImportSessionV2Request,
 ) -> Result<ImportSession, BackendError> {
-    state.with_current_project_write_access(
+    let persistent = state.with_current_project_write_access(
         &request.project_id,
         &request.project_root_path,
         |permit, _context| {
             state.import_v2_service.create_session_authorized(
                 permit,
                 &state.file_store,
-                request.resource_mode,
+                request.resource_mode.clone(),
             )
         },
-    )
+    );
+    match persistent {
+        Ok(session) => Ok(session),
+        Err(error) if preview_authority_error(&error) => {
+            let project_context =
+                state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+            let preview_context =
+                create_temporary_preview_context(&request.project_id, &project_context.root)?;
+            let session = state.import_v2_service.create_temporary_preview_session(
+                &preview_context,
+                &state.file_store,
+                request.resource_mode,
+            )?;
+            temporary_preview_workspaces()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(
+                    session.session_id.clone(),
+                    TemporaryPreviewWorkspace {
+                        project_id: request.project_id,
+                        project_root: project_context.root,
+                        context: preview_context,
+                        last_access: SystemTime::now(),
+                    },
+                );
+            Ok(session)
+        }
+        Err(error) => Err(error),
+    }
 }
 pub fn get_import_session_v2(
     state: State<'_, AppState>,
     request: GetImportSessionV2Request,
 ) -> Result<ImportSession, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let context = import_session_context(
+        &state,
+        &request.project_id,
+        &request.project_root_path,
+        &request.session_id,
+    )?;
     state
         .import_v2_service
         .read_session(&context, &state.file_store, &request.session_id)
@@ -210,7 +451,12 @@ pub fn get_import_session_overview_v2(
     state: State<'_, AppState>,
     request: GetImportSessionV2Request,
 ) -> Result<ImportSessionOverview, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let context = import_session_context(
+        &state,
+        &request.project_id,
+        &request.project_root_path,
+        &request.session_id,
+    )?;
     let overview = state.import_v2_service.read_session_overview(
         &context,
         &state.file_store,
@@ -235,19 +481,53 @@ pub(crate) fn enrich_import_session_overview(
             200,
         )?
         .next_cursor;
-    overview.operation_task = state
+    let operation_task = state
         .task_service
         .list_tasks(None)
         .into_iter()
         .find(|task| {
             task.project_id.as_deref() == Some(context.project_id.as_str())
                 && import_batch_operation_session_id(task) == Some(overview.session_id.as_str())
-        })
-        .map(|task| ImportOperationTaskSummary {
-            task_id: task.id,
-            status: task.status,
-            progress: task.progress,
         });
+    if operation_task.as_ref().is_some_and(|task| {
+        matches!(
+            task.status,
+            TaskStatus::Queued
+                | TaskStatus::Running
+                | TaskStatus::WaitingForConfirmation
+                | TaskStatus::Cancelling
+        )
+    }) {
+        // An in-process operation owns both its in-flight item states and any
+        // live transaction journal. Those are not restart recovery facts and
+        // must not race the active worker through the recovery command.
+        overview.recovery_reasons.retain(|reason| {
+            !matches!(
+                reason,
+                ImportRecoveryReason::StaleInFlightItem
+                    | ImportRecoveryReason::IncompleteJournal
+                    | ImportRecoveryReason::ResidualStaging
+            )
+        });
+        overview.recovery_required = !overview.recovery_reasons.is_empty();
+    }
+    if operation_task
+        .as_ref()
+        .is_some_and(|task| task.status == TaskStatus::Interrupted)
+        && !overview
+            .recovery_reasons
+            .contains(&ImportRecoveryReason::InterruptedTask)
+    {
+        overview
+            .recovery_reasons
+            .push(ImportRecoveryReason::InterruptedTask);
+        overview.recovery_required = true;
+    }
+    overview.operation_task = operation_task.map(|task| ImportOperationTaskSummary {
+        task_id: task.id,
+        status: task.status,
+        progress: task.progress,
+    });
     Ok(overview)
 }
 
@@ -255,7 +535,12 @@ pub fn list_import_session_items_v2(
     state: State<'_, AppState>,
     request: ListImportSessionItemsV2Request,
 ) -> Result<ImportItemPage, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let context = import_session_context(
+        &state,
+        &request.project_id,
+        &request.project_root_path,
+        &request.session_id,
+    )?;
     state.import_v2_service.list_session_items(
         &context,
         &state.file_store,
@@ -465,6 +750,20 @@ pub fn add_import_items_v2(
     state: State<'_, AppState>,
     request: AddImportItemsV2Request,
 ) -> Result<ImportSession, BackendError> {
+    if is_temporary_preview_session(&request.session_id) {
+        let context = import_session_context(
+            &state,
+            &request.project_id,
+            &request.project_root_path,
+            &request.session_id,
+        )?;
+        return state.import_v2_service.add_temporary_preview_inputs(
+            &context,
+            &state.file_store,
+            &request.session_id,
+            request.inputs,
+        );
+    }
     state.with_current_project_write_access(
         &request.project_id,
         &request.project_root_path,
@@ -483,6 +782,21 @@ pub fn add_import_text_v2(
     state: State<'_, AppState>,
     request: AddImportTextV2Request,
 ) -> Result<ImportSession, BackendError> {
+    if is_temporary_preview_session(&request.session_id) {
+        let context = import_session_context(
+            &state,
+            &request.project_id,
+            &request.project_root_path,
+            &request.session_id,
+        )?;
+        return state.import_v2_service.add_temporary_preview_text(
+            &context,
+            &state.file_store,
+            &request.session_id,
+            &request.source_name,
+            &request.content,
+        );
+    }
     state.with_current_project_write_access(
         &request.project_id,
         &request.project_root_path,
@@ -654,7 +968,8 @@ pub(crate) fn load_history_batch(
             true,
         ));
     }
-    let path = context.resolve_project_path(&format!(".app/import-history/{batch_id}.json"))?;
+    let path =
+        context.resolve_project_path(&context.layout.import_paths()?.history_entry(batch_id)?)?;
     let bytes = std::fs::read(&path).map_err(|_| {
         BackendError::new(
             "IMPORT_V2_HISTORY_NOT_FOUND",
@@ -784,11 +1099,113 @@ pub fn start_import_items_v2(
     state: State<'_, AppState>,
     request: StartImportItemsV2Request,
 ) -> Result<Vec<BackendTask>, BackendError> {
+    if is_temporary_preview_session(&request.session_id) {
+        return start_temporary_preview_items(app, &state, request);
+    }
     let project_id = request.project_id.clone();
     let project_root_path = request.project_root_path.clone();
     state.with_current_project_write_access(&project_id, &project_root_path, |permit, _context| {
         start_import_items_for_state(app, &state, permit, request, None, None)
     })
+}
+
+fn start_temporary_preview_items(
+    app: AppHandle,
+    state: &AppState,
+    request: StartImportItemsV2Request,
+) -> Result<Vec<BackendTask>, BackendError> {
+    if request.item_ids.len() > 200 {
+        return Err(task_error(
+            "Temporary preview supports at most 200 items per operation.",
+        ));
+    }
+    let context = import_session_context(
+        state,
+        &request.project_id,
+        &request.project_root_path,
+        &request.session_id,
+    )?;
+    let project_context =
+        state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let session =
+        state
+            .import_v2_service
+            .load_session(&context, &state.file_store, &request.session_id)?;
+    let unique_ids: HashSet<&str> = request.item_ids.iter().map(String::as_str).collect();
+    if unique_ids.len() != request.item_ids.len()
+        || request
+            .item_ids
+            .iter()
+            .any(|item_id| !session.items.iter().any(|item| &item.item_id == item_id))
+    {
+        return Err(task_error("Temporary preview item selection is invalid."));
+    }
+    let mut tasks = Vec::with_capacity(request.item_ids.len());
+    for item_id in &request.item_ids {
+        let item = session
+            .items
+            .iter()
+            .find(|item| &item.item_id == item_id)
+            .expect("temporary preview items were validated");
+        let task = state
+            .task_service
+            .create_memory_project_task(
+                TaskType::Import,
+                request.project_id.clone(),
+                project_context.root.clone(),
+                format!("Preview {}", item.input.display_name),
+                true,
+            )
+            .map_err(|error| task_error(&error))?;
+        tasks.push(task);
+    }
+    let bindings = request
+        .item_ids
+        .iter()
+        .cloned()
+        .zip(tasks.iter().map(|task| task.id.clone()))
+        .collect::<Vec<_>>();
+    let snapshots = match state.import_v2_service.bind_temporary_preview_tasks(
+        &context,
+        &state.file_store,
+        &request.session_id,
+        &bindings,
+    ) {
+        Ok(snapshots) => snapshots,
+        Err(error) => {
+            let ids = tasks.iter().map(|task| task.id.clone()).collect::<Vec<_>>();
+            let _ = state.task_service.discard_unstarted_tasks(&ids);
+            return Err(error);
+        }
+    };
+    let target_reservations = state
+        .import_v2_service
+        .target_reservations_for_session(&context, &session)?;
+    let snapshots = snapshots
+        .into_iter()
+        .map(|snapshot| (snapshot.item_id.clone(), snapshot))
+        .collect::<HashMap<_, _>>();
+    let jobs = bindings
+        .into_iter()
+        .map(|(item_id, task_id)| ImportWorkerJob {
+            app: app.clone(),
+            project_id: request.project_id.clone(),
+            project_root_path: request.project_root_path.clone(),
+            session_id: request.session_id.clone(),
+            snapshot: snapshots
+                .get(&item_id)
+                .expect("temporary preview snapshot exists")
+                .clone(),
+            item_id,
+            task_id,
+            target_reservations: Arc::clone(&target_reservations),
+            recovery_action: request.recovery_action.clone(),
+            batch_operation: None,
+            preview_only: true,
+        })
+        .collect();
+    enqueue_import_jobs(jobs, DEFAULT_IMPORT_WORKER_LIMIT);
+    Ok(tasks)
 }
 
 pub(crate) fn start_import_items_for_state(
@@ -837,6 +1254,12 @@ pub(crate) fn start_import_items_for_state(
     // observable and cancellable after navigation or app restart.
     let batch_id = Uuid::new_v4().to_string();
     let recovery_action = request.recovery_action.clone();
+    let task_state_root = context
+        .layout
+        .task_state_root
+        .as_deref()
+        .ok_or_else(|| task_error("Import task persistence is unavailable."))
+        .and_then(|relative| context.resolve_project_path(relative))?;
     let prepared = prepare_all(
         request.item_ids,
         |item_id| {
@@ -847,10 +1270,11 @@ pub(crate) fn start_import_items_for_state(
                 .expect("all item ids were validated before task creation");
             state
                 .task_service
-                .create_project_task_with_batch(
+                .create_project_task_with_batch_at(
                     TaskType::Import,
                     request.project_id.clone(),
                     context.root.clone(),
+                    task_state_root.clone(),
                     format!("Import {}", item.input.display_name),
                     true,
                     batch_id.clone(),
@@ -936,6 +1360,7 @@ pub(crate) fn start_import_items_for_state(
             target_reservations: Arc::clone(&target_reservations),
             recovery_action: recovery_action.clone(),
             batch_operation: None,
+            preview_only: false,
         });
         tasks.push(task);
     }
@@ -1120,6 +1545,7 @@ pub(crate) fn dispatch_claimed_import_batch_for_state(
                                 task_id: operation_task_id.clone(),
                                 recovery_action: request.recovery_action.clone(),
                                 batch_operation: Some(operation.clone()),
+                                preview_only: false,
                             })
                             .collect::<Vec<_>>();
                         // The atomic claim completes before enqueue, so failed or cancelled
@@ -1295,46 +1721,51 @@ fn schedule_import_workers() {
 
 fn run_import_worker_job(job: &ImportWorkerJob) {
     let state = job.app.state::<AppState>();
-    let result = state
-        .resolve_project_context(&job.project_id, &job.project_root_path)
-        .and_then(|context| {
-            let item_is_still_bound = state
-                .import_v2_service
-                .load_item(&context, &state.file_store, &job.session_id, &job.item_id)
-                .is_ok_and(|item| {
-                    item.task_id.as_deref() == Some(job.task_id.as_str())
-                        && !matches!(
-                            item.status,
-                            ImportItemStatus::Cancelled
-                                | ImportItemStatus::Skipped
-                                | ImportItemStatus::Completed
-                        )
-                });
-            if !item_is_still_bound {
-                if job.batch_operation.is_none() {
-                    state
-                        .task_service
-                        .cancel_task(&job.task_id)
-                        .map_err(|error| task_error(&error))?;
-                }
-                return Ok(false);
-            }
-            let execution = state.begin_project_external_task(&context, &job.task_id)?;
-            let processed_item = if job.batch_operation.is_some() {
+    let result = import_session_context(
+        &state,
+        &job.project_id,
+        &job.project_root_path,
+        &job.session_id,
+    )
+    .and_then(|context| {
+        let item_is_still_bound = state
+            .import_v2_service
+            .load_item(&context, &state.file_store, &job.session_id, &job.item_id)
+            .is_ok_and(|item| {
+                item.task_id.as_deref() == Some(job.task_id.as_str())
+                    && !matches!(
+                        item.status,
+                        ImportItemStatus::Cancelled
+                            | ImportItemStatus::Skipped
+                            | ImportItemStatus::Completed
+                    )
+            });
+        if !item_is_still_bound {
+            if job.batch_operation.is_none() {
                 state
-                    .import_v2_service
-                    .run_item_with_recovery_in_batch_authorized(
-                        &execution,
-                        &state.file_store,
-                        &state.task_service,
-                        &job.session_id,
-                        &job.task_id,
-                        job.snapshot.clone(),
-                        &job.target_reservations,
-                        job.recovery_action.as_ref(),
-                    )?
-            } else {
-                state.import_v2_service.run_item_with_recovery_authorized(
+                    .task_service
+                    .cancel_task(&job.task_id)
+                    .map_err(|error| task_error(&error))?;
+            }
+            return Ok(false);
+        }
+        if job.preview_only {
+            state.import_v2_service.run_temporary_preview_item(
+                &context,
+                &state.file_store,
+                &state.task_service,
+                &job.session_id,
+                &job.item_id,
+                &job.task_id,
+                job.recovery_action.as_ref(),
+            )?;
+            return Ok(true);
+        }
+        let execution = state.begin_project_external_task(&context, &job.task_id)?;
+        let processed_item = if job.batch_operation.is_some() {
+            state
+                .import_v2_service
+                .run_item_with_recovery_in_batch_authorized(
                     &execution,
                     &state.file_store,
                     &state.task_service,
@@ -1344,107 +1775,121 @@ fn run_import_worker_job(job: &ImportWorkerJob) {
                     &job.target_reservations,
                     job.recovery_action.as_ref(),
                 )?
-            };
-            let deferred_exact_duplicate = job.batch_operation.is_some()
-                && processed_item
-                    .preview
-                    .as_ref()
-                    .and_then(|preview| preview.resolution.as_ref())
-                    .is_some_and(|resolution| {
-                        resolution.kind == ImportResolutionKind::ExactDuplicate
-                    });
-            if deferred_exact_duplicate {
-                if let Some(operation) = &job.batch_operation {
-                    operation
-                        .duplicate_item_ids
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .push(job.item_id.clone());
-                }
-                return Ok(true);
+        } else {
+            state.import_v2_service.run_item_with_recovery_authorized(
+                &execution,
+                &state.file_store,
+                &state.task_service,
+                &job.session_id,
+                &job.task_id,
+                job.snapshot.clone(),
+                &job.target_reservations,
+                job.recovery_action.as_ref(),
+            )?
+        };
+        let deferred_exact_duplicate = job.batch_operation.is_some()
+            && processed_item
+                .preview
+                .as_ref()
+                .and_then(|preview| preview.resolution.as_ref())
+                .is_some_and(|resolution| resolution.kind == ImportResolutionKind::ExactDuplicate);
+        if deferred_exact_duplicate {
+            if let Some(operation) = &job.batch_operation {
+                operation
+                    .duplicate_item_ids
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(job.item_id.clone());
             }
-            state.require_current_execution_epoch(&context, &execution)?;
-            let restricted_content_acknowledged = state
-                .file_store
-                .exists(&context, RESTRICTED_CONTENT_ACK_PATH);
-            let git_cancellation = state
-                .task_service
-                .get_cancellation_token(&job.task_id)
-                .unwrap_or_default();
-            let duplicate_batch = if job.batch_operation.is_some() {
-                None
-            } else {
-                state.with_current_project_write_access(
+            return Ok(true);
+        }
+        state.require_current_execution_epoch(&context, &execution)?;
+        let restricted_content_acknowledged = state
+            .file_store
+            .exists(&context, RESTRICTED_CONTENT_ACK_PATH);
+        let git_cancellation = state
+            .task_service
+            .get_cancellation_token(&job.task_id)
+            .unwrap_or_default();
+        let duplicate_batch = if job.batch_operation.is_some() {
+            None
+        } else {
+            state.with_current_project_write_access(
+                &job.project_id,
+                &job.project_root_path,
+                |_permit, write_context| {
+                    let canonical_project_identity =
+                        crate::services::project_identity(&write_context.root)
+                            .map_err(|error| {
+                                BackendError::new("PROJECT_IDENTITY_FAILED", error, true, false)
+                            })?
+                            .canonical_identity_key;
+                    state.blocking_work.run_project_git_blocking(
+                        canonical_project_identity,
+                        Some(&git_cancellation),
+                        || {
+                            state
+                                .import_v2_service
+                                .finalize_exact_duplicate_cancellable_authorized(
+                                    &execution,
+                                    &state.file_store,
+                                    &state.git_service,
+                                    &job.session_id,
+                                    &job.item_id,
+                                    &job.task_id,
+                                    restricted_content_acknowledged,
+                                    || state.task_service.is_cancelled(&job.task_id),
+                                    || {
+                                        if job.batch_operation.is_some() {
+                                            Ok(())
+                                        } else {
+                                            state
+                                                .task_service
+                                                .transition_status(
+                                                    &job.task_id,
+                                                    TaskStatus::Running,
+                                                )
+                                                .map(|_| ())
+                                                .map_err(|error| task_error(&error))
+                                        }
+                                    },
+                                )
+                        },
+                    )
+                },
+            )?
+        };
+        if let Some(batch) = duplicate_batch {
+            if job.batch_operation.is_none() {
+                let history_path = import_session_context(
+                    &state,
                     &job.project_id,
                     &job.project_root_path,
-                    |_permit, write_context| {
-                        let canonical_project_identity =
-                            crate::services::project_identity(&write_context.root)
-                                .map_err(|error| {
-                                    BackendError::new("PROJECT_IDENTITY_FAILED", error, true, false)
-                                })?
-                                .canonical_identity_key;
-                        state.blocking_work.run_project_git_blocking(
-                            canonical_project_identity,
-                            Some(&git_cancellation),
-                            || {
-                                state
-                                    .import_v2_service
-                                    .finalize_exact_duplicate_cancellable_authorized(
-                                        &execution,
-                                        &state.file_store,
-                                        &state.git_service,
-                                        &job.session_id,
-                                        &job.item_id,
-                                        &job.task_id,
-                                        restricted_content_acknowledged,
-                                        || state.task_service.is_cancelled(&job.task_id),
-                                        || {
-                                            if job.batch_operation.is_some() {
-                                                Ok(())
-                                            } else {
-                                                state
-                                                    .task_service
-                                                    .transition_status(
-                                                        &job.task_id,
-                                                        TaskStatus::Running,
-                                                    )
-                                                    .map(|_| ())
-                                                    .map_err(|error| task_error(&error))
-                                            }
-                                        },
-                                    )
-                            },
-                        )
-                    },
+                    &job.session_id,
                 )?
-            };
-            if let Some(batch) = duplicate_batch {
-                if job.batch_operation.is_none() {
-                    state
-                        .task_service
-                        .complete_running_with_result(
-                            &job.task_id,
-                            TaskResult {
-                                summary: "Duplicate already exists; its locator was recorded."
-                                    .into(),
-                                affected_paths: vec![format!(
-                                    ".app/import-history/{}.json",
-                                    batch.batch_id
-                                )],
-                                reference: Some(TaskResultReference::ImportV2SessionPreview {
-                                    session_id: batch.session_id.clone(),
-                                    batch_id: Some(batch.batch_id.clone()),
-                                    completion: batch.completion.clone(),
-                                }),
-                                pending_action: None,
-                            },
-                        )
-                        .map_err(|error| task_error(&error))?;
-                }
+                .layout
+                .import_paths()?
+                .history_entry(&batch.batch_id)?;
+                state
+                    .task_service
+                    .complete_running_with_result(
+                        &job.task_id,
+                        TaskResult {
+                            summary: "Duplicate already exists; its locator was recorded.".into(),
+                            affected_paths: vec![history_path],
+                            reference: Some(TaskResultReference::ImportV2SessionPreview {
+                                session_id: batch.session_id.clone(),
+                                batch_id: Some(batch.batch_id.clone()),
+                                completion: batch.completion.clone(),
+                            }),
+                            pending_action: None,
+                        },
+                    )
+                    .map_err(|error| task_error(&error))?;
             }
-            Ok(false)
-        });
+        }
+        Ok(false)
+    });
     if let Some(_) = job.batch_operation {
         let outcome = match result {
             Ok(true) => return,
@@ -1948,6 +2393,20 @@ pub fn confirm_import_session_v2(
     state: State<'_, AppState>,
     request: CommitImportSessionRequest,
 ) -> Result<BackendTask, BackendError> {
+    if is_temporary_preview_session(&request.session_id) {
+        state.with_current_project_write_access(
+            &request.project_id,
+            &request.project_root_path,
+            |_permit, _context| Ok(()),
+        )?;
+        release_temporary_preview_workspace(&request.session_id);
+        return Err(BackendError::new(
+            "IMPORT_PREVIEW_RESTART_REQUIRED",
+            "Write access is available now. Start a project-backed Import session before committing this isolated preview.",
+            true,
+            true,
+        ));
+    }
     let (task, preview_task_ids, canonical_project_identity) = state
         .with_current_project_write_access(
             &request.project_id,
@@ -2051,6 +2510,11 @@ pub fn confirm_import_session_v2(
                     .create_project_import_commit_task(
                         request.project_id.clone(),
                         context.root.clone(),
+                        context.resolve_project_path(
+                            context.layout.task_state_root.as_deref().ok_or_else(|| {
+                                task_error("Import task persistence is unavailable.")
+                            })?,
+                        )?,
                         "Confirm import session".into(),
                         request.session_id.clone(),
                     )
@@ -2122,10 +2586,10 @@ pub fn confirm_import_session_v2(
                             "Committed {} import item(s); {} failed.",
                             batch.committed_count, batch.failed_count
                         ),
-                        affected_paths: vec![format!(
-                            ".app/import-history/{}.json",
-                            batch.batch_id
-                        )],
+                        affected_paths: vec![context
+                            .layout
+                            .import_paths()?
+                            .history_entry(&batch.batch_id)?],
                         reference: Some(TaskResultReference::ImportV2SessionPreview {
                             session_id: batch.session_id.clone(),
                             batch_id: Some(batch.batch_id.clone()),
@@ -2275,6 +2739,78 @@ mod tests {
             configured_import_worker_limit(u64::MAX),
             MAX_IMPORT_WORKER_LIMIT
         );
+    }
+
+    #[test]
+    fn temporary_preview_runs_in_application_temp_without_project_state_writes() {
+        let project_root =
+            std::env::temp_dir().join(format!("import-v2-read-only-project-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::write(project_root.join("existing.md"), "# Existing\n").unwrap();
+        let before = std::fs::read(project_root.join("existing.md")).unwrap();
+        let context = create_temporary_preview_context("project", &project_root).unwrap();
+        assert!(!context.root.starts_with(&project_root));
+
+        let state = AppState::default();
+        let session = state
+            .import_v2_service
+            .create_temporary_preview_session(
+                &context,
+                &state.file_store,
+                ImportResourceMode::Balanced,
+            )
+            .unwrap();
+        let session = state
+            .import_v2_service
+            .add_temporary_preview_text(
+                &context,
+                &state.file_store,
+                &session.session_id,
+                "研究 笔记.md",
+                "# 研究笔记\n\n只读预览。",
+            )
+            .unwrap();
+        let item = session.items.first().unwrap();
+        let task = state
+            .task_service
+            .create_memory_project_task(
+                TaskType::Import,
+                "project".into(),
+                context.root.clone(),
+                "Preview".into(),
+                true,
+            )
+            .unwrap();
+        state
+            .import_v2_service
+            .bind_temporary_preview_tasks(
+                &context,
+                &state.file_store,
+                &session.session_id,
+                &[(item.item_id.clone(), task.id.clone())],
+            )
+            .unwrap();
+        let preview = state
+            .import_v2_service
+            .run_temporary_preview_item(
+                &context,
+                &state.file_store,
+                &state.task_service,
+                &session.session_id,
+                &item.item_id,
+                &task.id,
+                None,
+            )
+            .unwrap();
+        assert_eq!(preview.status, ImportItemStatus::PreviewReady);
+        assert_eq!(
+            std::fs::read(project_root.join("existing.md")).unwrap(),
+            before
+        );
+        assert_eq!(std::fs::read_dir(&project_root).unwrap().count(), 1);
+
+        std::fs::remove_dir_all(context.root).ok();
+        std::fs::remove_dir_all(project_root).ok();
     }
 
     #[test]

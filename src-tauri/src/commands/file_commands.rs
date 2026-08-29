@@ -79,7 +79,12 @@ pub fn write_markdown_file(
         &request.project_root_path,
         |_permit, context| {
             reject_generic_source_path(context, &state.file_store, &request.relative_path)?;
-            reject_generic_source_create(&request.relative_path, None, Some(&request.contents))?;
+            reject_generic_source_create(
+                context,
+                &request.relative_path,
+                None,
+                Some(&request.contents),
+            )?;
             state.file_store.write_markdown_checked(
                 context,
                 &request.relative_path,

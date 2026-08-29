@@ -45,9 +45,10 @@ fn measured_remote_media_bytes(
     item_id: &str,
 ) -> Option<u64> {
     let staging = context
-        .resolve_project_path(&format!(
-            ".app/import-sessions/{session_id}/items/{item_id}/staging"
-        ))
+        .layout
+        .import_paths()
+        .and_then(|paths| paths.item_staging(session_id, item_id))
+        .and_then(|path| context.resolve_project_path(&path))
         .ok()?;
     for relative in ["media-download/manifest.json", "metadata.json"] {
         let Ok(bytes) = std::fs::read(staging.join(relative)) else {

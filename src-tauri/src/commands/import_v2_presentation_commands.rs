@@ -103,7 +103,12 @@ pub fn get_import_preview_content_v2(
     state: State<'_, AppState>,
     request: GetImportPreviewContentV2Request,
 ) -> Result<ImportPreviewContent, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let context = crate::commands::import_v2_commands::import_session_context(
+        &state,
+        &request.project_id,
+        &request.project_root_path,
+        &request.session_id,
+    )?;
     let session = if let Some(batch_id) = request.history_batch_id.as_deref() {
         match crate::services::import_v2::HistoryStore::default().load_item_session_snapshot(
             &context,
@@ -194,10 +199,10 @@ pub fn get_import_preview_content_v2(
     if let Some(batch_id) = request.history_batch_id.as_deref() {
         validate_identifier(batch_id)?;
         validate_identifier(&request.item_id)?;
-        let history_relative = format!(
-            ".app/import-history-previews/{batch_id}/{}.md",
-            request.item_id
-        );
+        let history_relative = context
+            .layout
+            .import_paths()?
+            .history_preview(batch_id, &request.item_id)?;
         if let Ok(history_path) = safe_project_path(&context.root, &history_relative) {
             if history_path.is_file() && request.candidate_id.is_none() {
                 return Ok(ImportPreviewContent {
@@ -280,7 +285,10 @@ fn preview_comparison(
     let manifest = crate::services::import_v2::source_registry::SourceRegistry::read_manifest(
         context,
         files,
-        &format!(".app/sources/{}.json", binding.source_id),
+        &context
+            .layout
+            .source_paths()?
+            .manifest(&binding.source_id)?,
     )?;
     let current_path = safe_project_path(&context.root, &manifest.wiki_path)?;
     let current_bytes = fs::read(current_path).map_err(|_| {
@@ -349,7 +357,10 @@ fn preview_target(
         crate::services::import_v2::source_registry::SourceRegistry::read_manifest(
             context,
             files,
-            &format!(".app/sources/{}.json", binding.source_id),
+            &context
+                .layout
+                .source_paths()?
+                .manifest(&binding.source_id)?,
         )
         .ok()
         .map(|manifest| manifest.wiki_path)
@@ -408,8 +419,11 @@ fn read_preview_resources(
             let data_url = if artifact.kind == ArtifactKind::Image
                 && artifact.size_bytes <= MAX_INLINE_IMAGE_BYTES
             {
-                let relative =
-                    format!(".app/import-sessions/{session_id}/items/{item_id}/staging/{source}");
+                let staging = context
+                    .layout
+                    .import_paths()?
+                    .item_staging(session_id, item_id)?;
+                let relative = format!("{staging}/{source}");
                 let path = safe_project_path(&context.root, &relative)?;
                 let bytes = fs::read(path).map_err(|_| {
                     presentation_error(
@@ -864,7 +878,12 @@ pub fn get_import_capability_requirement_v2(
     state: State<'_, AppState>,
     request: GetImportCapabilityRequirementV2Request,
 ) -> Result<ImportCapabilityRequirement, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let context = crate::commands::import_v2_commands::import_session_context(
+        &state,
+        &request.project_id,
+        &request.project_root_path,
+        &request.session_id,
+    )?;
     let session =
         state
             .import_v2_service
@@ -923,7 +942,12 @@ pub fn get_import_asr_enablement_plan_v2(
     state: State<'_, AppState>,
     request: GetImportAsrEnablementPlanV2Request,
 ) -> Result<ImportAsrEnablementPlan, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let context = crate::commands::import_v2_commands::import_session_context(
+        &state,
+        &request.project_id,
+        &request.project_root_path,
+        &request.session_id,
+    )?;
     let session =
         state
             .import_v2_service
@@ -1483,8 +1507,11 @@ fn read_staging_markdown(
     validate_identifier(session_id)?;
     validate_identifier(item_id)?;
     let normalized = normalize_relative(relative_path)?;
-    let relative =
-        format!(".app/import-sessions/{session_id}/items/{item_id}/staging/{normalized}");
+    let staging = context
+        .layout
+        .import_paths()?
+        .item_staging(session_id, item_id)?;
+    let relative = format!("{staging}/{normalized}");
     let path = safe_project_path(&context.root, &relative)?;
     let metadata = fs::metadata(&path).map_err(|_| {
         presentation_error(

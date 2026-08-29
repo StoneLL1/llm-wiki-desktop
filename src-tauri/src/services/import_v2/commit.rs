@@ -260,7 +260,10 @@ impl ImportV2Service {
         let manifest = SourceRegistry::read_manifest(
             context,
             files,
-            &format!(".app/sources/{}.json", binding.source_id),
+            &context
+                .layout
+                .source_paths()?
+                .manifest(&binding.source_id)?,
         )?;
         let version = manifest
             .versions
@@ -275,9 +278,12 @@ impl ImportV2Service {
             return Err(stale_resolution_error());
         }
         let preview = item.preview.as_ref().ok_or_else(stale_resolution_error)?;
-        let staging = context.root.join(format!(
-            ".app/import-sessions/{session_id}/items/{item_id}/staging"
-        ));
+        let staging = context.resolve_project_path(
+            &context
+                .layout
+                .import_paths()?
+                .item_staging(session_id, item_id)?,
+        )?;
         let candidate = verified_artifact(
             &staging,
             &preview.markdown.relative_path,
@@ -314,7 +320,7 @@ impl ImportV2Service {
         let project_locks = self.project_locks(context)?;
         let session_lock = project_locks.session(session_id)?;
         let _guard = self.lock_session(&session_lock);
-        FileTransaction::reconcile_project(&context.root)?;
+        FileTransaction::reconcile_context(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         let item_position = session
             .items
@@ -382,7 +388,7 @@ impl ImportV2Service {
         let project_locks = self.project_locks(context)?;
         let session_lock = project_locks.session(session_id)?;
         let _guard = self.lock_session(&session_lock);
-        FileTransaction::reconcile_project(&context.root)?;
+        FileTransaction::reconcile_context(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         let item_position = session
             .items
@@ -415,8 +421,10 @@ impl ImportV2Service {
             .ok_or_else(stale_resolution_error)?
             .clone();
         item.status = ImportItemStatus::NeedsMerge;
-        let relative_path =
-            format!(".app/import-sessions/{session_id}/items/{item_id}/staging/manual-merge.md");
+        let relative_path = context
+            .layout
+            .import_paths()?
+            .manual_merge(session_id, item_id)?;
         files.write_markdown(context, &relative_path, merged_markdown)?;
         let manual_merge = ImportArtifact {
             kind: ArtifactKind::Markdown,
@@ -909,7 +917,7 @@ impl ImportV2Service {
         let project_locks = self.project_locks(context)?;
         let session_lock = project_locks.session(session_id)?;
         let _guard = self.lock_session(&session_lock);
-        FileTransaction::reconcile_project(&context.root)?;
+        FileTransaction::reconcile_context(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         let mut changed = false;
         for (item_id, code, fingerprint) in failures {
@@ -1098,7 +1106,7 @@ impl ImportV2Service {
                 "Import commit project context does not match.",
             ));
         }
-        FileTransaction::reconcile_project(&context.root)?;
+        FileTransaction::reconcile_context(context)?;
         SourceRegistry::migrate_project_v3(context, file_store)?;
         let mut session = self
             .sessions
@@ -1333,14 +1341,10 @@ impl ImportV2Service {
                     "Import commit was cancelled.",
                 ));
             }
-            let history_manifest_path = format!(
-                ".app/import-history/working/{}/manifest.json",
-                batch.batch_id
-            );
-            let history_snapshot_path = format!(
-                ".app/import-history/working/{}/snapshots/{}.json",
-                batch.batch_id, decision.item_id
-            );
+            let import_paths = context.layout.import_paths()?;
+            let history_manifest_path = import_paths.history_working_manifest(&batch.batch_id)?;
+            let history_snapshot_path =
+                import_paths.history_working_snapshot(&batch.batch_id, &decision.item_id)?;
             let history_manifest_hash = file_store.file_hash(context, &history_manifest_path)?;
             let history_snapshot_hash = file_store.file_hash(context, &history_snapshot_path)?;
             let provisional = match self.commit_one(
@@ -1413,7 +1417,7 @@ impl ImportV2Service {
         session.updated_at = chrono::Utc::now().to_rfc3339();
         finalize_history_snapshot(&mut batch);
         let summary_write = self.sessions.serialized_summary(context, &session)?;
-        let mut summary_transaction = FileTransaction::new_for_project(&context.root);
+        let mut summary_transaction = FileTransaction::new_for_context(context)?;
         summary_transaction.write_if_hash_matches(
             &context.resolve_project_path(&summary_write.0)?,
             &summary_write.1,
@@ -1507,10 +1511,12 @@ impl ImportV2Service {
                 "Failed quality previews cannot be committed.",
             ));
         }
-        let staging = context.root.join(format!(
-            ".app/import-sessions/{}/items/{}/staging",
-            session.session_id, item.item_id
-        ));
+        let staging = context.resolve_project_path(
+            &context
+                .layout
+                .import_paths()?
+                .item_staging(&session.session_id, &item.item_id)?,
+        )?;
         let source = verified_artifact(
             &staging,
             &preview.source_snapshot.relative_path,
@@ -1619,9 +1625,11 @@ impl ImportV2Service {
             &preview.markdown.sha256,
             &preview.assets,
         );
-        let index_existed = files.exists(context, ".app/source-index-v2.json");
+        let source_paths = context.layout.source_paths()?;
+        let index_path = source_paths.index();
+        let index_existed = files.exists(context, &index_path);
         let index_hash = index_existed
-            .then(|| files.file_hash(context, ".app/source-index-v2.json"))
+            .then(|| files.file_hash(context, &index_path))
             .transpose()?;
         let index = SourceRegistry::read_index(context, files)?;
         let locator = canonical_candidate_locator(&item.input.kind, &candidate)
@@ -1642,8 +1650,9 @@ impl ImportV2Service {
             .by_locator
             .get(&locator)
             .or_else(|| index.by_content_hash.get(&content_hash));
-        let existing_manifest_path =
-            pointer.map(|pointer| format!(".app/sources/{}.json", pointer.source_id));
+        let existing_manifest_path = pointer
+            .map(|pointer| source_paths.manifest(&pointer.source_id))
+            .transpose()?;
         let existing_manifest_hash = existing_manifest_path
             .as_deref()
             .map(|path| files.file_hash(context, path))
@@ -1665,7 +1674,8 @@ impl ImportV2Service {
             .to_string();
         let prepared_source = prepare_source_snapshot(&item.input.kind, &extension, source)?;
         let imported_at = chrono::Utc::now().to_rfc3339();
-        let mut plan = SourceRegistry.build_commit_plan(
+        let mut plan = SourceRegistry.build_commit_plan_for_layout(
+            &context.layout,
             &index,
             existing_manifest.as_ref(),
             &SourceCommitInput {
@@ -1884,7 +1894,7 @@ impl ImportV2Service {
         if matches!(resolution, SourceResolution::New) {
             let expected_path = preview_target_wiki_path.ok_or_else(stale_resolution_error)?;
             if expected_path != plan.wiki_path {
-                if !expected_path.starts_with("wiki/sources/")
+                if !source_paths.contains_source_markdown(expected_path)
                     || context.resolve_project_path(expected_path).is_err()
                 {
                     return Err(stale_resolution_error());
@@ -2061,10 +2071,11 @@ impl ImportV2Service {
                             .and_then(|value| value.to_str())
                             .ok_or_else(staging_artifact_error)?;
                         let wiki_path = format!("{wiki_root}/{file_name}");
-                        let baseline_path = format!(
-                            ".app/source-artifacts/{}/{}/package/{file_name}",
-                            plan.source_id, plan.version_id
-                        );
+                        let baseline_path = source_paths.artifact_package_file(
+                            &plan.source_id,
+                            &plan.version_id,
+                            file_name,
+                        )?;
                         let artifact = preview
                             .assets
                             .iter()
@@ -2192,7 +2203,10 @@ impl ImportV2Service {
             std::fs::read(context.resolve_project_path(&plan.wiki_path)?)
                 .map_err(|_| commit_error(IMPORT_V2_COMMIT_FAILED, "Source could not be read."))?
         };
-        SourceRegistry::validate_manifest_contract(&plan.next_manifest)?;
+        SourceRegistry::validate_manifest_contract_for_layout(
+            &plan.next_manifest,
+            &context.layout,
+        )?;
         for path in [
             &plan.raw_path,
             &source_record_path,
@@ -2201,7 +2215,7 @@ impl ImportV2Service {
             &plan.baseline_path,
             &plan.wiki_path,
             &plan.manifest_path,
-            ".app/source-index-v2.json",
+            &index_path,
         ] {
             context.resolve_project_path(path)?;
         }
@@ -2265,10 +2279,10 @@ impl ImportV2Service {
             committed: true,
             error_code: None,
         };
-        let history_preview_path = format!(
-            ".app/import-history-previews/{}/{}.md",
-            prior_batch.batch_id, item.item_id
-        );
+        let history_preview_path = context
+            .layout
+            .import_paths()?
+            .history_preview(&prior_batch.batch_id, &item.item_id)?;
         #[cfg(test)]
         {
             let mut targets = Vec::new();
@@ -2359,7 +2373,7 @@ impl ImportV2Service {
             ));
             run_commit_durable_targets_hook(targets);
         }
-        let mut transaction = FileTransaction::new_for_project(&context.root);
+        let mut transaction = FileTransaction::new_for_context(context)?;
         let mut sidecar_observer_writes = Vec::new();
         let write_result = (|| -> Result<(), BackendError> {
             if !duplicate {
@@ -2424,7 +2438,7 @@ impl ImportV2Service {
             } else {
                 transaction.write_new(&manifest_path, &json_bytes(&plan.next_manifest)?)?;
             }
-            let index_path = context.resolve_project_path(".app/source-index-v2.json")?;
+            let index_path = context.resolve_project_path(&index_path)?;
             if index_existed {
                 transaction.write_if_hash_matches(
                     &index_path,
@@ -2510,7 +2524,14 @@ fn remove_committed_clipboard_input(
     if input.kind != ImportInputKind::ClipboardText {
         return;
     }
-    let expected_prefix = format!(".app/import-sessions/{session_id}/inputs/");
+    let Ok(input_root) = context
+        .layout
+        .import_paths()
+        .and_then(|paths| paths.clipboard_input_root(session_id))
+    else {
+        return;
+    };
+    let expected_prefix = format!("{input_root}/");
     if !input
         .locator
         .replace('\\', "/")
@@ -2894,10 +2915,12 @@ fn planned_wiki_target_identity(
         .preview
         .as_ref()
         .ok_or_else(|| commit_error(IMPORT_V2_STATE_INVALID, "Import preview is missing."))?;
-    let staging = context.root.join(format!(
-        ".app/import-sessions/{session_id}/items/{}/staging",
-        item.item_id
-    ));
+    let staging = context.resolve_project_path(
+        &context
+            .layout
+            .import_paths()?
+            .item_staging(session_id, &item.item_id)?,
+    )?;
     let markdown = verified_artifact(
         &staging,
         &preview.markdown.relative_path,
@@ -2933,12 +2956,14 @@ fn planned_wiki_target_identity(
                 "Normalized source locator is missing.",
             )
         })?;
-    let mut preferred = crate::services::import_v2::source_registry::derive_wiki_path_for_input(
-        &item.input.kind,
-        &item.input.display_name,
-        &locator,
-        candidate.canonical_url.as_deref(),
-    );
+    let mut preferred =
+        crate::services::import_v2::source_registry::derive_wiki_path_for_input_with_layout(
+            &context.layout,
+            &item.input.kind,
+            &item.input.display_name,
+            &locator,
+            candidate.canonical_url.as_deref(),
+        )?;
     let package = preview
         .assets
         .iter()
@@ -3110,7 +3135,10 @@ fn planned_new_source_wiki_path_internal(
                 let manifest = SourceRegistry::read_manifest(
                     context,
                     files,
-                    &format!(".app/sources/{}.json", pointer.source_id),
+                    &context
+                        .layout
+                        .source_paths()?
+                        .manifest(&pointer.source_id)?,
                 )?;
                 return Ok(Some(manifest.wiki_path));
             }
@@ -3498,10 +3526,12 @@ fn derive_resolution_context(
         .preview
         .as_ref()
         .ok_or_else(|| commit_error(IMPORT_V2_STATE_INVALID, "Import preview is missing."))?;
-    let staging = context.root.join(format!(
-        ".app/import-sessions/{}/items/{}/staging",
-        session_id, item.item_id
-    ));
+    let staging = context.resolve_project_path(
+        &context
+            .layout
+            .import_paths()?
+            .item_staging(session_id, &item.item_id)?,
+    )?;
     derive_resolution_context_from_staging(context, files, item, preview, &staging)
 }
 
@@ -3570,8 +3600,11 @@ fn derive_resolution_context_from_staging(
         | SourceResolution::UpdatedOrigin { source_id, .. } => source_id,
         SourceResolution::New => unreachable!(),
     };
-    let manifest =
-        SourceRegistry::read_manifest(context, files, &format!(".app/sources/{source_id}.json"))?;
+    let manifest = SourceRegistry::read_manifest(
+        context,
+        files,
+        &context.layout.source_paths()?.manifest(source_id)?,
+    )?;
     let current_hash = files.file_hash_if_exists(context, &manifest.wiki_path)?;
     let current_version = manifest
         .versions

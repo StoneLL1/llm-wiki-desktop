@@ -529,6 +529,25 @@ impl TaskService {
         cancellable: bool,
     ) -> Result<BackendTask, String> {
         let persistence_dir = project_root.join(".app/tasks");
+        self.create_project_task_at(
+            task_type,
+            project_id,
+            project_root,
+            persistence_dir,
+            title,
+            cancellable,
+        )
+    }
+
+    pub fn create_project_task_at(
+        &self,
+        task_type: TaskType,
+        project_id: String,
+        project_root: PathBuf,
+        persistence_dir: PathBuf,
+        title: String,
+        cancellable: bool,
+    ) -> Result<BackendTask, String> {
         self.create_task_internal(
             task_type,
             Some(project_id),
@@ -603,10 +622,10 @@ impl TaskService {
         &self,
         project_id: String,
         project_root: PathBuf,
+        task_state_root: PathBuf,
         title: String,
         session_id: String,
     ) -> Result<BackendTask, String> {
-        let persistence_dir = project_root.join(".app/tasks");
         self.create_task_internal(
             TaskType::Import,
             Some(project_id),
@@ -617,7 +636,7 @@ impl TaskService {
             Some(TaskOperation::ImportCommit { session_id }),
             true,
             None,
-            Some(persistence_dir),
+            Some(task_state_root),
         )
     }
 
@@ -693,6 +712,27 @@ impl TaskService {
         batch_id: String,
     ) -> Result<BackendTask, String> {
         let persistence_dir = project_root.join(".app/tasks");
+        self.create_project_task_with_batch_at(
+            task_type,
+            project_id,
+            project_root,
+            persistence_dir,
+            title,
+            cancellable,
+            batch_id,
+        )
+    }
+
+    pub fn create_project_task_with_batch_at(
+        &self,
+        task_type: TaskType,
+        project_id: String,
+        project_root: PathBuf,
+        persistence_dir: PathBuf,
+        title: String,
+        cancellable: bool,
+        batch_id: String,
+    ) -> Result<BackendTask, String> {
         self.create_task_internal(
             task_type,
             Some(project_id),
@@ -3852,13 +3892,14 @@ impl TaskService {
                                 ) || (task.status == TaskStatus::WaitingForConfirmation
                                     && !task.is_import_operation())
                                 {
-                                    let capability_install = matches!(
+                                    let recoverable_interruption = task.is_import_operation()
+                                        || matches!(
                                         task.operation.as_ref(),
                                         Some(
                                             crate::models::task::TaskOperation::CapabilityInstall { .. }
                                         )
                                     );
-                                    task.status = if capability_install {
+                                    task.status = if recoverable_interruption {
                                         TaskStatus::Interrupted
                                     } else {
                                         TaskStatus::Failed
@@ -3869,8 +3910,8 @@ impl TaskService {
                                         true,
                                         false,
                                     ));
-                                    task.completed_at =
-                                        (!capability_install).then(|| Utc::now().to_rfc3339());
+                                    task.completed_at = (!recoverable_interruption)
+                                        .then(|| Utc::now().to_rfc3339());
                                     task.updated_at = Utc::now().to_rfc3339();
                                 }
 
@@ -4414,7 +4455,7 @@ mod tests {
             .recover_tasks_from(project.path(), &tasks_root, None)
             .unwrap();
         let recovered = restarted.get_task(&task.id).unwrap();
-        assert_eq!(recovered.status, TaskStatus::Failed);
+        assert_eq!(recovered.status, TaskStatus::Interrupted);
         let progress = recovered.progress.unwrap();
         assert_eq!(progress.current, 2);
         assert_eq!(progress.label.as_deref(), Some("latest"));
@@ -6100,7 +6141,8 @@ mod tests {
             let recovered = service2.recover_tasks(&temp).unwrap();
             assert_eq!(recovered.len(), 2);
 
-            // Running task should be marked as Failed after recovery
+            // Legacy Import tasks without typed operation metadata retain the
+            // historical terminal recovery behavior.
             let r1 = service2
                 .get_task(
                     &recovered
@@ -6141,13 +6183,17 @@ mod tests {
         std::fs::create_dir_all(&temp).unwrap();
 
         let (service, _events) = make_service();
-        service.set_project_root(Some(temp.clone())).unwrap();
-        let task = service.create_task(
-            TaskType::Import,
-            Some("project-live".to_string()),
-            "Live import".to_string(),
-            true,
-        );
+        let task = service
+            .create_project_import_operation_task(
+                "project-live".to_string(),
+                temp.clone(),
+                temp.join(".app/tasks"),
+                "Live import".to_string(),
+                "session-live".to_string(),
+                1,
+                None,
+            )
+            .unwrap();
         service
             .transition_status(&task.id, TaskStatus::Running)
             .unwrap();
@@ -6165,7 +6211,7 @@ mod tests {
         restarted.recover_tasks(&temp).unwrap();
         assert_eq!(
             restarted.get_task(&task.id).unwrap().status,
-            TaskStatus::Failed
+            TaskStatus::Interrupted
         );
         assert_eq!(
             restarted.get_logs(&task.id).unwrap()[0].message,
@@ -6180,19 +6226,22 @@ mod tests {
         let root = std::env::temp_dir().join(format!("task-recover-queued-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let (service, _) = make_service();
-        service.set_project_root(Some(root.clone())).unwrap();
-        let queued = service.create_task(
-            TaskType::Import,
-            Some("p".into()),
-            "Queued import".into(),
-            true,
-        );
-        service.persist_task(&queued.id, &root).unwrap();
+        let queued = service
+            .create_project_import_operation_task(
+                "p".into(),
+                root.clone(),
+                root.join(".app/tasks"),
+                "Queued import".into(),
+                "session-queued".into(),
+                1,
+                None,
+            )
+            .unwrap();
 
         let (restarted, _) = make_service();
         restarted.recover_tasks(&root).unwrap();
         let recovered = restarted.get_task(&queued.id).unwrap();
-        assert_eq!(recovered.status, TaskStatus::Failed);
+        assert_eq!(recovered.status, TaskStatus::Interrupted);
         let error = recovered.error.unwrap();
         assert_eq!(error.code, "TASK_RECOVERY");
         assert!(error.recoverable);

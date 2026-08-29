@@ -2,7 +2,7 @@ use std::sync::atomic::AtomicBool;
 
 use llm_wiki_desktop_lib::app_state::ProjectRegistry;
 use llm_wiki_desktop_lib::models::layout::{
-    inspect_native_layout, resolve_layout, NativeLayoutState,
+    inspect_native_layout, resolve_layout, NativeLayoutState, ProjectLayout,
 };
 use llm_wiki_desktop_lib::models::project::{ProjectFormat, ProjectHealth};
 use llm_wiki_desktop_lib::services::assess_project_folder;
@@ -69,6 +69,49 @@ fn native_legacy_repairable_state_advertises_a_repair_plan() {
     assert_eq!(assessment.format, ProjectFormat::NativeLegacy);
     assert_eq!(assessment.health, ProjectHealth::Repairable);
     assert!(assessment.repair_available);
+}
+
+#[test]
+fn import_and_source_paths_are_fully_layout_derived_for_compatible_vaults() {
+    let mut layout = ProjectLayout::native();
+    layout.app_state_root = Some(".app/compat".into());
+    layout.import_state_root = Some(".app/compat/import-sessions".into());
+    layout.source_state_root = Some(".app/compat/sources".into());
+    layout.evidence_root = Some(".app/compat/evidence".into());
+    layout.source_write_root = Some("Notes/Sources".into());
+
+    let import = layout.import_paths().unwrap();
+    assert_eq!(
+        import.item_staging("会话 A", "item-1").unwrap(),
+        ".app/compat/import-sessions/会话 A/items/item-1/staging"
+    );
+    assert_eq!(
+        import.history_preview("batch-1", "item-1").unwrap(),
+        ".app/compat/import-history-previews/batch-1/item-1.md"
+    );
+    assert_eq!(
+        import.recovery_journal_root(),
+        ".app/compat/import-v2-journal"
+    );
+
+    let source = layout.source_paths().unwrap();
+    assert_eq!(
+        source.manifest("source-1").unwrap(),
+        ".app/compat/sources/source-1.json"
+    );
+    assert_eq!(source.index(), ".app/compat/source-index-v2.json");
+    assert_eq!(
+        source.local_evidence_root("source-1", "version-1").unwrap(),
+        ".app/compat/evidence/sources/source-1/version-1"
+    );
+    assert_eq!(
+        source.baseline("source-1", "version-1").unwrap(),
+        ".app/compat/source-artifacts/source-1/version-1/baseline.md"
+    );
+    assert_eq!(
+        source.local_markdown("研究笔记.md").unwrap(),
+        "Notes/Sources/local/研究笔记.md"
+    );
 }
 
 #[test]

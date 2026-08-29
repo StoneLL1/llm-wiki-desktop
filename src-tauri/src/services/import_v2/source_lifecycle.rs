@@ -44,6 +44,7 @@ use crate::utils::markdown_utils::extract_wikilinks;
 use crate::utils::markdown_utils::rewrite_wikilinks;
 use crate::utils::path_utils::normalize_project_path;
 
+#[cfg(test)]
 const SOURCE_INDEX_PATH: &str = ".app/source-index-v2.json";
 const MAX_SOURCE_PREVIEW_BYTES: usize = 256 * 1024;
 const DELETE_CONFIRMATION_TEXT: &str = "永久删除此来源";
@@ -195,7 +196,7 @@ impl ImportV2Service {
     ) -> Result<SourceCandidateSummary, BackendError> {
         let project_locks = self.project_locks(context)?;
         let _guard = self.lock_project(&project_locks);
-        FileTransaction::reconcile_project(&context.root)?;
+        FileTransaction::reconcile_context(context)?;
         let loaded = load_source(context, files, &request.source_id)?;
         if loaded.current_hash != request.expected_markdown_hash {
             return Err(source_changed(&loaded.current_hash));
@@ -271,9 +272,13 @@ impl ImportV2Service {
             .into_iter()
             .enumerate()
             .map(|(index, (evidence_kind, bytes))| {
-                let path =
-                    candidate_evidence_path(&loaded.manifest.source_id, &candidate_id, index);
-                (
+                let path = candidate_evidence_path(
+                    context,
+                    &loaded.manifest.source_id,
+                    &candidate_id,
+                    index,
+                )?;
+                Ok((
                     SourceArtifactRecord {
                         path: path.clone(),
                         sha256: digest(&bytes),
@@ -281,9 +286,9 @@ impl ImportV2Service {
                         kind: evidence_kind,
                     },
                     bytes,
-                )
+                ))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, BackendError>>()?;
         let candidate = StoredSourceCandidate {
             schema_version: 1,
             candidate_id: candidate_id.clone(),
@@ -302,8 +307,8 @@ impl ImportV2Service {
                 .collect(),
             ai_organize: None,
         };
-        let path = candidate_path(&candidate.source_id, &candidate.candidate_id);
-        let mut transaction = FileTransaction::new_for_project(&context.root);
+        let path = candidate_path(context, &candidate.source_id, &candidate.candidate_id)?;
+        let mut transaction = FileTransaction::new_for_context(context)?;
         for (record, bytes) in processing_evidence {
             transaction.write_new(&context.resolve_project_path(&record.path)?, &bytes)?;
         }
@@ -448,7 +453,7 @@ impl ImportV2Service {
     ) -> Result<SourceCandidateSummary, BackendError> {
         let project_locks = self.project_locks(context)?;
         let _guard = self.lock_project(&project_locks);
-        FileTransaction::reconcile_project(&context.root)?;
+        FileTransaction::reconcile_context(context)?;
         let loaded = load_source(context, files, &input.source_id)?;
         if digest(input.current_markdown.as_bytes()) != input.markdown_hash {
             return Err(source_invalid());
@@ -483,10 +488,14 @@ impl ImportV2Service {
                 engine_version,
             }),
         };
-        let path = candidate_path(&candidate.source_id, &candidate.candidate_id);
+        let path = candidate_path(context, &candidate.source_id, &candidate.candidate_id)?;
         let mut superseded = Vec::new();
-        let candidate_root = context
-            .resolve_project_path(&format!(".app/source-candidates/{}", candidate.source_id))?;
+        let candidate_root = context.resolve_project_path(
+            &context
+                .layout
+                .source_paths()?
+                .candidate_root(&candidate.source_id)?,
+        )?;
         if candidate_root.exists() {
             for entry in fs::read_dir(&candidate_root).map_err(|_| source_invalid())? {
                 let entry = entry.map_err(|_| source_invalid())?;
@@ -498,7 +507,7 @@ impl ImportV2Service {
                 }
             }
         }
-        let mut transaction = FileTransaction::new_for_project(&context.root);
+        let mut transaction = FileTransaction::new_for_context(context)?;
         transaction.write_new(
             &context.resolve_project_path(&path)?,
             &pretty_json(&candidate)?,
@@ -531,13 +540,14 @@ impl ImportV2Service {
         {
             return Err(source_invalid());
         }
-        let path = candidate_path(source_id, candidate_id);
+        let path = candidate_path(context, source_id, candidate_id)?;
         let hash = files.file_hash(context, &path)?;
-        let mut transaction = FileTransaction::new_for_project(&context.root);
+        let mut transaction = FileTransaction::new_for_context(context)?;
         transaction.delete_if_hash_matches(&context.resolve_project_path(&path)?, &hash)?;
         transaction.commit()?;
         remove_empty_tree(
-            &context.resolve_project_path(&format!(".app/source-candidates/{source_id}"))?,
+            &context
+                .resolve_project_path(&context.layout.source_paths()?.candidate_root(source_id)?)?,
         );
         Ok(())
     }
@@ -551,15 +561,16 @@ impl ImportV2Service {
     ) -> Result<(), BackendError> {
         let project_locks = self.project_locks(context)?;
         let _guard = self.lock_project(&project_locks);
-        FileTransaction::reconcile_project(&context.root)?;
+        FileTransaction::reconcile_context(context)?;
         let candidate = load_candidate(context, files, source_id, candidate_id)?;
-        let path = candidate_path(&candidate.source_id, &candidate.candidate_id);
+        let path = candidate_path(context, &candidate.source_id, &candidate.candidate_id)?;
         let hash = files.file_hash(context, &path)?;
-        let mut transaction = FileTransaction::new_for_project(&context.root);
+        let mut transaction = FileTransaction::new_for_context(context)?;
         transaction.delete_if_hash_matches(&context.resolve_project_path(&path)?, &hash)?;
         transaction.commit()?;
         remove_empty_tree(
-            &context.resolve_project_path(&format!(".app/source-candidates/{source_id}"))?,
+            &context
+                .resolve_project_path(&context.layout.source_paths()?.candidate_root(source_id)?)?,
         );
         Ok(())
     }
@@ -606,7 +617,7 @@ impl ImportV2Service {
     ) -> Result<SourceMutationResult, BackendError> {
         let project_locks = self.project_locks(context)?;
         let _guard = self.lock_project(&project_locks);
-        FileTransaction::reconcile_project(&context.root)?;
+        FileTransaction::reconcile_context(context)?;
         let loaded = load_source(context, files, &request.source_id)?;
         let candidate = load_candidate(context, files, &request.source_id, &request.candidate_id)?;
         let expected_guard =
@@ -655,7 +666,11 @@ impl ImportV2Service {
             .iter()
             .map(|artifact| artifact.path.clone())
             .collect::<Vec<_>>();
-        candidate_paths.push(candidate_path(&request.source_id, &request.candidate_id));
+        candidate_paths.push(candidate_path(
+            context,
+            &request.source_id,
+            &request.candidate_id,
+        )?);
         let provenance = candidate
             .ai_organize
             .as_ref()
@@ -695,7 +710,7 @@ impl ImportV2Service {
     ) -> Result<SourceMutationResult, BackendError> {
         let project_locks = self.project_locks(context)?;
         let _guard = self.lock_project(&project_locks);
-        FileTransaction::reconcile_project(&context.root)?;
+        FileTransaction::reconcile_context(context)?;
         let loaded = load_source(context, files, source_id)?;
         if loaded.current_hash != expected_markdown_hash {
             return Err(source_changed(&loaded.current_hash));
@@ -751,7 +766,7 @@ impl ImportV2Service {
     ) -> Result<SourceMutationResult, BackendError> {
         let project_locks = self.project_locks(context)?;
         let _guard = self.lock_project(&project_locks);
-        FileTransaction::reconcile_project(&context.root)?;
+        FileTransaction::reconcile_context(context)?;
         let loaded = load_source(context, files, &request.source_id)?;
         let preview = build_move_preview(context, files, &loaded, &request.new_wiki_path)?;
         if preview.guard_token != request.guard_token {
@@ -787,17 +802,19 @@ impl ImportV2Service {
         }
         let project_locks = self.project_locks(context)?;
         let _guard = self.lock_project(&project_locks);
-        FileTransaction::reconcile_project(&context.root)?;
+        FileTransaction::reconcile_context(context)?;
         let loaded = load_source(context, files, &request.source_id)?;
         let preview = build_delete_preview(context, files, &loaded)?;
         if preview.guard_token != request.guard_token {
             return Err(source_changed(&loaded.current_hash));
         }
         let inventory = source_inventory(context, files, &loaded)?;
+        let source_paths = context.layout.source_paths()?;
+        let index_path = source_paths.index();
         let affected_paths = inventory
             .iter()
             .map(|entry| entry.path.clone())
-            .chain(std::iter::once(SOURCE_INDEX_PATH.to_string()))
+            .chain(std::iter::once(index_path.clone()))
             .collect::<Vec<_>>();
         let checkpoint = git.create_scoped_checkpoint(
             context,
@@ -814,8 +831,8 @@ impl ImportV2Service {
         next_index
             .by_locator
             .retain(|_, pointer| pointer.source_id != request.source_id);
-        let index_hash = files.file_hash(context, SOURCE_INDEX_PATH)?;
-        let audit_path = format!(".app/source-audit/deletions/{}.json", uuid::Uuid::new_v4());
+        let index_hash = files.file_hash(context, &index_path)?;
+        let audit_path = source_paths.deletion_audit(&uuid::Uuid::new_v4().to_string())?;
         let audit = serde_json::json!({
             "schemaVersion": 1,
             "sourceId": request.source_id,
@@ -825,13 +842,13 @@ impl ImportV2Service {
             "result": "succeeded"
         });
 
-        let mut transaction = FileTransaction::new_for_project(&context.root);
+        let mut transaction = FileTransaction::new_for_context(context)?;
         for entry in &inventory {
             transaction
                 .delete_if_hash_matches(&context.resolve_project_path(&entry.path)?, &entry.hash)?;
         }
         transaction.write_if_hash_matches(
-            &context.resolve_project_path(SOURCE_INDEX_PATH)?,
+            &context.resolve_project_path(&index_path)?,
             &pretty_json(&next_index)?,
             &index_hash,
         )?;
@@ -840,7 +857,7 @@ impl ImportV2Service {
             &pretty_json(&audit)?,
         )?;
         transaction.commit()?;
-        remove_empty_source_directories(context, &request.source_id);
+        remove_empty_source_directories(context, &request.source_id)?;
         Ok(SourceMutationResult {
             source_id: request.source_id.clone(),
             version_id: loaded.version.version_id,
@@ -1127,7 +1144,7 @@ fn build_move_preview(
         affected_paths.push(destination.clone());
     }
     affected_paths.push(loaded.manifest_path.clone());
-    affected_paths.push(SOURCE_INDEX_PATH.into());
+    affected_paths.push(context.layout.source_paths()?.index());
     affected_paths.sort();
     affected_paths.dedup();
     Ok(MoveSourcePreview {
@@ -1145,7 +1162,10 @@ fn validate_source_move_target(
     target: &str,
 ) -> Result<(), BackendError> {
     let resolved = context.resolve_project_path(target)?;
-    if !target.starts_with("wiki/sources/")
+    if !context
+        .layout
+        .source_paths()?
+        .contains_source_markdown(target)
         || !target.ends_with(".md")
         || resolved.strip_prefix(&context.wiki_dir).is_err()
         || target.split('/').any(|segment| {
@@ -1211,6 +1231,7 @@ fn apply_source_move(
     let moves = source_move_paths(&loaded, &preview.new_wiki_path)?;
     let now = chrono::Utc::now().to_rfc3339();
     let version_id = uuid::Uuid::new_v4().to_string();
+    let source_paths = context.layout.source_paths()?;
     let (_, body) = parse_final_source(&String::from_utf8_lossy(&loaded.current_markdown))
         .map_err(|_| source_invalid())?;
     let content_hash = digest(body.as_bytes());
@@ -1233,10 +1254,7 @@ fn apply_source_move(
     };
     let final_entry = render_source_markdown(&frontmatter, &body)?.into_bytes();
     let final_hash = digest(&final_entry);
-    let baseline_path = format!(
-        ".app/source-artifacts/{}/{}/baseline.md",
-        loaded.manifest.source_id, version_id
-    );
+    let baseline_path = source_paths.baseline(&loaded.manifest.source_id, &version_id)?;
     let mut new_writes = vec![(baseline_path.clone(), final_entry.clone())];
     let mut raw_evidence = Vec::new();
     let mut assets = Vec::new();
@@ -1313,10 +1331,11 @@ fn apply_source_move(
                     .file_name()
                     .and_then(|value| value.to_str())
                     .ok_or_else(source_invalid)?;
-                let next_baseline = format!(
-                    ".app/source-artifacts/{}/{}/package/{file_name}",
-                    loaded.manifest.source_id, version_id
-                );
+                let next_baseline = source_paths.artifact_package_file(
+                    &loaded.manifest.source_id,
+                    &version_id,
+                    file_name,
+                )?;
                 member.baseline_path = next_baseline.clone();
                 member.content_hash = hash.clone();
                 member.human_edit_hash = hash;
@@ -1324,10 +1343,11 @@ fn apply_source_move(
             }
         }
         package.validate_committed().map_err(|_| source_invalid())?;
-        let package_path = format!(
-            "raw/sources/{}/{}/derived/source-package.json",
-            loaded.manifest.source_id, version_id
-        );
+        let package_path = source_paths.local_derived_file(
+            &loaded.manifest.source_id,
+            &version_id,
+            "source-package.json",
+        )?;
         let bytes = pretty_json(package)?;
         raw_evidence.push(SourceArtifactRecord {
             path: package_path.clone(),
@@ -1338,10 +1358,11 @@ fn apply_source_move(
         new_writes.push((package_path, bytes));
     }
     if raw_evidence.is_empty() {
-        let raw_path = format!(
-            "raw/sources/{}/{}/derived/source-move.md",
-            loaded.manifest.source_id, version_id
-        );
+        let raw_path = source_paths.local_derived_file(
+            &loaded.manifest.source_id,
+            &version_id,
+            "source-move.md",
+        )?;
         raw_evidence.push(SourceArtifactRecord {
             path: raw_path.clone(),
             sha256: final_hash.clone(),
@@ -1455,7 +1476,7 @@ fn apply_source_move(
         human_edit_hash: Some(final_hash),
         checkpoint: checkpoint.commit_hash.clone(),
     });
-    SourceRegistry::validate_manifest_contract(&next_manifest)?;
+    SourceRegistry::validate_manifest_contract_for_layout(&next_manifest, &context.layout)?;
     let mut next_index = SourceRegistry::read_index(context, files)?;
     repoint_source(&mut next_index, &next_manifest.source_id, &version_id);
     next_index.by_content_hash.insert(
@@ -1465,8 +1486,9 @@ fn apply_source_move(
             version_id: version_id.clone(),
         },
     );
-    let index_hash = files.file_hash(context, SOURCE_INDEX_PATH)?;
-    let mut transaction = FileTransaction::new_for_project(&context.root);
+    let index_path = context.layout.source_paths()?.index();
+    let index_hash = files.file_hash(context, &index_path)?;
+    let mut transaction = FileTransaction::new_for_context(context)?;
     for (path, bytes) in new_writes {
         transaction.write_new(&context.resolve_project_path(&path)?, &bytes)?;
     }
@@ -1492,7 +1514,7 @@ fn apply_source_move(
         &loaded.manifest_hash,
     )?;
     transaction.write_if_hash_matches(
-        &context.resolve_project_path(SOURCE_INDEX_PATH)?,
+        &context.resolve_project_path(&index_path)?,
         &pretty_json(&next_index)?,
         &index_hash,
     )?;
@@ -1558,12 +1580,17 @@ pub fn reject_generic_source_path(
     relative_path: &str,
 ) -> Result<(), BackendError> {
     let normalized = normalize_project_path(relative_path.trim());
-    if normalized.starts_with("wiki/sources/") {
+    if context
+        .layout
+        .source_paths()?
+        .contains_source_markdown(&normalized)
+    {
         return Err(source_requires_dedicated_action());
     }
     let index = SourceRegistry::read_index(context, files)?;
     for source_id in source_ids(&index) {
-        let manifest = SourceRegistry::read_manifest(context, files, &manifest_path(&source_id))?;
+        let manifest =
+            SourceRegistry::read_manifest(context, files, &manifest_path(context, &source_id)?)?;
         if manifest.wiki_path == normalized {
             return Err(source_requires_dedicated_action());
         }
@@ -1583,6 +1610,7 @@ pub fn reject_generic_source_path(
 }
 
 pub fn reject_generic_source_create(
+    context: &ProjectContext,
     relative_path: &str,
     page_type: Option<&str>,
     contents: Option<&str>,
@@ -1594,7 +1622,12 @@ pub fn reject_generic_source_create(
             "source" | "sources"
         )
     }) || contents.is_some_and(markdown_declares_source);
-    if normalized.starts_with("wiki/sources/") || declares_source {
+    if context
+        .layout
+        .source_paths()?
+        .contains_source_markdown(&normalized)
+        || declares_source
+    {
         return Err(source_requires_dedicated_action());
     }
     Ok(())
@@ -1653,12 +1686,14 @@ fn validated_source_binding_for_page(
         return Ok(None);
     }
 
-    let manifest =
-        match SourceRegistry::read_manifest(context, files, &manifest_path(&frontmatter.source_id))
-        {
-            Ok(manifest) => manifest,
-            Err(_) => return Ok(None),
-        };
+    let manifest = match SourceRegistry::read_manifest(
+        context,
+        files,
+        &manifest_path(context, &frontmatter.source_id)?,
+    ) {
+        Ok(manifest) => manifest,
+        Err(_) => return Ok(None),
+    };
     if manifest.source_id != frontmatter.source_id
         || manifest.current_version_id != frontmatter.version_id
         || normalize_project_path(&manifest.wiki_path) != normalize_project_path(page_path)
@@ -1718,7 +1753,7 @@ fn load_source_with_index(
     if !safe_id(source_id) {
         return Err(source_not_found());
     }
-    let manifest_path = manifest_path(source_id);
+    let manifest_path = manifest_path(context, source_id)?;
     let manifest = SourceRegistry::read_manifest(context, files, &manifest_path)?;
     if manifest.source_id != source_id {
         return Err(source_not_found());
@@ -1917,7 +1952,10 @@ fn execute_source_processing(
         return Err(source_processing_cancelled());
     }
     let job_id = uuid::Uuid::new_v4().to_string();
-    let staging_relative = format!(".app/import-staging/source-reprocess-{job_id}");
+    let staging_relative = format!(
+        "{}/source-reprocess-{job_id}",
+        context.layout.import_paths()?.staging_root()
+    );
     let staging = context.resolve_project_path(&staging_relative)?;
     fs::create_dir_all(&staging).map_err(|_| source_invalid())?;
     let staging_guard = SourceProcessingStaging::new(context, staging.clone())?;
@@ -2126,7 +2164,7 @@ struct SourceProcessingStaging {
 
 impl SourceProcessingStaging {
     fn new(context: &ProjectContext, path: PathBuf) -> Result<Self, BackendError> {
-        let root = context.resolve_project_path(".app/import-staging")?;
+        let root = context.resolve_project_path(&context.layout.import_paths()?.staging_root())?;
         if path.strip_prefix(&root).is_err() || path == root {
             return Err(source_invalid());
         }
@@ -2400,7 +2438,8 @@ fn latest_candidate(
     files: &FileStore,
     source_id: &str,
 ) -> Result<Option<StoredSourceCandidate>, BackendError> {
-    let root = context.resolve_project_path(&format!(".app/source-candidates/{source_id}"))?;
+    let root =
+        context.resolve_project_path(&context.layout.source_paths()?.candidate_root(source_id)?)?;
     let entries = match fs::read_dir(&root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -2434,7 +2473,7 @@ fn load_candidate(
         return Err(source_not_found());
     }
     let mut candidate: StoredSourceCandidate =
-        files.read_json(context, &candidate_path(source_id, candidate_id))?;
+        files.read_json(context, &candidate_path(context, source_id, candidate_id)?)?;
     normalize_ai_organize_metadata(&mut candidate.ai_organize);
     validate_candidate(&candidate, source_id)?;
     validate_candidate_evidence(context, files, &candidate)?;
@@ -2469,8 +2508,11 @@ fn validate_candidate_evidence(
     candidate: &StoredSourceCandidate,
 ) -> Result<(), BackendError> {
     let prefix = format!(
-        ".app/source-candidate-evidence/{}/{}/",
-        candidate.source_id, candidate.candidate_id
+        "{}/",
+        context
+            .layout
+            .source_paths()?
+            .candidate_evidence_root(&candidate.source_id, &candidate.candidate_id)?
     );
     for artifact in &candidate.processing_evidence {
         let metadata = fs::symlink_metadata(context.resolve_project_path(&artifact.path)?)
@@ -2505,6 +2547,7 @@ fn apply_markdown_version(
     }
     let now = chrono::Utc::now().to_rfc3339();
     let version_id = uuid::Uuid::new_v4().to_string();
+    let source_paths = context.layout.source_paths()?;
     let content_hash = digest(body.as_bytes());
     let frontmatter = SourceFrontmatter {
         page_type: crate::models::import_v2::SourcePageType::Source,
@@ -2525,14 +2568,12 @@ fn apply_markdown_version(
     };
     let final_markdown = render_source_markdown(&frontmatter, &body)?;
     let final_hash = digest(final_markdown.as_bytes());
-    let raw_path = format!(
-        "raw/sources/{}/{}/derived/source-update.md",
-        loaded.manifest.source_id, version_id
-    );
-    let baseline_path = format!(
-        ".app/source-artifacts/{}/{}/baseline.md",
-        loaded.manifest.source_id, version_id
-    );
+    let raw_path = source_paths.local_derived_file(
+        &loaded.manifest.source_id,
+        &version_id,
+        "source-update.md",
+    )?;
+    let baseline_path = source_paths.baseline(&loaded.manifest.source_id, &version_id)?;
     let manifest_path = loaded.manifest_path.clone();
     let mut raw_evidence = Vec::new();
     let mut additional_new_writes = Vec::<(String, Vec<u8>)>::new();
@@ -2567,10 +2608,11 @@ fn apply_markdown_version(
         kind: "source_reprocess_candidate".into(),
     });
     for (index, (kind, bytes)) in processing_evidence.into_iter().enumerate() {
-        let path = format!(
-            "raw/sources/{}/{}/derived/processing-evidence-{index}.bin",
-            loaded.manifest.source_id, version_id
-        );
+        let path = source_paths.local_derived_file(
+            &loaded.manifest.source_id,
+            &version_id,
+            &format!("processing-evidence-{index}.bin"),
+        )?;
         raw_evidence.push(SourceArtifactRecord {
             path: path.clone(),
             sha256: digest(&bytes),
@@ -2644,20 +2686,22 @@ fn apply_markdown_version(
                 .file_name()
                 .and_then(|value| value.to_str())
                 .ok_or_else(source_invalid)?;
-            let next_baseline = format!(
-                ".app/source-artifacts/{}/{}/package/{file_name}",
-                loaded.manifest.source_id, version_id
-            );
+            let next_baseline = source_paths.artifact_package_file(
+                &loaded.manifest.source_id,
+                &version_id,
+                file_name,
+            )?;
             member.baseline_path = next_baseline.clone();
             member.content_hash = hash.clone();
             member.human_edit_hash = hash;
             additional_new_writes.push((next_baseline, bytes));
         }
         package.validate_committed().map_err(|_| source_invalid())?;
-        let package_path = format!(
-            "raw/sources/{}/{}/derived/source-package.json",
-            loaded.manifest.source_id, version_id
-        );
+        let package_path = source_paths.local_derived_file(
+            &loaded.manifest.source_id,
+            &version_id,
+            "source-package.json",
+        )?;
         let package_bytes = pretty_json(&package)?;
         raw_evidence.push(SourceArtifactRecord {
             path: package_path.clone(),
@@ -2670,7 +2714,7 @@ fn apply_markdown_version(
     let mut affected_paths = vec![
         loaded.manifest.wiki_path.clone(),
         manifest_path.clone(),
-        SOURCE_INDEX_PATH.into(),
+        context.layout.source_paths()?.index(),
         raw_path.clone(),
         baseline_path.clone(),
     ];
@@ -2739,7 +2783,7 @@ fn apply_markdown_version(
         created_at: now,
         checkpoint: checkpoint.commit_hash.clone(),
     });
-    SourceRegistry::validate_manifest_contract(&next_manifest)?;
+    SourceRegistry::validate_manifest_contract_for_layout(&next_manifest, &context.layout)?;
     let mut next_index = SourceRegistry::read_index(context, files)?;
     repoint_source(&mut next_index, &next_manifest.source_id, &version_id);
     next_index.by_content_hash.insert(
@@ -2749,8 +2793,9 @@ fn apply_markdown_version(
             version_id: version_id.clone(),
         },
     );
-    let index_hash = files.file_hash(context, SOURCE_INDEX_PATH)?;
-    let mut transaction = FileTransaction::new_for_project(&context.root);
+    let index_path = context.layout.source_paths()?.index();
+    let index_hash = files.file_hash(context, &index_path)?;
+    let mut transaction = FileTransaction::new_for_context(context)?;
     transaction.write_new(
         &context.resolve_project_path(&raw_path)?,
         final_markdown.as_bytes(),
@@ -2780,7 +2825,7 @@ fn apply_markdown_version(
         &loaded.manifest_hash,
     )?;
     transaction.write_if_hash_matches(
-        &context.resolve_project_path(SOURCE_INDEX_PATH)?,
+        &context.resolve_project_path(&index_path)?,
         &pretty_json(&next_index)?,
         &index_hash,
     )?;
@@ -2792,14 +2837,14 @@ fn apply_markdown_version(
     }
     transaction.commit()?;
     if applied_candidate {
-        remove_empty_tree(&context.resolve_project_path(&format!(
-            ".app/source-candidates/{}",
-            next_manifest.source_id
-        ))?);
-        remove_empty_tree(&context.resolve_project_path(&format!(
-            ".app/source-candidate-evidence/{}",
-            next_manifest.source_id
-        ))?);
+        let source_paths = context.layout.source_paths()?;
+        remove_empty_tree(
+            &context
+                .resolve_project_path(&source_paths.candidate_root(&next_manifest.source_id)?)?,
+        );
+        remove_empty_tree(&context.resolve_project_path(
+            &source_paths.source_candidate_evidence_root(&next_manifest.source_id)?,
+        )?);
     }
     Ok(SourceMutationResult {
         source_id: next_manifest.source_id,
@@ -2884,17 +2929,15 @@ fn source_inventory(
             }
         }
     }
-    let candidate_root = context.resolve_project_path(&format!(
-        ".app/source-candidates/{}",
-        loaded.manifest.source_id
-    ))?;
+    let source_paths = context.layout.source_paths()?;
+    let candidate_root =
+        context.resolve_project_path(&source_paths.candidate_root(&loaded.manifest.source_id)?)?;
     if candidate_root.exists() {
         collect_project_files(context, &candidate_root, &mut paths, "source_candidate")?;
     }
-    let candidate_evidence_root = context.resolve_project_path(&format!(
-        ".app/source-candidate-evidence/{}",
-        loaded.manifest.source_id
-    ))?;
+    let candidate_evidence_root = context.resolve_project_path(
+        &source_paths.source_candidate_evidence_root(&loaded.manifest.source_id)?,
+    )?;
     if candidate_evidence_root.exists() {
         collect_project_files(
             context,
@@ -2905,7 +2948,7 @@ fn source_inventory(
     }
     let mut inventory = Vec::new();
     for (path, kind) in paths {
-        validate_source_inventory_path(&path, &loaded.manifest.source_id)?;
+        validate_source_inventory_path(context, &path, &loaded.manifest.source_id)?;
         let absolute = context.resolve_project_path(&path)?;
         let metadata = fs::symlink_metadata(&absolute).map_err(|_| source_invalid())?;
         if !metadata.is_file() || metadata.file_type().is_symlink() {
@@ -2922,16 +2965,27 @@ fn source_inventory(
     Ok(inventory)
 }
 
-fn validate_source_inventory_path(path: &str, source_id: &str) -> Result<(), BackendError> {
+fn validate_source_inventory_path(
+    context: &ProjectContext,
+    path: &str,
+    source_id: &str,
+) -> Result<(), BackendError> {
     let normalized = normalize_project_path(path);
-    let allowed = normalized == format!(".app/sources/{source_id}.json")
-        || normalized.starts_with(&format!(".app/source-artifacts/{source_id}/"))
-        || normalized.starts_with(&format!(".app/source-candidates/{source_id}/"))
-        || normalized.starts_with(&format!(".app/source-candidate-evidence/{source_id}/"))
-        || normalized.starts_with(&format!("raw/sources/{source_id}/"))
-        || normalized.starts_with(&format!("raw/web/{source_id}/"))
-        || normalized.starts_with(&format!("raw/assets/{source_id}/"))
-        || normalized.starts_with("wiki/sources/");
+    let source_paths = context.layout.source_paths()?;
+    let manifest = source_paths.manifest(source_id)?;
+    let owned_roots = [
+        source_paths.artifact_source_root(source_id)?,
+        source_paths.candidate_root(source_id)?,
+        source_paths.source_candidate_evidence_root(source_id)?,
+        source_paths.local_source_root(source_id)?,
+        source_paths.web_source_root(source_id)?,
+        source_paths.asset_source_root(source_id)?,
+    ];
+    let allowed = normalized == manifest
+        || owned_roots
+            .iter()
+            .any(|root| normalized == *root || normalized.starts_with(&format!("{root}/")))
+        || source_paths.contains_source_markdown(&normalized);
     if !allowed {
         return Err(source_invalid());
     }
@@ -3124,20 +3178,22 @@ fn source_ids(index: &SourceIndex) -> BTreeSet<String> {
         .collect()
 }
 
-fn remove_empty_source_directories(context: &ProjectContext, source_id: &str) {
-    for path in [
-        context.root.join(".app/source-candidates").join(source_id),
-        context
-            .root
-            .join(".app/source-candidate-evidence")
-            .join(source_id),
-        context.root.join(".app/source-artifacts").join(source_id),
-        context.root.join("raw/sources").join(source_id),
-        context.root.join("raw/web").join(source_id),
-        context.root.join("raw/assets").join(source_id),
+fn remove_empty_source_directories(
+    context: &ProjectContext,
+    source_id: &str,
+) -> Result<(), BackendError> {
+    let source_paths = context.layout.source_paths()?;
+    for relative in [
+        source_paths.candidate_root(source_id)?,
+        source_paths.source_candidate_evidence_root(source_id)?,
+        source_paths.artifact_source_root(source_id)?,
+        source_paths.local_source_root(source_id)?,
+        source_paths.web_source_root(source_id)?,
+        source_paths.asset_source_root(source_id)?,
     ] {
-        remove_empty_tree(&path);
+        remove_empty_tree(&context.resolve_project_path(&relative)?);
     }
+    Ok(())
 }
 
 fn remove_empty_tree(path: &Path) {
@@ -3156,16 +3212,31 @@ fn remove_empty_tree(path: &Path) {
     let _ = fs::remove_dir(path);
 }
 
-fn candidate_path(source_id: &str, candidate_id: &str) -> String {
-    format!(".app/source-candidates/{source_id}/{candidate_id}.json")
+fn candidate_path(
+    context: &ProjectContext,
+    source_id: &str,
+    candidate_id: &str,
+) -> Result<String, BackendError> {
+    context
+        .layout
+        .source_paths()?
+        .candidate(source_id, candidate_id)
 }
 
-fn candidate_evidence_path(source_id: &str, candidate_id: &str, index: usize) -> String {
-    format!(".app/source-candidate-evidence/{source_id}/{candidate_id}/{index}.bin")
+fn candidate_evidence_path(
+    context: &ProjectContext,
+    source_id: &str,
+    candidate_id: &str,
+    index: usize,
+) -> Result<String, BackendError> {
+    context
+        .layout
+        .source_paths()?
+        .candidate_evidence(source_id, candidate_id, index)
 }
 
-fn manifest_path(source_id: &str) -> String {
-    format!(".app/sources/{source_id}.json")
+fn manifest_path(context: &ProjectContext, source_id: &str) -> Result<String, BackendError> {
+    context.layout.source_paths()?.manifest(source_id)
 }
 
 fn safe_id(value: &str) -> bool {

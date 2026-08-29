@@ -206,6 +206,8 @@ function overviewFor(value: ImportSession) {
     },
     selection: { selected: ready, newSources: ready, updates: 0, warnings: 0, pending: 0, restricted: value.items.filter((entry) => entry.selected && entry.restrictedContent).length },
     indexState: "ready" as const,
+    recoveryRequired: false,
+    recoveryReasons: [],
     actionGroups: [],
     unresolvedCount: 0,
     remainingCount: value.items.filter((entry) => entry.status !== "completed" && entry.status !== "skipped").length,
@@ -791,7 +793,9 @@ describe("useImportWorkflow", () => {
     api.getSession.mockResolvedValue({ ...session(projectA.projectId, [item("recover.md")]), sessionId: "session-recover" });
     api.getSessionOverview.mockResolvedValue({
       ...overviewFor({ ...session(projectA.projectId, [item("recover.md")]), sessionId: "session-recover" }),
-      indexState: "rebuild_required" as const,
+      indexState: "ready" as const,
+      recoveryRequired: true,
+      recoveryReasons: ["stale_in_flight_item"],
     });
     let recoveryFactPublications = 0;
     const unsubscribe = useTaskStore.subscribe((state, previous) => {

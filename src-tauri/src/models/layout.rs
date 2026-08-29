@@ -185,6 +185,24 @@ pub struct ProjectLayout {
     pub schema_context: Option<ProjectContextDocument>,
 }
 
+/// Layout-derived paths owned by Import. Callers must use this facade instead
+/// of assuming the native `.app` layout so compatible vault state remains
+/// isolated under its configured app-state root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportLayoutPaths {
+    app_state_root: String,
+    import_state_root: String,
+}
+
+/// Layout-derived paths owned by the source registry and source artifacts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLayoutPaths {
+    app_state_root: String,
+    source_state_root: String,
+    evidence_root: String,
+    source_write_root: String,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectLayoutConfidence {
@@ -308,7 +326,362 @@ pub struct LayoutDiscoveryBudget<'a> {
     pub cancelled: &'a AtomicBool,
 }
 
+impl ImportLayoutPaths {
+    pub fn session_root(&self, session_id: &str) -> Result<String, BackendError> {
+        join_layout_identity(&self.import_state_root, &[session_id])
+    }
+
+    pub fn session_manifest(&self, session_id: &str) -> Result<String, BackendError> {
+        Ok(format!("{}/session.json", self.session_root(session_id)?))
+    }
+
+    pub fn active_session(&self) -> String {
+        format!("{}/active-session.json", self.import_state_root)
+    }
+
+    pub fn item_root(&self, session_id: &str, item_id: &str) -> Result<String, BackendError> {
+        join_layout_identity(&self.import_state_root, &[session_id, "items", item_id])
+    }
+
+    pub fn item_record(&self, session_id: &str, item_id: &str) -> Result<String, BackendError> {
+        Ok(format!(
+            "{}/items/{item_id}.json",
+            self.session_root(session_id)?
+        ))
+    }
+
+    pub fn item_staging(&self, session_id: &str, item_id: &str) -> Result<String, BackendError> {
+        Ok(format!("{}/staging", self.item_root(session_id, item_id)?))
+    }
+
+    pub fn item_child(
+        &self,
+        session_id: &str,
+        item_id: &str,
+        segments: &[&str],
+    ) -> Result<String, BackendError> {
+        let mut path = self.item_root(session_id, item_id)?;
+        for segment in segments {
+            path.push('/');
+            path.push_str(validated_layout_identity(segment)?);
+        }
+        Ok(path)
+    }
+
+    pub fn item_staging_child(
+        &self,
+        session_id: &str,
+        item_id: &str,
+        segments: &[&str],
+    ) -> Result<String, BackendError> {
+        let mut path = self.item_staging(session_id, item_id)?;
+        for segment in segments {
+            path.push('/');
+            path.push_str(validated_layout_identity(segment)?);
+        }
+        Ok(path)
+    }
+
+    pub fn item_attempts(&self, session_id: &str, item_id: &str) -> Result<String, BackendError> {
+        Ok(format!("{}/attempts", self.item_root(session_id, item_id)?))
+    }
+
+    pub fn manual_merge(&self, session_id: &str, item_id: &str) -> Result<String, BackendError> {
+        Ok(format!(
+            "{}/manual-merge.md",
+            self.item_staging(session_id, item_id)?
+        ))
+    }
+
+    pub fn clipboard_input_root(&self, session_id: &str) -> Result<String, BackendError> {
+        Ok(format!("{}/inputs", self.session_root(session_id)?))
+    }
+
+    pub fn history_root(&self) -> String {
+        format!("{}/import-history", self.app_state_root)
+    }
+
+    pub fn history_entry(&self, history_id: &str) -> Result<String, BackendError> {
+        Ok(format!(
+            "{}/{}.json",
+            self.history_root(),
+            validated_layout_identity(history_id)?
+        ))
+    }
+
+    pub fn history_working_root(&self, history_id: &str) -> Result<String, BackendError> {
+        join_layout_identity(&format!("{}/working", self.history_root()), &[history_id])
+    }
+
+    pub fn history_working_manifest(&self, history_id: &str) -> Result<String, BackendError> {
+        Ok(format!(
+            "{}/manifest.json",
+            self.history_working_root(history_id)?
+        ))
+    }
+
+    pub fn history_working_snapshot(
+        &self,
+        history_id: &str,
+        item_id: &str,
+    ) -> Result<String, BackendError> {
+        Ok(format!(
+            "{}/snapshots/{}.json",
+            self.history_working_root(history_id)?,
+            validated_layout_identity(item_id)?
+        ))
+    }
+
+    pub fn history_working_result(
+        &self,
+        history_id: &str,
+        sequence: u64,
+        item_id: &str,
+    ) -> Result<String, BackendError> {
+        Ok(format!(
+            "{}/results/{sequence:08}-{}.json",
+            self.history_working_root(history_id)?,
+            validated_layout_identity(item_id)?
+        ))
+    }
+
+    pub fn history_preview(&self, history_id: &str, item_id: &str) -> Result<String, BackendError> {
+        let root = format!("{}/import-history-previews", self.app_state_root);
+        Ok(format!(
+            "{}/{}.md",
+            join_layout_identity(&root, &[history_id])?,
+            validated_layout_identity(item_id)?
+        ))
+    }
+
+    pub fn recovery_journal_root(&self) -> String {
+        format!("{}/import-v2-journal", self.app_state_root)
+    }
+
+    pub fn cleanup_root(&self) -> String {
+        format!("{}/import-cleanup", self.app_state_root)
+    }
+
+    pub fn staging_root(&self) -> String {
+        format!("{}/import-staging", self.app_state_root)
+    }
+}
+
+impl SourceLayoutPaths {
+    pub fn manifest(&self, source_id: &str) -> Result<String, BackendError> {
+        Ok(format!(
+            "{}/{}.json",
+            self.source_state_root,
+            validated_layout_identity(source_id)?
+        ))
+    }
+
+    pub fn index(&self) -> String {
+        format!("{}/source-index-v2.json", self.app_state_root)
+    }
+
+    pub fn local_evidence_root(
+        &self,
+        source_id: &str,
+        version_id: &str,
+    ) -> Result<String, BackendError> {
+        join_layout_identity(
+            &format!("{}/sources", self.evidence_root),
+            &[source_id, version_id],
+        )
+    }
+
+    pub fn web_evidence_root(
+        &self,
+        source_id: &str,
+        version_id: &str,
+    ) -> Result<String, BackendError> {
+        join_layout_identity(
+            &format!("{}/web", self.evidence_root),
+            &[source_id, version_id],
+        )
+    }
+
+    pub fn asset_root(&self, source_id: &str, version_id: &str) -> Result<String, BackendError> {
+        join_layout_identity(
+            &format!("{}/assets", self.evidence_root),
+            &[source_id, version_id],
+        )
+    }
+
+    pub fn artifact_version_root(
+        &self,
+        source_id: &str,
+        version_id: &str,
+    ) -> Result<String, BackendError> {
+        join_layout_identity(
+            &format!("{}/source-artifacts", self.app_state_root),
+            &[source_id, version_id],
+        )
+    }
+
+    pub fn artifact_source_root(&self, source_id: &str) -> Result<String, BackendError> {
+        join_layout_identity(
+            &format!("{}/source-artifacts", self.app_state_root),
+            &[source_id],
+        )
+    }
+
+    pub fn baseline(&self, source_id: &str, version_id: &str) -> Result<String, BackendError> {
+        Ok(format!(
+            "{}/baseline.md",
+            self.artifact_version_root(source_id, version_id)?
+        ))
+    }
+
+    pub fn artifact_package_file(
+        &self,
+        source_id: &str,
+        version_id: &str,
+        file_name: &str,
+    ) -> Result<String, BackendError> {
+        Ok(format!(
+            "{}/package/{}",
+            self.artifact_version_root(source_id, version_id)?,
+            validated_layout_identity(file_name)?
+        ))
+    }
+
+    pub fn candidate_root(&self, source_id: &str) -> Result<String, BackendError> {
+        join_layout_identity(
+            &format!("{}/source-candidates", self.app_state_root),
+            &[source_id],
+        )
+    }
+
+    pub fn candidate(&self, source_id: &str, candidate_id: &str) -> Result<String, BackendError> {
+        Ok(format!(
+            "{}/{}.json",
+            self.candidate_root(source_id)?,
+            validated_layout_identity(candidate_id)?
+        ))
+    }
+
+    pub fn candidate_evidence_root(
+        &self,
+        source_id: &str,
+        candidate_id: &str,
+    ) -> Result<String, BackendError> {
+        join_layout_identity(
+            &format!("{}/source-candidate-evidence", self.app_state_root),
+            &[source_id, candidate_id],
+        )
+    }
+
+    pub fn candidate_evidence(
+        &self,
+        source_id: &str,
+        candidate_id: &str,
+        index: usize,
+    ) -> Result<String, BackendError> {
+        Ok(format!(
+            "{}/{index}.bin",
+            self.candidate_evidence_root(source_id, candidate_id)?
+        ))
+    }
+
+    pub fn source_candidate_evidence_root(&self, source_id: &str) -> Result<String, BackendError> {
+        join_layout_identity(
+            &format!("{}/source-candidate-evidence", self.app_state_root),
+            &[source_id],
+        )
+    }
+
+    pub fn deletion_audit(&self, audit_id: &str) -> Result<String, BackendError> {
+        Ok(format!(
+            "{}/source-audit/deletions/{}.json",
+            self.app_state_root,
+            validated_layout_identity(audit_id)?
+        ))
+    }
+
+    pub fn local_source_root(&self, source_id: &str) -> Result<String, BackendError> {
+        join_layout_identity(&format!("{}/sources", self.evidence_root), &[source_id])
+    }
+
+    pub fn web_source_root(&self, source_id: &str) -> Result<String, BackendError> {
+        join_layout_identity(&format!("{}/web", self.evidence_root), &[source_id])
+    }
+
+    pub fn asset_source_root(&self, source_id: &str) -> Result<String, BackendError> {
+        join_layout_identity(&format!("{}/assets", self.evidence_root), &[source_id])
+    }
+
+    pub fn local_derived_file(
+        &self,
+        source_id: &str,
+        version_id: &str,
+        file_name: &str,
+    ) -> Result<String, BackendError> {
+        Ok(format!(
+            "{}/derived/{}",
+            self.local_evidence_root(source_id, version_id)?,
+            validated_layout_identity(file_name)?
+        ))
+    }
+
+    pub fn contains_source_markdown(&self, path: &str) -> bool {
+        let normalized = normalize_project_path(path);
+        normalized == self.source_write_root
+            || normalized.starts_with(&format!("{}/", self.source_write_root))
+    }
+
+    pub fn source_write_root(&self) -> &str {
+        &self.source_write_root
+    }
+
+    pub fn local_markdown(&self, file_name: &str) -> Result<String, BackendError> {
+        Ok(format!(
+            "{}/local/{}",
+            self.source_write_root,
+            validated_layout_identity(file_name)?
+        ))
+    }
+
+    pub fn web_markdown(&self, file_name: &str) -> Result<String, BackendError> {
+        Ok(format!(
+            "{}/web/{}",
+            self.source_write_root,
+            validated_layout_identity(file_name)?
+        ))
+    }
+
+    pub fn web_markdown_in_host(
+        &self,
+        host: &str,
+        file_name: &str,
+    ) -> Result<String, BackendError> {
+        Ok(format!(
+            "{}/web/{}/{}",
+            self.source_write_root,
+            validated_layout_identity(host)?,
+            validated_layout_identity(file_name)?
+        ))
+    }
+}
+
 impl ProjectLayout {
+    pub fn import_paths(&self) -> Result<ImportLayoutPaths, BackendError> {
+        Ok(ImportLayoutPaths {
+            app_state_root: required_layout_root(&self.app_state_root, "appStateRoot")?,
+            import_state_root: required_layout_root(&self.import_state_root, "importStateRoot")?,
+        })
+    }
+
+    pub fn source_paths(&self) -> Result<SourceLayoutPaths, BackendError> {
+        Ok(SourceLayoutPaths {
+            app_state_root: required_layout_root(&self.app_state_root, "appStateRoot")?,
+            source_state_root: required_layout_root(&self.source_state_root, "sourceStateRoot")?,
+            evidence_root: required_layout_root(&self.evidence_root, "evidenceRoot")?,
+            source_write_root: required_layout_root(&self.source_write_root, "sourceWriteRoot")?,
+        })
+    }
+
     pub fn native() -> Self {
         Self {
             app_state_root: some(".app"),
@@ -373,7 +746,8 @@ impl ProjectLayout {
             .canonicalize()
             .map_err(|error| layout_io_error(error, project_root))?;
         let wanted = roles.iter().copied().collect::<HashSet<_>>();
-        let legacy_native_scan = self.app_state_root.is_some() && self.evidence_root.is_some();
+        let legacy_native_scan = self.app_state_root.as_deref() == Some(".app")
+            && self.evidence_root.as_deref() == Some("raw");
         let mut seen_files = HashSet::new();
         let mut seen_directories = HashSet::new();
         let mut files = Vec::new();
@@ -568,7 +942,7 @@ fn discover_compatible_layout(
             // content-write capability: compatible adapters still expose no
             // source/wiki/export write roots until a later explicit mapping.
             app_state_root: compat_enabled.then(|| ".app/compat".into()),
-            evidence_root: None,
+            evidence_root: compat_enabled.then(|| ".app/compat/evidence".into()),
             markdown_roots,
             source_write_root: compatible_mapping
                 .as_ref()
@@ -1141,6 +1515,46 @@ fn safe_file_marker(root: &Path, relative: &str) -> bool {
 
 fn some(value: &str) -> Option<String> {
     Some(value.into())
+}
+
+fn required_layout_root(value: &Option<String>, field: &str) -> Result<String, BackendError> {
+    value.clone().ok_or_else(|| {
+        BackendError::new(
+            "PROJECT_LAYOUT_ROOT_UNAVAILABLE",
+            format!("The project layout does not expose {field}."),
+            false,
+            false,
+        )
+        .with_details(serde_json::json!({ "field": field }))
+    })
+}
+
+fn validated_layout_identity(value: &str) -> Result<&str, BackendError> {
+    if value.is_empty()
+        || matches!(value, "." | "..")
+        || value.contains('/')
+        || value.contains('\\')
+        || value.contains('\0')
+    {
+        return Err(BackendError::new(
+            "PROJECT_LAYOUT_PATH_INVALID",
+            "A layout identity contains an unsafe path component.",
+            false,
+            false,
+        ));
+    }
+    Ok(value)
+}
+
+fn join_layout_identity(root: &str, segments: &[&str]) -> Result<String, BackendError> {
+    let mut path = normalize_project_path(root)
+        .trim_end_matches('/')
+        .to_string();
+    for segment in segments {
+        path.push('/');
+        path.push_str(validated_layout_identity(segment)?);
+    }
+    Ok(path)
 }
 
 fn layout_io_error(error: std::io::Error, path: &Path) -> BackendError {

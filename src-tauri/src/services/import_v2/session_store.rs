@@ -12,8 +12,8 @@ use crate::errors::{
 use crate::models::import_v2::{
     ImportCollectionChildRelation, ImportCollectionRelation, ImportInput, ImportItem,
     ImportItemPage, ImportItemPageFilter, ImportItemStatus, ImportMediaAuthorization,
-    ImportRecoveryAction, ImportResourceMode, ImportSelectionSummary, ImportSession,
-    ImportSessionActionGroup, ImportSessionActionGroupKind, ImportSessionCounts,
+    ImportRecoveryAction, ImportRecoveryReason, ImportResourceMode, ImportSelectionSummary,
+    ImportSession, ImportSessionActionGroup, ImportSessionActionGroupKind, ImportSessionCounts,
     ImportSessionIndexState, ImportSessionOverview, ImportSessionStatus, ImportSessionStatusCounts,
     QualityLevel, IMPORT_V2_SCHEMA_VERSION,
 };
@@ -183,27 +183,11 @@ fn validate_id(value: &str) -> Result<(), BackendError> {
 }
 
 fn session_root(context: &ProjectContext, session_id: &str) -> Result<String, BackendError> {
-    let root = context.layout.import_state_root.as_deref().ok_or_else(|| {
-        BackendError::new(
-            IMPORT_V2_STATE_INVALID,
-            "Import state is unavailable for this project layout.",
-            true,
-            false,
-        )
-    })?;
-    Ok(format!("{root}/{session_id}"))
+    context.layout.import_paths()?.session_root(session_id)
 }
 
 fn active_session_path(context: &ProjectContext) -> Result<String, BackendError> {
-    let root = context.layout.import_state_root.as_deref().ok_or_else(|| {
-        BackendError::new(
-            IMPORT_V2_STATE_INVALID,
-            "Import state is unavailable for this project layout.",
-            true,
-            false,
-        )
-    })?;
-    Ok(format!("{root}/active-session.json"))
+    Ok(context.layout.import_paths()?.active_session())
 }
 
 fn item_projection(item: &ImportItem) -> ItemProjection {
@@ -580,6 +564,7 @@ fn overview_from_control(control: SessionControlRecord) -> ImportSessionOverview
             + control.status_counts.skipped
             + control.status_counts.cancelled,
     );
+    let recovery_reasons = recovery_reasons_from_status_counts(&control.status_counts);
     ImportSessionOverview {
         schema_version: IMPORT_V2_SCHEMA_VERSION,
         session_id: control.session_id,
@@ -597,6 +582,8 @@ fn overview_from_control(control: SessionControlRecord) -> ImportSessionOverview
         status_counts: control.status_counts,
         selection: control.selection,
         index_state: ImportSessionIndexState::Ready,
+        recovery_required: !recovery_reasons.is_empty(),
+        recovery_reasons,
         action_groups: control.action_groups,
         unresolved_count,
         remaining_count,
@@ -993,7 +980,9 @@ impl SessionStore {
                     && control.session_id == session_id
                     && control.project_id == context.project_id
                 {
-                    return Ok(overview_from_control(control));
+                    let mut overview = overview_from_control(control);
+                    append_filesystem_recovery_reasons(context, session_id, &mut overview)?;
+                    return Ok(overview);
                 }
             }
         }
@@ -1016,7 +1005,7 @@ impl SessionStore {
                 "Import session metadata does not match the current project.",
             ));
         }
-        Ok(ImportSessionOverview {
+        let mut overview = ImportSessionOverview {
             schema_version: record.schema_version,
             session_id: record.session_id,
             project_id: record.project_id,
@@ -1036,12 +1025,16 @@ impl SessionStore {
             status_counts: ImportSessionStatusCounts::default(),
             selection: ImportSelectionSummary::default(),
             index_state: ImportSessionIndexState::RebuildRequired,
+            recovery_required: true,
+            recovery_reasons: vec![ImportRecoveryReason::InterruptedTask],
             action_groups: Vec::new(),
             unresolved_count: 0,
             remaining_count: record.item_ids.len() as u64,
             operation_task: None,
             next_cursor: None,
-        })
+        };
+        append_filesystem_recovery_reasons(context, session_id, &mut overview)?;
+        Ok(overview)
     }
 
     pub fn validate_selection_snapshot(
@@ -1305,7 +1298,10 @@ impl SessionStore {
                     "Import session contains duplicate item identifiers.",
                 ));
             }
-            let item_path = format!("{root}/items/{item_id}.json");
+            let item_path = context
+                .layout
+                .import_paths()?
+                .item_record(session_id, item_id)?;
             if !file_store.exists(context, &item_path) {
                 return Err(invalid_session("Import session item data is missing."));
             }
@@ -1363,7 +1359,10 @@ impl SessionStore {
         for item in &session.items {
             file_store.write_json_atomic(
                 context,
-                &format!("{root}/items/{}.json", item.item_id),
+                &context
+                    .layout
+                    .import_paths()?
+                    .item_record(&session.session_id, &item.item_id)?,
                 item,
             )?;
         }
@@ -1614,8 +1613,10 @@ impl SessionStore {
     ) -> Result<ImportItem, BackendError> {
         validate_id(session_id)?;
         validate_id(item_id)?;
-        let root = session_root(context, session_id)?;
-        let path = format!("{root}/items/{item_id}.json");
+        let path = context
+            .layout
+            .import_paths()?
+            .item_record(session_id, item_id)?;
         if !file_store.exists(context, &path) {
             return Err(BackendError::new(
                 IMPORT_V2_ITEM_NOT_FOUND,
@@ -1684,8 +1685,12 @@ impl SessionStore {
             ));
         }
         let after_pointer = pointer_from_control(&after_control)?;
-        let item_path =
-            context.resolve_project_path(&format!("{root}/items/{}.json", after.item_id))?;
+        let item_path = context.resolve_project_path(
+            &context
+                .layout
+                .import_paths()?
+                .item_record(session_id, &after.item_id)?,
+        )?;
         let state_path = context.resolve_project_path(&control_path)?;
         let pointer_absolute = context.resolve_project_path(&pointer_path)?;
         let before_item_bytes = pretty_bytes(&before, "Import session item")?;
@@ -1711,7 +1716,7 @@ impl SessionStore {
                 format!("{:x}", Sha256::digest(before_pointer_bytes)),
             ),
         ];
-        let mut transaction = FileTransaction::new_for_project(&context.root);
+        let mut transaction = FileTransaction::new_for_context(context)?;
         transaction.write_many_if_hash_matches(&writes)?;
         transaction.commit()?;
         for (path, bytes, _) in &writes {
@@ -1728,8 +1733,10 @@ impl SessionStore {
         items: &[ImportItem],
     ) -> Result<(), BackendError> {
         for item in items {
-            let root = session_root(context, session_id)?;
-            let path = format!("{root}/items/{}.json", item.item_id);
+            let path = context
+                .layout
+                .import_paths()?
+                .item_record(session_id, &item.item_id)?;
             if file_store.exists(context, &path) {
                 self.write_item(context, file_store, session_id, item)?;
             } else {
@@ -1777,7 +1784,6 @@ impl SessionStore {
                 "Import item cohort does not match its snapshot.",
             ));
         }
-        let root = session_root(context, session_id)?;
         let mut revised_items = Vec::with_capacity(replacements.len());
         let mut writes = Vec::with_capacity(originals.len() + 2);
         for (before, after) in originals.iter().zip(replacements) {
@@ -1805,7 +1811,12 @@ impl SessionStore {
             let desired = serde_json::to_vec_pretty(&revised)
                 .map_err(|_| invalid_session("Import session item could not be serialized."))?;
             writes.push((
-                context.resolve_project_path(&format!("{root}/items/{}.json", after.item_id))?,
+                context.resolve_project_path(
+                    &context
+                        .layout
+                        .import_paths()?
+                        .item_record(session_id, &after.item_id)?,
+                )?,
                 desired,
                 expected,
             ));
@@ -1815,7 +1826,7 @@ impl SessionStore {
         writes.extend(
             self.control_writes_for_item_changes(context, file_store, session_id, &changes)?,
         );
-        let mut transaction = FileTransaction::new_for_project(&context.root);
+        let mut transaction = FileTransaction::new_for_context(context)?;
         transaction.write_many_if_hash_matches_with_cancel(&writes, should_cancel)?;
         transaction.commit()?;
         for (path, bytes, _) in &writes {
@@ -1871,7 +1882,12 @@ impl SessionStore {
             let desired = serde_json::to_vec_pretty(&revised)
                 .map_err(|_| invalid_session("Import session item could not be serialized."))?;
             writes.push((
-                context.resolve_project_path(&format!("{root}/items/{}.json", after.item_id))?,
+                context.resolve_project_path(
+                    &context
+                        .layout
+                        .import_paths()?
+                        .item_record(&after_session.session_id, &after.item_id)?,
+                )?,
                 desired,
                 format!("{:x}", Sha256::digest(expected_bytes)),
             ));
@@ -1895,7 +1911,7 @@ impl SessionStore {
             &changes,
         )?);
 
-        let mut transaction = FileTransaction::new_for_project(&context.root);
+        let mut transaction = FileTransaction::new_for_context(context)?;
         transaction.write_many_if_hash_matches_with_cancel(&writes, should_cancel)?;
         transaction.commit()?;
         for (path, bytes, _) in &writes {
@@ -1950,7 +1966,7 @@ impl SessionStore {
         let before_record: SessionRecord =
             file_store.read_json(context, &format!("{root}/session.json"))?;
         file_store.ensure_dir(context, &format!("{root}/order"))?;
-        let mut transaction = FileTransaction::new_for_project(&context.root);
+        let mut transaction = FileTransaction::new_for_context(context)?;
         let mut observed = Vec::new();
 
         let mut stage_existing =
@@ -2027,6 +2043,116 @@ impl SessionStore {
         file_store.ensure_dir(context, &format!("{root}/items"))?;
         self.write_items(context, file_store, &session.session_id, new_items)?;
         self.write_session_record(context, file_store, session)
+    }
+}
+
+fn recovery_reasons_from_status_counts(
+    counts: &ImportSessionStatusCounts,
+) -> Vec<ImportRecoveryReason> {
+    let mut reasons = Vec::new();
+    if counts.inspecting > 0
+        || counts.extracting > 0
+        || counts.validating > 0
+        || counts.committing > 0
+    {
+        reasons.push(ImportRecoveryReason::StaleInFlightItem);
+    }
+    reasons
+}
+
+fn append_filesystem_recovery_reasons(
+    context: &ProjectContext,
+    session_id: &str,
+    overview: &mut ImportSessionOverview,
+) -> Result<(), BackendError> {
+    let import_paths = context.layout.import_paths()?;
+    if super::transaction::incomplete_journal_touches_session(context, session_id)? {
+        push_recovery_reason(overview, ImportRecoveryReason::IncompleteJournal);
+    }
+
+    let items_root = context
+        .resolve_project_path(&format!("{}/items", import_paths.session_root(session_id)?))?;
+    let mut inspected = 0usize;
+    let mut pending = vec![items_root];
+    let mut residual_staging = false;
+    while let Some(directory) = pending.pop() {
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(invalid_session(&format!(
+                    "Import recovery state could not be inspected: {error}"
+                )))
+            }
+        };
+        for entry in entries {
+            if inspected >= 2_048 {
+                break;
+            }
+            inspected += 1;
+            let entry = entry.map_err(|error| {
+                invalid_session(&format!(
+                    "Import recovery state could not be inspected: {error}"
+                ))
+            })?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                invalid_session(&format!(
+                    "Import recovery state could not be inspected: {error}"
+                ))
+            })?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            let under_staging = path
+                .components()
+                .any(|component| component.as_os_str() == "staging");
+            residual_staging |= under_staging;
+            let partial_file = metadata.is_file()
+                && (name.ends_with(".part")
+                    || name.ends_with(".partial")
+                    || name.ends_with(".download"));
+            if partial_file {
+                let capability_partial = path.components().any(|component| {
+                    let component = component.as_os_str().to_string_lossy().to_ascii_lowercase();
+                    component.contains("capability") || component.contains("install")
+                });
+                push_recovery_reason(
+                    overview,
+                    if capability_partial {
+                        ImportRecoveryReason::PartialCapabilityDownload
+                    } else {
+                        ImportRecoveryReason::PartialRemoteDownload
+                    },
+                );
+            }
+            if metadata.is_dir() {
+                pending.push(path);
+            }
+        }
+        if inspected >= 2_048 {
+            break;
+        }
+    }
+    if residual_staging
+        && (overview.index_state == ImportSessionIndexState::RebuildRequired
+            || overview.recovery_reasons.iter().any(|reason| {
+                matches!(
+                    reason,
+                    ImportRecoveryReason::StaleInFlightItem | ImportRecoveryReason::InterruptedTask
+                )
+            }))
+    {
+        push_recovery_reason(overview, ImportRecoveryReason::ResidualStaging);
+    }
+    overview.recovery_required = !overview.recovery_reasons.is_empty();
+    Ok(())
+}
+
+fn push_recovery_reason(overview: &mut ImportSessionOverview, reason: ImportRecoveryReason) {
+    if !overview.recovery_reasons.contains(&reason) {
+        overview.recovery_reasons.push(reason);
     }
 }
 
@@ -2586,6 +2712,8 @@ mod tests {
             .unwrap();
         assert_eq!(before.remaining_count, 6);
         assert_eq!(before.unresolved_count, 6);
+        assert!(!before.recovery_required);
+        assert!(before.recovery_reasons.is_empty());
         assert_eq!(before.action_groups.len(), 6);
         assert!(before.action_groups.iter().any(|group| {
             group.kind == ImportSessionActionGroupKind::Login
