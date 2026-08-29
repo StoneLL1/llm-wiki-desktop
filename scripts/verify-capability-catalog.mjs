@@ -3,25 +3,21 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
+import {
+  CAPABILITY_PACKS,
+  CAPABILITY_TARGETS,
+  MODEL_CAPABILITY_PACKS,
+  PRODUCT_MANIFEST,
+  expectedReleaseMatrix,
+} from "./verify-product-capabilities.mjs";
+
+export { CAPABILITY_PACKS, CAPABILITY_TARGETS, MODEL_CAPABILITY_PACKS };
+
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 export const repositoryRoot = path.resolve(scriptDirectory, "..");
 
-export const CAPABILITY_PACKS = [
-  "asr-sensevoice-small",
-  "browser-runtime",
-  "browser-runtime-lite",
-  "media-metadata",
-  "ocr-cjk-accurate",
-];
-
-export const CAPABILITY_TARGETS = [
-  "aarch64-apple-darwin",
-  "x86_64-apple-darwin",
-  "x86_64-pc-windows-msvc",
-  "x86_64-unknown-linux-gnu",
-];
-
-const MODEL_CAPABILITY_PACKS = new Set(["asr-sensevoice-small", "ocr-cjk-accurate"]);
+const MODEL_PACK_SET = new Set(MODEL_CAPABILITY_PACKS);
+const PRODUCT_DEFINITIONS = new Map(PRODUCT_MANIFEST.definitions.map((definition) => [definition.capabilityId, definition]));
 const CAPABILITY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const SEMVER_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const RELEASE_TAG_PATTERN = /^app-v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-rc\.[1-9]\d*)?$/;
@@ -121,8 +117,19 @@ const entryErrors = (entry, index, expectedTag) => {
       errors.push(label + " " + field + " must be a positive integer");
     }
   }
+  const definition = PRODUCT_DEFINITIONS.get(entry.capabilityId);
+  if (!definition || definition.distributionTier !== "published") {
+    errors.push(label + " capabilityId is not a published product capability");
+  } else {
+    if (!definition.supportedTargets.includes(entry.targetTriple)) {
+      errors.push(label + " targetTriple is not supported by the product capability");
+    }
+    if (entry.license !== definition.licensePolicy.expression) {
+      errors.push(label + " license must match the product capability license policy");
+    }
+  }
   const requiresModelBytes = typeof entry.capabilityId === "string"
-    && MODEL_CAPABILITY_PACKS.has(entry.capabilityId);
+    && MODEL_PACK_SET.has(entry.capabilityId);
   if (requiresModelBytes && (!Number.isSafeInteger(entry.modelBytes) || entry.modelBytes <= 0)) {
     errors.push(label + " modelBytes is required for model capability packs");
   }
@@ -197,8 +204,10 @@ export function verifyCapabilityCatalog({
       errors.push(...entryErrors(entry, index, expectedTag));
     });
     if (releaseMode) {
-      if (entries.length !== 20) {
-        errors.push("release catalog must contain exactly 20 entries, found " + entries.length);
+      const expectedMatrix = expectedReleaseMatrix(PRODUCT_MANIFEST);
+      if (entries.length !== expectedMatrix.length) {
+        errors.push("release catalog must contain the manifest-derived exact matrix of "
+          + expectedMatrix.length + " entries, found " + entries.length);
       }
       if (entries.length === 0) {
         errors.push("release builds cannot embed an empty capability catalog");
@@ -215,7 +224,11 @@ export function verifyCapabilityCatalog({
         errors.push("release catalog must cover exactly the four supported desktop targets");
       }
       if (JSON.stringify([...packs].sort()) !== JSON.stringify([...CAPABILITY_PACKS].sort())) {
-        errors.push("release catalog must cover exactly the five signed capability packs");
+        errors.push("release catalog must cover exactly the product manifest's published capability packs");
+      }
+      const expectedPairs = new Set(expectedMatrix.map((entry) => entry.capabilityId + "\u0000" + entry.targetTriple));
+      for (const pair of expectedPairs) {
+        if (!pairs.has(pair)) errors.push("release catalog is missing product matrix entry " + pair.replace("\u0000", " / "));
       }
     }
   }

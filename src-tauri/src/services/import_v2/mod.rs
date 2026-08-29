@@ -33,6 +33,7 @@ pub mod pack_protocol;
 pub mod pdf_router;
 pub mod platform_network_policy;
 pub mod platform_provider;
+pub mod product_capability;
 pub mod quality_gate;
 pub(crate) mod redaction;
 pub mod remote_media_retention;

@@ -123,6 +123,7 @@ export function ImportAsrDialog({
     task,
     selected?.installable ?? false,
     selected?.available ?? false,
+    selected?.unavailableReasonCode ?? null,
   );
   const taskBusy = task !== null && ["queued", "running", "cancelling"].includes(task.status);
   const blocked = busy || taskBusy;
@@ -273,7 +274,10 @@ export function ImportAsrDialog({
             <input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} disabled={blocked || loading} />
             <span>{t("importV2.asr.remember")}</span>
           </label>
-          {!selected?.available && !["not_installed", "signed_release_unavailable"].includes(installState.kind) ? (
+          {installState.kind === "catalog_unavailable" ? (
+            <p className="mt-3 text-[11px] text-[var(--warning-text)]" role="alert">{t("importV2.capability.state.catalog_unavailable")}</p>
+          ) : null}
+          {!selected?.available && !["not_installed", "catalog_unavailable", "signed_release_unavailable"].includes(installState.kind) ? (
             <div className="mt-3" role="status">
               <div className="flex items-center justify-between gap-3 text-[11px]">
                 <span>{t(`importV2.capability.state.${installState.kind}`)}</span>

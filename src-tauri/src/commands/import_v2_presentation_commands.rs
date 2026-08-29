@@ -35,7 +35,8 @@ use crate::models::paths::ProjectContext;
 use crate::models::task::{BackendTask, TaskResult, TaskStatus};
 use crate::services::import_v2::activation::ImportV2ActivationService;
 use crate::services::import_v2::capability_installer::{
-    catalog_entry, install_catalog_entry, CapabilityInstallPhase,
+    catalog_availability, catalog_entry, install_catalog_entry, CapabilityCatalogAvailability,
+    CapabilityInstallPhase,
 };
 use crate::services::import_v2::capability_runtime::CapabilityRuntimeStatus;
 use crate::services::import_v2::migration::{
@@ -894,6 +895,14 @@ pub fn get_import_capability_requirement_v2(
         .into_iter()
         .any(|status| status.capability_id == capability_id && status.available);
     let catalog = catalog_entry(capability_id, &requirement.target_triple);
+    let unavailable_reason_code = (!available && catalog.is_none()).then(|| {
+        if catalog_availability() == CapabilityCatalogAvailability::CatalogUnavailable {
+            "catalog_unavailable"
+        } else {
+            "signed_release_unavailable"
+        }
+        .into()
+    });
     let requirement_revision = capability_requirement_revision(item, capability_id, route);
     Ok(ImportCapabilityRequirement {
         requirement,
@@ -905,6 +914,7 @@ pub fn get_import_capability_requirement_v2(
         model_bytes: catalog.as_ref().and_then(|entry| entry.model_bytes),
         license: Some(license.into()),
         fallback: (!available && catalog.is_none()).then_some("This source build has no signed capability artifact for the current target. Release CI must publish the target pack and catalog entry before installation can be enabled.".into()),
+        unavailable_reason_code,
         requirement_revision,
     })
 }
@@ -1693,6 +1703,8 @@ fn build_asr_profile_plan(
     let unavailable_reason_code = (!available).then(|| {
         if installable {
             "not_installed".into()
+        } else if catalog_availability() == CapabilityCatalogAvailability::CatalogUnavailable {
+            "catalog_unavailable".into()
         } else {
             runtime
                 .and_then(|status| status.reason.clone())

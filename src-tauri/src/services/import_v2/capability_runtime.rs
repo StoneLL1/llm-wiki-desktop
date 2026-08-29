@@ -582,6 +582,22 @@ mod tests {
     }
 
     #[test]
+    fn legacy_runtime_specs_resolve_to_product_definitions_while_release_is_disabled() {
+        let product =
+            super::super::product_capability::ProductCapabilityManifest::embedded().unwrap();
+        for spec in PACK_SPECS {
+            let definition = product
+                .definition(spec.id)
+                .unwrap_or_else(|| panic!("{} is missing from the product manifest", spec.id));
+            assert!(definition.routes.iter().any(|route| route == spec.route));
+            assert!(spec
+                .licenses
+                .iter()
+                .all(|license| *license == definition.license_policy.expression));
+        }
+    }
+
+    #[test]
     #[ignore = "requires scripts/prepare-sensevoice-dev.mjs"]
     fn prepared_development_sensevoice_pack_passes_runtime_integrity() {
         let development_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../.dev-capabilities");

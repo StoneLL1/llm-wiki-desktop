@@ -135,6 +135,25 @@ pub struct CapabilityCatalogEntry {
     pub license: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityCatalogAvailability {
+    Available,
+    CatalogUnavailable,
+}
+
+pub fn catalog_availability() -> CapabilityCatalogAvailability {
+    let catalog = serde_json::from_str::<InstallCatalog>(include_str!(concat!(
+        env!("OUT_DIR"),
+        "/capabilities/install-catalog.json"
+    )));
+    match catalog {
+        Ok(catalog) if catalog.schema_version == 1 && !catalog.entries.is_empty() => {
+            CapabilityCatalogAvailability::Available
+        }
+        _ => CapabilityCatalogAvailability::CatalogUnavailable,
+    }
+}
+
 pub fn catalog_entry(capability_id: &str, target_triple: &str) -> Option<CapabilityCatalogEntry> {
     let catalog: InstallCatalog = serde_json::from_str(include_str!(concat!(
         env!("OUT_DIR"),
@@ -1798,7 +1817,7 @@ mod tests {
         )))
         .unwrap();
         let mode = record["mode"].as_str().unwrap();
-        assert!(matches!(mode, "source" | "release"));
+        assert!(matches!(mode, "development" | "distributable"));
         assert_eq!(catalog.schema_version, 1);
         assert_eq!(
             catalog.entries.len() as u64,
@@ -1809,10 +1828,19 @@ mod tests {
             .entries
             .iter()
             .all(|entry| !entry.url.contains("placeholder")));
-        if mode == "release" {
+        if mode == "distributable" {
             assert!(
                 !catalog.entries.is_empty(),
                 "release builds cannot embed an empty capability catalog"
+            );
+            assert_eq!(
+                catalog_availability(),
+                CapabilityCatalogAvailability::Available
+            );
+        } else if catalog.entries.is_empty() {
+            assert_eq!(
+                catalog_availability(),
+                CapabilityCatalogAvailability::CatalogUnavailable
             );
         }
     }

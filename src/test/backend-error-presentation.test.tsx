@@ -357,6 +357,7 @@ describe("BackendError presentation", () => {
       modelBytes: null,
       license: "Apache-2.0",
       fallback: null,
+      unavailableReasonCode: null,
       requirementRevision: "fixture-browser-runtime-revision",
     };
     const onInstall = vi.fn()
