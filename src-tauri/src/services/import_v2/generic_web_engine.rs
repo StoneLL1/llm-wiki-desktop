@@ -22,10 +22,14 @@ use crate::services::import_v2::platform_provider::{
     extract_platform_document, Platform, PlatformSubtitleKind,
 };
 use crate::services::import_v2::redaction::redact_sensitive_text;
+use crate::services::import_v2::remote_media_retention::{
+    checkpoint_remote_media_partial, clear_remote_media_partial, load_remote_media_partial,
+};
 use crate::services::import_v2::subtitle::{parse_subtitle_segments, render_subtitle_markdown};
 use crate::services::import_v2::url_policy::{PrivateTargetGrant, SessionWebTarget, UrlPolicy};
 use crate::services::import_v2::web_fetch::{
-    WebFetchArtifact, WebFetchContent, WebFetchPolicy, WebFetchProgress, WebFetchService,
+    WebFetchArtifact, WebFetchCheckpoint, WebFetchContent, WebFetchPolicy, WebFetchProgress,
+    WebFetchResume, WebFetchService,
 };
 use crate::services::import_v2::web_target_store::WebTargetStore;
 use crate::tasks::task_model::CancellationToken;
@@ -204,6 +208,7 @@ impl ImportEngine for GenericWebEngine {
                 "The generic web engine supports URL inputs only.",
             ));
         }
+        self.web_targets.renew(&request.input.locator)?;
         let target = self.web_targets.resolve(
             &request.input.locator,
             request.input.normalized_locator.as_deref(),
@@ -231,9 +236,38 @@ impl ImportEngine for GenericWebEngine {
         let direct_media_url = is_direct_media_locator(&request.input);
         let direct_image_url = is_direct_image_locator(&request.input);
         if direct_media_url {
-            fetch_policy.content = WebFetchContent::Media;
-            fetch_policy.max_response_bytes = 256 * 1024 * 1024;
-        } else if direct_image_url {
+            let project_root = Path::new(&request.project_root);
+            let staging = resolve_inside(project_root, &request.staging_root)?;
+            let download_root = staging.join("media-download");
+            ensure_bound_directory(project_root, &download_root).map_err(|_| {
+                unavailable("The direct media staging directory could not be created.")
+            })?;
+            let partial_path = download_root.join("partial.bin");
+            let artifact = match fetch_media_to_file(
+                &target.public.public_url,
+                None,
+                &item_id,
+                cancellation,
+                &target.public.public_url,
+                &request.input.locator,
+                project_root,
+                &staging,
+                &partial_path,
+                report_progress,
+                private_grant.as_ref(),
+                Some(target.clone()),
+            ) {
+                Ok(artifact) => artifact,
+                Err(error) => {
+                    let _ = clear_remote_media_partial(project_root, &staging);
+                    return Err(error);
+                }
+            };
+            let result = direct_media_result(request, cancellation, &artifact, Some(&partial_path));
+            let _ = clear_remote_media_partial(project_root, &staging);
+            return result;
+        }
+        if direct_image_url {
             fetch_policy.content = WebFetchContent::Image;
             fetch_policy.max_response_bytes = 8 * 1024 * 1024;
         }
@@ -287,7 +321,7 @@ impl ImportEngine for GenericWebEngine {
         if is_media_content_type(&artifact.content_type)
             || (direct_media_url && artifact.content_type.contains("octet-stream"))
         {
-            return direct_media_result(request, cancellation, &artifact);
+            return direct_media_result(request, cancellation, &artifact, None);
         }
         if (direct_image_url || artifact.content_type.starts_with("image/"))
             && (artifact.content_type.starts_with("image/")
@@ -752,9 +786,11 @@ impl ImportEngine for GenericWebEngine {
                         warnings.push("IMPORT_MEDIA_REUSED_COMPLETE_DOWNLOAD".into());
                         Some((media, None))
                     } else {
-                        let download =
-                            TemporaryMediaWorkspace::create_unique(&staging, ".media-fetch")?;
-                        let download_path = download.path().join("response.bin");
+                        let download_root = staging.join("media-download");
+                        ensure_bound_directory(project_root, &download_root).map_err(|_| {
+                            unavailable("The remote media staging directory could not be created.")
+                        })?;
+                        let download_path = download_root.join("partial.bin");
                         match fetch_media_to_file(
                             &media_url,
                             platform,
@@ -765,12 +801,17 @@ impl ImportEngine for GenericWebEngine {
                                 .normalized_locator
                                 .as_deref()
                                 .unwrap_or(&request.input.locator),
+                            &request.input.locator,
+                            project_root,
+                            &staging,
                             &download_path,
                             report_progress,
                             private_grant.as_ref(),
+                            None,
                         ) {
-                            Ok(media) => Some((media, Some(download))),
+                            Ok(media) => Some((media, Some(download_path))),
                             Err(error) if transcription_ready => {
+                                let _ = clear_remote_media_partial(project_root, &staging);
                                 markdown = replace_markdown_asset_reference(
                                     &markdown,
                                     &media_url,
@@ -782,7 +823,10 @@ impl ImportEngine for GenericWebEngine {
                                 ));
                                 None
                             }
-                            Err(error) => return Err(error),
+                            Err(error) => {
+                                let _ = clear_remote_media_partial(project_root, &staging);
+                                return Err(error);
+                            }
                         }
                     }
                 } else {
@@ -794,7 +838,7 @@ impl ImportEngine for GenericWebEngine {
                             !is_trusted_platform_asset_url(platform, &media.final_public_url)
                         }) =>
                     {
-                        drop(download);
+                        let _ = clear_remote_media_partial(project_root, &staging);
                         warnings.push(
                             "Platform media redirect left the verified host allowlist.".into(),
                         );
@@ -820,10 +864,9 @@ impl ImportEngine for GenericWebEngine {
                         let path = store_completed_media_download(
                             Path::new(&request.project_root),
                             &staging,
-                            &download.path().join("response.bin"),
+                            &download,
                             &media,
                         )?;
-                        drop(download);
                         path
                     } else {
                         staging.join("media-download/payload.bin")
@@ -833,7 +876,7 @@ impl ImportEngine for GenericWebEngine {
                     {
                         let relative = format!("assets/original-media.{extension}");
                         let durable_path = staging.join(&relative);
-                        if copy_bound_file(project_root, &downloaded_path, &durable_path).is_err() {
+                        if link_or_copy(&downloaded_path, &durable_path).is_err() {
                             markdown = replace_markdown_asset_reference(
                                 &markdown,
                                 &media_url,
@@ -1232,11 +1275,18 @@ fn direct_media_result(
     request: &EngineRequest,
     cancellation: &CancellationToken,
     artifact: &crate::services::import_v2::web_fetch::WebFetchArtifact,
+    source_file: Option<&Path>,
 ) -> Result<EngineResult, BackendError> {
     let project_root = Path::new(&request.project_root);
     let staging = resolve_inside(project_root, &request.staging_root)?;
     ensure_bound_directory(project_root, &staging)
         .map_err(|_| unavailable("The media staging directory could not be created."))?;
+    let source_snapshot = staging.join("source.bin");
+    match source_file {
+        Some(source) => copy_bound_file(project_root, source, &source_snapshot),
+        None => write_bound_bytes(project_root, &source_snapshot, &artifact.bytes),
+    }
+    .map_err(|_| unavailable("The direct media source could not be staged."))?;
     let extension = media_extension(&artifact.content_type, &artifact.final_public_url);
     let lower_url = artifact.final_public_url.to_ascii_lowercase();
     let kind = if artifact
@@ -1260,7 +1310,7 @@ fn direct_media_result(
     let mut warnings = Vec::new();
     if request.media_save_mode == MediaSaveMode::PreserveOriginal {
         let relative = format!("assets/original-media.{extension}");
-        if write_bound_bytes(project_root, &staging.join(&relative), &artifact.bytes).is_ok() {
+        if link_or_copy(&source_snapshot, &staging.join(&relative)).is_ok() {
             markdown.push_str(&format!("\n[Download original media]({relative})\n"));
             asset_paths.push(relative);
         } else {
@@ -1272,7 +1322,7 @@ fn direct_media_result(
     let continuation = if request.local_asr_authorized {
         let temporary = TemporaryMediaWorkspace::create_unique(&staging, ".asr-input")?;
         let temporary_path = temporary.path().join(format!("input.{extension}"));
-        write_bound_bytes(project_root, &temporary_path, &artifact.bytes)
+        link_or_copy(&source_snapshot, &temporary_path)
             .map_err(|_| unavailable("The temporary media could not be staged."))?;
         let temporary_relative = temporary_path
             .strip_prefix(&staging)
@@ -1320,22 +1370,19 @@ fn direct_media_result(
     };
     let metadata_bytes = serde_json::to_vec_pretty(&metadata)
         .map_err(|_| unavailable("The direct media metadata could not be serialized."))?;
-    write_bound_bytes(project_root, &staging.join("source.bin"), &artifact.bytes)
-        .and_then(|_| {
-            write_bound_bytes(
-                project_root,
-                &staging.join("document.md"),
-                markdown.as_bytes(),
-            )
-        })
-        .and_then(|_| {
-            write_bound_bytes(
-                project_root,
-                &staging.join("metadata.json"),
-                &metadata_bytes,
-            )
-        })
-        .map_err(|_| unavailable("The direct media evidence could not be staged."))?;
+    write_bound_bytes(
+        project_root,
+        &staging.join("document.md"),
+        markdown.as_bytes(),
+    )
+    .and_then(|_| {
+        write_bound_bytes(
+            project_root,
+            &staging.join("metadata.json"),
+            &metadata_bytes,
+        )
+    })
+    .map_err(|_| unavailable("The direct media evidence could not be staged."))?;
     if cancellation.is_cancelled() {
         return Err(cancelled());
     }
@@ -1824,11 +1871,19 @@ fn store_completed_media_download(
     let manifest_path = root.join("complete.json");
     let (binding, _) = BoundProjectMutationRoot::ensure_and_bind(project_root, &payload)
         .map_err(|_| unavailable("The completed media cache could not be created."))?;
-    let mut downloaded = std::fs::File::open(downloaded_path)
-        .map_err(|_| unavailable("The completed media payload could not be staged."))?;
-    let pending_payload = binding
-        .copy_synced_temp(&payload, &mut downloaded)
-        .map_err(|_| unavailable("The completed media payload could not be staged."))?;
+    let direct_partial = downloaded_path == root.join("partial.bin");
+    let pending_payload = if direct_partial {
+        binding
+            .open_regular(downloaded_path)
+            .map_err(|_| unavailable("The completed media payload could not be staged."))?;
+        downloaded_path.to_path_buf()
+    } else {
+        let mut downloaded = std::fs::File::open(downloaded_path)
+            .map_err(|_| unavailable("The completed media payload could not be staged."))?;
+        binding
+            .copy_synced_temp(&payload, &mut downloaded)
+            .map_err(|_| unavailable("The completed media payload could not be staged."))?
+    };
     let byte_len = binding
         .open_regular(&pending_payload)
         .and_then(|file| file.metadata())
@@ -1856,8 +1911,10 @@ fn store_completed_media_download(
     binding
         .install_prepared(&pending_manifest, &manifest_path)
         .map_err(|_| unavailable("The completed media cache manifest could not be finalized."))?;
-    drop(downloaded);
-    let _ = remove_project_file(project_root, downloaded_path);
+    let _ = binding.remove_file(&root.join("partial-v2.json"));
+    if !direct_partial {
+        let _ = remove_project_file(project_root, downloaded_path);
+    }
     Ok(payload)
 }
 
@@ -1898,24 +1955,53 @@ fn fetch_media_to_file(
     item_id: &str,
     cancellation: &CancellationToken,
     referer: &str,
+    locator_identity: &str,
+    project_root: &Path,
+    staging: &Path,
     destination: &Path,
     report_progress: &EngineProgressReporter<'_>,
     private_grant: Option<&PrivateTargetGrant>,
+    resolved_target: Option<crate::services::import_v2::url_policy::SessionWebTarget>,
 ) -> Result<crate::services::import_v2::web_fetch::WebFetchArtifact, BackendError> {
     report_progress(EngineProgress {
         current: 0,
         total: None,
         label: "media.downloading".into(),
     })?;
-    let target = UrlPolicy.normalize_for_session(url)?;
-    let item_id = item_id.to_string();
-    let referer = referer.to_string();
-    let destination = destination.to_path_buf();
+    let target = match resolved_target {
+        Some(target) => target,
+        None => UrlPolicy.normalize_for_session(url)?,
+    };
+    let canonical_url = target.public.public_url.clone();
+    let partial =
+        load_remote_media_partial(project_root, staging, &canonical_url, locator_identity)?;
+    let resume = partial
+        .as_ref()
+        .filter(|partial| partial.journal.range_supported)
+        .map(|partial| WebFetchResume {
+            downloaded_bytes: partial.journal.downloaded_bytes,
+            total_bytes: partial.journal.total_bytes,
+            etag: partial.journal.etag.clone(),
+            last_modified: partial.journal.last_modified.clone(),
+            partial_sha256: partial.journal.partial_sha256.clone(),
+        });
+    let (destination_binding, _) =
+        BoundProjectMutationRoot::ensure_and_bind(project_root, destination)
+            .map_err(|_| unavailable("The remote media destination could not be bound safely."))?;
+    let worker_file = destination_binding
+        .open_regular_mutate_or_create(destination, false)
+        .map_err(|_| unavailable("The remote media destination could not be opened safely."))?;
+    let worker_item_id = item_id.to_string();
+    let worker_referer = referer.to_string();
+    let worker_locator_identity = locator_identity.to_string();
+    let worker_project_root = project_root.to_path_buf();
+    let worker_staging = staging.to_path_buf();
     let token = cancellation.clone();
-    let private_grant = private_grant.cloned();
+    let worker_private_grant = private_grant.cloned();
     let worker_stop = CancellationToken::new();
     let worker_stop_for_fetch = worker_stop.clone();
     let (progress_sender, progress_receiver) = std::sync::mpsc::channel::<WebFetchProgress>();
+    let retry_target = target.clone();
     let worker = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1923,14 +2009,14 @@ fn fetch_media_to_file(
             .map_err(|_| unavailable("The media fetch runtime could not be started."))?;
         let mut last_progress_bucket = None;
         runtime.block_on(
-            WebFetchService::default().fetch_to_file(
+            WebFetchService::default().fetch_to_open_file_resumable(
                 target,
                 &UrlPolicy::default(),
                 &WebFetchPolicy {
-                    max_response_bytes: 1024 * 1024 * 1024,
+                    max_response_bytes: 32 * 1024 * 1024 * 1024,
                     total_timeout_ms: 30 * 60 * 1000,
                     content: WebFetchContent::TemporaryMedia,
-                    referer: Some(referer),
+                    referer: Some(worker_referer),
                     require_https: platform.is_some(),
                     allowed_host_suffixes: platform
                         .map(trusted_platform_asset_suffixes)
@@ -1940,9 +2026,10 @@ fn fetch_media_to_file(
                         .collect(),
                     ..WebFetchPolicy::default()
                 },
-                private_grant.as_ref(),
-                &item_id,
-                &destination,
+                worker_private_grant.as_ref(),
+                &worker_item_id,
+                worker_file,
+                resume.as_ref(),
                 move |progress| {
                     let bucket = progress
                         .total_bytes
@@ -1956,6 +2043,42 @@ fn fetch_media_to_file(
                     }
                     last_progress_bucket = Some(bucket);
                     let _ = progress_sender.send(progress);
+                },
+                move |checkpoint: WebFetchCheckpoint| {
+                    if let Some(total) = checkpoint.total_bytes {
+                        let required = total
+                            .saturating_mul(3)
+                            .saturating_add(256 * 1024 * 1024);
+                        if crate::services::import_v2::remote_media_retention::available_disk_bytes(
+                            &worker_project_root,
+                        )
+                        .is_some_and(|available| available < required)
+                        {
+                            return Err(BackendError::new(
+                                "IMPORT_FILE_INSUFFICIENT_DISK",
+                                "Remote media requires more temporary disk space than is available.",
+                                true,
+                                true,
+                            )
+                            .with_details(serde_json::json!({
+                                "requiredBytes": required,
+                                "sourceBytes": total,
+                            })));
+                        }
+                    }
+                    checkpoint_remote_media_partial(
+                        &worker_project_root,
+                        &worker_staging,
+                        &canonical_url,
+                        &worker_locator_identity,
+                        checkpoint.downloaded_bytes,
+                        checkpoint.total_bytes,
+                        checkpoint.etag,
+                        checkpoint.last_modified,
+                        checkpoint.range_supported,
+                        checkpoint.partial_sha256,
+                    )?;
+                    Ok(())
                 },
                 || token.is_cancelled() || worker_stop_for_fetch.is_cancelled(),
             ),
@@ -1984,7 +2107,26 @@ fn fetch_media_to_file(
     while let Ok(progress) = progress_receiver.try_recv() {
         report_media_download_progress(report_progress, progress)?;
     }
-    fetched
+    match fetched {
+        Err(error) if error.code == "IMPORT_WEB_PARTIAL_IDENTITY_CHANGED" => {
+            clear_remote_media_partial(project_root, staging)?;
+            fetch_media_to_file(
+                url,
+                platform,
+                item_id,
+                cancellation,
+                referer,
+                locator_identity,
+                project_root,
+                staging,
+                destination,
+                report_progress,
+                private_grant,
+                Some(retry_target),
+            )
+        }
+        result => result,
+    }
 }
 
 fn report_media_download_progress(
@@ -2285,7 +2427,8 @@ mod tests {
             elapsed_ms: 1,
         };
 
-        let result = direct_media_result(&request, &CancellationToken::new(), &artifact).unwrap();
+        let result =
+            direct_media_result(&request, &CancellationToken::new(), &artifact, None).unwrap();
 
         assert!(result.asset_paths.is_empty());
         assert!(result.continuation.is_some());

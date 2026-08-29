@@ -18,6 +18,7 @@ describe("Batch 5 import confirmations", () => {
   it("keeps collection discovery order while adding only selected children", async () => {
     const onConfirm = vi.fn().mockResolvedValue(undefined);
     const preview: ImportCollectionPreview = {
+      taskId: "task-collection",
       collectionRef: "opaque-collection",
       sourceUrl: "https://space.bilibili.com/42/video",
       platform: "bilibili",
@@ -75,6 +76,7 @@ describe("Batch 5 import confirmations", () => {
 
   it("supports keyboard-reachable inversion and incremental loading for long collections", () => {
     const preview: ImportCollectionPreview = {
+      taskId: "task-long-collection",
       collectionRef: "opaque-long-collection",
       sourceUrl: "https://www.bilibili.com/medialist/play/long",
       platform: "bilibili",
@@ -112,6 +114,7 @@ describe("Batch 5 import confirmations", () => {
 
   it("selects newly loaded collection items without restoring an earlier deselection", () => {
     const firstPage: ImportCollectionPreview = {
+      taskId: "task-paged-collection",
       collectionRef: "opaque-paged-collection",
       sourceUrl: "https://www.bilibili.com/medialist/play/paged",
       platform: "bilibili",

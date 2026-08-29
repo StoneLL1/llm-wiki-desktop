@@ -89,6 +89,7 @@ export interface ImportWorkflow {
   addText: (content: string, sourceName: string) => Promise<void>;
   addUrl: (url: string, mediaSaveMode?: MediaSaveMode) => Promise<void>;
   collectionPreview: ImportCollectionPreview | null;
+  restoreCollection?: (preview: ImportCollectionPreview) => void;
   loadCollectionPage: (loadAll?: boolean) => Promise<void>;
   confirmCollection: (itemRefs: readonly string[]) => Promise<void>;
   dismissCollection: () => void;

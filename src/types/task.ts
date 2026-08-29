@@ -51,6 +51,9 @@ export type TaskOperation = {
   itemCount: number;
   sourceLabel?: string | null;
 } | {
+  kind: "import_collection_discovery";
+  sessionId: string;
+} | {
   kind: "capability_install";
   sessionId: string;
   itemId: string;
@@ -87,6 +90,11 @@ export type TaskResultReference = {
   sessionId: string;
   batchId?: string | null;
   completion?: import("./importV2").ImportCompletion | null;
+} | {
+  type: "import_collection_preview";
+  sessionId: string;
+  collectionRef: string;
+  preview: import("./importV2Web").ImportCollectionPreview;
 } | {
   type: "compile";
   result: import("./compile").CompileResult;

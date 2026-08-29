@@ -778,6 +778,49 @@ impl TaskService {
         )
     }
 
+    pub fn create_project_import_collection_task(
+        &self,
+        project_id: String,
+        project_root: PathBuf,
+        task_state_root: PathBuf,
+        title: String,
+        session_id: String,
+    ) -> Result<BackendTask, String> {
+        self.create_task_internal(
+            TaskType::Import,
+            Some(project_id),
+            Some(project_root),
+            title,
+            true,
+            None,
+            Some(TaskOperation::ImportCollectionDiscovery { session_id }),
+            true,
+            None,
+            Some(task_state_root),
+        )
+    }
+
+    pub fn create_memory_import_collection_task(
+        &self,
+        project_id: String,
+        project_root: PathBuf,
+        title: String,
+        session_id: String,
+    ) -> Result<BackendTask, String> {
+        self.create_task_internal(
+            TaskType::Import,
+            Some(project_id),
+            Some(project_root),
+            title,
+            true,
+            None,
+            Some(TaskOperation::ImportCollectionDiscovery { session_id }),
+            false,
+            None,
+            None,
+        )
+    }
+
     pub fn create_project_capability_install_task(
         &self,
         project_id: String,

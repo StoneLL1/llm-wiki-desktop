@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useImportStore } from "../../stores/importStore";
+import { useTaskStore } from "../../stores/taskStore";
 import type { ImportItem } from "../../types/importV2";
 import type { AgentCandidateView as AgentCandidateViewType } from "../../types/importV2Agent";
 import type { ConnectorSessionRef, ImportAsrEnablementPlan, ImportCapabilityRequirement } from "../../types/importV2Presentation";
@@ -36,6 +37,12 @@ export interface ImportV2DialogsProps {
 export function ImportV2Dialogs({ workflow, privateItem, asrItem, asrItemIds = [], subtitleItem, candidateView, onCloseCandidate, onCandidateIntent, onClosePrivate, onCloseAsr, onCloseSubtitle }: ImportV2DialogsProps) {
   const { t } = useTranslation();
   const sessionId = useImportStore((state) => state.session?.sessionId ?? null);
+  const collectionSessionId = workflow.session?.sessionId ?? null;
+  const restoredCollection = useTaskStore((state) => state.tasks.find((task) =>
+    task.status === "waiting_for_confirmation"
+    && task.operation?.kind === "import_collection_discovery"
+    && task.operation.sessionId === collectionSessionId
+    && task.result?.reference?.type === "import_collection_preview")?.result?.reference);
   const previewItemId = useImportStore((state) => state.previewItemId);
   const capabilityItemId = useImportStore((state) => state.capabilityItemId);
   const loginItemId = useImportStore((state) => state.loginItemId);
@@ -62,6 +69,12 @@ export function ImportV2Dialogs({ workflow, privateItem, asrItem, asrItemIds = [
     setAsrPlanLoading(false);
     setConnector(null);
   }, [workflow.projectKey]);
+
+  useEffect(() => {
+    if (!workflow.collectionPreview && restoredCollection?.type === "import_collection_preview") {
+      workflow.restoreCollection?.(restoredCollection.preview);
+    }
+  }, [restoredCollection, workflow.collectionPreview, workflow.restoreCollection]);
 
   useEffect(() => {
     if (!capabilityItemId) {

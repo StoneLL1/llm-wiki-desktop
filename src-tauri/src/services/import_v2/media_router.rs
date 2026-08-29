@@ -7,13 +7,14 @@ use crate::errors::{BackendError, IMPORT_V2_CAPABILITY_INVALID};
 
 pub const MEDIA_CHUNK_BYTES: usize = 1024 * 1024;
 pub const MEDIA_MAX_IN_FLIGHT_CHUNKS: usize = 2;
-const ITEM_STAGING_TEMP_PREFIXES: [&str; 6] = [
+const ITEM_STAGING_TEMP_PREFIXES: [&str; 7] = [
     ".asr-input-",
     ".ocr-input-",
     ".media-fetch-",
     ".web-fetch-",
     ".capability-runtime-",
     ".sensevoice-output-",
+    ".media-copy-",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -257,6 +258,10 @@ pub fn recover_item_staging_temporary_workspaces(staging: &Path) -> Result<(), B
         if metadata.is_dir() && !metadata.file_type().is_symlink() && !is_reparse(&metadata) {
             fs::remove_dir_all(&path)
                 .map_err(|_| media_error("Could not remove an orphaned item workspace."))?;
+        } else if metadata.is_file() && !metadata.file_type().is_symlink() && !is_reparse(&metadata)
+        {
+            fs::remove_file(&path)
+                .map_err(|_| media_error("Could not remove an orphaned item temporary file."))?;
         }
     }
     Ok(())
@@ -413,6 +418,7 @@ mod tests {
         fs::create_dir_all(staging.join(".media-fetch-orphan")).unwrap();
         fs::create_dir_all(staging.join(".web-fetch-orphan")).unwrap();
         fs::create_dir_all(staging.join(".capability-runtime-orphan")).unwrap();
+        fs::write(staging.join(".media-copy-orphan.tmp"), b"partial").unwrap();
         fs::create_dir_all(staging.join("runtime-temp/legacy-orphan")).unwrap();
         fs::create_dir_all(staging.join("assets")).unwrap();
         fs::write(staging.join("assets/cover.jpg"), b"durable").unwrap();
@@ -426,6 +432,7 @@ mod tests {
             ".media-fetch-orphan",
             ".web-fetch-orphan",
             ".capability-runtime-orphan",
+            ".media-copy-orphan.tmp",
             "runtime-temp/legacy-orphan",
         ] {
             assert!(

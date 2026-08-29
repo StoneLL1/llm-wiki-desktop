@@ -515,6 +515,9 @@ export function useImportWorkflow(
   }, [isScopeCurrent, pendingCollection, projectId, projectKey, rootPath]);
 
   const dismissCollection = useCallback(() => setPendingCollection(null), []);
+  const restoreCollection = useCallback((preview: ImportCollectionPreview) => {
+    setPendingCollection({ preview, mediaSaveMode: "extract_only" });
+  }, []);
 
   const setItemSelected = useCallback(async (itemId: string, selected: boolean) => {
     const current = useImportStore.getState();
@@ -1161,6 +1164,7 @@ export function useImportWorkflow(
     addText,
     addUrl,
     collectionPreview: pendingCollection?.preview ?? null,
+    restoreCollection,
     loadCollectionPage,
     confirmCollection,
     dismissCollection,

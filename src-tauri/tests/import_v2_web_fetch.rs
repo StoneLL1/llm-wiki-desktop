@@ -1,11 +1,13 @@
 use llm_wiki_desktop_lib::services::import_v2::{
     domain_limiter::DomainLimiter,
     url_policy::{PrivateTargetGrant, UrlPolicy},
-    web_fetch::{WebFetchPolicy, WebFetchService},
+    web_fetch::{WebFetchContent, WebFetchPolicy, WebFetchResume, WebFetchService},
 };
+use sha2::{Digest, Sha256};
 use std::{
     io::{Read, Write},
     net::{IpAddr, Ipv4Addr, TcpListener},
+    sync::{Arc, Mutex},
     thread,
 };
 #[test]
@@ -107,6 +109,196 @@ async fn controlled_server_can_stream_a_response_directly_to_disk() {
     assert_eq!(artifact.byte_len, body.len() as u64);
     assert_eq!(std::fs::read(&destination).unwrap(), body.as_bytes());
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn resumable_fetch_verifies_range_identity_and_appends_to_the_partial() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let join = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0u8; 4096];
+        let read = stream.read(&mut request).unwrap();
+        let request = String::from_utf8_lossy(&request[..read]);
+        assert!(request.to_ascii_lowercase().contains("range: bytes=4-"));
+        assert!(
+            request.contains("If-Range: \"media-v1\"")
+                || request.contains("if-range: \"media-v1\"")
+        );
+        stream
+            .write_all(
+                b"HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Length: 6\r\nContent-Range: bytes 4-9/10\r\nETag: \"media-v1\"\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\nefghij",
+            )
+            .unwrap();
+    });
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("partial.bin");
+    std::fs::write(&destination, b"abcd").unwrap();
+    let target = UrlPolicy
+        .normalize_for_session(&format!("http://127.0.0.1:{port}/media"))
+        .unwrap();
+    let checkpoints = Arc::new(Mutex::new(Vec::new()));
+    let observed = checkpoints.clone();
+    let artifact = WebFetchService
+        .fetch_to_file_resumable(
+            target,
+            &UrlPolicy,
+            &WebFetchPolicy {
+                content: WebFetchContent::TemporaryMedia,
+                ..WebFetchPolicy::default()
+            },
+            Some(&grant(port)),
+            "item",
+            &destination,
+            Some(&WebFetchResume {
+                downloaded_bytes: 4,
+                total_bytes: Some(10),
+                etag: Some("\"media-v1\"".into()),
+                last_modified: None,
+                partial_sha256: format!("{:x}", Sha256::digest(b"abcd")),
+            }),
+            |_| {},
+            move |checkpoint| {
+                observed.lock().unwrap().push(checkpoint);
+                Ok(())
+            },
+            || false,
+        )
+        .await
+        .unwrap();
+    join.join().unwrap();
+    assert_eq!(artifact.byte_len, 10);
+    assert_eq!(std::fs::read(destination).unwrap(), b"abcdefghij");
+    let checkpoint = checkpoints.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(checkpoint.downloaded_bytes, 10);
+    assert!(checkpoint.range_supported);
+}
+
+#[tokio::test]
+async fn resumable_fetch_restarts_safely_when_the_server_ignores_range() {
+    let body = "replacement body";
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nETag: \"media-v2\"\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let (port, join) = server(response);
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("partial.bin");
+    std::fs::write(&destination, b"obsolete").unwrap();
+    let target = UrlPolicy
+        .normalize_for_session(&format!("http://127.0.0.1:{port}/media"))
+        .unwrap();
+    WebFetchService
+        .fetch_to_file_resumable(
+            target,
+            &UrlPolicy,
+            &WebFetchPolicy {
+                content: WebFetchContent::TemporaryMedia,
+                ..WebFetchPolicy::default()
+            },
+            Some(&grant(port)),
+            "item",
+            &destination,
+            Some(&WebFetchResume {
+                downloaded_bytes: 8,
+                total_bytes: None,
+                etag: Some("\"media-v1\"".into()),
+                last_modified: None,
+                partial_sha256: format!("{:x}", Sha256::digest(b"obsolete")),
+            }),
+            |_| {},
+            |_| Ok(()),
+            || false,
+        )
+        .await
+        .unwrap();
+    join.join().unwrap();
+    assert_eq!(std::fs::read(destination).unwrap(), body.as_bytes());
+}
+
+#[tokio::test]
+async fn completed_verified_partial_activates_without_an_invalid_range_request() {
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("partial.bin");
+    std::fs::write(&destination, b"complete").unwrap();
+    let target = UrlPolicy
+        .normalize_for_session("https://example.com/media.bin")
+        .unwrap();
+    let artifact = WebFetchService
+        .fetch_to_file_resumable(
+            target,
+            &UrlPolicy,
+            &WebFetchPolicy {
+                content: WebFetchContent::TemporaryMedia,
+                ..WebFetchPolicy::default()
+            },
+            None,
+            "item",
+            &destination,
+            Some(&WebFetchResume {
+                downloaded_bytes: 8,
+                total_bytes: Some(8),
+                etag: Some("\"media-v1\"".into()),
+                last_modified: None,
+                partial_sha256: format!("{:x}", Sha256::digest(b"complete")),
+            }),
+            |_| {},
+            |_| Ok(()),
+            || false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(artifact.byte_len, 8);
+}
+
+#[tokio::test]
+async fn truncated_partial_content_is_never_promoted_as_complete() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let join = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0u8; 4096];
+        let _ = stream.read(&mut request).unwrap();
+        stream
+            .write_all(
+                b"HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Length: 2\r\nContent-Range: bytes 4-9/10\r\nETag: \"media-v1\"\r\nConnection: close\r\n\r\nef",
+            )
+            .unwrap();
+    });
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("partial.bin");
+    std::fs::write(&destination, b"abcd").unwrap();
+    let target = UrlPolicy
+        .normalize_for_session(&format!("http://127.0.0.1:{port}/media"))
+        .unwrap();
+    let error = WebFetchService
+        .fetch_to_file_resumable(
+            target,
+            &UrlPolicy,
+            &WebFetchPolicy {
+                content: WebFetchContent::TemporaryMedia,
+                ..WebFetchPolicy::default()
+            },
+            Some(&grant(port)),
+            "item",
+            &destination,
+            Some(&WebFetchResume {
+                downloaded_bytes: 4,
+                total_bytes: Some(10),
+                etag: Some("\"media-v1\"".into()),
+                last_modified: None,
+                partial_sha256: format!("{:x}", Sha256::digest(b"abcd")),
+            }),
+            |_| {},
+            |_| Ok(()),
+            || false,
+        )
+        .await
+        .unwrap_err();
+    join.join().unwrap();
+    assert_eq!(error.code, "IMPORT_WEB_PARTIAL_INVALID");
+    assert_eq!(std::fs::read(destination).unwrap(), b"abcd");
 }
 
 #[tokio::test]

@@ -1517,6 +1517,191 @@ pub(crate) fn safe_read_source(
     Ok(bytes)
 }
 
+pub(crate) fn copy_verified_source_streaming<F>(
+    path: &Path,
+    identity: &crate::models::import_v2::SourceIdentity,
+    destination: &Path,
+    cancellation: &crate::tasks::task_model::CancellationToken,
+    mut progress: F,
+) -> Result<(), BackendError>
+where
+    F: FnMut(u64, u64) -> Result<(), BackendError>,
+{
+    let link = std::fs::symlink_metadata(path)
+        .map_err(|_| invalid("The source file could not be inspected."))?;
+    if link.file_type().is_symlink() || is_reparse_point(&link) || !link.is_file() {
+        return Err(source_changed());
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|_| invalid("The source file could not be resolved."))?;
+    if canonical.to_string_lossy() != identity.canonical_path || link.len() != identity.size_bytes {
+        return Err(source_changed());
+    }
+    let parent = destination
+        .parent()
+        .ok_or_else(|| invalid("The media staging destination is invalid."))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|_| invalid("The media staging destination could not be created."))?;
+    remove_orphaned_media_copy_files(parent)?;
+    match std::fs::symlink_metadata(destination) {
+        Ok(metadata)
+            if metadata.is_file()
+                && !metadata.file_type().is_symlink()
+                && !is_reparse_point(&metadata) =>
+        {
+            if staged_media_copy_matches(destination, identity, cancellation)? {
+                progress(identity.size_bytes, identity.size_bytes)?;
+                return Ok(());
+            }
+            std::fs::remove_file(destination)
+                .map_err(|_| invalid("The stale media staging file could not be replaced."))?;
+        }
+        Ok(_) => {
+            return Err(invalid(
+                "The media staging destination is not a safe regular file.",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {
+            return Err(invalid(
+                "The media staging destination could not be inspected.",
+            ));
+        }
+    }
+    let pending = parent.join(format!(".media-copy-{}.tmp", uuid::Uuid::new_v4().simple()));
+    let copy = (|| -> Result<(), BackendError> {
+        let mut source = std::fs::File::open(&canonical)
+            .map_err(|_| invalid("The source file could not be read."))?;
+        let before = source
+            .metadata()
+            .map_err(|_| invalid("The source file could not be inspected."))?;
+        if before.len() != identity.size_bytes {
+            return Err(source_changed());
+        }
+        let mut output = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&pending)
+            .map_err(|_| invalid("The media staging file could not be created."))?;
+        let mut full = Sha256::new();
+        let mut prefix = Vec::with_capacity(8192);
+        let mut buffer = [0_u8; 1024 * 1024];
+        let mut copied = 0_u64;
+        use std::io::{Read, Write};
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(BackendError::new(
+                    crate::errors::IMPORT_V2_CANCELLED,
+                    "Local media import was cancelled.",
+                    true,
+                    true,
+                ));
+            }
+            let read = source
+                .read(&mut buffer)
+                .map_err(|_| invalid("The source file could not be read."))?;
+            if read == 0 {
+                break;
+            }
+            output
+                .write_all(&buffer[..read])
+                .map_err(|_| invalid("The media staging file could not be written."))?;
+            full.update(&buffer[..read]);
+            if prefix.len() < 8192 {
+                let remaining = 8192 - prefix.len();
+                prefix.extend_from_slice(&buffer[..read.min(remaining)]);
+            }
+            copied = copied.saturating_add(read as u64);
+            progress(copied, identity.size_bytes)?;
+        }
+        output
+            .sync_all()
+            .map_err(|_| invalid("The media staging file could not be finalized."))?;
+        let after = std::fs::metadata(&canonical)
+            .map_err(|_| invalid("The source file changed while it was being read."))?;
+        let sha256 = format!("{:x}", full.finalize());
+        let magic = format!("{:x}", Sha256::digest(&prefix));
+        if copied != identity.size_bytes
+            || after.len() != before.len()
+            || sha256 != identity.sha256
+            || magic != identity.magic
+        {
+            return Err(source_changed());
+        }
+        std::fs::rename(&pending, destination)
+            .map_err(|_| invalid("The media staging file could not be installed."))?;
+        Ok(())
+    })();
+    if copy.is_err() {
+        let _ = std::fs::remove_file(&pending);
+    }
+    copy
+}
+
+fn remove_orphaned_media_copy_files(parent: &Path) -> Result<(), BackendError> {
+    let entries = std::fs::read_dir(parent)
+        .map_err(|_| invalid("The media staging directory could not be inspected."))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|_| invalid("The media staging directory could not be inspected."))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(".media-copy-") {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(entry.path())
+            .map_err(|_| invalid("A media staging temporary file could not be inspected."))?;
+        if metadata.is_file() && !metadata.file_type().is_symlink() && !is_reparse_point(&metadata)
+        {
+            std::fs::remove_file(entry.path())
+                .map_err(|_| invalid("A media staging temporary file could not be removed."))?;
+        }
+    }
+    Ok(())
+}
+
+fn staged_media_copy_matches(
+    path: &Path,
+    identity: &crate::models::import_v2::SourceIdentity,
+    cancellation: &crate::tasks::task_model::CancellationToken,
+) -> Result<bool, BackendError> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|_| invalid("The media staging file could not be read."))?;
+    if file
+        .metadata()
+        .map_err(|_| invalid("The media staging file could not be inspected."))?
+        .len()
+        != identity.size_bytes
+    {
+        return Ok(false);
+    }
+    let mut full = Sha256::new();
+    let mut prefix = Vec::with_capacity(8192);
+    let mut buffer = [0_u8; 1024 * 1024];
+    let mut read_total = 0_u64;
+    use std::io::Read;
+    loop {
+        if cancellation.is_cancelled() {
+            return Err(cancelled());
+        }
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| invalid("The media staging file could not be read."))?;
+        if read == 0 {
+            break;
+        }
+        full.update(&buffer[..read]);
+        if prefix.len() < 8192 {
+            let remaining = 8192 - prefix.len();
+            prefix.extend_from_slice(&buffer[..read.min(remaining)]);
+        }
+        read_total = read_total.saturating_add(read as u64);
+    }
+    Ok(read_total == identity.size_bytes
+        && format!("{:x}", full.finalize()) == identity.sha256
+        && format!("{:x}", Sha256::digest(&prefix)) == identity.magic)
+}
+
 fn source_changed() -> BackendError {
     BackendError::new(
         "IMPORT_FILE_SOURCE_CHANGED",

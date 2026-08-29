@@ -401,6 +401,14 @@ impl ImportLayoutPaths {
         format!("{}/import-history", self.app_state_root)
     }
 
+    pub fn collection_preview(&self, collection_id: &str) -> Result<String, BackendError> {
+        Ok(format!(
+            "{}/import-collections/{}.json",
+            self.app_state_root,
+            validated_layout_identity(collection_id)?
+        ))
+    }
+
     pub fn history_entry(&self, history_id: &str) -> Result<String, BackendError> {
         Ok(format!(
             "{}/{}.json",

@@ -140,6 +140,60 @@ beforeEach(async () => {
 });
 
 describe("ImportView V2 composition", () => {
+  it("hands a restored durable collection confirmation back to the workflow", async () => {
+    const previousTaskState = useTaskStore.getState();
+    const restoreCollection = vi.fn();
+    const preview = {
+      taskId: "collection-task",
+      collectionRef: "import-web-collection:durable",
+      sourceUrl: "https://space.bilibili.com/42",
+      platform: "bilibili",
+      title: "Durable collection",
+      totalDurationSeconds: null,
+      estimatedLoginCount: 0,
+      estimatedAsrCount: 1,
+      discoveredTotal: 1,
+      loadedCount: 1,
+      hasMore: false,
+      nextCursor: null,
+      items: [{ itemRef: "item-1", title: "Entry 1", publicUrl: "https://example.com/1" }],
+    };
+    useTaskStore.setState({
+      tasks: [{
+        id: "collection-task",
+        taskType: "import",
+        projectId: "project-a",
+        operation: { kind: "import_collection_discovery", sessionId: "session-a" },
+        title: "Discover collection",
+        status: "waiting_for_confirmation",
+        progress: null,
+        startedAt: "2026-08-30T00:00:00Z",
+        updatedAt: "2026-08-30T00:00:00Z",
+        completedAt: null,
+        cancellable: true,
+        logPath: null,
+        result: {
+          summary: "Collection preview ready",
+          affectedPaths: [],
+          reference: {
+            type: "import_collection_preview",
+            sessionId: "session-a",
+            collectionRef: preview.collectionRef,
+            preview,
+          },
+        },
+        error: null,
+      }],
+    });
+    const view = render(<ImportView workflow={workflow({ restoreCollection })} />);
+    try {
+      await waitFor(() => expect(restoreCollection).toHaveBeenCalledWith(preview));
+    } finally {
+      view.unmount();
+      useTaskStore.setState(previousTaskState, true);
+    }
+  });
+
   it("opens the typed per-item Source merge flow instead of the Agent candidate flow", async () => {
     const unresolved = mergeItem();
     const loadMergeContext = vi.fn().mockResolvedValue({
