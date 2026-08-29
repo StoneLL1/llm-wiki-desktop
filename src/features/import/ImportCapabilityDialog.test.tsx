@@ -66,4 +66,11 @@ describe("ImportCapabilityDialog", () => {
 
     expect(screen.getByRole("alert")).toHaveTextContent(/development build.*catalog/i);
   });
+
+  it("explains that installation is read-only while runner confinement is unverified", () => {
+    render(<ImportCapabilityDialog open requirement={{ ...requirement, installable: false, unavailableReasonCode: "runtime_confinement_unavailable" }} onInstall={vi.fn()} onCancel={vi.fn()} />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent(/installation remains read-only.*confinement/i);
+    expect(screen.getByRole("button", { name: /install capability/i })).toBeDisabled();
+  });
 });

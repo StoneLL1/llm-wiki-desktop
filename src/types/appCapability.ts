@@ -30,6 +30,8 @@ export interface AppCapabilityView {
   targetTriple: string;
   targetVersion?: string;
   acknowledgementVersion?: string;
+  installAllowed: boolean;
+  installBlockedReasonCode?: string;
   distribution: { state: AppCapabilityDistributionState; errorCode?: string };
   installation: { state: AppCapabilityInstallationState; healthyVersion?: string };
   operation: {

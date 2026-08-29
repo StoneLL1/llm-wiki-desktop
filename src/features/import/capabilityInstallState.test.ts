@@ -40,6 +40,7 @@ describe("capabilityInstallState", () => {
     expect(capabilityInstallState(task({ status: "failed", error: { code: "IMPORT_V2_CAPABILITY_HEALTH_CHECK_FAILED", message: "failed", details: null, recoverable: true, userActionRequired: false } }), true, false).kind).toBe("health_check_failed");
     expect(capabilityInstallState(null, false, false).kind).toBe("signed_release_unavailable");
     expect(capabilityInstallState(null, false, false, "catalog_unavailable").kind).toBe("catalog_unavailable");
+    expect(capabilityInstallState(null, false, false, "runtime_confinement_unavailable").kind).toBe("runtime_confinement_unavailable");
     expect(capabilityInstallState(null, false, true).kind).toBe("installed");
     expect(capabilityInstallState(task({ status: "cancelled" }), false, false).kind).toBe("signed_release_unavailable");
     expect(capabilityInstallState(task({ status: "succeeded" }), true, false).kind).toBe("installed");

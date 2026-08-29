@@ -19,6 +19,10 @@ use crate::services::import_v2::capability_installer::{
 };
 use crate::services::import_v2::capability_runtime::{target_triple, ImportCapabilityRuntime};
 use crate::services::import_v2::product_capability::ProductCapabilityManifest;
+use crate::services::import_v2::runner_confinement::{
+    capability_installation_mutations_enabled, require_capability_installation_confinement,
+    APP_CAPABILITY_CONFINEMENT_UNAVAILABLE,
+};
 use crate::services::FileStore;
 use crate::tasks::TaskService;
 
@@ -107,6 +111,7 @@ impl AppCapabilityCoordinator {
         expected_version: &str,
         acknowledgement_version: &str,
     ) -> Result<(BackendTask, bool), BackendError> {
+        require_capability_installation_confinement()?;
         if entry.version != expected_version {
             return Err(coordinator_error(
                 "APP_CAPABILITY_VERSION_STALE",
@@ -324,6 +329,8 @@ impl AppCapabilityCoordinator {
         let mut views = Vec::with_capacity(manifest.definitions.len());
         for definition in manifest.definitions {
             let entry = catalog_entry(&definition.capability_id, &target);
+            let (install_allowed, install_blocked_reason_code) =
+                capability_install_policy(entry.is_some());
             let distribution_state = if definition.distribution_tier != "published" {
                 AppCapabilityDistributionState::Unsupported
             } else if entry.is_some() {
@@ -443,6 +450,8 @@ impl AppCapabilityCoordinator {
                 target_triple: target.clone(),
                 target_version: entry.as_ref().map(|entry| entry.version.clone()),
                 acknowledgement_version: entry.as_ref().map(app_capability_acknowledgement_version),
+                install_allowed,
+                install_blocked_reason_code,
                 distribution: AppCapabilityDistribution {
                     state: distribution_state,
                     error_code: error_code.clone(),
@@ -747,4 +756,26 @@ fn coordinator_locked() -> BackendError {
 
 fn coordinator_error(code: &str, message: &str) -> BackendError {
     BackendError::new(code, message, true, true)
+}
+
+fn capability_install_policy(catalog_entry_present: bool) -> (bool, Option<String>) {
+    let install_allowed = catalog_entry_present && capability_installation_mutations_enabled();
+    let blocked_reason = (catalog_entry_present && !install_allowed)
+        .then(|| APP_CAPABILITY_CONFINEMENT_UNAVAILABLE.to_owned());
+    (install_allowed, blocked_reason)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn published_catalog_entry_is_non_installable_while_confinement_is_unavailable() {
+        let (install_allowed, blocked_reason) = capability_install_policy(true);
+        assert!(!install_allowed);
+        assert_eq!(
+            blocked_reason.as_deref(),
+            Some(APP_CAPABILITY_CONFINEMENT_UNAVAILABLE)
+        );
+    }
 }

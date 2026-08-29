@@ -189,6 +189,7 @@ pub async fn install_catalog_entry(
     token: &CancellationToken,
     mut progress: impl FnMut(CapabilityInstallPhase, u64, u64),
 ) -> Result<CapabilityInstallOutcome, BackendError> {
+    super::runner_confinement::require_capability_installation_confinement()?;
     let preflight_root = install_root.to_path_buf();
     let preflight_entry = entry.clone();
     let preflight_owner = owner_task_id.to_owned();
@@ -1747,6 +1748,46 @@ mod tests {
     use std::io::Write;
     use zip::write::SimpleFileOptions;
     use zip::{CompressionMethod, ZipWriter};
+
+    #[tokio::test]
+    async fn confinement_gate_rejects_before_creating_the_install_root() {
+        let install_root = std::env::temp_dir().join(format!(
+            "llm-wiki-blocked-installer-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let entry = CapabilityCatalogEntry {
+            capability_id: "browser-runtime".into(),
+            version: "1.0.0".into(),
+            target_triple: "x86_64-pc-windows-msvc".into(),
+            url: "https://example.invalid/browser-runtime.zip".into(),
+            archive_sha256: "a".repeat(64),
+            manifest_sha256: "b".repeat(64),
+            compressed_bytes: 1,
+            installed_bytes: 1,
+            model_bytes: None,
+            license: "MIT".into(),
+        };
+
+        let error = match install_catalog_entry(
+            &BlockingWorkCoordinator::default(),
+            &install_root,
+            &entry,
+            "blocked-task",
+            &CancellationToken::new(),
+            |_, _, _| {},
+        )
+        .await
+        {
+            Ok(_) => panic!("confinement gate unexpectedly allowed installation"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.code,
+            super::super::runner_confinement::APP_CAPABILITY_CONFINEMENT_UNAVAILABLE
+        );
+        assert!(!install_root.exists());
+    }
 
     struct SignedFixture {
         root: PathBuf,

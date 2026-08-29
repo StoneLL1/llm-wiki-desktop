@@ -14,6 +14,7 @@ use crate::services::import_v2::capability_installer::{
 };
 use crate::services::import_v2::capability_runtime::target_triple;
 use crate::services::import_v2::product_capability::ProductCapabilityManifest;
+use crate::services::import_v2::runner_confinement::require_capability_installation_confinement;
 use crate::services::BlockingWorkClass;
 use crate::tasks::task_model::LogLine;
 
@@ -99,6 +100,7 @@ fn begin_app_capability_install_inner(
     request: InstallAppCapabilityV1Request,
     continuation_id: Option<&str>,
 ) -> Result<BackendTask, BackendError> {
+    require_capability_installation_confinement()?;
     let entry = catalog_entry(&request.capability_id, &target_triple()).ok_or_else(|| {
         let catalog_empty = crate::services::import_v2::capability_installer::catalog_availability()
             == crate::services::import_v2::capability_installer::CapabilityCatalogAvailability::CatalogUnavailable;
@@ -164,6 +166,7 @@ pub async fn resume_app_capability_install_v1(
     blocking_work
         .run(BlockingWorkClass::HeavyIo, move || {
             let state = app.state::<AppState>();
+            require_capability_installation_confinement()?;
             let task = require_control_target(&state, &request)?;
             let entry = entry_for_task(&task)?;
             require_batch4_install_route(&entry)?;

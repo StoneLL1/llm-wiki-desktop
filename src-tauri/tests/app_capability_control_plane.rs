@@ -7,7 +7,7 @@ use llm_wiki_desktop_lib::models::app_capability::{
     AppCapabilityInstallationState, AppCapabilityOperation, AppCapabilityOperationState,
     AppCapabilityUpdate, AppCapabilityUpdateState, AppCapabilityView,
 };
-use llm_wiki_desktop_lib::models::task::TaskStatus;
+use llm_wiki_desktop_lib::models::task::{BackendTask, TaskStatus};
 use llm_wiki_desktop_lib::services::import_v2::capability_installer::CapabilityCatalogEntry;
 use llm_wiki_desktop_lib::services::import_v2::capability_runtime::ImportCapabilityRuntime;
 use llm_wiki_desktop_lib::services::{
@@ -29,6 +29,23 @@ fn fixture_catalog_entry() -> CapabilityCatalogEntry {
         model_bytes: None,
         license: "MIT".into(),
     }
+}
+
+fn create_fixture_app_task(
+    root: &std::path::Path,
+    tasks: &TaskService,
+    entry: &CapabilityCatalogEntry,
+) -> BackendTask {
+    tasks
+        .create_app_capability_install_task(
+            root.to_path_buf(),
+            format!("Install {} {}", entry.capability_id, entry.version),
+            entry.capability_id.clone(),
+            entry.version.clone(),
+            entry.target_triple.clone(),
+            "fixture-archive-identity".into(),
+        )
+        .unwrap()
 }
 
 fn continuation() -> AppCapabilityContinuation {
@@ -68,6 +85,8 @@ fn app_capability_view_serializes_orthogonal_facts() {
         target_triple: "x86_64-pc-windows-msvc".into(),
         target_version: Some("1.2.3".into()),
         acknowledgement_version: Some("ack-v1".into()),
+        install_allowed: false,
+        install_blocked_reason_code: Some("APP_CAPABILITY_CONFINEMENT_UNAVAILABLE".into()),
         distribution: AppCapabilityDistribution {
             state: AppCapabilityDistributionState::Published,
             error_code: None,
@@ -101,34 +120,32 @@ fn app_capability_view_serializes_orthogonal_facts() {
     assert_eq!(value["operation"]["state"], serde_json::Value::Null);
     assert_eq!(value["update"]["state"], "available");
     assert_eq!(value["displayState"], "update_available");
+    assert_eq!(value["installAllowed"], false);
+    assert_eq!(
+        value["installBlockedReasonCode"],
+        "APP_CAPABILITY_CONFINEMENT_UNAVAILABLE"
+    );
 }
 
 #[test]
-fn identical_install_intents_join_one_persisted_app_task() {
+fn coordinator_rejects_install_before_task_persistence() {
     let root = tempdir().unwrap();
     let tasks = TaskService::default();
     let coordinator = AppCapabilityCoordinator::default();
     coordinator.initialize(root.path(), &tasks).unwrap();
     let entry = fixture_catalog_entry();
-    let acknowledgement = app_capability_acknowledgement_version(&entry);
+    let error = coordinator
+        .join_or_create_install(
+            &tasks,
+            &entry,
+            &entry.version,
+            &app_capability_acknowledgement_version(&entry),
+        )
+        .unwrap_err();
 
-    let (first, first_created) = coordinator
-        .join_or_create_install(&tasks, &entry, &entry.version, &acknowledgement)
-        .unwrap();
-    let (second, second_created) = coordinator
-        .join_or_create_install(&tasks, &entry, &entry.version, &acknowledgement)
-        .unwrap();
-
-    assert!(first_created);
-    assert!(!second_created);
-    assert_eq!(first.id, second.id);
-    assert_eq!(first.project_id, None);
-    assert_eq!(tasks.list_app_tasks(None).len(), 1);
-    assert!(root
-        .path()
-        .join("tasks")
-        .join(format!("{}.json", first.id))
-        .exists());
+    assert_eq!(error.code, "APP_CAPABILITY_CONFINEMENT_UNAVAILABLE");
+    assert!(tasks.list_app_tasks(None).is_empty());
+    assert!(!root.path().join("tasks").exists());
 }
 
 #[test]
@@ -171,6 +188,14 @@ fn capability_inventory_is_available_without_an_active_project() {
     assert!(views
         .iter()
         .all(|view| view.current_project_waiting_count == 0));
+    assert!(views.iter().all(|view| !view.install_allowed));
+    assert!(views
+        .iter()
+        .filter(|view| view.target_version.is_some())
+        .all(|view| {
+            view.install_blocked_reason_code.as_deref()
+                == Some("APP_CAPABILITY_CONFINEMENT_UNAVAILABLE")
+        }));
 }
 
 #[test]
@@ -180,14 +205,7 @@ fn paused_app_install_recovers_as_interrupted_and_can_resume() {
     let coordinator = AppCapabilityCoordinator::default();
     coordinator.initialize(root.path(), &tasks).unwrap();
     let entry = fixture_catalog_entry();
-    let (task, _) = coordinator
-        .join_or_create_install(
-            &tasks,
-            &entry,
-            &entry.version,
-            &app_capability_acknowledgement_version(&entry),
-        )
-        .unwrap();
+    let task = create_fixture_app_task(root.path(), &tasks, &entry);
 
     let paused = tasks
         .request_app_task_pause(&task.id, &task.updated_at)
@@ -220,14 +238,7 @@ fn failed_app_task_remains_visible_with_its_stable_error() {
     let coordinator = AppCapabilityCoordinator::default();
     coordinator.initialize(root.path(), &tasks).unwrap();
     let entry = fixture_catalog_entry();
-    let (task, _) = coordinator
-        .join_or_create_install(
-            &tasks,
-            &entry,
-            &entry.version,
-            &app_capability_acknowledgement_version(&entry),
-        )
-        .unwrap();
+    let task = create_fixture_app_task(root.path(), &tasks, &entry);
     tasks
         .transition_status(&task.id, TaskStatus::Running)
         .unwrap();
@@ -271,10 +282,7 @@ fn registered_continuations_rebind_to_a_management_retry() {
     coordinator.initialize(root.path(), &tasks).unwrap();
     coordinator.register_continuation(continuation()).unwrap();
     let entry = fixture_catalog_entry();
-    let acknowledgement = app_capability_acknowledgement_version(&entry);
-    let (first, _) = coordinator
-        .join_or_create_install(&tasks, &entry, &entry.version, &acknowledgement)
-        .unwrap();
+    let first = create_fixture_app_task(root.path(), &tasks, &entry);
     coordinator
         .bind_registered_continuations(&entry.capability_id, &first.id)
         .unwrap();
@@ -286,10 +294,7 @@ fn registered_continuations_rebind_to_a_management_retry() {
         .unwrap();
     coordinator.settle_task(&failed);
 
-    let (retry, created) = coordinator
-        .join_or_create_install(&tasks, &entry, &entry.version, &acknowledgement)
-        .unwrap();
-    assert!(created);
+    let retry = create_fixture_app_task(root.path(), &tasks, &entry);
     coordinator
         .bind_registered_continuations(&entry.capability_id, &retry.id)
         .unwrap();

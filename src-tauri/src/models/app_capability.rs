@@ -119,6 +119,10 @@ pub struct AppCapabilityView {
     pub target_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acknowledgement_version: Option<String>,
+    #[serde(default)]
+    pub install_allowed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_blocked_reason_code: Option<String>,
     pub distribution: AppCapabilityDistribution,
     pub installation: AppCapabilityInstallation,
     pub operation: AppCapabilityOperation,
