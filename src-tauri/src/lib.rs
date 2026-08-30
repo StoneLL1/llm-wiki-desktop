@@ -17,10 +17,18 @@ use tauri::{Emitter, Manager};
 #[cfg(feature = "gui")]
 const APP_FOREGROUND_CHANGED_EVENT: &str = "app://foreground-changed";
 
-#[cfg(feature = "gui")]
+#[cfg(any(feature = "gui", test))]
 #[derive(Clone, serde::Serialize)]
 struct AppForegroundChangedPayload {
     foreground: bool,
+}
+
+#[cfg(all(windows, any(feature = "gui", test)))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowsForegroundObservation {
+    NoWindow,
+    ProcessLookupFailed,
+    Process(u32),
 }
 
 #[cfg(all(windows, any(feature = "gui", test)))]
@@ -29,6 +37,25 @@ fn foreground_process_matches(foreground_process_id: u32, current_process_id: u3
         return None;
     }
     Some(foreground_process_id == current_process_id)
+}
+
+#[cfg(all(windows, any(feature = "gui", test)))]
+fn normalized_windows_foreground(
+    observation: WindowsForegroundObservation,
+    current_process_id: u32,
+) -> Option<bool> {
+    match observation {
+        WindowsForegroundObservation::NoWindow
+        | WindowsForegroundObservation::ProcessLookupFailed => None,
+        WindowsForegroundObservation::Process(foreground_process_id) => {
+            foreground_process_matches(foreground_process_id, current_process_id)
+        }
+    }
+}
+
+#[cfg(any(test, all(feature = "gui", not(windows))))]
+fn normalized_non_windows_foreground(focused: bool) -> Option<bool> {
+    Some(focused)
 }
 
 #[cfg(all(feature = "gui", windows))]
@@ -43,19 +70,28 @@ fn normalized_app_foreground(_focused: bool) -> Option<bool> {
     unsafe {
         let foreground_window = GetForegroundWindow();
         if foreground_window.is_null() {
-            return None;
+            return normalized_windows_foreground(
+                WindowsForegroundObservation::NoWindow,
+                GetCurrentProcessId(),
+            );
         }
         let mut foreground_process_id = 0;
         if GetWindowThreadProcessId(foreground_window, &mut foreground_process_id) == 0 {
-            return None;
+            return normalized_windows_foreground(
+                WindowsForegroundObservation::ProcessLookupFailed,
+                GetCurrentProcessId(),
+            );
         }
-        foreground_process_matches(foreground_process_id, GetCurrentProcessId())
+        normalized_windows_foreground(
+            WindowsForegroundObservation::Process(foreground_process_id),
+            GetCurrentProcessId(),
+        )
     }
 }
 
 #[cfg(all(feature = "gui", not(windows)))]
 fn normalized_app_foreground(focused: bool) -> Option<bool> {
-    Some(focused)
+    normalized_non_windows_foreground(focused)
 }
 
 #[cfg(feature = "gui")]
@@ -896,15 +932,82 @@ pub fn run() {
         .expect("failed to run LLM Wiki Desktop");
 }
 
-#[cfg(all(test, windows))]
-mod foreground_tests {
-    use super::foreground_process_matches;
+#[cfg(test)]
+mod foreground_contract_tests {
+    use super::{normalized_non_windows_foreground, AppForegroundChangedPayload};
 
     #[test]
-    fn foreground_pid_matching_fails_closed_for_unknown_processes() {
-        assert_eq!(foreground_process_matches(42, 42), Some(true));
-        assert_eq!(foreground_process_matches(42, 7), Some(false));
-        assert_eq!(foreground_process_matches(0, 7), None);
-        assert_eq!(foreground_process_matches(42, 0), None);
+    fn foreground_payload_serializes_with_a_stable_field_name() {
+        assert_eq!(
+            serde_json::to_value(AppForegroundChangedPayload { foreground: true }).unwrap(),
+            serde_json::json!({ "foreground": true })
+        );
+    }
+
+    #[test]
+    fn non_windows_normalization_preserves_the_focused_value() {
+        assert_eq!(normalized_non_windows_foreground(true), Some(true));
+        assert_eq!(normalized_non_windows_foreground(false), Some(false));
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_foreground_tests {
+    use super::{normalized_windows_foreground, WindowsForegroundObservation};
+
+    #[test]
+    fn current_process_foreground_is_true() {
+        assert_eq!(
+            normalized_windows_foreground(WindowsForegroundObservation::Process(42), 42),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn another_process_foreground_is_false() {
+        assert_eq!(
+            normalized_windows_foreground(WindowsForegroundObservation::Process(42), 7),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn missing_foreground_window_is_unknown() {
+        assert_eq!(
+            normalized_windows_foreground(WindowsForegroundObservation::NoWindow, 7),
+            None
+        );
+    }
+
+    #[test]
+    fn failed_process_lookup_is_unknown() {
+        assert_eq!(
+            normalized_windows_foreground(WindowsForegroundObservation::ProcessLookupFailed, 7,),
+            None
+        );
+    }
+
+    #[test]
+    fn zero_foreground_process_identity_is_unknown() {
+        assert_eq!(
+            normalized_windows_foreground(WindowsForegroundObservation::Process(0), 7),
+            None
+        );
+    }
+
+    #[test]
+    fn same_process_dialog_is_still_foreground() {
+        assert_eq!(
+            normalized_windows_foreground(WindowsForegroundObservation::Process(42), 42),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn missing_current_process_identity_is_unknown() {
+        assert_eq!(
+            normalized_windows_foreground(WindowsForegroundObservation::Process(42), 0),
+            None
+        );
     }
 }
