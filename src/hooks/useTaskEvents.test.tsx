@@ -5,6 +5,7 @@ import type { BackendEvent, BackendTask } from "../types/task";
 import { defaultProject, useProjectStore } from "../stores/projectStore";
 import { useTaskStore } from "../stores/taskStore";
 import { useChatStore } from "../stores/chatStore";
+import { useGraphStore } from "../stores/graphStore";
 import {
   clearPendingTaskEvents,
   dispatchTaskEvent,
@@ -25,11 +26,82 @@ import {
   projectFactsAuthorityKey,
   resetProjectFactsStoreForTests,
 } from "../stores/projectFactsStore";
+import type { GraphData } from "../types/graph";
 
 const listenMock = vi.hoisted(() => vi.fn());
 const notifyTaskEventMock = vi.hoisted(() => vi.fn());
 const invalidateNotificationPermissionEpochMock = vi.hoisted(() => vi.fn());
 const invokeMock = vi.hoisted(() => vi.fn());
+
+type ForegroundChangedCallback = (event: {
+  payload: { foreground: boolean };
+}) => void;
+
+async function foregroundChangedCallback(
+  callIndex = 0,
+): Promise<ForegroundChangedCallback> {
+  await waitFor(() => expect(
+    listenMock.mock.calls.filter(
+      ([channel]) => channel === "app://foreground-changed",
+    )[callIndex]?.[1],
+  ).toBeTypeOf("function"));
+  return listenMock.mock.calls.filter(
+    ([channel]) => channel === "app://foreground-changed",
+  )[callIndex]?.[1] as ForegroundChangedCallback;
+}
+
+const graphData = (): GraphData => ({
+  nodes: [{
+    id: "wiki/a.md",
+    path: "wiki/a.md",
+    label: "A",
+    type: "concept",
+    tags: [],
+    starred: false,
+    degree: 0,
+  }],
+  edges: [],
+  contentHash: "graph-hash",
+  builtAt: "2026-08-31T00:00:00Z",
+  layout: null,
+});
+
+async function mountForegroundResource(options: {
+  observed?: boolean;
+  projectId?: string;
+  rootPath?: string;
+} = {}) {
+  const projectId = options.projectId ?? "project-a";
+  const rootPath = options.rootPath ?? "D:/wiki";
+  useProjectStore.setState({
+    currentProject: {
+      ...defaultProject,
+      projectId,
+      rootPath,
+    },
+  });
+  const invalidate = vi.fn();
+  const revalidate = vi.fn();
+  const unregister = registerProjectResource("wiki", { invalidate }, revalidate);
+  const unobserve = options.observed === false
+    ? undefined
+    : observeProjectResources({ projectId, rootPath }, ["wiki"]);
+  const listenerIndex = listenMock.mock.calls.filter(
+    ([channel]) => channel === "app://foreground-changed",
+  ).length;
+  const mounted = renderHook(() => useTaskEvents());
+  const foregroundChanged = await foregroundChangedCallback(listenerIndex);
+  return {
+    foregroundChanged,
+    invalidate,
+    revalidate,
+    dispose: () => {
+      mounted.unmount();
+      unobserve?.();
+      unregister();
+    },
+  };
+}
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
@@ -75,6 +147,7 @@ beforeEach(() => {
     taskOutputs: {},
   });
   useChatStore.getState().reset();
+  useGraphStore.getState().reset();
   resetProjectFactsStoreForTests();
   Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
 });
@@ -331,37 +404,205 @@ describe("task event listener bridge", () => {
     mounted.unmount();
   });
 
-  it("keeps observed resources unchanged during titlebar-style blur/focus churn", async () => {
-    useProjectStore.setState({
-      currentProject: {
-        ...defaultProject,
-        projectId: "project-a",
-        rootPath: "D:/wiki",
-      },
+  it("keeps resource refresh separate from a standalone DOM focus", async () => {
+    const resource = await mountForegroundResource();
+
+    act(() => window.dispatchEvent(new Event("focus")));
+
+    expect(invalidateNotificationPermissionEpochMock).toHaveBeenCalledOnce();
+    expect(resource.invalidate).not.toHaveBeenCalled();
+    expect(resource.revalidate).not.toHaveBeenCalled();
+    resource.dispose();
+  });
+
+  it("ignores repeated foreground truth from titlebar-style focus noise", async () => {
+    const resource = await mountForegroundResource();
+
+    act(() => {
+      resource.foregroundChanged({ payload: { foreground: true } });
+      resource.foregroundChanged({ payload: { foreground: true } });
+    });
+
+    expect(resource.invalidate).not.toHaveBeenCalled();
+    expect(resource.revalidate).not.toHaveBeenCalled();
+    expect(invalidateNotificationPermissionEpochMock).not.toHaveBeenCalled();
+    resource.dispose();
+  });
+
+  it("revalidates observed resources once after a real background cycle", async () => {
+    const resource = await mountForegroundResource();
+
+    act(() => {
+      resource.foregroundChanged({ payload: { foreground: false } });
+      resource.foregroundChanged({ payload: { foreground: true } });
+    });
+
+    expect(resource.invalidate).toHaveBeenCalledOnce();
+    expect(resource.invalidate).toHaveBeenCalledWith({
+      projectId: "project-a",
+      rootPath: "D:/wiki",
+    });
+    expect(resource.revalidate).toHaveBeenCalledOnce();
+    expect(invalidateNotificationPermissionEpochMock).not.toHaveBeenCalled();
+    resource.dispose();
+  });
+
+  it("consumes one background arm across twenty foreground events", async () => {
+    const resource = await mountForegroundResource();
+
+    act(() => {
+      resource.foregroundChanged({ payload: { foreground: false } });
+      for (let index = 0; index < 20; index += 1) {
+        resource.foregroundChanged({ payload: { foreground: true } });
+      }
+    });
+
+    expect(resource.invalidate).toHaveBeenCalledOnce();
+    expect(resource.revalidate).toHaveBeenCalledOnce();
+    resource.dispose();
+  });
+
+  it("coalesces multiple background events into one foreground refresh", async () => {
+    const resource = await mountForegroundResource();
+
+    act(() => {
+      resource.foregroundChanged({ payload: { foreground: false } });
+      resource.foregroundChanged({ payload: { foreground: false } });
+      resource.foregroundChanged({ payload: { foreground: false } });
+      resource.foregroundChanged({ payload: { foreground: true } });
+    });
+
+    expect(resource.invalidate).toHaveBeenCalledOnce();
+    expect(resource.revalidate).toHaveBeenCalledOnce();
+    resource.dispose();
+  });
+
+  it("never refreshes resources for a foreground-only sequence", async () => {
+    const resource = await mountForegroundResource();
+
+    act(() => {
+      resource.foregroundChanged({ payload: { foreground: true } });
+      resource.foregroundChanged({ payload: { foreground: true } });
+      resource.foregroundChanged({ payload: { foreground: true } });
+    });
+
+    expect(resource.invalidate).not.toHaveBeenCalled();
+    expect(resource.revalidate).not.toHaveBeenCalled();
+    resource.dispose();
+  });
+
+  it("unlistens and rejects stale foreground callbacks after unmount", async () => {
+    const callbacks = new Map<string, ForegroundChangedCallback>();
+    const unlisteners = new Map<string, ReturnType<typeof vi.fn>>();
+    listenMock.mockImplementation((channel: string, callback: ForegroundChangedCallback) => {
+      callbacks.set(channel, callback);
+      const unlisten = vi.fn();
+      unlisteners.set(channel, unlisten);
+      return Promise.resolve(unlisten);
     });
     const invalidate = vi.fn();
     const revalidate = vi.fn();
     const unregister = registerProjectResource("wiki", { invalidate }, revalidate);
     const unobserve = observeProjectResources(
-      { projectId: "project-a", rootPath: "D:/wiki" },
+      { projectId: "project-a", rootPath: "" },
+      ["wiki"],
+    );
+    const mounted = renderHook(() => useTaskEvents());
+    const foregroundChanged = await foregroundChangedCallback();
+    await Promise.resolve();
+
+    mounted.unmount();
+    expect(unlisteners.get("app://foreground-changed")).toHaveBeenCalledOnce();
+    act(() => {
+      foregroundChanged({ payload: { foreground: false } });
+      foregroundChanged({ payload: { foreground: true } });
+    });
+
+    expect(invalidate).not.toHaveBeenCalled();
+    expect(revalidate).not.toHaveBeenCalled();
+    expect(callbacks.get("app://foreground-changed")).toBe(foregroundChanged);
+    unobserve();
+    unregister();
+  });
+
+  it("lets only the current foreground listener consume after remount", async () => {
+    const resource = await mountForegroundResource();
+    const staleForegroundChanged = resource.foregroundChanged;
+    resource.dispose();
+    const current = await mountForegroundResource();
+
+    act(() => {
+      staleForegroundChanged({ payload: { foreground: false } });
+      staleForegroundChanged({ payload: { foreground: true } });
+      current.foregroundChanged({ payload: { foreground: false } });
+      current.foregroundChanged({ payload: { foreground: true } });
+    });
+
+    expect(current.invalidate).toHaveBeenCalledOnce();
+    expect(current.revalidate).toHaveBeenCalledOnce();
+    current.dispose();
+  });
+
+  it("refreshes only the project that is current when foreground returns", async () => {
+    const resource = await mountForegroundResource({
+      projectId: "project-a",
+      rootPath: "D:/a",
+    });
+
+    act(() => {
+      resource.foregroundChanged({ payload: { foreground: false } });
+      useProjectStore.getState().setCurrentProject({
+        ...defaultProject,
+        projectId: "project-b",
+        rootPath: "D:/b",
+      });
+      resource.foregroundChanged({ payload: { foreground: true } });
+    });
+
+    expect(resource.invalidate).toHaveBeenCalledOnce();
+    expect(resource.invalidate).toHaveBeenCalledWith({
+      projectId: "project-b",
+      rootPath: "D:/b",
+    });
+    expect(resource.revalidate).toHaveBeenCalledWith({
+      projectId: "project-b",
+      rootPath: "D:/b",
+    });
+    resource.dispose();
+  });
+
+  it("does not revalidate an unobserved resource after foreground returns", async () => {
+    const resource = await mountForegroundResource({ observed: false });
+
+    act(() => {
+      resource.foregroundChanged({ payload: { foreground: false } });
+      resource.foregroundChanged({ payload: { foreground: true } });
+    });
+
+    expect(resource.invalidate).toHaveBeenCalledOnce();
+    expect(resource.revalidate).not.toHaveBeenCalled();
+    resource.dispose();
+  });
+
+  it("fails closed when the foreground listener cannot register", async () => {
+    listenMock.mockImplementation((channel: string) => channel === "app://foreground-changed"
+      ? Promise.reject(new Error("foreground listener unavailable"))
+      : Promise.resolve(vi.fn()));
+    const invalidate = vi.fn();
+    const revalidate = vi.fn();
+    const unregister = registerProjectResource("wiki", { invalidate }, revalidate);
+    const unobserve = observeProjectResources(
+      { projectId: "project-a", rootPath: "" },
       ["wiki"],
     );
     const mounted = renderHook(() => useTaskEvents());
     await waitFor(() => expect(
-      listenMock.mock.calls.find(([channel]) => channel === "app://foreground-changed")?.[1],
-    ).toBeTypeOf("function"));
-    const foregroundChanged = listenMock.mock.calls.find(
-      ([channel]) => channel === "app://foreground-changed",
-    )?.[1] as ((event: { payload: { foreground: boolean } }) => void) | undefined;
+      listenMock.mock.calls.some(([channel]) => channel === "app://foreground-changed"),
+    ).toBe(true));
 
-    act(() => {
-      window.dispatchEvent(new Event("blur"));
-      window.dispatchEvent(new Event("focus"));
-      foregroundChanged?.({ payload: { foreground: true } });
-      foregroundChanged?.({ payload: { foreground: true } });
-    });
+    act(() => window.dispatchEvent(new Event("focus")));
 
-    expect(invalidateNotificationPermissionEpochMock).toHaveBeenCalledTimes(1);
+    expect(invalidateNotificationPermissionEpochMock).toHaveBeenCalledOnce();
     expect(invalidate).not.toHaveBeenCalled();
     expect(revalidate).not.toHaveBeenCalled();
     mounted.unmount();
@@ -369,41 +610,40 @@ describe("task event listener bridge", () => {
     unregister();
   });
 
-  it("revalidates observed resources once after a real background cycle", async () => {
+  it("keeps the real Graph handler cold for focus noise and reloads once after background", async () => {
+    const scope = { projectId: "project-a", rootPath: "D:/wiki" };
     useProjectStore.setState({
-      currentProject: {
-        ...defaultProject,
-        projectId: "project-a",
-        rootPath: "D:/wiki",
-      },
+      currentProject: { ...defaultProject, ...scope },
     });
-    const invalidate = vi.fn();
-    const revalidate = vi.fn();
-    const unregister = registerProjectResource("wiki", { invalidate }, revalidate);
-    const unobserve = observeProjectResources(
-      { projectId: "project-a", rootPath: "D:/wiki" },
-      ["wiki"],
-    );
+    invokeMock.mockImplementation((command: string) => command === "get_graph"
+      ? Promise.resolve({ data: graphData(), cached: true, layoutStale: false })
+      : Promise.resolve(null));
+    await useGraphStore.getState().ensureGraph(scope.projectId, scope.rootPath);
+    const unobserve = observeProjectResources(scope, ["graph"]);
     const mounted = renderHook(() => useTaskEvents());
-    await waitFor(() => expect(
-      listenMock.mock.calls.find(([channel]) => channel === "app://foreground-changed")?.[1],
-    ).toBeTypeOf("function"));
-    const foregroundChanged = listenMock.mock.calls.find(
-      ([channel]) => channel === "app://foreground-changed",
-    )?.[1] as ((event: { payload: { foreground: boolean } }) => void) | undefined;
+    const foregroundChanged = await foregroundChangedCallback();
 
     act(() => {
-      foregroundChanged?.({ payload: { foreground: false } });
-      foregroundChanged?.({ payload: { foreground: true } });
-      foregroundChanged?.({ payload: { foreground: true } });
+      foregroundChanged({ payload: { foreground: true } });
+      foregroundChanged({ payload: { foreground: true } });
     });
+    expect(invokeMock.mock.calls.filter(([command]) => command === "get_graph")).toHaveLength(1);
 
-    expect(invalidate).toHaveBeenCalledOnce();
-    expect(invalidate).toHaveBeenCalledWith({ projectId: "project-a", rootPath: "D:/wiki" });
-    expect(revalidate).toHaveBeenCalledOnce();
+    act(() => {
+      foregroundChanged({ payload: { foreground: false } });
+      foregroundChanged({ payload: { foreground: true } });
+      foregroundChanged({ payload: { foreground: true } });
+    });
+    await waitFor(() => expect(
+      invokeMock.mock.calls.filter(([command]) => command === "get_graph"),
+    ).toHaveLength(2));
+    expect(invokeMock.mock.calls.filter(([command]) => command === "get_graph")).toEqual([
+      ["get_graph", { request: { projectId: "project-a", projectRootPath: "D:/wiki" } }],
+      ["get_graph", { request: { projectId: "project-a", projectRootPath: "D:/wiki" } }],
+    ]);
+
     mounted.unmount();
     unobserve();
-    unregister();
   });
 
   it("drops deferred invalidation after the active project switches", async () => {
