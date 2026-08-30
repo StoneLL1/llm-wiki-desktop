@@ -12,7 +12,51 @@ use tasks::task_events::EventBus;
 #[cfg(feature = "gui")]
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 #[cfg(feature = "gui")]
-use tauri::Manager;
+use tauri::{Emitter, Manager};
+
+#[cfg(feature = "gui")]
+const APP_FOREGROUND_CHANGED_EVENT: &str = "app://foreground-changed";
+
+#[cfg(feature = "gui")]
+#[derive(Clone, serde::Serialize)]
+struct AppForegroundChangedPayload {
+    foreground: bool,
+}
+
+#[cfg(all(windows, any(feature = "gui", test)))]
+fn foreground_process_matches(foreground_process_id: u32, current_process_id: u32) -> Option<bool> {
+    if foreground_process_id == 0 || current_process_id == 0 {
+        return None;
+    }
+    Some(foreground_process_id == current_process_id)
+}
+
+#[cfg(all(feature = "gui", windows))]
+fn normalized_app_foreground(_focused: bool) -> Option<bool> {
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId,
+    };
+
+    // SAFETY: both APIs are read-only process/window queries. The HWND is
+    // checked before use and the PID out-parameter is valid for the call.
+    unsafe {
+        let foreground_window = GetForegroundWindow();
+        if foreground_window.is_null() {
+            return None;
+        }
+        let mut foreground_process_id = 0;
+        if GetWindowThreadProcessId(foreground_window, &mut foreground_process_id) == 0 {
+            return None;
+        }
+        foreground_process_matches(foreground_process_id, GetCurrentProcessId())
+    }
+}
+
+#[cfg(all(feature = "gui", not(windows)))]
+fn normalized_app_foreground(focused: bool) -> Option<bool> {
+    Some(focused)
+}
 
 #[cfg(feature = "gui")]
 fn startup_backend_error(error: errors::BackendError) -> String {
@@ -615,6 +659,19 @@ pub fn run() {
                             let _ = window_clone.hide();
                         }
                     }
+                    if let tauri::WindowEvent::Focused(focused) = event {
+                        if let Some(foreground) = normalized_app_foreground(*focused) {
+                            if let Err(error) = window_clone.emit(
+                                APP_FOREGROUND_CHANGED_EVENT,
+                                AppForegroundChangedPayload { foreground },
+                            ) {
+                                eprintln!(
+                                    "foreground_event_emit_error event={} message={error}",
+                                    APP_FOREGROUND_CHANGED_EVENT
+                                );
+                            }
+                        }
+                    }
                 });
             }
 
@@ -837,4 +894,17 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run LLM Wiki Desktop");
+}
+
+#[cfg(all(test, windows))]
+mod foreground_tests {
+    use super::foreground_process_matches;
+
+    #[test]
+    fn foreground_pid_matching_fails_closed_for_unknown_processes() {
+        assert_eq!(foreground_process_matches(42, 42), Some(true));
+        assert_eq!(foreground_process_matches(42, 7), Some(false));
+        assert_eq!(foreground_process_matches(0, 7), None);
+        assert_eq!(foreground_process_matches(42, 0), None);
+    }
 }
