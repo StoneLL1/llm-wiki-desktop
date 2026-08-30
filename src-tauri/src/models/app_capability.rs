@@ -116,6 +116,10 @@ pub struct AppCapabilityView {
     pub platform_content_types: Vec<String>,
     pub target_triple: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher_key_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_domain: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acknowledgement_version: Option<String>,

@@ -319,6 +319,25 @@ describe("recoverTasksForProject", () => {
     ]);
   });
 
+  it("drops the previous project's tasks when entering no-project recovery", async () => {
+    useProjectStore.setState({ currentProject: defaultProject });
+    useTaskStore.setState({
+      activeProjectId: "project-a",
+      activeProjectRootPath: "D:/project-a",
+      tasks: [task("task-project-a", "project-a")],
+    });
+    invokeMock.mockResolvedValueOnce([globalCapabilityTask("global-current")]);
+
+    await recoverAppTasks();
+
+    expect(useTaskStore.getState()).toMatchObject({
+      activeProjectId: null,
+      activeProjectRootPath: null,
+      tasksHydrated: true,
+    });
+    expect(useTaskStore.getState().tasks.map((item) => item.id)).toEqual(["global-current"]);
+  });
+
   it("does not publish a semantically identical task snapshot twice", () => {
     const current = task("task-a", "project-a");
     useTaskStore.getState().upsertTask(current);

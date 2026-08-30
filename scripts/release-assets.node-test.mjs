@@ -39,6 +39,7 @@ const releaseEntry = (capabilityId, targetTriple) => ({
   url: exactReleaseAssetUrl(TAG, `${capabilityId}-1.2.3-${targetTriple}.zip`),
   archiveSha256: crypto.createHash("sha256").update("zip").digest("hex"),
   manifestSha256: "c".repeat(64),
+  signingKeyId: "release-key",
   compressedBytes: 3,
   installedBytes: 2345,
   modelBytes: MODEL_CAPABILITY_PACKS.includes(capabilityId) ? 640 : null,
@@ -76,7 +77,7 @@ function createReleaseBundle(root) {
   fs.mkdirSync(capabilityRoot, { recursive: true });
   for (const entry of entries) fs.writeFileSync(path.join(capabilityRoot, path.basename(new URL(entry.url).pathname)), "zip");
   writeJson(path.join(capabilityRoot, "install-catalog.json"), { schemaVersion: 1, entries });
-  writeJson(path.join(capabilityRoot, "trusted-keys.json"), { release: "d".repeat(64) });
+  writeJson(path.join(capabilityRoot, "trusted-keys.json"), { "release-key": "d".repeat(64) });
   writeJson(path.join(capabilityRoot, "catalog-provenance.json"), {
     schemaVersion: 1, releaseTag: TAG, commitSha: COMMIT, workflowRunId: RUN_ID,
   });

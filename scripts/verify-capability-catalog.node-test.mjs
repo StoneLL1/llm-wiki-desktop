@@ -25,6 +25,7 @@ const releaseEntry = (capabilityId, targetTriple, overrides = {}) => ({
     + capabilityId + "-1.2.3-" + targetTriple + ".zip",
   archiveSha256: "a".repeat(64),
   manifestSha256: "b".repeat(64),
+  signingKeyId: "release",
   compressedBytes: 1234,
   installedBytes: 2345,
   modelBytes: MODEL_CAPABILITY_PACKS.includes(capabilityId)
@@ -111,6 +112,7 @@ test("entry measurements and identities must be complete", () => {
     { targetTriple: "x86_64-pc-windows-gnu" },
     { capabilityId: "bad pack id!" },
     { modelBytes: 0 },
+    { signingKeyId: "retired-key" },
   ];
   for (const overrides of invalidEntries) {
     const catalog = releaseCatalog(

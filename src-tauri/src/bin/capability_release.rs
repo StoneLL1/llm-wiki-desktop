@@ -298,6 +298,7 @@ fn assemble(options: &AssembleOptions) -> Result<AssembleResult, String> {
         url: format!("{base_url}/{file_name}"),
         archive_sha256: sha256_file(&archive_path)?,
         manifest_sha256: encode_hex(&Sha256::digest(&manifest_bytes)),
+        signing_key_id: options.key_id.clone(),
         compressed_bytes,
         installed_bytes,
         model_bytes: options.model_bytes,
@@ -543,6 +544,9 @@ fn verify_archive(
     manifest_bytes: &[u8],
     entry: &CapabilityCatalogEntry,
 ) -> Result<(), String> {
+    if manifest.signing_key_id != entry.signing_key_id {
+        return Err("catalog signing key differs from the signed manifest".into());
+    }
     let file = File::open(path).map_err(|error| format!("cannot verify archive: {error}"))?;
     let mut archive = ZipArchive::new(file).map_err(|error| format!("invalid archive: {error}"))?;
     if archive.len() != manifest.files.len() + 1 {
@@ -768,6 +772,7 @@ fn verify_release_entry(
     }
     if manifest.pack_id != entry.capability_id
         || manifest.version != entry.version
+        || manifest.signing_key_id != entry.signing_key_id
         || manifest.license_expression != entry.license
         || !manifest
             .target_triples
@@ -835,6 +840,7 @@ fn validate_catalog_entry(entry: &CapabilityCatalogEntry) -> Result<(), String> 
             .bytes()
             .all(|value| value.is_ascii_hexdigit())
         && !entry.manifest_sha256.bytes().all(|value| value == b'0')
+        && !entry.signing_key_id.trim().is_empty()
         && (1..=MAX_ARCHIVE_BYTES).contains(&entry.compressed_bytes)
         && (1..=MAX_INSTALLED_BYTES).contains(&entry.installed_bytes)
         && entry

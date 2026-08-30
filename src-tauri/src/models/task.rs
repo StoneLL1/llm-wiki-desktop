@@ -170,6 +170,13 @@ pub struct TaskResult {
     rename_all_fields = "camelCase"
 )]
 pub enum TaskResultReference {
+    AppCapabilityInstall {
+        capability_id: String,
+        version: String,
+        resumed_continuations: u64,
+        deferred_continuations: u64,
+        failed_continuations: u64,
+    },
     ImportPreview {
         session_id: String,
         item_id: String,
@@ -520,6 +527,27 @@ mod tests {
         assert_eq!(value["sessionId"], json!("session-1"));
         assert_eq!(value["taskId"], json!("operation-1"));
         assert_eq!(value["itemCount"], json!(1_001));
+    }
+
+    #[test]
+    fn app_capability_result_reference_preserves_continuation_outcomes() {
+        let reference = TaskResultReference::AppCapabilityInstall {
+            capability_id: "browser-runtime".into(),
+            version: "1.4.0".into(),
+            resumed_continuations: 2,
+            deferred_continuations: 1,
+            failed_continuations: 1,
+        };
+        let value = serde_json::to_value(&reference).unwrap();
+        assert_eq!(value["type"], json!("app_capability_install"));
+        assert_eq!(value["capabilityId"], json!("browser-runtime"));
+        assert_eq!(value["resumedContinuations"], json!(2));
+        assert_eq!(value["deferredContinuations"], json!(1));
+        assert_eq!(value["failedContinuations"], json!(1));
+        assert_eq!(
+            serde_json::from_value::<TaskResultReference>(value).unwrap(),
+            reference
+        );
     }
 
     #[test]

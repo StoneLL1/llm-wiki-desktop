@@ -24,6 +24,7 @@ fn fixture_catalog_entry() -> CapabilityCatalogEntry {
         url: "https://example.invalid/releases/browser-runtime.zip".into(),
         archive_sha256: "a".repeat(64),
         manifest_sha256: "b".repeat(64),
+        signing_key_id: "llm-wiki-capability-v1".into(),
         compressed_bytes: 123,
         installed_bytes: 456,
         model_bytes: None,
@@ -83,6 +84,8 @@ fn app_capability_view_serializes_orthogonal_facts() {
         formats: vec!["html".into()],
         platform_content_types: vec!["web_page".into()],
         target_triple: "x86_64-pc-windows-msvc".into(),
+        publisher_key_id: Some("llm-wiki-capability-v1".into()),
+        source_domain: Some("github.com".into()),
         target_version: Some("1.2.3".into()),
         acknowledgement_version: Some("ack-v1".into()),
         install_allowed: true,
@@ -120,6 +123,8 @@ fn app_capability_view_serializes_orthogonal_facts() {
     assert_eq!(value["operation"]["state"], serde_json::Value::Null);
     assert_eq!(value["update"]["state"], "available");
     assert_eq!(value["displayState"], "update_available");
+    assert_eq!(value["publisherKeyId"], "llm-wiki-capability-v1");
+    assert_eq!(value["sourceDomain"], "github.com");
     assert_eq!(value["installAllowed"], true);
     assert_eq!(value["installBlockedReasonCode"], serde_json::Value::Null);
 }
@@ -198,6 +203,7 @@ fn capability_inventory_is_available_without_an_active_project() {
     assert!(views
         .iter()
         .all(|view| view.current_project_waiting_count == 0));
+    assert!(views.iter().all(|view| view.publisher_key_id.is_none()));
     assert!(views
         .iter()
         .filter(|view| view.target_version.is_some())

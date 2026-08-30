@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { i18next } from "../../i18n";
+import { useAppCapabilityStore } from "../../stores/appCapabilityStore";
 import { useTaskStore } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import type { ImportCompletion, ImportItem, ImportItemResolution, ImportSession } from "../../types/importV2";
@@ -137,6 +138,7 @@ function mergeItem(defaultResolution?: ImportItemResolution): ImportItem {
 beforeEach(async () => {
   await i18next.changeLanguage("en");
   useToastStore.setState({ toasts: [] });
+  useAppCapabilityStore.getState().resetForTests();
 });
 
 describe("ImportView V2 composition", () => {
@@ -342,6 +344,38 @@ describe("ImportView V2 composition", () => {
       legacyHistoryAvailable: false,
       capabilities: [{ capabilityId: "asr-sensevoice-small", route: "media.asr", available: true, reasonCode: null }],
     };
+    useAppCapabilityStore.setState({
+      initialized: true,
+      capabilities: [{
+        capabilityId: "asr-sensevoice-small",
+        nameKey: "importV2.capabilityName.asr-sensevoice-small",
+        purposeKey: "importV2.capabilityPurpose.asr",
+        category: "media_asr",
+        routes: ["media.asr"],
+        formats: ["audio"],
+        platformContentTypes: [],
+        targetTriple: "x86_64-pc-windows-msvc",
+        publisherKeyId: "release-key",
+        sourceDomain: "github.com",
+        targetVersion: "1.0.0",
+        acknowledgementVersion: "ack-v1",
+        installAllowed: true,
+        distribution: { state: "published" },
+        installation: { state: "healthy", healthyVersion: "1.0.0" },
+        operation: {},
+        update: { state: "none" },
+        displayState: "installed",
+        compressedBytes: 1,
+        installedBytes: 1,
+        modelBytes: 1,
+        licenseExpression: "Apache-2.0",
+        thirdPartyNotices: [],
+        runtimeNetwork: false,
+        runtimeSubprocess: true,
+        runtimeFilesystem: ["app-capability-dir"],
+        currentProjectWaitingCount: 0,
+      }],
+    });
     render(<ImportView workflow={workflow({ readiness, listHistory })} />);
 
     expect(listHistory).not.toHaveBeenCalled();
@@ -353,8 +387,8 @@ describe("ImportView V2 composition", () => {
     fireEvent.click(screen.getByRole("button", { name: /capability packs/i }));
     expect(screen.getByText("Local speech recognition")).toBeInTheDocument();
     expect(screen.queryByText("asr-sensevoice-small")).not.toBeInTheDocument();
-    expect(screen.getByText("Supported source types: 1")).toBeInTheDocument();
-    expect(screen.queryByText("media.asr")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("audio · media.asr")).toBeInTheDocument();
+    expect(screen.getByText("installed 1.0.0 · target 1.0.0")).toBeInTheDocument();
     expect(screen.queryByRole("region", { name: /import methods/i })).not.toBeInTheDocument();
   });
 

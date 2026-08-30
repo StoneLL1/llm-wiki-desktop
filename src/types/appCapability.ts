@@ -28,6 +28,8 @@ export interface AppCapabilityView {
   formats: string[];
   platformContentTypes: string[];
   targetTriple: string;
+  publisherKeyId?: string;
+  sourceDomain?: string;
   targetVersion?: string;
   acknowledgementVersion?: string;
   installAllowed: boolean;

@@ -812,11 +812,6 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
           />
         ) : (
           <ImportCapabilitiesPanel
-            capabilities={workflow.readiness?.capabilities ?? []}
-            items={session?.items ?? []}
-            onAction={(action, itemId) => {
-              void handleActionRequest(action, itemId).catch(() => undefined);
-            }}
           />
         )}
       </div>

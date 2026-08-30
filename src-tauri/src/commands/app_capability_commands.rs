@@ -7,7 +7,9 @@ use crate::models::app_capability::{
     AppTaskControlScope, InstallAppCapabilityV1Request,
 };
 use crate::models::task::TaskActivity;
-use crate::models::task::{BackendTask, TaskOperation, TaskResult, TaskStatus};
+use crate::models::task::{
+    BackendTask, TaskOperation, TaskResult, TaskResultReference, TaskStatus,
+};
 use crate::services::import_v2::capability_installer::{
     catalog_entry, discard_catalog_partial, install_catalog_entry, CapabilityCatalogEntry,
     CapabilityInstallPhase,
@@ -440,6 +442,7 @@ fn spawn_install_worker(app: AppHandle, task: BackendTask, entry: CapabilityCata
         // active capability version as a cancelled installation.
         let mut resumed = 0usize;
         let mut deferred = 0usize;
+        let mut failed = 0usize;
         let continuations = state
             .app_capability_coordinator
             .continuations_for_task(&task_id);
@@ -511,6 +514,8 @@ fn spawn_install_worker(app: AppHandle, task: BackendTask, entry: CapabilityCata
                         || error.code.contains("MISMATCH");
                     if deferred_error {
                         deferred += 1;
+                    } else {
+                        failed += 1;
                     }
                     final_updates.push((
                         continuation.continuation_id.clone(),
@@ -535,11 +540,17 @@ fn spawn_install_worker(app: AppHandle, task: BackendTask, entry: CapabilityCata
             &task_id,
             TaskResult {
                 summary: format!(
-                    "Installed {} {}; resumed {} continuation(s), deferred {}.",
-                    entry.capability_id, entry.version, resumed, deferred
+                    "Installed {} {}; resumed {} continuation(s), deferred {}, failed {}.",
+                    entry.capability_id, entry.version, resumed, deferred, failed
                 ),
                 affected_paths: Vec::new(),
-                reference: None,
+                reference: Some(TaskResultReference::AppCapabilityInstall {
+                    capability_id: entry.capability_id.clone(),
+                    version: entry.version.clone(),
+                    resumed_continuations: resumed as u64,
+                    deferred_continuations: deferred as u64,
+                    failed_continuations: failed as u64,
+                }),
                 pending_action: None,
             },
         );

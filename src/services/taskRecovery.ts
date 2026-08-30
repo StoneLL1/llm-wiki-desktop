@@ -79,16 +79,34 @@ export async function recoverTasksForProject(projectId: string, rootPath: string
 export async function recoverAppTasks(): Promise<void> {
   if (!hasTauri()) return;
   const recoveryId = ++recoveryEpoch;
+  const project = useProjectStore.getState().currentProject;
+  const resetProjectContext = !project.projectId && !project.rootPath;
   const before = useTaskStore.getState();
-  const activeProjectId = before.activeProjectId;
-  const activeProjectRootPath = before.activeProjectRootPath;
+  const expectedProjectId = resetProjectContext ? null : before.activeProjectId;
+  const expectedProjectRootPath = resetProjectContext ? null : before.activeProjectRootPath;
+  const retainedTasks = before.tasks.filter((task) =>
+    task.projectId === null || (!resetProjectContext && task.projectId === expectedProjectId));
+  useTaskStore.setState({
+    activeProjectId: expectedProjectId,
+    activeProjectRootPath: expectedProjectRootPath,
+    tasks: retainedTasks,
+    tasksHydrated: false,
+    projectPersistence: null,
+    projectPersistenceReason: "no_project",
+  });
   const globalTasks = await listAppTasks();
   const state = useTaskStore.getState();
   if (
     recoveryId !== recoveryEpoch ||
-    state.activeProjectId !== activeProjectId ||
-    state.activeProjectRootPath !== activeProjectRootPath
+    state.activeProjectId !== expectedProjectId ||
+    state.activeProjectRootPath !== expectedProjectRootPath
   ) return;
-  const projectTasks = state.tasks.filter((task) => task.projectId === activeProjectId);
-  state.setTasks([...(Array.isArray(globalTasks) ? globalTasks : []), ...projectTasks]);
+  const merged = new Map<string, BackendTask>();
+  for (const task of Array.isArray(globalTasks) ? globalTasks : []) merged.set(task.id, task);
+  for (const task of state.tasks) {
+    if ((task.projectId === null || (!resetProjectContext && task.projectId === expectedProjectId))
+      && !merged.has(task.id)) merged.set(task.id, task);
+  }
+  state.setTasks([...merged.values()]);
+  useTaskStore.setState({ tasksHydrated: true });
 }

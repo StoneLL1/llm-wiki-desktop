@@ -142,6 +142,7 @@ pub struct CapabilityCatalogEntry {
     pub url: String,
     pub archive_sha256: String,
     pub manifest_sha256: String,
+    pub signing_key_id: String,
     pub compressed_bytes: u64,
     pub installed_bytes: u64,
     #[serde(default)]
@@ -1502,6 +1503,11 @@ fn verify_installed_root_with_keys(
             "Installed capability manifest does not match the catalog entry.",
         ));
     }
+    if pack.manifest.signing_key_id != entry.signing_key_id {
+        return Err(install_error(
+            "Installed capability signer does not match the catalog entry.",
+        ));
+    }
     let legacy_measurements_match = pack.manifest.schema_version != 1
         || (pack.manifest.archive_sha256 == entry.archive_sha256
             && pack.manifest.compressed_bytes == entry.compressed_bytes
@@ -1669,6 +1675,7 @@ fn valid_catalog_entry(entry: &CapabilityCatalogEntry) -> bool {
             .chars()
             .all(|value| value.is_ascii_hexdigit())
         && !entry.manifest_sha256.chars().all(|value| value == '0')
+        && !entry.signing_key_id.trim().is_empty()
         && entry.compressed_bytes > 0
         && entry.compressed_bytes <= MAX_ARCHIVE_BYTES
         && entry.installed_bytes > 0
@@ -1883,6 +1890,7 @@ mod tests {
                 url: "https://example.test/fixture.zip".into(),
                 archive_sha256: hash_file(&archive).unwrap(),
                 manifest_sha256: format!("{:x}", Sha256::digest(&manifest_bytes)),
+                signing_key_id: key_id.into(),
                 compressed_bytes: std::fs::metadata(&archive).unwrap().len(),
                 installed_bytes: (manifest_bytes.len() + runtime.len()) as u64,
                 model_bytes: None,
@@ -1957,6 +1965,7 @@ mod tests {
             url: "http://example.test/pack.zip".into(),
             archive_sha256: "a".repeat(64),
             manifest_sha256: "b".repeat(64),
+            signing_key_id: "release-a".into(),
             compressed_bytes: 1,
             installed_bytes: 1,
             model_bytes: None,
@@ -1975,6 +1984,7 @@ mod tests {
             url: format!("https://example.test/browser-runtime-{version}.zip"),
             archive_sha256: "ab".repeat(32),
             manifest_sha256: "cd".repeat(32),
+            signing_key_id: "release-a".into(),
             compressed_bytes: 1,
             installed_bytes: 1,
             model_bytes: None,
@@ -2002,6 +2012,27 @@ mod tests {
         .unwrap();
         verify_installed_root_with_keys(&install_root, &fixture.entry, fixture.keys.clone())
             .unwrap();
+    }
+
+    #[test]
+    fn catalog_entry_binds_one_exact_manifest_signer_during_key_rotation() {
+        let signed_by_a = SignedFixture::new(b"verified-runtime", "release-a");
+        let signed_by_b = SignedFixture::new(b"other-runtime", "release-b");
+        let mut rotated_keys = signed_by_a.keys.clone();
+        rotated_keys.extend(signed_by_b.keys.clone());
+        let mut mismatched_catalog = signed_by_a.entry.clone();
+        mismatched_catalog.signing_key_id = "release-b".into();
+
+        let error = extract_and_verify_with_keys(
+            &signed_by_a.archive,
+            &signed_by_a.install_root(),
+            &mismatched_catalog,
+            rotated_keys,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "IMPORT_V2_CAPABILITY_INSTALL_FAILED");
+        assert!(error.message.contains("signer"));
     }
 
     #[test]

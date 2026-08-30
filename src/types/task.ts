@@ -84,6 +84,13 @@ export interface TaskResult {
 }
 
 export type TaskResultReference = {
+  type: "app_capability_install";
+  capabilityId: string;
+  version: string;
+  resumedContinuations: number;
+  deferredContinuations: number;
+  failedContinuations: number;
+} | {
   type: "import_preview";
   sessionId: string;
   itemId: string;
