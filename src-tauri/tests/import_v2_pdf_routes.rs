@@ -159,7 +159,7 @@ fn passive_inspection_counts_every_page_and_never_executes_actions() {
 }
 
 #[test]
-fn document_layout_pack_is_pinned_cross_platform_and_cannot_install_at_runtime() {
+fn document_layout_pack_is_pinned_cross_platform_and_offline_at_runtime() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap();
@@ -169,12 +169,17 @@ fn document_layout_pack_is_pinned_cross_platform_and_cannot_install_at_runtime()
     .unwrap();
     assert_eq!(manifest["packId"], "document-layout");
     assert_eq!(manifest["version"], "2.48.0");
-    assert_eq!(manifest["licenseExpression"], "MIT");
+    assert_eq!(
+        manifest["licenseExpression"],
+        "MIT AND Apache-2.0 AND CDLA-Permissive-2.0 AND PSF-2.0 AND MPL-2.0 AND LicenseRef-Bundled-Third-Party-Notices"
+    );
     assert_eq!(manifest["targetTriples"].as_array().unwrap().len(), 4);
     let runner =
         std::fs::read_to_string(root.join("capabilities/document-layout/runner/docling_pack.py"))
             .unwrap();
-    assert!(runner.contains("waiting_capability"));
+    assert!(runner.contains("DocumentConverter"));
+    assert!(runner.contains("options.enable_remote_services = False"));
+    assert!(runner.contains("options.allow_external_plugins = False"));
     assert!(!runner.contains("pip install"));
 }
 

@@ -27,6 +27,7 @@ from core import (
 
 MAX_RPC_BYTES = 1024 * 1024
 PACK_ROOT = Path(__file__).resolve().parent.parent
+PACK_ROUTES = {"ocr-basic": "ocr.basic", "ocr-cjk-accurate": "ocr.cjk-accurate"}
 
 
 def block_network() -> None:
@@ -89,35 +90,39 @@ def relative_to_staging(staging_root: Path, value: Path) -> str:
 
 rpc = None
 output_root = None
+rendered_pdf_root = None
 completed = False
 try:
     rpc = read_rpc()
     params = rpc.get("params")
     if rpc.get("method") == "capability.health":
         route = params.get("route") if isinstance(params, dict) else None
+        with (PACK_ROOT / "manifest.json").open("r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        capability_id = manifest.get("packId")
         if (
             not isinstance(params, dict)
             or params.get("protocolVersion") != "2"
-            or params.get("capabilityId") != "ocr-cjk-accurate"
-            or route != "ocr.cjk-accurate"
+            or params.get("capabilityId") != capability_id
+            or route != PACK_ROUTES.get(capability_id)
         ):
             raise OcrPolicyError("IMPORT_OCR_INVALID_REQUEST")
-        with (PACK_ROOT / "manifest.json").open("r", encoding="utf-8") as handle:
-            manifest = json.load(handle)
-        if manifest.get("packId") != "ocr-cjk-accurate" or manifest.get("protocolVersion") != "2":
+        if capability_id not in PACK_ROUTES or manifest.get("protocolVersion") != "2":
             raise OcrPolicyError("IMPORT_OCR_ENGINE_INTEGRITY_FAILED")
         for relative in MODEL_DECLARATIONS:
             verify_signed_file(PACK_ROOT, manifest, relative)
         verify_signed_file(PACK_ROOT, manifest, "models/ppocrv5_dict.txt")
         import rapidocr  # noqa: F401
         from PIL import Image  # noqa: F401
+        import pillow_heif  # noqa: F401
+        import pypdfium2  # noqa: F401
         write_response({
             "jsonrpc": "2.0",
             "id": rpc.get("id"),
             "result": {
                 "healthy": True,
                 "protocolVersion": "2",
-                "capabilityId": "ocr-cjk-accurate",
+                "capabilityId": capability_id,
                 "route": route,
             },
             "error": None,
@@ -140,7 +145,7 @@ try:
     )
     with (PACK_ROOT / "manifest.json").open("r", encoding="utf-8") as handle:
         manifest = json.load(handle)
-    if manifest.get("packId") != "ocr-cjk-accurate" or manifest.get("protocolVersion") != "2":
+    if manifest.get("packId") not in PACK_ROUTES or manifest.get("protocolVersion") != "2":
         raise OcrPolicyError("IMPORT_OCR_ENGINE_INTEGRITY_FAILED")
 
     model_paths = {
@@ -159,15 +164,37 @@ try:
     })
     from rapidocr import OCRVersion, RapidOCR
     from PIL import Image, UnidentifiedImageError
+    import pillow_heif
+    import pypdfium2
+
+    pillow_heif.register_heif_opener()
 
     Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+    images_for_ocr = [image_path]
     try:
-        with Image.open(native_tool_path(image_path)) as image_probe:
-            validate_image_geometry(
-                image_probe.width,
-                image_probe.height,
-                int(getattr(image_probe, "n_frames", 1)),
-            )
+        if image_path.suffix.lower() == ".pdf":
+            document = pypdfium2.PdfDocument(native_tool_path(image_path))
+            if len(document) < 1 or len(document) > 200:
+                raise OcrPolicyError("IMPORT_OCR_IMAGE_TOO_LARGE")
+            rendered_pdf_root = Path(tempfile.mkdtemp(prefix=".pdf-ocr-input-", dir=staging_root))
+            images_for_ocr = []
+            total_pixels = 0
+            for page_index in range(len(document)):
+                rendered = rendered_pdf_root / f"page-{page_index + 1}.png"
+                document[page_index].render(scale=2).to_pil().save(rendered, format="PNG")
+                images_for_ocr.append(rendered)
+            document.close()
+        for image_for_ocr in images_for_ocr:
+            with Image.open(native_tool_path(image_for_ocr)) as image_probe:
+                validate_image_geometry(
+                    image_probe.width,
+                    image_probe.height,
+                    int(getattr(image_probe, "n_frames", 1)),
+                )
+                if image_path.suffix.lower() == ".pdf":
+                    total_pixels += image_probe.width * image_probe.height
+                    if total_pixels > MAX_IMAGE_PIXELS * 4:
+                        raise OcrPolicyError("IMPORT_OCR_IMAGE_TOO_LARGE")
     except OcrPolicyError:
         raise
     except Image.DecompressionBombError:
@@ -194,11 +221,25 @@ try:
         "Rec.model_path": native_tool_path(model_paths["models/ch_PP-OCRv5_rec_mobile.onnx"]),
         "Rec.rec_keys_path": native_tool_path(dictionary),
     })
-    output = engine(native_tool_path(image_path))
-    if output.img is None or getattr(output.img, "ndim", 0) < 2:
-        raise OcrPolicyError("IMPORT_OCR_OUTPUT_INVALID")
-    image_height, image_width = (int(output.img.shape[0]), int(output.img.shape[1]))
-    blocks = normalize_blocks(output.boxes, output.txts, output.scores, image_width, image_height)
+    pages = []
+    blocks = []
+    for page_number, image_for_ocr in enumerate(images_for_ocr, start=1):
+        output = engine(native_tool_path(image_for_ocr))
+        if output.img is None or getattr(output.img, "ndim", 0) < 2:
+            raise OcrPolicyError("IMPORT_OCR_OUTPUT_INVALID")
+        image_height, image_width = (int(output.img.shape[0]), int(output.img.shape[1]))
+        page_blocks = normalize_blocks(output.boxes, output.txts, output.scores, image_width, image_height)
+        for block in page_blocks:
+            block["pageNumber"] = page_number
+        blocks.extend(page_blocks)
+        pages.append({
+            "pageNumber": page_number,
+            "image": {"width": image_width, "height": image_height},
+            "confidence": mean_confidence(page_blocks),
+            "blocks": page_blocks,
+        })
+        if len(blocks) > 10_000:
+            raise OcrPolicyError("IMPORT_OCR_OUTPUT_INVALID")
     confidence = mean_confidence(blocks)
 
     output_root = Path(tempfile.mkdtemp(prefix=".rapidocr-output-", dir=staging_root))
@@ -211,7 +252,8 @@ try:
         "modelVersion": MODEL_VERSION,
         "provider": "cpu",
         "sourceName": image_path.name,
-        "image": {"width": image_width, "height": image_height},
+        "pageCount": len(pages),
+        "pages": pages,
         "confidence": confidence,
         "blocks": blocks,
         "models": [
@@ -221,7 +263,14 @@ try:
         "provenance": "authorized-local-ocr",
     }
     markdown_path.write_text(
-        render_markdown(image_path.name, blocks, confidence),
+        "\n\n".join(
+            render_markdown(
+                image_path.name if len(pages) == 1 else f"{image_path.name} — page {page['pageNumber']}",
+                page["blocks"],
+                page["confidence"],
+            )
+            for page in pages
+        ),
         encoding="utf-8",
         newline="\n",
     )
@@ -251,3 +300,5 @@ except Exception:
 finally:
     if output_root is not None and not completed:
         shutil.rmtree(output_root, ignore_errors=True)
+    if rendered_pdf_root is not None:
+        shutil.rmtree(rendered_pdf_root, ignore_errors=True)

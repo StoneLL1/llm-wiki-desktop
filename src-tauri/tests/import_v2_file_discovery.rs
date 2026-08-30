@@ -19,6 +19,13 @@ struct LocalFormatCase {
     routes: &'static [&'static str],
 }
 
+const MEDIA_ROUTE_MATRIX: &[&str] = &[
+    "media.companion",
+    "media.subtitle",
+    "media.keyframes",
+    "media.asr",
+];
+
 const LOCAL_FORMAT_CASES: &[LocalFormatCase] = &[
     LocalFormatCase {
         fixture: "note.md",
@@ -48,7 +55,7 @@ const LOCAL_FORMAT_CASES: &[LocalFormatCase] = &[
         fixture: "legacy.doc",
         format: FileFormat::Doc,
         content_kind: FileContentKind::Document,
-        routes: &["pack.office-legacy", "pack.office-oxide", "agent.office"],
+        routes: &["pack.office-legacy", "pack.markitdown", "pack.office-oxide", "agent.office"],
     },
     LocalFormatCase {
         fixture: "document.docx",
@@ -65,7 +72,7 @@ const LOCAL_FORMAT_CASES: &[LocalFormatCase] = &[
         fixture: "legacy.xls",
         format: FileFormat::Xls,
         content_kind: FileContentKind::Document,
-        routes: &["pack.office-legacy", "pack.office-oxide", "agent.office"],
+        routes: &["pack.office-legacy", "pack.markitdown", "pack.office-oxide", "agent.office"],
     },
     LocalFormatCase {
         fixture: "workbook.xlsx",
@@ -82,7 +89,7 @@ const LOCAL_FORMAT_CASES: &[LocalFormatCase] = &[
         fixture: "legacy.ppt",
         format: FileFormat::Ppt,
         content_kind: FileContentKind::Document,
-        routes: &["pack.office-legacy", "pack.office-oxide", "agent.office"],
+        routes: &["pack.office-legacy", "pack.markitdown", "pack.office-oxide", "agent.office"],
     },
     LocalFormatCase {
         fixture: "presentation.pptx",
@@ -153,97 +160,97 @@ const LOCAL_FORMAT_CASES: &[LocalFormatCase] = &[
         fixture: "animated.gif",
         format: FileFormat::AnimatedGif,
         content_kind: FileContentKind::Video,
-        routes: &["media.companion", "media.asr"],
+        routes: MEDIA_ROUTE_MATRIX,
     },
     LocalFormatCase {
         fixture: "audio.mp3",
         format: FileFormat::Mp3,
         content_kind: FileContentKind::Audio,
-        routes: &["media.companion", "media.asr"],
+        routes: MEDIA_ROUTE_MATRIX,
     },
     LocalFormatCase {
         fixture: "audio.wav",
         format: FileFormat::Wav,
         content_kind: FileContentKind::Audio,
-        routes: &["media.companion", "media.asr"],
+        routes: MEDIA_ROUTE_MATRIX,
     },
     LocalFormatCase {
         fixture: "media.m4a",
         format: FileFormat::M4a,
         content_kind: FileContentKind::Audio,
-        routes: &["media.companion", "media.asr"],
+        routes: MEDIA_ROUTE_MATRIX,
     },
     LocalFormatCase {
         fixture: "audio.aac",
         format: FileFormat::Aac,
         content_kind: FileContentKind::Audio,
-        routes: &["media.companion", "media.asr"],
+        routes: MEDIA_ROUTE_MATRIX,
     },
     LocalFormatCase {
         fixture: "audio.flac",
         format: FileFormat::Flac,
         content_kind: FileContentKind::Audio,
-        routes: &["media.companion", "media.asr"],
+        routes: MEDIA_ROUTE_MATRIX,
     },
     LocalFormatCase {
         fixture: "audio.ogg",
         format: FileFormat::Ogg,
         content_kind: FileContentKind::Audio,
-        routes: &["media.companion", "media.asr"],
+        routes: MEDIA_ROUTE_MATRIX,
     },
     LocalFormatCase {
         fixture: "audio.opus",
         format: FileFormat::Opus,
         content_kind: FileContentKind::Audio,
-        routes: &["media.companion", "media.asr"],
+        routes: MEDIA_ROUTE_MATRIX,
     },
     LocalFormatCase {
         fixture: "audio.wma",
         format: FileFormat::Wma,
         content_kind: FileContentKind::Audio,
-        routes: &["media.companion", "media.asr"],
+        routes: MEDIA_ROUTE_MATRIX,
     },
     LocalFormatCase {
         fixture: "media.mp4",
         format: FileFormat::Mp4,
         content_kind: FileContentKind::Video,
-        routes: &["media.companion", "media.asr"],
+        routes: MEDIA_ROUTE_MATRIX,
     },
     LocalFormatCase {
         fixture: "media.mov",
         format: FileFormat::Mov,
         content_kind: FileContentKind::Video,
-        routes: &["media.companion", "media.asr"],
+        routes: MEDIA_ROUTE_MATRIX,
     },
     LocalFormatCase {
         fixture: "video.mkv",
         format: FileFormat::Mkv,
         content_kind: FileContentKind::Video,
-        routes: &["media.companion", "media.asr"],
+        routes: MEDIA_ROUTE_MATRIX,
     },
     LocalFormatCase {
         fixture: "video.webm",
         format: FileFormat::Webm,
         content_kind: FileContentKind::Video,
-        routes: &["media.companion", "media.asr"],
+        routes: MEDIA_ROUTE_MATRIX,
     },
     LocalFormatCase {
         fixture: "video.avi",
         format: FileFormat::Avi,
         content_kind: FileContentKind::Video,
-        routes: &["media.companion", "media.asr"],
+        routes: MEDIA_ROUTE_MATRIX,
     },
     LocalFormatCase {
         fixture: "media.m4v",
         format: FileFormat::M4v,
         content_kind: FileContentKind::Video,
-        routes: &["media.companion", "media.asr"],
+        routes: MEDIA_ROUTE_MATRIX,
     },
     LocalFormatCase {
         fixture: "video.wmv",
         format: FileFormat::Wmv,
         content_kind: FileContentKind::Video,
-        routes: &["media.companion", "media.asr"],
+        routes: MEDIA_ROUTE_MATRIX,
     },
     LocalFormatCase {
         fixture: "subtitle.srt",
@@ -339,12 +346,12 @@ fn ocr_asr_and_companion_edge_fixtures_reach_their_batch_three_routes() {
         (
             "speech.wav",
             FileFormat::Wav,
-            &["media.companion", "media.asr"][..],
+            MEDIA_ROUTE_MATRIX,
         ),
         (
             "silence.wav",
             FileFormat::Wav,
-            &["media.companion", "media.asr"][..],
+            MEDIA_ROUTE_MATRIX,
         ),
         (
             "companion-lrc.lrc",

@@ -10,7 +10,7 @@ import { stageRapidOcrCapability } from "./stage-rapidocr-capability.mjs";
 const dependencyLicenses = [
   "certifi", "charset-normalizer", "colorama", "coloredlogs", "colorlog", "flatbuffers",
   "humanfriendly", "idna", "mpmath", "numpy", "omegaconf", "onnxruntime", "opencv-python",
-  "packaging", "pillow", "protobuf", "pyclipper", "pyreadline3", "pyyaml", "rapidocr",
+  "packaging", "pillow", "pillow-heif", "protobuf", "pyclipper", "pypdfium2", "pyreadline3", "pyyaml", "rapidocr",
   "requests", "shapely", "six", "sympy", "tqdm", "typing-extensions", "urllib3",
 ];
 

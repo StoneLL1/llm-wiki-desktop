@@ -56,7 +56,7 @@ The workflow artifact named `draft-release-bundle` is the safe pre-publication c
 
 Record the workflow artifact name, byte size, and SHA-256 for every item. All URLs and provenance must bind to one tag, one commit, and one workflow run.
 
-- 20 unique signed capability archives: 5 packs × Windows x64, macOS arm64, macOS x64, Linux x64.
+- Exactly one signed capability archive for every `published definition × supported target` pair derived from `capabilities/product-manifest.json` (44 entries for the current 11 × 4 manifest; never use 44 as a permanent hard-coded gate).
 - Signed capability catalog and committed trust-key set.
 - Windows x64 canonical NSIS installer/updater and updater `.sig`; record `windows-authenticode-not-required` policy evidence.
 - macOS arm64 DMG/app updater archive and `.sig`; record `apple-developer-id-not-required` policy evidence.

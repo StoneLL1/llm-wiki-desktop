@@ -29,14 +29,14 @@ concurrency:
   group: capability-release-${{ inputs.release_tag }}
   cancel-in-progress: false
 
-# Batch 0 deliberately quarantines the legacy five-pack release matrix. Batch 8
-# must replace this blocker with manifest-derived staging and qualification jobs;
-# until then no distributable catalog can be produced from incomplete assets.
 jobs:
-  release-blocker:
-    name: Validate the product matrix and keep distributable release disabled
+  release-preflight:
+    name: Validate the manifest-derived formal release matrix
     runs-on: ubuntu-24.04
     environment: capability-release
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      expectedEntryCount: ${{ steps.matrix.outputs.expectedEntryCount }}
     steps:
       - name: Checkout exact default-branch commit with release history
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -48,18 +48,206 @@ jobs:
         with:
           node-version: 22.23.1
 
-      - name: Require the canonical repository, exact coordinate, and manifest-derived matrix
+      - name: Require the canonical repository and exact coordinate
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = 'StoneLL1/llm-wiki-desktop'
           node scripts/check-release-version.mjs --tag "$RELEASE_TAG"
-          node scripts/verify-product-capabilities.mjs --print-matrix
           node scripts/verify-product-capabilities.mjs --require-release-ready
           test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$GITHUB_SHA"
 
-      - name: Refuse distributable capability publication until Batch 8 activates every manifest entry
+      - name: Materialize the exact formal staging and qualification plan
+        id: matrix
         run: |
-          echo "Capability publication remains quarantined until Batch 8 supplies manifest-derived staging and real qualification evidence." >&2
-          exit 1
+          set -euo pipefail
+          plan="$(node scripts/capability-release-plan.mjs)"
+          count="$(node -e 'const value=JSON.parse(process.argv[1]);process.stdout.write(String(value.expectedEntryCount))' "$plan")"
+          test "$count" -gt 0
+          echo "matrix=$(node -e 'const value=JSON.parse(process.argv[1]);process.stdout.write(JSON.stringify({include:value.include}))' "$plan")" >> "$GITHUB_OUTPUT"
+          echo "expectedEntryCount=$count" >> "$GITHUB_OUTPUT"
+          node scripts/verify-product-capabilities.mjs --print-matrix
+
+      - name: Run the local and CI shared distributable preflight
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run test:capability-tools
+          npm run check:release-config
+
+      - name: Upload the immutable release-plan evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: capability-release-plan
+          path: |
+            capabilities/product-manifest.json
+            capabilities/release-recipes.json
+            capabilities/release-sources.json
+            capabilities/qualification-corpus.json
+          if-no-files-found: error
+          retention-days: 30
+
+  build-capability:
+    name: Build and qualify ${{ matrix.capabilityId }} (${{ matrix.targetTriple }})
+    needs: release-preflight
+    runs-on: ${{ matrix.os }}
+    environment: capability-release
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.release-preflight.outputs.matrix) }}
+    steps:
+      - name: Checkout the exact release commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with: { fetch-depth: 0 }
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with: { node-version: 22.23.1, cache: npm }
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with: { version: "0.10.8", enable-cache: false }
+
+      - name: Setup Rust
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustup toolchain install 1.92.0 --profile minimal --no-self-update
+          rustup default 1.92.0
+
+      - name: Install Linux build and browser runtime prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config nasm libavcodec-dev libavformat-dev libavutil-dev libswresample-dev
+          npm ci --ignore-scripts --prefix capabilities/browser-runtime
+          npm exec --prefix capabilities/browser-runtime -- playwright install-deps chromium
+
+      - name: Build release assembler without signing credentials
+        run: cargo build --locked --release --no-default-features --manifest-path src-tauri/Cargo.toml --bin capability_release
+
+      - name: Fetch locked sources and prepare the deterministic payload
+        id: payload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $payload = Join-Path $env:RUNNER_TEMP 'capability-payload'
+          $result = node scripts/prepare-release-capability.mjs --pack '${{ matrix.capabilityId }}' --target '${{ matrix.targetTriple }}' --output $payload | ConvertFrom-Json
+          "root=$payload" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "entrypoint=$($result.entrypoint)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "entrypointArgs=$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($result.entrypointArgs | ConvertTo-Json -Compress))))" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "modelBytes=$($result.modelBytes ?? 0)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Assemble and sign exactly one target archive
+        shell: pwsh
+        env:
+          LLM_WIKI_CAPABILITY_SIGNING_KEY_PKCS8_HEX: ${{ secrets.LLM_WIKI_CAPABILITY_SIGNING_KEY_PKCS8_HEX }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SIGNING_KEY_ID: ${{ inputs.signing_key_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ($env:RELEASE_TAG -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' -or $env:SIGNING_KEY_ID -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') { throw 'invalid release coordinate' }
+          $tool = if ($IsWindows) { 'src-tauri/target/release/capability_release.exe' } else { 'src-tauri/target/release/capability_release' }
+          $dist = Join-Path $env:GITHUB_WORKSPACE 'capability-dist'
+          $argsJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${{ steps.payload.outputs.entrypointArgs }}')) | ConvertFrom-Json
+          $arguments = @('assemble', '--template', 'capabilities/${{ matrix.capabilityId }}/manifest.json', '--payload', '${{ steps.payload.outputs.root }}', '--target', '${{ matrix.targetTriple }}', '--entrypoint', '${{ steps.payload.outputs.entrypoint }}')
+          foreach ($value in @($argsJson)) { $arguments += @('--entrypoint-arg', [string]$value) }
+          $arguments += @('--output', $dist, '--base-url', "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/$env:RELEASE_TAG", '--trusted-keys', 'capabilities/trusted-keys.json', '--key-id', $env:SIGNING_KEY_ID)
+          if ([uint64]'${{ steps.payload.outputs.modelBytes }}' -gt 0) { $arguments += @('--model-bytes', '${{ steps.payload.outputs.modelBytes }}') }
+          & $tool @arguments
+          if (@(Get-ChildItem -LiteralPath $dist -Filter '*.zip' -File).Count -ne 1 -or @(Get-ChildItem -LiteralPath $dist -Filter '*.catalog.json' -File).Count -ne 1) { throw 'one matrix entry must produce exactly one archive and fragment' }
+
+      - name: Re-extract the signed archive and run formal qualification
+        shell: pwsh
+        env:
+          LLM_WIKI_X_PRODUCTION_SAMPLE_URL: ${{ vars.X_PRODUCTION_SAMPLE_URL }}
+          LLM_WIKI_WECHAT_PRODUCTION_SAMPLE_URL: ${{ vars.WECHAT_PRODUCTION_SAMPLE_URL }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $archive = Get-ChildItem -LiteralPath capability-dist -Filter '*.zip' -File | Select-Object -ExpandProperty FullName
+          $qualified = Join-Path $env:RUNNER_TEMP 'signed-qualification'
+          New-Item -ItemType Directory -Path $qualified | Out-Null
+          tar -xf $archive -C $qualified
+          node scripts/qualify-staged-capability.mjs --payload $qualified
+          $evidence = Join-Path $env:GITHUB_WORKSPACE 'capability-dist/${{ matrix.capabilityId }}-${{ matrix.targetTriple }}.qualification.json'
+          node scripts/qualify-release-corpus.mjs --payload $qualified --evidence $evidence
+          $runner = Join-Path $qualified '${{ steps.payload.outputs.entrypoint }}'
+          switch ('${{ matrix.capabilityId }}') {
+            'browser-runtime' {
+              & $runner --test (Join-Path $qualified 'runner/platform-extract.node-test.mjs') (Join-Path $qualified 'runner/snapshot-policy.node-test.mjs') (Join-Path $qualified 'runner/linux-deps.node-test.mjs')
+              & $runner (Join-Path $qualified 'runner/policy.smoke.mjs')
+              & $runner (Join-Path $qualified 'runner/x-route.qualification.mjs')
+              & $runner (Join-Path $qualified 'runner/wechat-route.qualification.mjs')
+            }
+            'browser-runtime-lite' { & $runner --test (Join-Path $qualified 'runner/index.node-test.mjs') }
+            'media-metadata' { & $runner --test (Join-Path $qualified 'runner/core.node-test.mjs') }
+            'asr-sensevoice-small' { & $runner (Join-Path $qualified 'runner/qualification.mjs') }
+            'asr-whisper' { & $runner --test (Join-Path $qualified 'runner/core.node-test.mjs') }
+            'ocr-basic' { & $runner (Join-Path $qualified 'runner/qualification.py') }
+            'ocr-cjk-accurate' { & $runner (Join-Path $qualified 'runner/qualification.py') }
+            'office-legacy' { & $runner (Join-Path $qualified 'runner/office_legacy_pack_test.py') }
+          }
+
+      - name: Upload this exact signed archive and catalog fragment
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.capabilityId }}-capabilities-${{ matrix.targetTriple }}
+          path: capability-dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  merge-catalog:
+    name: Merge and verify the manifest-derived install catalog
+    needs: [release-preflight, build-capability]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout the exact release commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with: { node-version: 22.23.1 }
+
+      - name: Setup Rust
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.92.0 --profile minimal --no-self-update
+          rustup default 1.92.0
+          cargo build --locked --release --no-default-features --manifest-path src-tauri/Cargo.toml --bin capability_release
+
+      - name: Download every matrix artifact from this run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: '*-capabilities-*'
+          path: capability-dist
+          merge-multiple: true
+
+      - name: Require exact counts, merge signed fragments, and verify the sealed catalog
+        env:
+          EXPECTED_ENTRY_COUNT: ${{ needs.release-preflight.outputs.expectedEntryCount }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          COMMIT_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          test "$(find capability-dist -maxdepth 1 -type f -name '*.zip' | wc -l)" -eq "$EXPECTED_ENTRY_COUNT"
+          test "$(find capability-dist -maxdepth 1 -type f -name '*.catalog.json' | wc -l)" -eq "$EXPECTED_ENTRY_COUNT"
+          src-tauri/target/release/capability_release merge-catalog --input capability-dist --output capability-dist/install-catalog.generated.json --trusted-keys capabilities/trusted-keys.json --expected-tag "$RELEASE_TAG"
+          mkdir -p capability-dist/application-integration/capabilities
+          node scripts/verify-capability-catalog.mjs --catalog capability-dist/install-catalog.generated.json --trusted-keys capabilities/trusted-keys.json --mode release --tag "$RELEASE_TAG" --emit-provenance capability-dist/application-integration/capabilities/catalog-provenance.json --commit-sha "$COMMIT_SHA" --run-id "$RUN_ID"
+          node scripts/verify-product-capabilities.mjs --require-release-ready
+          cp capability-dist/install-catalog.generated.json capability-dist/application-integration/capabilities/install-catalog.json
+          cp capabilities/trusted-keys.json capability-dist/application-integration/capabilities/trusted-keys.json
+
+      - name: Upload exact catalog bytes for same-run desktop embedding
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: capability-install-catalog
+          path: capability-dist/application-integration/capabilities/*
+          if-no-files-found: error
+          retention-days: 30

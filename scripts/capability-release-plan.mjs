@@ -1,0 +1,157 @@
+import fs from "node:fs/promises";
+import { createHash } from "node:crypto";
+import path from "node:path";
+import process from "node:process";
+import { fileURLToPath } from "node:url";
+
+const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+async function readJson(relativePath, root = repositoryRoot) {
+  return JSON.parse(await fs.readFile(path.join(root, relativePath), "utf8"));
+}
+
+async function exists(relativePath, root) {
+  return Boolean(await fs.stat(path.join(root, relativePath)).catch(() => null));
+}
+
+function lookup(source, dottedPath) {
+  return dottedPath.split(".").reduce((value, key) => value?.[key], source);
+}
+
+function licenseTerms(expression) {
+  return [...expression.matchAll(/[A-Za-z][A-Za-z0-9.+-]*/gu)]
+    .map((match) => match[0])
+    .filter((term) => !["AND", "OR", "WITH"].includes(term));
+}
+
+async function validateSourceLock(name, source, root, targets) {
+  const errors = [];
+  const localLock = source.lock || (source.lockSha256 && typeof source.source === "string" && !source.source.startsWith("https://") ? source.source : null);
+  if (localLock) {
+    const bytes = await fs.readFile(path.join(root, localLock)).catch(() => null);
+    const digest = bytes && createHash("sha256").update(bytes).digest("hex");
+    if (!bytes || digest !== source.lockSha256) errors.push(`${name} dependency lock digest is not exact`);
+  }
+  if (source.distributions) {
+    for (const target of targets) {
+      const artifact = source.distributions[target];
+      if (!artifact || !/^[0-9a-f]{64}$/u.test(artifact.sha256) ||
+          !Number.isSafeInteger(artifact.bytes) || artifact.bytes <= 0) {
+        errors.push(`${name} has no SHA-256 and byte lock for ${target}`);
+      }
+    }
+  }
+  if (source.models?.repository && !/^[0-9a-f]{40}$/u.test(source.models.revision || "")) {
+    errors.push(`${name} model repository revision is not an exact commit`);
+  }
+  for (const [lockField, digestField] of [["dependencyLock", "dependencyLockSha256"]]) {
+    if (source[lockField]) {
+      const bytes = await fs.readFile(path.join(root, source[lockField])).catch(() => null);
+      const digest = bytes && createHash("sha256").update(bytes).digest("hex");
+      if (!bytes || digest !== source[digestField]) errors.push(`${name} ${lockField} digest is not exact`);
+    }
+  }
+  function inspect(value, label) {
+    if (!value || typeof value !== "object") return;
+    if (Object.hasOwn(value, "sha256")) {
+      if (!/^[0-9a-f]{64}$/u.test(value.sha256) || /^0+$/u.test(value.sha256)) errors.push(`${label} has no exact SHA-256`);
+      if (!Number.isSafeInteger(value.bytes) || value.bytes <= 0) errors.push(`${label} has no exact byte count`);
+      if (typeof value.source === "string" && value.source.includes("://") && !value.source.startsWith("https://")) {
+        errors.push(`${label} source is not public HTTPS`);
+      }
+    }
+    for (const [key, child] of Object.entries(value)) inspect(child, `${label}.${key}`);
+  }
+  inspect(source, name);
+  return errors;
+}
+
+const runnerForTarget = (target) => ({
+  "x86_64-pc-windows-msvc": "windows-2025",
+  "aarch64-apple-darwin": "macos-15",
+  "x86_64-apple-darwin": "macos-15-intel",
+  "x86_64-unknown-linux-gnu": "ubuntu-24.04",
+})[target];
+
+export async function buildCapabilityReleasePlan(root = repositoryRoot) {
+  const [manifest, recipes, sources, corpus] = await Promise.all([
+    readJson("capabilities/product-manifest.json", root),
+    readJson("capabilities/release-recipes.json", root),
+    readJson("capabilities/release-sources.json", root),
+    readJson("capabilities/qualification-corpus.json", root),
+  ]);
+  const errors = [];
+  const published = manifest.definitions
+    .filter((definition) => definition.distributionTier === "published")
+    .sort((left, right) => left.capabilityId.localeCompare(right.capabilityId));
+  const entries = [];
+  const checkedSources = new Set();
+  for (const definition of published) {
+    const recipe = recipes.recipes?.[definition.capabilityId];
+    if (!recipe) errors.push(`${definition.capabilityId} has no release recipe`);
+    if (definition.release.stagingStatus !== "implemented") errors.push(`${definition.capabilityId} staging is not implemented`);
+    if (definition.qualification.status !== "implemented") errors.push(`${definition.capabilityId} qualification is not implemented`);
+    for (const entrypoint of [definition.release.stagingScript, definition.qualification.entrypoint]) {
+      if (!entrypoint || !(await exists(entrypoint, root))) errors.push(`${definition.capabilityId} is missing ${entrypoint || "an entrypoint"}`);
+    }
+    for (const sourceName of recipe?.sources || []) {
+      const source = lookup(sources, sourceName);
+      if (!source || typeof source.version !== "string" || typeof source.license !== "string") {
+        errors.push(`${definition.capabilityId} source ${sourceName} is not version/license locked`);
+      }
+      if (source?.license && licenseTerms(source.license).some((term) => !definition.licensePolicy.expression.includes(term))) {
+        errors.push(`${definition.capabilityId} product license omits ${sourceName}: ${source.license}`);
+      }
+      if (source && !checkedSources.has(sourceName)) {
+        checkedSources.add(sourceName);
+        errors.push(...await validateSourceLock(sourceName, source, root, manifest.supportedTargets));
+      }
+    }
+    if (!definition.licensePolicy.thirdPartyNotices.length) {
+      errors.push(`${definition.capabilityId} has no published third-party notice policy`);
+    }
+    if (recipe?.modelSource && !lookup(sources, recipe.modelSource)) errors.push(`${definition.capabilityId} model source is not locked`);
+    for (const extension of definition.formats.extensions) {
+      const fixture = corpus.fixtureByExtension?.[extension];
+      if (!fixture || !(await exists(path.join(corpus.root, fixture), root))) {
+        errors.push(`${definition.capabilityId} format ${extension} has no real qualification fixture`);
+      }
+    }
+    for (const targetTriple of manifest.supportedTargets) {
+      if (!definition.supportedTargets.includes(targetTriple)) errors.push(`${definition.capabilityId} does not support ${targetTriple}`);
+      entries.push({
+        capabilityId: definition.capabilityId,
+        targetTriple,
+        os: runnerForTarget(targetTriple),
+        family: recipe?.family,
+        stagingScript: definition.release.stagingScript,
+        qualificationEntrypoint: definition.qualification.entrypoint,
+        routes: definition.routes,
+        extensions: definition.formats.extensions,
+        platformContentTypes: definition.formats.platformContentTypes,
+      });
+    }
+  }
+  const unique = new Set(entries.map((entry) => `${entry.capabilityId}\0${entry.targetTriple}`));
+  if (unique.size !== entries.length) errors.push("release plan contains duplicate pack × target entries");
+  if (entries.length !== published.length * manifest.supportedTargets.length) errors.push("release plan is not an exact manifest-derived cartesian product");
+  if (!Array.isArray(corpus.generatedCases) || corpus.generatedCases.length !== 5) errors.push("qualification corpus must define the five required generated cases");
+  return { errors, manifest, entries, expectedEntryCount: published.length * manifest.supportedTargets.length };
+}
+
+async function main() {
+  const { errors, entries, expectedEntryCount } = await buildCapabilityReleasePlan();
+  if (errors.length) {
+    for (const error of errors) process.stderr.write(`[capability-release-plan] ${error}\n`);
+    process.exitCode = 1;
+    return;
+  }
+  process.stdout.write(`${JSON.stringify({ include: entries, expectedEntryCount })}\n`);
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    process.stderr.write(`[capability-release-plan] ${error.message}\n`);
+    process.exitCode = 2;
+  });
+}

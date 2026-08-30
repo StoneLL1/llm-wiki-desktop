@@ -454,6 +454,8 @@ cancel_app_capability_install_v1(taskId, taskRevision) -> BackendTask
 
 ## 13. Batch 8：正式能力制品与全格式闭环
 
+**状态（2026-08-30）**：源码级闭环已完成。正式 workflow 已改为从产品清单派生四目标矩阵，并对每个 entry 执行锁定来源准备、签名组装、正式 runner 健康检查、真实语料 qualification 与 exact-count catalog 合并；许可证、来源锁、格式 / route 合同、support matrix 与 release evidence 已同步。当前发布结论仍为 **No-Go**：本 Batch 不创建 tag 或发布资产，必须由 Batch 9 在同一 exact commit 上实际跑完四平台 sealed packaged matrix 后才能解除。
+
 ### 13.1 目标
 
 把 Batch 0 中所有 `published` definition 变成四目标真实、签名、可健康检查的制品，并用正式 runner 而不是测试 fake pack 证明每个格式和平台路线。

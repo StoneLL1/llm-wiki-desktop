@@ -6087,7 +6087,12 @@ pub fn routes_for_format(format: FileFormat) -> Vec<&'static str> {
             "agent.office",
         ],
         FileFormat::Doc | FileFormat::Xls | FileFormat::Ppt => {
-            vec!["pack.office-legacy", "pack.office-oxide", "agent.office"]
+            vec![
+                "pack.office-legacy",
+                "pack.markitdown",
+                "pack.office-oxide",
+                "agent.office",
+            ]
         }
         FileFormat::Pdf => vec![
             "pdf.text",
@@ -6114,7 +6119,9 @@ pub fn routes_for_format(format: FileFormat) -> Vec<&'static str> {
         | FileFormat::Avi
         | FileFormat::M4v
         | FileFormat::Wmv
-        | FileFormat::AnimatedGif => vec!["media.companion", "media.asr"],
+        | FileFormat::AnimatedGif => {
+            vec!["media.companion", "media.subtitle", "media.keyframes", "media.asr"]
+        }
         FileFormat::Png
         | FileFormat::Jpeg
         | FileFormat::Webp

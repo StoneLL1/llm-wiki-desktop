@@ -73,6 +73,17 @@ fn continuation() -> AppCapabilityContinuation {
     }
 }
 
+fn continuation_for(id: &str, project_id: &str, project_root: &str) -> AppCapabilityContinuation {
+    AppCapabilityContinuation {
+        continuation_id: id.into(),
+        project_id: project_id.into(),
+        project_root_path: project_root.into(),
+        session_id: format!("session-{project_id}"),
+        item_id: format!("item-{project_id}"),
+        ..continuation()
+    }
+}
+
 #[test]
 fn app_capability_view_serializes_orthogonal_facts() {
     let view = AppCapabilityView {
@@ -313,4 +324,73 @@ fn registered_continuations_rebind_to_a_management_retry() {
     let rebound = coordinator.continuations_for_task(&retry.id);
     assert_eq!(rebound.len(), 1);
     assert_eq!(rebound[0].continuation_id, "continuation-1");
+}
+
+#[test]
+fn release_install_wiring_is_app_global_restart_safe_and_fans_out_projects() {
+    let source_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let command_source = fs::read_to_string(source_root.join("commands/app_capability_commands.rs")).unwrap();
+    let installer_source = fs::read_to_string(source_root.join("services/import_v2/capability_installer.rs")).unwrap();
+    let continuation_source = fs::read_to_string(
+        source_root.join("commands/import_v2_presentation_commands.rs"),
+    )
+    .unwrap();
+    let ordered = [
+        "install_catalog_entry(",
+        "probe_version_routes(",
+        "activate_probed_version_atomically(",
+        "continuations_for_task(",
+        "resume_import_capability_continuation(",
+        "complete_running_with_result(",
+    ];
+    let mut cursor = 0;
+    for marker in ordered {
+        let next = command_source[cursor..]
+            .find(marker)
+            .unwrap_or_else(|| panic!("missing app-global release step {marker}"));
+        cursor += next + marker.len();
+    }
+    assert!(installer_source.contains("RANGE"));
+    assert!(installer_source.contains("content_range_starts_at"));
+    assert!(installer_source.contains("verify_installed_root"));
+    assert!(continuation_source.contains("with_current_project_write_access"));
+    assert!(continuation_source.contains("start_import_items_for_state"));
+
+    let root = tempdir().unwrap();
+    let tasks = TaskService::default();
+    let coordinator = AppCapabilityCoordinator::default();
+    coordinator.initialize(root.path(), &tasks).unwrap();
+    let first = continuation_for("continuation-a", "project-a", "D:/knowledge/project-a");
+    let second = continuation_for("continuation-b", "project-b", "D:/knowledge/project-b");
+    coordinator.register_continuation(first.clone()).unwrap();
+    coordinator.register_continuation(second.clone()).unwrap();
+    let entry = fixture_catalog_entry();
+    let (task, created) = coordinator
+        .join_or_create_install(
+            &tasks,
+            &entry,
+            &entry.version,
+            &app_capability_acknowledgement_version(&entry),
+        )
+        .unwrap();
+    assert!(created);
+    let bound = coordinator
+        .bind_registered_continuations(&entry.capability_id, &task.id)
+        .unwrap();
+    assert_eq!(bound.len(), 2);
+    assert_eq!(
+        bound.iter().map(|value| value.project_id.as_str()).collect::<Vec<_>>(),
+        ["project-a", "project-b"]
+    );
+
+    let restarted_tasks = TaskService::default();
+    restarted_tasks.recover_app_tasks(root.path()).unwrap();
+    let restarted = AppCapabilityCoordinator::default();
+    restarted.initialize(root.path(), &restarted_tasks).unwrap();
+    let recovered = restarted.continuations_for_task(&task.id);
+    assert_eq!(recovered.len(), 2);
+    assert!(recovered.iter().all(|value| {
+        value.state == AppCapabilityContinuationState::Registered
+            && value.task_id.as_deref() == Some(task.id.as_str())
+    }));
 }

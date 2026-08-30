@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::tasks::task_model::CancellationToken;
 use crate::{errors::BackendError, models::import_v2_file::CapabilityRequirement};
@@ -163,6 +163,7 @@ impl ImportCapabilityRuntime {
                 accepted_license_expressions: spec.licenses.iter().map(|v| (*v).into()).collect(),
             };
             let result = manager.resolve(&requirement).and_then(|pack| {
+                validate_signed_product_contract(&pack)?;
                 let healthy_version = pack.manifest.version.clone();
                 let browser_pack = (spec.id == "browser-runtime").then(|| pack.clone());
                 if spec.id == "office-oxide"
@@ -249,6 +250,7 @@ impl ImportCapabilityRuntime {
         let manager =
             CapabilityPackManager::new(install_root.to_path_buf(), embedded_trusted_keys());
         let pack = manager.resolve_version(&requirement, version)?;
+        validate_signed_product_contract(&pack)?;
         probe_declared_routes(&route_specs, cancellation, |route| {
             super::pack_engine::probe_capability_pack(&pack, capability_id, route, cancellation)
         })?;
@@ -328,6 +330,113 @@ impl ImportCapabilityRuntime {
     pub fn install_root(&self) -> Option<PathBuf> {
         self.install_root.read().ok().and_then(|root| root.clone())
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SignedCapabilityContract {
+    schema_version: u32,
+    capability_id: String,
+    target_triple: String,
+    protocol_version: String,
+    entrypoint: String,
+    #[serde(default)]
+    entrypoint_args: Vec<String>,
+    routes: Vec<String>,
+    formats: SignedCapabilityFormats,
+    runtime: SignedRuntimePermissions,
+    license_expression: String,
+    source_locks: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SignedCapabilityFormats {
+    extensions: Vec<String>,
+    platform_content_types: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SignedRuntimePermissions {
+    network: bool,
+    subprocess: bool,
+    filesystem: Vec<String>,
+}
+
+const RELEASE_RECIPES_JSON: &str =
+    include_str!("../../../../capabilities/release-recipes.json");
+const RELEASE_SOURCES_JSON: &str =
+    include_str!("../../../../capabilities/release-sources.json");
+
+fn expected_source_locks(
+    capability_id: &str,
+    target: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, BackendError> {
+    let recipes: serde_json::Value = serde_json::from_str(RELEASE_RECIPES_JSON)
+        .map_err(|_| capability_route_contract_error())?;
+    let sources: serde_json::Value = serde_json::from_str(RELEASE_SOURCES_JSON)
+        .map_err(|_| capability_route_contract_error())?;
+    let names = recipes.pointer(&format!("/recipes/{capability_id}/sources"))
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(capability_route_contract_error)?;
+    let mut locks = serde_json::Map::new();
+    for name in names {
+        let name = name.as_str().ok_or_else(capability_route_contract_error)?;
+        let source = sources.get(name).ok_or_else(capability_route_contract_error)?;
+        let mut lock = source.as_object().cloned().ok_or_else(capability_route_contract_error)?;
+        if let Some(distributions) = lock.get("distributions").and_then(serde_json::Value::as_object) {
+            let selected = distributions.get(target).cloned().ok_or_else(capability_route_contract_error)?;
+            let mut selected_distributions = serde_json::Map::new();
+            selected_distributions.insert(target.into(), selected);
+            lock.insert(
+                "distributions".into(),
+                serde_json::Value::Object(selected_distributions),
+            );
+        }
+        if lock.get("version").and_then(serde_json::Value::as_str).is_none()
+            || lock.get("license").and_then(serde_json::Value::as_str).is_none()
+        {
+            return Err(capability_route_contract_error());
+        }
+        locks.insert(name.into(), serde_json::Value::Object(lock));
+    }
+    if locks.is_empty() {
+        return Err(capability_route_contract_error());
+    }
+    Ok(locks)
+}
+
+fn validate_signed_product_contract(pack: &ResolvedCapabilityPack) -> Result<(), BackendError> {
+    let product = ProductCapabilityManifest::embedded().map_err(|_| capability_route_contract_error())?;
+    let definition = product
+        .definition(&pack.manifest.pack_id)
+        .filter(|definition| definition.distribution_tier == "published")
+        .ok_or_else(capability_route_contract_error)?;
+    let contract_path = pack.root.join("CAPABILITY-CONTRACT.json");
+    let bytes = std::fs::read(&contract_path).map_err(|_| capability_route_contract_error())?;
+    let contract: SignedCapabilityContract =
+        serde_json::from_slice(&bytes).map_err(|_| capability_route_contract_error())?;
+    let expected_locks = expected_source_locks(&pack.manifest.pack_id, &target_triple())?;
+    if contract.schema_version != 1
+        || contract.capability_id != pack.manifest.pack_id
+        || contract.target_triple != target_triple()
+        || contract.protocol_version != pack.manifest.protocol_version
+        || contract.entrypoint != pack.manifest.entrypoint
+        || contract.entrypoint_args != pack.manifest.entrypoint_args
+        || contract.routes != definition.routes
+        || contract.formats.extensions != definition.formats.extensions
+        || contract.formats.platform_content_types != definition.formats.platform_content_types
+        || contract.runtime.network != definition.runtime.network
+        || contract.runtime.subprocess != definition.runtime.subprocess
+        || contract.runtime.filesystem != definition.runtime.filesystem
+        || contract.source_locks != expected_locks
+        || contract.license_expression != pack.manifest.license_expression
+        || contract.license_expression != definition.license_policy.expression
+    {
+        return Err(capability_route_contract_error());
+    }
+    Ok(())
 }
 
 fn probe_declared_routes<F>(
@@ -476,22 +585,22 @@ const PACK_SPECS: &[PackSpec] = &[
     PackSpec {
         id: "document-standard",
         route: "pack.markitdown",
-        extensions: &["docx", "xlsx", "pptx", "pdf"],
-        licenses: &["MIT"],
+        extensions: &["doc", "docx", "xls", "xlsx", "ppt", "pptx", "pdf"],
+        licenses: &["MIT AND PSF-2.0 AND MPL-2.0 AND LicenseRef-Bundled-Third-Party-Notices"],
         timeout_seconds: DEFAULT_PACK_TIMEOUT_SECONDS,
     },
     PackSpec {
         id: "document-layout",
         route: "pdf.layout",
         extensions: &["pdf"],
-        licenses: &["MIT"],
+        licenses: &["MIT AND Apache-2.0 AND CDLA-Permissive-2.0 AND PSF-2.0 AND MPL-2.0 AND LicenseRef-Bundled-Third-Party-Notices"],
         timeout_seconds: DEFAULT_PACK_TIMEOUT_SECONDS,
     },
     PackSpec {
         id: "office-legacy",
         route: "pack.office-legacy",
         extensions: &["doc", "xls", "ppt"],
-        licenses: &["MPL-2.0 OR LGPL-3.0-or-later"],
+        licenses: &["(MPL-2.0 OR LGPL-3.0-or-later) AND PSF-2.0 AND MPL-2.0"],
         timeout_seconds: DEFAULT_PACK_TIMEOUT_SECONDS,
     },
     PackSpec {
@@ -504,40 +613,37 @@ const PACK_SPECS: &[PackSpec] = &[
     PackSpec {
         id: "ocr-basic",
         route: "ocr.basic",
-        extensions: &["pdf", "avif", "gif", "jpeg", "jpg", "png", "tiff", "webp"],
-        licenses: &["Apache-2.0 AND BSD-2-Clause"],
+        extensions: &["pdf", "png", "jpg", "jpeg", "webp", "tif", "tiff", "bmp"],
+        licenses: &["Apache-2.0 AND MIT AND BSD-3-Clause AND HPND AND MPL-2.0 AND PSF-2.0 AND LGPL-2.1-only AND LGPL-3.0-only"],
         timeout_seconds: OCR_PACK_TIMEOUT_SECONDS,
     },
     PackSpec {
         id: "ocr-cjk-accurate",
         route: "ocr.cjk-accurate",
-        extensions: &["bmp", "jpeg", "jpg", "png", "tif", "tiff", "webp"],
+        extensions: &["pdf", "png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "heic", "heif"],
         licenses: &["Apache-2.0 AND MIT AND BSD-3-Clause AND HPND AND MPL-2.0 AND PSF-2.0 AND LGPL-2.1-only AND LGPL-3.0-only"],
         timeout_seconds: OCR_PACK_TIMEOUT_SECONDS,
     },
     PackSpec {
         id: "media-runtime",
         route: "media.subtitle",
-        extensions: &["srt", "vtt", "lrc", "ass", "ssa"],
-        licenses: &["LGPL-2.1-or-later"],
+        extensions: &["gif", "wma", "wmv", "srt", "vtt", "ass", "ssa", "lrc"],
+        licenses: &["MIT AND LGPL-3.0-or-later"],
         timeout_seconds: DEFAULT_PACK_TIMEOUT_SECONDS,
     },
     PackSpec {
         id: "media-runtime",
         route: "media.keyframes",
-        extensions: &[
-            "aac", "avi", "flac", "gif", "m4a", "m4v", "mkv", "mov", "mp3", "mp4",
-            "ogg", "opus", "wav", "webm", "wma", "wmv",
-        ],
-        licenses: &["LGPL-2.1-or-later"],
+        extensions: &["gif", "wma", "wmv", "srt", "vtt", "ass", "ssa", "lrc"],
+        licenses: &["MIT AND LGPL-3.0-or-later"],
         timeout_seconds: DEFAULT_PACK_TIMEOUT_SECONDS,
     },
     PackSpec {
         id: "asr-sensevoice-small",
         route: "media.asr",
         extensions: &[
-            "aac", "flac", "m4a", "mka", "mp3", "ogg", "opus", "wav", "avi", "m4v",
-            "mkv", "mov", "mp4", "mpeg", "mpg", "webm",
+            "mp3", "wav", "m4a", "aac", "flac", "ogg", "opus", "wma", "mp4", "mov",
+            "mkv", "webm", "avi", "m4v", "wmv",
         ],
         licenses: &["Apache-2.0 AND LGPL-3.0-or-later AND MIT"],
         timeout_seconds: ASR_PACK_TIMEOUT_SECONDS,
@@ -546,10 +652,10 @@ const PACK_SPECS: &[PackSpec] = &[
         id: "asr-whisper",
         route: "media.asr",
         extensions: &[
-            "aac", "flac", "m4a", "mka", "mp3", "ogg", "opus", "wav", "avi", "m4v",
-            "mkv", "mov", "mp4", "mpeg", "mpg", "webm",
+            "mp3", "wav", "m4a", "aac", "flac", "ogg", "opus", "wma", "mp4", "mov",
+            "mkv", "webm", "avi", "m4v", "wmv",
         ],
-        licenses: &["MIT AND LGPL-2.1-or-later"],
+        licenses: &["MIT AND LGPL-3.0-or-later"],
         timeout_seconds: ASR_PACK_TIMEOUT_SECONDS,
     },
 ];
@@ -684,7 +790,7 @@ mod tests {
             .iter()
             .any(|entry| entry.route == "media.asr" && entry.available));
     }
-    use crate::services::import_v2::capability_pack::CapabilityPackManifest;
+    use crate::services::import_v2::capability_pack::{CapabilityPackFile, CapabilityPackManifest};
     use ring::signature::{Ed25519KeyPair, KeyPair};
     use sha2::{Digest, Sha256};
 
@@ -715,7 +821,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             ocr.extensions,
-            &["bmp", "jpeg", "jpg", "png", "tif", "tiff", "webp"]
+            &["pdf", "png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "heic", "heif"]
         );
         assert!(ocr.timeout_seconds >= 15 * 60);
     }
@@ -733,6 +839,18 @@ mod tests {
                 .licenses
                 .iter()
                 .all(|license| *license == definition.license_policy.expression));
+            assert_eq!(
+                spec.extensions,
+                definition
+                    .formats
+                    .extensions
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                "{} / {} format contract drifted from the product manifest",
+                spec.id,
+                spec.route
+            );
         }
     }
 
@@ -850,23 +968,56 @@ mod tests {
         let pack_root = root.join("document-standard/1.2.0");
         std::fs::create_dir_all(&pack_root).unwrap();
         std::fs::write(pack_root.join("runner.bin"), b"verified runtime").unwrap();
+        let contract = serde_json::to_vec_pretty(&serde_json::json!({
+            "schemaVersion": 1,
+            "capabilityId": "document-standard",
+            "targetTriple": target_triple(),
+            "protocolVersion": "2",
+            "entrypoint": "runner.bin",
+            "entrypointArgs": [],
+            "routes": ["pack.markitdown"],
+            "formats": {
+                "extensions": ["doc", "docx", "xls", "xlsx", "ppt", "pptx", "pdf"],
+                "platformContentTypes": []
+            },
+            "runtime": {
+                "network": false,
+                "subprocess": true,
+                "filesystem": ["application_capability_root", "item_staging_input", "item_staging_output"]
+            },
+            "licenseExpression": "MIT AND PSF-2.0 AND MPL-2.0 AND LicenseRef-Bundled-Third-Party-Notices",
+            "sourceLocks": expected_source_locks("document-standard", &target_triple()).unwrap()
+        }))
+        .unwrap();
+        std::fs::write(pack_root.join("CAPABILITY-CONTRACT.json"), &contract).unwrap();
         let key = Ed25519KeyPair::from_seed_unchecked(&[9; 32]).unwrap();
         let mut manifest = CapabilityPackManifest {
-            schema_version: 1,
+            schema_version: 2,
             pack_id: "document-standard".into(),
             version: "1.2.0".into(),
             protocol_version: "2".into(),
             target_triples: vec![target_triple()],
-            archive_sha256: format!("{:x}", Sha256::digest(b"verified runtime")),
-            license_expression: "MIT".into(),
+            archive_sha256: String::new(),
+            license_expression: "MIT AND PSF-2.0 AND MPL-2.0 AND LicenseRef-Bundled-Third-Party-Notices".into(),
             entrypoint: "runner.bin".into(),
             entrypoint_args: Vec::new(),
             executable_files: Vec::new(),
-            compressed_bytes: 16,
-            installed_bytes: 16,
+            compressed_bytes: 0,
+            installed_bytes: 0,
             signing_key_id: "release-test".into(),
             signature: String::new(),
-            files: vec![],
+            files: vec![
+                CapabilityPackFile {
+                    path: "CAPABILITY-CONTRACT.json".into(),
+                    sha256: format!("{:x}", Sha256::digest(&contract)),
+                    bytes: contract.len() as u64,
+                },
+                CapabilityPackFile {
+                    path: "runner.bin".into(),
+                    sha256: format!("{:x}", Sha256::digest(b"verified runtime")),
+                    bytes: b"verified runtime".len() as u64,
+                },
+            ],
         };
         manifest.signature = key
             .sign(&manifest.signing_payload().unwrap())
@@ -893,7 +1044,7 @@ mod tests {
             .into_iter()
             .find(|status| status.capability_id == "document-standard")
             .unwrap();
-        assert!(status.available);
+        assert!(status.available, "{:?}", status.reason);
         assert!(service
             .registered_engine_routes()
             .unwrap()

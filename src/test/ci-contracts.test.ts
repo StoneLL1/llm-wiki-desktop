@@ -107,7 +107,7 @@ describe("CI validation contract", () => {
       "node scripts/check-import-source-media-flow.mjs",
     );
     expect(packageJson.scripts["check:release-config"]).toBe(
-      "node --test --experimental-test-isolation=none scripts/check-release-config.node-test.mjs scripts/release-assets.node-test.mjs scripts/verify-product-capabilities.node-test.mjs scripts/verify-capability-catalog.node-test.mjs scripts/verify-embedded-capability-catalog.node-test.mjs && npm run test:updater-signature && node scripts/check-release-version.mjs && node scripts/verify-product-capabilities.mjs && node scripts/verify-capability-catalog.mjs --catalog capabilities/install-catalog.json --trusted-keys capabilities/trusted-keys.json --mode source",
+      "node --test --experimental-test-isolation=none scripts/check-release-config.node-test.mjs scripts/release-assets.node-test.mjs scripts/verify-product-capabilities.node-test.mjs scripts/capability-release-plan.node-test.mjs scripts/verify-capability-catalog.node-test.mjs scripts/verify-embedded-capability-catalog.node-test.mjs && npm run test:updater-signature && node scripts/check-release-version.mjs && node scripts/verify-product-capabilities.mjs --require-release-ready && node scripts/capability-release-plan.mjs && node scripts/verify-capability-catalog.mjs --catalog capabilities/install-catalog.json --trusted-keys capabilities/trusted-keys.json --mode source",
     );
     expect(packageJson.scripts["test:final-four-redlines"]).toBe(
       "node --test --experimental-test-isolation=none scripts/check-final-four-redlines.node-test.mjs",
@@ -163,7 +163,7 @@ describe("CI validation contract", () => {
     ]);
   });
 
-  it("keeps build tooling compatible while capability distribution is quarantined", () => {
+  it("keeps build tooling compatible while capability distribution uses the formal matrix", () => {
     const capabilityWorkflow = readRootFile(".github/workflows/capability-release.yml");
     const desktopWorkflow = readRootFile(".github/workflows/desktop-release.yml");
     const releaseSources = JSON.parse(
@@ -177,7 +177,7 @@ describe("CI validation contract", () => {
     };
 
     expect(desktopWorkflow).toContain("NODE_VERSION: 22.23.1");
-    expect(capabilityWorkflow.match(/node-version: 22\.23\.1/g)).toHaveLength(1);
+    expect(capabilityWorkflow.match(/node-version: 22\.23\.1/g)).toHaveLength(3);
     expect(capabilityWorkflow).not.toContain("--node-version 22.17.0");
     expect(capabilityWorkflow).not.toMatch(
       /& \$(?:browserNode|liteNode|mediaNode|node) --test --(?:experimental-)?test-isolation=none/,
@@ -204,7 +204,7 @@ describe("CI validation contract", () => {
     });
   });
 
-  it("keeps capability release inputs out of executable scripts", () => {
+  it("keeps capability release inputs out of executable scripts and closes the formal matrix", () => {
     const workflow = readRootFile(".github/workflows/capability-release.yml");
     const runBlocks = workflowRunBlocks(workflow);
 
@@ -212,10 +212,13 @@ describe("CI validation contract", () => {
     expect(workflow).toContain("environment: capability-release");
     expect(workflow).toContain("verify-product-capabilities.mjs --print-matrix");
     expect(workflow).toContain("verify-product-capabilities.mjs --require-release-ready");
-    expect(workflow).toContain("Capability publication remains quarantined");
-    expect(workflow).toContain("exit 1");
-    expect(workflow).not.toContain("matrix.target");
-    expect(workflow).not.toContain("merge-catalog");
+    expect(workflow).toContain("capability-release-plan.mjs");
+    expect(workflow).toContain("prepare-release-capability.mjs");
+    expect(workflow).toContain("qualify-release-corpus.mjs");
+    expect(workflow).toContain("matrix.targetTriple");
+    expect(workflow).toContain("merge-catalog --input capability-dist");
+    expect(workflow).toContain("name: capability-install-catalog");
+    expect(workflow).not.toContain("Capability publication remains quarantined");
     expect(workflow).not.toMatch(/gh release (?:create|upload)/i);
     expect(workflow).toMatch(/^ {2}workflow_call:\s*$/m);
     expect(workflow).not.toContain("--clobber");
