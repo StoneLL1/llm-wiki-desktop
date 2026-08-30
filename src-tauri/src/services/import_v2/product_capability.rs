@@ -6,6 +6,14 @@ use serde::Deserialize;
 pub const PRODUCT_MANIFEST_JSON: &str =
     include_str!("../../../../capabilities/product-manifest.json");
 
+pub(crate) fn embedded_product_manifest() -> &'static ProductCapabilityManifest {
+    static MANIFEST: OnceLock<ProductCapabilityManifest> = OnceLock::new();
+    MANIFEST.get_or_init(|| {
+        ProductCapabilityManifest::embedded()
+            .expect("the embedded product capability manifest is build-validated")
+    })
+}
+
 const REQUIRED_TARGETS: &[&str] = &[
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
@@ -386,11 +394,7 @@ pub(crate) fn capability_id_for_recovery_action(
     recovery_action: &str,
     route: Option<&str>,
 ) -> Option<&'static str> {
-    static MANIFEST: OnceLock<ProductCapabilityManifest> = OnceLock::new();
-    let manifest = MANIFEST.get_or_init(|| {
-        ProductCapabilityManifest::embedded()
-            .expect("the embedded product capability manifest is build-validated")
-    });
+    let manifest = embedded_product_manifest();
     let eligible = || {
         manifest.definitions.iter().filter(|definition| {
             definition.distribution_tier == "published"

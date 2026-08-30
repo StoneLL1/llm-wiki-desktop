@@ -166,7 +166,7 @@ describe("Import V2 end-to-end presentation boundary", () => {
     workflow.loadMoreItems = vi.fn();
     render(<ImportView workflow={workflow} />);
 
-    expect(screen.getAllByRole("listitem").length).toBeLessThanOrEqual(80);
+    expect(screen.getAllByRole("option").length).toBeLessThanOrEqual(80);
     expect(screen.getByText(/showing 200 of 2000 items/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /load more/i }));
     expect(workflow.loadMoreItems).toHaveBeenCalledOnce();

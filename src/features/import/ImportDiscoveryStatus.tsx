@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import type { FileScanResult } from "../../types/importV2File";
 import type { BackendTask } from "../../types/task";
+import { normalizeBackendError } from "../../lib/backendError";
 
 export interface ImportDiscoveryStatusProps {
   task: BackendTask | null;
@@ -55,6 +56,11 @@ export function ImportDiscoveryStatus({
   const pendingLargePaths = pendingLarge.map((file) => file.sourcePath);
   const mismatches = (scan?.files ?? []).filter((file) => file.identity.extensionMismatch);
   const number = new Intl.NumberFormat(i18n.language);
+  const taskError = task.error ? normalizeBackendError(task.error, {
+    defaultSummaryKey: "backendError.summary.import",
+    defaultRecoverable: true,
+    defaultActionKind: "retry",
+  }) : null;
   const confirmScan: ((paths?: string[]) => void | Promise<unknown>) | undefined = onConfirmScan
     ?? (onConfirmLargeData ? (paths) => paths ? onConfirmLargeData(paths) : undefined : undefined);
   const totals = scan?.totals;
@@ -94,13 +100,19 @@ export function ImportDiscoveryStatus({
       </summary>
       <ul className="mt-2 max-h-40 space-y-1 overflow-y-auto pl-4">
         {skipped.slice(0, 50).map((entry, index) => (
-          <li key={`${entry.sourcePath}-${index}`} className="min-w-0" title={entry.detail ?? undefined}>
+          <li key={`${entry.sourcePath}-${index}`} className="min-w-0">
             <div className="truncate font-mono text-[10.5px] text-[var(--text-primary)]">
               {entry.relativePath ?? entry.sourcePath}
             </div>
             <div className="text-[10.5px] text-[var(--text-muted)]">
-              {t(`importV2.discovery.reason.${entry.reason}`, { defaultValue: entry.detail ?? entry.reason })}
+              {t(`importV2.discovery.reason.${entry.reason}`, { defaultValue: entry.reason })}
             </div>
+            {entry.detail ? (
+              <details className="text-[10px] text-[var(--text-muted)]">
+                <summary>{t("backendError.technicalDetails")}</summary>
+                <span className="break-words font-mono">{entry.detail}</span>
+              </details>
+            ) : null}
           </li>
         ))}
       </ul>
@@ -233,7 +245,8 @@ export function ImportDiscoveryStatus({
       <CircleAlert size={15} className="shrink-0" aria-hidden="true" />
       <div className="min-w-0 flex-1">
         <p className="m-0">{task.status === "cancelled" ? t("importV2.discovery.cancelled") : t("importV2.discovery.failed")}</p>
-        {task.status !== "cancelled" && task.error?.message ? <p className="m-0 mt-0.5 break-words text-[10.5px] text-[var(--danger-text)]">{t("importV2.discovery.errorDetail", { message: task.error.message })}</p> : null}
+        {task.status !== "cancelled" && taskError ? <p className="m-0 mt-0.5 break-words text-[10.5px] text-[var(--danger-text)]">{t(taskError.summaryKey, taskError.summaryParams)}</p> : null}
+        {task.status !== "cancelled" && taskError?.technicalDetails ? <details className="mt-1 text-[10px] text-[var(--text-muted)]"><summary>{t("backendError.technicalDetails")}</summary><pre className="whitespace-pre-wrap break-all">{taskError.technicalDetails}</pre></details> : null}
       </div>
       <button type="button" className="icon-button" aria-label={t("importV2.discovery.dismiss")} title={t("importV2.discovery.dismiss")} onClick={onDismiss}><X size={14} aria-hidden="true" /></button>
     </section>

@@ -86,6 +86,30 @@ describe("ImportMarkdownPreviewDialog", () => {
     expect(screen.getByText(/image preview unavailable/i)).toBeInTheDocument();
   });
 
+  it("localizes normalized preview failures, keeps diagnostics, and retries", async () => {
+    const identity = { sessionId: "session-a", itemId: "item-a", candidateId: "candidate-a" } as const;
+    const loadContent = vi.fn()
+      .mockRejectedValueOnce({
+        code: "IMPORT_V2_PREVIEW_FAILED",
+        summaryKey: "backendError.summary.import",
+        technicalDetails: "preview parser failed",
+        recoverable: true,
+        userActionRequired: false,
+        actionKind: "retry",
+      })
+      .mockResolvedValueOnce(content(identity, "# Recovered"));
+
+    render(<ImportMarkdownPreviewDialog open identity={identity} loadContent={loadContent} onClose={vi.fn()} />);
+
+    expect(await screen.findByText(/import could not continue/i)).toBeVisible();
+    expect(screen.queryByText("[object Object]")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("Technical details"));
+    expect(screen.getByText(/preview parser failed/i)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: /retry/i }));
+    expect(await screen.findByRole("heading", { name: "Recovered" })).toBeVisible();
+    expect(loadContent).toHaveBeenCalledTimes(2);
+  });
+
   it("renders verified local image resources and never renders a remote URL", async () => {
     const identity = { sessionId: "session-a", itemId: "item-a", candidateId: null } as const;
     const preview = {
@@ -162,7 +186,7 @@ describe("ImportMarkdownPreviewDialog", () => {
       <ImportMarkdownPreviewDialog open identity={identityB} loadContent={loadContent} onClose={vi.fn()} />,
     );
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(/temporarily unavailable/i);
+    expect(await screen.findByRole("alert")).toHaveTextContent(/import could not continue/i);
     expect(screen.getByText("Technical details").closest("details")).toHaveTextContent("preview unavailable");
     resolveA(content(identityA, "# stale"));
     await waitFor(() => expect(screen.queryByText("stale")).not.toBeInTheDocument());

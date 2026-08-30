@@ -60,7 +60,7 @@ export function useImportSupportingActions({
   const selectedTaskUpsert = useTaskStore((state) => state.upsertTask);
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
   const showError = useCallback((error: unknown) => {
-    pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error) }));
+    pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error, t) }));
   }, [pushToast, t]);
 
   const invokeLocalAgent = useCallback(async (

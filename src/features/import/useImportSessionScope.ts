@@ -1,82 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 
+import {
+  normalizeBackendError,
+  type NormalizedBackendError,
+} from "../../lib/backendError";
 import { importV2Api } from "../../services/importV2Api";
 import { importProjectKey, useImportStore, type ImportQueueFilter } from "../../stores/importStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useTaskStore } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import type { AppView } from "../../stores/navigationStore";
-import type { ImportSession, ImportSessionOverview } from "../../types/importV2";
 import type { ImportFrontendReadiness } from "../../types/importV2Presentation";
 import type { ProjectSessionAuthority, ProjectSummary } from "../../types/project";
 import type { ImportBootstrapState } from "./importWorkflow";
 
 export const hasImportTauriRuntime = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-
-function createdSessionOverview(session: ImportSession): ImportSessionOverview {
-  const activeStatuses = new Set(["queued", "inspecting", "extracting", "validating", "committing"]);
-  const readyItems = session.items.filter((item) => item.status === "preview_ready");
-  const selected = readyItems.filter((item) => item.selected && item.preview?.quality.level !== "fail");
-  return {
-    ...session,
-    itemCount: session.items.length,
-    semanticRevision: 1,
-    selectionRevision: 1,
-    confirmationDigest: `created:${session.sessionId}`,
-    counts: {
-      all: session.items.filter((item) => item.status !== "completed" && item.status !== "skipped").length,
-      active: session.items.filter((item) => activeStatuses.has(item.status)).length,
-      ready: readyItems.length,
-      needsAction: session.items.filter((item) => ["waiting_capability", "waiting_login", "waiting_authorization", "needs_merge"].includes(item.status)).length,
-      failed: session.items.filter((item) => item.status === "failed").length,
-      completed: session.items.filter((item) => item.status === "completed").length,
-      waiting: session.items.filter((item) => ["waiting_capability", "waiting_login", "waiting_authorization"].includes(item.status)).length,
-      processed: session.items.filter((item) => ["preview_ready", "needs_merge", "completed", "failed", "cancelled", "skipped"].includes(item.status)).length,
-      cancelled: session.items.filter((item) => item.status === "cancelled").length,
-    },
-    statusCounts: {
-      queued: session.items.filter((item) => item.status === "queued").length,
-      inspecting: session.items.filter((item) => item.status === "inspecting").length,
-      waitingCapability: session.items.filter((item) => item.status === "waiting_capability").length,
-      waitingLogin: session.items.filter((item) => item.status === "waiting_login").length,
-      waitingAuthorization: session.items.filter((item) => item.status === "waiting_authorization").length,
-      extracting: session.items.filter((item) => item.status === "extracting").length,
-      validating: session.items.filter((item) => item.status === "validating").length,
-      previewReady: session.items.filter((item) => item.status === "preview_ready").length,
-      needsMerge: session.items.filter((item) => item.status === "needs_merge").length,
-      committing: session.items.filter((item) => item.status === "committing").length,
-      completed: session.items.filter((item) => item.status === "completed").length,
-      paused: session.items.filter((item) => item.status === "paused").length,
-      cancelled: session.items.filter((item) => item.status === "cancelled").length,
-      skipped: session.items.filter((item) => item.status === "skipped").length,
-      failed: session.items.filter((item) => item.status === "failed").length,
-    },
-    selection: {
-      selected: selected.length,
-      newSources: selected.filter((item) => !item.preview?.resolution || item.preview.resolution.kind === "new_source").length,
-      updates: selected.filter((item) => item.preview?.resolution?.kind === "same_source_new_version" || item.preview?.resolution?.kind === "needs_three_way_merge").length,
-      warnings: selected.filter((item) => item.preview?.quality.level === "warning").length,
-      pending: session.items.filter((item) => ["failed", "needs_merge", "waiting_capability", "waiting_login", "waiting_authorization"].includes(item.status)).length,
-      restricted: selected.filter((item) => item.restrictedContent).length,
-    },
-    indexState: "ready",
-    recoveryRequired: false,
-    recoveryReasons: [],
-  };
-}
-
-function attachCreatedSession(projectKey: string, epoch: number, session: ImportSession): void {
-  const overview = createdSessionOverview(session);
-  useImportStore.getState().attachSessionWindow(projectKey, overview, {
-    sessionId: session.sessionId,
-    snapshotRevision: overview.semanticRevision,
-    items: session.items.slice(0, 200),
-    nextCursor: session.items.length > 200 ? "created-session-window" : null,
-    total: session.items.length,
-  }, epoch);
-}
 
 function authorityRevisionKey(
   authority: ProjectSessionAuthority | null,
@@ -94,36 +35,50 @@ function authorityRevisionKey(
   ].join("\0");
 }
 
-export function importWorkflowErrorMessage(error: unknown): string {
-  if (typeof error === "object" && error !== null && "message" in error) {
-    const message = (error as { message: unknown }).message;
-    if (typeof message === "string") {
-      return message;
-    }
-  }
-  return String(error);
+export function normalizeImportWorkflowError(error: unknown): NormalizedBackendError {
+  return normalizeBackendError(error, {
+    defaultSummaryKey: "backendError.summary.import",
+    defaultRecoverable: true,
+    defaultActionKind: "retry",
+  });
 }
 
-async function loadConsistentSessionWindow(
+export function importWorkflowErrorMessage(error: unknown, t: TFunction): string {
+  const normalized = normalizeImportWorkflowError(error);
+  return t(normalized.summaryKey, normalized.summaryParams);
+}
+
+export async function loadConsistentSessionWindow(
   projectId: string,
   projectRootPath: string,
   sessionId: string,
   filter: ImportQueueFilter,
 ) {
+  let lastError: unknown = null;
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const [overview, page] = await Promise.all([
-      importV2Api.getSessionOverview({ projectId, projectRootPath, sessionId }),
-      importV2Api.listSessionItems({
-        projectId,
-        projectRootPath,
-        sessionId,
-        filter,
-        limit: 200,
-      }),
-    ]);
-    if (overview.semanticRevision === page.snapshotRevision) return { overview, page };
+    try {
+      const [overview, page] = await Promise.all([
+        importV2Api.getSessionOverview({ projectId, projectRootPath, sessionId }),
+        importV2Api.listSessionItems({
+          projectId,
+          projectRootPath,
+          sessionId,
+          filter,
+          limit: 200,
+        }),
+      ]);
+      if (
+        overview.projectId === projectId
+        && overview.sessionId === sessionId
+        && page.sessionId === sessionId
+        && overview.semanticRevision === page.snapshotRevision
+      ) return { overview, page, filter };
+      lastError = new Error("Import session identity or revision changed while its first page was loading.");
+    } catch (error) {
+      lastError = error;
+    }
   }
-  throw new Error("Import session changed while its first page was loading.");
+  throw lastError ?? new Error("Import session changed while its first page was loading.");
 }
 
 export interface ImportSessionScope {
@@ -131,11 +86,16 @@ export interface ImportSessionScope {
   rootPath: string;
   projectKey: string;
   readiness: ImportFrontendReadiness | null;
-  readinessWarning: string | null;
-  bootstrapError: string | null;
+  readinessWarning: NormalizedBackendError | null;
+  readinessRetrying: boolean;
+  recoveryWarning: NormalizedBackendError | null;
+  recoveryRetrying: boolean;
+  bootstrapError: NormalizedBackendError | null;
   bootstrapState: ImportBootstrapState;
   isSyncingSession: boolean;
   retryBootstrap: () => void;
+  retryReadiness: () => Promise<void>;
+  retryRecovery: () => Promise<void>;
   isProjectCurrent: (requestKey: string) => boolean;
   isScopeCurrent: (requestKey: string, epoch: number, expectedSessionId?: string) => boolean;
   nextSessionMutationRevision: () => number;
@@ -160,13 +120,19 @@ export function useImportSessionScope(
   latestAuthorityRevisionKey.current = expectedAuthorityRevisionKey;
 
   const [readiness, setReadiness] = useState<ImportFrontendReadiness | null>(null);
-  const [readinessWarning, setReadinessWarning] = useState<string | null>(null);
-  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
+  const [readinessWarning, setReadinessWarning] = useState<NormalizedBackendError | null>(null);
+  const [readinessRetrying, setReadinessRetrying] = useState(false);
+  const [recoveryWarning, setRecoveryWarning] = useState<NormalizedBackendError | null>(null);
+  const [recoveryRetrying, setRecoveryRetrying] = useState(false);
+  const [recoverySessionId, setRecoverySessionId] = useState<string | null>(null);
+  const [bootstrapError, setBootstrapError] = useState<NormalizedBackendError | null>(null);
   const [bootstrapState, setBootstrapState] = useState<ImportBootstrapState>("loading");
   const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
   const [isSyncingSession, setIsSyncingSession] = useState(false);
   const refreshInFlight = useRef<{ scopeKey: string; promise: Promise<void> } | null>(null);
   const sessionMutationRevisionRef = useRef(0);
+  const readinessRequestRevisionRef = useRef(0);
+  const recoveryRequestRevisionRef = useRef(0);
 
   const retryBootstrap = useCallback(() => setBootstrapAttempt((attempt) => attempt + 1), []);
   const isProjectCurrent = useCallback(
@@ -194,6 +160,78 @@ export function useImportSessionScope(
     [],
   );
 
+  const retryReadiness = useCallback(async () => {
+    const requestKey = projectKey;
+    const epoch = useImportStore.getState().sessionEpoch;
+    const requestRevision = ++readinessRequestRevisionRef.current;
+    if (!isScopeCurrent(requestKey, epoch)) return;
+    setReadinessRetrying(true);
+    try {
+      const next = await importV2Api.getReadiness({ projectId, projectRootPath: rootPath });
+      if (readinessRequestRevisionRef.current !== requestRevision || !isScopeCurrent(requestKey, epoch)) return;
+      setReadiness(next);
+      setReadinessWarning(null);
+    } catch (error) {
+      if (readinessRequestRevisionRef.current === requestRevision && isScopeCurrent(requestKey, epoch)) {
+        setReadinessWarning(normalizeImportWorkflowError(error));
+      }
+    } finally {
+      if (readinessRequestRevisionRef.current === requestRevision && isScopeCurrent(requestKey, epoch)) {
+        setReadinessRetrying(false);
+      }
+    }
+  }, [isScopeCurrent, projectId, projectKey, rootPath]);
+
+  const startRecoveryForScope = useCallback(async (
+    requestKey: string,
+    epoch: number,
+    sessionId: string,
+  ) => {
+    const requestRevision = ++recoveryRequestRevisionRef.current;
+    if (!isScopeCurrent(requestKey, epoch, sessionId)) return;
+    setRecoverySessionId(sessionId);
+    setRecoveryWarning(null);
+    setRecoveryRetrying(true);
+    setIsSyncingSession(true);
+    try {
+      const task = await importV2Api.startSessionRecovery({
+        projectId,
+        projectRootPath: rootPath,
+        sessionId,
+      });
+      const taskStore = useTaskStore.getState();
+      if (
+        recoveryRequestRevisionRef.current === requestRevision
+        && isScopeCurrent(requestKey, epoch, sessionId)
+      ) {
+        taskStore.upsertTask(task);
+      } else {
+        taskStore.recordTaskFact(task);
+      }
+    } catch (error) {
+      if (
+        recoveryRequestRevisionRef.current === requestRevision
+        && isScopeCurrent(requestKey, epoch, sessionId)
+      ) {
+        setIsSyncingSession(false);
+        setRecoveryWarning(normalizeImportWorkflowError(error));
+      }
+    } finally {
+      if (
+        recoveryRequestRevisionRef.current === requestRevision
+        && isScopeCurrent(requestKey, epoch, sessionId)
+      ) {
+        setRecoveryRetrying(false);
+      }
+    }
+  }, [isScopeCurrent, projectId, rootPath]);
+
+  const retryRecovery = useCallback(async () => {
+    const current = useImportStore.getState();
+    if (!recoverySessionId || current.session?.sessionId !== recoverySessionId) return;
+    await startRecoveryForScope(projectKey, current.sessionEpoch, recoverySessionId);
+  }, [projectKey, recoverySessionId, startRecoveryForScope]);
+
   const refreshForScope = useCallback(async (
     requestKey: string,
     epoch: number,
@@ -211,22 +249,14 @@ export function useImportSessionScope(
     setIsSyncingSession(true);
 
     const filter = useImportStore.getState().filter;
-    const request = Promise.all([
-      loadConsistentSessionWindow(projectId, rootPath, sessionId, filter),
-      importV2Api.getReadiness({ projectId, projectRootPath: rootPath })
-        .then((nextReadiness) => ({ nextReadiness, warning: null as string | null }))
-        .catch((error) => ({
-          nextReadiness: null,
-          warning: importWorkflowErrorMessage(error),
-        })),
-    ]);
+    const request = loadConsistentSessionWindow(projectId, rootPath, sessionId, filter);
     const refresh = request
-      .then(([window, readinessResult]) => {
-        if (isScopeCurrent(requestKey, epoch)) {
-          if (readinessResult.nextReadiness) setReadiness(readinessResult.nextReadiness);
-          setReadinessWarning(readinessResult.warning);
-        }
-        if (isScopeCurrent(requestKey, epoch) && sessionMutationRevisionRef.current === refreshRevision) {
+      .then((window) => {
+        if (
+          isScopeCurrent(requestKey, epoch)
+          && useImportStore.getState().filter === window.filter
+          && sessionMutationRevisionRef.current === refreshRevision
+        ) {
           if (!useImportStore.getState().attachSessionWindow(requestKey, window.overview, window.page, epoch)) {
             refreshAgain = true;
           }
@@ -236,7 +266,7 @@ export function useImportSessionScope(
       })
       .catch((error) => {
         if (isScopeCurrent(requestKey, epoch)) {
-          pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error) }));
+          pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error, t) }));
         }
         throw error;
       });
@@ -278,8 +308,14 @@ export function useImportSessionScope(
 
     currentStore.resetProjectPresentation(projectKey);
     const epoch = currentStore.beginSessionEpoch(projectKey);
+    readinessRequestRevisionRef.current += 1;
+    recoveryRequestRevisionRef.current += 1;
     setReadiness(null);
     setReadinessWarning(null);
+    setReadinessRetrying(false);
+    setRecoveryWarning(null);
+    setRecoveryRetrying(false);
+    setRecoverySessionId(null);
     setBootstrapError(null);
     setIsSyncingSession(false);
     setBootstrapState("loading");
@@ -297,58 +333,24 @@ export function useImportSessionScope(
           nextReadiness = await importV2Api.getReadiness({ projectId, projectRootPath: rootPath });
         } catch (error) {
           if (cancelled || !isScopeCurrent(projectKey, epoch)) return;
-          setReadinessWarning(importWorkflowErrorMessage(error));
+          setReadinessWarning(normalizeImportWorkflowError(error));
         }
         if (cancelled || !isScopeCurrent(projectKey, epoch)) return;
         setReadiness(nextReadiness);
 
         let sessionId: string;
-        let attached = false;
         if (nextReadiness?.unfinishedSessionId) {
-          try {
-            sessionId = nextReadiness.unfinishedSessionId;
-            const { overview, page } = await loadConsistentSessionWindow(
-              projectId,
-              rootPath,
-              sessionId,
-              useImportStore.getState().filter,
-            );
-            if (cancelled || !isScopeCurrent(projectKey, epoch)) return;
-            useImportStore.getState().attachSessionWindow(projectKey, overview, page, epoch);
-            if (overview.recoveryRequired || overview.indexState === "rebuild_required") {
-              setIsSyncingSession(true);
-              void importV2Api
-                .startSessionRecovery({
-                  projectId,
-                  projectRootPath: rootPath,
-                  sessionId: nextReadiness.unfinishedSessionId,
-                })
-                .then((task) => {
-                  const taskStore = useTaskStore.getState();
-                  if (!cancelled && isScopeCurrent(projectKey, epoch)) {
-                    taskStore.upsertTask(task);
-                  } else {
-                    taskStore.recordTaskFact(task);
-                  }
-                })
-                .catch((error) => {
-                  if (!cancelled && isScopeCurrent(projectKey, epoch)) {
-                    setIsSyncingSession(false);
-                    setReadinessWarning(importWorkflowErrorMessage(error));
-                  }
-                });
-            }
-          } catch (error) {
-            if (cancelled || !isScopeCurrent(projectKey, epoch)) return;
-            setReadinessWarning(importWorkflowErrorMessage(error));
-            const created = await importV2Api.createSession({
-              projectId,
-              projectRootPath: rootPath,
-              resourceMode: "balanced",
-            });
-            sessionId = created.sessionId;
-            attachCreatedSession(projectKey, epoch, created);
-            attached = true;
+          sessionId = nextReadiness.unfinishedSessionId;
+          const { overview, page, filter } = await loadConsistentSessionWindow(
+            projectId,
+            rootPath,
+            sessionId,
+            useImportStore.getState().filter,
+          );
+          if (cancelled || !isScopeCurrent(projectKey, epoch) || useImportStore.getState().filter !== filter) return;
+          useImportStore.getState().attachSessionWindow(projectKey, overview, page, epoch);
+          if (overview.recoveryRequired || overview.indexState === "rebuild_required") {
+            void startRecoveryForScope(projectKey, epoch, sessionId);
           }
         } else {
           const created = await importV2Api.createSession({
@@ -357,33 +359,28 @@ export function useImportSessionScope(
             resourceMode: "balanced",
           });
           sessionId = created.sessionId;
-          attachCreatedSession(projectKey, epoch, created);
-          attached = true;
-        }
-        if (cancelled || !isScopeCurrent(projectKey, epoch)) return;
-        if (!attached && useImportStore.getState().session?.sessionId !== sessionId) {
-          const { overview, page } = await loadConsistentSessionWindow(
+          const { overview, page, filter } = await loadConsistentSessionWindow(
             projectId,
             rootPath,
             sessionId,
             useImportStore.getState().filter,
           );
-          if (cancelled || !isScopeCurrent(projectKey, epoch)) return;
+          if (cancelled || !isScopeCurrent(projectKey, epoch) || useImportStore.getState().filter !== filter) return;
           useImportStore.getState().attachSessionWindow(projectKey, overview, page, epoch);
         }
         setBootstrapState("ready");
       } catch (error) {
         if (cancelled || !isScopeCurrent(projectKey, epoch)) return;
-        setBootstrapError(importWorkflowErrorMessage(error));
+        setBootstrapError(normalizeImportWorkflowError(error));
         setBootstrapState("error");
-        pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error) }));
+        pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error, t) }));
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [activeView, bootstrapAttempt, expectedAuthorityRevisionKey, isScopeCurrent, projectId, projectKey, pushToast, rootPath, t]);
+  }, [activeView, bootstrapAttempt, expectedAuthorityRevisionKey, isScopeCurrent, projectId, projectKey, pushToast, rootPath, startRecoveryForScope, t]);
 
   return {
     projectId,
@@ -391,10 +388,15 @@ export function useImportSessionScope(
     projectKey,
     readiness,
     readinessWarning,
+    readinessRetrying,
+    recoveryWarning,
+    recoveryRetrying,
     bootstrapError,
     bootstrapState,
     isSyncingSession,
     retryBootstrap,
+    retryReadiness,
+    retryRecovery,
     isProjectCurrent,
     isScopeCurrent,
     nextSessionMutationRevision,

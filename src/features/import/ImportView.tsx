@@ -28,6 +28,7 @@ import { ImportQueue } from "./ImportQueue";
 import { ImportSourceMethods } from "./ImportSourceMethods";
 import { ImportV2Dialogs } from "./ImportV2Dialogs";
 import { ImportV2Header, type ImportV2Section } from "./ImportV2Header";
+import { ActionableErrorNotice } from "../../components/app/ActionableErrorNotice";
 import { presentImportItem, type ImportItemAction } from "./importStatusPresentation";
 import type { ImportWorkflow } from "./useImportWorkflow";
 import type { ImportCandidateDiffIntent } from "./ImportCandidateDiffDialog";
@@ -689,14 +690,23 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
         {blocked ? (
           <div role="alert" className="import-v2-state import-v2-state--blocked">
             <strong>{workflow.bootstrapState === "error" ? t("importV2.state.error") : t("importV2.state.blocked")}</strong>
-            {workflow.bootstrapState === "error" && workflow.bootstrapError ? <p className="m-0 mt-2 text-[11px] text-[var(--text-secondary)]">{workflow.bootstrapError}</p> : null}
+            {workflow.bootstrapState === "error" && workflow.bootstrapError ? <ActionableErrorNotice className="mt-2" error={workflow.bootstrapError} onAction={() => workflow.retryBootstrap?.()} /> : null}
             {workflow.bootstrapState === "error" && workflow.retryBootstrap ? <button type="button" className="btn btn--sm mt-3" onClick={workflow.retryBootstrap}>{t("importV2.state.retry")}</button> : null}
           </div>
         ) : activeSection === "workbench" ? (
           <>
+            {workflow.recoveryWarning ? (
+              <ActionableErrorNotice
+                className="mb-3"
+                error={workflow.recoveryWarning}
+                onAction={() => workflow.retryRecovery?.()}
+              />
+            ) : null}
             {workflow.completion ? (
               <ImportCompletionSummary
                 completion={workflow.completion}
+                remainingCount={workflow.overview?.remainingCount ?? 0}
+                onContinueRemaining={() => workflow.setFilter("all")}
                 onViewSources={() => {
                   void workflow.viewImportedSources();
                 }}
@@ -730,6 +740,9 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
               matrixExpanded={sourceMatrixExpanded}
               onMatrixExpandedChange={setSourceMatrixExpanded}
               onManageCapabilities={() => handleSectionChange("capabilities")}
+              readinessUnavailable={Boolean(workflow.readinessWarning)}
+              readinessRetrying={workflow.readinessRetrying}
+              onRetryReadiness={workflow.retryReadiness}
             />
             <ImportDiscoveryStatus
               task={workflow.discoveryTask ?? null}

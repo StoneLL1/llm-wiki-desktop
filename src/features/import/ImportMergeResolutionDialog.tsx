@@ -3,6 +3,7 @@ import { GitMerge, LoaderCircle, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { useModalDialog } from "../../hooks/useModalDialog";
+import { normalizeBackendError } from "../../lib/backendError";
 import type {
   ImportItemResolution,
   ImportResolutionBinding,
@@ -70,7 +71,7 @@ export function ImportMergeResolutionDialog({
       })
       .catch((error: unknown) => {
         if (!current) return;
-        setTechnicalError(error instanceof Error ? error.message : String(error));
+        setTechnicalError(normalizeBackendError(error).technicalDetails);
         setState("error");
       });
     return () => {
@@ -87,7 +88,7 @@ export function ImportMergeResolutionDialog({
       await onChoose(itemId, boundResolution(kind, binding));
       onClose();
     } catch (error) {
-      setTechnicalError(error instanceof Error ? error.message : String(error));
+      setTechnicalError(normalizeBackendError(error).technicalDetails);
       setState("error");
     }
   }
@@ -100,7 +101,7 @@ export function ImportMergeResolutionDialog({
       await onSaveMerged(itemId, mergedMarkdown);
       onClose();
     } catch (error) {
-      setTechnicalError(error instanceof Error ? error.message : String(error));
+      setTechnicalError(normalizeBackendError(error).technicalDetails);
       setState("error");
     }
   }

@@ -278,7 +278,11 @@ beforeEach(() => {
   });
   api.getReadiness.mockResolvedValue(readiness);
   api.createSession.mockResolvedValue(session(projectA.projectId));
-  api.getSession.mockResolvedValue(session(projectA.projectId));
+  api.getSession.mockImplementation(async (request: { sessionId: string }) => {
+    const createdResult = api.createSession.mock.results.at(-1)?.value as Promise<ImportSession> | undefined;
+    const created = createdResult ? await createdResult : null;
+    return created?.sessionId === request.sessionId ? created : session(projectA.projectId);
+  });
   let windowSession: Promise<ImportSession> | null = null;
   api.getSessionOverview.mockImplementation(async (request: { sessionId: string }) => {
     windowSession = Promise.resolve(api.getSession(request));
@@ -715,6 +719,54 @@ describe("useImportWorkflow", () => {
     expect(result.current.visibleItems).toEqual([]);
   });
 
+  it("releases a stale load-more lock after switching projects", async () => {
+    const firstA = item("first-a.md");
+    const staleA = item("stale-a.md");
+    const firstB = item("first-b.md");
+    const secondB = item("second-b.md");
+    let resolveA!: (page: { sessionId: string; snapshotRevision: number; items: ImportItem[]; nextCursor: null; total: number }) => void;
+    api.getReadiness.mockImplementation(({ projectId }: { projectId: string }) => Promise.resolve({
+      ...readiness,
+      unfinishedSessionId: `session-${projectId}`,
+    }));
+    api.getSessionOverview.mockImplementation(({ projectId, sessionId }: { projectId: string; sessionId: string }) => Promise.resolve(
+      overviewFor({ ...session(projectId), sessionId }),
+    ));
+    api.listSessionItems.mockImplementation((request: { projectId: string; sessionId: string; cursor?: string }) => {
+      if (request.projectId === projectA.projectId && request.cursor === "cursor-a") {
+        return new Promise((resolve) => { resolveA = resolve; });
+      }
+      if (request.projectId === projectA.projectId) {
+        return Promise.resolve({ sessionId: request.sessionId, snapshotRevision: 1, items: [firstA], nextCursor: "cursor-a", total: 2 });
+      }
+      if (request.cursor === "cursor-b") {
+        return Promise.resolve({ sessionId: request.sessionId, snapshotRevision: 1, items: [secondB], nextCursor: null, total: 2 });
+      }
+      return Promise.resolve({ sessionId: request.sessionId, snapshotRevision: 1, items: [firstB], nextCursor: "cursor-b", total: 2 });
+    });
+
+    const { result, rerender } = renderHook(
+      ({ project }) => useImportWorkflow(project, "import", launcher()),
+      { initialProps: { project: projectA } },
+    );
+    await waitFor(() => expect(result.current.visibleItems.map(({ itemId }) => itemId)).toEqual(["first-a.md"]));
+    let staleLoad!: Promise<void>;
+    act(() => { staleLoad = result.current.loadMoreItems?.() ?? Promise.resolve(); });
+    await waitFor(() => expect(result.current.isLoadingMoreItems).toBe(true));
+
+    rerender({ project: projectB });
+    await waitFor(() => expect(result.current.visibleItems.map(({ itemId }) => itemId)).toEqual(["first-b.md"]));
+    expect(result.current.isLoadingMoreItems).toBe(false);
+    await act(async () => result.current.loadMoreItems?.());
+    expect(result.current.visibleItems.map(({ itemId }) => itemId)).toEqual(["first-b.md", "second-b.md"]);
+
+    await act(async () => {
+      resolveA({ sessionId: "session-project-a", snapshotRevision: 1, items: [staleA], nextCursor: null, total: 2 });
+      await staleLoad;
+    });
+    expect(result.current.visibleItems.map(({ itemId }) => itemId)).toEqual(["first-b.md", "second-b.md"]);
+  });
+
   it("rejects an async session mutation after the project authority revision changes", async () => {
     useProjectStore.setState({ authority: authorityA });
     let resolveAddition!: (value: ImportSession) => void;
@@ -848,6 +900,32 @@ describe("useImportWorkflow", () => {
     expect(recoveryFactPublications).toBe(1);
   });
 
+  it("keeps recovery failure separate from readiness and retries the recovery task", async () => {
+    api.getReadiness.mockResolvedValue({ ...readiness, unfinishedSessionId: "session-recover" });
+    const recovering = { ...session(projectA.projectId, [item("recover.md")]), sessionId: "session-recover" };
+    api.getSession.mockResolvedValue(recovering);
+    api.getSessionOverview.mockResolvedValue({
+      ...overviewFor(recovering),
+      recoveryRequired: true,
+      recoveryReasons: ["stale_in_flight_item"],
+    });
+    api.startSessionRecovery
+      .mockRejectedValueOnce({ code: "IMPORT_V2_RECOVERY_FAILED", message: "worker unavailable", recoverable: true })
+      .mockResolvedValueOnce({
+        ...task("session-recovery"),
+        operation: { kind: "import_recovery", sessionId: "session-recover" },
+      });
+
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.recoveryWarning?.summaryKey).toBe("backendError.summary.import"));
+    expect(result.current.readinessWarning).toBeNull();
+
+    await act(async () => result.current.retryRecovery?.());
+    await waitFor(() => expect(result.current.recoveryWarning).toBeNull());
+    expect(api.startSessionRecovery).toHaveBeenCalledTimes(2);
+    expect(useTaskStore.getState().taskById["session-recovery"]).toBeDefined();
+  });
+
   it("refreshes the unfinished session when its recovery task reaches terminal state", async () => {
     api.getReadiness.mockResolvedValue({ ...readiness, unfinishedSessionId: "session-recover" });
     const initial = { ...session(projectA.projectId, [item("recover.md")]), sessionId: "session-recover" };
@@ -902,7 +980,8 @@ describe("useImportWorkflow", () => {
     await waitFor(() => expect(result.current.bootstrapState).toBe("ready"));
     expect(result.current.session?.projectId).toBe(projectA.projectId);
     expect(result.current.readiness).toBeNull();
-    expect(result.current.readinessWarning).toContain("MIGRATION_REPORT_INVALID");
+    expect(result.current.readinessWarning?.summaryKey).toBe("backendError.summary.import");
+    expect(result.current.readinessWarning?.technicalDetails).toContain("MIGRATION_REPORT_INVALID");
     expect(api.createSession).toHaveBeenCalledWith({
       projectId: projectA.projectId,
       projectRootPath: projectA.rootPath,
@@ -927,7 +1006,39 @@ describe("useImportWorkflow", () => {
     expect(result.current.session?.projectId).toBe(projectB.projectId);
   });
 
-  it("keeps a late project A task globally without attaching it to project B import UI", async () => {
+  it("drops a delayed readiness retry across an A to B to A epoch change", async () => {
+    let resolveStale!: (value: ImportFrontendReadiness) => void;
+    const staleRetry = new Promise<ImportFrontendReadiness>((resolve) => { resolveStale = resolve; });
+    api.getReadiness
+      .mockResolvedValueOnce(readiness)
+      .mockReturnValueOnce(staleRetry)
+      .mockResolvedValueOnce({ ...readiness, backendVersion: "project-b" })
+      .mockResolvedValueOnce({ ...readiness, backendVersion: "fresh-a" });
+    api.createSession.mockImplementation(({ projectId }: { projectId: string }) => Promise.resolve(session(projectId)));
+
+    const { result, rerender } = renderHook(
+      ({ project }) => useImportWorkflow(project, "import", launcher()),
+      { initialProps: { project: projectA } },
+    );
+    await waitFor(() => expect(result.current.bootstrapState).toBe("ready"));
+    let retry!: Promise<void>;
+    act(() => { retry = result.current.retryReadiness?.() ?? Promise.resolve(); });
+    await waitFor(() => expect(result.current.readinessRetrying).toBe(true));
+
+    rerender({ project: projectB });
+    await waitFor(() => expect(result.current.session?.projectId).toBe(projectB.projectId));
+    rerender({ project: projectA });
+    await waitFor(() => expect(result.current.readiness?.backendVersion).toBe("fresh-a"));
+
+    await act(async () => {
+      resolveStale({ ...readiness, backendVersion: "stale-a" });
+      await retry;
+    });
+    expect(result.current.readiness?.backendVersion).toBe("fresh-a");
+    expect(result.current.readinessRetrying).toBe(false);
+  });
+
+  it("keeps a late project A task as a fact without surfacing it in project B import UI", async () => {
     const queued = item("queued.md");
     api.createSession.mockImplementation(({ projectId }: { projectId: string }) =>
       Promise.resolve(session(projectId, projectId === projectA.projectId ? [queued] : [])));
@@ -946,7 +1057,8 @@ describe("useImportWorkflow", () => {
     await waitFor(() => expect(result.current.session?.projectId).toBe(projectB.projectId));
 
     await act(async () => resolveStart(task("late-project-a-task")));
-    expect(useTaskStore.getState().tasks).toContainEqual(task("late-project-a-task"));
+    expect(useTaskStore.getState().tasks).not.toContainEqual(task("late-project-a-task"));
+    expect(useTaskStore.getState().taskFacts["late-project-a-task"]).toEqual(task("late-project-a-task"));
     expect(result.current.pendingItemIds?.size).toBe(0);
     expect(result.current.batch).toBeNull();
   });
@@ -1035,7 +1147,7 @@ describe("useImportWorkflow", () => {
     const selectionSession = session(projectA.projectId, [{ ...existing, selected: false }]);
     const latestSession = session(projectA.projectId, [{ ...existing, selected: false }, item("url-late")]);
     api.setSelection.mockResolvedValue(selectionSession);
-    api.getSession.mockResolvedValue(latestSession);
+    api.getSession.mockResolvedValueOnce(session(projectA.projectId, [existing])).mockResolvedValue(latestSession);
     const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
     await waitFor(() => expect(result.current.session?.items).toHaveLength(1));
 
@@ -1612,7 +1724,7 @@ describe("useImportWorkflow", () => {
       reviewReady: 1,
       failed: 0,
     });
-    await waitFor(() => expect(api.getSession).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(api.getSession).toHaveBeenCalledTimes(2));
 
     await act(async () => notifyTaskEventListeners({
       eventId: "event-operation-task-terminal",
@@ -1622,7 +1734,7 @@ describe("useImportWorkflow", () => {
       timestamp: "2026-08-06T00:00:01Z",
       payload: { ...operation, status: "succeeded" },
     }));
-    expect(api.getSession).toHaveBeenCalledTimes(1);
+    expect(api.getSession).toHaveBeenCalledTimes(2);
   });
 
   it("buffers a matching pre-response patch but ignores an unbound stale patch", async () => {
@@ -1633,7 +1745,7 @@ describe("useImportWorkflow", () => {
     };
     const patched = { ...queued, status: "failed" as const, taskId: operation.id };
     api.createSession.mockResolvedValue(session(projectA.projectId, [queued]));
-    api.getSession.mockResolvedValue(session(projectA.projectId, [patched]));
+    api.getSession.mockResolvedValueOnce(session(projectA.projectId, [queued])).mockResolvedValue(session(projectA.projectId, [patched]));
     let resolveStart!: (value: BackendTask) => void;
     api.startBatch.mockReturnValue(new Promise<BackendTask>((resolve) => { resolveStart = resolve; }));
     const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
@@ -2068,7 +2180,7 @@ describe("useImportWorkflow", () => {
     const started = task("url-task");
     api.startBatch.mockResolvedValue(started);
     const completed = session(projectA.projectId, [item("url-1", "preview_ready")]);
-    api.getSession.mockResolvedValueOnce(completed);
+    api.getSession.mockResolvedValueOnce(session(projectA.projectId)).mockResolvedValue(completed);
     const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
     await waitFor(() => expect(result.current.bootstrapState).toBe("ready"));
 
@@ -2135,7 +2247,7 @@ describe("useImportWorkflow", () => {
     const selectedSession = session(projectA.projectId, [{ ...ready, selected: true }]);
     api.createSession.mockResolvedValue(session(projectA.projectId, [ready]));
     api.setSelection.mockResolvedValue(selectedSession);
-    api.getSession.mockResolvedValue(selectedSession);
+    api.getSession.mockResolvedValueOnce(session(projectA.projectId, [ready])).mockResolvedValue(selectedSession);
     const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
     await waitFor(() => expect(result.current.session?.items[0].selected).toBe(false));
 
@@ -2373,6 +2485,42 @@ describe("useImportWorkflow", () => {
     expect(api.resumeMigration).toHaveBeenCalledWith({ projectId: projectA.projectId, projectRootPath: projectA.rootPath, plan: preparation!.plan, confirmation });
     expect(api.listHistory).toHaveBeenCalledWith({ projectId: projectA.projectId, projectRootPath: projectA.rootPath, cursor: "cursor-1", limit: 50 });
     expect(useTaskStore.getState().tasks.map((entry) => entry.id)).toEqual(expect.arrayContaining(["migration-task", "migration-resume-task"]));
+  });
+
+  it("drops a late restricted-content response after switching projects", async () => {
+    const restricted = item("restricted.md", "preview_ready");
+    restricted.selected = true;
+    restricted.restrictedContent = true;
+    api.createSession.mockImplementation(({ projectId }: { projectId: string }) => Promise.resolve(
+      session(projectId, projectId === projectA.projectId ? [restricted] : []),
+    ));
+    let resolveRestricted!: (value: { confirmationRequired: boolean }) => void;
+    api.getRestrictedContentStatus.mockReturnValue(new Promise((resolve) => { resolveRestricted = resolve; }));
+    const { result, rerender } = renderHook(({ project }) => useImportWorkflow(project, "import", launcher()), { initialProps: { project: projectA } });
+    await waitFor(() => expect(result.current.session?.projectId).toBe(projectA.projectId));
+    act(() => { void result.current.confirm(); });
+    await waitFor(() => expect(api.getRestrictedContentStatus).toHaveBeenCalledTimes(1));
+    rerender({ project: projectB });
+    await waitFor(() => expect(result.current.session?.projectId).toBe(projectB.projectId));
+    await act(async () => resolveRestricted({ confirmationRequired: true }));
+    expect(result.current.restrictedCommitPending).toBe(false);
+    expect(api.confirmSession).not.toHaveBeenCalled();
+    expect(useToastStore.getState().toasts).toHaveLength(0);
+  });
+
+  it("keeps successful OCR authorizations and starts only those items after a partial failure", async () => {
+    const first = item("first.png", "waiting_authorization");
+    const second = item("second.png", "waiting_authorization");
+    api.createSession.mockResolvedValue(session(projectA.projectId, [first, second]));
+    api.authorizeLocalOcr.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("ocr denied"));
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.session?.items).toHaveLength(2));
+    await act(async () => result.current.authorizeLocalOcrGroup?.([first.itemId, second.itemId]));
+    expect(api.authorizeLocalOcr).toHaveBeenCalledTimes(2);
+    expect(api.startBatch).toHaveBeenCalledWith(expect.objectContaining({ itemIds: [first.itemId] }));
+    expect(result.current.pendingItemIds?.has(first.itemId)).toBe(true);
+    expect(result.current.pendingItemIds?.has(second.itemId)).toBe(false);
+    expect(useToastStore.getState().toasts.at(-1)?.tone).toBe("warning");
   });
 
   it("starts one observable history index task when paged history needs preparation", async () => {

@@ -186,7 +186,7 @@ describe("three-core performance frontend contracts", () => {
     const items = session(10_000).items;
     const commits = createReactCommitObserver();
     const rendered = render(queue(items, commits));
-    expect(screen.getAllByRole("listitem").length).toBeLessThanOrEqual(80);
+    expect(screen.getAllByRole("option").length).toBeLessThanOrEqual(80);
 
     const updated = [...items];
     updated[0] = { ...updated[0], progress: { current: 2, total: 100, label: "Synthetic progress" } };
@@ -195,11 +195,11 @@ describe("three-core performance frontend contracts", () => {
     expect(statusRenders.get("item-0")).toBe(2);
     expect(statusRenders.get("item-1")).toBe(1);
 
-    fireEvent.scroll(screen.getByRole("list", { name: "Sources" }), {
+    fireEvent.scroll(screen.getByRole("listbox", { name: "Sources" }), {
       target: { scrollTop: 9_999 * 72 },
     });
     expect(await screen.findByTestId("import-item-item-9999")).toBeInTheDocument();
-    expect(screen.getAllByRole("listitem").length).toBeLessThanOrEqual(80);
+    expect(screen.getAllByRole("option").length).toBeLessThanOrEqual(80);
     expect(commits.commits).toBeLessThanOrEqual(4);
   }, 300_000);
 });

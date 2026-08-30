@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import { normalizeBackendError } from "../lib/backendError";
+
 import type {
   AddImportItemsV2Request,
   AddImportTextV2Request,
@@ -155,8 +157,17 @@ const commandNames: ImportV2CommandNames = {
   getActivation: "get_import_backend_activation",
 };
 
-const request = <Response, Payload = unknown>(name: string, value: Payload) =>
-  invoke<Response>(name, { request: value });
+const request = async <Response, Payload = unknown>(name: string, value: Payload) => {
+  try {
+    return await invoke<Response>(name, { request: value });
+  } catch (error) {
+    throw normalizeBackendError(error, {
+      defaultSummaryKey: "backendError.summary.import",
+      defaultRecoverable: true,
+      defaultActionKind: "retry",
+    });
+  }
+};
 
 export const importV2Api: ImportV2Api = {
   commandNames,

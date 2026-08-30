@@ -5,6 +5,8 @@ import type { ImportCompletion } from "../../types/importV2";
 
 export interface ImportCompletionSummaryProps {
   completion: ImportCompletion;
+  remainingCount?: number;
+  onContinueRemaining?: () => void;
   onViewSources: () => void;
   onViewSource: (wikiPath: string) => void;
   onUpdateWiki: () => void;
@@ -27,6 +29,8 @@ function fileName(path: string): string {
 
 export function ImportCompletionSummary({
   completion,
+  remainingCount = 0,
+  onContinueRemaining = () => undefined,
   onViewSources,
   onViewSource,
   onUpdateWiki,
@@ -47,6 +51,14 @@ export function ImportCompletionSummary({
         </h2>
       </div>
       <div className="p-3">
+        {remainingCount > 0 ? (
+          <div className="mb-3 flex items-center justify-between gap-3 border border-[var(--warning)] bg-[var(--warning-soft)] px-3 py-2 text-[12px]">
+            <span>{t("importV2.completion.remaining", { count: remainingCount })}</span>
+            <button type="button" className="btn btn--sm" onClick={onContinueRemaining}>
+              {t("importV2.completion.continueRemaining", { count: remainingCount })}
+            </button>
+          </div>
+        ) : null}
         <dl className="m-0 grid grid-cols-5 gap-2" aria-label={t("importV2.completion.counts")}>
           {completionCountRows(completion).map((row) => (
             <div key={row.key} className="min-w-0">

@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
 
 import type { TaskLauncher } from "../../hooks/useTaskLauncher";
+import { translateBackendError } from "../../lib/backendError";
 import { importV2Api } from "../../services/importV2Api";
 import { useImportStore } from "../../stores/importStore";
 import { useTaskStore } from "../../stores/taskStore";
@@ -417,7 +418,7 @@ export function useImportBatchController({
       }
     } catch (error) {
       if (isScopeCurrent(projectKey, sessionEpoch, target.sessionId)) {
-        pushToast("error", error instanceof Error ? error.message : t("importV2.workflow.batchCancelFailed"));
+        pushToast("error", translateBackendError(error, t));
       }
     } finally {
       setCancellingBatchIds((current) => {

@@ -19,7 +19,7 @@ use crate::models::import_v2::{
     ArtifactKind, ImportAsrProfile, ImportInputKind, ImportItem, ImportItemStatus,
     ImportRecoveryAction, ImportResolutionKind, ImportResourceMode, ImportSession,
 };
-use crate::models::import_v2_file::CapabilityRequirement;
+use crate::models::import_v2_file::{CapabilityRequirement, FileFormat};
 use crate::models::import_v2_migration::MigrationStatus;
 use crate::models::import_v2_presentation::{
     GetImportAsrEnablementPlanV2Request, GetImportCapabilityRequirementV2Request,
@@ -46,6 +46,10 @@ use crate::services::import_v2::capability_runtime::CapabilityRuntimeStatus;
 use crate::services::import_v2::migration::{
     LegacyHistoryAdapter, MigrationService, REQUIRED_IMPORT_V2_CONTRACT,
 };
+use crate::services::import_v2::product_capability::{
+    embedded_product_manifest, ProductCapabilityManifest,
+};
+use crate::services::import_v2::routes_for_format;
 use crate::services::BlockingWorkClass;
 use crate::services::{app_capability_acknowledgement_version, project_identity};
 use crate::tasks::task_model::LogLevel;
@@ -519,9 +523,10 @@ pub fn get_import_frontend_readiness_v2(
     }) && migration.status == MigrationStatus::Applied;
     let registered_routes = state.import_v2_service.registered_engine_routes()?;
     let capability_statuses = state.import_capability_runtime.statuses();
-    let files = file_readiness(&registered_routes, &capability_statuses);
-    let platforms = platform_readiness(&registered_routes, &capability_statuses);
-    let abilities = ability_readiness(&registered_routes, &capability_statuses);
+    let manifest = embedded_product_manifest();
+    let files = file_readiness(manifest, &registered_routes, &capability_statuses);
+    let platforms = platform_readiness(manifest, &registered_routes, &capability_statuses);
+    let abilities = ability_readiness(manifest, &registered_routes, &capability_statuses);
     let capabilities = capability_statuses
         .into_iter()
         .map(|status| ImportCapabilityReadiness {
@@ -547,155 +552,201 @@ pub fn get_import_frontend_readiness_v2(
 }
 
 fn file_readiness(
+    manifest: &ProductCapabilityManifest,
     registered_routes: &[String],
     capability_statuses: &[CapabilityRuntimeStatus],
 ) -> Vec<ImportFeatureReadiness> {
-    let route = |id: &str, candidates: &[&str]| {
-        let available = candidates.iter().any(|candidate| {
-            registered_routes.iter().any(|route| route == candidate)
-                || capability_statuses
-                    .iter()
-                    .any(|status| status.route == *candidate && status.available)
-        });
-        ImportFeatureReadiness {
-            id: id.into(),
-            available,
-            reason_code: (!available).then(|| "capability_missing".into()),
-        }
+    manifest
+        .surface
+        .formats
+        .iter()
+        .map(|format| {
+            let routes = manifest_routes_for_format(manifest, format);
+            feature_from_routes(format, &routes, registered_routes, capability_statuses)
+        })
+        .collect()
+}
+
+fn route_available(
+    route: &str,
+    registered_routes: &[String],
+    capability_statuses: &[CapabilityRuntimeStatus],
+) -> bool {
+    registered_routes
+        .iter()
+        .any(|registered| registered == route)
+        || capability_statuses
+            .iter()
+            .any(|status| status.available && status.route == route)
+}
+
+fn feature_from_routes(
+    id: &str,
+    routes: &[&str],
+    registered_routes: &[String],
+    capability_statuses: &[CapabilityRuntimeStatus],
+) -> ImportFeatureReadiness {
+    let available = routes
+        .iter()
+        .any(|route| route_available(route, registered_routes, capability_statuses));
+    ImportFeatureReadiness {
+        id: id.into(),
+        available,
+        reason_code: (!available).then(|| "capability_missing".into()),
+    }
+}
+
+fn file_format_from_manifest_id(id: &str) -> Option<FileFormat> {
+    Some(match id {
+        "md" | "markdown" => FileFormat::Markdown,
+        "txt" => FileFormat::Text,
+        "html" | "htm" => FileFormat::Html,
+        "csv" => FileFormat::Csv,
+        "doc" => FileFormat::Doc,
+        "docx" => FileFormat::Docx,
+        "xls" => FileFormat::Xls,
+        "xlsx" => FileFormat::Xlsx,
+        "ppt" => FileFormat::Ppt,
+        "pptx" => FileFormat::Pptx,
+        "pdf" => FileFormat::Pdf,
+        "png" => FileFormat::Png,
+        "jpg" | "jpeg" => FileFormat::Jpeg,
+        "webp" => FileFormat::Webp,
+        "bmp" => FileFormat::Bmp,
+        "tif" | "tiff" => FileFormat::Tiff,
+        "heic" => FileFormat::Heic,
+        "heif" => FileFormat::Heif,
+        "gif" => FileFormat::AnimatedGif,
+        "mp3" => FileFormat::Mp3,
+        "wav" => FileFormat::Wav,
+        "m4a" => FileFormat::M4a,
+        "aac" => FileFormat::Aac,
+        "flac" => FileFormat::Flac,
+        "ogg" => FileFormat::Ogg,
+        "opus" => FileFormat::Opus,
+        "wma" => FileFormat::Wma,
+        "mp4" => FileFormat::Mp4,
+        "mov" => FileFormat::Mov,
+        "mkv" => FileFormat::Mkv,
+        "webm" => FileFormat::Webm,
+        "avi" => FileFormat::Avi,
+        "m4v" => FileFormat::M4v,
+        "wmv" => FileFormat::Wmv,
+        "srt" => FileFormat::Srt,
+        "vtt" => FileFormat::Vtt,
+        "ass" | "ssa" => FileFormat::Ass,
+        "lrc" => FileFormat::Lrc,
+        _ => return None,
+    })
+}
+
+fn manifest_routes_for_format<'a>(
+    manifest: &'a ProductCapabilityManifest,
+    format: &str,
+) -> Vec<&'a str> {
+    let Some(file_format) = file_format_from_manifest_id(format) else {
+        return Vec::new();
     };
-    vec![
-        route("doc", &["pack.office-legacy", "pack.markitdown"]),
-        route(
-            "docx",
-            &["office.modern.docx", "pack.markitdown", "pack.office-oxide"],
-        ),
-        route("xls", &["pack.office-legacy", "pack.markitdown"]),
-        route("pdf", &["pdf.text", "pdf.layout", "pack.markitdown"]),
-        route(
-            "xlsx",
-            &["office.modern.xlsx", "pack.markitdown", "pack.office-oxide"],
-        ),
-        route("pptx", &["office.modern.pptx", "pack.markitdown"]),
-        route("ppt", &["pack.office-legacy", "pack.markitdown"]),
-        route("md", &["file.native"]),
-        route("txt", &["file.native"]),
-        route("html", &["file.native"]),
-        route("csv", &["file.csv-package"]),
-        route("png", &["ocr.cjk-accurate", "ocr.basic"]),
-        route("jpeg", &["ocr.cjk-accurate", "ocr.basic"]),
-        route("webp", &["ocr.cjk-accurate", "ocr.basic"]),
-        route("bmp", &["ocr.cjk-accurate", "ocr.basic"]),
-        route("tiff", &["ocr.cjk-accurate", "ocr.basic"]),
-        route("heic", &["ocr.cjk-accurate", "ocr.basic"]),
-        route("heif", &["ocr.cjk-accurate", "ocr.basic"]),
-        route("gif", &["ocr.cjk-accurate", "ocr.basic"]),
-        route("mp3", &["media.companion", "media.asr"]),
-        route("wav", &["media.companion", "media.asr"]),
-        route("m4a", &["media.companion", "media.asr"]),
-        route("aac", &["media.companion", "media.asr"]),
-        route("flac", &["media.companion", "media.asr"]),
-        route("ogg", &["media.companion", "media.asr"]),
-        route("opus", &["media.companion", "media.asr"]),
-        route("wma", &["media.companion", "media.asr"]),
-        route("mp4", &["media.companion", "media.asr"]),
-        route("mov", &["media.companion", "media.asr"]),
-        route("mkv", &["media.companion", "media.asr"]),
-        route("webm", &["media.companion", "media.asr"]),
-        route("avi", &["media.companion", "media.asr"]),
-        route("m4v", &["media.companion", "media.asr"]),
-        route("wmv", &["media.companion", "media.asr"]),
-        route("srt", &["media.subtitle"]),
-        route("vtt", &["media.subtitle"]),
-        route("ass", &["media.subtitle"]),
-        ImportFeatureReadiness {
-            id: "lrc".into(),
-            available: false,
-            reason_code: Some("batch_four".into()),
-        },
-    ]
+    let production_routes = routes_for_format(file_format);
+    manifest
+        .definitions
+        .iter()
+        .filter(|definition| {
+            definition
+                .formats
+                .extensions
+                .iter()
+                .any(|extension| extension == format)
+        })
+        .flat_map(|definition| definition.routes.iter().map(String::as_str))
+        .filter(|route| {
+            production_routes.contains(route)
+                || (*route == "media.keyframes"
+                    && file_format == FileFormat::AnimatedGif
+                    && manifest.definitions.iter().any(|definition| {
+                        definition
+                            .profiles
+                            .ocr
+                            .iter()
+                            .any(|profile| profile == "keyframes")
+                    }))
+        })
+        .collect()
 }
 
 fn ability_readiness(
+    manifest: &ProductCapabilityManifest,
     registered_routes: &[String],
     capability_statuses: &[CapabilityRuntimeStatus],
 ) -> Vec<ImportFeatureReadiness> {
-    let route = |id: &str, candidates: &[&str]| {
-        let available = candidates.iter().any(|candidate| {
-            registered_routes.iter().any(|route| route == candidate)
-                || capability_statuses
-                    .iter()
-                    .any(|status| status.route == *candidate && status.available)
-        });
-        ImportFeatureReadiness {
-            id: id.into(),
-            available,
-            reason_code: (!available).then(|| "capability_missing".into()),
-        }
+    let declared = |route: &'static str| {
+        manifest
+            .surface
+            .routes
+            .iter()
+            .any(|candidate| candidate == route)
+            .then_some(route)
+            .into_iter()
+            .collect::<Vec<_>>()
     };
     vec![
-        ImportFeatureReadiness {
-            id: "subtitle".into(),
-            available: true,
-            reason_code: None,
-        },
-        route("local_asr", &["media.asr"]),
-        route("ocr", &["ocr.cjk-accurate", "ocr.basic"]),
-        ImportFeatureReadiness {
-            id: "keyframes".into(),
-            available: false,
-            reason_code: Some("phase_two".into()),
-        },
+        feature_from_routes(
+            "subtitle",
+            &declared("media.subtitle"),
+            registered_routes,
+            capability_statuses,
+        ),
+        feature_from_routes(
+            "local_asr",
+            &declared("media.asr"),
+            registered_routes,
+            capability_statuses,
+        ),
+        feature_from_routes(
+            "ocr",
+            &[declared("ocr.basic"), declared("ocr.cjk-accurate")].concat(),
+            registered_routes,
+            capability_statuses,
+        ),
+        feature_from_routes(
+            "keyframes",
+            &declared("media.keyframes"),
+            registered_routes,
+            capability_statuses,
+        ),
     ]
 }
 
 fn platform_readiness(
+    manifest: &ProductCapabilityManifest,
     registered_routes: &[String],
     capability_statuses: &[CapabilityRuntimeStatus],
 ) -> Vec<ImportPlatformReadiness> {
-    let route_status = |id: &str, routes: &[&str], phase_two: bool| {
-        if phase_two {
-            return ImportPlatformReadiness {
-                id: id.into(),
-                available: false,
-                reason_code: Some("phase_two".into()),
-            };
-        }
-        let available = routes.iter().any(|route| {
-            registered_routes
+    let ids = [
+        ("generic_web", "http", "web.generic.readability"),
+        ("wechat_article", "wechat", "web.wechat.article"),
+        ("zhihu_content", "zhihu", "web.zhihu.content"),
+        ("bilibili_video", "bilibili", "web.bilibili.metadata"),
+        ("x_post", "x", "web.x.post"),
+    ];
+    ids.into_iter()
+        .filter(|(content_type, _, route)| {
+            manifest
+                .surface
+                .platform_content_types
                 .iter()
-                .any(|registered| registered == route)
-                || capability_statuses
-                    .iter()
-                    .any(|status| status.route == *route && status.available)
-        });
-        let reason_code = (!available).then(|| {
-            if capability_statuses
-                .iter()
-                .any(|status| routes.iter().any(|route| status.route == *route))
-            {
-                "capability_missing".into()
-            } else {
-                "route_unavailable".into()
+                .any(|value| value == content_type)
+                && manifest.surface.routes.iter().any(|value| value == route)
+        })
+        .map(|(_, id, route)| {
+            let feature = feature_from_routes(id, &[route], registered_routes, capability_statuses);
+            ImportPlatformReadiness {
+                id: feature.id,
+                available: feature.available,
+                reason_code: feature.reason_code,
             }
-        });
-        ImportPlatformReadiness {
-            id: id.into(),
-            available,
-            reason_code,
-        }
-    };
-    let http = route_status("http", &["web.generic.readability"], false);
-    let wechat = route_status("wechat", &["web.wechat.article"], false);
-    let zhihu = route_status("zhihu", &["web.zhihu.content"], false);
-    let bilibili = route_status(
-        "bilibili",
-        &["web.bilibili.metadata", "web.bilibili.video"],
-        false,
-    );
-    let xiaohongshu = route_status("xiaohongshu", &["web.xiaohongshu.note"], false);
-    let douyin = route_status("douyin", &["web.douyin.video"], false);
-    let x = route_status("x", &[], true);
-    vec![http, wechat, zhihu, bilibili, xiaohongshu, douyin, x]
+        })
+        .collect()
 }
 
 pub fn list_import_history_v2(
@@ -2466,7 +2517,7 @@ mod tests {
             healthy_version: None,
             reason: Some("not installed".into()),
         }];
-        let platforms = platform_readiness(&routes, &capabilities);
+        let platforms = platform_readiness(embedded_product_manifest(), &routes, &capabilities);
 
         let http = platforms.iter().find(|item| item.id == "http").unwrap();
         let wechat = platforms.iter().find(|item| item.id == "wechat").unwrap();
@@ -2476,7 +2527,7 @@ mod tests {
         assert!(wechat.available);
         assert!(!zhihu.available);
         assert_eq!(zhihu.reason_code.as_deref(), Some("capability_missing"));
-        assert_eq!(x.reason_code.as_deref(), Some("phase_two"));
+        assert_eq!(x.reason_code.as_deref(), Some("capability_missing"));
     }
 
     #[test]
@@ -2489,7 +2540,7 @@ mod tests {
             healthy_version: Some("1.0.0".into()),
             reason: None,
         }];
-        let abilities = ability_readiness(&routes, &capabilities);
+        let abilities = ability_readiness(embedded_product_manifest(), &routes, &capabilities);
 
         assert!(
             abilities
@@ -2517,7 +2568,7 @@ mod tests {
             .find(|item| item.id == "keyframes")
             .unwrap();
         assert!(!keyframes.available);
-        assert_eq!(keyframes.reason_code.as_deref(), Some("phase_two"));
+        assert_eq!(keyframes.reason_code.as_deref(), Some("capability_missing"));
     }
 
     #[test]
@@ -2532,7 +2583,7 @@ mod tests {
             "media.companion".into(),
             "media.subtitle".into(),
         ];
-        let files = file_readiness(&routes, &[]);
+        let files = file_readiness(embedded_product_manifest(), &routes, &[]);
         let ids = files
             .iter()
             .map(|file| file.id.as_str())
@@ -2554,7 +2605,7 @@ mod tests {
                 .available
         );
         assert!(
-            !files
+            files
                 .iter()
                 .find(|file| file.id == "lrc")
                 .unwrap()

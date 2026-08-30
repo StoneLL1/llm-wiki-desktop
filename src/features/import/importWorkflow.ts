@@ -21,6 +21,7 @@ import type {
 import type { BackendTask } from "../../types/task";
 import type { ImportQueueFilter } from "../../stores/importStore";
 import type { ImportQueueCounts, ImportSessionProgress } from "../../stores/importStore";
+import type { NormalizedBackendError } from "../../lib/backendError";
 
 export type ImportBootstrapState = "loading" | "ready" | "blocked" | "error";
 export interface AsrAuthorizationOptions { profile: ImportAsrProfile; language: string | null; }
@@ -61,9 +62,14 @@ export interface ImportWorkflow {
   completion: ImportCompletion | null;
   readiness: ImportFrontendReadiness | null;
   /** Readiness is advisory; a warning must not prevent V2 staging. */
-  readinessWarning?: string | null;
+  readinessWarning?: NormalizedBackendError | null;
+  readinessRetrying?: boolean;
+  retryReadiness?: () => Promise<void>;
+  recoveryWarning?: NormalizedBackendError | null;
+  recoveryRetrying?: boolean;
+  retryRecovery?: () => Promise<void>;
   /** Only session/project bootstrap failures block the import surface. */
-  bootstrapError?: string | null;
+  bootstrapError?: NormalizedBackendError | null;
   retryBootstrap?: () => void;
   bootstrapState: ImportBootstrapState;
   visibleItems: ImportItem[];

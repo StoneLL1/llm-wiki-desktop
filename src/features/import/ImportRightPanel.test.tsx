@@ -204,6 +204,21 @@ describe("ImportRightPanel", () => {
     await waitFor(() => expect(screen.queryByText("最终候选")).not.toBeInTheDocument());
   });
 
+  it("localizes preview failures, preserves diagnostics, and retries", async () => {
+    vi.mocked(importV2Api.getPreviewContent)
+      .mockRejectedValueOnce({ code: "IMPORT_PREVIEW_OFFLINE", message: "raw offline transport failure" })
+      .mockResolvedValueOnce(preview());
+    renderPanel(item());
+
+    expect(await screen.findByText("The import could not continue.")).toBeInTheDocument();
+    expect(screen.queryByText("raw offline transport failure")).not.toBeInTheDocument();
+    const details = screen.getByText("Technical details").closest("details");
+    expect(details).toHaveTextContent("raw offline transport failure");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("最终候选")).toBeInTheDocument();
+    expect(importV2Api.getPreviewContent).toHaveBeenCalledTimes(2);
+  });
+
   it("shows live local recognition percentage and stage before a preview exists", () => {
     renderPanel(item({
       status: "extracting",

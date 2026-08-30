@@ -4294,6 +4294,7 @@ select:focus-visible {
 .import-v2-queue__row:last-child { border-bottom: 0; }
 .import-v2-queue__row:hover,
 .import-v2-queue__row.is-selected { background: var(--surface-muted); }
+.import-v2-queue__row.is-active { outline: 1px solid var(--accent); outline-offset: -2px; }
 .import-v2-queue__row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .import-v2-action-menu {
   position: fixed;

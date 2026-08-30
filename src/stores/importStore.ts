@@ -454,13 +454,22 @@ export const useImportStore = create<ImportState>((set, get) => ({
     const state = get();
     if (!scopeAccepts(state, projectKey, epoch) || overview.sessionId !== page.sessionId || overview.semanticRevision !== page.snapshotRevision) return false;
     const pageKey = `${state.filter}:0`;
+    const sameSession = state.session?.sessionId === overview.sessionId;
     const itemById = Object.fromEntries(page.items.map((item) => [item.itemId, item]));
+    if (sameSession && state.selectedItemId && state.itemById[state.selectedItemId]) {
+      itemById[state.selectedItemId] ??= state.itemById[state.selectedItemId]!;
+    }
     const normalized = {
       itemById,
       orderedItemIdsByPage: { [pageKey]: page.items.map((item) => item.itemId) },
       loadedPages: [pageKey],
       loadedItemStartIndex: 0,
-      knownItemIds: new Set(page.items.map((item) => item.itemId)),
+      knownItemIds: new Set([
+        ...page.items.map((item) => item.itemId),
+        ...(sameSession && state.selectedItemId && state.itemById[state.selectedItemId]
+          ? [state.selectedItemId]
+          : []),
+      ]),
       itemIdsByTaskId: indexTasks(page.items),
     };
     const session = sessionFromWindow(overview, page.items);
@@ -476,7 +485,7 @@ export const useImportStore = create<ImportState>((set, get) => ({
       nextItemCursor: page.nextCursor ?? null,
       itemPageTotal: page.total,
       completion: state.session?.sessionId === session.sessionId ? state.completion : null,
-      selectedItemId: selectedItemIdFor(normalized, state.selectedItemId),
+      selectedItemId: sameSession ? selectedItemIdFor(normalized, state.selectedItemId) : null,
     });
     return true;
   },
