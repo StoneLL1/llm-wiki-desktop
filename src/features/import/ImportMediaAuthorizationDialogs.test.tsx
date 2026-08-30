@@ -133,30 +133,6 @@ describe("Import media authorization dialogs", () => {
     expect(screen.getByRole("button", { name: /Retry/i })).toBeInTheDocument();
   });
 
-  it("keeps ASR installation read-only while runner confinement is unverified", () => {
-    const blockedPlan = {
-      ...asrPlan,
-      profiles: asrPlan.profiles.map((profile) =>
-        profile.profile === "accurate"
-          ? { ...profile, installable: false, unavailableReasonCode: "runtime_confinement_unavailable" }
-          : profile,
-      ),
-    };
-    render(
-      <ImportAsrDialog
-        open
-        plan={blockedPlan}
-        loading={false}
-        onConfirm={vi.fn()}
-        onInstall={vi.fn()}
-        onCancel={vi.fn()}
-      />,
-    );
-
-    expect(screen.getByRole("alert")).toHaveTextContent(/installation remains read-only.*confinement/i);
-    expect(screen.getByRole("button", { name: /unavailable on this device/i })).toBeDisabled();
-  });
-
   it("requires an explicit choice when multiple CJK companion subtitles match", async () => {
     const onConfirm = vi.fn().mockResolvedValue(undefined);
     render(

@@ -13,8 +13,6 @@ use crate::services::import_v2::capability_installer::{
     CapabilityInstallPhase,
 };
 use crate::services::import_v2::capability_runtime::target_triple;
-use crate::services::import_v2::product_capability::ProductCapabilityManifest;
-use crate::services::import_v2::runner_confinement::require_capability_installation_confinement;
 use crate::services::BlockingWorkClass;
 use crate::tasks::task_model::LogLine;
 
@@ -100,7 +98,6 @@ fn begin_app_capability_install_inner(
     request: InstallAppCapabilityV1Request,
     continuation_id: Option<&str>,
 ) -> Result<BackendTask, BackendError> {
-    require_capability_installation_confinement()?;
     let entry = catalog_entry(&request.capability_id, &target_triple()).ok_or_else(|| {
         let catalog_empty = crate::services::import_v2::capability_installer::catalog_availability()
             == crate::services::import_v2::capability_installer::CapabilityCatalogAvailability::CatalogUnavailable;
@@ -117,7 +114,6 @@ fn begin_app_capability_install_inner(
             },
         )
     })?;
-    require_batch4_install_route(&entry)?;
     let (task, created) = state.app_capability_coordinator.join_or_create_install(
         &state.task_service,
         &entry,
@@ -166,10 +162,8 @@ pub async fn resume_app_capability_install_v1(
     blocking_work
         .run(BlockingWorkClass::HeavyIo, move || {
             let state = app.state::<AppState>();
-            require_capability_installation_confinement()?;
             let task = require_control_target(&state, &request)?;
             let entry = entry_for_task(&task)?;
-            require_batch4_install_route(&entry)?;
             let resumed = state
                 .task_service
                 .resume_app_task(&task.id, &request.task_revision)
@@ -299,27 +293,6 @@ fn entry_for_task(task: &BackendTask) -> Result<CapabilityCatalogEntry, BackendE
     Ok(entry)
 }
 
-fn require_batch4_install_route(entry: &CapabilityCatalogEntry) -> Result<String, BackendError> {
-    let definition = ProductCapabilityManifest::embedded()
-        .map_err(|message| capability_error("APP_CAPABILITY_MANIFEST_INVALID", &message))?
-        .definitions
-        .into_iter()
-        .find(|definition| definition.capability_id == entry.capability_id)
-        .ok_or_else(|| {
-            capability_error(
-                "APP_CAPABILITY_MANIFEST_INVALID",
-                "The capability is not declared by the product manifest.",
-            )
-        })?;
-    if definition.routes.len() != 1 {
-        return Err(capability_error(
-            "APP_CAPABILITY_ATOMIC_ACTIVATION_REQUIRED",
-            "This capability requires the all-route atomic activation gate from Batch 5.",
-        ));
-    }
-    Ok(definition.routes[0].clone())
-}
-
 fn spawn_install_worker(app: AppHandle, task: BackendTask, entry: CapabilityCatalogEntry) {
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
@@ -391,17 +364,6 @@ fn spawn_install_worker(app: AppHandle, task: BackendTask, entry: CapabilityCata
             }
             return;
         }
-        let route = match require_batch4_install_route(&entry) {
-            Ok(route) => route,
-            Err(error) => {
-                let error = outcome
-                    .rollback(&install_root, &entry)
-                    .err()
-                    .unwrap_or(error);
-                finish_error(&state, &task_id, error);
-                return;
-            }
-        };
         let _ = state.task_service.update_progress(
             &task_id,
             entry.compressed_bytes,
@@ -411,26 +373,25 @@ fn spawn_install_worker(app: AppHandle, task: BackendTask, entry: CapabilityCata
         let health_app = app.clone();
         let health_root = install_root.clone();
         let health_entry = entry.clone();
-        let health_route = route.clone();
         let health_token = token.clone();
         let health_task_id = task_id.clone();
         let health = state
             .blocking_work
             .run_cancellable(BlockingWorkClass::HeavyIo, token.clone(), move || {
                 let state = health_app.state::<AppState>();
-                let pack = match state.import_capability_runtime.probe_version(
+                let probed = match state.import_capability_runtime.probe_version_routes(
                     &health_root,
                     &health_entry.capability_id,
                     &health_entry.version,
-                    &health_route,
                     &health_token,
                 ) {
                     Ok(pack) => pack,
                     Err(error) => {
-                        return Err(outcome
-                            .rollback(&health_root, &health_entry)
-                            .err()
-                            .unwrap_or(error));
+                        return Err(outcome.rollback_with_receipt(
+                            &health_root,
+                            &health_entry,
+                            error,
+                        ));
                     }
                 };
                 let _ = state.task_service.update_progress(
@@ -439,24 +400,34 @@ fn spawn_install_worker(app: AppHandle, task: BackendTask, entry: CapabilityCata
                     Some(health_entry.compressed_bytes),
                     Some("capability.activating".into()),
                 );
-                if let Err(error) = outcome.activate(&health_root) {
-                    return Err(outcome
-                        .rollback(&health_root, &health_entry)
-                        .err()
-                        .unwrap_or(error));
+                if health_token.is_cancelled() {
+                    return Err(outcome.rollback_with_receipt(
+                        &health_root,
+                        &health_entry,
+                        BackendError::new(
+                            crate::errors::IMPORT_V2_CANCELLED,
+                            "Capability activation was cancelled.",
+                            true,
+                            false,
+                        ),
+                    ));
                 }
-                let activation = state.import_capability_runtime.activate_probed_version(
-                    pack,
-                    &health_entry.capability_id,
-                    &health_route,
-                    &state.import_v2_service,
-                );
+                if let Err(error) = outcome.mark_probed(&health_root) {
+                    return Err(outcome.rollback_with_receipt(&health_root, &health_entry, error));
+                }
+                let activation = state
+                    .import_capability_runtime
+                    .activate_probed_version_atomically(
+                        probed,
+                        &health_entry.capability_id,
+                        &state.import_v2_service,
+                        || outcome.activate(&health_root),
+                    );
                 match activation {
                     Ok(()) => Ok(()),
-                    Err(error) => Err(outcome
-                        .rollback(&health_root, &health_entry)
-                        .err()
-                        .unwrap_or(error)),
+                    Err(error) => {
+                        Err(outcome.rollback_with_receipt(&health_root, &health_entry, error))
+                    }
                 }
             })
             .await;
@@ -464,20 +435,9 @@ fn spawn_install_worker(app: AppHandle, task: BackendTask, entry: CapabilityCata
             finish_error(&state, &task_id, error);
             return;
         }
-        if token.is_cancelled() {
-            if token.is_pause_requested() {
-                let _ = state.task_service.finalize_app_task_pause(&task_id);
-            } else {
-                let _ = state
-                    .task_service
-                    .transition_status(&task_id, TaskStatus::Cancelled);
-                let _ = cancel_continuations(&state, &task_id);
-                if let Some(task) = state.task_service.get_task(&task_id) {
-                    state.app_capability_coordinator.settle_task(&task);
-                }
-            }
-            return;
-        }
+        // Activation is the commit boundary. A stop requested after this point
+        // may defer project continuations, but it must not report the already
+        // active capability version as a cancelled installation.
         let mut resumed = 0usize;
         let mut deferred = 0usize;
         let continuations = state
@@ -525,25 +485,8 @@ fn spawn_install_worker(app: AppHandle, task: BackendTask, entry: CapabilityCata
                         Some("APP_CAPABILITY_CONTINUATION_STOPPED".into()),
                     )
                 }));
-                if let Err(error) = state
-                    .app_capability_coordinator
-                    .update_continuation_states(&final_updates)
-                {
-                    finish_error(&state, &task_id, error);
-                    return;
-                }
-                if token.is_pause_requested() {
-                    let _ = state.task_service.finalize_app_task_pause(&task_id);
-                } else {
-                    let _ = state
-                        .task_service
-                        .transition_status(&task_id, TaskStatus::Cancelled);
-                    let _ = cancel_continuations(&state, &task_id);
-                    if let Some(task) = state.task_service.get_task(&task_id) {
-                        state.app_capability_coordinator.settle_task(&task);
-                    }
-                }
-                return;
+                deferred += continuations.len().saturating_sub(index);
+                break;
             }
             match continuation_result {
                 Ok(true) => {
@@ -700,7 +643,15 @@ fn classify_install_error(error: BackendError) -> BackendError {
         "APP_CAPABILITY_INSTALL_FAILED"
     };
     BackendError::new(code, &error.message, true, true).with_details(serde_json::json!({
-        "sourceCode": error.code
+        "sourceCode": error.code,
+        "rollbackRestored": error
+            .details
+            .as_ref()
+            .and_then(|details| details.get("rollbackRestored"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        "failedCapabilityId": error.details.as_ref().and_then(|details| details.get("failedCapabilityId")),
+        "failedVersion": error.details.as_ref().and_then(|details| details.get("failedVersion")),
     }))
 }
 

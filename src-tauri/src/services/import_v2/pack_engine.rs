@@ -1,6 +1,7 @@
 #[cfg(test)]
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -85,11 +86,18 @@ pub(crate) fn probe_capability_pack(
     cancellation: &CancellationToken,
 ) -> Result<(), BackendError> {
     validate_entrypoint_unchanged(pack)?;
+    let entrypoint_args = resolve_pack_entrypoint_args(pack)
+        .map_err(|_| health_error("The capability entrypoint arguments are invalid."))?;
+    let invocation_root = TemporaryMediaWorkspace::create_unique(
+        &std::env::temp_dir(),
+        ".llm-wiki-capability-health",
+    )
+    .map_err(|_| health_error("The capability health workspace is unavailable."))?;
     let request_id = format!("health-{}", uuid::Uuid::new_v4());
     let mut command = Command::new(&pack.entrypoint);
     command
-        .args(&pack.manifest.entrypoint_args)
-        .current_dir(&pack.root)
+        .args(&entrypoint_args)
+        .current_dir(invocation_root.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -99,6 +107,9 @@ pub(crate) fn probe_capability_pack(
             command.env(key, value);
         }
     }
+    command
+        .env("TEMP", invocation_root.path())
+        .env("TMP", invocation_root.path());
     configure_isolated_process(&mut command);
     let mut child = command
         .spawn()
@@ -196,7 +207,38 @@ pub(crate) fn probe_capability_pack(
             "The capability health response did not confirm readiness.",
         ));
     }
+    drop(child);
+    verify_runtime_integrity(pack)
+        .map_err(|_| health_error("The capability runtime changed during its health check."))?;
     Ok(())
+}
+
+pub(super) fn resolve_pack_entrypoint_args(
+    pack: &ResolvedCapabilityPack,
+) -> Result<Vec<OsString>, ()> {
+    pack.manifest
+        .entrypoint_args
+        .iter()
+        .map(|argument| {
+            let relative = Path::new(argument);
+            if relative.is_absolute() {
+                return Err(());
+            }
+            let candidate = pack.root.join(relative);
+            if !candidate.exists() {
+                return Ok(OsString::from(argument));
+            }
+            let metadata = std::fs::symlink_metadata(&candidate).map_err(|_| ())?;
+            if metadata.file_type().is_symlink() || is_reparse(&metadata) || !metadata.is_file() {
+                return Err(());
+            }
+            let canonical = std::fs::canonicalize(candidate).map_err(|_| ())?;
+            if !canonical.starts_with(&pack.root) {
+                return Err(());
+            }
+            Ok(canonical.into_os_string())
+        })
+        .collect()
 }
 
 fn health_error(message: &str) -> BackendError {
@@ -322,10 +364,13 @@ impl ImportEngine for PackProcessEngine {
         let runtime_temp_workspace =
             TemporaryMediaWorkspace::create_unique(&staging_root, ".capability-runtime")?;
         let runtime_temp = runtime_temp_workspace.path();
+        let pack_request = scope_request_to_invocation_root(&request, &staging_root)?;
+        let entrypoint_args = resolve_pack_entrypoint_args(&self.pack)
+            .map_err(|_| engine_error("The capability entrypoint arguments are invalid."))?;
         let mut command = Command::new(&self.pack.entrypoint);
         command
-            .args(&self.pack.manifest.entrypoint_args)
-            .current_dir(&self.pack.root)
+            .args(&entrypoint_args)
+            .current_dir(&staging_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -372,9 +417,9 @@ impl ImportEngine for PackProcessEngine {
         let mut child = ProcessGuard(child, None, None, Some(lifetime));
         let rpc = JsonRpcRequest {
             jsonrpc: "2.0".into(),
-            id: request.request_id.clone(),
+            id: pack_request.request_id.clone(),
             method: "import.execute".into(),
-            params: request.clone(),
+            params: pack_request,
         };
         let mut stdin = child
             .0
@@ -509,6 +554,33 @@ impl ImportEngine for PackProcessEngine {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
+}
+
+fn scope_request_to_invocation_root(
+    request: &EngineRequest,
+    staging_root: &Path,
+) -> Result<EngineRequest, BackendError> {
+    let mut scoped = request.clone();
+    scoped.project_root = staging_root.to_string_lossy().into_owned();
+    scoped.staging_root = ".".into();
+    if scoped.input.kind == ImportInputKind::File {
+        let input = std::fs::canonicalize(&scoped.input.locator)
+            .map_err(|_| engine_error("The capability input is unavailable."))?;
+        let relative = input
+            .strip_prefix(staging_root)
+            .map_err(|_| engine_error("The capability input is outside its invocation root."))?;
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        if relative.is_empty()
+            || relative
+                .split('/')
+                .any(|component| component.is_empty() || matches!(component, "." | ".."))
+        {
+            return Err(engine_error("The capability input path is invalid."));
+        }
+        scoped.input.locator = relative.clone();
+        scoped.input.normalized_locator = Some(relative);
+    }
+    Ok(scoped)
 }
 
 fn receive_output_after_exit(
@@ -1696,6 +1768,51 @@ mod tests {
     use std::io::{Cursor, Read};
 
     #[test]
+    fn pack_request_exposes_only_the_item_invocation_root() {
+        let project = tempfile::tempdir().unwrap();
+        let staging = project.path().join(".app/import-v2/staging/session/item");
+        std::fs::create_dir_all(staging.join("authorized")).unwrap();
+        let input = staging.join("authorized/source.pdf");
+        std::fs::write(&input, b"fixture").unwrap();
+        let staging = staging.canonicalize().unwrap();
+        let input = input.canonicalize().unwrap();
+        let request = EngineRequest {
+            protocol_version: "2".into(),
+            request_id: "request-1".into(),
+            project_id: "project-1".into(),
+            session_id: "session-1".into(),
+            item_id: "item-1".into(),
+            task_id: "task-1".into(),
+            operation: crate::services::import_v2::engine::EngineOperation::Extract,
+            input: ImportInput {
+                kind: ImportInputKind::File,
+                display_name: "source.pdf".into(),
+                locator: input.to_string_lossy().into_owned(),
+                normalized_locator: None,
+                source_identity: None,
+                media_save_mode: MediaSaveMode::ExtractOnly,
+            },
+            project_root: project.path().to_string_lossy().into_owned(),
+            staging_root: ".app/import-v2/staging/session/item".into(),
+            chained_input: None,
+            local_asr_authorized: false,
+            asr_probe_only: false,
+            asr_profile: None,
+            recognition_language: None,
+            selected_subtitle: None,
+            local_ocr_authorized: false,
+            media_save_mode: MediaSaveMode::ExtractOnly,
+        };
+
+        let scoped = scope_request_to_invocation_root(&request, &staging).unwrap();
+
+        assert_eq!(scoped.project_root, staging.to_string_lossy());
+        assert_ne!(scoped.project_root, project.path().to_string_lossy());
+        assert_eq!(scoped.staging_root, ".");
+        assert_eq!(scoped.input.locator, "authorized/source.pdf");
+    }
+
+    #[test]
     fn platform_pack_assets_share_the_builtin_https_redirect_allowlists() {
         let suffixes =
             platform_asset_redirect_suffixes("https://www.bilibili.com/video/BV1example")
@@ -1778,6 +1895,43 @@ mod tests {
         std::fs::write(&entrypoint, b"replaced").unwrap();
         assert!(validate_entrypoint_unchanged(&pack).is_err());
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn resolves_pack_relative_script_arguments_before_switching_to_invocation_cwd() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("runner")).unwrap();
+        let entrypoint = root.path().join("runtime.bin");
+        let script = root.path().join("runner/index.mjs");
+        std::fs::write(&entrypoint, b"runtime").unwrap();
+        std::fs::write(&script, b"script").unwrap();
+        let pack = ResolvedCapabilityPack {
+            manifest: CapabilityPackManifest {
+                schema_version: 1,
+                pack_id: "fixture".into(),
+                version: "1".into(),
+                protocol_version: "2".into(),
+                target_triples: vec![],
+                archive_sha256: String::new(),
+                license_expression: "MIT".into(),
+                entrypoint: "runtime.bin".into(),
+                entrypoint_args: vec!["runner/index.mjs".into(), "--health".into()],
+                executable_files: Vec::new(),
+                compressed_bytes: 0,
+                installed_bytes: 0,
+                signing_key_id: "fixture".into(),
+                signature: String::new(),
+                files: vec![],
+            },
+            root: root.path().canonicalize().unwrap(),
+            entrypoint: entrypoint.canonicalize().unwrap(),
+            entrypoint_sha256: format!("{:x}", Sha256::digest(b"runtime")),
+        };
+
+        let arguments = resolve_pack_entrypoint_args(&pack).unwrap();
+
+        assert_eq!(Path::new(&arguments[0]), script.canonicalize().unwrap());
+        assert_eq!(arguments[1], OsString::from("--health"));
     }
 
     struct SlowReader {

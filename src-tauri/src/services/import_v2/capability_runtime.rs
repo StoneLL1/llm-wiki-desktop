@@ -11,8 +11,10 @@ use crate::tasks::task_model::CancellationToken;
 use crate::{errors::BackendError, models::import_v2_file::CapabilityRequirement};
 
 use super::{
+    capability_installer::CapabilityInstallRecovery,
     capability_pack::{CapabilityPackManager, ResolvedCapabilityPack},
     file_router::CapabilitySnapshot,
+    product_capability::ProductCapabilityManifest,
     ImportV2Service,
 };
 
@@ -29,11 +31,24 @@ pub struct CapabilityRuntimeStatus {
     pub reason: Option<String>,
 }
 
+pub struct ProbedCapabilityVersion {
+    pack: ResolvedCapabilityPack,
+    routes: Vec<CapabilityRouteSpec>,
+}
+
+#[derive(Clone)]
+struct CapabilityRouteSpec {
+    route: String,
+    extensions: Vec<String>,
+    timeout: Duration,
+}
+
 #[derive(Default)]
 pub struct ImportCapabilityRuntime {
     statuses: RwLock<Vec<CapabilityRuntimeStatus>>,
     browser_pack: RwLock<Option<ResolvedCapabilityPack>>,
     install_root: RwLock<Option<PathBuf>>,
+    startup_recovery: RwLock<CapabilityInstallRecovery>,
     #[cfg(debug_assertions)]
     development: RwLock<Option<(PathBuf, Vec<u8>)>>,
 }
@@ -50,7 +65,10 @@ impl ImportCapabilityRuntime {
         service: &ImportV2Service,
     ) -> Result<bool, BackendError> {
         run_startup_loader(move || {
-            super::capability_installer::recover_install_root(install_root)?;
+            let recovery = super::capability_installer::recover_install_root(install_root)?;
+            if let Ok(mut startup_recovery) = self.startup_recovery.write() {
+                *startup_recovery = recovery;
+            }
             self.load_installed(install_root, service);
             #[cfg(debug_assertions)]
             {
@@ -66,6 +84,13 @@ impl ImportCapabilityRuntime {
                 Ok(false)
             }
         })?
+    }
+
+    pub fn startup_recovery(&self) -> CapabilityInstallRecovery {
+        self.startup_recovery
+            .read()
+            .map(|recovery| *recovery)
+            .unwrap_or_default()
     }
 
     pub fn load_installed(&self, install_root: &Path, service: &ImportV2Service) {
@@ -195,28 +220,21 @@ impl ImportCapabilityRuntime {
         self.statuses.read().map(|v| v.clone()).unwrap_or_default()
     }
 
-    /// Probe the exact newly installed version through its real pack process
-    /// protocol, then switch only the requested route. Existing routes keep
-    /// their previous healthy engine until this succeeds.
-    pub fn probe_version(
+    /// Probe every route declared by the authoritative product manifest for
+    /// this exact installed version. No route is published until all probes
+    /// have returned a protocol-valid health response.
+    pub fn probe_version_routes(
         &self,
         install_root: &Path,
         capability_id: &str,
         version: &str,
-        route: &str,
         cancellation: &CancellationToken,
-    ) -> Result<ResolvedCapabilityPack, BackendError> {
+    ) -> Result<ProbedCapabilityVersion, BackendError> {
+        let route_specs = route_specs_for(capability_id)?;
         let spec = PACK_SPECS
             .iter()
-            .find(|spec| spec.id == capability_id && spec.route == route)
-            .ok_or_else(|| {
-                BackendError::new(
-                    "IMPORT_V2_CAPABILITY_HEALTH_CHECK_FAILED",
-                    "The installed capability does not provide the required route.",
-                    true,
-                    false,
-                )
-            })?;
+            .find(|spec| spec.id == capability_id)
+            .ok_or_else(capability_route_contract_error)?;
         let requirement = CapabilityRequirement {
             capability_id: capability_id.into(),
             minimum_version: Some(version.into()),
@@ -231,56 +249,72 @@ impl ImportCapabilityRuntime {
         let manager =
             CapabilityPackManager::new(install_root.to_path_buf(), embedded_trusted_keys());
         let pack = manager.resolve_version(&requirement, version)?;
-        super::pack_engine::probe_capability_pack(&pack, capability_id, route, cancellation)?;
-        Ok(pack)
+        probe_declared_routes(&route_specs, cancellation, |route| {
+            super::pack_engine::probe_capability_pack(&pack, capability_id, route, cancellation)
+        })?;
+        Ok(ProbedCapabilityVersion {
+            pack,
+            routes: route_specs,
+        })
     }
 
-    pub fn activate_probed_version(
+    /// Publish all probed routes and commit the activation journal while the
+    /// routing write lock is held. A commit error restores the previous engine
+    /// vector before any resolver can observe the failed snapshot.
+    pub fn activate_probed_version_atomically<F>(
         &self,
-        pack: ResolvedCapabilityPack,
+        probed: ProbedCapabilityVersion,
         capability_id: &str,
-        route: &str,
         service: &ImportV2Service,
-    ) -> Result<(), BackendError> {
-        let healthy_version = pack.manifest.version.clone();
-        let spec = PACK_SPECS
-            .iter()
-            .find(|spec| spec.id == capability_id && spec.route == route)
-            .ok_or_else(|| {
-                BackendError::new(
-                    "IMPORT_V2_CAPABILITY_HEALTH_CHECK_FAILED",
-                    "The installed capability does not provide the required route.",
-                    true,
-                    false,
-                )
-            })?;
-        service.replace_capability_pack(
-            pack.clone(),
-            route.into(),
-            spec.extensions
+        commit: F,
+    ) -> Result<(), BackendError>
+    where
+        F: FnOnce() -> Result<(), BackendError>,
+    {
+        if probed.pack.manifest.pack_id != capability_id
+            || probed.routes.is_empty()
+            || route_specs_for(capability_id)?
                 .iter()
-                .map(|value| (*value).into())
-                .collect(),
-            Duration::from_secs(spec.timeout_seconds),
-        )?;
-        if capability_id == "browser-runtime" {
-            *self.browser_pack.write().map_err(|_| {
-                BackendError::new(
-                    "IMPORT_V2_CAPABILITY_LOCKED",
-                    "Capability runtime is unavailable.",
-                    true,
-                    false,
-                )
-            })? = Some(pack);
+                .map(|spec| spec.route.as_str())
+                .ne(probed.routes.iter().map(|spec| spec.route.as_str()))
+        {
+            return Err(capability_route_contract_error());
         }
-        if let Ok(mut statuses) = self.statuses.write() {
+        let healthy_version = probed.pack.manifest.version.clone();
+        let mut statuses = self.statuses.write().map_err(|_| runtime_locked())?;
+        let mut browser_pack = self.browser_pack.write().map_err(|_| runtime_locked())?;
+        let replacements = probed
+            .routes
+            .iter()
+            .map(|spec| {
+                (
+                    probed.pack.clone(),
+                    spec.route.clone(),
+                    spec.extensions.clone(),
+                    spec.timeout,
+                )
+            })
+            .collect();
+        service.replace_capability_packs_atomically(replacements, commit)?;
+        if capability_id == "browser-runtime" {
+            *browser_pack = Some(probed.pack.clone());
+        }
+        for route in probed.routes.iter().map(|spec| spec.route.as_str()) {
             if let Some(status) = statuses
                 .iter_mut()
                 .find(|status| status.capability_id == capability_id && status.route == route)
             {
                 status.available = true;
-                status.healthy_version = Some(healthy_version);
+                status.healthy_version = Some(healthy_version.clone());
                 status.reason = None;
+            } else {
+                statuses.push(CapabilityRuntimeStatus {
+                    capability_id: capability_id.into(),
+                    route: route.into(),
+                    available: true,
+                    healthy_version: Some(healthy_version.clone()),
+                    reason: None,
+                });
             }
         }
         Ok(())
@@ -294,6 +328,28 @@ impl ImportCapabilityRuntime {
     pub fn install_root(&self) -> Option<PathBuf> {
         self.install_root.read().ok().and_then(|root| root.clone())
     }
+}
+
+fn probe_declared_routes<F>(
+    route_specs: &[CapabilityRouteSpec],
+    cancellation: &CancellationToken,
+    mut probe: F,
+) -> Result<(), BackendError>
+where
+    F: FnMut(&str) -> Result<(), BackendError>,
+{
+    for route_spec in route_specs {
+        if cancellation.is_cancelled() {
+            return Err(BackendError::new(
+                crate::errors::IMPORT_V2_CANCELLED,
+                "Capability health checks were cancelled.",
+                true,
+                false,
+            ));
+        }
+        probe(&route_spec.route)?;
+    }
+    Ok(())
 }
 
 fn run_startup_loader<T, F>(work: F) -> Result<T, BackendError>
@@ -355,6 +411,7 @@ fn merge_development_statuses(
     statuses
 }
 
+#[derive(Clone, Copy)]
 struct PackSpec {
     id: &'static str,
     route: &'static str,
@@ -391,6 +448,13 @@ const PACK_SPECS: &[PackSpec] = &[
     PackSpec {
         id: "browser-runtime",
         route: "web.wechat.article",
+        extensions: &[],
+        licenses: &[BROWSER_BUNDLE_LICENSE],
+        timeout_seconds: DEFAULT_PACK_TIMEOUT_SECONDS,
+    },
+    PackSpec {
+        id: "browser-runtime",
+        route: "web.x.post",
         extensions: &[],
         licenses: &[BROWSER_BUNDLE_LICENSE],
         timeout_seconds: DEFAULT_PACK_TIMEOUT_SECONDS,
@@ -459,6 +523,16 @@ const PACK_SPECS: &[PackSpec] = &[
         timeout_seconds: DEFAULT_PACK_TIMEOUT_SECONDS,
     },
     PackSpec {
+        id: "media-runtime",
+        route: "media.keyframes",
+        extensions: &[
+            "aac", "avi", "flac", "gif", "m4a", "m4v", "mkv", "mov", "mp3", "mp4",
+            "ogg", "opus", "wav", "webm", "wma", "wmv",
+        ],
+        licenses: &["LGPL-2.1-or-later"],
+        timeout_seconds: DEFAULT_PACK_TIMEOUT_SECONDS,
+    },
+    PackSpec {
         id: "asr-sensevoice-small",
         route: "media.asr",
         extensions: &[
@@ -479,6 +553,63 @@ const PACK_SPECS: &[PackSpec] = &[
         timeout_seconds: ASR_PACK_TIMEOUT_SECONDS,
     },
 ];
+
+fn route_specs_for(capability_id: &str) -> Result<Vec<CapabilityRouteSpec>, BackendError> {
+    let product =
+        ProductCapabilityManifest::embedded().map_err(|_| capability_route_contract_error())?;
+    let definition = product
+        .definition(capability_id)
+        .filter(|definition| definition.distribution_tier == "published")
+        .ok_or_else(capability_route_contract_error)?;
+    let mut specs = Vec::with_capacity(definition.routes.len());
+    for route in &definition.routes {
+        let matches = PACK_SPECS
+            .iter()
+            .filter(|spec| spec.id == capability_id && spec.route == route)
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return Err(capability_route_contract_error());
+        }
+        let spec = matches[0];
+        specs.push(CapabilityRouteSpec {
+            route: route.clone(),
+            extensions: spec
+                .extensions
+                .iter()
+                .map(|value| (*value).into())
+                .collect(),
+            timeout: Duration::from_secs(spec.timeout_seconds),
+        });
+    }
+    if specs.is_empty()
+        || PACK_SPECS
+            .iter()
+            .filter(|spec| spec.id == capability_id)
+            .count()
+            != specs.len()
+    {
+        return Err(capability_route_contract_error());
+    }
+    Ok(specs)
+}
+
+fn capability_route_contract_error() -> BackendError {
+    BackendError::new(
+        "IMPORT_V2_CAPABILITY_HEALTH_CHECK_FAILED",
+        "The capability route contract does not match the product manifest.",
+        true,
+        false,
+    )
+}
+
+fn runtime_locked() -> BackendError {
+    BackendError::new(
+        "IMPORT_V2_CAPABILITY_LOCKED",
+        "Capability runtime is unavailable.",
+        true,
+        false,
+    )
+}
 
 fn embedded_trusted_keys() -> HashMap<String, Vec<u8>> {
     let encoded: HashMap<String, String> = serde_json::from_str(include_str!(concat!(
@@ -590,7 +721,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_runtime_specs_resolve_to_product_definitions_while_release_is_disabled() {
+    fn runtime_specs_resolve_to_product_definitions() {
         let product =
             super::super::product_capability::ProductCapabilityManifest::embedded().unwrap();
         for spec in PACK_SPECS {
@@ -603,6 +734,50 @@ mod tests {
                 .iter()
                 .all(|license| *license == definition.license_policy.expression));
         }
+    }
+
+    #[test]
+    fn every_published_capability_has_an_exact_ordered_runtime_route_contract() {
+        let product = ProductCapabilityManifest::embedded().unwrap();
+        for definition in product.published_definitions() {
+            let specs = route_specs_for(&definition.capability_id).unwrap();
+            assert_eq!(
+                specs
+                    .iter()
+                    .map(|spec| spec.route.as_str())
+                    .collect::<Vec<_>>(),
+                definition
+                    .routes
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                "{} must probe every product route before activation",
+                definition.capability_id
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_route_probe_stops_the_multi_route_release_before_publication() {
+        let specs = route_specs_for("browser-runtime").unwrap();
+        let mut observed = Vec::new();
+        let error = probe_declared_routes(&specs, &CancellationToken::new(), |route| {
+            observed.push(route.to_owned());
+            if route == "web.wechat.article" {
+                Err(BackendError::new(
+                    "IMPORT_V2_CAPABILITY_HEALTH_CHECK_FAILED",
+                    "fixture route failed",
+                    true,
+                    false,
+                ))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+
+        assert_eq!(error.code, "IMPORT_V2_CAPABILITY_HEALTH_CHECK_FAILED");
+        assert_eq!(observed, ["web.generic.browser", "web.wechat.article"]);
     }
 
     #[test]

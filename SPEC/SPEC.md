@@ -740,6 +740,7 @@ npm install @milkdown/core @milkdown/react @milkdown/plugin-math
 
 - source checkout 中的 `capabilities/install-catalog.json` 只是明确的 development fallback；release build 必须注入同一 tag/run 产生的 4 target × 5 signed catalog 与 trusted key，验证 binary embed、hash/signature/provenance 后才可打包。空 catalog 的 source build 不得被描述为可安装 capability release。
 - capability 下载使用 release-scoped partial identity、Range resume 或明确安全重下、启动 reaper、最终全量 hash/signature、事务安装、health rollback，并把成功安装绑定回原 Import session/item 的继续动作。主动取消与 crash pause 是不同终态。
+- 2026-08-30 决策修订后，固定官方 catalog / trusted key 发布且通过完整性、target、manifest、protocol 与 route-set 校验的 capability runner 按受信任应用组件执行；首版不以四平台 OS 级 runner sandbox 作为 Batch 6 或发布门，也不得宣称已 sandbox。Batch 5R 已移除历史 `APP_CAPABILITY_CONFINEMENT_UNAVAILABLE` stop gate，并恢复官方包安装及全部声明 route 的原子激活；任意 URL、本地 archive、第三方 catalog / signing root 与用户 PATH runtime 仍不开放。
 - 应用更新是 project-independent 的全局 controller/store。后端只使用编译时固定 HTTPS endpoint 和 committed public key，限制 manifest 大小，生成有 TTL 与 identity 的 ephemeral offer；前端不能传 endpoint、artifact URL 或 signature。
 - 下载可取消/重试并发布进度；安装前重新验证 exact artifact。确认临界区重新采集未保存编辑与 Import commit 等 presentation facts并锁定编辑器，后端 barrier 原子复查其拥有的等待确认、关键任务与 Workflow apply facts；任一 blocker 都 fail closed。安装 handoff/失败 receipt 持久化在 app-global state，不写用户项目。
 

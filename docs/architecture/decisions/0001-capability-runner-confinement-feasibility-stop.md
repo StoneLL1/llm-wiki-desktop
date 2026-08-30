@@ -1,9 +1,11 @@
 # ADR 0001: Stop native capability installation until runner confinement is proven
 
-- Status: Accepted — release stop
+- Status: Superseded by [ADR 0002](0002-trusted-official-capability-pack-execution.md)
 - Date: 2026-08-30
 - Decision owners: desktop runtime and release engineering
 - Related plan: Batch 5 of `2026-08-29-import-release-readiness-and-capability-management-implementation-plan.md`
+
+> Historical note (2026-08-30): this ADR accurately records why the original Batch 5 stopped and why the temporary `APP_CAPABILITY_CONFINEMENT_UNAVAILABLE` gate was added. The product owner subsequently chose a functionality-first trust model in ADR 0002. OS-level runner confinement is therefore no longer a Batch 6 or release prerequisite; this document must not be used as the current implementation decision.
 
 ## Context
 

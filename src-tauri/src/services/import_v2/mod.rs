@@ -37,7 +37,6 @@ pub mod product_capability;
 pub mod quality_gate;
 pub(crate) mod redaction;
 pub mod remote_media_retention;
-pub mod runner_confinement;
 pub mod scan_confirmation;
 pub(crate) mod session_store;
 pub mod source_ai_organize;

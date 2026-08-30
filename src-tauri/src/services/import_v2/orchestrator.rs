@@ -3201,6 +3201,36 @@ impl ImportV2Service {
                 self.connector_profiles_root.clone(),
             )))
     }
+
+    pub(crate) fn replace_capability_packs_atomically<F>(
+        &self,
+        replacements: Vec<(
+            ResolvedCapabilityPack,
+            String,
+            Vec<String>,
+            std::time::Duration,
+        )>,
+        commit: F,
+    ) -> Result<(), BackendError>
+    where
+        F: FnOnce() -> Result<(), BackendError>,
+    {
+        let engines = replacements
+            .into_iter()
+            .map(|(pack, route, supported_extensions, timeout)| {
+                Arc::new(PackProcessEngine::new(
+                    pack,
+                    route,
+                    supported_extensions,
+                    timeout,
+                    self.web_targets.clone(),
+                    self.connector_profiles_root.clone(),
+                )) as Arc<dyn ImportEngine>
+            })
+            .collect();
+        self.engines
+            .replace_registered_batch_transaction(engines, commit)
+    }
     fn set_item_selected_unchecked(
         &self,
         context: &ProjectContext,

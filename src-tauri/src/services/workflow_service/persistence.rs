@@ -94,12 +94,7 @@ fn platform_revision_material(path: &Path) -> Result<String, String> {
             std::io::Error::last_os_error()
         ));
     }
-    if information
-        .FileId
-        .Identifier
-        .iter()
-        .all(|byte| *byte == 0)
-    {
+    if information.FileId.Identifier.iter().all(|byte| *byte == 0) {
         return Err(
             "Project root filesystem does not expose a stable 128-bit file identity.".into(),
         );

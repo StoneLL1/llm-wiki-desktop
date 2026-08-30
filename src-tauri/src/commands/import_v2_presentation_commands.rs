@@ -46,9 +46,6 @@ use crate::services::import_v2::capability_runtime::CapabilityRuntimeStatus;
 use crate::services::import_v2::migration::{
     LegacyHistoryAdapter, MigrationService, REQUIRED_IMPORT_V2_CONTRACT,
 };
-use crate::services::import_v2::runner_confinement::{
-    capability_installation_mutations_enabled, require_capability_installation_confinement,
-};
 use crate::services::BlockingWorkClass;
 use crate::services::{app_capability_acknowledgement_version, project_identity};
 use crate::tasks::task_model::LogLevel;
@@ -922,11 +919,10 @@ pub fn get_import_capability_requirement_v2(
         .into_iter()
         .any(|status| status.capability_id == capability_id && status.available);
     let catalog = catalog_entry(capability_id, &requirement.target_triple);
-    let confinement_ready = capability_installation_mutations_enabled();
-    let installable = !available && catalog.is_some() && confinement_ready;
+    let installable = !available && catalog.is_some();
     let unavailable_reason_code = (!available).then(|| {
-        if catalog.is_some() && !confinement_ready {
-            "runtime_confinement_unavailable"
+        if installable {
+            "not_installed"
         } else if catalog_availability() == CapabilityCatalogAvailability::CatalogUnavailable {
             "catalog_unavailable"
         } else {
@@ -945,8 +941,8 @@ pub fn get_import_capability_requirement_v2(
         model_bytes: catalog.as_ref().and_then(|entry| entry.model_bytes),
         license: Some(license.into()),
         fallback: (!available).then(|| {
-            if catalog.is_some() && !confinement_ready {
-                "Capability installation remains read-only until runner confinement is verified on every release target.".into()
+            if installable {
+                "Install the signed official capability pack to continue this import route.".into()
             } else {
                 "This source build has no signed capability artifact for the current target. Release CI must publish the target pack and catalog entry before installation can be enabled.".into()
             }
@@ -1068,7 +1064,6 @@ pub fn install_import_capability_v2(
             "Capability installation requires explicit confirmation.",
         ));
     }
-    require_capability_installation_confinement()?;
     let entry = catalog_entry(&request.capability_id, &target_triple()).ok_or_else(|| {
         presentation_error(
             "IMPORT_V2_CAPABILITY_INSTALL_UNAVAILABLE",
@@ -1217,7 +1212,6 @@ pub fn install_import_capability_v2_legacy(
             "Capability installation requires explicit confirmation.",
         ));
     }
-    require_capability_installation_confinement()?;
     let target = target_triple();
     let entry = catalog_entry(&request.capability_id, &target).ok_or_else(|| {
         presentation_error(
@@ -1231,7 +1225,7 @@ pub fn install_import_capability_v2_legacy(
             "Capability installation is unavailable before the application data directory is initialized.",
         )
     })?;
-    let (task, context, requested_route, expected_item) = state.with_current_project_write_access(
+    let (task, context, expected_item) = state.with_current_project_write_access(
         &request.project_id,
         &request.project_root_path,
         |_permit, context| {
@@ -1337,7 +1331,7 @@ pub fn install_import_capability_v2_legacy(
                     current_revision,
                 )
                 .map_err(|error| presentation_error("IMPORT_V2_TASK_FAILED", &error))?;
-            Ok((task, context.clone(), requested_route.to_owned(), item.clone()))
+            Ok((task, context.clone(), item.clone()))
         },
     )?;
     let task_id = task.id.clone();
@@ -1421,48 +1415,71 @@ pub fn install_import_capability_v2_legacy(
         let health_app = app.clone();
         let health_root = install_root.clone();
         let health_entry = entry.clone();
-        let health_route = requested_route.clone();
         let health_token = token.clone();
         let health_result = state
             .blocking_work
             .run_cancellable(BlockingWorkClass::HeavyIo, token.clone(), move || {
                 let state = health_app.state::<AppState>();
                 let mut install_outcome = install_outcome;
-                let probed_pack = match state.import_capability_runtime.probe_version(
+                let probed = match state.import_capability_runtime.probe_version_routes(
                     &health_root,
                     &health_entry.capability_id,
                     &health_entry.version,
-                    &health_route,
                     &health_token,
                 ) {
                     Ok(pack) => pack,
                     Err(error) => {
-                        let _ = install_outcome.rollback(&health_root, &health_entry);
-                        return Err(error);
+                        return Err(install_outcome.rollback_with_receipt(
+                            &health_root,
+                            &health_entry,
+                            error,
+                        ));
                     }
                 };
-                if let Err(error) = install_outcome.activate(&health_root) {
-                    let _ = install_outcome.rollback(&health_root, &health_entry);
-                    return Err(error);
+                if health_token.is_cancelled() {
+                    return Err(install_outcome.rollback_with_receipt(
+                        &health_root,
+                        &health_entry,
+                        BackendError::new(
+                            crate::errors::IMPORT_V2_CANCELLED,
+                            "Capability activation was cancelled.",
+                            true,
+                            false,
+                        ),
+                    ));
                 }
-                state.import_capability_runtime.activate_probed_version(
-                    probed_pack,
-                    &health_entry.capability_id,
-                    &health_route,
-                    &state.import_v2_service,
-                )
+                if let Err(error) = install_outcome.mark_probed(&health_root) {
+                    return Err(install_outcome.rollback_with_receipt(
+                        &health_root,
+                        &health_entry,
+                        error,
+                    ));
+                }
+                let activation = state
+                    .import_capability_runtime
+                    .activate_probed_version_atomically(
+                        probed,
+                        &health_entry.capability_id,
+                        &state.import_v2_service,
+                        || install_outcome.activate(&health_root),
+                    );
+                match activation {
+                    Ok(()) => Ok(()),
+                    Err(error) => Err(install_outcome.rollback_with_receipt(
+                        &health_root,
+                        &health_entry,
+                        error,
+                    )),
+                }
             })
             .await;
         if let Err(error) = health_result {
             finish_capability_install_error(&state, &task_id, error);
             return;
         }
-        if token.is_cancelled() {
-            let _ = state
-                .task_service
-                .transition_status(&task_id, TaskStatus::Cancelled);
-            return;
-        }
+        // The capability is active once the atomic activation above returns.
+        // Cancellation from here only stops/defer the originating Import
+        // continuation; the installation task remains a committed success.
         if let Some(profile) = asr_profile.clone() {
             let authorization_app = app.clone();
             let authorization_expected_item = expected_item.clone();
@@ -1486,12 +1503,12 @@ pub fn install_import_capability_v2_legacy(
                 })
                 .await;
             if let Err(error) = authorization_result {
-                if error.code.starts_with("PROJECT_") {
+                if token.is_cancelled() || error.code.starts_with("PROJECT_") {
                     let _ = state.task_service.complete_running_with_result(
                         &task_id,
                         TaskResult {
                             summary: format!(
-                                "Installed {}; the originating project is no longer active, so ASR authorization was deferred.",
+                                "Installed {}; ASR authorization was deferred.",
                                 entry.capability_id
                             ),
                             affected_paths: Vec::new(),
@@ -1632,12 +1649,12 @@ pub fn install_import_capability_v2_legacy(
             })
             .await;
         if let Err(error) = resume_result {
-            if error.code.starts_with("PROJECT_") {
+            if token.is_cancelled() || error.code.starts_with("PROJECT_") {
                 let _ = state.task_service.complete_running_with_result(
                     &task_id,
                     TaskResult {
                         summary: format!(
-                            "Installed {}; the originating project is no longer active, so continuation was deferred.",
+                            "Installed {}; the originating Import continuation was deferred.",
                             entry.capability_id
                         ),
                         affected_paths: Vec::new(),
@@ -1965,8 +1982,7 @@ fn build_asr_profile_plan(
         .find(|status| status.capability_id == spec.capability_id && status.route == "media.asr");
     let available = runtime.is_some_and(|status| status.available);
     let catalog = catalog_entry(spec.capability_id, target);
-    let installable =
-        !available && catalog.is_some() && capability_installation_mutations_enabled();
+    let installable = !available && catalog.is_some();
     let component_available = available;
     let dependency = |kind, name: &str, source: &str, license: &str| ImportAsrDependency {
         kind,
@@ -2009,9 +2025,7 @@ fn build_asr_profile_plan(
             .max(1)
     });
     let unavailable_reason_code = (!available).then(|| {
-        if catalog.is_some() && !capability_installation_mutations_enabled() {
-            "runtime_confinement_unavailable".into()
-        } else if installable {
+        if installable {
             "not_installed".into()
         } else if catalog_availability() == CapabilityCatalogAvailability::CatalogUnavailable {
             "catalog_unavailable".into()
