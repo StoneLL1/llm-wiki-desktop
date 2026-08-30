@@ -28,12 +28,13 @@ import {
 
 const listenMock = vi.hoisted(() => vi.fn());
 const notifyTaskEventMock = vi.hoisted(() => vi.fn());
+const invalidateNotificationPermissionEpochMock = vi.hoisted(() => vi.fn());
 const invokeMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("../services/notifications", () => ({
-  invalidateNotificationPermissionEpoch: vi.fn(),
+  invalidateNotificationPermissionEpoch: invalidateNotificationPermissionEpochMock,
   notifyTaskEvent: notifyTaskEventMock,
   registerNotificationActionListener: vi.fn(async () => vi.fn()),
 }));
@@ -51,6 +52,7 @@ beforeEach(() => {
   listenMock.mockReset();
   invokeMock.mockReset();
   notifyTaskEventMock.mockReset();
+  invalidateNotificationPermissionEpochMock.mockReset();
   listenMock.mockResolvedValue(vi.fn());
   clearPendingTaskEvents();
   useProjectStore.setState({
@@ -329,7 +331,7 @@ describe("task event listener bridge", () => {
     mounted.unmount();
   });
 
-  it("marks and revalidates only observed resources on window focus", async () => {
+  it("keeps observed resources unchanged during titlebar-style blur/focus churn", async () => {
     useProjectStore.setState({
       currentProject: {
         ...defaultProject,
@@ -347,10 +349,14 @@ describe("task event listener bridge", () => {
     const mounted = renderHook(() => useTaskEvents());
     await waitFor(() => expect(listenMock).toHaveBeenCalled());
 
-    act(() => window.dispatchEvent(new Event("focus")));
+    act(() => {
+      window.dispatchEvent(new Event("blur"));
+      window.dispatchEvent(new Event("focus"));
+    });
 
-    await waitFor(() => expect(invalidate).toHaveBeenCalledTimes(1));
-    expect(revalidate).toHaveBeenCalledWith({ projectId: "project-a", rootPath: "D:/wiki" });
+    expect(invalidateNotificationPermissionEpochMock).toHaveBeenCalledTimes(1);
+    expect(invalidate).not.toHaveBeenCalled();
+    expect(revalidate).not.toHaveBeenCalled();
     mounted.unmount();
     unobserve();
     unregister();
