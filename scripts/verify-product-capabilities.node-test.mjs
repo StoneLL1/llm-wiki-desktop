@@ -54,9 +54,17 @@ test("release expectations are manifest-derived rather than fixed five-pack coun
   }
   assert.equal(capabilityWorkflow.includes("verify-product-capabilities.mjs --print-matrix"), true);
   assert.equal(capabilityWorkflow.includes("verify-product-capabilities.mjs --require-release-ready"), true);
-  assert.equal(capabilityWorkflow.includes("matrix.target"), false);
-  assert.equal(capabilityWorkflow.includes("merge-catalog"), false);
-  assert.match(capabilityWorkflow, /Capability publication remains quarantined[\s\S]*exit 1/);
+  assert.equal(capabilityWorkflow.includes("capability-release-plan.mjs"), true);
+  assert.equal(capabilityWorkflow.includes("expectedEntryCount"), true);
+  assert.equal(capabilityWorkflow.includes("prepare-release-capability.mjs"), true);
+  assert.equal(capabilityWorkflow.includes("capability_release assemble"), false);
+  assert.match(capabilityWorkflow, /& \$tool @arguments/);
+  assert.equal(capabilityWorkflow.includes("qualify-staged-capability.mjs"), true);
+  assert.equal(capabilityWorkflow.includes("qualify-release-corpus.mjs"), true);
+  assert.equal(capabilityWorkflow.includes("merge-catalog --input capability-dist"), true);
+  assert.equal(capabilityWorkflow.includes("name: capability-install-catalog"), true);
+  assert.equal(capabilityWorkflow.includes("Capability publication remains quarantined"), false);
+  assert.equal(capabilityWorkflow.includes("entries.length !== 20"), false);
 });
 
 test("an undeclared fixture extension cannot widen release evidence", async () => {

@@ -1,22 +1,22 @@
 {
   "schemaVersion": 1,
   "packId": "ocr-basic",
-  "version": "5.4.1",
+  "version": "3.8.1+ppocrv5-basic",
   "protocolVersion": "2",
   "targetTriples": ["x86_64-pc-windows-msvc", "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"],
   "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",
-  "licenseExpression": "Apache-2.0 AND BSD-2-Clause",
-  "entrypoint": "runner/ocr-basic-pack",
+  "licenseExpression": "Apache-2.0 AND MIT AND BSD-3-Clause AND HPND AND MPL-2.0 AND PSF-2.0 AND LGPL-2.1-only AND LGPL-3.0-only",
+  "entrypoint": "runner/index.py",
   "compressedBytes": 0,
   "installedBytes": 0,
   "signingKeyId": "release-build-placeholder",
   "signature": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
   "payloadStatus": "release_ci_required",
-  "engine": { "name": "Tesseract", "version": "5.4.1", "license": "Apache-2.0" },
+  "engine": { "name": "RapidOCR", "version": "3.8.1", "license": "Apache-2.0", "profile": "basic-cpu" },
   "models": [
-    { "language": "eng", "file": "models/eng.traineddata", "version": "tessdata_best-4.1.0", "sha256": "release-ci-must-substitute" },
-    { "language": "chi_sim", "file": "models/chi_sim.traineddata", "version": "tessdata_best-4.1.0", "sha256": "release-ci-must-substitute" },
-    { "language": "chi_tra", "file": "models/chi_tra.traineddata", "version": "tessdata_best-4.1.0", "sha256": "release-ci-must-substitute", "optional": true }
+    { "id": "detector", "file": "models/ch_PP-OCRv5_det_mobile.onnx", "version": "PP-OCRv5-mobile-v3.8.0", "sha256": "4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae" },
+    { "id": "recognizer", "file": "models/ch_PP-OCRv5_rec_mobile.onnx", "version": "PP-OCRv5-mobile-v3.8.0", "sha256": "5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5" },
+    { "id": "classifier", "file": "models/ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx", "version": "PP-OCRv5-mobile-v3.8.0", "sha256": "54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7" }
   ],
-  "distributionNote": "Release CI must pin platform binaries, traineddata bytes, hashes, sizes, notices, and SBOM. This source manifest is intentionally not installable."
+  "distributionNote": "Release CI stages the reviewed RapidOCR/PP-OCRv5 CPU payload with exact dependency lock, model bytes, notices, SBOM, signed inventory, and the ocr.basic route contract."
 }

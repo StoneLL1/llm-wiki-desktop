@@ -28,6 +28,12 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin capability_release -- publi
 
 Add only the resulting 32-byte public key hex under a stable key ID in `trusted-keys.json`. Configure the same PKCS#8 hex as the protected GitHub Actions secret `LLM_WIKI_CAPABILITY_SIGNING_KEY_PKCS8_HEX`. The release builder refuses a private key that does not match the committed public key.
 
+## Manifest-derived release matrix
+
+`capabilities/product-manifest.json` is the only pack/route/format/target authority. `scripts/capability-release-plan.mjs` joins it with `release-recipes.json`, `release-sources.json`, and `qualification-corpus.json`; release preflight fails unless every published definition has implemented staging and qualification, locked source ownership, a real fixture for every declared extension, and exactly one entry for each supported target. The current matrix is 11 published packs × 4 targets = 44 archives, but workflows and verifiers must derive that count rather than hard-code it.
+
+Every staged payload contains `CAPABILITY-CONTRACT.json`. The release assembler signs it through the ordinary schema-v2 inventory. At startup and before atomic activation, Rust compares that signed contract with the embedded product definition and rejects missing or drifted routes, formats, platform content types, target, protocol, entrypoint/arguments, license, or runtime policy.
+
 ## Node/browser packs
 
 The reusable `Capability release` workflow builds `browser-runtime`, `browser-runtime-lite`, and `media-metadata` for Windows x64, macOS arm64, macOS x64, and Linux x64. It:
@@ -49,9 +55,9 @@ Development builds keep the explicit source fallback (`LLM_WIKI_CAPABILITY_CATAL
 
 On Linux, Node and Chromium application bytes are bundled, but desktop shared libraries are intentionally supplied by the host OS. `BUILD-PROVENANCE.json` contains the exact shared-library support contract. The release workflow qualifies on Ubuntu 24.04 after Playwright installs that dependency baseline; the runtime reports launch failures as missing-host-dependency errors rather than claiming a fully static Linux bundle.
 
-## SenseVoice and RapidOCR packs
+## Document, OCR, media, and ASR packs
 
-The protected workflow also builds `asr-sensevoice-small` and `ocr-cjk-accurate` on the same four targets. The source folders and placeholder manifests remain fail-closed; the desktop binary cannot install either capability until the protected workflow succeeds, the generated catalog is reviewed and committed, the public signing key is committed, and the application is rebuilt.
+The protected workflow also builds document-standard, document-layout, office-legacy, both OCR profiles, media-runtime, SenseVoice, and Whisper on the same four targets. Source folders and placeholder manifests remain fail-closed; the desktop binary cannot install a capability until the protected workflow succeeds, qualification uses the staged runtime, and the same-run catalog/trust/provenance inputs are embedded in the desktop build.
 
 SenseVoice release jobs:
 
@@ -70,9 +76,9 @@ are not claimed to be bit-for-bit identical across runner-image revisions.
 RapidOCR release jobs:
 
 - verify a relocatable CPython 3.12.13 runtime for Windows x64, macOS arm64/x64, and Linux x64;
-- install RapidOCR 3.8.1, ONNX Runtime 1.23.2, OpenCV 4.12, and all transitive dependencies from the committed hash lock using prebuilt wheels only;
+- install RapidOCR 3.8.1, ONNX Runtime, OpenCV, Pillow HEIF, PDFium, and all transitive dependencies from the committed hash lock using prebuilt wheels only;
 - bundle the exact PP-OCRv5 mobile detector, recognizer, orientation classifier, and dictionary;
-- run the official `ch_en_num.jpg` fixture through the staged offline JSON-RPC runner and require Chinese text, coordinates, confidence, and evidence labeling;
+- run the official `ch_en_num.jpg` fixture plus the repository HEIC/HEIF and scanned-PDF fixtures through the staged offline JSON-RPC runner and require Chinese text, coordinates, confidence, and evidence labeling;
 - emit the dependency lock, source provenance, notices, and SPDX SBOM into the signed payload. Cloud OCR and runtime model downloads are forbidden.
 
 Primary implementation references:

@@ -15,7 +15,7 @@ import time
 import zipfile
 from pathlib import Path
 
-PACK_VERSION = "24.2.7"
+PACK_VERSION = "26.2.4"
 TARGETS = {".doc": ("docx", "word/document.xml"),
            ".xls": ("xlsx", "xl/workbook.xml"),
            ".ppt": ("pptx", "ppt/presentation.xml")}
@@ -41,6 +41,17 @@ def contained(root, path):
 def fail(request_id, code, message):
     return {"jsonrpc": "2.0", "id": request_id, "result": None,
             "error": {"code": code, "message": message, "data": None}}
+
+
+def bundled_executable():
+    configured = os.environ.get("LLM_WIKI_LIBREOFFICE")
+    candidates = [Path(configured)] if configured else []
+    pack_root = Path(__file__).resolve().parent.parent
+    candidates.extend([
+        pack_root / "runtime" / "libreoffice" / "program" / ("soffice.exe" if os.name == "nt" else "soffice"),
+        pack_root / "runtime" / "LibreOffice.app" / "Contents" / "MacOS" / "soffice",
+    ])
+    return next((candidate for candidate in candidates if candidate.is_file()), None)
 
 
 def profile_uri(profile):
@@ -157,6 +168,18 @@ def execute_libreoffice(executable, source, output_dir, profile, timeout_seconds
 
 def handle(request):
     request_id = str(request.get("id", ""))
+    if request.get("jsonrpc") == "2.0" and request.get("method") == "capability.health":
+        params = request.get("params", {})
+        executable = bundled_executable()
+        if (params.get("protocolVersion") != "2"
+                or params.get("capabilityId") != "office-legacy"
+                or params.get("route") != "pack.office-legacy"):
+            return fail(request_id, -32602, "invalid health request")
+        if not executable:
+            return fail(request_id, -32020, "office-legacy runtime is incomplete")
+        return {"jsonrpc": "2.0", "id": request_id, "result": {
+            "healthy": True, "protocolVersion": "2",
+            "capabilityId": "office-legacy", "route": "pack.office-legacy"}, "error": None}
     if request.get("jsonrpc") != "2.0" or request.get("method") != "import.execute":
         return fail(request_id, -32600, "invalid request")
     params = request.get("params", {})
@@ -172,8 +195,8 @@ def handle(request):
     suffix = source.suffix.lower()
     if not source.is_file() or not contained(project, staging) or suffix not in TARGETS:
         return fail(request_id, -32602, "unauthorized or unsupported source")
-    executable = os.environ.get("LLM_WIKI_LIBREOFFICE")
-    if not executable or not Path(executable).is_file():
+    executable = bundled_executable()
+    if not executable:
         return fail(request_id, -32020, "office-legacy capability is not installed")
     try:
         staging.mkdir(parents=True, exist_ok=True)
@@ -200,7 +223,7 @@ def handle(request):
             native_output_dir.mkdir()
             shutil.copyfile(source, native_source)
             execute_libreoffice(
-                Path(executable),
+                executable,
                 native_source,
                 native_output_dir,
                 profile,

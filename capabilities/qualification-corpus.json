@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "root": "tests/fixtures/import-v2/local/batch3/matrix",
+  "fixtureByExtension": {
+    "aac": "audio.aac", "ass": "subtitle.ass", "avi": "video.avi", "bmp": "image.bmp",
+    "doc": "legacy.doc", "docx": "document.docx", "flac": "audio.flac", "gif": "animated.gif",
+    "heic": "media.heic", "heif": "media.heif", "jpeg": "image.jpg", "jpg": "image.jpg",
+    "lrc": "subtitle.lrc", "m4a": "media.m4a", "m4v": "media.m4v", "mkv": "video.mkv",
+    "mov": "media.mov", "mp3": "audio.mp3", "mp4": "media.mp4", "ogg": "audio.ogg",
+    "opus": "audio.opus", "pdf": "document.pdf", "png": "image.png", "ppt": "legacy.ppt",
+    "pptx": "presentation.pptx", "srt": "subtitle.srt", "ssa": "subtitle.ass", "tif": "image.tiff",
+    "tiff": "image.tiff", "vtt": "subtitle.vtt", "wav": "audio.wav", "webm": "video.webm",
+    "webp": "image.webp", "wma": "audio.wma", "wmv": "video.wmv", "xls": "legacy.xls",
+    "xlsx": "workbook.xlsx"
+  },
+  "generatedCases": [
+    { "id": "normal", "operation": "copy" },
+    { "id": "extension-masquerade", "operation": "rename-with-wrong-extension", "expected": "typed-rejection" },
+    { "id": "corrupt", "operation": "truncate-middle", "expected": "typed-rejection" },
+    { "id": "cancel", "operation": "terminate-after-first-progress", "expected": "no-published-output" },
+    { "id": "boundary", "operation": "bounded-valid-prefix-and-path", "expected": "bounded-result" }
+  ],
+  "networkCases": [
+    "public", "login-wall", "restricted", "unknown-platform-fallback", "endpoint-policy"
+  ],
+  "networkFixtureRoot": "tests/fixtures/import-v2/web",
+  "productionProbeRequired": ["web.wechat.article", "web.x.post"]
+}

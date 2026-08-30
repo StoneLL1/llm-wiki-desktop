@@ -163,6 +163,7 @@ export async function stageSenseVoiceCapability(options) {
   if (!ffmpegEvidence.length) throw new Error("FFmpeg payload has no bundled license evidence");
   const provenance = {
     ...sourceProvenance,
+    packId: "asr-sensevoice-small",
     nodeVersion: options.nodeVersion.replace(/^v/, ""),
     runtimeNetwork: false,
     callerFlags: false,

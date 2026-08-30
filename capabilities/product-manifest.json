@@ -133,7 +133,7 @@
       "profiles": { "asr": [], "ocr": [] },
       "installation": { "proactive": true, "updates": true },
       "runtime": { "network": true, "subprocess": true, "filesystem": ["application_capability_root", "item_staging_input", "item_staging_output"] },
-      "qualification": { "status": "planned_batch_8", "entrypoint": "capabilities/browser-runtime/runner/x-route.qualification.mjs" },
+      "qualification": { "status": "implemented", "entrypoint": "capabilities/browser-runtime/runner/x-route.qualification.mjs" },
       "release": { "stagingStatus": "implemented", "stagingScript": "scripts/stage-node-capability.mjs", "owner": "web-import" }
     },
     {
@@ -148,7 +148,7 @@
       "supportedTargets": [
         "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"
       ],
-      "licensePolicy": { "expression": "MIT", "thirdPartyNotices": [] },
+      "licensePolicy": { "expression": "MIT", "thirdPartyNotices": ["Node.js notices and generated SBOM"] },
       "sizeSources": { "compressedBytes": "catalog.compressedBytes", "installedBytes": "catalog.installedBytes", "modelBytes": null },
       "recoveryActions": ["install_media_capability"],
       "profiles": { "asr": [], "ocr": [] },
@@ -169,14 +169,14 @@
       "supportedTargets": [
         "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"
       ],
-      "licensePolicy": { "expression": "MIT", "thirdPartyNotices": ["generated release NOTICE and SBOM"] },
+      "licensePolicy": { "expression": "MIT AND PSF-2.0 AND MPL-2.0 AND LicenseRef-Bundled-Third-Party-Notices", "thirdPartyNotices": ["MarkItDown, bundled Python, dependency licenses, generated release NOTICE and SBOM"] },
       "sizeSources": { "compressedBytes": "catalog.compressedBytes", "installedBytes": "catalog.installedBytes", "modelBytes": null },
       "recoveryActions": ["install_capability"],
       "profiles": { "asr": [], "ocr": [] },
       "installation": { "proactive": true, "updates": true },
       "runtime": { "network": false, "subprocess": true, "filesystem": ["application_capability_root", "item_staging_input", "item_staging_output"] },
-      "qualification": { "status": "planned_batch_8", "entrypoint": "capabilities/document-standard/qualification" },
-      "release": { "stagingStatus": "planned_batch_8", "stagingScript": "scripts/stage-document-standard-capability.mjs", "owner": "document-import" }
+      "qualification": { "status": "implemented", "entrypoint": "scripts/qualify-staged-capability.mjs" },
+      "release": { "stagingStatus": "implemented", "stagingScript": "scripts/stage-prepared-capability.mjs", "owner": "document-import" }
     },
     {
       "capabilityId": "document-layout",
@@ -190,14 +190,14 @@
       "supportedTargets": [
         "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"
       ],
-      "licensePolicy": { "expression": "MIT", "thirdPartyNotices": ["generated release NOTICE and SBOM"] },
+      "licensePolicy": { "expression": "MIT AND Apache-2.0 AND CDLA-Permissive-2.0 AND PSF-2.0 AND MPL-2.0 AND LicenseRef-Bundled-Third-Party-Notices", "thirdPartyNotices": ["Docling, model, bundled Python, dependency licenses, generated release NOTICE and SBOM"] },
       "sizeSources": { "compressedBytes": "catalog.compressedBytes", "installedBytes": "catalog.installedBytes", "modelBytes": "catalog.modelBytes" },
       "recoveryActions": ["install_capability"],
       "profiles": { "asr": [], "ocr": [] },
       "installation": { "proactive": true, "updates": true },
       "runtime": { "network": false, "subprocess": true, "filesystem": ["application_capability_root", "item_staging_input", "item_staging_output"] },
-      "qualification": { "status": "planned_batch_8", "entrypoint": "capabilities/document-layout/qualification" },
-      "release": { "stagingStatus": "planned_batch_8", "stagingScript": "scripts/stage-document-layout-capability.mjs", "owner": "document-import" }
+      "qualification": { "status": "implemented", "entrypoint": "scripts/qualify-staged-capability.mjs" },
+      "release": { "stagingStatus": "implemented", "stagingScript": "scripts/stage-prepared-capability.mjs", "owner": "document-import" }
     },
     {
       "capabilityId": "office-legacy",
@@ -211,14 +211,14 @@
       "supportedTargets": [
         "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"
       ],
-      "licensePolicy": { "expression": "MPL-2.0 OR LGPL-3.0-or-later", "thirdPartyNotices": ["LibreOffice notices and generated SBOM"] },
+      "licensePolicy": { "expression": "(MPL-2.0 OR LGPL-3.0-or-later) AND PSF-2.0 AND MPL-2.0", "thirdPartyNotices": ["LibreOffice, bundled Python notices and generated SBOM"] },
       "sizeSources": { "compressedBytes": "catalog.compressedBytes", "installedBytes": "catalog.installedBytes", "modelBytes": null },
       "recoveryActions": ["install_capability"],
       "profiles": { "asr": [], "ocr": [] },
       "installation": { "proactive": true, "updates": true },
       "runtime": { "network": false, "subprocess": true, "filesystem": ["application_capability_root", "item_staging_input", "item_staging_output"] },
-      "qualification": { "status": "planned_batch_8", "entrypoint": "capabilities/office-legacy/runner/office_legacy_pack_test.py" },
-      "release": { "stagingStatus": "planned_batch_8", "stagingScript": "scripts/stage-office-legacy-capability.mjs", "owner": "document-import" }
+      "qualification": { "status": "implemented", "entrypoint": "capabilities/office-legacy/runner/office_legacy_pack_test.py" },
+      "release": { "stagingStatus": "implemented", "stagingScript": "scripts/stage-prepared-capability.mjs", "owner": "document-import" }
     },
     {
       "capabilityId": "office-oxide",
@@ -253,14 +253,14 @@
       "supportedTargets": [
         "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"
       ],
-      "licensePolicy": { "expression": "Apache-2.0 AND BSD-2-Clause", "thirdPartyNotices": ["generated release NOTICE and SBOM"] },
+      "licensePolicy": { "expression": "Apache-2.0 AND MIT AND BSD-3-Clause AND HPND AND MPL-2.0 AND PSF-2.0 AND LGPL-2.1-only AND LGPL-3.0-only", "thirdPartyNotices": ["RapidOCR, native wheel, decoder notices, and generated SBOM"] },
       "sizeSources": { "compressedBytes": "catalog.compressedBytes", "installedBytes": "catalog.installedBytes", "modelBytes": "catalog.modelBytes" },
       "recoveryActions": ["enable_ocr", "install_ocr_capability"],
       "profiles": { "asr": [], "ocr": ["basic"] },
       "installation": { "proactive": true, "updates": true },
       "runtime": { "network": false, "subprocess": true, "filesystem": ["application_capability_root", "item_staging_input", "item_staging_output"] },
-      "qualification": { "status": "planned_batch_8", "entrypoint": "capabilities/ocr-basic/qualification" },
-      "release": { "stagingStatus": "planned_batch_8", "stagingScript": "scripts/stage-ocr-basic-capability.mjs", "owner": "ocr-import" }
+      "qualification": { "status": "implemented", "entrypoint": "scripts/qualify-staged-capability.mjs" },
+      "release": { "stagingStatus": "implemented", "stagingScript": "scripts/stage-prepared-capability.mjs", "owner": "ocr-import" }
     },
     {
       "capabilityId": "ocr-cjk-accurate",
@@ -283,7 +283,7 @@
       "profiles": { "asr": [], "ocr": ["cjk_accurate"] },
       "installation": { "proactive": true, "updates": true },
       "runtime": { "network": false, "subprocess": true, "filesystem": ["application_capability_root", "item_staging_input", "item_staging_output"] },
-      "qualification": { "status": "planned_batch_8", "entrypoint": "capabilities/ocr-cjk-accurate/runner/qualification.py" },
+      "qualification": { "status": "implemented", "entrypoint": "capabilities/ocr-cjk-accurate/runner/qualification.py" },
       "release": { "stagingStatus": "implemented", "stagingScript": "scripts/stage-rapidocr-capability.mjs", "owner": "ocr-import" }
     },
     {
@@ -298,14 +298,14 @@
       "supportedTargets": [
         "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"
       ],
-      "licensePolicy": { "expression": "LGPL-2.1-or-later", "thirdPartyNotices": ["FFmpeg notices and generated SBOM"] },
+      "licensePolicy": { "expression": "MIT AND LGPL-3.0-or-later", "thirdPartyNotices": ["Node.js, FFmpeg notices and generated SBOM"] },
       "sizeSources": { "compressedBytes": "catalog.compressedBytes", "installedBytes": "catalog.installedBytes", "modelBytes": null },
       "recoveryActions": ["install_media_capability"],
       "profiles": { "asr": [], "ocr": ["keyframes"] },
       "installation": { "proactive": true, "updates": true },
       "runtime": { "network": false, "subprocess": true, "filesystem": ["application_capability_root", "item_staging_input", "item_staging_output"] },
-      "qualification": { "status": "planned_batch_8", "entrypoint": "capabilities/media-runtime/qualification" },
-      "release": { "stagingStatus": "planned_batch_8", "stagingScript": "scripts/stage-media-runtime-capability.mjs", "owner": "media-import" }
+      "qualification": { "status": "implemented", "entrypoint": "scripts/qualify-staged-capability.mjs" },
+      "release": { "stagingStatus": "implemented", "stagingScript": "scripts/stage-prepared-capability.mjs", "owner": "media-import" }
     },
     {
       "capabilityId": "asr-sensevoice-small",
@@ -328,7 +328,7 @@
       "profiles": { "asr": ["fast", "balanced"], "ocr": [] },
       "installation": { "proactive": true, "updates": true },
       "runtime": { "network": false, "subprocess": true, "filesystem": ["application_capability_root", "item_staging_input", "item_staging_output"] },
-      "qualification": { "status": "planned_batch_8", "entrypoint": "capabilities/asr-sensevoice-small/runner/qualification.mjs" },
+      "qualification": { "status": "implemented", "entrypoint": "capabilities/asr-sensevoice-small/runner/qualification.mjs" },
       "release": { "stagingStatus": "implemented", "stagingScript": "scripts/stage-sensevoice-capability.mjs", "owner": "media-import" }
     },
     {
@@ -346,14 +346,14 @@
       "supportedTargets": [
         "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"
       ],
-      "licensePolicy": { "expression": "MIT AND LGPL-2.1-or-later", "thirdPartyNotices": ["whisper.cpp, FFmpeg, model notices, and generated SBOM"] },
+      "licensePolicy": { "expression": "MIT AND LGPL-3.0-or-later", "thirdPartyNotices": ["Node.js, whisper.cpp, FFmpeg, model notices, and generated SBOM"] },
       "sizeSources": { "compressedBytes": "catalog.compressedBytes", "installedBytes": "catalog.installedBytes", "modelBytes": "catalog.modelBytes" },
       "recoveryActions": ["install_media_capability", "authorize_local_asr"],
       "profiles": { "asr": ["accurate"], "ocr": [] },
       "installation": { "proactive": true, "updates": true },
       "runtime": { "network": false, "subprocess": true, "filesystem": ["application_capability_root", "item_staging_input", "item_staging_output"] },
-      "qualification": { "status": "planned_batch_8", "entrypoint": "capabilities/asr-whisper/qualification" },
-      "release": { "stagingStatus": "planned_batch_8", "stagingScript": "scripts/stage-whisper-capability.mjs", "owner": "media-import" }
+      "qualification": { "status": "implemented", "entrypoint": "scripts/qualify-staged-capability.mjs" },
+      "release": { "stagingStatus": "implemented", "stagingScript": "scripts/stage-prepared-capability.mjs", "owner": "media-import" }
     }
   ]
 }

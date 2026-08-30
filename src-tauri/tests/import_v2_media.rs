@@ -115,7 +115,7 @@ fn asr_runtime_requires_qualified_lgpl_m4a_decoding() {
     assert!(value["licenseExpression"]
         .as_str()
         .unwrap()
-        .contains("LGPL-2.1-or-later"));
+        .contains("LGPL-3.0-or-later"));
     assert!(value["audioDecoding"]["componentInventory"]
         .as_array()
         .unwrap()
@@ -144,7 +144,7 @@ fn temporary_media_is_removed_on_success_failure_and_restart() {
 }
 
 #[test]
-fn media_manifest_is_strict_lgpl_and_does_not_promise_installed_binaries() {
+fn media_manifest_is_strict_lgpl_and_declares_only_release_targets() {
     let value: serde_json::Value = serde_json::from_str(include_str!(
         "../../capabilities/media-runtime/manifest.json"
     ))
@@ -154,7 +154,18 @@ fn media_manifest_is_strict_lgpl_and_does_not_promise_installed_binaries() {
         .unwrap();
     assert!(flags.iter().any(|flag| flag == "--disable-gpl"));
     assert!(flags.iter().any(|flag| flag == "--disable-nonfree"));
-    assert_eq!(value["targetTriples"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        value["targetTriples"].as_array().unwrap(),
+        &[
+            "x86_64-pc-windows-msvc",
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin",
+            "x86_64-unknown-linux-gnu",
+        ]
+    );
+    assert_eq!(value["payloadStatus"], "release_ci_required");
+    assert_eq!(value["compressedBytes"], 0);
+    assert_eq!(value["installedBytes"], 0);
     assert!(
         value["buildProvenance"]["componentInventory"]
             .as_array()

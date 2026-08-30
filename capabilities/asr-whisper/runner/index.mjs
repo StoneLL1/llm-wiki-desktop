@@ -15,7 +15,6 @@ import {
   buildVideoOcrFrameArguments,
   buildVideoTextProbeArguments,
   classifyExecutionError,
-  currentRuntimeKey,
   ffmpegRelativePath,
   isNoAudioExecutionError,
   isVideoMedia,
@@ -32,6 +31,31 @@ const execFileAsync = promisify(execFile);
 const MAX_RPC_BYTES = 1024 * 1024;
 const EXECUTION_TIMEOUT_MS = 30 * 60 * 1000;
 const packRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+function inventoryDeclaration(manifest, file) {
+  const matches = (manifest.files || []).filter((item) => item?.path === file);
+  if (matches.length !== 1) throw new Error("IMPORT_ASR_ENGINE_INTEGRITY_FAILED");
+  return { file, sha256: matches[0].sha256 };
+}
+
+async function releaseRuntime(manifest) {
+  const binary = process.platform === "win32" ? "bin/whisper-cli.exe" : "bin/whisper-cli";
+  const provenancePath = await verifyArtifact(
+    packRoot,
+    inventoryDeclaration(manifest, "BUILD-PROVENANCE.json"),
+    "BUILD-PROVENANCE.json",
+  );
+  const provenance = JSON.parse(await fs.readFile(provenancePath, "utf8"));
+  if (provenance.packId !== "asr-whisper" || provenance.runtimeNetwork !== false ||
+      !provenance.buildFeatures?.includes("WHISPER_FFMPEG")) {
+    throw new Error("IMPORT_ASR_ENGINE_INTEGRITY_FAILED");
+  }
+  return {
+    ...inventoryDeclaration(manifest, binary),
+    ffmpeg: inventoryDeclaration(manifest, ffmpegRelativePath()),
+    model: inventoryDeclaration(manifest, "models/ggml-small.bin"),
+  };
+}
 
 async function readRpc() {
   process.stdin.setEncoding("utf8");
@@ -129,6 +153,25 @@ let completed = false;
 try {
   rpc = await readRpc();
   const params = rpc?.params;
+  if (rpc?.method === "capability.health") {
+    const route = params?.route;
+    if (params?.protocolVersion !== "2" || params?.capabilityId !== "asr-whisper" || route !== "media.asr") {
+      throw new Error("IMPORT_ASR_INVALID_REQUEST");
+    }
+    const manifest = JSON.parse(await fs.readFile(path.join(packRoot, "manifest.json"), "utf8"));
+    const runtimeDeclaration = await releaseRuntime(manifest);
+    const binaryName = process.platform === "win32" ? "bin/whisper-cli.exe" : "bin/whisper-cli";
+    if (manifest.packId !== "asr-whisper" || manifest.protocolVersion !== "2") {
+      throw new Error("IMPORT_ASR_ENGINE_INTEGRITY_FAILED");
+    }
+    await Promise.all([
+      verifyArtifact(packRoot, runtimeDeclaration, binaryName),
+      verifyArtifact(packRoot, runtimeDeclaration.ffmpeg, ffmpegRelativePath()),
+    ]);
+    process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { healthy: true, protocolVersion: "2", capabilityId: "asr-whisper", route }, error: null })}\n`);
+    completed = true;
+    process.exit(0);
+  }
   if (rpc?.jsonrpc !== "2.0" || !params || params.operation !== "extract" ||
       params.input?.kind !== "file" ||
       (!params.localAsrAuthorized && !params.asrProbeOnly)) {
@@ -141,12 +184,7 @@ try {
   const asrProfile = typeof params.asrProfile === "string" ? params.asrProfile : "balanced";
 
   const manifest = JSON.parse(await fs.readFile(path.join(packRoot, "manifest.json"), "utf8"));
-  const runtimeDeclaration = manifest.runtimeArtifacts?.[currentRuntimeKey()];
-  if (manifest.audioDecoding?.requiredBuildFeature !== "WHISPER_FFMPEG" ||
-      !runtimeDeclaration?.buildFeatures?.includes("WHISPER_FFMPEG") ||
-      runtimeDeclaration?.qualificationFixture !== manifest.audioDecoding.qualificationFixture) {
-    throw new Error("IMPORT_ASR_ENGINE_INTEGRITY_FAILED");
-  }
+  const runtimeDeclaration = await releaseRuntime(manifest);
   const runtimeTemp = path.join(stagingRoot, "runtime-temp");
   await fs.mkdir(runtimeTemp, { recursive: true });
   temporaryRoot = await fs.mkdtemp(path.join(runtimeTemp, "asr-output-"));
@@ -212,9 +250,8 @@ try {
   } else {
   const binaryName = process.platform === "win32" ? "bin/whisper-cli.exe" : "bin/whisper-cli";
   const binary = await verifyArtifact(packRoot, runtimeDeclaration, binaryName);
-  const modelDeclaration = manifest.models?.find((model) => model.id === "small");
-  if (modelDeclaration?.sha256 !== MODEL_SHA256) throw new Error("IMPORT_ASR_ENGINE_INTEGRITY_FAILED");
-  const model = await verifyArtifact(packRoot, modelDeclaration, "models/ggml-small.bin");
+  if (runtimeDeclaration.model.sha256 !== MODEL_SHA256) throw new Error("IMPORT_ASR_ENGINE_INTEGRITY_FAILED");
+  const model = await verifyArtifact(packRoot, runtimeDeclaration.model, "models/ggml-small.bin");
 
   const mediaSha256 = await sha256File(mediaPath);
   const shardRoot = path.join(stagingRoot, "asr-shards");

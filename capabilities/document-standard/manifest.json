@@ -10,7 +10,7 @@
     "x86_64-unknown-linux-gnu"
   ],
   "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",
-  "licenseExpression": "MIT",
+  "licenseExpression": "MIT AND PSF-2.0 AND MPL-2.0 AND LicenseRef-Bundled-Third-Party-Notices",
   "entrypoint": "runner/markitdown-pack",
   "compressedBytes": 0,
   "installedBytes": 0,

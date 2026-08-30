@@ -41,6 +41,9 @@ IMAGE_EXTENSIONS = {
     ".tif",
     ".tiff",
     ".webp",
+    ".heic",
+    ".heif",
+    ".pdf",
 }
 
 
