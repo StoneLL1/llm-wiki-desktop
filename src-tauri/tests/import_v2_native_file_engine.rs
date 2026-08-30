@@ -10,9 +10,7 @@ use llm_wiki_desktop_lib::services::import_v2::native_file_engine::{
     NativeCsvPackageEngine, NativeFileEngine, NativeStructuredFileEngine,
 };
 use llm_wiki_desktop_lib::services::import_v2::quality_gate::QualityGate;
-use llm_wiki_desktop_lib::services::import_v2::url_policy::{
-    PrivateTargetGrant, SessionWebTarget,
-};
+use llm_wiki_desktop_lib::services::import_v2::url_policy::{PrivateTargetGrant, SessionWebTarget};
 use llm_wiki_desktop_lib::services::import_v2::web_fetch::{WebFetchArtifact, WebFetchPolicy};
 use llm_wiki_desktop_lib::tasks::task_model::CancellationToken;
 use sha2::{Digest, Sha256};

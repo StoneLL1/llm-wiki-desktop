@@ -240,6 +240,93 @@ quality: ...
 - 能力 tile：安装、更新、详情。
 - 完整管理进入“能力管理”页签。
 
+#### 6.3.1 能力管理页的下载与安装
+
+“能力管理”不是当前 Import 队列的状态摘要，而是应用级的官方能力目录。它读取应用安装事实，不依赖当前会话里是否恰好有 `waiting_capability` 条目；切换项目、页签或最小化窗口不得取消正在进行的下载与安装。
+
+首版只展示产品清单中声明、由官方签名 catalog 发布的能力包，不提供任意 URL、本地压缩包、第三方市场或卸载入口。用户动作统一写作“下载并安装”，因为下载完成的压缩包不能绕过验签与健康检查单独保留为可用能力。
+
+这些官方能力包属于应用发布链维护的受信任应用组件。首版以固定 catalog / trusted key、hash / signature / manifest / target / route-set 校验、事务安装、健康检查、取消与旧版本回滚保证功能正确性；不以 Windows / macOS / Linux 的 OS 级 runner 沙箱作为安装、Batch 6 或发布前置，也不得在产品文案中宣称 runner 已被沙箱化。任意 URL、本地包、第三方 catalog、用户 PATH runtime 或自定义签名源不继承此信任决策。
+
+页面沿用紧凑工具界面，不使用能力卡片墙。结构为：
+
+1. 顶部摘要：已安装、可安装、可更新、进行中、需要处理、当前平台未发布。
+2. 筛选：全部 / 文档 / 网页 / OCR / 媒体与 ASR；另有状态筛选与名称搜索。
+3. 连续列表或表格：能力名称与用途、覆盖格式 / 路线、状态与版本、下载与安装大小、许可证、主操作、详情。
+4. 进行中的任务同时进入应用任务抽屉；离开本页后仍可观察、取消或在中断后继续。
+
+示意信息密度如下：
+
+```text
+能力名称              适用范围                 状态 / 版本           大小        操作
+文档兼容解析          DOC / XLS / PPT          可安装 1.0.0          286 MB      下载并安装
+中文图片文字识别      PNG / JPG / TIFF …       下载中 42%            640 MB      取消
+本地语音转写          音频 / 视频              已安装 1.0.0          1.2 GB      查看详情
+高精度语音转写        音频 / 视频              当前平台未发布        —           查看原因
+```
+
+每行数据由后端返回四组正交事实，前端不得根据按钮或当前 Import item 猜测：
+
+- `distribution`：`published` / `source_catalog_empty` / `not_published_for_target` / `unsupported`。
+- `installation`：`absent` / `healthy` / `unhealthy`，并给出当前健康版本。
+- `operation`：空，或 `queued` / `downloading` / `paused` / `verifying` / `installing` / `health_checking` / `activating` / `recovering` / `failed` / `cancelled` / `succeeded`。
+- `update`：`none` / `available` / `in_progress` / `rollback_restored`。
+
+后端再提供一个用于列表排序和主文案的派生 display state。这样“旧版本健康可用”和“新版本正在下载 / 更新失败已回退”可以同时成立。可见状态包括：
+
+- `installed_healthy`：当前版本已安装且全部声明路线健康。
+- `install_available`：当前 target 有签名发布物，可以下载并安装。
+- `update_available`：已安装健康版本仍可用，同时存在更新版本。
+- `queued` / `downloading` / `verifying` / `installing` / `health_checking`：可观察任务阶段；只有有界字节或步骤才显示百分比。
+- `paused`：应用中断后保留可续传事实，由用户点击“继续”。
+- `failed_recoverable`：展示“重试”和折叠技术详情；旧健康版本继续可用。
+- `rolled_back`：新版本健康检查失败，旧健康版本仍在使用。
+- `not_published_for_target`：产品支持该能力，但当前平台没有签名发布物；不得显示无效安装按钮。
+- `catalog_unavailable`：当前构建未嵌入可验证的发布 catalog；明确说明构建问题，不伪装成网络失败。
+- `unsupported_by_app`：catalog 条目存在但不属于当前应用版本冻结的产品清单，不下载、不执行。
+
+点击“下载并安装”先打开单一确认对话框，至少展示：
+
+- 能力用途、将新增的格式 / 路线和是否会继续当前 Import 待办。
+- 固定版本、当前平台、发布者 / 签名 key id、来源域名。
+- 包体、模型、安装后预计占用和最低可用磁盘空间。
+- SPDX 许可证摘要与第三方 notices 入口。
+- 运行权限事实：是否启动子进程、是否需要运行时网络、文件系统仅允许应用能力目录与当前条目的 staging 输入；签名可信不等于运行时无限权限。
+- 应用级安装位置说明；不写入项目目录，不修改 `raw/`、`wiki/`、`.app/` 或 Git。
+- “下载后仍会校验 SHA-256、签名、清单和健康状态；失败不会激活”的安全说明。
+
+主按钮为“下载并安装”。对话框确认只表达这一次、这个固定版本与许可证快照的授权；版本、许可证或包体 identity 变化后必须重新确认。React 只提交 `capabilityId + expectedVersion + acknowledgementVersion`，不得接收或拼装下载 URL、SHA-256、签名、解压路径或执行命令。
+
+#### 6.3.2 应用级能力合同与 Import 续接
+
+为了让上述页面可实现，后端必须提供应用级只读快照和安装意图，而不能复用只接受 `projectId + sessionId + itemId` 的条目安装接口：
+
+```text
+list_app_capabilities_v1()
+  -> AppCapabilityView[]
+
+install_app_capability_v1(
+  capabilityId,
+  expectedVersion,
+  acknowledgementVersion
+)
+  -> BackendTask
+```
+
+`AppCapabilityView` 至少包含：稳定能力 id、i18n 文案 key、产品用途、声明路线、覆盖格式 / 平台、当前 target、上述 distribution / installation / operation / update 事实、派生 display state、包体 / 模型 / 安装大小、许可证、发布与可安装事实、运行权限摘要、活动 task id、等待该能力的当前项目条目数，以及可复制的稳定错误码。列表中的下载状态以应用级 task 为准，不跟随某个 Import item 的生命周期销毁。
+
+后端同时维护冻结的 `ProductCapabilityDefinition` 清单。每个能力包必须声明它提供的全部 routes、格式 / 平台、协议版本、许可证策略、是否为发布承诺的一部分。catalog 只能为这份产品清单提供固定版本与签名资产，不能反过来扩大应用可执行能力。
+
+构建必须区分 source / development 与 distributable release。source fallback 允许空 catalog，但 UI 必须显示 `catalog_unavailable`，版本信息也必须标为不可分发开发构建；任何标记为可分发的 release build 若没有注入并验证当前版本要求的完整 catalog，构建阶段直接失败，不能静默生成“所有能力下载都不可用”的 release 二进制。
+
+安装协调器以 `(capabilityId, targetVersion, targetTriple, archiveIdentity)` single-flight：多个入口和多个等待条目只能加入同一个下载 / 安装任务。下载使用固定发布 URL、Range 续传和安全重下；随后依次执行大小上限、SHA-256、签名、manifest、路径安全、事务安装和真实 runner 健康检查。任何一步失败都不得把新版本标记为可用，且保留或恢复旧健康版本。更新安装的 activation journal 只能在全部 runtime route 切换成功后提交；不能先删除回滚依据再尝试激活。
+
+一个 pack 可以提供多条 route。健康检查与激活必须以产品清单中的整组 routes 为单位，而不是只检查触发安装的 `requestedRoute`；整组成功后一次性发布新 runtime snapshot，任一路线失败则整组不激活并回滚。这样从管理页主动安装时不需要虚构某个 Import route，也不会出现“包已安装但同包另一条路线仍不可用”。
+
+保留条目级 `install_import_capability_v2` 作为 Import-linked facade：它先校验当前项目、root、session、item、requirement revision 与用户确认，再向应用级协调器登记 continuation。全局任务成功后，对当前活动项目里所有匹配的等待条目做 fan-out；每个条目都必须在 trusted + writable authority 临界区重新校验原 identity、revision 和当前状态，符合时才继续。不活动项目只获得应用级能力事实，重新打开并复核后再继续，不能跨项目静默写入。
+
+下载失败需要区分并给出下一步：离线 / 代理、服务器不支持续传、签名或哈希不匹配、磁盘不足、杀毒软件或文件占用、当前平台未发布、健康检查失败并回滚。技术 URL、临时目录和 runner 输出只放在脱敏后的折叠详情中。
+
 ### 6.4 队列行
 
 队列采用紧凑连续列表或表格，不使用卡片堆叠。
@@ -584,6 +671,8 @@ OCR 用于补足缺失正文，不对所有图片例行扫描。
 5. 原字幕保存在原始资料中，Source 使用规范化可读版本。
 6. 没有可靠伴随稿时走本地 ASR；视频 ASR 无效时可进入画面 OCR。
 7. 本地原媒体在确认导入后完整保存到 layout-defined evidence root。
+8. 媒体不沿用面向文档 / 图片的小文件上限。类型识别、hash、复制和解码使用有界缓冲流；不得把完整媒体读入单个内存 `Vec`，也不得为 staging 无条件创建两份全量副本。
+9. 超大媒体显示大小、预计时长、磁盘需求与真实字节进度；安全 hard limit 必须按媒体类型和可用磁盘制定，并在加入任务前给出 typed 原因，不能在格式识别前用统一 64 MiB 上限静默跳过。
 
 ### 11.8 本地媒体能力包
 
@@ -593,6 +682,7 @@ OCR 用于补足缺失正文，不对所有图片例行扫描。
 - 安装弹窗展示来源、许可证、下载量、磁盘占用和安装位置。
 - 安装与健康检查通过后恢复所有当前会话等待项。
 - 应用调用自己管理且校验过的能力包，不依赖用户 PATH 中未知二进制。
+- ASR / OCR / decoder 的 route extensions、真实 runner 接受格式、产品能力清单、UI 矩阵和 release catalog 必须同源；测试临时注册的额外扩展不能扩大发布承诺。
 - 能力仍不支持时可交给 Agent 尝试转换，但不静默安装软件。
 
 ## 12. 网页与平台媒体流程
@@ -1031,6 +1121,28 @@ CompileChangeSet
 - 用户外部编辑 Source 后刷新来源触发三方合并。
 - 失败项不创建占位 Markdown。
 - 批次部分成功不被单项失败回滚。
+- 201、600、1000、1001 与 10k 个普通输入的后台工作范围由后端 operation task 冻结；UI 只分页渲染，筛选、滚动或只加载首 200 项不得改变实际处理项或聚合待办总数。
+- action groups、状态计数和“仍待处理”来自 session overview 的全量事实，不从当前筛选页遍历推导。
+- >64 MiB 的真实音频 / 视频可以进入 discovery、字幕 / ASR、取消与重启恢复，不因统一文档上限被跳过。
+- native 与 compatible knowledge base 的 Import preview、commit、history、cleanup、recovery 全部从当前 `ProjectContext.layout` 派生路径；不得写死 `.app/import-sessions`、`.app/sources` 或 `raw/`。
+- 普通 OS kill、应用崩溃和更新重启都会由独立 `recoveryRequired` 事实触发轻量 reconciliation；不依赖索引恰好损坏，结果显示“已暂停，可继续”。
+
+### 19.7 能力管理与 release 覆盖
+
+- 当前 Import 会话没有等待项时，“能力管理”仍能列出产品清单、安装事实和可下载版本，并能独立“下载并安装”。
+- UI 只提交稳定能力 id、固定目标版本与确认 revision；URL、hash、签名、key、临时路径、解压和 runner 启动完全由后端掌握。
+- 同一能力、版本、target 与 archive identity 的并发请求只产生一次下载 / 安装任务，管理页和 Import 等待项共享进度。
+- 页面切换、项目切换和最小化不取消应用级任务；进程中断后显示“已暂停，可继续”，主动取消才按产品规则清理 partial。
+- 下载阶段显示真实 bytes；校验、安装、健康检查和激活只显示可靠步骤，不伪造百分比。
+- hash、签名、manifest、target、路径安全或任一声明 route 健康检查失败时，新版本均不激活；更新失败继续使用旧健康版本。
+- 多 route pack 只有在全部产品声明路线 probe 成功后才整体激活；管理页主动安装不需要伪造 `requestedRoute`。
+- 安装成功后，当前活动项目中所有匹配 continuation 分别重验 project / root / session / item / revision / authority，再安全继续；撤权、漂移或非活动项目不得被静默写入。
+- `catalog_unavailable` 与 `not_published_for_target` 有明确空态且没有安装按钮；开发 source fallback 的空 catalog 不得被描述为正式 release 可下载。
+- 普通本地打包与 CI 使用同一“可分发”闸门：只要产物带正式 channel / distribution 标记，缺 catalog、缺 trusted key、条目数或产品覆盖不完整都必须 build-fail；仅显式 development artifact 可以嵌入空 fallback。
+- 发布 catalog 的能力集合与用户可见格式、平台、恢复动作和 ASR profile 逐项闭合。每个承诺要么由内置路线提供，要么在四个目标平台都有签名发布物；缺一项即为 release No-Go。
+- Windows x64、macOS Apple Silicon、macOS Intel、Linux x64 的 packaged app 均完成干净环境验收：列表、下载、Range 续传、安全重下、验签、事务安装、真实 runner 健康检查、应用重启恢复和 Import 精确续接。
+- 四个平台分别用真实代表样本验证每个非内置格式族和网络路线；测试夹具注册的临时 pack 不能替代正式发布资产证据。
+- 官方签名能力包通过当前条目 staging / output 协议执行，并如实展示用途与运行权限摘要；首版把它视为受信任应用组件，不要求 OS 级文件、网络或子进程隔离证据，但必须通过完整性、协议、全 route 原子激活、取消、重启恢复与旧版本回滚验收，且不得宣称 sandbox。
 
 ## 20. 文档维护规则
 

@@ -2445,7 +2445,6 @@
   "importV2.capability.state.installing": "Installing capability",
   "importV2.capability.state.health_check_failed": "Installed files did not pass the runtime health check",
   "importV2.capability.state.catalog_unavailable": "This development build has no distributable capability catalog.",
-  "importV2.capability.state.runtime_confinement_unavailable": "Capability installation remains read-only until runner confinement is verified on every release target.",
   "importV2.capability.unavailable": "This capability is not available on the current platform.",
   "importV2.capability.installedState": "Already available",
   "importV2.common.loading": "Working",

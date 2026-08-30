@@ -19,10 +19,6 @@ use crate::services::import_v2::capability_installer::{
 };
 use crate::services::import_v2::capability_runtime::{target_triple, ImportCapabilityRuntime};
 use crate::services::import_v2::product_capability::ProductCapabilityManifest;
-use crate::services::import_v2::runner_confinement::{
-    capability_installation_mutations_enabled, require_capability_installation_confinement,
-    APP_CAPABILITY_CONFINEMENT_UNAVAILABLE,
-};
 use crate::services::FileStore;
 use crate::tasks::TaskService;
 
@@ -111,7 +107,6 @@ impl AppCapabilityCoordinator {
         expected_version: &str,
         acknowledgement_version: &str,
     ) -> Result<(BackendTask, bool), BackendError> {
-        require_capability_installation_confinement()?;
         if entry.version != expected_version {
             return Err(coordinator_error(
                 "APP_CAPABILITY_VERSION_STALE",
@@ -385,6 +380,14 @@ impl AppCapabilityCoordinator {
                 .filter(|task| task_capability_id(task) == Some(definition.capability_id.as_str()))
                 .max_by(|left, right| left.updated_at.cmp(&right.updated_at));
             let operation = operation_from_task(active_task.or(latest_task));
+            let rollback_restored = latest_task.is_some_and(|task| {
+                task.error
+                    .as_ref()
+                    .and_then(|error| error.details.as_ref())
+                    .and_then(|details| details.get("rollbackRestored"))
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+            });
             let update_available =
                 healthy_version
                     .as_ref()
@@ -395,6 +398,7 @@ impl AppCapabilityCoordinator {
                     });
             let update_state = if operation.state == Some(AppCapabilityOperationState::Failed)
                 && healthy_version.is_some()
+                && rollback_restored
             {
                 AppCapabilityUpdateState::RollbackRestored
             } else if active_task.is_some() && healthy_version.is_some() {
@@ -759,10 +763,7 @@ fn coordinator_error(code: &str, message: &str) -> BackendError {
 }
 
 fn capability_install_policy(catalog_entry_present: bool) -> (bool, Option<String>) {
-    let install_allowed = catalog_entry_present && capability_installation_mutations_enabled();
-    let blocked_reason = (catalog_entry_present && !install_allowed)
-        .then(|| APP_CAPABILITY_CONFINEMENT_UNAVAILABLE.to_owned());
-    (install_allowed, blocked_reason)
+    (catalog_entry_present, None)
 }
 
 #[cfg(test)]
@@ -770,12 +771,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn published_catalog_entry_is_non_installable_while_confinement_is_unavailable() {
+    fn published_catalog_entry_is_installable_without_an_os_confinement_gate() {
         let (install_allowed, blocked_reason) = capability_install_policy(true);
-        assert!(!install_allowed);
-        assert_eq!(
-            blocked_reason.as_deref(),
-            Some(APP_CAPABILITY_CONFINEMENT_UNAVAILABLE)
-        );
+        assert!(install_allowed);
+        assert_eq!(blocked_reason, None);
     }
 }

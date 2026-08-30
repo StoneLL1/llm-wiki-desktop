@@ -62,6 +62,17 @@ struct PendingActivation {
     capability_id: String,
     version: String,
     owner_task_id: String,
+    #[serde(default)]
+    phase: PendingActivationPhase,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum PendingActivationPhase {
+    #[default]
+    Prepared,
+    Probed,
+    Activated,
 }
 
 impl PartialDownloadMetadata {
@@ -110,6 +121,9 @@ pub struct CapabilityInstallRecovery {
     pub removed_orphans: usize,
     pub removed_staging: usize,
     pub rolled_back_pending: usize,
+    pub rolled_back_prepared: usize,
+    pub rolled_back_probed: usize,
+    pub rolled_back_activated: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -189,7 +203,6 @@ pub async fn install_catalog_entry(
     token: &CancellationToken,
     mut progress: impl FnMut(CapabilityInstallPhase, u64, u64),
 ) -> Result<CapabilityInstallOutcome, BackendError> {
-    super::runner_confinement::require_capability_installation_confinement()?;
     let preflight_root = install_root.to_path_buf();
     let preflight_entry = entry.clone();
     let preflight_owner = owner_task_id.to_owned();
@@ -309,6 +322,7 @@ pub async fn install_catalog_entry(
                             capability_id: install_entry.capability_id.clone(),
                             version: install_entry.version.clone(),
                             owner_task_id: install_owner.clone(),
+                            phase: PendingActivationPhase::Prepared,
                         },
                     )?;
                     pending_activation = Some(pending_path.clone());
@@ -367,8 +381,16 @@ pub struct CapabilityInstallOutcome {
 }
 
 impl CapabilityInstallOutcome {
+    pub fn mark_probed(&self, install_root: &Path) -> Result<(), BackendError> {
+        if let Some(path) = self.pending_activation.as_ref() {
+            update_pending_activation_phase(install_root, path, PendingActivationPhase::Probed)?;
+        }
+        Ok(())
+    }
+
     pub fn activate(&mut self, install_root: &Path) -> Result<(), BackendError> {
         if let Some(path) = self.pending_activation.as_ref() {
+            update_pending_activation_phase(install_root, path, PendingActivationPhase::Activated)?;
             remove_pending_activation(install_root, path)?;
         }
         self.pending_activation = None;
@@ -389,6 +411,29 @@ impl CapabilityInstallOutcome {
             remove_pending_activation(install_root, path)?;
         }
         Ok(())
+    }
+
+    pub fn rollback_with_receipt(
+        self,
+        install_root: &Path,
+        entry: &CapabilityCatalogEntry,
+        cause: BackendError,
+    ) -> BackendError {
+        let restored_previous_snapshot = self.created_by_this_call;
+        match self.rollback(install_root, entry) {
+            Ok(()) if restored_previous_snapshot => cause.with_details(serde_json::json!({
+                "rollbackRestored": true,
+                "failedCapabilityId": entry.capability_id,
+                "failedVersion": entry.version,
+            })),
+            Ok(()) => cause,
+            Err(rollback_error) => rollback_error.with_details(serde_json::json!({
+                "rollbackRestored": false,
+                "failedCapabilityId": entry.capability_id,
+                "failedVersion": entry.version,
+                "causeCode": cause.code,
+            })),
+        }
     }
 }
 
@@ -756,6 +801,25 @@ fn write_pending_activation(
         .map_err(|_| install_error("Capability activation journal could not be created."))
 }
 
+fn update_pending_activation_phase(
+    install_root: &Path,
+    path: &Path,
+    phase: PendingActivationPhase,
+) -> Result<(), BackendError> {
+    let binding = BoundProjectMutationRoot::bind(install_root, path)
+        .map_err(|_| install_error("Capability activation journal path is unsafe."))?;
+    let mut pending = read_bounded_regular(&binding, path)
+        .and_then(|bytes| serde_json::from_slice::<PendingActivation>(&bytes).ok())
+        .filter(|pending| pending.schema_version == 1)
+        .ok_or_else(|| install_error("Capability activation journal is invalid."))?;
+    pending.phase = phase;
+    let bytes = serde_json::to_vec(&pending)
+        .map_err(|_| install_error("Capability activation journal is invalid."))?;
+    binding
+        .write_atomic_replace(path, &bytes)
+        .map_err(|_| install_error("Capability activation journal could not be updated."))
+}
+
 fn recover_pending_activation_for_release(
     install_root: &Path,
     identity: &str,
@@ -774,17 +838,18 @@ fn recover_pending_activation_for_release(
     let binding = BoundProjectMutationRoot::bind(install_root, &path)
         .map_err(|_| install_error("Capability activation journal path is unsafe."))?;
     let pending = read_bounded_regular(&binding, &path)
-        .and_then(|bytes| serde_json::from_slice::<PendingActivation>(&bytes).ok());
-    let _pending_matches = pending.as_ref().is_some_and(|pending| {
-        pending.schema_version == 1
-            && pending.identity == identity
-            && pending.capability_id == entry.capability_id
-            && pending.version == entry.version
-            && !pending.owner_task_id.trim().is_empty()
-    });
-    // Even a damaged journal name is deterministically bound to this signed
-    // release. Fail closed by discarding its possibly unprobed final directory
-    // before allowing a retry.
+        .and_then(|bytes| serde_json::from_slice::<PendingActivation>(&bytes).ok())
+        .filter(|pending| {
+            pending.schema_version == 1
+                && pending.identity == identity
+                && pending.capability_id == entry.capability_id
+                && pending.version == entry.version
+                && !pending.owner_task_id.trim().is_empty()
+        })
+        .ok_or_else(|| {
+            install_error("Capability activation journal is invalid and requires manual recovery.")
+        })?;
+    debug_assert_eq!(pending.identity, identity);
     let version_root = install_root.join(&entry.capability_id).join(&entry.version);
     rollback_installed_directory(install_root, &version_root)?;
     remove_pending_activation(install_root, &path)
@@ -1034,29 +1099,35 @@ pub fn recover_install_root(
         else {
             continue;
         };
-        let Ok(_release_lock) = acquire_release_lock(install_root, identity, "startup-reaper")
-        else {
-            continue;
-        };
+        let _release_lock = acquire_release_lock(install_root, identity, "startup-reaper")
+            .map_err(|_| install_error("Capability activation journal is currently locked."))?;
         let pending = read_bounded_regular(&root_binding, &path)
-            .and_then(|bytes| serde_json::from_slice::<PendingActivation>(&bytes).ok());
-        let valid = pending.as_ref().is_some_and(|pending| {
-            pending.schema_version == 1
-                && pending.identity == identity
-                && !pending.owner_task_id.trim().is_empty()
-                && !pending.capability_id.is_empty()
-                && pending
-                    .capability_id
-                    .chars()
-                    .all(|value| value.is_ascii_alphanumeric() || matches!(value, '-' | '_'))
-                && semver::Version::parse(&pending.version).is_ok()
-        });
-        if let Some(pending) = pending.filter(|_| valid) {
-            let version_root = install_root
-                .join(&pending.capability_id)
-                .join(&pending.version);
-            rollback_installed_directory(install_root, &version_root)?;
-            result.rolled_back_pending += 1;
+            .and_then(|bytes| serde_json::from_slice::<PendingActivation>(&bytes).ok())
+            .filter(|pending| {
+                pending.schema_version == 1
+                    && pending.identity == identity
+                    && !pending.owner_task_id.trim().is_empty()
+                    && !pending.capability_id.is_empty()
+                    && pending
+                        .capability_id
+                        .chars()
+                        .all(|value| value.is_ascii_alphanumeric() || matches!(value, '-' | '_'))
+                    && semver::Version::parse(&pending.version).is_ok()
+            })
+            .ok_or_else(|| {
+                install_error(
+                    "Capability activation journal is invalid and requires manual recovery.",
+                )
+            })?;
+        let version_root = install_root
+            .join(&pending.capability_id)
+            .join(&pending.version);
+        rollback_installed_directory(install_root, &version_root)?;
+        result.rolled_back_pending += 1;
+        match pending.phase {
+            PendingActivationPhase::Prepared => result.rolled_back_prepared += 1,
+            PendingActivationPhase::Probed => result.rolled_back_probed += 1,
+            PendingActivationPhase::Activated => result.rolled_back_activated += 1,
         }
         remove_pending_activation(install_root, &path)?;
     }
@@ -1749,46 +1820,6 @@ mod tests {
     use zip::write::SimpleFileOptions;
     use zip::{CompressionMethod, ZipWriter};
 
-    #[tokio::test]
-    async fn confinement_gate_rejects_before_creating_the_install_root() {
-        let install_root = std::env::temp_dir().join(format!(
-            "llm-wiki-blocked-installer-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let entry = CapabilityCatalogEntry {
-            capability_id: "browser-runtime".into(),
-            version: "1.0.0".into(),
-            target_triple: "x86_64-pc-windows-msvc".into(),
-            url: "https://example.invalid/browser-runtime.zip".into(),
-            archive_sha256: "a".repeat(64),
-            manifest_sha256: "b".repeat(64),
-            compressed_bytes: 1,
-            installed_bytes: 1,
-            model_bytes: None,
-            license: "MIT".into(),
-        };
-
-        let error = match install_catalog_entry(
-            &BlockingWorkCoordinator::default(),
-            &install_root,
-            &entry,
-            "blocked-task",
-            &CancellationToken::new(),
-            |_, _, _| {},
-        )
-        .await
-        {
-            Ok(_) => panic!("confinement gate unexpectedly allowed installation"),
-            Err(error) => error,
-        };
-
-        assert_eq!(
-            error.code,
-            super::super::runner_confinement::APP_CAPABILITY_CONFINEMENT_UNAVAILABLE
-        );
-        assert!(!install_root.exists());
-    }
-
     struct SignedFixture {
         root: PathBuf,
         archive: PathBuf,
@@ -2182,6 +2213,35 @@ mod tests {
     }
 
     #[test]
+    fn rollback_receipt_is_emitted_only_when_this_install_removed_the_failed_version() {
+        let fixture = SignedFixture::new(b"runtime", "release-a");
+        let install_root = fixture.install_root();
+        let version_root = install_root.join("fixture/1.0.0");
+        std::fs::create_dir_all(&version_root).unwrap();
+        let identity = release_identity(&fixture.entry);
+        let release_lock = acquire_release_lock(&install_root, &identity, "task-created").unwrap();
+        let error = CapabilityInstallOutcome {
+            created_by_this_call: true,
+            release_lock,
+            pending_activation: None,
+        }
+        .rollback_with_receipt(
+            &install_root,
+            &fixture.entry,
+            install_error("Capability health check failed."),
+        );
+
+        assert_eq!(
+            error
+                .details
+                .as_ref()
+                .and_then(|details| details["rollbackRestored"].as_bool()),
+            Some(true)
+        );
+        assert!(!version_root.exists());
+    }
+
+    #[test]
     fn startup_recovery_rolls_back_a_version_left_pending_before_health() {
         let fixture = SignedFixture::new(b"runtime", "release-a");
         let install_root = fixture.install_root();
@@ -2198,6 +2258,7 @@ mod tests {
                 capability_id: "fixture".into(),
                 version: "1.0.0".into(),
                 owner_task_id: "crashed-task".into(),
+                phase: PendingActivationPhase::Prepared,
             },
         )
         .unwrap();
@@ -2205,12 +2266,55 @@ mod tests {
         let recovered = recover_install_root(&install_root).unwrap();
 
         assert_eq!(recovered.rolled_back_pending, 1);
+        assert_eq!(recovered.rolled_back_prepared, 1);
         assert!(!version_root.exists());
         assert!(!pending_path.exists());
     }
 
     #[test]
-    fn same_process_retry_recovers_a_stale_activation_journal() {
+    fn startup_recovery_reports_probed_and_activated_journal_rollbacks() {
+        for phase in [
+            PendingActivationPhase::Probed,
+            PendingActivationPhase::Activated,
+        ] {
+            let fixture = SignedFixture::new(b"runtime", "release-a");
+            let install_root = fixture.install_root();
+            let version_root = install_root.join("fixture/1.0.0");
+            std::fs::create_dir_all(&version_root).unwrap();
+            let identity = release_identity(&fixture.entry);
+            let pending_path = pending_activation_path(&install_root, &identity);
+            write_pending_activation(
+                &install_root,
+                &pending_path,
+                &PendingActivation {
+                    schema_version: 1,
+                    identity,
+                    capability_id: "fixture".into(),
+                    version: "1.0.0".into(),
+                    owner_task_id: "crashed-task".into(),
+                    phase,
+                },
+            )
+            .unwrap();
+
+            let recovered = recover_install_root(&install_root).unwrap();
+
+            assert_eq!(recovered.rolled_back_pending, 1);
+            assert_eq!(
+                recovered.rolled_back_probed,
+                usize::from(phase == PendingActivationPhase::Probed)
+            );
+            assert_eq!(
+                recovered.rolled_back_activated,
+                usize::from(phase == PendingActivationPhase::Activated)
+            );
+            assert!(!version_root.exists());
+            assert!(!pending_path.exists());
+        }
+    }
+
+    #[test]
+    fn same_process_retry_fails_closed_on_a_damaged_activation_journal() {
         let fixture = SignedFixture::new(b"runtime", "release-a");
         let install_root = fixture.install_root();
         let version_root = install_root.join("fixture/1.0.0");
@@ -2219,10 +2323,30 @@ mod tests {
         let pending_path = pending_activation_path(&install_root, &identity);
         std::fs::write(&pending_path, b"damaged-journal").unwrap();
 
-        recover_pending_activation_for_release(&install_root, &identity, &fixture.entry).unwrap();
+        let error =
+            recover_pending_activation_for_release(&install_root, &identity, &fixture.entry)
+                .unwrap_err();
 
-        assert!(!version_root.exists());
-        assert!(!pending_path.exists());
+        assert_eq!(error.code, "IMPORT_V2_CAPABILITY_INSTALL_FAILED");
+        assert!(version_root.exists());
+        assert!(pending_path.exists());
+    }
+
+    #[test]
+    fn startup_recovery_fails_closed_on_a_truncated_activation_journal() {
+        let fixture = SignedFixture::new(b"runtime", "release-a");
+        let install_root = fixture.install_root();
+        let version_root = install_root.join("fixture/1.0.0");
+        std::fs::create_dir_all(&version_root).unwrap();
+        let identity = release_identity(&fixture.entry);
+        let pending_path = pending_activation_path(&install_root, &identity);
+        std::fs::write(&pending_path, br#"{"schemaVersion":1,"identity":"#).unwrap();
+
+        let error = recover_install_root(&install_root).unwrap_err();
+
+        assert_eq!(error.code, "IMPORT_V2_CAPABILITY_INSTALL_FAILED");
+        assert!(version_root.exists());
+        assert!(pending_path.exists());
     }
 
     #[test]

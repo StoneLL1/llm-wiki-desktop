@@ -8,7 +8,6 @@ export type CapabilityInstallStateKind =
   | "installing"
   | "health_check_failed"
   | "catalog_unavailable"
-  | "runtime_confinement_unavailable"
   | "signed_release_unavailable"
   | "installed";
 
@@ -36,9 +35,7 @@ export function capabilityInstallState(
     const unavailableKind =
       unavailableReasonCode === "catalog_unavailable"
         ? "catalog_unavailable"
-        : unavailableReasonCode === "runtime_confinement_unavailable"
-          ? "runtime_confinement_unavailable"
-          : "signed_release_unavailable";
+        : "signed_release_unavailable";
     return {
       kind: unavailableKind,
       downloadedBytes: null,

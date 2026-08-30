@@ -85,8 +85,8 @@ fn app_capability_view_serializes_orthogonal_facts() {
         target_triple: "x86_64-pc-windows-msvc".into(),
         target_version: Some("1.2.3".into()),
         acknowledgement_version: Some("ack-v1".into()),
-        install_allowed: false,
-        install_blocked_reason_code: Some("APP_CAPABILITY_CONFINEMENT_UNAVAILABLE".into()),
+        install_allowed: true,
+        install_blocked_reason_code: None,
         distribution: AppCapabilityDistribution {
             state: AppCapabilityDistributionState::Published,
             error_code: None,
@@ -120,32 +120,42 @@ fn app_capability_view_serializes_orthogonal_facts() {
     assert_eq!(value["operation"]["state"], serde_json::Value::Null);
     assert_eq!(value["update"]["state"], "available");
     assert_eq!(value["displayState"], "update_available");
-    assert_eq!(value["installAllowed"], false);
-    assert_eq!(
-        value["installBlockedReasonCode"],
-        "APP_CAPABILITY_CONFINEMENT_UNAVAILABLE"
-    );
+    assert_eq!(value["installAllowed"], true);
+    assert_eq!(value["installBlockedReasonCode"], serde_json::Value::Null);
 }
 
 #[test]
-fn coordinator_rejects_install_before_task_persistence() {
+fn coordinator_creates_one_install_task_for_a_reviewed_official_release() {
     let root = tempdir().unwrap();
     let tasks = TaskService::default();
     let coordinator = AppCapabilityCoordinator::default();
     coordinator.initialize(root.path(), &tasks).unwrap();
     let entry = fixture_catalog_entry();
-    let error = coordinator
+    let (task, created) = coordinator
         .join_or_create_install(
             &tasks,
             &entry,
             &entry.version,
             &app_capability_acknowledgement_version(&entry),
         )
-        .unwrap_err();
+        .unwrap();
 
-    assert_eq!(error.code, "APP_CAPABILITY_CONFINEMENT_UNAVAILABLE");
-    assert!(tasks.list_app_tasks(None).is_empty());
-    assert!(!root.path().join("tasks").exists());
+    assert!(created);
+    assert_eq!(task.status, TaskStatus::Queued);
+    assert_eq!(tasks.list_app_tasks(None), vec![task]);
+    assert!(root.path().join("tasks").exists());
+
+    let (joined, created_again) = coordinator
+        .join_or_create_install(
+            &tasks,
+            &entry,
+            &entry.version,
+            &app_capability_acknowledgement_version(&entry),
+        )
+        .unwrap();
+    assert!(!created_again);
+    assert_eq!(joined.id, tasks.list_app_tasks(None)[0].id);
+    assert_eq!(tasks.list_app_tasks(None).len(), 1);
 }
 
 #[test]
@@ -188,14 +198,10 @@ fn capability_inventory_is_available_without_an_active_project() {
     assert!(views
         .iter()
         .all(|view| view.current_project_waiting_count == 0));
-    assert!(views.iter().all(|view| !view.install_allowed));
     assert!(views
         .iter()
         .filter(|view| view.target_version.is_some())
-        .all(|view| {
-            view.install_blocked_reason_code.as_deref()
-                == Some("APP_CAPABILITY_CONFINEMENT_UNAVAILABLE")
-        }));
+        .all(|view| view.install_allowed && view.install_blocked_reason_code.is_none()));
 }
 
 #[test]
