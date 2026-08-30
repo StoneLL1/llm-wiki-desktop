@@ -87,7 +87,7 @@ const catalogUrlErrors = (entry, label, expectedTag) => {
   return errors;
 };
 
-const entryErrors = (entry, index, expectedTag) => {
+const entryErrors = (entry, index, expectedTag, trustedKeys) => {
   const errors = [];
   const label = "entries[" + index + "]";
   if (!isObject(entry)) {
@@ -104,6 +104,11 @@ const entryErrors = (entry, index, expectedTag) => {
   }
   if (typeof entry.license !== "string" || entry.license.trim().length === 0) {
     errors.push(label + " license must be a non-empty expression");
+  }
+  if (typeof entry.signingKeyId !== "string"
+    || !isObject(trustedKeys)
+    || !Object.hasOwn(trustedKeys, entry.signingKeyId)) {
+    errors.push(label + " signingKeyId must name a committed trusted key");
   }
   for (const field of ["archiveSha256", "manifestSha256"]) {
     if (typeof entry[field] !== "string" || !SHA256_PATTERN.test(entry[field])) {
@@ -201,7 +206,7 @@ export function verifyCapabilityCatalog({
     errors.push("install catalog entries must be an array");
   } else {
     entries.forEach((entry, index) => {
-      errors.push(...entryErrors(entry, index, expectedTag));
+      errors.push(...entryErrors(entry, index, expectedTag, trustedKeys));
     });
     if (releaseMode) {
       const expectedMatrix = expectedReleaseMatrix(PRODUCT_MANIFEST);

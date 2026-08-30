@@ -267,6 +267,7 @@ export function evaluateFinalFourRedlines(root) {
       && !/^0+$/.test(entry.archiveSha256)
       && /^[0-9a-f]{64}$/.test(entry.manifestSha256 ?? "")
       && !/^0+$/.test(entry.manifestSha256)
+      && typeof entry.signingKeyId === "string" && entry.signingKeyId.length > 0
       && Number.isSafeInteger(entry.compressedBytes) && entry.compressedBytes > 0
       && Number.isSafeInteger(entry.installedBytes) && entry.installedBytes > 0
       && typeof entry.license === "string" && entry.license.trim().length > 0;

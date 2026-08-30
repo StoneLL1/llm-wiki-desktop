@@ -1,5 +1,5 @@
-import { FolderOpen, FolderPlus, ShieldAlert } from "lucide-react";
-import { useState } from "react";
+import { FolderOpen, FolderPlus, Package, ShieldAlert } from "lucide-react";
+import { lazy, Suspense, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { LazyActionableErrorNotice } from "../../components/app/LazyActionableErrorNotice";
@@ -10,8 +10,17 @@ import {
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { pickDirectory } from "../import/nativeFilePicker";
-import { NewProjectDialog, type NewProjectPayload } from "./NewProjectDialog";
-import { ProjectAssessmentPanel } from "./ProjectAssessmentPanel";
+import type { NewProjectPayload } from "./NewProjectDialog";
+
+const NewProjectDialog = lazy(async () => {
+  const module = await import("./NewProjectDialog");
+  return { default: module.NewProjectDialog };
+});
+
+const ProjectAssessmentPanel = lazy(async () => {
+  const module = await import("./ProjectAssessmentPanel");
+  return { default: module.ProjectAssessmentPanel };
+});
 
 function canOpenAssessment(assessment: ReturnType<typeof useProjectStore.getState>["assessment"]): boolean {
   return Boolean(
@@ -167,7 +176,9 @@ export function NoProjectWorkspace({ activeView }: { activeView: string }) {
     const isAmbiguous = assessment.format === "ambiguous_markdown";
     return (
       <div className="no-project-workspace">
-        <ProjectAssessmentPanel assessment={assessment} onBack={() => void cancelProjectAssessment()} />
+        <Suspense fallback={null}>
+          <ProjectAssessmentPanel assessment={assessment} onBack={() => void cancelProjectAssessment()} />
+        </Suspense>
         {isMaterials || isAmbiguous ? (
           <section className="no-project-decision" aria-live="polite">
             <ShieldAlert aria-hidden="true" size={16} />
@@ -210,15 +221,17 @@ export function NoProjectWorkspace({ activeView }: { activeView: string }) {
           <LazyActionableErrorNotice className="no-project-error" error={localError ?? assessmentError} />
         ) : null}
         {newDialogOpen ? (
-          <NewProjectDialog
-            busy={busy}
-            error={localError}
-            onClose={() => {
-              setLocalError(null);
-              setNewDialogOpen(false);
-            }}
-            onCreate={(payload) => void create(payload)}
-          />
+          <Suspense fallback={null}>
+            <NewProjectDialog
+              busy={busy}
+              error={localError}
+              onClose={() => {
+                setLocalError(null);
+                setNewDialogOpen(false);
+              }}
+              onCreate={(payload) => void create(payload)}
+            />
+          </Suspense>
         ) : null}
       </div>
     );
@@ -242,6 +255,19 @@ export function NoProjectWorkspace({ activeView }: { activeView: string }) {
               <small>{t("noProject.open.detail")}</small>
             </span>
           </button>
+          <button
+            className="btn btn--ghost no-project-capability-link"
+            data-open-capability-management="true"
+            onClick={() => {
+              void import("../../stores/appCapabilityStore").then(({ useAppCapabilityStore }) => {
+                useAppCapabilityStore.getState().openManagement();
+              });
+            }}
+            type="button"
+          >
+            <Package aria-hidden="true" size={14} />
+            {t("importV2.capabilityManagement.noProjectAction")}
+          </button>
           <p className="no-project-storage-note">{t("noProject.storageNote")}</p>
         </div>
       ) : (
@@ -264,15 +290,17 @@ export function NoProjectWorkspace({ activeView }: { activeView: string }) {
           <LazyActionableErrorNotice className="no-project-error" error={localError ?? assessmentError} />
       ) : null}
       {newDialogOpen ? (
-        <NewProjectDialog
-          busy={busy}
-          error={localError}
-          onClose={() => {
-            setLocalError(null);
-            setNewDialogOpen(false);
-          }}
-          onCreate={(payload) => void create(payload)}
-        />
+        <Suspense fallback={null}>
+          <NewProjectDialog
+            busy={busy}
+            error={localError}
+            onClose={() => {
+              setLocalError(null);
+              setNewDialogOpen(false);
+            }}
+            onCreate={(payload) => void create(payload)}
+          />
+        </Suspense>
       ) : null}
     </div>
   );

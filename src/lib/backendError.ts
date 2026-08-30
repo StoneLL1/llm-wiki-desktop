@@ -73,6 +73,10 @@ const EXACT_ACTIONS: Record<string, BackendErrorActionKind> = {
   PROJECT_REPAIR_REQUIRED: "repair",
   UPDATE_RESTART_REQUIRED: "restart",
   UPDATER_RESTART_REQUIRED: "restart",
+  APP_CAPABILITY_CATALOG_UNAVAILABLE: null,
+  APP_CAPABILITY_NOT_PUBLISHED_FOR_TARGET: null,
+  APP_CAPABILITY_UNSUPPORTED_BY_APP: null,
+  APP_CAPABILITY_INSTALL_CANCELLED: null,
 };
 
 const EXACT_SUMMARIES: Record<string, string> = {
@@ -82,9 +86,26 @@ const EXACT_SUMMARIES: Record<string, string> = {
   PROJECT_REPAIR_REQUIRED: "backendError.summary.projectRepairRequired",
   UPDATE_RESTART_REQUIRED: "backendError.summary.restartRequired",
   UPDATER_RESTART_REQUIRED: "backendError.summary.restartRequired",
+  APP_CAPABILITY_CATALOG_UNAVAILABLE: "backendError.summary.appCapabilityCatalog",
+  APP_CAPABILITY_NOT_PUBLISHED_FOR_TARGET: "backendError.summary.appCapabilityTarget",
+  APP_CAPABILITY_UNSUPPORTED_BY_APP: "backendError.summary.appCapabilityUnsupported",
+  APP_CAPABILITY_DISK_FULL: "backendError.summary.appCapabilityDisk",
+  APP_CAPABILITY_FILE_LOCKED: "backendError.summary.appCapabilityFileLocked",
+  APP_CAPABILITY_INTEGRITY_FAILED: "backendError.summary.appCapabilityIntegrity",
+  APP_CAPABILITY_MANIFEST_INVALID: "backendError.summary.appCapabilityIntegrity",
+  APP_CAPABILITY_HEALTH_CHECK_FAILED: "backendError.summary.appCapabilityHealth",
+  APP_CAPABILITY_ROLLBACK_FAILED: "backendError.summary.appCapabilityRollback",
+  APP_CAPABILITY_NETWORK_UNAVAILABLE: "backendError.summary.appCapabilityNetwork",
+  APP_CAPABILITY_TASK_REVISION_STALE: "backendError.summary.appCapabilityStale",
+  APP_CAPABILITY_VERSION_STALE: "backendError.summary.appCapabilityStale",
+  APP_CAPABILITY_ACKNOWLEDGEMENT_STALE: "backendError.summary.appCapabilityStale",
 };
 
 const PREFIX_PRESENTATIONS: Array<[RegExp, ErrorPresentation]> = [
+  [/^APP_CAPABILITY_/, {
+    summaryKey: "backendError.summary.appCapability",
+    actionKind: RETRY,
+  }],
   [/(?:UNTRUSTED|READ_ONLY|AUTHORITY|PERMIT|POLICY|FORBIDDEN|DENIED|OUTSIDE_PROJECT)/, {
     summaryKey: "backendError.summary.securityRestriction",
     actionKind: OPEN_SETTINGS,

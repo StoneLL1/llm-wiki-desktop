@@ -19,6 +19,7 @@ import {
   redactBackendErrorDetails,
 } from "../lib/backendError";
 import { useProjectStore } from "../stores/projectStore";
+import { useAppCapabilityStore } from "../stores/appCapabilityStore";
 import type { ImportCapabilityRequirement } from "../types/importV2Presentation";
 
 const serializedBackendError = {
@@ -45,6 +46,7 @@ beforeEach(async () => {
     assessmentError: null,
     assessing: false,
   });
+  useAppCapabilityStore.getState().resetForTests();
 });
 
 describe("BackendError presentation", () => {
@@ -261,6 +263,33 @@ describe("BackendError presentation", () => {
       .toBe("retry");
   });
 
+  it("maps capability failures to exact summaries and truthful actions", () => {
+    const backendError = (code: string) => ({
+      code,
+      message: "raw installer detail that belongs in technical details",
+      details: null,
+      recoverable: true,
+      userActionRequired: false,
+    });
+
+    expect(normalizeBackendError(backendError("APP_CAPABILITY_CATALOG_UNAVAILABLE"))).toMatchObject({
+      summaryKey: "backendError.summary.appCapabilityCatalog",
+      actionKind: null,
+    });
+    expect(normalizeBackendError(backendError("APP_CAPABILITY_NETWORK_UNAVAILABLE"))).toMatchObject({
+      summaryKey: "backendError.summary.appCapabilityNetwork",
+      actionKind: "retry",
+    });
+    expect(normalizeBackendError(backendError("APP_CAPABILITY_TASK_REVISION_STALE"))).toMatchObject({
+      summaryKey: "backendError.summary.appCapabilityStale",
+      actionKind: "retry",
+    });
+    expect(normalizeBackendError(backendError("APP_CAPABILITY_FUTURE_FAILURE"))).toMatchObject({
+      summaryKey: "backendError.summary.appCapability",
+      actionKind: "retry",
+    });
+  });
+
   it("retry failure twice restores the action instead of staying busy", async () => {
     const onAction = vi.fn()
       .mockRejectedValueOnce(new Error("first failure"))
@@ -340,6 +369,16 @@ describe("BackendError presentation", () => {
     expect(alert).not.toHaveTextContent("[object Object]");
   });
 
+  it("opens app-global capability management without an active project", async () => {
+    render(<NoProjectWorkspace activeView="dashboard" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Manage capability packs" }));
+
+    await waitFor(() => {
+      expect(useAppCapabilityStore.getState().managementOpen).toBe(true);
+    });
+  });
+
   it("capability install errors remain visible and retryable", async () => {
     const requirement: ImportCapabilityRequirement = {
       requirement: {
@@ -366,7 +405,7 @@ describe("BackendError presentation", () => {
     render(<ImportCapabilityDialog open requirement={requirement} onInstall={onInstall} onCancel={vi.fn()} />);
 
     fireEvent.click(screen.getByRole("checkbox"));
-    fireEvent.click(screen.getByRole("button", { name: "Install capability" }));
+    fireEvent.click(screen.getByRole("button", { name: "Install" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("A required import capability is unavailable");
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(onInstall).toHaveBeenCalledTimes(2));

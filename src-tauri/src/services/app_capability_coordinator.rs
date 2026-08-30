@@ -452,6 +452,12 @@ impl AppCapabilityCoordinator {
                 formats: definition.formats.extensions,
                 platform_content_types: definition.formats.platform_content_types,
                 target_triple: target.clone(),
+                publisher_key_id: entry.as_ref().map(|entry| entry.signing_key_id.clone()),
+                source_domain: entry.as_ref().and_then(|entry| {
+                    url::Url::parse(&entry.url)
+                        .ok()
+                        .and_then(|url| url.host_str().map(str::to_owned))
+                }),
                 target_version: entry.as_ref().map(|entry| entry.version.clone()),
                 acknowledgement_version: entry.as_ref().map(app_capability_acknowledgement_version),
                 install_allowed,

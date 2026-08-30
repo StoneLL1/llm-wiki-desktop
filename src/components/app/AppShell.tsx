@@ -36,6 +36,11 @@ const TaskLogDrawer = lazy(async () => {
   return { default: module.TaskLogDrawer };
 });
 
+const AppCapabilityController = lazy(async () => {
+  const module = await import("./AppCapabilityController");
+  return { default: module.AppCapabilityController };
+});
+
 function useNarrowDesktop() {
   const [narrow, setNarrow] = useState(() =>
     typeof window.matchMedia === "function"
@@ -274,6 +279,9 @@ export function AppShell() {
         </ViewErrorBoundary>
       ) : null}
       <UpdateController />
+      <Suspense fallback={null}>
+        <AppCapabilityController />
+      </Suspense>
       {showRightPanelDialog
         ? createPortal(
             <div

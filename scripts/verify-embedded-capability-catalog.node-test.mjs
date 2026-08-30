@@ -17,6 +17,7 @@ const entry = (capabilityId, targetTriple) => ({
     + capabilityId + "-1.2.3-" + targetTriple + ".zip",
   archiveSha256: "a".repeat(64),
   manifestSha256: "b".repeat(64),
+  signingKeyId: "release-key",
   compressedBytes: 1234,
   installedBytes: 2345,
   modelBytes: null,

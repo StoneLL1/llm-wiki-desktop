@@ -51,6 +51,14 @@ const LEVEL_BADGE_CLASS: Record<string, string> = {
 
 const EMPTY_ACTIVITIES: TaskActivity[] = [];
 const EMPTY_LOGS: LogLine[] = [];
+const CAPABILITY_PROGRESS_LABEL_KEYS: Record<string, string> = {
+  "capability.downloading": "importV2.capabilityManagement.state.downloading",
+  "capability.verifying": "importV2.capabilityManagement.state.verifying",
+  "capability.installing": "importV2.capabilityManagement.state.installing",
+  "capability.health_check": "importV2.capabilityManagement.state.health_checking",
+  "capability.activating": "importV2.capabilityManagement.state.activating",
+  "capability.recovering": "importV2.capabilityManagement.state.recovering",
+};
 
 function StatusIcon({ status }: { status: TaskStatus }) {
   const { t } = useTranslation();
@@ -72,6 +80,7 @@ function StatusIcon({ status }: { status: TaskStatus }) {
       icon = <CircleX {...iconProps} className={`${cls} text-[var(--text-muted)]`} />;
       break;
     case "queued":
+    case "interrupted":
       icon = <Clock {...iconProps} className={`${cls} text-[var(--text-muted)]`} />;
       break;
     case "waiting_for_confirmation":
@@ -106,7 +115,9 @@ function ProgressBar({ task }: { task: BackendTask }) {
   // Import tasks currently report pipeline stages (0/4…4/4), not a measured
   // fraction of source work. Showing that as a percentage makes long fetches
   // look stalled or falsely precise, so keep those tasks indeterminate.
-  const canMeasure = task.taskType !== "import" || isMeasuredImportProgress(progress);
+  const canMeasure = task.taskType === "capability_install"
+    ? progress?.label === "capability.downloading"
+    : task.taskType !== "import" || isMeasuredImportProgress(progress);
   const pct = canMeasure && total && total > 0 ? Math.round((current / total) * 100) : null;
 
   return (
@@ -233,6 +244,8 @@ function TaskLogDrawerBody({
   const selectedProgressLabel = selectedTask?.progress?.label
     ? selectedTask.taskType === "import"
       ? t(IMPORT_PROGRESS_LABEL_KEYS[selectedTask.progress.label] ?? "importV2.progress.working")
+      : selectedTask.taskType === "capability_install"
+        ? t(CAPABILITY_PROGRESS_LABEL_KEYS[selectedTask.progress.label] ?? "importV2.capabilityManagement.state.downloading")
       : selectedTask.progress.label
     : null;
   const importSummary = useMemo(() => {
