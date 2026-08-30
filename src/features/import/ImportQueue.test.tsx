@@ -278,7 +278,7 @@ describe("ImportQueue", () => {
     expect(liveRegions[0]).toHaveTextContent(
       "Queue updated: 2 items, 0 need action, 1 ready.",
     );
-    expect(screen.getByRole("list", { name: "Sources" })).not.toHaveAttribute("aria-live");
+    expect(screen.getByRole("listbox", { name: "Sources" })).not.toHaveAttribute("aria-live");
   });
 
   it("coalesces rapid live-region summaries to at most two updates per second", () => {
@@ -319,10 +319,10 @@ describe("ImportQueue", () => {
       onAction: vi.fn(),
     };
     const rendered = render(<ImportQueue {...props} />);
-    fireEvent.scroll(screen.getByRole("list", { name: "Sources" }), { target: { scrollTop: 14400 } });
+    fireEvent.scroll(screen.getByRole("listbox", { name: "Sources" }), { target: { scrollTop: 14400 } });
     rendered.unmount();
     render(<ImportQueue {...props} />);
-    expect(screen.getByRole("list", { name: "Sources" })).toHaveProperty("scrollTop", 14400);
+    expect(screen.getByRole("listbox", { name: "Sources" })).toHaveProperty("scrollTop", 14400);
   });
 
   it("keeps a 10k queue inside the virtual DOM budget and exposes global ARIA positions", async () => {
@@ -342,18 +342,18 @@ describe("ImportQueue", () => {
       />,
     );
 
-    const list = screen.getByRole("list", { name: "Sources" });
-    expect(screen.getAllByRole("listitem").length).toBeLessThanOrEqual(80);
-    expect(screen.getAllByRole("listitem")[0]).toHaveAttribute("aria-posinset", "1");
-    expect(screen.getAllByRole("listitem")[0]).toHaveAttribute("aria-setsize", "10000");
+    const list = screen.getByRole("listbox", { name: "Sources" });
+    expect(screen.getAllByRole("option").length).toBeLessThanOrEqual(80);
+    expect(screen.getAllByRole("option")[0]).toHaveAttribute("aria-posinset", "1");
+    expect(screen.getAllByRole("option")[0]).toHaveAttribute("aria-setsize", "10000");
 
     fireEvent.scroll(list, { target: { scrollTop: 9_999 * 72 } });
     await waitFor(() => expect(screen.getByTestId("import-item-item-9999")).toBeInTheDocument());
-    expect(screen.getAllByRole("listitem").length).toBeLessThanOrEqual(80);
+    expect(screen.getAllByRole("option").length).toBeLessThanOrEqual(80);
     expect(screen.getByTestId("import-item-item-9999")).toHaveAttribute("aria-posinset", "10000");
   });
 
-  it("moves focus to the virtual list with a visible active descendant when a focused row is recycled", async () => {
+  it("keeps listbox focus and keyboard navigation when the active descendant is recycled", async () => {
     const items = Array.from({ length: 500 }, (_, index) => item(`focus-${index}`, "queued"));
     render(
       <ImportQueue
@@ -371,12 +371,16 @@ describe("ImportQueue", () => {
       />,
     );
 
-    const list = screen.getByRole("list", { name: "Sources" });
-    screen.getByTestId("import-item-focus-0").focus();
+    const list = screen.getByRole("listbox", { name: "Sources" });
+    list.focus();
+    fireEvent.keyDown(list, { key: "ArrowDown" });
+    expect(list).toHaveAttribute("aria-activedescendant", "import-queue-row-focus-0");
     fireEvent.scroll(list, { target: { scrollTop: 300 * 72 } });
 
-    await waitFor(() => expect(screen.getByTestId("import-item-focus-300")).toHaveFocus());
+    await waitFor(() => expect(list).toHaveAttribute("aria-activedescendant", "import-queue-row-focus-300"));
+    expect(list).toHaveFocus();
     expect(screen.getByTestId("import-item-focus-300")).toHaveAttribute("aria-posinset", "301");
-    expect(list).not.toHaveAttribute("aria-activedescendant");
+    fireEvent.keyDown(list, { key: "ArrowDown" });
+    expect(list).toHaveAttribute("aria-activedescendant", "import-queue-row-focus-301");
   });
 });

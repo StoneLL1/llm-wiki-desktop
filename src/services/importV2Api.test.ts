@@ -183,4 +183,21 @@ describe("Import V2 presentation API", () => {
 
     expect(invoke).toHaveBeenLastCalledWith("cancel_import_batch_v2", { request });
   });
+
+  it("normalizes backend failures while retaining technical diagnostics", async () => {
+    invoke.mockRejectedValueOnce({ code: "IMPORT_PREVIEW_OFFLINE", message: "raw transport detail" });
+    const failure = await importV2Api.getPreviewContent({
+      projectId: "project-1",
+      projectRootPath: "D:/Wiki/项目",
+      sessionId: "session-1",
+      itemId: "item-1",
+      candidateId: null,
+    }).catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      code: "IMPORT_PREVIEW_OFFLINE",
+      summaryKey: "backendError.summary.import",
+      recoverable: true,
+    });
+    expect((failure as { technicalDetails?: string }).technicalDetails).toContain("raw transport detail");
+  });
 });

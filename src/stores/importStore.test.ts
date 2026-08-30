@@ -242,6 +242,39 @@ describe("Import V2 session store", () => {
     expect(useImportStore.getState().session?.items).toHaveLength(6);
   });
 
+  it("preserves the stable selected item when a filtered first page omits it", () => {
+    useImportStore.getState().attachSession(projectA, session([item("selected"), item("other")]));
+    useImportStore.getState().selectItem("selected");
+    useImportStore.getState().attachSessionWindow(projectA, overview(1), {
+      sessionId: "session-a",
+      snapshotRevision: 7,
+      items: [item("other")],
+      nextCursor: null,
+      total: 1,
+    });
+    expect(useImportStore.getState().session?.items.map(({ itemId }) => itemId)).toEqual(["other"]);
+    expect(useImportStore.getState().selectedItemId).toBe("selected");
+    expect(useImportStore.getState().itemById.selected?.itemId).toBe("selected");
+  });
+
+  it("clears the selected item when a new session window is attached", () => {
+    useImportStore.getState().attachSession(projectA, session([item("selected")]));
+    useImportStore.getState().selectItem("selected");
+    useImportStore.getState().attachSessionWindow(projectA, {
+      ...overview(0),
+      sessionId: "session-next",
+    }, {
+      sessionId: "session-next",
+      snapshotRevision: 7,
+      items: [],
+      nextCursor: null,
+      total: 0,
+    });
+
+    expect(useImportStore.getState().selectedItemId).toBeNull();
+    expect(useImportStore.getState().itemById.selected).toBeUndefined();
+  });
+
   it("keeps page ordering stable for progress-only patches and updates it only on filter membership changes", () => {
     useImportStore.getState().attachSession(projectA, session([item("one"), item("two")]));
     const pageOrder = useImportStore.getState().orderedItemIdsByPage;

@@ -392,11 +392,12 @@ export function useImportTaskCoordinator({
     epoch: number,
     sessionId: string,
   ) => {
-    selectedTasksUpsert(tasks);
     if (!isScopeCurrent(requestKey, epoch, sessionId)) {
+      tasks.forEach((task) => useTaskStore.getState().recordTaskFact(task));
       endPendingItems(itemIds, requestKey, epoch);
       return;
     }
+    selectedTasksUpsert(tasks);
     const resolvedTasks = tasks.map(
       (task) => useTaskStore.getState().taskById[task.id] ?? task,
     );
@@ -449,7 +450,7 @@ export function useImportTaskCoordinator({
       void refreshForScope(pending.projectKey, pending.epoch)
         .catch((error) => {
           if (isScopeCurrent(pending.projectKey, pending.epoch)) {
-            pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error) }));
+            pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error, t) }));
           }
         })
         .finally(pending.settleQueue);
@@ -516,11 +517,12 @@ export function useImportTaskCoordinator({
   const trackPathTask = useCallback((task: BackendTask, pending: PendingPathTask) => {
     const knownTask = useTaskStore.getState().taskById[task.id];
     const observedTask = knownTask && isSettledImportTask(knownTask) ? knownTask : task;
-    selectedTaskUpsert(observedTask);
     if (!isScopeCurrent(pending.projectKey, pending.epoch)) {
+      useTaskStore.getState().recordTaskFact(observedTask);
       useImportStore.getState().endMutation(pending.mutationKey);
       return Promise.resolve();
     }
+    selectedTaskUpsert(observedTask);
     return new Promise<void>((settleQueue) => {
       trackedDiscoveryTaskIdsRef.current.add(task.id);
       pendingPathTasks.current.set(task.id, { ...pending, settleQueue });
@@ -538,8 +540,11 @@ export function useImportTaskCoordinator({
   const trackConfirmationTask = useCallback((task: BackendTask, pending: PendingScopedTask) => {
     const knownTask = useTaskStore.getState().taskById[task.id];
     const observedTask = knownTask && isTerminalStatus(knownTask.status) ? knownTask : task;
+    if (!isScopeCurrent(pending.projectKey, pending.epoch)) {
+      useTaskStore.getState().recordTaskFact(observedTask);
+      return;
+    }
     selectedTaskUpsert(observedTask);
-    if (!isScopeCurrent(pending.projectKey, pending.epoch)) return;
     pendingConfirmationTasks.current.set(task.id, pending);
     if (isScopeCurrent(pending.projectKey, pending.epoch)) openTaskDrawer(task.id);
     if (isTerminalStatus(observedTask.status)) settleConfirmationTask(observedTask, pending);
@@ -547,8 +552,11 @@ export function useImportTaskCoordinator({
   }, [isScopeCurrent, openTaskDrawer, requestTaskReconciliation, selectedTaskUpsert, settleConfirmationTask]);
 
   const trackCapabilityTask = useCallback((task: BackendTask, pending: PendingScopedTask) => {
+    if (!isScopeCurrent(pending.projectKey, pending.epoch)) {
+      useTaskStore.getState().recordTaskFact(task);
+      return;
+    }
     selectedTaskUpsert(task);
-    if (!isScopeCurrent(pending.projectKey, pending.epoch)) return;
     pendingCapabilityTasks.current.set(task.id, pending);
     openTaskDrawer(task.id);
     reconcilePendingTasks([task]);
@@ -678,7 +686,7 @@ export function useImportTaskCoordinator({
       await taskLauncher.cancel(discoveryTaskId);
     } catch (error) {
       if (isProjectCurrent(projectKey)) {
-        pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error) }));
+        pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error, t) }));
       }
       throw error;
     }
@@ -718,7 +726,7 @@ export function useImportTaskCoordinator({
       }
     } catch (error) {
       if (isScopeCurrent(projectKey, epoch, sessionId)) {
-        pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error) }));
+        pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error, t) }));
       }
       throw error;
     } finally {
@@ -743,7 +751,7 @@ export function useImportTaskCoordinator({
         });
       } catch (error) {
         if (isScopeCurrent(projectKey, epoch, sessionId)) {
-          pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error) }));
+          pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error, t) }));
         }
         throw error;
       }

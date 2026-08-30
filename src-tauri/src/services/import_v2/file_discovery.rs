@@ -252,7 +252,7 @@ impl FileDiscoveryService {
                     &mut result,
                     &path,
                     relative,
-                    FileSkipReason::InvalidPath,
+                    FileSkipReason::NonUtf8Path,
                     "Source path is not valid UTF-8.".into(),
                 );
                 continue;
@@ -263,7 +263,7 @@ impl FileDiscoveryService {
                     &mut result,
                     &path,
                     relative,
-                    FileSkipReason::InvalidPath,
+                    FileSkipReason::NonUtf8Path,
                     "File name is not valid UTF-8.".into(),
                 );
                 continue;

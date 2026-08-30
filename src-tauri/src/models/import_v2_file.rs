@@ -165,6 +165,7 @@ pub enum FileSkipReason {
     LargeDataConfirmationRequired,
     Duplicate,
     InvalidPath,
+    NonUtf8Path,
     Unreadable,
 }
 

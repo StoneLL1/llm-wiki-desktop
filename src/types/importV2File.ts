@@ -23,7 +23,7 @@ export const FILE_SKIP_REASONS = [
   "symlink_or_reparse_point", "hidden_or_system", "ignored_directory", "project_internal",
   "unsupported_format", "cycle_detected", "depth_limit_exceeded",
   "file_limit_exceeded", "file_too_large", "insufficient_disk", "large_data_confirmation_required",
-  "duplicate", "invalid_path", "unreadable",
+  "duplicate", "invalid_path", "non_utf8_path", "unreadable",
 ] as const;
 export type FileSkipReason = (typeof FILE_SKIP_REASONS)[number];
 

@@ -744,7 +744,7 @@ fn reports_non_utf8_paths_as_typed_visible_skips() {
     let skipped = result
         .skipped
         .iter()
-        .find(|entry| entry.reason == FileSkipReason::InvalidPath)
+        .find(|entry| entry.reason == FileSkipReason::NonUtf8Path)
         .expect("the unsupported path must remain visible as a typed skip");
     assert!(skipped
         .detail

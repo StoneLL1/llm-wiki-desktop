@@ -82,6 +82,7 @@ interface ImportQueueRowProps {
   position: number;
   setSize: number;
   selected: boolean;
+  active: boolean;
   pending: boolean;
   onSelectItem: (itemId: string) => void;
   onSetItemSelected: (itemId: string, selected: boolean) => void;
@@ -95,6 +96,7 @@ const ImportQueueRow = memo(function ImportQueueRow({
   position,
   setSize,
   selected,
+  active,
   pending,
   onSelectItem,
   onSetItemSelected,
@@ -110,20 +112,23 @@ const ImportQueueRow = memo(function ImportQueueRow({
       id={rowDomId(item.itemId)}
       data-testid={`import-item-${item.itemId}`}
       data-virtual-row-id={item.itemId}
-      className={`import-v2-queue__row ${selected ? "is-selected" : ""}`}
+      className={`import-v2-queue__row ${selected ? "is-selected" : ""} ${active ? "is-active" : ""}`}
       onClick={() => onSelectItem(item.itemId)}
       onKeyDown={(event) => {
         if (event.target !== event.currentTarget) return;
-        if (event.key === "Enter" || event.key === " ") {
+        if (event.key === "Enter") {
           event.preventDefault();
           onSelectItem(item.itemId);
+        } else if (event.key === " " && presentation.selectable && !pending) {
+          event.preventDefault();
+          onSetItemSelected(item.itemId, !item.selected);
         }
       }}
       tabIndex={-1}
-      role="listitem"
+      role="option"
       aria-posinset={position}
       aria-setsize={setSize}
-      aria-current={selected ? "true" : undefined}
+      aria-selected={selected}
       onFocus={(event) => {
         if (event.target === event.currentTarget) onActiveItem(item.itemId);
       }}
@@ -200,7 +205,6 @@ export function ImportQueue({
   const discoveryActive = discoveryTask?.status === "queued" || discoveryTask?.status === "running" || discoveryTask?.status === "cancelling";
   const discoveryCount = discoveryTask?.progress?.current ?? 0;
   const listRef = useRef<HTMLDivElement>(null);
-  const focusTransferRef = useRef(false);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(DEFAULT_VIEWPORT_HEIGHT);
   const [activeItemId, setActiveItemId] = useState<string | null>(selectedItemId);
@@ -239,16 +243,6 @@ export function ImportQueue({
   }, [anchorKey, itemIndexOffset]);
 
   useEffect(() => {
-    if (!focusTransferRef.current) return;
-    focusTransferRef.current = false;
-    const visibleMountedIndex = Math.max(0, Math.min(mountedItems.length - 1, Math.floor(scrollTop / ROW_HEIGHT) - windowStart));
-    const nextActive = mountedItems[visibleMountedIndex]?.itemId ?? null;
-    setActiveItemId(nextActive);
-    if (nextActive) document.getElementById(rowDomId(nextActive))?.focus();
-    else listRef.current?.focus();
-  }, [mountedItems, scrollTop, windowStart]);
-
-  useEffect(() => {
     if (selectedItemId) setActiveItemId(selectedItemId);
   }, [selectedItemId]);
 
@@ -260,12 +254,10 @@ export function ImportQueue({
       items.length,
       nextWindowStart + Math.min(MAX_MOUNTED_ROWS, Math.ceil(nextViewportHeight / ROW_HEIGHT) + (OVERSCAN_ROWS * 2)),
     );
-    const focusedRow = document.activeElement instanceof HTMLElement
-      ? document.activeElement.closest<HTMLElement>("[data-virtual-row-id]")
-      : null;
-    if (focusedRow) {
-      const focusedIndex = items.findIndex((item) => item.itemId === focusedRow.dataset.virtualRowId);
-      if (focusedIndex < nextWindowStart || focusedIndex >= nextWindowEnd) focusTransferRef.current = true;
+    const activeIndex = items.findIndex((item) => item.itemId === activeItemId);
+    if (activeIndex < nextWindowStart || activeIndex >= nextWindowEnd) {
+      const visibleIndex = Math.max(0, Math.min(items.length - 1, Math.floor(nextScrollTop / ROW_HEIGHT)));
+      setActiveItemId(items[visibleIndex]?.itemId ?? null);
     }
     const topIndex = Math.max(0, Math.min(items.length - 1, Math.floor(nextScrollTop / ROW_HEIGHT)));
     const topItem = items[topIndex];
@@ -289,15 +281,25 @@ export function ImportQueue({
 
   const handleListKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.target !== event.currentTarget || items.length === 0) return;
-    const currentIndex = Math.max(0, items.findIndex((item) => item.itemId === activeItemId));
+    const currentIndex = items.findIndex((item) => item.itemId === activeItemId);
     let nextIndex = currentIndex;
     if (event.key === "ArrowDown") nextIndex = Math.min(items.length - 1, currentIndex + 1);
-    else if (event.key === "ArrowUp") nextIndex = Math.max(0, currentIndex - 1);
+    else if (event.key === "ArrowUp") nextIndex = currentIndex < 0 ? 0 : Math.max(0, currentIndex - 1);
     else if (event.key === "Home") nextIndex = 0;
     else if (event.key === "End") nextIndex = items.length - 1;
-    else if ((event.key === "Enter" || event.key === " ") && activeItemId) {
+    else if (event.key === "Enter" && activeItemId) {
       event.preventDefault();
       onSelectItem(activeItemId);
+      return;
+    } else if (event.key === " " && activeItemId) {
+      event.preventDefault();
+      const activeItem = items.find((item) => item.itemId === activeItemId);
+      if (activeItem) {
+        const presentation = presentImportItem(activeItem);
+        if (presentation.selectable && !pendingItemIds.has(activeItemId)) {
+          onSetItemSelected(activeItemId, !activeItem.selected);
+        }
+      }
       return;
     } else return;
     event.preventDefault();
@@ -341,7 +343,8 @@ export function ImportQueue({
       <div
         ref={listRef}
         className="import-v2-queue__list app-pane-scrollbar"
-        role="list"
+        role="listbox"
+        aria-activedescendant={activeItemId && mountedItems.some((item) => item.itemId === activeItemId) ? rowDomId(activeItemId) : undefined}
         aria-label={t("importV2.queue.title")}
         tabIndex={0}
         onKeyDown={handleListKeyDown}
@@ -360,6 +363,7 @@ export function ImportQueue({
               position={itemIndexOffset + windowStart + mountedIndex + 1}
               setSize={setSize}
               selected={selectedItemId === item.itemId}
+              active={activeItemId === item.itemId}
               pending={pendingItemIds.has(item.itemId)}
               onSelectItem={onSelectItem}
               onSetItemSelected={onSetItemSelected}

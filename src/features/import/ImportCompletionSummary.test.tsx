@@ -62,6 +62,14 @@ describe("ImportCompletionSummary", () => {
     expect(completionCountRows(completion).find((row) => row.key === key)?.count).toBe(count);
   });
 
+  it("keeps waiting items out of completion and offers one continuation action", () => {
+    const onContinueRemaining = vi.fn();
+    render(<ImportCompletionSummary completion={completion} remainingCount={3} onContinueRemaining={onContinueRemaining} onViewSources={vi.fn()} onViewSource={vi.fn()} onUpdateWiki={vi.fn()} onRetryFailure={vi.fn()} />);
+    expect(screen.getByText(/3 item\(s\).*not complete/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Continue remaining 3" }));
+    expect(onContinueRemaining).toHaveBeenCalledTimes(1);
+  });
+
   it("shows human filenames, keeps internal identity hidden, and exposes independent actions", () => {
     const onViewSources = vi.fn();
     const onViewSource = vi.fn();
