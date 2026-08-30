@@ -502,6 +502,8 @@ cancel_app_capability_install_v1(taskId, taskRevision) -> BackendTask
 
 ## 14. Batch 9：sealed candidate 与四平台 Release 验收
 
+**状态（2026-08-30）**：已完成发布前只读审计与本地工作树源码门禁，但 Batch 9 保持 **No-Go / Pending**。本地 Batch 8 SHA `6dbd92c85ca5a670b5e8e4f1724813fbbb275b8b` 尚未进入 public `master`，没有同 SHA 三平台 CI，且门禁运行时保留了已有 dirty worktree，不能冒充 immutable candidate attestation；原计划的 `app-v0.1.0` 已绑定旧 commit 且对应 release preflight 失败，不可移动或复用，新的首发坐标还需要版本 / upgrade obligation 的机器合同重基线；严格 final-four gate 也按设计在真实 signed catalog 缺失时 fail closed。未获得新的 immutable tag 明确授权，未创建 tag、Draft、Release 或 `latest.json`，四平台 sealed packaged matrix 尚未开始。详见 `docs/release/2026-08-30-batch-9-preflight-evidence.md`。
+
 ### 14.1 前置条件
 
 - Batch 0–8 的代码、合同、两轮 review 和完整 gate 全绿。
@@ -545,13 +547,14 @@ npm run check:final-four-redlines
 npm run check
 ```
 
-然后要求：
+然后要求（按当前 workflow 分为发布前与发布后两阶段）：
 
 - 四个平台所有必测矩阵均为 Passed，不能以 Pending 或源码测试替代。
-- 匿名反向下载安装包、capability archive、catalog、`latest.json`、checksums、SBOM 和 provenance 成功。
-- 从公开候选制品重复至少一遍能力管理与 Import 续接，不使用 workflow 临时路径。
+- 发布前从 sealed `draft-release-bundle` 重复至少一遍能力管理与 Import 续接，不使用构建 job 临时路径。
 - `docs/release/batch-6-acceptance-evidence.md` 与 first-release checklist 更新为 exact candidate 证据。
-- Release owner 完成 Go / No-Go 记录；只有获得单独最终发布批准后才能执行 protected publisher。
+- Release owner 完成发布前 Go / No-Go 记录；只有获得单独最终发布批准后才能执行 protected publisher。
+- protected publisher 获批后，在同一受保护操作中发布并匿名反向下载安装包、capability archive、catalog、`latest.json`、checksums、SBOM 和 provenance；任一验证失败按 runbook fail closed / rollback。
+- 从公开制品重复至少一遍能力管理与 Import 续接，并单独记录发布后结果。该匿名公开证据不能作为当前 workflow 的发布前批准条件。
 
 ## 15. 审阅问题到 Batch 的追踪
 

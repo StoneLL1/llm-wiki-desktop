@@ -8,7 +8,17 @@ Audited predecessor master (before this contract update): `82690d5297d404c173b08
 
 Reviewed signing-contract merge: `41dee7207778222c8b4e44c5cf7da25e87cc6ec9` — three-platform [same-SHA CI passed](https://github.com/StoneLL1/llm-wiki-desktop/actions/runs/32933847144)
 
-Intended version/tag: `0.1.0` / `app-v0.1.0` — **tag not created**
+Historical intended version/tag as recorded on 2026-08-26: `0.1.0` / `app-v0.1.0` — **recorded then as not created; superseded by the correction below**
+
+## 2026-08-30 Batch 9 preflight correction
+
+Public read-only inspection now shows that `app-v0.1.0` exists and dereferences to `43cf323572f9e43cd59be93dfec8053fba6b3d8d`; its release workflow failed preflight, so this immutable tag must not be moved or reused. Local Batch 8 baseline `6dbd92c85ca5a670b5e8e4f1724813fbbb275b8b` is not public `master` (`df0e709ffb1a2571db4d96c459fd053a511ba24e`) and has no same-SHA hosted CI.
+
+The current decision remains **No-Go**. The release owner must first reconcile the candidate onto the protected branch, obtain same-SHA CI, choose a reviewed new version/tag, re-audit protected input names with valid authentication, and separately authorize creation of that immutable tag. No sealed bundle or four-platform row has been accepted. See [Batch 9 preflight evidence](2026-08-30-batch-9-preflight-evidence.md).
+
+The remaining `0.1.0`-specific prerequisites, waiver text, workflow steps, and matrix below are retained as historical evidence and must not be executed as a current checklist. Before Batch 9 resumes, rebaseline this checklist to the newly approved coordinate and explicitly decide its prior-version upgrade obligation; no `0.1.0` bootstrap waiver is inherited automatically.
+
+That rebaseline is a machine-contract change, not a documentation-only tag rename: update `release/release-contract.json`, package/Tauri versions, SPEC, runbook, release notes, known limitations, and contract tests together; review them, run the full local gate from a clean exact commit, and require same-SHA hosted CI. Under the current workflow, anonymous public downloads occur only inside the separately approved `publish-stable` job after publication. Therefore the current operational sequence must be: sealed-bundle platform evidence → release-owner pre-publication Go/No-Go → separate publisher approval → atomic publish plus anonymous reverse-download verification/rollback → post-publication result record.
 
 This checklist contains no secret value, private key, certificate, password, token, private signed URL, user path, or user content. A checked source/config item is not evidence that a real package was updater-signed, installed, upgraded, or anonymously downloaded; Windows Authenticode and Apple Developer ID/notarization are intentionally outside the initial policy.
 
@@ -44,7 +54,7 @@ After every prerequisite above is reviewed:
 1. Reverify `docs/release/release-notes.md` and `docs/release/known-limitations.md` for the exact candidate version.
 2. Run `npm run check:release-config`, `npm run check:release-config:local`, `npm run test:final-four-redlines`, `npm run check:final-four-redlines`, and a from-beginning `npm run check`.
 3. Require same-SHA Windows, macOS, and Ubuntu CI success for the commit containing the public signing identities/trust key.
-4. Obtain separate explicit user approval before creating or pushing `app-v0.1.0`. Do not reuse or move a release tag.
+4. Obtain separate explicit user approval before creating or pushing the newly reviewed immutable candidate tag. `app-v0.1.0` is already occupied; do not reuse or move it.
 5. Bind the workflow run, tag, and exact 40-character commit SHA in the evidence record.
 6. Allow the workflow to build and seal `draft-release-bundle`; do not approve `publish-stable`.
 7. Complete the four-platform `0.1.0` clean-install matrix below from that sealed bundle. The user has deferred this execution; no row may be marked complete until it is actually run.

@@ -1,7 +1,7 @@
 # Batch 6 release acceptance evidence
 
 Date: 2026-08-21
-Last updated: 2026-08-26
+Last updated: 2026-08-30
 
 Original candidate baseline: `5eac9315b32b8fcaad188e19e783716eb969bde5` on local `master`
 
@@ -9,6 +9,16 @@ Release coordinate: `StoneLL1/llm-wiki-desktop`, `0.1.0`
 Original decision: **Public beta No-Go; Batch 6 local automated acceptance complete, remote and packaged evidence Pending**
 
 This record contains no private key, certificate, token, user project path, user content, or private signed URL. It distinguishes deterministic source-level evidence from real signed package evidence; the former must not be used to claim the latter.
+
+## 2026-08-30 Batch 9 preflight audit
+
+Decision: **Public beta No-Go; the local source gate passed except for the intentionally fail-closed sealed-catalog redline, while the exact candidate, same-SHA CI, sealed artifacts, and four-platform real-host evidence do not exist.**
+
+- Local Batch 8 baseline is `6dbd92c85ca5a670b5e8e4f1724813fbbb275b8b`; public `master` is `df0e709ffb1a2571db4d96c459fd053a511ba24e`, so the local implementation cannot claim the public SHA's successful CI.
+- `app-v0.1.0` is no longer an unused coordinate: it points to older commit `43cf323572f9e43cd59be93dfec8053fba6b3d8d`, and its Atomic desktop release workflow failed repository preflight. The immutable tag must not be moved or reused.
+- The full local repository gate passed from the beginning in 12m35.2s outside the workspace sandbox, with the owner's pre-existing tracked and untracked changes preserved. This is diagnostic working-tree evidence, not an immutable exact-SHA candidate attestation. The strict final-four release gate correctly remains red until a product-manifest-derived exact signed catalog is produced by a real sealed candidate.
+- Resumption also requires a reviewed replacement first-stable coordinate and machine-contract rebaseline, a clean exact candidate commit, and the two-stage release decision required by the current workflow: pre-publication Go/No-Go before separate publisher approval, followed by atomic publication and anonymous reverse-download verification/rollback.
+- No tag, Draft, Release, `latest.json`, protected approval, artifact, or platform acceptance row was created or changed. The detailed findings and resumption conditions are in [Batch 9 preflight evidence](2026-08-30-batch-9-preflight-evidence.md).
 
 ## 2026-08-26 signing-contract merge and same-SHA CI closure
 
