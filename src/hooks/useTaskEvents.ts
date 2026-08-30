@@ -33,6 +33,10 @@ import {
 } from "../stores/projectScope";
 import { translateBackendError } from "../lib/backendError";
 
+interface AppForegroundChangedPayload {
+  foreground: boolean;
+}
+
 const hasTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -159,22 +163,40 @@ export function useTaskEvents(): void {
         // Notification actions are unavailable in browser-only development.
       });
 
-    const refreshPermissionEpoch = () => {
-      invalidateNotificationPermissionEpoch();
+    let resourceRefreshArmed = false;
+    listen<AppForegroundChangedPayload>("app://foreground-changed", (evt) => {
+      if (cancelled) return;
+      if (!evt.payload.foreground) {
+        resourceRefreshArmed = true;
+        return;
+      }
+      if (!resourceRefreshArmed) return;
+      resourceRefreshArmed = false;
       const activeProject = useProjectStore.getState().currentProject;
       invalidateObservedProjectResourcesOnFocus({
         projectId: activeProject.projectId,
         rootPath: activeProject.rootPath,
       });
+    })
+      .then((unlisten) => {
+        if (cancelled) unlisten();
+        else unlisteners.push(unlisten);
+      })
+      .catch(() => {
+        // Fail closed: DOM focus must not become a resource-refresh fallback.
+      });
+
+    const refreshNotificationPermissionEpoch = () => {
+      invalidateNotificationPermissionEpoch();
     };
-    window.addEventListener("focus", refreshPermissionEpoch);
+    window.addEventListener("focus", refreshNotificationPermissionEpoch);
 
     return () => {
       cancelled = true;
       const activeProjectId = useProjectStore.getState().currentProject.projectId;
       clearPendingTaskEvents((event) => event.projectId === activeProjectId);
       unregisterStoreListener();
-      window.removeEventListener("focus", refreshPermissionEpoch);
+      window.removeEventListener("focus", refreshNotificationPermissionEpoch);
       unlisteners.forEach((fn) => fn());
     };
   }, []);

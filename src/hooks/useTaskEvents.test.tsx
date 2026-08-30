@@ -347,16 +347,60 @@ describe("task event listener bridge", () => {
       ["wiki"],
     );
     const mounted = renderHook(() => useTaskEvents());
-    await waitFor(() => expect(listenMock).toHaveBeenCalled());
+    await waitFor(() => expect(
+      listenMock.mock.calls.find(([channel]) => channel === "app://foreground-changed")?.[1],
+    ).toBeTypeOf("function"));
+    const foregroundChanged = listenMock.mock.calls.find(
+      ([channel]) => channel === "app://foreground-changed",
+    )?.[1] as ((event: { payload: { foreground: boolean } }) => void) | undefined;
 
     act(() => {
       window.dispatchEvent(new Event("blur"));
       window.dispatchEvent(new Event("focus"));
+      foregroundChanged?.({ payload: { foreground: true } });
+      foregroundChanged?.({ payload: { foreground: true } });
     });
 
     expect(invalidateNotificationPermissionEpochMock).toHaveBeenCalledTimes(1);
     expect(invalidate).not.toHaveBeenCalled();
     expect(revalidate).not.toHaveBeenCalled();
+    mounted.unmount();
+    unobserve();
+    unregister();
+  });
+
+  it("revalidates observed resources once after a real background cycle", async () => {
+    useProjectStore.setState({
+      currentProject: {
+        ...defaultProject,
+        projectId: "project-a",
+        rootPath: "D:/wiki",
+      },
+    });
+    const invalidate = vi.fn();
+    const revalidate = vi.fn();
+    const unregister = registerProjectResource("wiki", { invalidate }, revalidate);
+    const unobserve = observeProjectResources(
+      { projectId: "project-a", rootPath: "D:/wiki" },
+      ["wiki"],
+    );
+    const mounted = renderHook(() => useTaskEvents());
+    await waitFor(() => expect(
+      listenMock.mock.calls.find(([channel]) => channel === "app://foreground-changed")?.[1],
+    ).toBeTypeOf("function"));
+    const foregroundChanged = listenMock.mock.calls.find(
+      ([channel]) => channel === "app://foreground-changed",
+    )?.[1] as ((event: { payload: { foreground: boolean } }) => void) | undefined;
+
+    act(() => {
+      foregroundChanged?.({ payload: { foreground: false } });
+      foregroundChanged?.({ payload: { foreground: true } });
+      foregroundChanged?.({ payload: { foreground: true } });
+    });
+
+    expect(invalidate).toHaveBeenCalledOnce();
+    expect(invalidate).toHaveBeenCalledWith({ projectId: "project-a", rootPath: "D:/wiki" });
+    expect(revalidate).toHaveBeenCalledOnce();
     mounted.unmount();
     unobserve();
     unregister();
