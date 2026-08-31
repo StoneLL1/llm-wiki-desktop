@@ -23,7 +23,8 @@ UI-Frontend-design/import-workbench.html
 
 # --- Local-only workspace state (machine-specific or regenerable) ---
 .worktrees/
-.codex/
+.codex/config.toml
+.codex/hooks.json
 .target-*/
 graphify-out/
 
