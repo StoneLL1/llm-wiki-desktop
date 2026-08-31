@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security reports
+    url: https://github.com/StoneLL1/llm-wiki-desktop/security/advisories
+    about: Vulnerabilities must be reported privately — see SECURITY.md, never in an issue.
