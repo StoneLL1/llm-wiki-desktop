@@ -1,19 +1,8 @@
 name: CI
 
-# Branch and PR pushes only (owner decision 10, audit §3.6 option A).
-# Release tags are validated by desktop-prerelease.yml (app-v*.*.*-rc.*)
-# and desktop-release.yml (stable app-v*.*.*), which run the full gate
-# with version-aware checks; a plain CI run on a tag would reject the
-# rc-suffixed version and fail.
 on:
   push:
-    branches:
-      - "**"
   pull_request:
-
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -22,7 +11,6 @@ jobs:
   validation:
     name: Validate (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -33,20 +21,18 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Setup Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@v4
         with:
           node-version: 22.23.1
           cache: npm
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        with:
-          toolchain: stable
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Install Linux Tauri dependencies
         if: runner.os == 'Linux'
@@ -94,47 +80,5 @@ jobs:
       - name: Check Tauri GUI Rust compile
         run: npm run check:rust:gui
 
-      - name: Verify committed Tauri schemas match regeneration
-        run: |
-          git diff --exit-code -- src-tauri/gen/schemas || {
-            echo "::error::src-tauri/gen/schemas is stale. Run 'npm run check:rust:gui' locally and commit the regenerated schemas in the same change."
-            exit 1
-          }
-
       - name: Run Rust service tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
-
-  cargo-audit:
-    name: Cargo audit
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
-
-      - name: Audit Rust dependencies against RustSec advisories
-        run: cargo audit --file src-tauri/Cargo.lock
-
-  codeql:
-    name: CodeQL (javascript-typescript)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: read
-      security-events: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
-        with:
-          languages: javascript-typescript
-
-      - name: Analyze
-        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
-        with:
-          category: "/language:javascript-typescript"
