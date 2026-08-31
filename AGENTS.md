@@ -106,6 +106,7 @@ This is mandatory for all agents (main and subagents).
 
 - **`progress.txt`** — Append a record after every important milestone (feature landed, architecture decision, milestone reached, significant fix). Newest on top (reverse chronological). Format: `[YYYY-MM-DD] Module/Task — Summary of what was done — Key decision or open issue`. Only append; never overwrite or edit history.
 - **`gotchas.txt`** — Record a single entry whenever an error recurs, is subtle, or is easy to trip over once. Format: `Symptom — Root cause — How to avoid`. When hitting a similar issue later, check here first.
+- **Local-only, never tracked** — Both files live under `SPEC/` (root-level copies of the same names are legacy duplicates, also maintained locally) and are intentionally untracked since 2026-08-31: they do not exist in a fresh clone and `.gitignore` excludes them. The public, machine-detail-free extract for outside contributors is `docs/maintainers/troubleshooting.md`. Never commit secrets to either file; keep machine-specific paths and environment details out of anything that will be distilled into the public guide.
 
 These rules are mirrored in `CLAUDE.md`.
 
