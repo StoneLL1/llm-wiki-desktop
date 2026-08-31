@@ -35,7 +35,7 @@
     "version": "1.61.1",
     "license": "Apache-2.0 AND BSD-2-Clause AND BSD-3-Clause AND ISC AND MIT",
     "source": "capabilities/browser-runtime/package-lock.json",
-    "lockSha256": "dd60248bd70345f6fb453c24f3a80ad33ce38b0fb23dd0296c4223007312e347",
+    "lockSha256": "56f671c5222a68549199b93c90edf6240ff01f6c208db04095f7294af96b97c6",
     "install": "npm exec --prefix capabilities/browser-runtime -- playwright install chromium"
   },
   "browserRuntimeLiteDependencies": {

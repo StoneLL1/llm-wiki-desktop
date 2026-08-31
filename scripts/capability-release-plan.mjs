@@ -24,12 +24,20 @@ function licenseTerms(expression) {
     .filter((term) => !["AND", "OR", "WITH"].includes(term));
 }
 
+// Declared digests are recorded over the canonical LF bytes that Git stores.
+// A Windows checkout with `core.autocrlf=true` materializes CRLF lock files,
+// so hash the line-ending-normalized content to keep verification identical
+// across contributor machines and CI runners.
+function lockDigest(bytes) {
+  return createHash("sha256").update(bytes.toString("utf8").replace(/\r\n/gu, "\n")).digest("hex");
+}
+
 async function validateSourceLock(name, source, root, targets) {
   const errors = [];
   const localLock = source.lock || (source.lockSha256 && typeof source.source === "string" && !source.source.startsWith("https://") ? source.source : null);
   if (localLock) {
     const bytes = await fs.readFile(path.join(root, localLock)).catch(() => null);
-    const digest = bytes && createHash("sha256").update(bytes).digest("hex");
+    const digest = bytes && lockDigest(bytes);
     if (!bytes || digest !== source.lockSha256) errors.push(`${name} dependency lock digest is not exact`);
   }
   if (source.distributions) {
@@ -47,7 +55,7 @@ async function validateSourceLock(name, source, root, targets) {
   for (const [lockField, digestField] of [["dependencyLock", "dependencyLockSha256"]]) {
     if (source[lockField]) {
       const bytes = await fs.readFile(path.join(root, source[lockField])).catch(() => null);
-      const digest = bytes && createHash("sha256").update(bytes).digest("hex");
+      const digest = bytes && lockDigest(bytes);
       if (!bytes || digest !== source[digestField]) errors.push(`${name} ${lockField} digest is not exact`);
     }
   }
