@@ -537,6 +537,7 @@ Layout:
 - Keep three tabs: Workbench, History, Capability Management.
 - Workbench order: compact source entry, capability matrix, batch status / grouped actions, continuous queue, fixed commit bar.
 - Source entry supports files, folders, URL and text / Markdown clipboard.
+- A user-triggered clipboard action routes one HTTP(S) URL to URL preview and all other text / Markdown to local text preview; never listen to the global clipboard silently.
 - Queue uses compact rows rather than cards.
 - Right context panel owns quick preview, provenance, quality, one primary action, technical details and logs.
 - Full Markdown preview opens in a large dialog and renders the final Source with local resources.
@@ -548,6 +549,7 @@ Rules:
 - All committable items are checked by default. Duplicates, failed items, unresolved conflicts and waiting items are not committable.
 - Each row has a checkbox, source icon, title / locator, status / progress, one primary action and an overflow menu.
 - Group login, OCR, ASR and capability-install actions in the batch status area; never chain unsolicited modals.
+- Batch action groups and counts come from the full backend session overview, not the current filter or loaded page. UI pagination must never determine which queued items start processing.
 - Preserve the capability matrix. Each tile shows only icon, name and a status dot; hover / focus reveals status, click / Enter pins an action popover, and Escape / outside click closes it.
 - Status dots require accessible names and must not be color-only.
 - The fixed bar shows selected, new, update, warning and unresolved counts. Primary copy is `导入到来源库 N 项`.
@@ -555,7 +557,10 @@ Rules:
 - Show final Markdown and affected paths before confirmation. Updates use Diff; risky overwrite / merge / replacement reports its Git checkpoint.
 - Partial batch success is valid. Unresolved items only block themselves.
 - Completion offers `查看已导入来源` and `用这些来源更新 Wiki`; the latter starts a new compile workflow.
+- Completion also reports unresolved / waiting items and offers `继续处理剩余项目`; a partial success summary must not make pending work disappear.
 - Preserve running state, grouped actions, filters and scroll across tab changes and navigation.
+- If readiness cannot be loaded, show `状态暂不可用` with retry. Do not fall back to a hard-coded optimistic support matrix.
+- Ordinary process interruption is reconciled from a backend `recoveryRequired` fact and shown as `已暂停，可继续`; do not couple recovery to index rebuild state.
 
 Login and capabilities:
 
@@ -563,6 +568,13 @@ Login and capabilities:
 - Raw Cookie values are never visible in React.
 - Capability actions describe the user goal (`启用本地 ASR 并继续`) and aggregate decoder, engine, model and language dependencies in one confirmation.
 - Login, install, OCR, ASR and Agent recovery are explicit user actions; successful preparation automatically resumes the affected item or group.
+- Capability Management is an app-global official catalog, not a passive summary of the current Import queue. It remains usable when no item is waiting and exposes `下载并安装` for a published, signed pack.
+- Use one compact list or table rather than a card wall. Each row shows purpose and coverage, installed / target version, distribution and operation state, package / model / installed size, license, one primary action and details.
+- Keep distribution, installed health, active operation and update / rollback as separate facts. A healthy old version may remain usable while an update is downloading or after the update rolls back.
+- Confirmation shows the exact version and target, publisher key, fixed source, sizes and disk requirement, license, runtime permission scope and whether matching Import items will continue. React never receives or constructs capability URLs, hashes, signatures, keys, archive paths or runner commands.
+- Downloads and installs use app-global observable tasks, survive tab / project navigation, and appear in the task drawer. Show real byte progress only while bounded; use named stages for verification, installation, health checking and activation.
+- `catalog unavailable` and `not published for this platform` are explicit non-actionable states. Never show an install button that cannot resolve to a frozen signed artifact for the current target.
+- A multi-route pack becomes installed only after every product-declared route passes its real runner health check and the runtime snapshot is activated as one unit.
 
 Source reader:
 
