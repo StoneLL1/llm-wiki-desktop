@@ -20,3 +20,40 @@ target-codex-*/
 .superpowers/
 UI-Frontend-design/import-v2-reference.html
 UI-Frontend-design/import-workbench.html
+
+# --- Local-only workspace state (machine-specific or regenerable) ---
+.worktrees/
+.codex/config.toml
+.codex/hooks.json
+.target-*/
+graphify-out/
+
+# Local maintenance logs — the public extract lives in
+# docs/maintainers/troubleshooting.md; these files stay on the
+# maintainer's machine only.
+/progress.txt
+/gotchas.txt
+/SPEC/progress.txt
+/SPEC/gotchas.txt
+
+# Private working documents — kept locally, not published. The four
+# docs/qa gate inputs below remain tracked because CI and Rust tests
+# read them (check:import-source-media, check:command-execution, and
+# include_str! fixtures); everything else under docs/qa is local-only.
+docs/audits/
+docs/reviews/
+docs/plans/
+docs/fixes/
+docs/qa/
+docs/superpowers/plans/
+docs/superpowers/evidence/
+docs/automation-research-and-implementation-plan.md
+docs/bilibili-to-markdown-runtime-retrospective.md
+docs/import-v2-cutover-checklist.md
+docs/import-v2-cutover-evidence.json
+docs/import-v2-migration-matching.md
+docs/import-v2-open-source-media-ingest-plan.md
+docs/release/2026-08-30-batch-5-runner-confinement-evidence.md
+docs/release/2026-08-30-batch-8-capability-evidence.md
+docs/release/2026-08-30-batch-9-preflight-evidence.md
+docs/release/batch-6-acceptance-evidence.md
