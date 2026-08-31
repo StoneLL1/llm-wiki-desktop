@@ -35,7 +35,7 @@ jobs:
       published_at: ${{ steps.coordinate.outputs.published_at }}
     steps:
       - name: Checkout the exact release tag with full history
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.release_tag || github.ref_name }}
           fetch-depth: 0
@@ -146,7 +146,7 @@ jobs:
             bundles: appimage
     steps:
       - name: Checkout exact release commit
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.preflight.outputs.commit_sha }}
 
@@ -303,7 +303,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout exact release commit
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.preflight.outputs.commit_sha }}
 
@@ -389,7 +389,7 @@ jobs:
             os: ubuntu-24.04
     steps:
       - name: Checkout exact release commit
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.preflight.outputs.commit_sha }}
 
@@ -485,7 +485,7 @@ jobs:
       attestations: write
     steps:
       - name: Checkout exact release commit
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.preflight.outputs.commit_sha }}
 
@@ -555,7 +555,7 @@ jobs:
       attestations: read
     steps:
       - name: Checkout exact release commit
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.preflight.outputs.commit_sha }}
 
