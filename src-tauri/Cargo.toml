@@ -51,7 +51,7 @@ pdf-extract = "0.10"
 lopdf = { version = "0.38", default-features = false }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 quick-xml = "0.36"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "4", default-features = false, features = ["deflate"] }
 unicode-normalization = "0.1"
 
 [target.'cfg(unix)'.dependencies]
