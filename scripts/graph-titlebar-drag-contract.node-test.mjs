@@ -190,6 +190,12 @@ test("requires exactly one Graph refresh after Alt-Tab return", () => {
   }
 });
 
+test("rejects an Alt-Tab away snapshot that never left the target window", () => {
+  const result = fixture();
+  result.altTab.native.away = { processId: 41, hwnd: 101 };
+  assert.ok(evaluateGraphTitlebarDragResult(result).failures.some((failure) => failure.code === "ALT_TAB_NATIVE"));
+});
+
 test("binds MSI and installed-build executable evidence to one clean source commit", () => {
   const expected = {
     sourceCommit: "a".repeat(40),

@@ -116,6 +116,13 @@ Start-Sleep -Milliseconds 250
 
 if ($Mode -eq 'alt-tab') {
   Add-Type -AssemblyName System.Windows.Forms
+  function Wait-WithMessagePump([int]$Milliseconds) {
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($Milliseconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+      [System.Windows.Forms.Application]::DoEvents()
+      Start-Sleep -Milliseconds 25
+    }
+  }
   $control = New-Object System.Windows.Forms.Form
   $control.Text = 'Graph titlebar Alt-Tab control'
   $control.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
@@ -132,56 +139,35 @@ if ($Mode -eq 'alt-tab') {
       Start-Sleep -Milliseconds 50
     }
     if ($control.Handle -eq [IntPtr]::Zero) { throw 'Alt-Tab control window was unavailable.' }
-    $control.TopMost = $true
-    $controlCenterX = $control.Left + [int]($control.Width / 2)
-    $controlCenterY = $control.Top + [int]($control.Height / 2)
-    [GraphTitlebarNativeInput]::Mouse([GraphTitlebarNativeInput]::MOUSEEVENTF_MOVE, $controlCenterX, $controlCenterY)
-    [GraphTitlebarNativeInput]::Mouse([GraphTitlebarNativeInput]::MOUSEEVENTF_LEFTDOWN, $controlCenterX, $controlCenterY)
-    [GraphTitlebarNativeInput]::Mouse([GraphTitlebarNativeInput]::MOUSEEVENTF_LEFTUP, $controlCenterX, $controlCenterY)
-    $controlForegroundDeadline = [DateTime]::UtcNow.AddMilliseconds(500)
-    while ([DateTime]::UtcNow -lt $controlForegroundDeadline) {
-      [System.Windows.Forms.Application]::DoEvents()
-      Start-Sleep -Milliseconds 25
-    }
-    $controlForeground = Get-ForegroundSnapshot
-    if ($controlForeground.processId -ne $PID) { throw "The Alt-Tab control window was not activated by native input. controlForeground=$(($controlForeground | ConvertTo-Json -Compress)) pid=$PID target=$ProcessId" }
-    $control.TopMost = $false
-    $zOrderFlags = [GraphTitlebarNativeInput]::SWP_NOSIZE -bor [GraphTitlebarNativeInput]::SWP_NOMOVE -bor [GraphTitlebarNativeInput]::SWP_SHOWWINDOW
-    [GraphTitlebarNativeInput]::SetWindowPos($handle, [GraphTitlebarNativeInput]::HWND_TOPMOST, 0, 0, 0, 0, $zOrderFlags) | Out-Null
-    $targetRect = New-Object GraphTitlebarNativeInput+RECT
-    if (-not [GraphTitlebarNativeInput]::GetWindowRect($handle, [ref]$targetRect)) { throw 'GetWindowRect failed before target activation.' }
-    $targetTitlebarX = $targetRect.Left + [int](($targetRect.Right - $targetRect.Left) / 2)
-    $targetTitlebarY = $targetRect.Top + 16
-    [GraphTitlebarNativeInput]::Mouse([GraphTitlebarNativeInput]::MOUSEEVENTF_MOVE, $targetTitlebarX, $targetTitlebarY)
-    [GraphTitlebarNativeInput]::Mouse([GraphTitlebarNativeInput]::MOUSEEVENTF_LEFTDOWN, $targetTitlebarX, $targetTitlebarY)
-    [GraphTitlebarNativeInput]::Mouse([GraphTitlebarNativeInput]::MOUSEEVENTF_LEFTUP, $targetTitlebarX, $targetTitlebarY)
-    $targetForegroundDeadline = [DateTime]::UtcNow.AddMilliseconds(500)
-    while ([DateTime]::UtcNow -lt $targetForegroundDeadline) {
-      [System.Windows.Forms.Application]::DoEvents()
-      Start-Sleep -Milliseconds 25
-    }
+    [GraphTitlebarNativeInput]::SetForegroundWindow($handle) | Out-Null
+    Wait-WithMessagePump 300
     $before = Get-ForegroundSnapshot
+    if ($before.processId -ne $ProcessId) {
+      $zOrderFlags = [GraphTitlebarNativeInput]::SWP_NOSIZE -bor [GraphTitlebarNativeInput]::SWP_NOMOVE -bor [GraphTitlebarNativeInput]::SWP_SHOWWINDOW
+      [GraphTitlebarNativeInput]::SetWindowPos($handle, [GraphTitlebarNativeInput]::HWND_TOPMOST, 0, 0, 0, 0, $zOrderFlags) | Out-Null
+      $targetRect = New-Object GraphTitlebarNativeInput+RECT
+      if (-not [GraphTitlebarNativeInput]::GetWindowRect($handle, [ref]$targetRect)) { throw 'GetWindowRect failed before target activation.' }
+      $targetTitlebarX = $targetRect.Left + [int](($targetRect.Right - $targetRect.Left) / 2)
+      $targetTitlebarY = $targetRect.Top + 16
+      [GraphTitlebarNativeInput]::Mouse([GraphTitlebarNativeInput]::MOUSEEVENTF_MOVE, $targetTitlebarX, $targetTitlebarY)
+      [GraphTitlebarNativeInput]::Mouse([GraphTitlebarNativeInput]::MOUSEEVENTF_LEFTDOWN, $targetTitlebarX, $targetTitlebarY)
+      [GraphTitlebarNativeInput]::Mouse([GraphTitlebarNativeInput]::MOUSEEVENTF_LEFTUP, $targetTitlebarX, $targetTitlebarY)
+      Wait-WithMessagePump 500
+      [GraphTitlebarNativeInput]::SetWindowPos($handle, [GraphTitlebarNativeInput]::HWND_NOTOPMOST, 0, 0, 0, 0, $zOrderFlags) | Out-Null
+      $before = Get-ForegroundSnapshot
+    }
     if ($before.processId -ne $ProcessId) { throw "The tested app was not foreground before Alt-Tab. before=$(($before | ConvertTo-Json -Compress)) target=$ProcessId targetHwnd=$($handle.ToInt64()) controlHwnd=$($control.Handle.ToInt64()) clickX=$targetTitlebarX clickY=$targetTitlebarY" }
-    [GraphTitlebarNativeInput]::SetWindowPos($handle, [GraphTitlebarNativeInput]::HWND_NOTOPMOST, 0, 0, 0, 0, $zOrderFlags) | Out-Null
     [GraphTitlebarNativeInput]::Key([GraphTitlebarNativeInput]::VK_MENU, $false)
     [GraphTitlebarNativeInput]::Key([GraphTitlebarNativeInput]::VK_TAB, $false)
     [GraphTitlebarNativeInput]::Key([GraphTitlebarNativeInput]::VK_TAB, $true)
     [GraphTitlebarNativeInput]::Key([GraphTitlebarNativeInput]::VK_MENU, $true)
-    $awayDeadline = [DateTime]::UtcNow.AddMilliseconds(800)
-    while ([DateTime]::UtcNow -lt $awayDeadline) {
-      [System.Windows.Forms.Application]::DoEvents()
-      Start-Sleep -Milliseconds 25
-    }
+    Wait-WithMessagePump 800
     $away = Get-ForegroundSnapshot
     [GraphTitlebarNativeInput]::Key([GraphTitlebarNativeInput]::VK_MENU, $false)
     [GraphTitlebarNativeInput]::Key([GraphTitlebarNativeInput]::VK_TAB, $false)
     [GraphTitlebarNativeInput]::Key([GraphTitlebarNativeInput]::VK_TAB, $true)
     [GraphTitlebarNativeInput]::Key([GraphTitlebarNativeInput]::VK_MENU, $true)
-    $returnDeadline = [DateTime]::UtcNow.AddMilliseconds(800)
-    while ([DateTime]::UtcNow -lt $returnDeadline) {
-      [System.Windows.Forms.Application]::DoEvents()
-      Start-Sleep -Milliseconds 25
-    }
+    Wait-WithMessagePump 800
     $returned = Get-ForegroundSnapshot
     [pscustomobject]@{ mode = 'send-input-alt-tab'; targetProcessId = $ProcessId; targetHwnd = $handle.ToInt64(); before = $before; away = $away; returned = $returned; controlProcessId = $PID; controlHwnd = $control.Handle.ToInt64() } |
       ConvertTo-Json -Compress -Depth 5

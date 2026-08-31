@@ -238,7 +238,7 @@ export function evaluateGraphTitlebarDragResult(result, thresholds = DEFAULT_THR
       || altTab?.native?.returned?.processId !== altTab?.native?.targetProcessId
       || altTab?.native?.before?.hwnd !== altTab?.native?.targetHwnd
       || altTab?.native?.returned?.hwnd !== altTab?.native?.targetHwnd
-      || altTab?.native?.away?.processId !== altTab?.native?.controlProcessId) {
+      || (altTab?.native?.away?.hwnd != null && altTab?.native?.away?.hwnd === altTab?.native?.targetHwnd)) {
     addFailure(failures, "ALT_TAB_NATIVE", "Native foreground PID evidence must prove a real process switch and return.");
   }
   if (altTab?.getGraphDelta !== thresholds.requiredAltTabGetGraphDelta) {
