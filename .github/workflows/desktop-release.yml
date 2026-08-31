@@ -290,7 +290,7 @@ jobs:
             --catalog release-input/capabilities/install-catalog.json --mode release
 
       - name: Upload updater-signed desktop transaction fragment
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-${{ matrix.platform }}
           path: desktop-dist/${{ matrix.platform }}/*
@@ -356,7 +356,7 @@ jobs:
           node -e 'const fs=require("fs"); const value={schemaVersion:1,repository:process.env.GITHUB_REPOSITORY,releaseTag:process.env.RELEASE_TAG,commitSha:process.env.COMMIT_SHA,workflowRunId:process.env.RUN_ID,capabilityWorkflowRunId:process.env.RUN_ID}; fs.writeFileSync("candidate/provenance/release-provenance.json",JSON.stringify(value,null,2)+"\n")'
 
       - name: Upload immutable pre-smoke candidate
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-candidate-base
           path: candidate/**
@@ -364,7 +364,7 @@ jobs:
           retention-days: 14
 
       - name: Upload controlled updater fixture manifest
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: updater-fixture-manifest
           path: candidate/latest.json
@@ -468,7 +468,7 @@ jobs:
           @{ platform = '${{ matrix.platform }}'; status = 'passed'; journeys = @('install-launch','packaged-process-alive','updater-fixture-manifest-verified'); productionEndpointAccessed = $false } | ConvertTo-Json | Set-Content 'smoke-fragment/${{ matrix.platform }}.json' -Encoding utf8
 
       - name: Upload packaged smoke fragment
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: packaged-smoke-${{ matrix.platform }}
           path: smoke-fragment/*.json
@@ -538,7 +538,7 @@ jobs:
           node scripts/verify-release-assets.mjs --root candidate --tag "$RELEASE_TAG" --version "$VERSION" --commit "$COMMIT_SHA" --runId "$RUN_ID"
 
       - name: Upload sealed draft release bundle
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: draft-release-bundle
           path: candidate/**
