@@ -49,7 +49,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "graphology": "^0.26.0",
-    "graphology-communities-louvain": "^1.5.0",
+    "graphology-communities-louvain": "^2.0.2",
     "graphology-layout-forceatlas2": "^0.10.1",
     "i18next": "^25.0.0",
     "lucide-react": "^0.468.0",
