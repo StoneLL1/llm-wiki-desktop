@@ -41,7 +41,9 @@ test("resolves only regular supported media contained by staging", async (t) => 
   t.after(value.cleanup);
   await fs.writeFile(path.join(value.staging, "clip.mp4"), "media");
   const resolved = await resolveStagingMedia(value.root, "staging", "clip.mp4");
-  assert.equal(resolved.mediaPath, path.join(value.staging, "clip.mp4"));
+  // Resolve through symlinks before comparing: macOS temp directories live
+  // under /var/folders, which realpath canonicalizes to /private/var/folders.
+  assert.equal(resolved.mediaPath, await fs.realpath(path.join(value.staging, "clip.mp4")));
   await assert.rejects(resolveStagingMedia(value.root, "staging", "../outside.mp4"), /IMPORT_ASR_POLICY_BLOCKED/);
   await fs.writeFile(path.join(value.staging, "flags.txt"), "--model evil");
   await assert.rejects(resolveStagingMedia(value.root, "staging", "flags.txt"), /IMPORT_ASR_UNSUPPORTED_MEDIA/);
@@ -100,7 +102,9 @@ test("artifact verification accepts an exact digest and rejects mismatch or trav
   const bytes = Buffer.from("fixture-binary");
   await fs.writeFile(binary, bytes);
   const digest = createHash("sha256").update(bytes).digest("hex");
-  assert.equal(await verifyArtifact(value.root, { file: "whisper-cli", sha256: digest }, "whisper-cli"), binary);
+  // verifyArtifact returns the realpath-resolved absolute path; compare
+  // against the canonicalized fixture so the assertion holds on macOS.
+  assert.equal(await verifyArtifact(value.root, { file: "whisper-cli", sha256: digest }, "whisper-cli"), await fs.realpath(binary));
   await assert.rejects(verifyArtifact(value.root, { file: "whisper-cli", sha256: "f".repeat(64) }, "whisper-cli"), /IMPORT_ASR_ENGINE_INTEGRITY_FAILED/);
   await assert.rejects(verifyArtifact(value.root, { file: "../whisper-cli", sha256: digest }, "whisper-cli"), /IMPORT_ASR_ENGINE_UNAVAILABLE/);
   await assert.rejects(verifyArtifact(value.root, null, "whisper-cli"), /IMPORT_ASR_ENGINE_UNAVAILABLE/);
