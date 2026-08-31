@@ -735,7 +735,14 @@ fn reports_non_utf8_paths_as_typed_visible_skips() {
     fs::create_dir_all(&input).unwrap();
     let invalid_name =
         OsString::from_vec(vec![b'n', b'o', b't', b'e', b'-', 0xff, b'.', b'm', b'd']);
-    fs::write(input.join(invalid_name), "# note").unwrap();
+    if let Err(error) = fs::write(input.join(&invalid_name), "# note") {
+        // APFS refuses to store invalid UTF-8 names outright (errno 92,
+        // EILSEQ), so a non-UTF-8 path can never reach a scan on macOS and
+        // the NonUtf8Path skip is unreachable there. Any other failure is a
+        // real fixture defect and must fail the test.
+        assert_eq!(error.raw_os_error(), Some(92), "unexpected write failure: {error}");
+        return;
+    }
 
     let result = FileDiscoveryService::default()
         .scan(
