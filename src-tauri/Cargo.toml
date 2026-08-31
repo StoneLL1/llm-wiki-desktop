@@ -23,7 +23,7 @@ gui = ["dep:tauri", "dep:tauri-plugin-dialog", "dep:tauri-plugin-notification", 
 performance-observers = []
 
 [dependencies]
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 csv = "1"
 dirs = "6"
