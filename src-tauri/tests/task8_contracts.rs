@@ -8,14 +8,17 @@ use llm_wiki_desktop_lib::services::{
     AgentInvocation, AgentService, CompileService, LlmService, ProcessRunner, SecretService,
 };
 use llm_wiki_desktop_lib::tasks::TaskService;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-struct FakeProcessRunner;
+struct FakeProcessRunner {
+    executable: PathBuf,
+}
 
 impl ProcessRunner for FakeProcessRunner {
     fn find_executable(&self, command: &str) -> Option<std::path::PathBuf> {
-        (command == "claude").then(|| "C:/fake/claude.exe".into())
+        (command == "claude").then(|| self.executable.clone())
     }
 
     fn run_with_timeout(
@@ -130,7 +133,12 @@ fn compile_route_contract_distinguishes_preference_from_resolved_route() {
 
 #[test]
 fn services_expose_replaceable_test_boundaries() {
-    let agent = AgentService::with_runner(Arc::new(FakeProcessRunner));
+    let fake_agent_dir = tempfile::tempdir().unwrap();
+    let fake_agent_executable = fake_agent_dir.path().join("claude-test");
+    std::fs::write(&fake_agent_executable, b"attested fake Agent fixture").unwrap();
+    let agent = AgentService::with_runner(Arc::new(FakeProcessRunner {
+        executable: fake_agent_executable,
+    }));
     let detected = agent.detect_agents(Some(AgentKind::Claude));
     assert_eq!(detected[0].state, AgentDetectionState::Installed);
     assert!(detected[1..]

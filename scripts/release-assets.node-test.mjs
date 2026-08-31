@@ -16,7 +16,8 @@ import { stageDesktopRelease } from "./stage-desktop-release.mjs";
 import { verifyReleaseAssets } from "./verify-release-assets.mjs";
 import { generateLatestJson, validateLatestJson } from "./verify-latest-json.mjs";
 import { publishedUpdaterPairs } from "./verify-updater-signatures.mjs";
-import { CAPABILITY_PACKS, CAPABILITY_TARGETS } from "./verify-capability-catalog.mjs";
+import { CAPABILITY_PACKS, CAPABILITY_TARGETS, MODEL_CAPABILITY_PACKS } from "./verify-capability-catalog.mjs";
+import { PRODUCT_MANIFEST } from "./verify-product-capabilities.mjs";
 
 const TAG = "app-v0.1.0";
 const VERSION = "0.1.0";
@@ -25,6 +26,7 @@ const RUN_ID = "1234567890";
 const MINISIGN_SIGNATURE = Buffer.from(
   "untrusted comment: signature from minisign secret key\nRWQf6LRCGA9i59SLOFxz6NxvASXDJeRtuZykwQepbDEGt87ig1BNpWaVWuNrm73YiIiJbq71Wi+dP9eKL8OC351vwIasSSbXxwA=\ntrusted comment: timestamp:1555779966\tfile:test\nQtKMXWyYcwdpZAlPF7tE2ENJkRd1ujvKjlj1m9RtHTBnZPa5WKU5uWRs5GoP5M/VqE81QFuMKI5k/SfNQUaOAA==\n",
 ).toString("base64");
+const productDefinitions = new Map(PRODUCT_MANIFEST.definitions.map((definition) => [definition.capabilityId, definition]));
 const writeJson = (file, value) => {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
@@ -37,10 +39,11 @@ const releaseEntry = (capabilityId, targetTriple) => ({
   url: exactReleaseAssetUrl(TAG, `${capabilityId}-1.2.3-${targetTriple}.zip`),
   archiveSha256: crypto.createHash("sha256").update("zip").digest("hex"),
   manifestSha256: "c".repeat(64),
+  signingKeyId: "release-key",
   compressedBytes: 3,
   installedBytes: 2345,
-  modelBytes: ["asr-sensevoice-small", "ocr-cjk-accurate"].includes(capabilityId) ? 640 : null,
-  license: "MIT",
+  modelBytes: MODEL_CAPABILITY_PACKS.includes(capabilityId) ? 640 : null,
+  license: productDefinitions.get(capabilityId)?.licensePolicy.expression ?? "MIT",
 });
 
 function createReleaseBundle(root) {
@@ -74,7 +77,7 @@ function createReleaseBundle(root) {
   fs.mkdirSync(capabilityRoot, { recursive: true });
   for (const entry of entries) fs.writeFileSync(path.join(capabilityRoot, path.basename(new URL(entry.url).pathname)), "zip");
   writeJson(path.join(capabilityRoot, "install-catalog.json"), { schemaVersion: 1, entries });
-  writeJson(path.join(capabilityRoot, "trusted-keys.json"), { release: "d".repeat(64) });
+  writeJson(path.join(capabilityRoot, "trusted-keys.json"), { "release-key": "d".repeat(64) });
   writeJson(path.join(capabilityRoot, "catalog-provenance.json"), {
     schemaVersion: 1, releaseTag: TAG, commitSha: COMMIT, workflowRunId: RUN_ID,
   });

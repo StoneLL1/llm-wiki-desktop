@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 use crate::app_state::AppState;
 use crate::errors::BackendError;
@@ -33,15 +33,58 @@ pub struct AssessedGitRequest {
 }
 
 #[tauri::command]
-pub fn git_status(
-    state: State<'_, AppState>,
+pub async fn git_status(
+    app: AppHandle,
     request: GitProjectRequest,
 ) -> Result<GitRepositoryStatus, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     // Git status is always a live repository read. Accepting force_refresh
     // keeps the typed IPC contract explicit if a cache is introduced later.
     let _force_refresh = request.force_refresh;
-    state.git_service.repository_status(&context)
+    let project_id = request.project_id;
+    let project_root_path = request.project_root_path;
+    let metadata_project_id = project_id.clone();
+    let metadata_root_path = project_root_path.clone();
+    let coordinator = app.state::<AppState>().blocking_work.clone();
+    coordinator
+        .run_project_facts_git(
+            {
+                let app = app.clone();
+                move || {
+                    let state = app.state::<AppState>();
+                    let context =
+                        state.resolve_project_context(&metadata_project_id, &metadata_root_path)?;
+                    let identity = crate::services::project_identity(&context.root)
+                        .map_err(|_| project_facts_identity_error())?;
+                    Ok((identity.canonical_identity_key, identity.identity_revision))
+                }
+            },
+            move |expected_identity_revision| {
+                let state = app.state::<AppState>();
+                let current_context =
+                    state.resolve_project_context(&project_id, &project_root_path)?;
+                let current_identity = crate::services::project_identity(&current_context.root)
+                    .map_err(|_| project_facts_identity_error())?;
+                if current_identity.identity_revision != expected_identity_revision {
+                    return Err(BackendError::new(
+                        "PROJECT_IDENTITY_CHANGED",
+                        "Project identity changed while Git status was queued.",
+                        true,
+                        true,
+                    ));
+                }
+                state.git_service.repository_status(&current_context)
+            },
+        )
+        .await
+}
+
+fn project_facts_identity_error() -> BackendError {
+    BackendError::new(
+        "PROJECT_IDENTITY_FAILED",
+        "Project identity could not be established.",
+        true,
+        true,
+    )
 }
 
 #[tauri::command]

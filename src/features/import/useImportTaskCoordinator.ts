@@ -17,7 +17,6 @@ import { mergeImportItemTask } from "./importTaskProgress";
 interface PendingPathTask {
   projectKey: string;
   epoch: number;
-  existingItemIds: ReadonlySet<string>;
   mutationKey: string;
 }
 
@@ -46,6 +45,7 @@ interface EarlyOperationPatch {
 }
 
 interface ImportTaskCoordinatorOptions {
+  importActive: boolean;
   projectId: string;
   rootPath: string;
   projectKey: string;
@@ -74,7 +74,6 @@ export interface ImportTaskCoordinator {
   discoveryTaskUnavailable: boolean;
   beginPendingItems: (itemIds: readonly string[], requestKey: string, epoch: number) => string[];
   endPendingItems: (itemIds: readonly string[], requestKey: string, epoch: number) => void;
-  startNewQueuedItems: (requestKey: string, epoch: number, before: ReadonlySet<string>) => Promise<void>;
   trackStartedItems: (
     tasks: readonly BackendTask[],
     itemIds: readonly string[],
@@ -118,6 +117,7 @@ function isSettledImportTask(task: BackendTask): boolean {
 }
 
 export function useImportTaskCoordinator({
+  importActive,
   projectId,
   rootPath,
   projectKey,
@@ -154,7 +154,6 @@ export function useImportTaskCoordinator({
   const trackedDiscoveryTaskIdsRef = useRef(new Set<string>());
   const reconciliationDelayRef = useRef(250);
   const [reconciliationRevision, setReconciliationRevision] = useState(0);
-
   const requestTaskReconciliation = useCallback(() => {
     reconciliationDelayRef.current = 250;
     setReconciliationRevision((revision) => revision + 1);
@@ -208,12 +207,9 @@ export function useImportTaskCoordinator({
   }, [pendingActionKeys, projectKey, sessionEpoch]);
 
   const hasCurrentSession = session?.projectId === projectId;
-  const discoveryTask = useMemo(
-    () => hasCurrentSession && discoveryTaskId
-      ? taskList.find((task) => task.id === discoveryTaskId && task.projectId === projectId) ?? null
-      : null,
-    [discoveryTaskId, hasCurrentSession, projectId, taskList],
-  );
+  const discoveryTask = useTaskStore((state) => importActive && hasCurrentSession && discoveryTaskId
+    ? state.taskById[discoveryTaskId]?.projectId === projectId ? state.taskById[discoveryTaskId] ?? null : null
+    : null);
   const discoveryTaskUnavailable = Boolean(hasCurrentSession && discoveryTaskId && tasksHydrated && !discoveryTask);
 
   const loadDiscoveryScan = useCallback(async (
@@ -302,10 +298,10 @@ export function useImportTaskCoordinator({
   ) => {
     const current = useImportStore.getState();
     if (current.projectKey !== requestKey || current.sessionEpoch !== epoch || !current.session) return;
-    const item = current.session.items.find((candidate) => candidate.itemId === itemId);
+    const item = current.itemById[itemId];
     if (!item) return;
     const next = mergeImportItemTask(item, task, allowBinding);
-    if (next !== item) current.replaceItem(requestKey, next, epoch);
+    if (next !== item) current.replaceItemLocal(requestKey, next, epoch);
   }, []);
 
   const consumeTaskCompletion = useCallback((
@@ -375,6 +371,7 @@ export function useImportTaskCoordinator({
     ) return;
     nextSessionMutationRevision();
     current.patchItems(requestKey, patch.items, epoch);
+    current.recordOperationCounts(requestKey, patch.batchId, patch.counts, patch.items, epoch);
     if (patch.counts.processed !== patch.counts.total) return;
     const firstTerminalPatch = !settledOperationTaskIdsRef.current.has(patch.batchId);
     settledOperationTaskIdsRef.current.add(patch.batchId);
@@ -395,13 +392,14 @@ export function useImportTaskCoordinator({
     epoch: number,
     sessionId: string,
   ) => {
-    selectedTasksUpsert(tasks);
     if (!isScopeCurrent(requestKey, epoch, sessionId)) {
+      tasks.forEach((task) => useTaskStore.getState().recordTaskFact(task));
       endPendingItems(itemIds, requestKey, epoch);
       return;
     }
+    selectedTasksUpsert(tasks);
     const resolvedTasks = tasks.map(
-      (task) => useTaskStore.getState().tasks.find((current) => current.id === task.id) ?? task,
+      (task) => useTaskStore.getState().taskById[task.id] ?? task,
     );
     const operation = resolvedTasks.length === 1
       && resolvedTasks[0] !== undefined
@@ -443,35 +441,6 @@ export function useImportTaskCoordinator({
     requestTaskReconciliation();
   }, [applyOperationPatch, consumeTaskCompletion, endPendingItems, isScopeCurrent, projectId, recordItemBatch, refreshForScope, registerItemTasks, requestTaskReconciliation, rootPath, selectedTasksUpsert, settleItemTask, syncItemTask]);
 
-  const startNewQueuedItems = useCallback(async (
-    requestKey: string,
-    epoch: number,
-    before: ReadonlySet<string>,
-  ) => {
-    if (!isScopeCurrent(requestKey, epoch)) return;
-    const current = useImportStore.getState().session;
-    if (!current) return;
-    const itemIds = current.items
-      .filter((item) => !before.has(item.itemId) && item.status === "queued")
-      .map((item) => item.itemId);
-    if (itemIds.length === 0) return;
-    const acceptedIds = beginPendingItems(itemIds, requestKey, epoch);
-    if (acceptedIds.length === 0) return;
-    nextSessionMutationRevision();
-    try {
-      const task = await importV2Api.startBatch({
-        projectId,
-        projectRootPath: rootPath,
-        sessionId: current.sessionId,
-        itemIds: acceptedIds,
-      });
-      trackStartedItems([task], acceptedIds, requestKey, epoch, current.sessionId);
-    } catch (error) {
-      endPendingItems(acceptedIds, requestKey, epoch);
-      throw error;
-    }
-  }, [beginPendingItems, endPendingItems, isScopeCurrent, nextSessionMutationRevision, projectId, rootPath, trackStartedItems]);
-
   const settlePathTask = useCallback((task: BackendTask): boolean => {
     const pending = pendingPathTasks.current.get(task.id);
     if (!pending || !isSettledImportTask(task)) return false;
@@ -479,10 +448,9 @@ export function useImportTaskCoordinator({
     useImportStore.getState().endMutation(pending.mutationKey);
     if (task.status === "succeeded") {
       void refreshForScope(pending.projectKey, pending.epoch)
-        .then(() => startNewQueuedItems(pending.projectKey, pending.epoch, pending.existingItemIds))
         .catch((error) => {
           if (isScopeCurrent(pending.projectKey, pending.epoch)) {
-            pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error) }));
+            pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error, t) }));
           }
         })
         .finally(pending.settleQueue);
@@ -494,7 +462,7 @@ export function useImportTaskCoordinator({
       pending.settleQueue();
     }
     return true;
-  }, [isScopeCurrent, loadDiscoveryScan, pushToast, refreshForScope, startNewQueuedItems, t]);
+  }, [isScopeCurrent, loadDiscoveryScan, pushToast, refreshForScope, t]);
 
   const settleConfirmationTask = useCallback((task: BackendTask, pending: PendingScopedTask) => {
     pendingConfirmationTasks.current.delete(task.id);
@@ -507,31 +475,37 @@ export function useImportTaskCoordinator({
   }, [consumeTaskCompletion, isScopeCurrent, pushToast, refreshForScope, t]);
 
   const reconcilePendingTasks = useCallback((
-    tasks: readonly BackendTask[] = useTaskStore.getState().tasks,
+    tasks?: readonly BackendTask[],
   ) => {
     const current = useImportStore.getState();
+    const suppliedById = tasks ? new Map(tasks.map((task) => [task.id, task])) : null;
+    const taskFor = (taskId: string) => suppliedById?.get(taskId) ?? useTaskStore.getState().taskById[taskId];
+    const pendingTaskIds = new Set([
+      ...pendingPathTasks.current.keys(),
+      ...pendingItemTasks.current.keys(),
+      ...pendingConfirmationTasks.current.keys(),
+      ...pendingCapabilityTasks.current.keys(),
+    ]);
     if (current.projectKey === projectKey && current.session) {
-      for (const task of tasks) {
-        if (task.projectId === projectId) {
-          consumeTaskCompletion(task, projectKey, current.sessionEpoch, current.session.sessionId);
-        }
+      for (const taskId of pendingTaskIds) {
+        const task = taskFor(taskId);
+        if (task?.projectId === projectId) consumeTaskCompletion(task, projectKey, current.sessionEpoch, current.session.sessionId);
       }
     }
-    const byId = new Map(tasks.map((task) => [task.id, task]));
     for (const taskId of pendingPathTasks.current.keys()) {
-      const task = byId.get(taskId);
+      const task = taskFor(taskId);
       if (task) settlePathTask(task);
     }
     for (const taskId of pendingItemTasks.current.keys()) {
-      const task = byId.get(taskId);
+      const task = taskFor(taskId);
       if (task && !settleOperationTask(task)) settleItemTask(task);
     }
     for (const [taskId, pending] of pendingConfirmationTasks.current) {
-      const task = byId.get(taskId);
+      const task = taskFor(taskId);
       if (task && isTerminalStatus(task.status)) settleConfirmationTask(task, pending);
     }
     for (const [taskId, pending] of pendingCapabilityTasks.current) {
-      const task = byId.get(taskId);
+      const task = taskFor(taskId);
       if (!task || !isSettledImportTask(task)) continue;
       pendingCapabilityTasks.current.delete(taskId);
       if (isScopeCurrent(pending.projectKey, pending.epoch)) {
@@ -541,13 +515,14 @@ export function useImportTaskCoordinator({
   }, [consumeTaskCompletion, isScopeCurrent, projectId, projectKey, refreshForScope, settleConfirmationTask, settleItemTask, settleOperationTask, settlePathTask]);
 
   const trackPathTask = useCallback((task: BackendTask, pending: PendingPathTask) => {
-    const knownTask = useTaskStore.getState().tasks.find((candidate) => candidate.id === task.id);
+    const knownTask = useTaskStore.getState().taskById[task.id];
     const observedTask = knownTask && isSettledImportTask(knownTask) ? knownTask : task;
-    selectedTaskUpsert(observedTask);
     if (!isScopeCurrent(pending.projectKey, pending.epoch)) {
+      useTaskStore.getState().recordTaskFact(observedTask);
       useImportStore.getState().endMutation(pending.mutationKey);
       return Promise.resolve();
     }
+    selectedTaskUpsert(observedTask);
     return new Promise<void>((settleQueue) => {
       trackedDiscoveryTaskIdsRef.current.add(task.id);
       pendingPathTasks.current.set(task.id, { ...pending, settleQueue });
@@ -563,10 +538,13 @@ export function useImportTaskCoordinator({
   }, [isScopeCurrent, requestTaskReconciliation, selectedTaskUpsert, settlePathTask]);
 
   const trackConfirmationTask = useCallback((task: BackendTask, pending: PendingScopedTask) => {
-    const knownTask = useTaskStore.getState().tasks.find((candidate) => candidate.id === task.id);
+    const knownTask = useTaskStore.getState().taskById[task.id];
     const observedTask = knownTask && isTerminalStatus(knownTask.status) ? knownTask : task;
+    if (!isScopeCurrent(pending.projectKey, pending.epoch)) {
+      useTaskStore.getState().recordTaskFact(observedTask);
+      return;
+    }
     selectedTaskUpsert(observedTask);
-    if (!isScopeCurrent(pending.projectKey, pending.epoch)) return;
     pendingConfirmationTasks.current.set(task.id, pending);
     if (isScopeCurrent(pending.projectKey, pending.epoch)) openTaskDrawer(task.id);
     if (isTerminalStatus(observedTask.status)) settleConfirmationTask(observedTask, pending);
@@ -574,8 +552,11 @@ export function useImportTaskCoordinator({
   }, [isScopeCurrent, openTaskDrawer, requestTaskReconciliation, selectedTaskUpsert, settleConfirmationTask]);
 
   const trackCapabilityTask = useCallback((task: BackendTask, pending: PendingScopedTask) => {
+    if (!isScopeCurrent(pending.projectKey, pending.epoch)) {
+      useTaskStore.getState().recordTaskFact(task);
+      return;
+    }
     selectedTaskUpsert(task);
-    if (!isScopeCurrent(pending.projectKey, pending.epoch)) return;
     pendingCapabilityTasks.current.set(task.id, pending);
     openTaskDrawer(task.id);
     reconcilePendingTasks([task]);
@@ -596,6 +577,14 @@ export function useImportTaskCoordinator({
         || !isScopeCurrent(projectKey, current.sessionEpoch, patch.sessionId)
       ) return;
       const pending = pendingItemTasks.current.get(patch.batchId);
+      const recoveryTask = useTaskStore.getState().taskById[patch.batchId];
+      if (
+        recoveryTask?.operation?.kind === "import_recovery"
+        && recoveryTask.operation.sessionId === patch.sessionId
+      ) {
+        applyOperationPatch(patch, projectKey, current.sessionEpoch);
+        return;
+      }
       if (pending?.operation) {
         applyOperationPatch(patch, pending.projectKey, pending.epoch);
         return;
@@ -631,9 +620,9 @@ export function useImportTaskCoordinator({
     }
     if (!event.taskId || !isTaskSnapshotEvent(event)) return;
     const payloadTask = event.payload as BackendTask;
-    selectedTaskUpsert(payloadTask);
-    const task = useTaskStore.getState().tasks.find((candidate) => candidate.id === event.taskId)
-      ?? payloadTask;
+    // useTaskEvents' owner has already committed this fact. Feature listeners
+    // consume the canonical snapshot and never upsert it a second time.
+    const task = useTaskStore.getState().taskById[event.taskId] ?? payloadTask;
     const currentScope = useImportStore.getState();
     if (event.projectId === projectId && currentScope.projectKey === projectKey && currentScope.session) {
       consumeTaskCompletion(
@@ -644,9 +633,15 @@ export function useImportTaskCoordinator({
       );
     }
     const pendingItem = pendingItemTasks.current.get(event.taskId);
-    if (pendingItem && !pendingItem.operation) {
-      for (const itemId of pendingItem.itemIds) {
-        syncItemTask(task, itemId, pendingItem.projectKey, pendingItem.epoch);
+    if (!pendingItem?.operation && !isImportBatchOperationTask(task)) {
+      const itemIds = pendingItem?.itemIds ?? useImportStore.getState().itemIdsByTaskId[event.taskId] ?? [];
+      for (const itemId of itemIds) {
+        syncItemTask(
+          task,
+          itemId,
+          pendingItem?.projectKey ?? projectKey,
+          pendingItem?.epoch ?? currentScope.sessionEpoch,
+        );
       }
     }
     if (!isTerminalTaskEvent(event) && !isWaitingTaskEvent(event)) return;
@@ -670,12 +665,20 @@ export function useImportTaskCoordinator({
     const current = useImportStore.getState();
     if (event.projectId !== projectId || current.projectKey !== projectKey || !current.session) return;
     if (
+      isTerminalTaskEvent(event)
+      && task.operation?.kind === "import_recovery"
+      && task.operation.sessionId === current.session.sessionId
+    ) {
+      void refreshForScope(projectKey, current.sessionEpoch, current.session.sessionId).catch(() => undefined);
+      return;
+    }
+    if (
       !settledOperationTaskIdsRef.current.has(event.taskId)
-      && current.session.items.some((item) => item.taskId === event.taskId)
+      && (current.itemIdsByTaskId[event.taskId]?.length ?? 0) > 0
     ) {
       void refreshForScope(projectKey, current.sessionEpoch).catch(() => undefined);
     }
-  }, [applyOperationPatch, consumeTaskCompletion, isScopeCurrent, projectId, projectKey, refreshForScope, rootPath, selectedTaskUpsert, settleConfirmationTask, settleItemTask, settleOperationTask, settlePathTask, syncItemTask]);
+  }, [applyOperationPatch, consumeTaskCompletion, isScopeCurrent, projectId, projectKey, refreshForScope, rootPath, settleConfirmationTask, settleItemTask, settleOperationTask, settlePathTask, syncItemTask]);
 
   const cancelDiscovery = useCallback(async () => {
     if (!discoveryTaskId) return;
@@ -683,7 +686,7 @@ export function useImportTaskCoordinator({
       await taskLauncher.cancel(discoveryTaskId);
     } catch (error) {
       if (isProjectCurrent(projectKey)) {
-        pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error) }));
+        pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error, t) }));
       }
       throw error;
     }
@@ -697,12 +700,11 @@ export function useImportTaskCoordinator({
     if (!current.session || !taskId || !confirmationToken || current.projectKey !== projectKey) return;
     const epoch = current.sessionEpoch;
     const sessionId = current.session.sessionId;
-    const existingItemIds = new Set(current.session.items.map((item) => item.itemId));
     const mutationKey = `add-paths:${projectKey}:${epoch}:accept:${taskId}`;
     nextSessionMutationRevision();
     current.beginMutation(mutationKey);
     try {
-      const nextSession = await importV2Api.acceptScan({
+      const result = await importV2Api.acceptScan({
         projectId,
         projectRootPath: rootPath,
         sessionId,
@@ -714,23 +716,23 @@ export function useImportTaskCoordinator({
         ...(sourcePaths && sourcePaths.length > 0 ? { sourcePaths: [...sourcePaths] } : {}),
       });
       if (!isScopeCurrent(projectKey, epoch, sessionId)) return;
-      useImportStore.getState().replaceSession(projectKey, nextSession.session, epoch);
-      if (nextSession.scan.acceptedAt) {
+      if (result.operationTask) useTaskStore.getState().upsertTask(result.operationTask);
+      await refreshForScope(projectKey, epoch, sessionId);
+      if (result.scan.acceptedAt) {
         setDiscoveryTaskId(null);
         setDiscoveryScan(null);
       } else {
-        setDiscoveryScan(nextSession.scan);
+        setDiscoveryScan(result.scan);
       }
-      await startNewQueuedItems(projectKey, epoch, existingItemIds);
     } catch (error) {
       if (isScopeCurrent(projectKey, epoch, sessionId)) {
-        pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error) }));
+        pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error, t) }));
       }
       throw error;
     } finally {
       useImportStore.getState().endMutation(mutationKey);
     }
-  }, [discoveryScan, discoveryTaskId, isScopeCurrent, nextSessionMutationRevision, projectId, projectKey, pushToast, rootPath, startNewQueuedItems, t]);
+  }, [discoveryScan, discoveryTaskId, isScopeCurrent, nextSessionMutationRevision, projectId, projectKey, pushToast, refreshForScope, rootPath, t]);
 
   const dismissDiscovery = useCallback(async () => {
     const current = useImportStore.getState();
@@ -749,7 +751,7 @@ export function useImportTaskCoordinator({
         });
       } catch (error) {
         if (isScopeCurrent(projectKey, epoch, sessionId)) {
-          pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error) }));
+          pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error, t) }));
         }
         throw error;
       }
@@ -772,7 +774,7 @@ export function useImportTaskCoordinator({
   useEffect(() => registerTaskEventListener(handleTaskEvent), [handleTaskEvent]);
 
   useEffect(() => {
-    reconcilePendingTasks(taskList);
+    reconcilePendingTasks();
   }, [reconcilePendingTasks, taskList]);
 
   useEffect(() => {
@@ -832,39 +834,37 @@ export function useImportTaskCoordinator({
     if (!session || session.projectId !== projectId || !session.discoveryTaskId) return;
     const taskId = session.discoveryTaskId;
     if (trackedDiscoveryTaskIdsRef.current.has(taskId) || pendingPathTasks.current.has(taskId)) return;
-    const task = taskList.find((candidate) => candidate.id === taskId && candidate.projectId === projectId);
+    const task = useTaskStore.getState().taskById[taskId]
+      ?? taskList.find((candidate) => candidate.id === taskId && candidate.projectId === projectId);
     if (!task) return;
     const mutationKey = `add-paths:${projectKey}:${sessionEpoch}:recovered:${taskId}`;
     useImportStore.getState().beginMutation(mutationKey);
     void trackPathTask(task, {
       projectKey,
       epoch: sessionEpoch,
-      existingItemIds: new Set(session.items.map((item) => item.itemId)),
       mutationKey,
     });
   }, [projectId, projectKey, session, sessionEpoch, taskList, trackPathTask]);
 
   useEffect(() => {
     if (!session || session.projectId !== projectId) return;
-    const tasksById = new Map(taskList.map((task) => [task.id, task]));
+    const currentTaskById = useTaskStore.getState().taskById;
+    const tasksById = new Map(taskList.map((task) => [task.id, currentTaskById[task.id] ?? task]));
     const operationItems = new Map<string, string[]>();
-    for (const item of session.items) {
-      if (!item.taskId) continue;
-      const task = tasksById.get(item.taskId);
+    for (const [taskId, indexedItemIds] of Object.entries(useImportStore.getState().itemIdsByTaskId)) {
+      const task = tasksById.get(taskId);
       if (!task || task.projectId !== projectId || isSettledImportTask(task)) continue;
       if (isImportBatchOperationTask(task)) {
-        const itemIds = operationItems.get(task.id) ?? [];
-        itemIds.push(item.itemId);
-        operationItems.set(task.id, itemIds);
+        operationItems.set(task.id, [...indexedItemIds]);
         continue;
       }
       pendingItemTasks.current.set(task.id, {
         projectKey,
         epoch: sessionEpoch,
-        itemIds: [item.itemId],
+        itemIds: [...indexedItemIds],
         operation: false,
       });
-      syncItemTask(task, item.itemId, projectKey, sessionEpoch);
+      for (const itemId of indexedItemIds) syncItemTask(task, itemId, projectKey, sessionEpoch);
     }
     for (const [taskId, itemIds] of operationItems) {
       pendingItemTasks.current.set(taskId, {
@@ -883,7 +883,6 @@ export function useImportTaskCoordinator({
     discoveryTaskUnavailable,
     beginPendingItems,
     endPendingItems,
-    startNewQueuedItems,
     trackStartedItems,
     trackPathTask,
     trackConfirmationTask,

@@ -59,6 +59,10 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: openDialogMock,
 }));
 
+vi.mock("../components/app/AppCapabilityController", () => ({
+  AppCapabilityController: () => null,
+}));
+
 function mockTask(overrides: Partial<BackendTask> = {}): BackendTask {
   return {
     id: "task-1",
@@ -274,7 +278,7 @@ describe("App", () => {
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: /New knowledge base/i }));
     expect(screen.queryByRole("checkbox", { name: /Initialize a Git repo/i })).not.toBeInTheDocument();
-    fireEvent.change(screen.getByRole("textbox", { name: "Project name" }), {
+    fireEvent.change(await screen.findByRole("textbox", { name: "Project name" }), {
       target: { value: "中文知识库" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Browse" }));
@@ -320,7 +324,7 @@ describe("App", () => {
 
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: /New knowledge base/i }));
-    fireEvent.change(screen.getByRole("textbox", { name: "Project name" }), { target: { value: "Audit" } });
+    fireEvent.change(await screen.findByRole("textbox", { name: "Project name" }), { target: { value: "Audit" } });
     fireEvent.click(screen.getByRole("button", { name: "Browse" }));
     await screen.findByText("D:\\Documents\\Audit");
     fireEvent.click(screen.getByRole("button", { name: "Create project" }));

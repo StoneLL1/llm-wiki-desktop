@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "recipes": {
+    "asr-sensevoice-small": { "family": "node-native", "sources": ["node", "senseVoice", "ffmpeg"], "modelSource": "senseVoice.model" },
+    "asr-whisper": { "family": "node-native", "sources": ["node", "whisper", "ffmpeg"], "modelSource": "whisper.model" },
+    "browser-runtime": { "family": "node", "sources": ["node", "playwrightChromium"] },
+    "browser-runtime-lite": { "family": "node", "sources": ["node", "browserRuntimeLiteDependencies"] },
+    "document-layout": { "family": "python", "sources": ["pythonStandalone", "documentLayout"], "modelSource": "documentLayout.models" },
+    "document-standard": { "family": "python", "sources": ["pythonStandalone", "documentStandard"] },
+    "media-metadata": { "family": "node", "sources": ["node"] },
+    "media-runtime": { "family": "node-native", "sources": ["node", "ffmpeg"] },
+    "ocr-basic": { "family": "python", "sources": ["pythonStandalone", "rapidOcr"] },
+    "ocr-cjk-accurate": { "family": "python", "sources": ["pythonStandalone", "rapidOcr"] },
+    "office-legacy": { "family": "native", "sources": ["pythonStandalone", "libreOffice"] }
+  }
+}

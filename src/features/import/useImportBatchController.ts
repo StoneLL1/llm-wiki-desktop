@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useShallow } from "zustand/react/shallow";
 
 import type { TaskLauncher } from "../../hooks/useTaskLauncher";
+import { translateBackendError } from "../../lib/backendError";
 import { importV2Api } from "../../services/importV2Api";
 import { useImportStore } from "../../stores/importStore";
 import { useTaskStore } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
-import type { ImportItem, ImportSession } from "../../types/importV2";
+import type { ImportItem, ImportSession, ImportSessionPatchCounts } from "../../types/importV2";
 import { isImportBatchOperationTask, isTerminalStatus, type BackendTask } from "../../types/task";
 import type { ImportBatchProgress, ImportBatchTask } from "./importWorkflow";
 import { hasImportTauriRuntime } from "./useImportSessionScope";
@@ -34,6 +36,8 @@ interface ImportBatchControllerOptions {
   sessionEpoch: number;
   session: ImportSession | null;
   taskList: readonly BackendTask[];
+  operationCountsByBatchId: Readonly<Record<string, ImportSessionPatchCounts>>;
+  operationFailedItemIdsByBatchId: Readonly<Record<string, readonly string[]>>;
   tasksHydrated: boolean;
   taskLauncher: TaskLauncher;
   isScopeCurrent: (requestKey: string, epoch: number, expectedSessionId?: string) => boolean;
@@ -74,13 +78,48 @@ export function buildImportBatchProgress(
   records: readonly ImportBatchRecord[],
   taskList: readonly BackendTask[],
   session: ImportSession | null,
+  operationCountsByBatchId: Readonly<Record<string, ImportSessionPatchCounts>> = {},
+  operationFailedItemIdsByBatchId: Readonly<Record<string, readonly string[]>> = {},
 ): readonly ImportBatchProgress[] {
   const taskById = new Map(taskList.map((task) => [task.id, task]));
-  const itemById = new Map((session?.items ?? []).map((item) => [item.itemId, item]));
+  let itemById: Map<string, ImportItem> | null = null;
+  const itemFor = (itemId: string) => {
+    itemById ??= new Map((session?.items ?? []).map((item) => [item.itemId, item]));
+    return itemById.get(itemId);
+  };
   return records.map((record) => {
     if (record.operationTaskId) {
       const operation = taskById.get(record.operationTaskId);
       const itemIds = record.itemIds ?? [];
+      const operationCounts = operationCountsByBatchId[record.operationTaskId];
+      if (operationCounts) {
+        const operationStatus = operation?.status ?? "unknown";
+        const active = Math.max(0, operationCounts.total - operationCounts.processed);
+        return {
+          id: record.id,
+          sessionId: record.sessionId,
+          total: operationCounts.total,
+          taskIds: [record.operationTaskId],
+          processed: operationCounts.processed,
+          active,
+          completed: operationCounts.succeeded,
+          waitingForConfirmation: operationCounts.succeeded + operationCounts.waiting,
+          reviewReady: operationCounts.succeeded,
+          failed: operationCounts.failed,
+          cancelled: operationCounts.cancelled,
+          cancelling: operationStatus === "cancelling" ? 1 : 0,
+          unknown: 0,
+          nonCancellable: active > 0 && operation && !operation.cancellable ? 1 : 0,
+          failedItemIds: operationFailedItemIdsByBatchId[record.operationTaskId] ?? [],
+          tasks: [{
+            id: record.operationTaskId,
+            itemId: "",
+            title: operation?.title ?? "Import batch",
+            status: operationStatus,
+            cancellable: operation?.cancellable ?? false,
+          }],
+        };
+      }
       let completed = 0;
       let waitingForConfirmation = 0;
       let reviewReady = 0;
@@ -90,7 +129,7 @@ export function buildImportBatchProgress(
       let unknown = 0;
       const failedItemIds: string[] = [];
       for (const itemId of itemIds) {
-        const item = itemById.get(itemId);
+        const item = itemFor(itemId);
         if (!item) {
           unknown += 1;
           continue;
@@ -157,7 +196,7 @@ export function buildImportBatchProgress(
       if (status === "succeeded") completed += 1;
       if (status === "waiting_for_confirmation") {
         waitingForConfirmation += 1;
-        if (itemById.get(reference.itemId)?.status === "preview_ready") reviewReady += 1;
+        if (itemFor(reference.itemId)?.status === "preview_ready") reviewReady += 1;
       }
       if (status === "failed") {
         failed += 1;
@@ -255,6 +294,8 @@ export function useImportBatchController({
   sessionEpoch,
   session,
   taskList,
+  operationCountsByBatchId,
+  operationFailedItemIdsByBatchId,
   tasksHydrated,
   taskLauncher,
   isScopeCurrent,
@@ -266,14 +307,27 @@ export function useImportBatchController({
   const [cancellingBatchIds, setCancellingBatchIds] = useState<ReadonlySet<string>>(new Set());
   const [dismissedBatchIds, setDismissedBatchIds] = useState<ReadonlySet<string>>(new Set());
   const localBatchCounter = useRef(0);
+  const trackedTaskIds = useMemo(() => [...new Set(batchRecords.flatMap((record) => [
+    ...(record.operationTaskId ? [record.operationTaskId] : []),
+    ...record.tasks.map((task) => task.taskId),
+  ]))], [batchRecords]);
+  const trackedTasks = useTaskStore(useShallow((state) => trackedTaskIds
+    .flatMap((taskId) => state.taskById[taskId] ? [state.taskById[taskId]!] : [])));
+  const presentationTasks = useMemo(() => {
+    const taskById = new Map(taskList.map((task) => [task.id, task]));
+    for (const task of trackedTasks) taskById.set(task.id, task);
+    return [...taskById.values()];
+  }, [taskList, trackedTasks]);
 
   const batches = useMemo(
     () => buildImportBatchProgress(
       batchRecords.filter((record) => record.projectKey === projectKey && record.epoch === sessionEpoch),
-      taskList,
+      presentationTasks,
       session,
+      operationCountsByBatchId,
+      operationFailedItemIdsByBatchId,
     ),
-    [batchRecords, projectKey, session, sessionEpoch, taskList],
+    [batchRecords, operationCountsByBatchId, operationFailedItemIdsByBatchId, presentationTasks, projectKey, session, sessionEpoch],
   );
   const batch = batches[0] ?? null;
   const isCancellingBatch = batches.some((candidate) => cancellingBatchIds.has(candidate.id));
@@ -295,8 +349,7 @@ export function useImportBatchController({
     sessionId: string,
   ) => {
     if (tasks.length === 0 || !isScopeCurrent(requestKey, epoch, sessionId)) return;
-    const currentSession = useImportStore.getState().session;
-    const itemById = new Map((currentSession?.items ?? []).map((item) => [item.itemId, item]));
+    const itemById = useImportStore.getState().itemById;
     const operationTask = tasks.length === 1
       && tasks[0] && isImportBatchOperationTask(tasks[0])
       ? tasks[0]
@@ -307,7 +360,7 @@ export function useImportBatchController({
     const taskRefs = tasks.map((task, index) => ({
       taskId: task.id,
       itemId: itemIds[index] ?? "",
-      title: itemById.get(itemIds[index] ?? "")?.input.displayName ?? task.title,
+      title: itemById[itemIds[index] ?? ""]?.input.displayName ?? task.title,
     }));
     const taskIds = new Set(taskRefs.map((task) => task.taskId));
     setBatchRecords((current) => [
@@ -365,7 +418,7 @@ export function useImportBatchController({
       }
     } catch (error) {
       if (isScopeCurrent(projectKey, sessionEpoch, target.sessionId)) {
-        pushToast("error", error instanceof Error ? error.message : t("importV2.workflow.batchCancelFailed"));
+        pushToast("error", translateBackendError(error, t));
       }
     } finally {
       setCancellingBatchIds((current) => {
@@ -397,9 +450,9 @@ export function useImportBatchController({
 
   useEffect(() => {
     if (!session || session.projectId !== projectId) return;
-    const hasReferencedTaskSnapshot = session.items.some(
-      (item) => item.taskId && taskList.some((task) => task.id === item.taskId),
-    );
+    const taskById = new Map(taskList.map((task) => [task.id, task]));
+    const hasReferencedTaskSnapshot = Object.keys(useImportStore.getState().itemIdsByTaskId)
+      .some((taskId) => taskById.has(taskId));
     if (hasImportTauriRuntime() && !tasksHydrated && !hasReferencedTaskSnapshot) return;
     const recovered = recoverImportBatchRecords(session, taskList, projectKey, sessionEpoch);
     if (recovered.length === 0) return;

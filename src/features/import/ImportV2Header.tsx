@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import type { ImportSession } from "../../types/importV2";
 import type { BackendTask } from "../../types/task";
-import type { ImportSessionProgress } from "./importViewModel";
+import type { ImportSessionProgress } from "../../stores/importStore";
 
 export interface ImportV2HeaderProps {
   session: ImportSession | null;
@@ -18,8 +18,8 @@ export type ImportV2Section = "workbench" | "history" | "capabilities";
 
 export function ImportV2Header({ session, progress, discoveryTask, syncing = false, activeSection = "workbench", onSectionChange }: ImportV2HeaderProps) {
   const { t } = useTranslation();
-  const total = session?.items.length ?? 0;
-  const completed = session?.items.filter((item) => item.status === "completed").length ?? 0;
+  const total = progress?.total ?? session?.items.length ?? 0;
+  const completed = progress?.completed ?? session?.items.filter((item) => item.status === "completed").length ?? 0;
   const processed = progress?.processed ?? completed;
   const active = progress?.active ?? 0;
   const failed = progress?.failed ?? 0;

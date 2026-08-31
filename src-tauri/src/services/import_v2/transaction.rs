@@ -290,6 +290,7 @@ pub struct FileTransaction {
     guard_by_destination: std::collections::HashMap<PathBuf, PathBuf>,
     deleted_destinations: std::collections::HashSet<PathBuf>,
     project_root: Option<PathBuf>,
+    journal_root: Option<PathBuf>,
     journal_path: Option<PathBuf>,
     journal_entries: Vec<JournalEntry>,
     journal_artifacts: Vec<String>,
@@ -308,7 +309,7 @@ pub(super) fn read_project_file_nofollow(
     Ok(bytes)
 }
 
-pub(super) fn is_project_reparse_point(metadata: &std::fs::Metadata) -> bool {
+pub(crate) fn is_project_reparse_point(metadata: &std::fs::Metadata) -> bool {
     transaction_is_reparse_point(metadata)
 }
 
@@ -334,6 +335,7 @@ impl FileTransaction {
             guard_by_destination: std::collections::HashMap::new(),
             deleted_destinations: std::collections::HashSet::new(),
             project_root: None,
+            journal_root: None,
             journal_path: None,
             journal_entries: Vec::new(),
             journal_artifacts: Vec::new(),
@@ -344,13 +346,29 @@ impl FileTransaction {
     }
 
     pub fn new_for_project(root: &Path) -> Self {
+        Self::new_for_project_at(root, ".app/import-v2-journal")
+    }
+
+    pub fn new_for_project_at(root: &Path, journal_root: &str) -> Self {
         let mut transaction = Self::new();
         transaction.project_root = Some(root.to_path_buf());
+        transaction.journal_root = Some(root.join(journal_root));
         transaction
     }
 
+    pub fn new_for_context(
+        context: &crate::models::paths::ProjectContext,
+    ) -> Result<Self, BackendError> {
+        let journal_root = context.layout.import_paths()?.recovery_journal_root();
+        Ok(Self::new_for_project_at(&context.root, &journal_root))
+    }
+
     pub fn reconcile_project(root: &Path) -> Result<(), BackendError> {
-        let directory = root.join(".app/import-v2-journal");
+        Self::reconcile_project_at(root, ".app/import-v2-journal")
+    }
+
+    pub fn reconcile_project_at(root: &Path, journal_root: &str) -> Result<(), BackendError> {
+        let directory = root.join(journal_root);
         match std::fs::symlink_metadata(&directory) {
             Ok(metadata)
                 if !metadata.is_dir()
@@ -496,6 +514,13 @@ impl FileTransaction {
         Ok(())
     }
 
+    pub fn reconcile_context(
+        context: &crate::models::paths::ProjectContext,
+    ) -> Result<(), BackendError> {
+        let journal_root = context.layout.import_paths()?.recovery_journal_root();
+        Self::reconcile_project_at(&context.root, &journal_root)
+    }
+
     fn record_intent(
         &mut self,
         path: &Path,
@@ -531,10 +556,10 @@ impl FileTransaction {
         let journal_path = self
             .journal_path
             .get_or_insert_with(|| {
-                root.join(format!(
-                    ".app/import-v2-journal/{}.json",
-                    uuid::Uuid::new_v4()
-                ))
+                self.journal_root
+                    .as_deref()
+                    .unwrap_or_else(|| Path::new(".app/import-v2-journal"))
+                    .join(format!("{}.json", uuid::Uuid::new_v4()))
             })
             .clone();
         let bytes = serde_json::to_vec(&Journal {
@@ -574,10 +599,10 @@ impl FileTransaction {
         let journal_path = self
             .journal_path
             .get_or_insert_with(|| {
-                root.join(format!(
-                    ".app/import-v2-journal/{}.json",
-                    uuid::Uuid::new_v4()
-                ))
+                self.journal_root
+                    .as_deref()
+                    .unwrap_or_else(|| Path::new(".app/import-v2-journal"))
+                    .join(format!("{}.json", uuid::Uuid::new_v4()))
             })
             .clone();
         let bytes = serde_json::to_vec(&Journal {
@@ -1288,10 +1313,10 @@ impl FileTransaction {
         let journal_path = self
             .journal_path
             .get_or_insert_with(|| {
-                root.join(format!(
-                    ".app/import-v2-journal/{}.json",
-                    uuid::Uuid::new_v4()
-                ))
+                self.journal_root
+                    .as_deref()
+                    .unwrap_or_else(|| Path::new(".app/import-v2-journal"))
+                    .join(format!("{}.json", uuid::Uuid::new_v4()))
             })
             .clone();
         self.write_journal_in_progress(&journal_path)
@@ -1620,6 +1645,51 @@ impl FileTransaction {
             })),
         }
     }
+}
+
+/// Return whether a bounded, safely-readable durable transaction journal
+/// actually contains an intent for this Import session. The journal root is
+/// project-wide, so treating any sibling transaction as session recovery work
+/// can race a live Source write or another Import session.
+pub(crate) fn incomplete_journal_touches_session(
+    context: &crate::models::paths::ProjectContext,
+    session_id: &str,
+) -> Result<bool, BackendError> {
+    const MAX_JOURNALS: usize = 128;
+
+    let import_paths = context.layout.import_paths()?;
+    let session_root = import_paths.session_root(session_id)?;
+    let session_prefix = format!("{session_root}/");
+    let journal_root = context.resolve_project_path(&import_paths.recovery_journal_root())?;
+    let entries = match std::fs::read_dir(&journal_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(io_error(error, &journal_root)),
+    };
+    for entry in entries.take(MAX_JOURNALS) {
+        let entry = entry.map_err(|error| io_error(error, &journal_root))?;
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| io_error(error, &path))?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || is_project_reparse_point(&metadata)
+        {
+            continue;
+        }
+        let bytes = read_project_file_nofollow(&context.root, &path)?;
+        let Ok(journal) = serde_json::from_slice::<Journal>(&bytes) else {
+            // A malformed journal is still handled by project-wide startup
+            // reconciliation; it must not be guessed to belong to every
+            // session overview.
+            continue;
+        };
+        if journal.entries.iter().any(|entry| {
+            entry.relative_path == session_root || entry.relative_path.starts_with(&session_prefix)
+        }) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 impl Drop for FileTransaction {
@@ -2345,14 +2415,15 @@ mod tests {
     #[cfg(unix)]
     use super::set_after_journal_directory_bind_hook;
     use super::{
-        digest_bytes, hard_link_identity_proof_error, set_after_initial_journal_publish_hook,
-        set_before_checked_displace_hook, set_before_checked_final_mutation_hook,
-        set_before_new_install_hook, set_before_recovery_final_mutation_hook,
-        set_before_recovery_mutation_hook, set_before_rollback_final_mutation_hook,
-        set_fail_next_candidate_install, set_fail_next_cleanup, set_fail_next_identity_query,
-        set_recovery_process_death_hook, FileTransaction, Journal, JournalState,
-        IMPORT_V2_CANCELLED, IMPORT_V2_COMMIT_CONFLICT,
+        digest_bytes, hard_link_identity_proof_error, incomplete_journal_touches_session,
+        set_after_initial_journal_publish_hook, set_before_checked_displace_hook,
+        set_before_checked_final_mutation_hook, set_before_new_install_hook,
+        set_before_recovery_final_mutation_hook, set_before_recovery_mutation_hook,
+        set_before_rollback_final_mutation_hook, set_fail_next_candidate_install,
+        set_fail_next_cleanup, set_fail_next_identity_query, set_recovery_process_death_hook,
+        FileTransaction, Journal, JournalState, IMPORT_V2_CANCELLED, IMPORT_V2_COMMIT_CONFLICT,
     };
+    use crate::models::paths::ProjectContext;
     use sha2::Digest;
     use std::path::Path;
 
@@ -2369,6 +2440,37 @@ mod tests {
             })
             .expect("candidate identity pin")
             .path()
+    }
+
+    #[test]
+    fn journal_recovery_fact_is_bound_to_the_owning_session() {
+        let root = std::env::temp_dir().join(format!(
+            "import-v2-journal-session-scope-{}",
+            uuid::Uuid::new_v4()
+        ));
+        for relative in [
+            "raw/sources",
+            "wiki",
+            ".app/import-sessions/session-a/items/item-a",
+            "exports",
+            "skills",
+        ] {
+            std::fs::create_dir_all(root.join(relative)).unwrap();
+        }
+        std::fs::write(root.join("purpose.md"), "# Purpose\n").unwrap();
+        std::fs::write(root.join("schema.md"), "# Schema\n").unwrap();
+        let context = ProjectContext::new("project", root.clone())
+            .with_resolved_layout()
+            .unwrap();
+        let target = root.join(".app/import-sessions/session-a/items/item-a/working-manifest.json");
+        let mut transaction = FileTransaction::new_for_context(&context).unwrap();
+        transaction.write_new(&target, b"{}\n").unwrap();
+
+        assert!(incomplete_journal_touches_session(&context, "session-a").unwrap());
+        assert!(!incomplete_journal_touches_session(&context, "session-b").unwrap());
+
+        drop(transaction);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

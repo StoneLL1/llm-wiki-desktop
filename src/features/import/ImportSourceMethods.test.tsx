@@ -169,8 +169,8 @@ describe("ImportSourceMethods", () => {
     expect(screen.getByLabelText("Supported files, platforms, and extraction capabilities")).toBeInTheDocument();
     const matrixSummary = screen.getByRole("button", { name: /^Expand supported sources\./ });
     expect(matrixSummary).toHaveAttribute("aria-expanded", "false");
-    expect(matrixSummary).toHaveAccessibleName(/Files: 7\/7 available/);
-    expect(matrixSummary).toHaveAccessibleName(/Platforms: 2\/7 available/);
+    expect(matrixSummary).toHaveAccessibleName(/Files: 0\/0 available/);
+    expect(matrixSummary).toHaveAccessibleName(/Platforms: 0\/0 available/);
     expect(matrixSummary).toHaveAccessibleName(/Abilities: 0\/0 available/);
     expect(screen.queryByLabelText("HTTP: available")).not.toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "URL" }).closest("form")).toHaveClass("import-v2-compact-url");
@@ -182,7 +182,7 @@ describe("ImportSourceMethods", () => {
 
     expandMatrix();
     expect(screen.getByRole("button", { name: /^Collapse supported sources\./ })).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByLabelText("HTTP: available")).toBeInTheDocument();
+    expect(screen.queryByLabelText("HTTP: available")).not.toBeInTheDocument();
   });
 
   it("shows localized validation for malformed public URLs", () => {
@@ -212,8 +212,12 @@ describe("ImportSourceMethods", () => {
     expect(screen.getByRole("button", { name: "Add URL" })).toBeDisabled();
   });
 
-  it("marks phase-two connectors as unavailable", () => {
-    render(<ImportSourceMethods onAddPaths={vi.fn()} onAddUrl={vi.fn()} />);
+  it("renders only backend-provided connector readiness", () => {
+    render(<ImportSourceMethods onAddPaths={vi.fn()} onAddUrl={vi.fn()} platforms={[
+      { id: "http", label: "HTTP", available: true },
+      { id: "wechat", label: "WeChat", available: true },
+      { id: "xiaohongshu", label: "Xiaohongshu", available: false },
+    ]} />);
 
     expandMatrix();
     expect(screen.getByLabelText("HTTP: available")).toBeInTheDocument();
@@ -246,6 +250,26 @@ describe("ImportSourceMethods", () => {
     fireEvent.pointerDown(document.body);
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Choose files" })).toBeEnabled();
+  });
+
+  it("routes an explicitly pasted single HTTP URL to URL preview and addition", async () => {
+    const onAddUrl = vi.fn().mockResolvedValue(undefined);
+    const onAddText = vi.fn();
+    render(<ImportSourceMethods onAddPaths={vi.fn()} onAddText={onAddText} onAddUrl={onAddUrl} />);
+    fireEvent.click(screen.getByRole("button", { name: "Paste text or Markdown" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Text or Markdown" }), { target: { value: "https://example.com/from-clipboard" } });
+    expect(screen.getByText("Detected as a web URL")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Add pasted text" }));
+    await waitFor(() => expect(onAddUrl).toHaveBeenCalledWith("https://example.com/from-clipboard"));
+    expect(onAddText).not.toHaveBeenCalled();
+  });
+
+  it("shows unavailable readiness without optimistic formats and supports retry", () => {
+    const onRetryReadiness = vi.fn();
+    render(<ImportSourceMethods onAddPaths={vi.fn()} onAddUrl={vi.fn()} readinessUnavailable onRetryReadiness={onRetryReadiness} />);
+    expect(screen.getByText(/readiness is unavailable/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(onRetryReadiness).toHaveBeenCalledTimes(1);
   });
 
   it("renders backend readiness for platforms and media abilities", () => {

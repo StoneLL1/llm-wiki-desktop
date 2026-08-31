@@ -5,6 +5,8 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { RightPanelHeader } from "../../components/app/RightPanelHeader";
+import { ActionableErrorNotice } from "../../components/app/ActionableErrorNotice";
+import { normalizeBackendError, type NormalizedBackendError } from "../../lib/backendError";
 import { compactPath } from "../../lib/pathDisplay";
 import { importV2Api } from "../../services/importV2Api";
 import type { ImportItem } from "../../types/importV2";
@@ -40,16 +42,20 @@ export function ImportRightPanel({
   const { t } = useTranslation();
   const [content, setContent] = useState<ImportPreviewContent | null>(null);
   const [previewState, setPreviewState] = useState<"idle" | "loading" | "error">("idle");
+  const [previewError, setPreviewError] = useState<NormalizedBackendError | null>(null);
+  const [previewAttempt, setPreviewAttempt] = useState(0);
 
   useEffect(() => {
     if (!selectedItem?.preview || !sessionId || !projectId || !projectRootPath) {
       setContent(null);
       setPreviewState("idle");
+      setPreviewError(null);
       return;
     }
     let current = true;
     setContent(null);
     setPreviewState("loading");
+    setPreviewError(null);
     void importV2Api.getPreviewContent({
       projectId,
       projectRootPath,
@@ -60,14 +66,19 @@ export function ImportRightPanel({
       if (!current) return;
       setContent(next);
       setPreviewState("idle");
-    }).catch(() => {
+    }).catch((error) => {
       if (!current) return;
+      setPreviewError(normalizeBackendError(error, {
+        defaultSummaryKey: "backendError.summary.import",
+        defaultRecoverable: true,
+        defaultActionKind: "retry",
+      }));
       setPreviewState("error");
     });
     return () => {
       current = false;
     };
-  }, [projectId, projectRootPath, selectedItem?.itemId, selectedItem?.preview, sessionId]);
+  }, [previewAttempt, projectId, projectRootPath, selectedItem?.itemId, selectedItem?.preview, sessionId]);
 
   return (
     <aside id="right-context-panel" aria-label={t("importV2.inspector.title")} className="right-panel">
@@ -84,6 +95,8 @@ export function ImportRightPanel({
             item={selectedItem}
             content={content}
             previewState={previewState}
+            previewError={previewError}
+            onRetryPreview={() => setPreviewAttempt((attempt) => attempt + 1)}
             onPreviewMarkdown={onPreviewMarkdown}
             onPrimaryAction={onPrimaryAction}
           />
@@ -97,12 +110,16 @@ function SelectedSource({
   item,
   content,
   previewState,
+  previewError,
+  onRetryPreview,
   onPreviewMarkdown,
   onPrimaryAction,
 }: {
   item: ImportItem;
   content: ImportPreviewContent | null;
   previewState: "idle" | "loading" | "error";
+  previewError: NormalizedBackendError | null;
+  onRetryPreview: () => void;
   onPreviewMarkdown: (itemId: string) => void;
   onPrimaryAction?: (action: ImportItemAction, itemId: string) => void;
 }) {
@@ -154,6 +171,8 @@ function SelectedSource({
             <LoaderCircle size={13} className="animate-spin" aria-hidden="true" />
             {t("importV2.preview.loading")}
           </p>
+        ) : previewState === "error" && previewError ? (
+          <ActionableErrorNotice error={previewError} role="status" onAction={() => onRetryPreview()} />
         ) : content ? (
           <>
             <div className="import-v2-quick-preview">

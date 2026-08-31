@@ -738,15 +738,16 @@ npm install @milkdown/core @milkdown/react @milkdown/plugin-math
 
 ### 16.9 Capability 与应用更新的当前实现
 
-- source checkout 中的 `capabilities/install-catalog.json` 只是明确的 development fallback；release build 必须注入同一 tag/run 产生的 4 target × 5 signed catalog 与 trusted key，验证 binary embed、hash/signature/provenance 后才可打包。空 catalog 的 source build 不得被描述为可安装 capability release。
+- source checkout 中的 `capabilities/install-catalog.json` 只是明确的 development fallback；release build 必须从 `capabilities/product-manifest.json` 派生全部 `published definition × 4 targets` 的 exact signed catalog 与 trusted key，验证 binary embed、hash/signature/provenance 后才可打包。当前清单为 11 × 4 = 44 项，但任何门禁都不得硬编码该数量。空 catalog 的 source build 不得被描述为可安装 capability release。
 - capability 下载使用 release-scoped partial identity、Range resume 或明确安全重下、启动 reaper、最终全量 hash/signature、事务安装、health rollback，并把成功安装绑定回原 Import session/item 的继续动作。主动取消与 crash pause 是不同终态。
+- 2026-08-30 决策修订后，固定官方 catalog / trusted key 发布且通过完整性、target、manifest、protocol 与 route-set 校验的 capability runner 按受信任应用组件执行；首版不以四平台 OS 级 runner sandbox 作为 Batch 6 或发布门，也不得宣称已 sandbox。Batch 5R 已移除历史 `APP_CAPABILITY_CONFINEMENT_UNAVAILABLE` stop gate，并恢复官方包安装及全部声明 route 的原子激活；任意 URL、本地 archive、第三方 catalog / signing root 与用户 PATH runtime 仍不开放。
 - 应用更新是 project-independent 的全局 controller/store。后端只使用编译时固定 HTTPS endpoint 和 committed public key，限制 manifest 大小，生成有 TTL 与 identity 的 ephemeral offer；前端不能传 endpoint、artifact URL 或 signature。
 - 下载可取消/重试并发布进度；安装前重新验证 exact artifact。确认临界区重新采集未保存编辑与 Import commit 等 presentation facts并锁定编辑器，后端 barrier 原子复查其拥有的等待确认、关键任务与 Workflow apply facts；任一 blocker 都 fail closed。安装 handoff/失败 receipt 持久化在 app-global state，不写用户项目。
 
 ### 16.10 Release 状态与公开发布门
 
 - `.github/workflows/desktop-release.yml` 是唯一 stable publisher：同一 tag/commit/run 组合 capability catalog、四 target desktop artifact、强制 updater signature、明确的 OS vendor identity policy evidence、完整 `latest.json`、checksums、SBOM、provenance/attestation、packaged smoke 与 draft reverse verification；只有 protected final publisher 可获得 `contents: write`。
-- 本地 fixture、源码测试或 `cargo check` 不能替代真实安装、旧版升级、卸载、恢复、匿名 endpoint 与平台证据。初始发布明确不要求 Windows Authenticode 与 Apple Developer ID/notarization；Windows SmartScreen/unknown-publisher 和 macOS Gatekeeper manual override 必须在限制说明与真实平台验收中如实记录，checksums/attestation 不得被描述成 OS publisher identity。Batch 6 当前结论为 Public beta No-Go；权威 Pending 矩阵见 `docs/release/batch-6-acceptance-evidence.md`。
+- 本地 fixture、源码测试或 `cargo check` 不能替代真实安装、旧版升级、卸载、恢复、匿名 endpoint 与平台证据。初始发布明确不要求 Windows Authenticode 与 Apple Developer ID/notarization；Windows SmartScreen/unknown-publisher 和 macOS Gatekeeper manual override 必须在限制说明与真实平台验收中如实记录，checksums/attestation 不得被描述成 OS publisher identity。Batch 8 完成清单派生的源码/制品合同后仍是 Public beta No-Go；Batch 9 必须对同一 sealed candidate 完成真实 packaged matrix，权威 Pending 矩阵见 `docs/release/batch-6-acceptance-evidence.md` 与 `docs/release/2026-08-30-batch-8-capability-evidence.md`。
 - production updater/capability private key、密码、PAT 不进入 workspace、日志或 artifact metadata；缺 capability trust key、matching protected secret、updater signing secret、protected reviewer 或公开 endpoint 任一项即停止发布，不得临时生成 production key 或禁用验证。`StoneLL1` 是唯一 owner/approver；backup custodian 不作为门槛，但单维护者 key-loss continuity risk 必须保持显式。
 - 首个 stable `0.1.0` 因不存在 prior production release，仅对“旧生产版→候选版升级”单项做一次性 owner-approved 豁免，并以 Windows x64、macOS arm64、macOS x64、Ubuntu 24.04 x64 四平台干净安装/启动重启/卸载/项目字节保持验收替代；updater/capability 签名、packaged smoke、OS warning、protected approval 均不豁免。自 `0.1.1` 起恢复真实 prior-production-to-candidate 四平台升级硬门禁。
 

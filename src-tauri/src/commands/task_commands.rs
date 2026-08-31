@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 use crate::app_state::AppState;
 use crate::errors::BackendError;
-use crate::models::task::{BackendTask, TaskActivity, TaskStatus, TaskType};
+use crate::models::task::{
+    BackendTask, TaskActivity, TaskOperation, TaskResultReference, TaskStatus, TaskType,
+};
 use crate::models::workflow::{
     WorkflowFilesystemAccess, WorkflowPersistenceMode, WorkflowProjectTrust, WorkflowRunPage,
 };
@@ -139,6 +141,46 @@ pub fn cancel_task(
             .ok_or_else(|| BackendError::new("TASK_NOT_FOUND", "Task not found.", false, false));
     }
     let task = state.task_service.get_task(&request.task_id);
+    if let Some(task) = task.as_ref().filter(|task| {
+        matches!(
+            task.operation.as_ref(),
+            Some(TaskOperation::ImportCollectionDiscovery { .. })
+        )
+    }) {
+        let session_id = match task.operation.as_ref() {
+            Some(TaskOperation::ImportCollectionDiscovery { session_id }) => session_id,
+            _ => unreachable!("collection task predicate was checked"),
+        };
+        let session_context = crate::commands::import_v2_commands::import_session_context(
+            &state,
+            &request.project_id,
+            &request.project_root_path,
+            session_id,
+        )?;
+        return state.with_current_project_task_access(
+            &request.project_id,
+            &request.project_root_path,
+            |_permit| {
+                if let Some(TaskResultReference::ImportCollectionPreview {
+                    collection_ref, ..
+                }) = task
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.reference.as_ref())
+                {
+                    state.import_v2_service.delete_web_collection_durable(
+                        &session_context,
+                        &state.file_store,
+                        collection_ref,
+                    )?;
+                }
+                state
+                    .task_service
+                    .cancel_task(&request.task_id)
+                    .map_err(|msg| BackendError::new("TASK_CANCEL_FAILED", &msg, true, false))
+            },
+        );
+    }
     if let Some(task) = task
         .as_ref()
         .filter(|task| is_import_batch_operation_task(task))
@@ -236,11 +278,16 @@ fn require_task_project(state: &AppState, request: &TaskByIdRequest) -> Result<(
 /// projects recover from the backend-derived layout root; memory-only projects
 /// neither bind nor create project app state.
 #[tauri::command]
-pub fn set_active_project(
-    state: State<'_, AppState>,
+pub async fn set_active_project(
+    app: AppHandle,
     request: SetActiveProjectRequest,
 ) -> Result<SetActiveProjectResult, BackendError> {
-    set_active_project_for_state(&state, request)
+    let coordinator = app.state::<AppState>().blocking_work.clone();
+    coordinator
+        .run_project_activation(move || {
+            set_active_project_for_state(&app.state::<AppState>(), request)
+        })
+        .await
 }
 
 fn set_active_project_for_state(
@@ -266,6 +313,22 @@ fn set_active_project_for_state(
             let (result, next_runs) = state.with_workflow_access(&context, |access| {
                 activate_project_with_access(state, &context, access)
             })?;
+            if result.persistence == WorkflowPersistenceMode::Persistent {
+                state.with_current_project_write_access(
+                    &context.project_id,
+                    context.root.to_string_lossy().as_ref(),
+                    |permit, _context| {
+                        state
+                            .import_v2_service
+                            .recover_unfinished_session_on_open_authorized(
+                                permit,
+                                &state.file_store,
+                                &state.task_service,
+                            )?;
+                        Ok(())
+                    },
+                )?;
+            }
             for next in next_runs {
                 state.workflow_service.dispatch_claimed_run_with_settings(
                     &state.task_service,
@@ -542,6 +605,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::models::import_v2::{
+        ImportInput, ImportInputKind, ImportItem, ImportItemStatus, ImportResourceMode,
+    };
     use crate::models::project::ProjectTrustKind;
     use crate::models::workflow::{
         HealthCheckMode, WorkflowExecutionOptions, WorkflowFilesystemAccess, WorkflowGitState,
@@ -757,6 +823,85 @@ mod tests {
         assert_eq!(result.persistence, WorkflowPersistenceMode::Persistent);
         assert_eq!(result.persistence_reason, None);
         assert!(result.tasks.iter().any(|task| task.id == expected.id));
+    }
+
+    #[test]
+    fn project_open_reconciles_interrupted_import_before_import_view_mounts() {
+        let project = native_project();
+        let state = AppState::default();
+        let context = state
+            .project_registry
+            .register("project-a", project.path())
+            .unwrap()
+            .with_resolved_layout()
+            .unwrap();
+        let session = state
+            .import_v2_service
+            .create_session(&context, &state.file_store, ImportResourceMode::Balanced)
+            .unwrap();
+        let session = state
+            .import_v2_service
+            .add_inputs(
+                &context,
+                &state.file_store,
+                &session.session_id,
+                vec![ImportInput {
+                    kind: ImportInputKind::File,
+                    display_name: "interrupted.md".into(),
+                    locator: project
+                        .path()
+                        .join("interrupted.md")
+                        .to_string_lossy()
+                        .into(),
+                    normalized_locator: None,
+                    source_identity: None,
+                    media_save_mode: Default::default(),
+                }],
+            )
+            .unwrap();
+        let task = state
+            .task_service
+            .create_project_task(
+                TaskType::Import,
+                context.project_id.clone(),
+                context.root.clone(),
+                "Interrupted Import".into(),
+                true,
+            )
+            .unwrap();
+        state
+            .task_service
+            .transition_status(&task.id, TaskStatus::Running)
+            .unwrap();
+        let mut item: ImportItem = session.items[0].clone();
+        item.status = ImportItemStatus::Inspecting;
+        item.task_id = Some(task.id.clone());
+        let item_path = context
+            .layout
+            .import_paths()
+            .unwrap()
+            .item_record(&session.session_id, &item.item_id)
+            .unwrap();
+        state
+            .file_store
+            .write_json_atomic(&context, &item_path, &item)
+            .unwrap();
+
+        set_active_project_for_state(
+            &state,
+            SetActiveProjectRequest {
+                project_id: Some(context.project_id.clone()),
+                root_path: Some(context.root.to_string_lossy().into()),
+            },
+        )
+        .unwrap();
+
+        let reopened = state
+            .import_v2_service
+            .read_session(&context, &state.file_store, &session.session_id)
+            .unwrap();
+        assert_eq!(reopened.items[0].status, ImportItemStatus::Paused);
+        assert!(reopened.items[0].task_id.is_none());
     }
 
     #[test]

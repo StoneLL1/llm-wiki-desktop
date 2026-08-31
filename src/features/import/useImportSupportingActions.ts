@@ -31,6 +31,7 @@ type SupportingActions = Pick<ImportWorkflow,
   | "getMigrationStatus"
   | "resumeMigration"
   | "listHistory"
+  | "loadHistoryDetail"
 >;
 
 interface ImportSupportingActionsOptions {
@@ -59,7 +60,7 @@ export function useImportSupportingActions({
   const selectedTaskUpsert = useTaskStore((state) => state.upsertTask);
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
   const showError = useCallback((error: unknown) => {
-    pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error) }));
+    pushToast("error", t("importV2.workflow.error", { message: importWorkflowErrorMessage(error, t) }));
   }, [pushToast, t]);
 
   const invokeLocalAgent = useCallback(async (
@@ -69,7 +70,7 @@ export function useImportSupportingActions({
   ) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey
-      || !current.session.items.some((item) => item.itemId === itemId)) return null;
+      || !current.knownItemIds.has(itemId)) return null;
     const epoch = current.sessionEpoch;
     try {
       const task = await importV2Api.startAgentAssistance({
@@ -93,7 +94,7 @@ export function useImportSupportingActions({
   const acceptAgentCandidate = useCallback(async (itemId: string, taskId: string) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey
-      || !current.session.items.some((item) => item.itemId === itemId)) return null;
+      || !current.knownItemIds.has(itemId)) return null;
     const epoch = current.sessionEpoch;
     try {
       const view = await importV2Api.acceptAgentCandidate({
@@ -118,7 +119,7 @@ export function useImportSupportingActions({
   }) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey
-      || !current.session.items.some((item) => item.itemId === request.itemId)) return null;
+      || !current.knownItemIds.has(request.itemId)) return null;
     const epoch = current.sessionEpoch;
     try {
       const result = await importV2Api.selectAgentCandidate({
@@ -145,7 +146,7 @@ export function useImportSupportingActions({
   const discardAgentCandidate = useCallback(async (itemId: string, candidateId: string) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey
-      || !current.session.items.some((item) => item.itemId === itemId)) return null;
+      || !current.knownItemIds.has(itemId)) return null;
     const epoch = current.sessionEpoch;
     try {
       const result = await importV2Api.discardAgentCandidate({
@@ -169,7 +170,7 @@ export function useImportSupportingActions({
   const beginLogin = useCallback(async (itemId: string, platform: string) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey
-      || !current.session.items.some((item) => item.itemId === itemId)) return null;
+      || !current.knownItemIds.has(itemId)) return null;
     const epoch = current.sessionEpoch;
     try {
       const result = await importV2Api.beginLogin({
@@ -189,7 +190,7 @@ export function useImportSupportingActions({
   const completeLogin = useCallback(async (itemId: string, connectorSessionId: string) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey
-      || !current.session.items.some((item) => item.itemId === itemId)) return null;
+      || !current.knownItemIds.has(itemId)) return null;
     const epoch = current.sessionEpoch;
     try {
       const result = await importV2Api.completeLogin({
@@ -229,7 +230,7 @@ export function useImportSupportingActions({
   const authorizePrivateTarget = useCallback(async (itemId: string, url: string) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey
-      || !current.session.items.some((item) => item.itemId === itemId)) return null;
+      || !current.knownItemIds.has(itemId)) return null;
     const epoch = current.sessionEpoch;
     try {
       const grant = await importV2Api.authorizePrivateTarget({
@@ -249,7 +250,7 @@ export function useImportSupportingActions({
   const getCapabilityRequirement = useCallback(async (itemId: string) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey
-      || !current.session.items.some((item) => item.itemId === itemId)) return null;
+      || !current.knownItemIds.has(itemId)) return null;
     const epoch = current.sessionEpoch;
     try {
       const result = await importV2Api.getCapabilityRequirement({
@@ -268,7 +269,7 @@ export function useImportSupportingActions({
   const getAsrEnablementPlan = useCallback(async (itemId: string) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey
-      || !current.session.items.some((item) => item.itemId === itemId)) return null;
+      || !current.knownItemIds.has(itemId)) return null;
     const epoch = current.sessionEpoch;
     try {
       const result = await importV2Api.getAsrEnablementPlan({
@@ -292,7 +293,7 @@ export function useImportSupportingActions({
   ) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey
-      || !current.session.items.some((item) => item.itemId === itemId)) return null;
+      || !current.knownItemIds.has(itemId)) return null;
     const epoch = current.sessionEpoch;
     try {
       const task = await importV2Api.installCapability({
@@ -400,6 +401,34 @@ export function useImportSupportingActions({
         cursor,
         limit: 50,
       });
+      if (cursor === null && page.warnings.some((warning) => warning.code === "IMPORT_V2_HISTORY_INDEX_REBUILD_REQUIRED")) {
+        try {
+          const task = await importV2Api.rebuildHistoryIndex({ projectId, projectRootPath: rootPath });
+          if (!isProjectCurrent(projectKey)) return null;
+          selectedTaskUpsert(task);
+        } catch {
+          // Restricted/read-only projects retain the bounded compatibility
+          // page and rebuild warning instead of turning a readable history
+          // response into a fatal error.
+        }
+      }
+      return isProjectCurrent(projectKey) ? page : null;
+    } catch (error) {
+      if (isProjectCurrent(projectKey)) showError(error);
+      throw error;
+    }
+  }, [isProjectCurrent, projectId, projectKey, rootPath, selectedTaskUpsert, showError]);
+
+  const loadHistoryDetail = useCallback(async (batchId: string, cursor: string | null = null) => {
+    if (!isProjectCurrent(projectKey)) return null;
+    try {
+      const page = await importV2Api.getHistoryDetail({
+        projectId,
+        projectRootPath: rootPath,
+        batchId,
+        cursor,
+        limit: 50,
+      });
       return isProjectCurrent(projectKey) ? page : null;
     } catch (error) {
       if (isProjectCurrent(projectKey)) showError(error);
@@ -425,5 +454,6 @@ export function useImportSupportingActions({
     getMigrationStatus,
     resumeMigration,
     listHistory,
+    loadHistoryDetail,
   };
 }

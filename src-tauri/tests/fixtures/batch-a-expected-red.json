@@ -29,7 +29,6 @@
     { "file": "project_layout_authority_contract.rs", "test": "native_legacy_repairable_state_advertises_a_repair_plan" },
     { "file": "import_v2_file_discovery.rs", "test": "batch_a_expected_red_counts_one_discovery_callback_per_file" },
     { "file": "import_v2_scale_contract.rs", "test": "expected_red_single_item_update_rewrites_every_persisted_item_file" },
-    { "file": "import_v2_file_orchestration.rs", "test": "batch_a_expected_red_task_service_creates_one_backend_task_per_item_at_scale" },
     { "file": "../../src/features/import/importScaleContract.test.ts", "test": "records one frontend store publication per terminal item under the current path" }
   ],
   "migration": {

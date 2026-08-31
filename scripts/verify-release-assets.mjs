@@ -16,7 +16,7 @@ import {
   safeAssetName,
   STABLE_TAG_PATTERN,
 } from "./release-assets-contract.mjs";
-import { verifyCapabilityCatalog } from "./verify-capability-catalog.mjs";
+import { CAPABILITY_PACKS, CAPABILITY_TARGETS, verifyCapabilityCatalog } from "./verify-capability-catalog.mjs";
 import { validateLatestJson } from "./verify-latest-json.mjs";
 
 const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
@@ -154,7 +154,10 @@ export function verifyReleaseAssets({ root, tag, version, commitSha, workflowRun
         expectedRunId: String(workflowRunId),
       }).errors);
       const archives = collectRegularFiles(capabilityRoot).filter((file) => file.endsWith(".zip"));
-      if (archives.length !== 20) errors.push(`release bundle must contain exactly 20 capability archives, found ${archives.length}`);
+      const expectedArchiveCount = CAPABILITY_TARGETS.length * CAPABILITY_PACKS.length;
+      if (archives.length !== expectedArchiveCount) {
+        errors.push(`release bundle must contain the manifest-derived exact matrix of ${expectedArchiveCount} capability archives, found ${archives.length}`);
+      }
       const archivesByName = new Map(archives.map((file) => [path.basename(file), file]));
       if (archivesByName.size !== archives.length) errors.push("capability archive names must be globally unique");
       for (const entry of catalog.entries ?? []) {

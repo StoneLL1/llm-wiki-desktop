@@ -5,6 +5,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -23,7 +24,13 @@ import type { AiCapabilitiesWorkflow } from "../../hooks/useAiCapabilities";
 import { useExportStore } from "../../stores/exportStore";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
-import { fetchTaskById, useTaskStore } from "../../stores/taskStore";
+import {
+  fetchTaskById,
+  selectProjectTaskById,
+  selectTaskIdsForProject,
+  selectTasksForProject,
+  useTaskStore,
+} from "../../stores/taskStore";
 import { useUpdateStore } from "../../stores/updateStore";
 import { ConfirmationDialog } from "../../components/app/ConfirmationDialog";
 import type { PendingAction } from "../../types/backend";
@@ -193,7 +200,6 @@ export function WikiView({ capabilities }: WikiViewProps) {
   const clearRunningTask = useExportStore((state) => state.clearRunningTask);
   const loadPreview = useExportStore((state) => state.loadPreview);
   const openFolder = useExportStore((state) => state.openFolder);
-  const tasks = useTaskStore((state) => state.tasks);
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
 
   const { projectId, rootPath } = currentProject;
@@ -318,20 +324,26 @@ export function WikiView({ capabilities }: WikiViewProps) {
     currentPendingWikiQuickExport?.taskId === runningExportTaskId
       ? runningExportTaskId
       : null;
-  const runningExportTask = currentRunningExportTaskId
-    ? tasks.find((task) => task.id === currentRunningExportTaskId) ?? null
-    : null;
   const selectedSourceId = page?.meta.sourceBinding?.sourceId ?? null;
-  const selectedSourceAiTasks = selectedSourceId
-    ? tasks.filter(
+  const projectTaskIds = useTaskStore((state) => selectTaskIdsForProject(state, projectId));
+  const runningExportTask = useTaskStore((state) =>
+    selectProjectTaskById(state, projectId, currentRunningExportTaskId));
+  const sourceAiWorkbenchTask = useTaskStore((state) =>
+    selectProjectTaskById(state, projectId, sourceAiWorkbench?.initialTaskId));
+  const selectedSourceAiTasks = useMemo(() => {
+    if (!selectedSourceId) return [];
+    const state = useTaskStore.getState();
+    return projectTaskIds
+      .map((taskId) => selectProjectTaskById(state, projectId, taskId))
+      .filter((task): task is BackendTask => task !== null)
+      .filter(
         (task) =>
           task.taskType === "source_ai_organize" &&
-          task.projectId === projectId &&
           task.result?.reference?.type === "source_ai_organize" &&
           sameProjectRoot(task.result.reference.projectRootPath, rootPath) &&
           task.result.reference.sourceId === selectedSourceId,
-      )
-    : [];
+      );
+  }, [projectId, projectTaskIds, rootPath, selectedSourceId]);
   const orderedSourceAiTasks = [...selectedSourceAiTasks].sort((left, right) =>
     right.updatedAt.localeCompare(left.updatedAt),
   );
@@ -352,9 +364,6 @@ export function WikiView({ capabilities }: WikiViewProps) {
     completedSourceAiTask?.result?.reference?.type === "source_ai_organize"
       ? completedSourceAiTask.result.reference.candidateId ?? null
       : null;
-  const sourceAiWorkbenchTask = sourceAiWorkbench?.initialTaskId
-    ? tasks.find((task) => task.id === sourceAiWorkbench.initialTaskId) ?? null
-    : null;
   const sourceAiWorkbenchFailedTask =
     sourceAiWorkbenchTask?.status === "failed" ||
     sourceAiWorkbenchTask?.status === "cancelled"
@@ -904,7 +913,7 @@ export function WikiView({ capabilities }: WikiViewProps) {
                         ? detail.candidate.candidateId
                         : null;
                     const initialTask = selectSourceAiWorkbenchTask(
-                      useTaskStore.getState().tasks,
+                      [...selectTasksForProject(useTaskStore.getState(), projectId)],
                       projectId,
                       rootPath,
                       sourceId,

@@ -110,6 +110,10 @@ beforeEach(() => {
     cancelPendingAction: async () => cancelPendingAction(),
   });
   useTaskStore.setState({
+    taskById: {},
+    taskIdsByProject: {},
+    runningCountByProject: {},
+    taskFacts: {},
     tasks: [],
     logs: {},
     drawerOpen: false,

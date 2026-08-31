@@ -18,7 +18,9 @@ pub(crate) mod execution_control;
 pub mod file_discovery;
 pub mod file_router;
 pub mod generic_web_engine;
+pub mod history_store;
 pub mod local_media_engine;
+pub(crate) mod lock_registry;
 pub mod markdown_normalizer;
 pub mod media_router;
 pub mod migration;
@@ -31,6 +33,7 @@ pub mod pack_protocol;
 pub mod pdf_router;
 pub mod platform_network_policy;
 pub mod platform_provider;
+pub mod product_capability;
 pub mod quality_gate;
 pub(crate) mod redaction;
 pub mod remote_media_retention;
@@ -51,7 +54,13 @@ pub mod wechat_web_engine;
 #[cfg(test)]
 mod test_support;
 
+pub(crate) use commit::NewSourceTargetReservations;
+pub use history_store::HistoryStore;
+#[cfg(feature = "gui")]
+pub(crate) use orchestrator::AcceptedImportOperation;
 #[cfg(feature = "gui")]
 pub(crate) use orchestrator::{import_batch_operation_session_id, is_import_batch_operation_task};
 pub use orchestrator::{routes_for_format, ImportV2Service};
+#[cfg(feature = "performance-observers")]
+pub use orchestrator::{ImportLockWaitObservation, ImportLockWaitSnapshot};
 pub use session_store::{CollectionImportInput, SessionStore};

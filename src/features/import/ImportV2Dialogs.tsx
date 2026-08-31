@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useImportStore } from "../../stores/importStore";
+import { useTaskStore } from "../../stores/taskStore";
 import type { ImportItem } from "../../types/importV2";
 import type { AgentCandidateView as AgentCandidateViewType } from "../../types/importV2Agent";
 import type { ConnectorSessionRef, ImportAsrEnablementPlan, ImportCapabilityRequirement } from "../../types/importV2Presentation";
@@ -35,7 +36,13 @@ export interface ImportV2DialogsProps {
 
 export function ImportV2Dialogs({ workflow, privateItem, asrItem, asrItemIds = [], subtitleItem, candidateView, onCloseCandidate, onCandidateIntent, onClosePrivate, onCloseAsr, onCloseSubtitle }: ImportV2DialogsProps) {
   const { t } = useTranslation();
-  const session = useImportStore((state) => state.session);
+  const sessionId = useImportStore((state) => state.session?.sessionId ?? null);
+  const collectionSessionId = workflow.session?.sessionId ?? null;
+  const restoredCollection = useTaskStore((state) => state.tasks.find((task) =>
+    task.status === "waiting_for_confirmation"
+    && task.operation?.kind === "import_collection_discovery"
+    && task.operation.sessionId === collectionSessionId
+    && task.result?.reference?.type === "import_collection_preview")?.result?.reference);
   const previewItemId = useImportStore((state) => state.previewItemId);
   const capabilityItemId = useImportStore((state) => state.capabilityItemId);
   const loginItemId = useImportStore((state) => state.loginItemId);
@@ -44,10 +51,10 @@ export function ImportV2Dialogs({ workflow, privateItem, asrItem, asrItemIds = [
   const closeLogin = useImportStore((state) => state.closeLogin);
   const asrItemId = asrItem?.itemId ?? null;
 
-  const previewItem = session?.items.find((item) => item.itemId === previewItemId) ?? null;
-  const previewIdentity = session && previewItem ? { sessionId: session.sessionId, itemId: previewItem.itemId, candidateId: null } : null;
-  const capabilityItem = session?.items.find((item) => item.itemId === capabilityItemId) ?? null;
-  const loginItem = session?.items.find((item) => item.itemId === loginItemId) ?? null;
+  const previewItem = useImportStore((state) => previewItemId ? state.itemById[previewItemId] ?? null : null);
+  const capabilityItem = useImportStore((state) => capabilityItemId ? state.itemById[capabilityItemId] ?? null : null);
+  const loginItem = useImportStore((state) => loginItemId ? state.itemById[loginItemId] ?? null : null);
+  const previewIdentity = sessionId && previewItem ? { sessionId, itemId: previewItem.itemId, candidateId: null } : null;
 
   const [capability, setCapability] = useState<ImportCapabilityRequirement | null>(null);
   const [asrPlan, setAsrPlan] = useState<ImportAsrEnablementPlan | null>(null);
@@ -62,6 +69,12 @@ export function ImportV2Dialogs({ workflow, privateItem, asrItem, asrItemIds = [
     setAsrPlanLoading(false);
     setConnector(null);
   }, [workflow.projectKey]);
+
+  useEffect(() => {
+    if (!workflow.collectionPreview && restoredCollection?.type === "import_collection_preview") {
+      workflow.restoreCollection?.(restoredCollection.preview);
+    }
+  }, [restoredCollection, workflow.collectionPreview, workflow.restoreCollection]);
 
   useEffect(() => {
     if (!capabilityItemId) {
@@ -129,7 +142,7 @@ export function ImportV2Dialogs({ workflow, privateItem, asrItem, asrItemIds = [
       <ImportCapabilityDialog
         open={Boolean(capabilityItemId && capability)}
         requirement={capability}
-        sessionId={session?.sessionId ?? null}
+        sessionId={sessionId}
         itemId={capabilityItem?.itemId ?? null}
         onCancel={closeCapability}
         onInstall={async (capabilityId) => {
@@ -158,7 +171,7 @@ export function ImportV2Dialogs({ workflow, privateItem, asrItem, asrItemIds = [
           }
           onCloseAsr();
         }}
-        sessionId={session?.sessionId ?? null}
+        sessionId={sessionId}
         itemId={asrItem?.itemId ?? null}
         onInstall={async (capabilityId, options) => {
           if (!asrItem) return;

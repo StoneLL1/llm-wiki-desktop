@@ -30,9 +30,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  preflight:
-    name: Validate frozen release coordinate
+  release-preflight:
+    name: Validate the manifest-derived formal release matrix
     runs-on: ubuntu-24.04
+    environment: capability-release
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      expectedEntryCount: ${{ steps.matrix.outputs.expectedEntryCount }}
     steps:
       - name: Checkout exact default-branch commit with release history
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -44,407 +48,100 @@ jobs:
         with:
           node-version: 22.23.1
 
-      - name: Require the canonical repository, existing tag, version, and exact commit
+      - name: Require the canonical repository and exact coordinate
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = 'StoneLL1/llm-wiki-desktop'
           node scripts/check-release-version.mjs --tag "$RELEASE_TAG"
+          node scripts/verify-product-capabilities.mjs --require-release-ready
           test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$GITHUB_SHA"
 
-  node-packs:
-    name: Node packs (${{ matrix.target }})
-    needs: preflight
-    runs-on: ${{ matrix.os }}
-    environment: capability-release
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            entrypoint: runtime/node.exe
-            release_tool: src-tauri/target/release/capability_release.exe
-          - os: macos-15
-            target: aarch64-apple-darwin
-            entrypoint: runtime/node
-            release_tool: src-tauri/target/release/capability_release
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            entrypoint: runtime/node
-            release_tool: src-tauri/target/release/capability_release
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-            entrypoint: runtime/node
-            release_tool: src-tauri/target/release/capability_release
-
-    steps:
-      - name: Require the default branch or the unified release tag for signing
-        shell: pwsh
-        env:
-          CURRENT_REF: ${{ github.ref }}
-          EXPECTED_REF: refs/heads/${{ github.event.repository.default_branch }}
-          RELEASE_REF: refs/tags/${{ inputs.release_tag }}
+      - name: Materialize the exact formal staging and qualification plan
+        id: matrix
         run: |
-          if ($env:CURRENT_REF -ne $env:EXPECTED_REF -and $env:CURRENT_REF -ne $env:RELEASE_REF) {
-            throw "Capability releases must run from the default branch or the unified desktop release tag."
-          }
+          set -euo pipefail
+          plan="$(node scripts/capability-release-plan.mjs)"
+          count="$(node -e 'const value=JSON.parse(process.argv[1]);process.stdout.write(String(value.expectedEntryCount))' "$plan")"
+          test "$count" -gt 0
+          echo "matrix=$(node -e 'const value=JSON.parse(process.argv[1]);process.stdout.write(JSON.stringify({include:value.include}))' "$plan")" >> "$GITHUB_OUTPUT"
+          echo "expectedEntryCount=$count" >> "$GITHUB_OUTPUT"
+          node scripts/verify-product-capabilities.mjs --print-matrix
 
-      - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Setup Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 22.23.1
-          cache: npm
-          cache-dependency-path: |
-            capabilities/browser-runtime/package-lock.json
-            capabilities/browser-runtime-lite/package-lock.json
-
-      - name: Setup Rust
-        shell: pwsh
+      - name: Run the local and CI shared distributable preflight
         run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
-          rustup toolchain install 1.92.0 --profile minimal --no-self-update
-          rustup default 1.92.0
+          set -euo pipefail
+          npm ci
+          npm run test:capability-tools
+          npm run check:release-config
 
-      - name: Install locked Node pack dependencies
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
-          npm ci --ignore-scripts --prefix capabilities/browser-runtime
-          npm ci --ignore-scripts --prefix capabilities/browser-runtime-lite
-
-      - name: Build release tool without signing credentials
-        run: cargo build --locked --release --no-default-features --manifest-path src-tauri/Cargo.toml --bin capability_release
-
-      - name: Install pinned Chromium and Linux runtime libraries
-        if: runner.os == 'Linux'
-        shell: pwsh
-        env:
-          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ms-playwright
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
-          npm exec --prefix capabilities/browser-runtime -- playwright install --with-deps chromium
-
-      - name: Install pinned Chromium
-        if: runner.os != 'Linux'
-        shell: pwsh
-        env:
-          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ms-playwright
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
-          npm exec --prefix capabilities/browser-runtime -- playwright install chromium
-
-      - name: Verify browser runtime policy and launch
-        shell: pwsh
-        env:
-          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ms-playwright
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
-          node capabilities/browser-runtime/runner/policy.smoke.mjs
-          node capabilities/browser-runtime/runner/platform-extract.node-test.mjs
-          node capabilities/browser-runtime/runner/browser.smoke.mjs
-
-      - name: Fetch verified Node distribution and stage payloads
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
-          $nodeRoot = Join-Path $env:RUNNER_TEMP 'capability-node'
-          node scripts/fetch-capability-runtime.mjs --target '${{ matrix.target }}' --output $nodeRoot
-          $stageRoot = Join-Path $env:RUNNER_TEMP 'capability-stage'
-          node scripts/stage-node-capability.mjs --pack browser-runtime --node-version 22.17.0 --node-root $nodeRoot --browser-root '${{ runner.temp }}/ms-playwright' --output (Join-Path $stageRoot 'browser-runtime')
-          node scripts/stage-node-capability.mjs --pack browser-runtime-lite --node-version 22.17.0 --node-root $nodeRoot --output (Join-Path $stageRoot 'browser-runtime-lite')
-          node scripts/stage-node-capability.mjs --pack media-metadata --node-version 22.17.0 --node-root $nodeRoot --output (Join-Path $stageRoot 'media-metadata')
-
-      - name: Qualify staged Node payloads
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
-          $stageRoot = Join-Path $env:RUNNER_TEMP 'capability-stage'
-          $browserStage = Join-Path $stageRoot 'browser-runtime'
-          $browserNode = Join-Path $browserStage '${{ matrix.entrypoint }}'
-          $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $browserStage 'runtime/ms-playwright'
-          & $browserNode (Join-Path $browserStage 'runner/policy.smoke.mjs')
-          & $browserNode --test (Join-Path $browserStage 'runner/platform-extract.node-test.mjs')
-          & $browserNode --test (Join-Path $browserStage 'runner/linux-deps.node-test.mjs')
-          & $browserNode (Join-Path $browserStage 'runner/browser.smoke.mjs')
-          $liteStage = Join-Path $stageRoot 'browser-runtime-lite'
-          $liteNode = Join-Path $liteStage '${{ matrix.entrypoint }}'
-          & $liteNode --test (Join-Path $liteStage 'runner/index.node-test.mjs')
-          $mediaStage = Join-Path $stageRoot 'media-metadata'
-          $mediaNode = Join-Path $mediaStage '${{ matrix.entrypoint }}'
-          & $mediaNode --test (Join-Path $mediaStage 'runner/core.node-test.mjs')
-
-      - name: Sign and assemble deterministic packs
-        shell: pwsh
-        env:
-          LLM_WIKI_CAPABILITY_SIGNING_KEY_PKCS8_HEX: ${{ secrets.LLM_WIKI_CAPABILITY_SIGNING_KEY_PKCS8_HEX }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-          SIGNING_KEY_ID: ${{ inputs.signing_key_id }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
-          if ($env:RELEASE_TAG -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') {
-            throw "release_tag contains unsupported characters."
-          }
-          if ($env:SIGNING_KEY_ID -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') {
-            throw "signing_key_id contains unsupported characters."
-          }
-          $stageRoot = Join-Path $env:RUNNER_TEMP 'capability-stage'
-          $dist = Join-Path $env:GITHUB_WORKSPACE 'capability-dist'
-          $baseUrl = "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/$env:RELEASE_TAG"
-          foreach ($pack in @('browser-runtime', 'browser-runtime-lite', 'media-metadata')) {
-            & '${{ matrix.release_tool }}' assemble `
-              --template "capabilities/$pack/manifest.json" `
-              --payload (Join-Path $stageRoot $pack) `
-              --target '${{ matrix.target }}' `
-              --entrypoint '${{ matrix.entrypoint }}' `
-              --entrypoint-arg 'runner/index.mjs' `
-              --output $dist `
-              --base-url $baseUrl `
-              --trusted-keys capabilities/trusted-keys.json `
-              --key-id $env:SIGNING_KEY_ID
-          }
-          $archives = @(Get-ChildItem -LiteralPath $dist -Filter '*.zip' -File)
-          $fragments = @(Get-ChildItem -LiteralPath $dist -Filter '*.catalog.json' -File)
-          if ($archives.Count -ne 3 -or $fragments.Count -ne 3) {
-            throw "Expected exactly three archives and three catalog fragments for this target."
-          }
-
-      - name: Upload target artifacts
+      - name: Upload the immutable release-plan evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: node-capabilities-${{ matrix.target }}
-          path: capability-dist/*
+          name: capability-release-plan
+          path: |
+            capabilities/product-manifest.json
+            capabilities/release-recipes.json
+            capabilities/release-sources.json
+            capabilities/qualification-corpus.json
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
 
-  sensevoice-packs:
-    name: SenseVoice pack (${{ matrix.target }})
-    needs: preflight
+  build-capability:
+    name: Build and qualify ${{ matrix.capabilityId }} (${{ matrix.targetTriple }})
+    needs: release-preflight
     runs-on: ${{ matrix.os }}
     environment: capability-release
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            entrypoint: runtime/node.exe
-            release_tool: src-tauri/target/release/capability_release.exe
-          - os: macos-15
-            target: aarch64-apple-darwin
-            entrypoint: runtime/node
-            release_tool: src-tauri/target/release/capability_release
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            entrypoint: runtime/node
-            release_tool: src-tauri/target/release/capability_release
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-            entrypoint: runtime/node
-            release_tool: src-tauri/target/release/capability_release
-
+      matrix: ${{ fromJSON(needs.release-preflight.outputs.matrix) }}
     steps:
-      - name: Require the default branch or the unified release tag for signing
-        shell: pwsh
-        env:
-          CURRENT_REF: ${{ github.ref }}
-          EXPECTED_REF: refs/heads/${{ github.event.repository.default_branch }}
-          RELEASE_REF: refs/tags/${{ inputs.release_tag }}
-        run: |
-          if ($env:CURRENT_REF -ne $env:EXPECTED_REF -and $env:CURRENT_REF -ne $env:RELEASE_REF) {
-            throw "Capability releases must run from the default branch or the unified desktop release tag."
-          }
-
-      - name: Checkout
+      - name: Checkout the exact release commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with: { fetch-depth: 0 }
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 22.23.1
-
-      - name: Setup Rust
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
-          rustup toolchain install 1.92.0 --profile minimal --no-self-update
-          rustup default 1.92.0
-
-      - name: Build release tool without signing credentials
-        run: cargo build --locked --release --no-default-features --manifest-path src-tauri/Cargo.toml --bin capability_release
-
-      - name: Fetch, verify, and stage SenseVoice payload
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
-          $nodeRoot = Join-Path $env:RUNNER_TEMP 'capability-node'
-          node scripts/fetch-capability-runtime.mjs --target '${{ matrix.target }}' --output $nodeRoot
-          $sourcesRoot = Join-Path $env:RUNNER_TEMP 'sensevoice-sources'
-          node scripts/fetch-sensevoice-sources.mjs --target '${{ matrix.target }}' --output $sourcesRoot
-          $stageRoot = Join-Path $env:RUNNER_TEMP 'sensevoice-stage'
-          node scripts/stage-sensevoice-capability.mjs `
-            --target '${{ matrix.target }}' `
-            --node-version 22.17.0 `
-            --node-root $nodeRoot `
-            --sources-root $sourcesRoot `
-            --output $stageRoot
-
-      - name: Qualify WAV and AAC-in-M4A decoding, ASR, provider reporting, and JSON-RPC policy
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
-          $stageRoot = Join-Path $env:RUNNER_TEMP 'sensevoice-stage'
-          $node = Join-Path $stageRoot '${{ matrix.entrypoint }}'
-          & $node --test (Join-Path $stageRoot 'runner/core.node-test.mjs')
-          & $node (Join-Path $stageRoot 'runner/qualification.mjs')
-
-      - name: Sign and assemble deterministic SenseVoice pack
-        shell: pwsh
-        env:
-          LLM_WIKI_CAPABILITY_SIGNING_KEY_PKCS8_HEX: ${{ secrets.LLM_WIKI_CAPABILITY_SIGNING_KEY_PKCS8_HEX }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-          SIGNING_KEY_ID: ${{ inputs.signing_key_id }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
-          if ($env:RELEASE_TAG -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') {
-            throw "release_tag contains unsupported characters."
-          }
-          if ($env:SIGNING_KEY_ID -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') {
-            throw "signing_key_id contains unsupported characters."
-          }
-          $stageRoot = Join-Path $env:RUNNER_TEMP 'sensevoice-stage'
-          $dist = Join-Path $env:GITHUB_WORKSPACE 'capability-dist'
-          $baseUrl = "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/$env:RELEASE_TAG"
-          $modelBytes = (Get-Item -LiteralPath (Join-Path $stageRoot 'models/model.int8.onnx')).Length
-          & '${{ matrix.release_tool }}' assemble `
-            --template capabilities/asr-sensevoice-small/manifest.json `
-            --payload $stageRoot `
-            --target '${{ matrix.target }}' `
-            --entrypoint '${{ matrix.entrypoint }}' `
-            --entrypoint-arg 'runner/index.mjs' `
-            --model-bytes $modelBytes `
-            --output $dist `
-            --base-url $baseUrl `
-            --trusted-keys capabilities/trusted-keys.json `
-            --key-id $env:SIGNING_KEY_ID
-          $archives = @(Get-ChildItem -LiteralPath $dist -Filter '*.zip' -File)
-          $fragments = @(Get-ChildItem -LiteralPath $dist -Filter '*.catalog.json' -File)
-          if ($archives.Count -ne 1 -or $fragments.Count -ne 1) {
-            throw "Expected exactly one SenseVoice archive and catalog fragment for this target."
-          }
-
-      - name: Upload target artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: sensevoice-capabilities-${{ matrix.target }}
-          path: capability-dist/*
-          if-no-files-found: error
-          retention-days: 14
-
-  ocr-packs:
-    name: RapidOCR pack (${{ matrix.target }})
-    needs: preflight
-    runs-on: ${{ matrix.os }}
-    environment: capability-release
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            entrypoint: runtime/python/python.exe
-            release_tool: src-tauri/target/release/capability_release.exe
-          - os: macos-15
-            target: aarch64-apple-darwin
-            entrypoint: runtime/python/bin/python3
-            release_tool: src-tauri/target/release/capability_release
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            entrypoint: runtime/python/bin/python3
-            release_tool: src-tauri/target/release/capability_release
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-            entrypoint: runtime/python/bin/python3
-            release_tool: src-tauri/target/release/capability_release
-
-    steps:
-      - name: Require the default branch or the unified release tag for signing
-        shell: pwsh
-        env:
-          CURRENT_REF: ${{ github.ref }}
-          EXPECTED_REF: refs/heads/${{ github.event.repository.default_branch }}
-          RELEASE_REF: refs/tags/${{ inputs.release_tag }}
-        run: |
-          if ($env:CURRENT_REF -ne $env:EXPECTED_REF -and $env:CURRENT_REF -ne $env:RELEASE_REF) {
-            throw "Capability releases must run from the default branch or the unified desktop release tag."
-          }
-
-      - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Setup Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 22.23.1
+        with: { node-version: 22.23.1, cache: npm }
 
       - name: Setup uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          version: "0.10.8"
-          enable-cache: false
+        with: { version: "0.10.8", enable-cache: false }
 
       - name: Setup Rust
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
           rustup toolchain install 1.92.0 --profile minimal --no-self-update
           rustup default 1.92.0
 
-      - name: Build release tool without signing credentials
+      - name: Install Linux build and browser runtime prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config nasm libavcodec-dev libavformat-dev libavutil-dev libswresample-dev
+          npm ci --ignore-scripts --prefix capabilities/browser-runtime
+          npm exec --prefix capabilities/browser-runtime -- playwright install-deps chromium
+
+      - name: Build release assembler without signing credentials
         run: cargo build --locked --release --no-default-features --manifest-path src-tauri/Cargo.toml --bin capability_release
 
-      - name: Fetch, verify, and stage RapidOCR payload
+      - name: Fetch locked sources and prepare the deterministic payload
+        id: payload
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
-          $sourcesRoot = Join-Path $env:RUNNER_TEMP 'rapidocr-sources'
-          node scripts/fetch-rapidocr-sources.mjs --target '${{ matrix.target }}' --output $sourcesRoot
-          $stageRoot = Join-Path $env:RUNNER_TEMP 'rapidocr-stage'
-          node scripts/stage-rapidocr-capability.mjs `
-            --target '${{ matrix.target }}' `
-            --sources-root $sourcesRoot `
-            --output $stageRoot
+          $payload = Join-Path $env:RUNNER_TEMP 'capability-payload'
+          $result = node scripts/prepare-release-capability.mjs --pack '${{ matrix.capabilityId }}' --target '${{ matrix.targetTriple }}' --output $payload | ConvertFrom-Json
+          "root=$payload" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "entrypoint=$($result.entrypoint)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "entrypointArgs=$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($result.entrypointArgs | ConvertTo-Json -Compress))))" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "modelBytes=$($result.modelBytes ?? 0)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: Qualify staged OCR policy, PP-OCRv5 inference, coordinates, and JSON-RPC
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
-          $stageRoot = Join-Path $env:RUNNER_TEMP 'rapidocr-stage'
-          $python = Join-Path $stageRoot '${{ matrix.entrypoint }}'
-          $env:PYTHONDONTWRITEBYTECODE = '1'
-          & $python (Join-Path $stageRoot 'runner/core_test.py')
-          & $python (Join-Path $stageRoot 'runner/qualification.py')
-
-      - name: Sign and assemble deterministic RapidOCR pack
+      - name: Assemble and sign exactly one target archive
         shell: pwsh
         env:
           LLM_WIKI_CAPABILITY_SIGNING_KEY_PKCS8_HEX: ${{ secrets.LLM_WIKI_CAPABILITY_SIGNING_KEY_PKCS8_HEX }}
@@ -453,109 +150,101 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
-          if ($env:RELEASE_TAG -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') {
-            throw "release_tag contains unsupported characters."
-          }
-          if ($env:SIGNING_KEY_ID -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') {
-            throw "signing_key_id contains unsupported characters."
-          }
-          $stageRoot = Join-Path $env:RUNNER_TEMP 'rapidocr-stage'
+          if ($env:RELEASE_TAG -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' -or $env:SIGNING_KEY_ID -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') { throw 'invalid release coordinate' }
+          $tool = if ($IsWindows) { 'src-tauri/target/release/capability_release.exe' } else { 'src-tauri/target/release/capability_release' }
           $dist = Join-Path $env:GITHUB_WORKSPACE 'capability-dist'
-          $baseUrl = "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/$env:RELEASE_TAG"
-          $modelBytes = (Get-ChildItem -LiteralPath (Join-Path $stageRoot 'models') -Filter '*.onnx' -File | Measure-Object -Property Length -Sum).Sum
-          & '${{ matrix.release_tool }}' assemble `
-            --template capabilities/ocr-cjk-accurate/manifest.json `
-            --payload $stageRoot `
-            --target '${{ matrix.target }}' `
-            --entrypoint '${{ matrix.entrypoint }}' `
-            --entrypoint-arg 'runner/index.py' `
-            --model-bytes $modelBytes `
-            --output $dist `
-            --base-url $baseUrl `
-            --trusted-keys capabilities/trusted-keys.json `
-            --key-id $env:SIGNING_KEY_ID
-          $archives = @(Get-ChildItem -LiteralPath $dist -Filter '*.zip' -File)
-          $fragments = @(Get-ChildItem -LiteralPath $dist -Filter '*.catalog.json' -File)
-          if ($archives.Count -ne 1 -or $fragments.Count -ne 1) {
-            throw "Expected exactly one RapidOCR archive and catalog fragment for this target."
+          $argsJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${{ steps.payload.outputs.entrypointArgs }}')) | ConvertFrom-Json
+          $arguments = @('assemble', '--template', 'capabilities/${{ matrix.capabilityId }}/manifest.json', '--payload', '${{ steps.payload.outputs.root }}', '--target', '${{ matrix.targetTriple }}', '--entrypoint', '${{ steps.payload.outputs.entrypoint }}')
+          foreach ($value in @($argsJson)) { $arguments += @('--entrypoint-arg', [string]$value) }
+          $arguments += @('--output', $dist, '--base-url', "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/$env:RELEASE_TAG", '--trusted-keys', 'capabilities/trusted-keys.json', '--key-id', $env:SIGNING_KEY_ID)
+          if ([uint64]'${{ steps.payload.outputs.modelBytes }}' -gt 0) { $arguments += @('--model-bytes', '${{ steps.payload.outputs.modelBytes }}') }
+          & $tool @arguments
+          if (@(Get-ChildItem -LiteralPath $dist -Filter '*.zip' -File).Count -ne 1 -or @(Get-ChildItem -LiteralPath $dist -Filter '*.catalog.json' -File).Count -ne 1) { throw 'one matrix entry must produce exactly one archive and fragment' }
+
+      - name: Re-extract the signed archive and run formal qualification
+        shell: pwsh
+        env:
+          LLM_WIKI_X_PRODUCTION_SAMPLE_URL: ${{ vars.X_PRODUCTION_SAMPLE_URL }}
+          LLM_WIKI_WECHAT_PRODUCTION_SAMPLE_URL: ${{ vars.WECHAT_PRODUCTION_SAMPLE_URL }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $archive = Get-ChildItem -LiteralPath capability-dist -Filter '*.zip' -File | Select-Object -ExpandProperty FullName
+          $qualified = Join-Path $env:RUNNER_TEMP 'signed-qualification'
+          New-Item -ItemType Directory -Path $qualified | Out-Null
+          tar -xf $archive -C $qualified
+          node scripts/qualify-staged-capability.mjs --payload $qualified
+          $evidence = Join-Path $env:GITHUB_WORKSPACE 'capability-dist/${{ matrix.capabilityId }}-${{ matrix.targetTriple }}.qualification.json'
+          node scripts/qualify-release-corpus.mjs --payload $qualified --evidence $evidence
+          $runner = Join-Path $qualified '${{ steps.payload.outputs.entrypoint }}'
+          switch ('${{ matrix.capabilityId }}') {
+            'browser-runtime' {
+              & $runner --test (Join-Path $qualified 'runner/platform-extract.node-test.mjs') (Join-Path $qualified 'runner/snapshot-policy.node-test.mjs') (Join-Path $qualified 'runner/linux-deps.node-test.mjs')
+              & $runner (Join-Path $qualified 'runner/policy.smoke.mjs')
+              & $runner (Join-Path $qualified 'runner/x-route.qualification.mjs')
+              & $runner (Join-Path $qualified 'runner/wechat-route.qualification.mjs')
+            }
+            'browser-runtime-lite' { & $runner --test (Join-Path $qualified 'runner/index.node-test.mjs') }
+            'media-metadata' { & $runner --test (Join-Path $qualified 'runner/core.node-test.mjs') }
+            'asr-sensevoice-small' { & $runner (Join-Path $qualified 'runner/qualification.mjs') }
+            'asr-whisper' { & $runner --test (Join-Path $qualified 'runner/core.node-test.mjs') }
+            'ocr-basic' { & $runner (Join-Path $qualified 'runner/qualification.py') }
+            'ocr-cjk-accurate' { & $runner (Join-Path $qualified 'runner/qualification.py') }
+            'office-legacy' { & $runner (Join-Path $qualified 'runner/office_legacy_pack_test.py') }
           }
 
-      - name: Upload target artifacts
+      - name: Upload this exact signed archive and catalog fragment
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ocr-capabilities-${{ matrix.target }}
+          name: ${{ matrix.capabilityId }}-capabilities-${{ matrix.targetTriple }}
           path: capability-dist/*
           if-no-files-found: error
           retention-days: 14
 
   merge-catalog:
-    name: Merge and verify install catalog
-    needs: [node-packs, sensevoice-packs, ocr-packs]
+    name: Merge and verify the manifest-derived install catalog
+    needs: [release-preflight, build-capability]
     runs-on: ubuntu-24.04
     steps:
-      - name: Checkout
+      - name: Checkout the exact release commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 22.23.1
+        with: { node-version: 22.23.1 }
 
       - name: Setup Rust
         run: |
           set -euo pipefail
           rustup toolchain install 1.92.0 --profile minimal --no-self-update
           rustup default 1.92.0
+          cargo build --locked --release --no-default-features --manifest-path src-tauri/Cargo.toml --bin capability_release
 
-      - name: Build catalog tool
-        run: cargo build --locked --release --no-default-features --manifest-path src-tauri/Cargo.toml --bin capability_release
-
-      - name: Download all target artifacts
+      - name: Download every matrix artifact from this run
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: '*-capabilities-*'
           path: capability-dist
           merge-multiple: true
 
-      - name: Merge and verify deterministic install catalog
+      - name: Require exact counts, merge signed fragments, and verify the sealed catalog
         env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
-        run: |
-          set -euo pipefail
-          src-tauri/target/release/capability_release merge-catalog \
-            --input capability-dist \
-            --output capability-dist/install-catalog.generated.json \
-            --trusted-keys capabilities/trusted-keys.json \
-            --expected-tag "$RELEASE_TAG"
-
-      - name: Verify the release catalog contract and record provenance
-        env:
+          EXPECTED_ENTRY_COUNT: ${{ needs.release-preflight.outputs.expectedEntryCount }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           COMMIT_SHA: ${{ github.sha }}
           RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
-          node scripts/verify-capability-catalog.mjs \
-            --catalog capability-dist/install-catalog.generated.json \
-            --trusted-keys capabilities/trusted-keys.json \
-            --mode release \
-            --tag "$RELEASE_TAG" \
-            --emit-provenance capability-dist/application-integration/capabilities/catalog-provenance.json \
-            --commit-sha "$COMMIT_SHA" \
-            --run-id "$RUN_ID"
-
-      - name: Stage exact application trust inputs
-        env:
-          SIGNING_KEY_ID: ${{ inputs.signing_key_id }}
-        run: |
-          set -euo pipefail
-          node -e 'const fs=require("fs");const keys=JSON.parse(fs.readFileSync("capabilities/trusted-keys.json","utf8"));const value=keys[process.env.SIGNING_KEY_ID];if(typeof value!=="string"||!/^[0-9a-f]{64}$/.test(value))throw new Error("the release public key is not committed")'
+          test "$(find capability-dist -maxdepth 1 -type f -name '*.zip' | wc -l)" -eq "$EXPECTED_ENTRY_COUNT"
+          test "$(find capability-dist -maxdepth 1 -type f -name '*.catalog.json' | wc -l)" -eq "$EXPECTED_ENTRY_COUNT"
+          src-tauri/target/release/capability_release merge-catalog --input capability-dist --output capability-dist/install-catalog.generated.json --trusted-keys capabilities/trusted-keys.json --expected-tag "$RELEASE_TAG"
           mkdir -p capability-dist/application-integration/capabilities
+          node scripts/verify-capability-catalog.mjs --catalog capability-dist/install-catalog.generated.json --trusted-keys capabilities/trusted-keys.json --mode release --tag "$RELEASE_TAG" --emit-provenance capability-dist/application-integration/capabilities/catalog-provenance.json --commit-sha "$COMMIT_SHA" --run-id "$RUN_ID"
+          node scripts/verify-product-capabilities.mjs --require-release-ready
           cp capability-dist/install-catalog.generated.json capability-dist/application-integration/capabilities/install-catalog.json
           cp capabilities/trusted-keys.json capability-dist/application-integration/capabilities/trusted-keys.json
-          cp capability-dist/install-catalog.generated.json capability-dist/install-catalog.json
 
-      - name: Upload merged catalog for application integration
+      - name: Upload exact catalog bytes for same-run desktop embedding
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: capability-install-catalog

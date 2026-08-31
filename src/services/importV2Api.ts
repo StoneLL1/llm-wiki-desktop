@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import { normalizeBackendError } from "../lib/backendError";
+
 import type {
   AddImportItemsV2Request,
   AddImportTextV2Request,
@@ -8,8 +10,11 @@ import type {
   GetImportSessionV2Request,
   ImportCompletion,
   ImportItem,
+  ImportItemPage,
   ImportMergeContextV2Request,
   ImportSession,
+  ImportSessionOverview,
+  ListImportSessionItemsV2Request,
   ImportThreeWayMergeContext,
   SetImportItemResolutionV2Request,
   SetImportItemSelectionV2Request,
@@ -65,6 +70,7 @@ import type {
   ImportFrontendReadiness,
   ImportRestrictedContentStatus,
   ImportHistoryPage,
+  ImportHistoryDetailPage,
   ImportPreviewContent,
   ImportWorkbenchPreferences,
   ImportWorkbenchPreferencesRequest,
@@ -72,6 +78,8 @@ import type {
   GetImportRestrictedContentStatusV2Request,
   GetImportPreviewContentV2Request,
   ListImportHistoryV2Request,
+  GetImportHistoryDetailV2Request,
+  RebuildImportHistoryIndexV2Request,
   AuthorizeImportPrivateTargetV2Request,
   BeginImportLoginV2Request,
   CompleteImportLoginV2Request,
@@ -91,6 +99,9 @@ import type { AcceptImportAgentCandidateRequest, DiscardImportAgentCandidateRequ
 const commandNames: ImportV2CommandNames = {
   createSession: "create_import_session_v2",
   getSession: "get_import_session_v2",
+  getSessionOverview: "get_import_session_overview_v2",
+  listSessionItems: "list_import_session_items_v2",
+  startSessionRecovery: "start_import_session_recovery_v2",
   getHistorySession: "get_import_history_session_v2",
   getCompletion: "get_import_completion_v2",
   addItems: "add_import_items_v2",
@@ -124,6 +135,8 @@ const commandNames: ImportV2CommandNames = {
   saveWorkbenchPreferences: "save_import_workbench_preferences_v2",
   getRestrictedContentStatus: "get_import_restricted_content_status_v2",
   listHistory: "list_import_history_v2",
+  getHistoryDetail: "get_import_history_detail_v2",
+  rebuildHistoryIndex: "rebuild_import_history_index_v2",
   authorizePrivateTarget: "authorize_import_private_target_v2",
   beginLogin: "begin_import_login_v2",
   completeLogin: "complete_import_login_v2",
@@ -144,13 +157,25 @@ const commandNames: ImportV2CommandNames = {
   getActivation: "get_import_backend_activation",
 };
 
-const request = <Response, Payload = unknown>(name: string, value: Payload) =>
-  invoke<Response>(name, { request: value });
+const request = async <Response, Payload = unknown>(name: string, value: Payload) => {
+  try {
+    return await invoke<Response>(name, { request: value });
+  } catch (error) {
+    throw normalizeBackendError(error, {
+      defaultSummaryKey: "backendError.summary.import",
+      defaultRecoverable: true,
+      defaultActionKind: "retry",
+    });
+  }
+};
 
 export const importV2Api: ImportV2Api = {
   commandNames,
   createSession: (value: CreateImportSessionV2Request) => request<ImportSession>(commandNames.createSession, value),
   getSession: (value: GetImportSessionV2Request) => request<ImportSession>(commandNames.getSession, value),
+  getSessionOverview: (value: GetImportSessionV2Request) => request<ImportSessionOverview>(commandNames.getSessionOverview, value),
+  listSessionItems: (value: ListImportSessionItemsV2Request) => request<ImportItemPage>(commandNames.listSessionItems, value),
+  startSessionRecovery: (value: GetImportSessionV2Request) => request<BackendTask>(commandNames.startSessionRecovery, value),
   getHistorySession: (value: GetImportSessionV2Request) => request<ImportSession>(commandNames.getHistorySession, value),
   getCompletion: (value: GetImportSessionV2Request) => request<ImportCompletion | null>(commandNames.getCompletion, value),
   addItems: (value: AddImportItemsV2Request) => request<ImportSession>(commandNames.addItems, value),
@@ -184,6 +209,8 @@ export const importV2Api: ImportV2Api = {
   saveWorkbenchPreferences: (value: SaveImportWorkbenchPreferencesRequest) => request<ImportWorkbenchPreferences>(commandNames.saveWorkbenchPreferences, value),
   getRestrictedContentStatus: (value: GetImportRestrictedContentStatusV2Request) => request<ImportRestrictedContentStatus>(commandNames.getRestrictedContentStatus, value),
   listHistory: (value: ListImportHistoryV2Request) => request<ImportHistoryPage>(commandNames.listHistory, value),
+  getHistoryDetail: (value: GetImportHistoryDetailV2Request) => request<ImportHistoryDetailPage>(commandNames.getHistoryDetail, value),
+  rebuildHistoryIndex: (value: RebuildImportHistoryIndexV2Request) => request<BackendTask>(commandNames.rebuildHistoryIndex, value),
   authorizePrivateTarget: (value: AuthorizeImportPrivateTargetV2Request) => request<string>(commandNames.authorizePrivateTarget, value),
   beginLogin: (value: BeginImportLoginV2Request) => request<ConnectorSessionRef>(commandNames.beginLogin, value),
   completeLogin: (value: CompleteImportLoginV2Request) => request<CompleteImportLoginResult>(commandNames.completeLogin, value),

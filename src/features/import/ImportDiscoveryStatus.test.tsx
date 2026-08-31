@@ -85,6 +85,44 @@ describe("ImportDiscoveryStatus", () => {
     expect(screen.getByText(/inside the current Wiki project/i)).toBeInTheDocument();
   });
 
+  it("localizes Unix non-UTF paths while retaining the diagnostic reason", () => {
+    const scan: FileScanResult = {
+      files: [],
+      skipped: [{
+        sourcePath: "/资料/�.md",
+        relativePath: "资料/�.md",
+        reason: "non_utf8_path",
+        detail: "Source path is not valid UTF-8.",
+      }],
+      truncated: false,
+    };
+    render(<ImportDiscoveryStatus task={task("succeeded")} scan={scan} onCancel={vi.fn()} onDismiss={vi.fn()} />);
+    fireEvent.click(screen.getByText(/view 1 skipped item/i));
+    expect(screen.getByText("资料/�.md")).toBeInTheDocument();
+    expect(screen.getByText(/cannot be represented safely as UTF-8/i)).toBeInTheDocument();
+    const diagnostics = screen.getByText("Technical details").closest("details");
+    expect(diagnostics).toHaveTextContent("Source path is not valid UTF-8.");
+  });
+
+  it("keeps disk diagnostics out of the visible skipped-item summary", () => {
+    const scan: FileScanResult = {
+      files: [],
+      skipped: [{
+        sourcePath: "D:/资料/video.mp4",
+        relativePath: "资料/video.mp4",
+        reason: "insufficient_disk",
+        detail: "Need 1048576 bytes but only 512 bytes are free.",
+      }],
+      truncated: false,
+    };
+    render(<ImportDiscoveryStatus task={task("succeeded")} scan={scan} onCancel={vi.fn()} onDismiss={vi.fn()} />);
+    fireEvent.click(screen.getByText(/view 1 skipped item/i));
+    expect(screen.getByText(/not enough free disk space/i)).toBeVisible();
+    expect(screen.queryByText(/1048576 bytes/)).not.toBeVisible();
+    fireEvent.click(screen.getByText("Technical details"));
+    expect(screen.getByText(/1048576 bytes/)).toBeVisible();
+  });
+
   it("shows content-detected extension mismatches", () => {
     const scan: FileScanResult = {
       files: [{

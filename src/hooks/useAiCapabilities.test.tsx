@@ -1,5 +1,5 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentInfo } from "../types/agent";
 import type { ProviderStatus } from "../types/llm";
@@ -74,7 +74,26 @@ beforeEach(() => {
   useProjectStore.setState({ currentProject: projectA });
 });
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 describe("useAiCapabilities", () => {
+  it("does not poll Agent or Provider after 60 idle seconds", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    invokeMock.mockResolvedValue([]);
+    renderHook(() => useAiCapabilities(projectA, false));
+    await act(async () => Promise.resolve());
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_100);
+    });
+
+    expect(invokeMock.mock.calls.filter(([command]) => command === "detect_agents")).toHaveLength(1);
+    expect(invokeMock.mock.calls.filter(([command]) => command === "list_llm_providers")).toHaveLength(1);
+  });
+
   it("marks only explicit user refreshes as force refreshes", async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === "detect_agents") return Promise.resolve([]);
@@ -212,13 +231,13 @@ describe("useAiCapabilities", () => {
       .mockResolvedValueOnce([provider("ollama", true, false)]);
     const { result } = renderHook(() => useAiCapabilities(projectA, false));
 
-    await act(async () => result.current.refresh(true));
-    await waitFor(() => expect(result.current.providers).toEqual([provider("ollama", true, false)]));
+    const refresh = result.current.refresh(true);
     act(() => {
       firstAgents.resolve([installedAgent]);
       firstProviders.resolve([]);
     });
-    await act(async () => Promise.all([firstAgents.promise, firstProviders.promise]));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(4));
+    await act(async () => refresh);
 
     expect(result.current.agents).toEqual([]);
     expect(result.current.providers).toEqual([provider("ollama", true, false)]);

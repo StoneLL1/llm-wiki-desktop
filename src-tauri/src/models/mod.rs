@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod app_capability;
 pub mod bookmark;
 pub mod chat;
 pub mod compile;

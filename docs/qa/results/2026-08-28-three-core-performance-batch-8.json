@@ -1,0 +1,89 @@
+{
+  "batch": 8,
+  "status": "completed",
+  "baseCommit": "795fdab4",
+  "commitControlPlane": [
+    {
+      "decisionCount": 100,
+      "mapProbes": 100,
+      "hashedItems": 100,
+      "hashedBytes": 43370,
+      "incrementalCounterUpdates": 100
+    },
+    {
+      "decisionCount": 1000,
+      "mapProbes": 1000,
+      "hashedItems": 1000,
+      "hashedBytes": 436670,
+      "incrementalCounterUpdates": 1000
+    },
+    {
+      "decisionCount": 10000,
+      "mapProbes": 10000,
+      "hashedItems": 10000,
+      "hashedBytes": 4396670,
+      "incrementalCounterUpdates": 10000
+    }
+  ],
+  "persistence": {
+    "focusedCas": "selected item JSON plus one terminal session summary",
+    "perItemTransaction": [
+      "Source and evidence writes",
+      "source manifest and index",
+      "focused session item",
+      "session control sidecars",
+      "bounded history receipt",
+      "bounded history item snapshot",
+      "bounded history manifest"
+    ],
+    "durableProgressShape": "one item delta with cumulative counters",
+    "boundedHistoryPayloadBytes": [
+      {
+        "decisionCount": 100,
+        "bytesPerItem": 1537,
+        "totalBytes": 153700
+      },
+      {
+        "decisionCount": 1000,
+        "bytesPerItem": 1539,
+        "totalBytes": 1539000
+      },
+      {
+        "decisionCount": 10000,
+        "bytesPerItem": 1541,
+        "totalBytes": 15410000
+      }
+    ],
+    "callbacksOutsideCommitLocks": true,
+    "crashRecovery": "new Source and checked overwrite exercised at every FileTransaction boundary"
+  },
+  "locking": {
+    "registryKey": "canonical project identity",
+    "projectLane": "shared SourceRegistry, Git, history, migration, activation and Source mutations",
+    "sessionLane": "ordinary focused session and item mutations",
+    "weakCleanup": true,
+    "sameSessionConcurrentUpdatesPreserved": true,
+    "sameProjectContentionObserved": true,
+    "crossProjectOverviewNanoseconds": 929200,
+    "crossProjectWorkerNanoseconds": 49540800,
+    "crossProjectLockWaitsOver50Milliseconds": 0
+  },
+  "boundaryTests": [
+    "10k decision lookup, focused hash and failure counter updates remain one-per-item",
+    "project A lock does not block project B overview or focused item worker update",
+    "same-project commit contender waits for the active focused commit boundary",
+    "same-session concurrent item updates preserve both revisions",
+    "canonical path aliases reuse one project lane",
+    "project and session Weak lanes prune after use",
+    "durable callbacks execute after project and session locks release",
+    "cancelled items each publish one bounded durable delta and exact-duplicate cancellation reloads the full finalized batch",
+    "terminal cancelled receipt rebuilds as cancelled before compatibility finalization",
+    "failed item transaction restores the in-memory before-image",
+    "new Source commit recovers at every persistence boundary",
+    "checked Wiki overwrite recovers at every persistence boundary"
+  ],
+  "deferred": [
+    "Batch 9 observational progress persistence coalescing",
+    "Batch 9 combined installed-app acceptance and final performance report"
+  ]
+}

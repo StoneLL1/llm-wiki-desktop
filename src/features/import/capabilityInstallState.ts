@@ -7,6 +7,7 @@ export type CapabilityInstallStateKind =
   | "verifying"
   | "installing"
   | "health_check_failed"
+  | "catalog_unavailable"
   | "signed_release_unavailable"
   | "installed";
 
@@ -21,6 +22,7 @@ export function capabilityInstallState(
   task: BackendTask | null,
   installable: boolean,
   available: boolean,
+  unavailableReasonCode: string | null = null,
 ): CapabilityInstallState {
   const active = task !== null && ["queued", "running", "cancelling"].includes(task.status);
   if (task?.status === "interrupted") {
@@ -30,7 +32,16 @@ export function capabilityInstallState(
     return { kind: "installed", downloadedBytes: task?.progress?.current ?? null, totalBytes: task?.progress?.total ?? null, task };
   }
   if (!installable && !active) {
-    return { kind: "signed_release_unavailable", downloadedBytes: null, totalBytes: null, task };
+    const unavailableKind =
+      unavailableReasonCode === "catalog_unavailable"
+        ? "catalog_unavailable"
+        : "signed_release_unavailable";
+    return {
+      kind: unavailableKind,
+      downloadedBytes: null,
+      totalBytes: null,
+      task,
+    };
   }
   if (task?.status === "cancelled") {
     return { kind: "not_installed", downloadedBytes: null, totalBytes: null, task };

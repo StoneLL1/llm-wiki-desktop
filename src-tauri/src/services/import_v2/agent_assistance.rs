@@ -142,10 +142,18 @@ impl<'a> AgentAssistanceService<'a> {
 
         let task = self
             .tasks
-            .create_project_task(
+            .create_project_task_at(
                 TaskType::AgentRun,
                 context.project_id.clone(),
                 context.root.clone(),
+                context.resolve_project_path(
+                    context.layout.task_state_root.as_deref().ok_or_else(|| {
+                        assistance_error(
+                            "IMPORT_AGENT_TASK_FAILED",
+                            "Import task persistence is unavailable for this project.",
+                        )
+                    })?,
+                )?,
                 format!("Agent assistance for {}", item.input.display_name),
                 true,
             )
@@ -179,8 +187,40 @@ impl<'a> AgentAssistanceService<'a> {
         trigger: AgentAssistanceTrigger,
         agent_kind: AgentKind,
     ) -> Result<(), BackendError> {
-        let audit_path =
-            format!(".app/import-sessions/{session_id}/items/{item_id}/agent-audit/{task_id}.json");
+        self.run_local_with_before_terminal(
+            state,
+            execution,
+            context,
+            session_id,
+            item_id,
+            task_id,
+            trigger,
+            agent_kind,
+            |_permit, _current| Ok(()),
+        )
+    }
+
+    pub(crate) fn run_local_with_before_terminal<F>(
+        &self,
+        state: &AppState,
+        execution: &ProjectExecutionLease,
+        context: &ProjectContext,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+        trigger: AgentAssistanceTrigger,
+        agent_kind: AgentKind,
+        before_terminal: F,
+    ) -> Result<(), BackendError>
+    where
+        F: FnOnce(&ProjectWritePermit<'_>, &ProjectContext) -> Result<(), BackendError>,
+    {
+        let audit_file = format!("{task_id}.json");
+        let audit_path = context.layout.import_paths()?.item_child(
+            session_id,
+            item_id,
+            &["agent-audit", &audit_file],
+        )?;
         if self.tasks.is_cancelled(task_id) {
             let _ = self.with_current_write(state, execution, context, |_permit, current| {
                 self.imports.finish_agent_assistance_attempt_unchecked(
@@ -352,27 +392,21 @@ impl<'a> AgentAssistanceService<'a> {
                 self.files.write_json_atomic(current, &audit_path, &audit)
             })?;
             let relative_workspace = audit.workspace_relative_path.clone();
-            self.with_current_write(state, execution, context, |_permit, current| {
+            let task_result = TaskResult {
+                summary: "Agent output is staged for candidate validation.".into(),
+                affected_paths: vec![format!("{relative_workspace}/output")],
+                reference: Some(TaskResultReference::ImportPreview {
+                    session_id: session_id.into(),
+                    item_id: item_id.into(),
+                }),
+                pending_action: None,
+            };
+            self.with_current_write(state, execution, context, |permit, current| {
                 self.tasks
-                    .complete_running_with_result(
-                        task_id,
-                        TaskResult {
-                            summary: "Agent output is staged for candidate validation.".into(),
-                            affected_paths: vec![format!("{relative_workspace}/output")],
-                            reference: Some(TaskResultReference::ImportPreview {
-                                session_id: session_id.into(),
-                                item_id: item_id.into(),
-                            }),
-                            pending_action: None,
-                        },
-                    )
+                    .seal_running_with_result(task_id, task_result.clone())
                     .map_err(|error| assistance_error("IMPORT_AGENT_TASK_FAILED", &error))?;
                 audit.outcome = "succeeded".into();
                 self.files.write_json_atomic(current, &audit_path, &audit)?;
-                // The durable task result is the recovery authority. If session
-                // persistence is interrupted here, recover_session reconciles the
-                // unfinished attempt from this Succeeded task without rerunning or
-                // charging the Agent again.
                 self.imports.finish_agent_assistance_attempt_unchecked(
                     current,
                     self.files,
@@ -381,7 +415,14 @@ impl<'a> AgentAssistanceService<'a> {
                     task_id,
                     AttemptOutcome::Succeeded,
                     Vec::new(),
-                )
+                )?;
+                // Candidate state is installed before the terminal event so a
+                // task-driven UI refresh can observe it immediately.
+                before_terminal(permit, current)?;
+                self.tasks
+                    .complete_running_with_result(task_id, task_result)
+                    .map(|_| ())
+                    .map_err(|error| assistance_error("IMPORT_AGENT_TASK_FAILED", &error))
             })?;
             Ok(())
         })();

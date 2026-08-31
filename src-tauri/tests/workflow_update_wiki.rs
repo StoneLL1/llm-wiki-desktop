@@ -64,7 +64,7 @@ struct SuccessfulAgent {
 
 impl ProcessRunner for SuccessfulAgent {
     fn find_executable(&self, _command: &str) -> Option<PathBuf> {
-        Some(PathBuf::from("fake-agent"))
+        std::env::current_exe().ok()
     }
 
     fn run_with_timeout(

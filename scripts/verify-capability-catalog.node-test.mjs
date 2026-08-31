@@ -7,12 +7,15 @@ import test from "node:test";
 import {
   CAPABILITY_PACKS,
   CAPABILITY_TARGETS,
+  MODEL_CAPABILITY_PACKS,
   emitCatalogProvenance,
   repositoryRoot,
   verifyCapabilityCatalog,
 } from "./verify-capability-catalog.mjs";
+import { PRODUCT_MANIFEST } from "./verify-product-capabilities.mjs";
 
 const trustedKeys = { release: "c".repeat(64) };
+const productDefinitions = new Map(PRODUCT_MANIFEST.definitions.map((definition) => [definition.capabilityId, definition]));
 
 const releaseEntry = (capabilityId, targetTriple, overrides = {}) => ({
   capabilityId,
@@ -22,12 +25,13 @@ const releaseEntry = (capabilityId, targetTriple, overrides = {}) => ({
     + capabilityId + "-1.2.3-" + targetTriple + ".zip",
   archiveSha256: "a".repeat(64),
   manifestSha256: "b".repeat(64),
+  signingKeyId: "release",
   compressedBytes: 1234,
   installedBytes: 2345,
-  modelBytes: capabilityId === "asr-sensevoice-small" || capabilityId === "ocr-cjk-accurate"
+  modelBytes: MODEL_CAPABILITY_PACKS.includes(capabilityId)
     ? 640
     : null,
-  license: "MIT",
+  license: productDefinitions.get(capabilityId)?.licensePolicy.expression ?? "MIT",
   ...overrides,
 });
 
@@ -44,11 +48,11 @@ const verify = (overrides = {}) => verifyCapabilityCatalog({
   ...overrides,
 });
 
-test("release mode requires the complete unique four-by-five matrix", () => {
+test("release mode requires the complete unique product-manifest matrix", () => {
   assert.deepEqual(verify().errors, []);
 
-  const nineteen = fullMatrix().slice(0, 19);
-  assert.equal(verify({ catalog: releaseCatalog(nineteen) }).errors.length > 0, true);
+  const incomplete = fullMatrix().slice(0, -1);
+  assert.equal(verify({ catalog: releaseCatalog(incomplete) }).errors.length > 0, true);
 
   const duplicated = [...fullMatrix(), fullMatrix()[0]];
   assert.equal(verify({ catalog: releaseCatalog(duplicated) }).errors.length > 0, true);
@@ -108,6 +112,7 @@ test("entry measurements and identities must be complete", () => {
     { targetTriple: "x86_64-pc-windows-gnu" },
     { capabilityId: "bad pack id!" },
     { modelBytes: 0 },
+    { signingKeyId: "retired-key" },
   ];
   for (const overrides of invalidEntries) {
     const catalog = releaseCatalog(
@@ -116,9 +121,11 @@ test("entry measurements and identities must be complete", () => {
     assert.equal(verify({ catalog }).errors.length > 0, true);
   }
 
-  const modelPackEntry = releaseEntry("asr-sensevoice-small", CAPABILITY_TARGETS[0]);
+  const modelPackEntry = releaseEntry(MODEL_CAPABILITY_PACKS[0], CAPABILITY_TARGETS[0]);
   delete modelPackEntry.modelBytes;
-  const removed = fullMatrix().with(6, modelPackEntry);
+  const modelIndex = fullMatrix().findIndex((entry) => entry.capabilityId === MODEL_CAPABILITY_PACKS[0]
+    && entry.targetTriple === CAPABILITY_TARGETS[0]);
+  const removed = fullMatrix().with(modelIndex, modelPackEntry);
   assert.equal(verify({ catalog: releaseCatalog(removed) }).errors.length > 0, true);
 });
 

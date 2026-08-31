@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "packId": "office-legacy",
-  "version": "24.2.7",
+  "version": "26.2.4",
   "protocolVersion": "2",
   "targetTriples": [
     "x86_64-pc-windows-msvc",
@@ -10,7 +10,7 @@
     "x86_64-unknown-linux-gnu"
   ],
   "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",
-  "licenseExpression": "MPL-2.0 OR LGPL-3.0-or-later",
+  "licenseExpression": "(MPL-2.0 OR LGPL-3.0-or-later) AND PSF-2.0 AND MPL-2.0",
   "entrypoint": "runner/office-legacy-pack",
   "compressedBytes": 0,
   "installedBytes": 0,

@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 use crate::app_state::AppState;
 use crate::errors::BackendError;
@@ -15,17 +15,23 @@ pub struct AgentProjectRequest {
 }
 
 #[tauri::command]
-pub fn detect_agents(
-    state: State<'_, AppState>,
+pub async fn detect_agents(
+    app: AppHandle,
     request: AgentProjectRequest,
 ) -> Result<Vec<AgentInfo>, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let config = crate::services::AgentService::load_config(&context)?;
-    let agents = state.agent_service.detect_agents(config.default_agent);
-    if request.force_refresh {
-        state.agent_service.invalidate_workflow_route_cache();
-    }
-    Ok(agents)
+    let coordinator = app.state::<AppState>().blocking_work.clone();
+    coordinator
+        .run_project_facts_agent(move || {
+            let state = app.state::<AppState>();
+            let context =
+                state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+            let config = crate::services::AgentService::load_config(&context)?;
+            if request.force_refresh {
+                state.agent_service.invalidate_workflow_route_cache();
+            }
+            Ok(state.agent_service.detect_agents(config.default_agent))
+        })
+        .await
 }
 
 #[tauri::command]
@@ -49,7 +55,6 @@ pub fn set_default_agent(
             let config = state
                 .settings_service
                 .save_agent_default(context, request.agent)?;
-            state.agent_service.invalidate_workflow_route_cache();
             Ok(config)
         },
     )

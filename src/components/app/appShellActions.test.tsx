@@ -36,6 +36,14 @@ function mockNarrowDesktop(matches: boolean) {
   });
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
 beforeEach(async () => {
   mockNarrowDesktop(false);
   await i18next.changeLanguage("en");
@@ -113,7 +121,11 @@ describe("AppShell workspace header", () => {
     render(<AppShell />);
     fireEvent.click(screen.getByRole("button", { name: "Check for updates" }));
 
-    expect(await screen.findByRole("dialog", { name: "Updates" })).toBeVisible();
+    expect(await screen.findByRole(
+      "dialog",
+      { name: "Updates" },
+      { timeout: 10_000 },
+    )).toBeVisible();
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("check_app_update"));
     expect(useUpdateStore.getState().uiStatus).toBe("up_to_date");
   });
@@ -284,6 +296,21 @@ describe("AppShell first-screen agent detection", () => {
     useProjectStore.getState().setCurrentProject(defaultProject);
   });
 
+  it("records zero Project Facts requests when no project is open", async () => {
+    tauriWindow.__TAURI_INTERNALS__ = {};
+    useProjectStore.getState().setCurrentProject(defaultProject);
+
+    render(<AppShell />);
+    await act(async () => Promise.resolve());
+
+    const projectFactsCommands = new Set([
+      "git_status",
+      "detect_agents",
+      "list_llm_providers",
+    ]);
+    expect(invokeMock.mock.calls.filter(([command]) => projectFactsCommands.has(command))).toHaveLength(0);
+  });
+
   it("refreshes agentRoute when the dashboard mounts with an active project", async () => {
     tauriWindow.__TAURI_INTERNALS__ = {};
     useProjectStore.getState().setCurrentProject({
@@ -352,12 +379,20 @@ describe("AppShell first-screen agent detection", () => {
     });
   });
 
-  it("single-flights one revalidation per fact when the app window regains focus", async () => {
+  it("refreshes only Git when the app window regains focus", async () => {
     tauriWindow.__TAURI_INTERNALS__ = {};
     useProjectStore.getState().setCurrentProject({
       ...defaultProject,
-      projectId: "proj-focus",
-      rootPath: "/tmp/proj-focus",
+      projectId: "proj-focus-target",
+      rootPath: "/tmp/proj-focus-target",
+    });
+    useProjectStore.setState({
+      authority: {
+        projectId: "proj-focus-target",
+        canonicalIdentityKey: "identity-focus-target",
+        identityRevision: "revision-1",
+        authorityRevision: "authority-1",
+      } as never,
     });
     invokeMock.mockImplementation((command: string) => {
       if (command === "git_status") {
@@ -377,16 +412,128 @@ describe("AppShell first-screen agent detection", () => {
       expect(invokeMock.mock.calls.filter(([command]) => command === "list_llm_providers")).toHaveLength(1);
     });
 
+    fireEvent.blur(window);
     fireEvent.focus(window);
 
     await waitFor(() => {
       expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(2);
-      expect(invokeMock.mock.calls.filter(([command]) => command === "detect_agents")).toHaveLength(2);
-      expect(invokeMock.mock.calls.filter(([command]) => command === "list_llm_providers")).toHaveLength(2);
     });
+    expect(invokeMock.mock.calls.filter(([command]) => command === "detect_agents")).toHaveLength(1);
+    expect(invokeMock.mock.calls.filter(([command]) => command === "list_llm_providers")).toHaveLength(1);
   });
 
-  it("reprobes mounted observers after the project authority identity changes", async () => {
+  it("coalesces a visibility transition and twenty focus events into one Git request", async () => {
+    tauriWindow.__TAURI_INTERNALS__ = {};
+    const project = {
+      ...defaultProject,
+      projectId: "proj-focus-coalesced",
+      rootPath: "/tmp/proj-focus-coalesced",
+    };
+    useProjectStore.getState().setCurrentProject(project);
+    useProjectStore.setState({
+      authority: {
+        projectId: project.projectId,
+        canonicalIdentityKey: "identity-focus-coalesced",
+        identityRevision: "revision-1",
+        authorityRevision: "authority-1",
+      } as never,
+    });
+    const firstFocus = deferred<{
+      isRepository: boolean;
+      branch: string | null;
+      head: string | null;
+      hasChanges: boolean;
+    }>();
+    let gitCalls = 0;
+    let activeGit = 0;
+    let maximumActiveGit = 0;
+    invokeMock.mockImplementation((command: string) => {
+      if (command !== "git_status") return Promise.resolve([]);
+      gitCalls += 1;
+      if (gitCalls === 1) {
+        return Promise.resolve({
+          isRepository: true,
+          branch: "main",
+          head: "initial",
+          hasChanges: false,
+        });
+      }
+      activeGit += 1;
+      maximumActiveGit = Math.max(maximumActiveGit, activeGit);
+      return firstFocus.promise.finally(() => {
+        activeGit -= 1;
+      });
+    });
+
+    render(<AppShell />);
+    await waitFor(() => expect(gitCalls).toBe(1));
+    fireEvent.blur(window);
+    for (let index = 0; index < 20; index += 1) fireEvent.focus(window);
+
+    expect(gitCalls).toBe(2);
+    expect(maximumActiveGit).toBe(1);
+    firstFocus.resolve({
+      isRepository: true,
+      branch: "main",
+      head: "focus-1",
+      hasChanges: false,
+    });
+    await waitFor(() => expect(activeGit).toBe(0));
+
+    expect(gitCalls).toBe(2);
+    expect(maximumActiveGit).toBe(1);
+  });
+
+  it("coalesces a delayed focus pair until another background cycle", async () => {
+    tauriWindow.__TAURI_INTERNALS__ = {};
+    const project = {
+      ...defaultProject,
+      projectId: "proj-focus-delayed-pair",
+      rootPath: "/tmp/proj-focus-delayed-pair",
+    };
+    useProjectStore.getState().setCurrentProject(project);
+    useProjectStore.setState({
+      authority: {
+        projectId: project.projectId,
+        canonicalIdentityKey: "identity-focus-delayed-pair",
+        identityRevision: "revision-1",
+        authorityRevision: "authority-1",
+      } as never,
+    });
+    invokeMock.mockImplementation((command: string) => command === "git_status"
+      ? Promise.resolve({
+        isRepository: true,
+        branch: "main",
+        head: "focus-delayed-pair",
+        hasChanges: false,
+      })
+      : Promise.resolve([]));
+    const now = vi.spyOn(Date, "now");
+    render(<AppShell />);
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(1);
+    });
+
+    now.mockReturnValue(1_000);
+    fireEvent.blur(window);
+    fireEvent.focus(window);
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(2);
+    });
+    now.mockReturnValue(1_600);
+    fireEvent.focus(window);
+    await act(async () => Promise.resolve());
+    expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(2);
+
+    fireEvent.blur(window);
+    fireEvent.focus(window);
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(3);
+    });
+    now.mockRestore();
+  });
+
+  it("reprobes mounted observers after only the authority revision changes", async () => {
     tauriWindow.__TAURI_INTERNALS__ = {};
     const project = {
       ...defaultProject,
@@ -400,6 +547,7 @@ describe("AppShell first-screen agent detection", () => {
         projectId: project.projectId,
         canonicalIdentityKey: "identity-a",
         identityRevision: "revision-1",
+        authorityRevision: "authority-1",
       } as never,
     });
     invokeMock.mockImplementation((command: string) => {
@@ -424,7 +572,8 @@ describe("AppShell first-screen agent detection", () => {
       authority: {
         projectId: project.projectId,
         canonicalIdentityKey: "identity-a",
-        identityRevision: "revision-2",
+        identityRevision: "revision-1",
+        authorityRevision: "authority-2",
       } as never,
     }));
 

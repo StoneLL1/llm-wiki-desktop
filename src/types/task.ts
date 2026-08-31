@@ -9,6 +9,7 @@ export type TaskType =
   | "export"
   | "source_ai_organize"
   | "project_inventory"
+  | "capability_install"
   | "workflow";
 
 export type TaskStatus =
@@ -51,14 +52,28 @@ export type TaskOperation = {
   itemCount: number;
   sourceLabel?: string | null;
 } | {
+  kind: "import_collection_discovery";
+  sessionId: string;
+} | {
   kind: "capability_install";
   sessionId: string;
   itemId: string;
   capabilityId: string;
   requirementRevision: string;
 } | {
+  kind: "app_capability_install";
+  capabilityId: string;
+  version: string;
+  targetTriple: string;
+  archiveIdentity: string;
+} | {
   kind: "import_commit";
   sessionId: string;
+} | {
+  kind: "import_recovery";
+  sessionId: string;
+} | {
+  kind: "import_history_index_rebuild";
 };
 
 export interface TaskResult {
@@ -69,14 +84,31 @@ export interface TaskResult {
 }
 
 export type TaskResultReference = {
+  type: "app_capability_install";
+  capabilityId: string;
+  version: string;
+  resumedContinuations: number;
+  deferredContinuations: number;
+  failedContinuations: number;
+} | {
   type: "import_preview";
   sessionId: string;
   itemId: string;
+} | {
+  type: "import_operation";
+  sessionId: string;
+  taskId: string;
+  itemCount: number;
 } | {
   type: "import_v2_session_preview";
   sessionId: string;
   batchId?: string | null;
   completion?: import("./importV2").ImportCompletion | null;
+} | {
+  type: "import_collection_preview";
+  sessionId: string;
+  collectionRef: string;
+  preview: import("./importV2Web").ImportCollectionPreview;
 } | {
   type: "compile";
   result: import("./compile").CompileResult;
@@ -204,6 +236,7 @@ export const TASK_TYPE_LABELS: Record<TaskType, string> = {
   export: "task.type.export",
   source_ai_organize: "task.type.sourceAiOrganize",
   project_inventory: "task.type.projectInventory",
+  capability_install: "task.type.capabilityInstall",
   workflow: "task.type.workflow",
 };
 

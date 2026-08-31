@@ -161,8 +161,12 @@ fn source_manifests_never_claim_unbuilt_payloads() {
     let accurate: serde_json::Value =
         serde_json::from_slice(&fs::read(root.join("ocr-cjk-accurate/manifest.json")).unwrap())
             .unwrap();
-    assert_eq!(basic["engine"]["name"], "Tesseract");
-    assert_eq!(basic["licenseExpression"], "Apache-2.0 AND BSD-2-Clause");
+    assert_eq!(basic["engine"]["name"], "RapidOCR");
+    assert_eq!(basic["engine"]["version"], "3.8.1");
+    assert_eq!(
+        basic["licenseExpression"],
+        "Apache-2.0 AND MIT AND BSD-3-Clause AND HPND AND MPL-2.0 AND PSF-2.0 AND LGPL-2.1-only AND LGPL-3.0-only"
+    );
     assert_eq!(basic["payloadStatus"], "release_ci_required");
     assert_eq!(accurate["engine"]["name"], "RapidOCR with ONNX Runtime");
     assert_eq!(accurate["engine"]["version"], "3.8.1");

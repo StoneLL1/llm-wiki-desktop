@@ -76,6 +76,7 @@ const importWorkflow: ImportWorkflow = {
   getMigrationStatus: vi.fn(),
   resumeMigration: vi.fn(),
   listHistory: vi.fn(),
+  loadHistoryDetail: vi.fn(),
 };
 const workflowsController: WorkflowsController = {
   refresh: vi.fn(),

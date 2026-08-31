@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
   "packId": "media-runtime",
-  "version": "8.0.1",
+  "version": "8.1.2",
   "protocolVersion": "2",
-  "targetTriples": [],
+  "targetTriples": ["x86_64-pc-windows-msvc", "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"],
   "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",
-  "licenseExpression": "LGPL-2.1-or-later",
-  "entrypoint": "runner/media-runtime-pack",
+  "licenseExpression": "MIT AND LGPL-3.0-or-later",
+  "entrypoint": "runner/index.mjs",
   "compressedBytes": 0,
   "installedBytes": 0,
   "signingKeyId": "release-build-placeholder",
@@ -15,13 +15,13 @@
   "buildProvenance": {
     "configureFlags": ["--disable-gpl", "--disable-nonfree", "--enable-shared"],
     "componentInventory": [
-      {"name": "FFmpeg", "version": "8.0.1", "license": "LGPL-2.1-or-later"},
-      {"name": "libavformat", "license": "LGPL-2.1-or-later"},
-      {"name": "libavcodec", "license": "LGPL-2.1-or-later"},
-      {"name": "libavutil", "license": "LGPL-2.1-or-later"},
-      {"name": "libswresample", "license": "LGPL-2.1-or-later"}
+      {"name": "FFmpeg", "version": "8.1.2", "license": "LGPL-3.0-or-later"},
+      {"name": "libavformat", "license": "LGPL-3.0-or-later"},
+      {"name": "libavcodec", "license": "LGPL-3.0-or-later"},
+      {"name": "libavutil", "license": "LGPL-3.0-or-later"},
+      {"name": "libswresample", "license": "LGPL-3.0-or-later"}
     ],
-    "sourceRecipe": "Release CI fetches the signed ffmpeg-8.0.1 source archive, verifies its pinned digest, configures only the audited LGPL component inventory with the declared flags, builds shared libraries, emits SBOM/notices, and substitutes real hashes/sizes/signatures."
+    "sourceRecipe": "Release CI fetches the locked FFmpeg 8.1.2 source or reviewed target payload, verifies its pinned digest and byte count, configures only the audited LGPL component inventory with the declared flags where a source build is required, and emits signed inventory, SBOM, notices, and catalog measurements."
   },
   "execution": {"process": "independent", "shell": false, "protocol": "json-rpc-2.0-stdio", "stagingOnly": true},
   "distributionNote": "This source manifest is intentionally not installable. Qualified release CI must publish separately signed Windows, macOS, and Linux payloads."

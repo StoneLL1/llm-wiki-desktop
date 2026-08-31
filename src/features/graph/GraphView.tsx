@@ -17,7 +17,7 @@ import { projectResourceKey } from "../../lib/projectResourceFreshness";
 import { observeProjectResources } from "../../stores/projectScope";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
-import { useTaskStore } from "../../stores/taskStore";
+import { selectTaskById, useTaskStore } from "../../stores/taskStore";
 import { useWikiStore } from "../wiki/wikiStore";
 import {
   COMMUNITY_PALETTE,
@@ -122,9 +122,7 @@ export function GraphView() {
   const setSearch = useGraphStore((state) => state.setSearch);
   const saveLayout = useGraphStore((state) => state.saveLayout);
   const registerActions = useGraphStore((state) => state.registerActions);
-  const activeBuildTask = useTaskStore((state) =>
-    buildUi.taskId ? state.tasks.find((task) => task.id === buildUi.taskId) ?? null : null,
-  );
+  const activeBuildTask = useTaskStore((state) => selectTaskById(state, buildUi.taskId));
 
   const currentProject = useProjectStore((state) => state.currentProject);
   const setActiveView = useNavigationStore((state) => state.setActiveView);

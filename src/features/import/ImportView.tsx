@@ -3,14 +3,14 @@ import { useTranslation } from "react-i18next";
 
 import type { AiCapabilitiesWorkflow } from "../../hooks/useAiCapabilities";
 import { useImportStore } from "../../stores/importStore";
-import { useTaskStore } from "../../stores/taskStore";
+import { selectTaskIdsForProject, useTaskStore } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
 import type { AgentCandidateView } from "../../types/importV2Agent";
-import type { CommitItemDecision, ImportItem, ImportSession } from "../../types/importV2";
+import type { ImportItem } from "../../types/importV2";
 import {
   canOpenHistoricalResult,
   type ImportHistoryAction,
-  type ImportHistoryEntry,
+  type ImportHistoryDetailPage,
   type ImportHistoryPage,
   type ImportWorkbenchPreferences,
 } from "../../types/importV2Presentation";
@@ -28,11 +28,13 @@ import { ImportQueue } from "./ImportQueue";
 import { ImportSourceMethods } from "./ImportSourceMethods";
 import { ImportV2Dialogs } from "./ImportV2Dialogs";
 import { ImportV2Header, type ImportV2Section } from "./ImportV2Header";
+import { ActionableErrorNotice } from "../../components/app/ActionableErrorNotice";
 import { presentImportItem, type ImportItemAction } from "./importStatusPresentation";
 import type { ImportWorkflow } from "./useImportWorkflow";
 import type { ImportCandidateDiffIntent } from "./ImportCandidateDiffDialog";
 
 const EMPTY_CAPABILITIES: AiCapabilitiesWorkflow = { agents: [], providers: [], refreshing: false, refresh: async () => undefined };
+const historyPageCache = new WeakMap<ImportWorkflow["listHistory"], Map<string, ImportHistoryPage>>();
 const DEFAULT_WORKBENCH_PREFERENCES: ImportWorkbenchPreferences = {
   schemaVersion: 1,
   activeSection: "workbench",
@@ -64,9 +66,26 @@ function itemById(items: readonly ImportItem[], itemId: string | null): ImportIt
   return itemId ? items.find((item) => item.itemId === itemId) ?? null : null;
 }
 
+function backendErrorCode(error: unknown): string | null {
+  if (!error || typeof error !== "object" || !("code" in error)) return null;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" ? code : null;
+}
+
 export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: ImportViewProps) {
   const { t } = useTranslation();
-  const taskList = useTaskStore((state) => state.tasks);
+  const taskIds = useTaskStore((state) => selectTaskIdsForProject(state, state.activeProjectId));
+  const historyRebuildSucceededRevision = useTaskStore((state) => {
+    const ids = selectTaskIdsForProject(state, state.activeProjectId);
+    let revision = "";
+    for (const id of ids) {
+      const task = state.taskById[id];
+      if (task?.operation?.kind === "import_history_index_rebuild" && task.status === "succeeded" && task.updatedAt > revision) {
+        revision = task.updatedAt;
+      }
+    }
+    return revision;
+  });
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
   const pushToast = useToastStore((state) => state.pushToast);
   const session = workflow.session;
@@ -89,10 +108,14 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
   const [openingHistoryEntryId, setOpeningHistoryEntryId] = useState<string | null>(null);
   const historyEntryBusyRef = useRef<string | null>(null);
-  const [historyDetail, setHistoryDetail] = useState<{ entry: ImportHistoryEntry; session: ImportSession } | null>(null);
+  const [historyDetail, setHistoryDetail] = useState<ImportHistoryDetailPage | null>(null);
+  const [historyDetailLoadingMore, setHistoryDetailLoadingMore] = useState(false);
   const [historyResultUnavailable, setHistoryResultUnavailable] = useState(false);
   const [historyPreviewIdentity, setHistoryPreviewIdentity] = useState<ImportPreviewIdentity | null>(null);
   const historyLoadLock = useRef(false);
+  const historyPageOneInFlightRef = useRef<{ key: string; promise: Promise<void> } | null>(null);
+  const historyStaleRef = useRef(true);
+  const historyRebuildSeenRef = useRef("");
   const historyRequestRef = useRef(0);
   const confirmingRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -139,40 +162,82 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
     }));
   }, [t, workflow.readiness]);
 
-  const loadHistory = useCallback(async () => {
+  const historyCacheKey = workflow.projectKey;
+
+  const loadHistory = useCallback(() => {
+    if (historyPageOneInFlightRef.current?.key === historyCacheKey) return historyPageOneInFlightRef.current.promise;
     const requestId = ++historyRequestRef.current;
     const requestProjectKey = workflow.projectKey;
     setHistoryError(false);
-    try {
-      const page = await workflow.listHistory();
-      if (activeProjectKeyRef.current === requestProjectKey && historyRequestRef.current === requestId) setHistory(page);
-    } catch {
-      if (activeProjectKeyRef.current === requestProjectKey && historyRequestRef.current === requestId) {
-        setHistory(null);
-        setHistoryError(true);
+    const request = (async () => {
+      try {
+        const page = await workflow.listHistory();
+        if (activeProjectKeyRef.current === requestProjectKey && historyRequestRef.current === requestId) {
+          setHistory(page);
+          historyStaleRef.current = false;
+          if (page) {
+            const pages = historyPageCache.get(workflow.listHistory) ?? new Map<string, ImportHistoryPage>();
+            pages.delete(historyCacheKey);
+            pages.set(historyCacheKey, page);
+            while (pages.size > 4) pages.delete(pages.keys().next().value as string);
+            historyPageCache.set(workflow.listHistory, pages);
+          }
+        }
+      } catch {
+        if (activeProjectKeyRef.current === requestProjectKey && historyRequestRef.current === requestId) {
+          setHistoryError(true);
+          historyStaleRef.current = false;
+        }
+      } finally {
+        if (historyPageOneInFlightRef.current?.key === historyCacheKey) historyPageOneInFlightRef.current = null;
       }
-    }
-  }, [workflow.listHistory, workflow.projectKey]);
+    })();
+    historyPageOneInFlightRef.current = { key: historyCacheKey, promise: request };
+    return request;
+  }, [historyCacheKey, workflow.listHistory, workflow.projectKey]);
 
   useEffect(() => {
     if (workflow.bootstrapState !== "ready") {
       historyRequestRef.current += 1;
       setHistory(null);
       setHistoryError(false);
+      historyStaleRef.current = true;
       return;
     }
-    setHistory(null);
-    void loadHistory();
+    const cached = historyPageCache.get(workflow.listHistory)?.get(historyCacheKey) ?? null;
+    setHistory(cached);
+    setHistoryError(false);
+    historyStaleRef.current = true;
     return () => { historyRequestRef.current += 1; };
-  }, [loadHistory, workflow.bootstrapState, workflow.completion?.batchId, workflow.projectKey, session?.sessionId]);
+  }, [historyCacheKey, workflow.bootstrapState, workflow.listHistory]);
+
+  useEffect(() => {
+    if (activeSection !== "history" || workflow.bootstrapState !== "ready") return;
+    if (historyError) return;
+    if (history === null || historyStaleRef.current) void loadHistory();
+  }, [activeSection, history, historyError, loadHistory, workflow.bootstrapState]);
+
+  useEffect(() => {
+    if (!workflow.completion?.batchId) return;
+    historyStaleRef.current = true;
+    if (activeSection === "history" && workflow.bootstrapState === "ready") void loadHistory();
+  }, [activeSection, loadHistory, workflow.bootstrapState, workflow.completion?.batchId]);
+
+  useEffect(() => {
+    if (!historyRebuildSucceededRevision || historyRebuildSeenRef.current === historyRebuildSucceededRevision) return;
+    historyRebuildSeenRef.current = historyRebuildSucceededRevision;
+    historyStaleRef.current = true;
+    if (activeSection === "history" && workflow.bootstrapState === "ready") void loadHistory();
+  }, [activeSection, historyRebuildSucceededRevision, loadHistory, workflow.bootstrapState]);
 
   useEffect(() => {
     if (confirmingProjectKeyRef.current === workflow.projectKey && confirmingRef.current && !workflow.isConfirming) {
-      void loadHistory();
+      historyStaleRef.current = true;
+      if (activeSection === "history") void loadHistory();
     }
     confirmingProjectKeyRef.current = workflow.projectKey;
     confirmingRef.current = workflow.isConfirming;
-  }, [loadHistory, workflow.isConfirming, workflow.projectKey]);
+  }, [activeSection, loadHistory, workflow.isConfirming, workflow.projectKey]);
 
   useEffect(() => {
     const defaults = { ...DEFAULT_WORKBENCH_PREFERENCES };
@@ -263,6 +328,15 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
   }, [workflow.discoveryTask?.id, workflow.discoveryTask?.status]);
 
   const commitCounts = useMemo(() => {
+    if (workflow.overview) {
+      return {
+        selected: workflow.overview.selection.selected,
+        newSources: workflow.overview.selection.newSources,
+        updates: workflow.overview.selection.updates,
+        warnings: workflow.overview.selection.warnings,
+        pending: workflow.overview.selection.pending,
+      };
+    }
     const selected = (session?.items ?? []).filter(
       (item) => item.selected && presentImportItem(item).committable,
     );
@@ -287,13 +361,7 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
         },
       ).length,
     };
-  }, [session]);
-  const decisions = useMemo<CommitItemDecision[]>(() => (session?.items ?? [])
-    .filter((item) => item.selected && presentImportItem(item).committable)
-    .map((item) => ({
-      itemId: item.itemId,
-      resolution: item.preview?.resolution?.defaultResolution ?? null,
-    })), [session]);
+  }, [session, workflow.overview]);
 
   async function compareCandidate(itemId: string) {
     const requestProjectKey = workflow.projectKey;
@@ -434,7 +502,9 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
   }, [actionRequest, clearActionRequest]);
 
   async function handleActionGroup(group: ImportActionGroup) {
-    const firstItemId = group.itemIds[0];
+    const loadedItems = useImportStore.getState().itemById;
+    const firstItemId = group.itemIds.find((itemId) => Boolean(loadedItems[itemId]))
+      ?? group.itemIds[0];
     if (!firstItemId) return;
     switch (group.kind) {
       case "login":
@@ -455,6 +525,9 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
         return;
       case "resume":
         await workflow.startItems(group.itemIds, "retry");
+        return;
+      case "conflict":
+        await handleAction("resolve_merge", firstItemId);
         return;
     }
   }
@@ -477,8 +550,15 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
         const warnings = new Map(current.warnings.concat(next.warnings).map((warning) => [`${warning.code}:${warning.evidencePath}`, warning]));
         return { ...next, entries: [...entries.values()], legacyReadOnly: [...legacyReadOnly.values()], warnings: [...warnings.values()] };
       });
-    } catch {
-      if (activeProjectKeyRef.current === requestProjectKey) pushToast("error", t("importV2.history.error"));
+    } catch (error) {
+      if (activeProjectKeyRef.current === requestProjectKey) {
+        if (backendErrorCode(error) === "IMPORT_V2_HISTORY_CURSOR_STALE") {
+          historyStaleRef.current = true;
+          await loadHistory();
+        } else {
+          pushToast("error", t("importV2.history.error"));
+        }
+      }
     } finally {
       if (activeProjectKeyRef.current === requestProjectKey) {
         historyLoadLock.current = false;
@@ -491,22 +571,32 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
     if (historyEntryBusyRef.current) return;
     const requestProjectKey = workflow.projectKey;
     const entry = history?.entries.find((candidate) => candidate.id === entryId);
-    if (!entry?.sessionId) return;
+    if (!entry?.sessionId || !entry.batchId) return;
     historyEntryBusyRef.current = entryId;
     setOpeningHistoryEntryId(entryId);
     setHistoryResultUnavailable(false);
     try {
-      const historicalSession = await workflow.loadSession(entry.sessionId, entry.batchId);
-      if (activeProjectKeyRef.current !== requestProjectKey) return;
-      if (!historicalSession) {
-        pushToast("info", t("importV2.history.resultUnavailable"));
+      if (action === "update_wiki") {
+        const completion = await workflow.loadCompletion(entry.sessionId, entry.batchId);
+        if (activeProjectKeyRef.current !== requestProjectKey) return;
+        if (completion) await workflow.updateWiki(completion);
+        else pushToast("info", t("importV2.history.resultUnavailable"));
         return;
       }
+      const detail = await workflow.loadHistoryDetail(entry.batchId);
+      if (activeProjectKeyRef.current !== requestProjectKey || !detail) return;
       if (action === "view_logs") {
         const currentTasks = useTaskStore.getState().tasks;
-        const taskId = [entry.taskId, ...entry.itemIds
-          .map((itemId) => historicalSession.items.find((item) => item.itemId === itemId)?.taskId)
-        ].find((candidate): candidate is string => Boolean(candidate) && currentTasks.some((task) => task.id === candidate));
+        let taskId = entry.taskId && currentTasks.some((task) => task.id === entry.taskId) ? entry.taskId : null;
+        let page: ImportHistoryDetailPage | null = detail;
+        while (!taskId && page) {
+          taskId = page.items.map((item) => item.taskId)
+            .find((candidate): candidate is string => Boolean(candidate) && currentTasks.some((task) => task.id === candidate)) ?? null;
+          page = !taskId && page.nextCursor
+            ? await workflow.loadHistoryDetail(entry.batchId, page.nextCursor)
+            : null;
+          if (activeProjectKeyRef.current !== requestProjectKey) return;
+        }
         if (taskId) {
           openTaskDrawer(taskId);
         } else {
@@ -514,28 +604,24 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
         }
         return;
       }
-      if (action === "update_wiki" && entry.batchId) {
-        const completion = await workflow.loadCompletion(entry.sessionId, entry.batchId);
-        if (activeProjectKeyRef.current !== requestProjectKey) return;
-        if (completion) {
-          await workflow.updateWiki(completion);
-        } else {
-          pushToast("info", t("importV2.history.resultUnavailable"));
-        }
-        return;
-      }
       if (action === "open_result") {
-        const previewItem = canOpenHistoricalResult(entry)
-          ? historicalSession.items.find((item) => entry.itemIds.includes(item.itemId) && item.status === "completed" && item.preview)
-          : undefined;
+        let page: ImportHistoryDetailPage | null = detail;
+        let previewItem: ImportItem | undefined;
+        while (canOpenHistoricalResult(entry) && page && !previewItem) {
+          previewItem = page.items.find((item) => item.status === "completed" && item.preview);
+          page = !previewItem && page.nextCursor
+            ? await workflow.loadHistoryDetail(entry.batchId, page.nextCursor)
+            : null;
+          if (activeProjectKeyRef.current !== requestProjectKey) return;
+        }
         if (previewItem) {
-          setHistoryPreviewIdentity({ sessionId: historicalSession.sessionId, itemId: previewItem.itemId, candidateId: null, historyBatchId: entry.batchId });
+          setHistoryPreviewIdentity({ sessionId: entry.sessionId, itemId: previewItem.itemId, candidateId: null, historyBatchId: entry.batchId });
           return;
         }
         pushToast("info", t("importV2.history.resultUnavailable"));
         setHistoryResultUnavailable(true);
       }
-      setHistoryDetail({ entry, session: historicalSession });
+      setHistoryDetail(detail);
     } finally {
       if (activeProjectKeyRef.current === requestProjectKey) {
         historyEntryBusyRef.current = null;
@@ -544,8 +630,35 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
     }
   }
 
-  const privateItem = itemById(session?.items ?? [], privateItemId);
-  const mergeItem = itemById(session?.items ?? [], mergeItemId);
+  const actionRequestHandlerRef = useRef(handleActionRequest);
+  actionRequestHandlerRef.current = handleActionRequest;
+  const setItemSelectedRef = useRef(workflow.setItemSelected);
+  setItemSelectedRef.current = workflow.setItemSelected;
+  const setFilterRef = useRef(workflow.setFilter);
+  setFilterRef.current = workflow.setFilter;
+  const loadMoreItemsRef = useRef(workflow.loadMoreItems);
+  loadMoreItemsRef.current = workflow.loadMoreItems;
+  const persistPreferencesRef = useRef(persistPreferences);
+  persistPreferencesRef.current = persistPreferences;
+  const handleQueueAction = useCallback((action: ImportItemAction, itemId: string) => {
+    void actionRequestHandlerRef.current(action, itemId).catch(() => undefined);
+  }, []);
+  const handleQueueSelection = useCallback((itemId: string, selected: boolean) => {
+    void setItemSelectedRef.current(itemId, selected);
+  }, []);
+  const handleQueueFilter = useCallback((filter: typeof workflow.filter) => {
+    const normalized = filter === "completed" ? "all" : filter;
+    setFilterRef.current(normalized);
+    persistPreferencesRef.current({ ...preferencesRef.current, queueFilter: normalized });
+  }, []);
+  const handleQueueLoadMore = useCallback(() => {
+    void loadMoreItemsRef.current?.();
+  }, []);
+
+  const privateItem = useImportStore((state) => privateItemId ? state.itemById[privateItemId] ?? itemById(session?.items ?? [], privateItemId) : null);
+  const mergeItem = useImportStore((state) => mergeItemId ? state.itemById[mergeItemId] ?? itemById(session?.items ?? [], mergeItemId) : null);
+  const asrItem = useImportStore((state) => asrItemIds[0] ? state.itemById[asrItemIds[0]] ?? itemById(session?.items ?? [], asrItemIds[0]) : null);
+  const subtitleItem = useImportStore((state) => subtitleItemId ? state.itemById[subtitleItemId] ?? itemById(session?.items ?? [], subtitleItemId) : null);
   const blocked = workflow.bootstrapState === "blocked" || workflow.bootstrapState === "error";
   const discoveryActive = workflow.discoveryTask?.status === "queued" || workflow.discoveryTask?.status === "running" || workflow.discoveryTask?.status === "cancelling";
   // Migration is read-only metadata reconciliation. All current imports use
@@ -577,14 +690,23 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
         {blocked ? (
           <div role="alert" className="import-v2-state import-v2-state--blocked">
             <strong>{workflow.bootstrapState === "error" ? t("importV2.state.error") : t("importV2.state.blocked")}</strong>
-            {workflow.bootstrapState === "error" && workflow.bootstrapError ? <p className="m-0 mt-2 text-[11px] text-[var(--text-secondary)]">{workflow.bootstrapError}</p> : null}
+            {workflow.bootstrapState === "error" && workflow.bootstrapError ? <ActionableErrorNotice className="mt-2" error={workflow.bootstrapError} onAction={() => workflow.retryBootstrap?.()} /> : null}
             {workflow.bootstrapState === "error" && workflow.retryBootstrap ? <button type="button" className="btn btn--sm mt-3" onClick={workflow.retryBootstrap}>{t("importV2.state.retry")}</button> : null}
           </div>
         ) : activeSection === "workbench" ? (
           <>
+            {workflow.recoveryWarning ? (
+              <ActionableErrorNotice
+                className="mb-3"
+                error={workflow.recoveryWarning}
+                onAction={() => workflow.retryRecovery?.()}
+              />
+            ) : null}
             {workflow.completion ? (
               <ImportCompletionSummary
                 completion={workflow.completion}
+                remainingCount={workflow.overview?.remainingCount ?? 0}
+                onContinueRemaining={() => workflow.setFilter("all")}
                 onViewSources={() => {
                   void workflow.viewImportedSources();
                 }}
@@ -618,6 +740,9 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
               matrixExpanded={sourceMatrixExpanded}
               onMatrixExpandedChange={setSourceMatrixExpanded}
               onManageCapabilities={() => handleSectionChange("capabilities")}
+              readinessUnavailable={Boolean(workflow.readinessWarning)}
+              readinessRetrying={workflow.readinessRetrying}
+              onRetryReadiness={workflow.retryReadiness}
             />
             <ImportDiscoveryStatus
               task={workflow.discoveryTask ?? null}
@@ -636,7 +761,7 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
               confirmingLargeData={workflow.isAddingPaths}
             />
             <ImportActionGroups
-              items={session?.items ?? []}
+              groups={workflow.overview?.actionGroups ?? []}
               pendingItemIds={pendingItemIds}
               onRun={(group) => {
                 void handleActionGroup(group).catch(() => undefined);
@@ -657,7 +782,7 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
                 }}
                 onDismiss={(batchId) => workflow.dismissBatch?.(batchId)}
                 onViewTask={(taskId) => {
-                  if (taskList.some((task) => task.id === taskId)) {
+                  if (taskIds.includes(taskId)) {
                     openTaskDrawer(taskId);
                   } else {
                     pushToast("info", t("importV2.batch.taskUnavailable"));
@@ -667,23 +792,24 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
             ))}
             <ImportQueue
               items={workflow.visibleItems}
+              totalItems={workflow.totalItems}
+              itemIndexOffset={workflow.itemIndexOffset}
               counts={workflow.counts}
               progress={workflow.progress}
               selectedItemId={workflow.selectedItemId}
               filter={workflow.filter}
-              onFilterChange={(filter) => {
-                const normalized = filter === "completed" ? "all" : filter;
-                workflow.setFilter(normalized);
-                persistPreferences({ ...preferencesRef.current, queueFilter: normalized });
-              }}
+              onFilterChange={handleQueueFilter}
               onSelectItem={workflow.selectItem}
-              onSetItemSelected={(itemId, selected) => { void workflow.setItemSelected(itemId, selected); }}
+              onSetItemSelected={handleQueueSelection}
               pendingItemIds={pendingItemIds}
               onCopyLocator={workflow.requestClipboard}
               sessionSyncing={workflow.isSyncingSession}
               discoveryTask={workflow.discoveryTask}
               resetKey={session?.sessionId}
-              onAction={(action, itemId) => { void handleActionRequest(action, itemId).catch(() => undefined); }}
+              hasMoreItems={workflow.hasMoreItems}
+              loadingMoreItems={workflow.isLoadingMoreItems}
+              onLoadMoreItems={handleQueueLoadMore}
+              onAction={handleQueueAction}
             />
           </>
         ) : activeSection === "history" ? (
@@ -699,21 +825,16 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
           />
         ) : (
           <ImportCapabilitiesPanel
-            capabilities={workflow.readiness?.capabilities ?? []}
-            items={session?.items ?? []}
-            onAction={(action, itemId) => {
-              void handleActionRequest(action, itemId).catch(() => undefined);
-            }}
           />
         )}
       </div>
-      {activeSection === "workbench" ? <ImportCommitBar counts={commitCounts} isConfirming={workflow.isConfirming} disabled={writesBlocked} onConfirm={() => { void workflow.confirm(decisions); }} /> : null}
+      {activeSection === "workbench" ? <ImportCommitBar counts={commitCounts} isConfirming={workflow.isConfirming} disabled={writesBlocked} onConfirm={() => { void workflow.confirm(); }} /> : null}
       <ImportV2Dialogs
         workflow={workflow}
         privateItem={privateItem}
-        asrItem={itemById(session?.items ?? [], asrItemIds[0] ?? null)}
+        asrItem={asrItem}
         asrItemIds={asrItemIds}
-        subtitleItem={itemById(session?.items ?? [], subtitleItemId)}
+        subtitleItem={subtitleItem}
         candidateView={candidateView}
         onCloseCandidate={() => setCandidateView(null)}
         onCandidateIntent={(intent) => { void handleCandidateIntent(intent); }}
@@ -732,8 +853,28 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
       />
       <ImportHistoryDetailDialog
         open={Boolean(historyDetail)}
-        entry={historyDetail?.entry ?? null}
-        session={historyDetail?.session ?? null}
+        page={historyDetail}
+        loadingMore={historyDetailLoadingMore}
+        onLoadMore={async (cursor) => {
+          if (!historyDetail || historyDetailLoadingMore) return;
+          const requestProjectKey = workflow.projectKey;
+          setHistoryDetailLoadingMore(true);
+          try {
+            const next = await workflow.loadHistoryDetail(historyDetail.entry.id, cursor);
+            if (!next || activeProjectKeyRef.current !== requestProjectKey) return;
+            setHistoryDetail((current) => current ? {
+              ...next,
+              items: [...current.items, ...next.items.filter((item) => !current.items.some((existing) => existing.itemId === item.itemId))],
+            } : next);
+          } catch (error) {
+            if (activeProjectKeyRef.current === requestProjectKey && backendErrorCode(error) === "IMPORT_V2_HISTORY_DETAIL_CURSOR_STALE") {
+              const refreshed = await workflow.loadHistoryDetail(historyDetail.entry.id);
+              if (refreshed && activeProjectKeyRef.current === requestProjectKey) setHistoryDetail(refreshed);
+            }
+          } finally {
+            if (activeProjectKeyRef.current === requestProjectKey) setHistoryDetailLoadingMore(false);
+          }
+        }}
         resultUnavailable={historyResultUnavailable}
         onClose={() => {
           setHistoryDetail(null);
@@ -743,9 +884,9 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
           if (!historyDetail) return;
           setHistoryDetail(null);
           setHistoryResultUnavailable(false);
-          setHistoryPreviewIdentity({ sessionId: historyDetail.session.sessionId, itemId, candidateId: null, historyBatchId: historyDetail.entry.batchId });
+          setHistoryPreviewIdentity({ sessionId: historyDetail.entry.sessionId ?? "", itemId, candidateId: null, historyBatchId: historyDetail.entry.batchId });
         }}
-        canViewLogs={(taskId) => taskList.some((task) => task.id === taskId)}
+        canViewLogs={(taskId) => taskIds.includes(taskId)}
         onViewLogs={(taskId) => {
           setHistoryDetail(null);
           openTaskDrawer(taskId);

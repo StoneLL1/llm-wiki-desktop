@@ -1,0 +1,359 @@
+{
+  "$schema": "./product-manifest.schema.json",
+  "schemaVersion": 1,
+  "supportedTargets": [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu"
+  ],
+  "surface": {
+    "routes": [
+      "file.native",
+      "file.csv-package",
+      "office.modern.docx",
+      "office.modern.xlsx",
+      "office.modern.pptx",
+      "pdf.text",
+      "media.companion",
+      "web.generic.static",
+      "web.generic.readability",
+      "web.generic.browser",
+      "web.wechat.article",
+      "web.zhihu.content",
+      "web.bilibili.metadata",
+      "web.x.post",
+      "pack.markitdown",
+      "pdf.layout",
+      "pack.office-legacy",
+      "ocr.basic",
+      "ocr.cjk-accurate",
+      "media.subtitle",
+      "media.keyframes",
+      "media.asr"
+    ],
+    "formats": [
+      "md", "markdown", "txt", "html", "htm", "csv", "pdf",
+      "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+      "png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "heic", "heif", "gif",
+      "mp3", "wav", "m4a", "aac", "flac", "ogg", "opus", "wma",
+      "mp4", "mov", "mkv", "webm", "avi", "m4v", "wmv",
+      "srt", "vtt", "ass", "ssa", "lrc"
+    ],
+    "platformContentTypes": [
+      "generic_web", "wechat_article", "zhihu_content", "bilibili_video",
+      "x_post", "collection", "remote_media"
+    ],
+    "recoveryActions": [
+      "install_capability", "retry", "switch_parser", "enable_ocr", "invoke_agent",
+      "skip", "view_log", "retry_route", "switch_route", "begin_login",
+      "authorize_private_target", "install_browser_capability", "install_media_capability",
+      "install_ocr_capability", "authorize_local_asr", "select_subtitle"
+    ],
+    "asrProfiles": ["fast", "balanced", "accurate"],
+    "ocrProfiles": ["basic", "cjk_accurate", "keyframes"]
+  },
+  "definitions": [
+    {
+      "capabilityId": "import-core",
+      "nameKey": "importV2.capabilityName.import-core",
+      "category": "core",
+      "purposeKey": "importV2.capabilityPurpose.local",
+      "routes": [
+        "file.native", "file.csv-package", "office.modern.docx", "office.modern.xlsx",
+        "office.modern.pptx", "pdf.text", "media.companion", "web.generic.static"
+      ],
+      "formats": {
+        "extensions": [
+          "md", "markdown", "txt", "html", "htm", "csv", "pdf", "docx", "xlsx", "pptx",
+          "mp3", "wav", "m4a", "aac", "flac", "ogg", "opus", "wma", "mp4", "mov", "mkv",
+          "webm", "avi", "m4v", "wmv", "srt", "vtt", "ass", "ssa", "lrc"
+        ],
+        "platformContentTypes": ["collection", "remote_media"]
+      },
+      "protocolVersion": "2",
+      "distributionTier": "built_in",
+      "supportedTargets": [
+        "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"
+      ],
+      "licensePolicy": { "expression": "LicenseRef-LLM-Wiki-Desktop", "thirdPartyNotices": [] },
+      "sizeSources": { "compressedBytes": null, "installedBytes": null, "modelBytes": null },
+      "recoveryActions": [
+        "retry", "switch_parser", "invoke_agent", "skip", "view_log", "retry_route", "switch_route",
+        "begin_login", "authorize_private_target", "select_subtitle"
+      ],
+      "profiles": { "asr": [], "ocr": [] },
+      "installation": { "proactive": false, "updates": false },
+      "runtime": { "network": false, "subprocess": false, "filesystem": ["item_staging_input", "item_staging_output"] },
+      "qualification": { "status": "not_applicable", "entrypoint": null },
+      "release": { "stagingStatus": "not_applicable", "stagingScript": null, "owner": "import-core" }
+    },
+    {
+      "capabilityId": "browser-runtime-lite",
+      "nameKey": "importV2.capabilityName.browser-runtime-lite",
+      "category": "web",
+      "purposeKey": "importV2.capabilityPurpose.web",
+      "routes": ["web.generic.readability", "web.wechat.article", "web.zhihu.content"],
+      "formats": { "extensions": [], "platformContentTypes": ["generic_web", "wechat_article", "zhihu_content"] },
+      "protocolVersion": "2",
+      "distributionTier": "published",
+      "supportedTargets": [
+        "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"
+      ],
+      "licensePolicy": {
+        "expression": "Apache-2.0 AND MIT AND BSD-2-Clause AND BSD-3-Clause AND ISC AND MIT-0 AND LicenseRef-Bundled-Third-Party-Notices",
+        "thirdPartyNotices": ["generated release NOTICE and SBOM"]
+      },
+      "sizeSources": { "compressedBytes": "catalog.compressedBytes", "installedBytes": "catalog.installedBytes", "modelBytes": null },
+      "recoveryActions": ["install_browser_capability"],
+      "profiles": { "asr": [], "ocr": [] },
+      "installation": { "proactive": true, "updates": true },
+      "runtime": { "network": false, "subprocess": true, "filesystem": ["application_capability_root", "item_staging_input", "item_staging_output"] },
+      "qualification": { "status": "implemented", "entrypoint": "capabilities/browser-runtime-lite/runner/index.node-test.mjs" },
+      "release": { "stagingStatus": "implemented", "stagingScript": "scripts/stage-node-capability.mjs", "owner": "web-import" }
+    },
+    {
+      "capabilityId": "browser-runtime",
+      "nameKey": "importV2.capabilityName.browser-runtime",
+      "category": "web",
+      "purposeKey": "importV2.capabilityPurpose.web",
+      "routes": ["web.generic.browser", "web.wechat.article", "web.x.post"],
+      "formats": { "extensions": [], "platformContentTypes": ["generic_web", "wechat_article", "x_post"] },
+      "protocolVersion": "2",
+      "distributionTier": "published",
+      "supportedTargets": [
+        "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"
+      ],
+      "licensePolicy": {
+        "expression": "Apache-2.0 AND MIT AND BSD-2-Clause AND BSD-3-Clause AND ISC AND MIT-0 AND LicenseRef-Bundled-Third-Party-Notices",
+        "thirdPartyNotices": ["generated release NOTICE and SBOM"]
+      },
+      "sizeSources": { "compressedBytes": "catalog.compressedBytes", "installedBytes": "catalog.installedBytes", "modelBytes": null },
+      "recoveryActions": ["install_browser_capability"],
+      "profiles": { "asr": [], "ocr": [] },
+      "installation": { "proactive": true, "updates": true },
+      "runtime": { "network": true, "subprocess": true, "filesystem": ["application_capability_root", "item_staging_input", "item_staging_output"] },
+      "qualification": { "status": "implemented", "entrypoint": "capabilities/browser-runtime/runner/x-route.qualification.mjs" },
+      "release": { "stagingStatus": "implemented", "stagingScript": "scripts/stage-node-capability.mjs", "owner": "web-import" }
+    },
+    {
+      "capabilityId": "media-metadata",
+      "nameKey": "importV2.capabilityName.media-metadata",
+      "category": "web",
+      "purposeKey": "importV2.capabilityPurpose.media",
+      "routes": ["web.bilibili.metadata"],
+      "formats": { "extensions": [], "platformContentTypes": ["bilibili_video"] },
+      "protocolVersion": "2",
+      "distributionTier": "published",
+      "supportedTargets": [
+        "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"
+      ],
+      "licensePolicy": { "expression": "MIT", "thirdPartyNotices": ["Node.js notices and generated SBOM"] },
+      "sizeSources": { "compressedBytes": "catalog.compressedBytes", "installedBytes": "catalog.installedBytes", "modelBytes": null },
+      "recoveryActions": ["install_media_capability"],
+      "profiles": { "asr": [], "ocr": [] },
+      "installation": { "proactive": true, "updates": true },
+      "runtime": { "network": false, "subprocess": true, "filesystem": ["application_capability_root", "item_staging_input", "item_staging_output"] },
+      "qualification": { "status": "implemented", "entrypoint": "capabilities/media-metadata/runner/core.node-test.mjs" },
+      "release": { "stagingStatus": "implemented", "stagingScript": "scripts/stage-node-capability.mjs", "owner": "web-import" }
+    },
+    {
+      "capabilityId": "document-standard",
+      "nameKey": "importV2.capabilityName.document-standard",
+      "category": "documents",
+      "purposeKey": "importV2.capabilityPurpose.documents",
+      "routes": ["pack.markitdown"],
+      "formats": { "extensions": ["doc", "docx", "xls", "xlsx", "ppt", "pptx", "pdf"], "platformContentTypes": [] },
+      "protocolVersion": "2",
+      "distributionTier": "published",
+      "supportedTargets": [
+        "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"
+      ],
+      "licensePolicy": { "expression": "MIT AND PSF-2.0 AND MPL-2.0 AND LicenseRef-Bundled-Third-Party-Notices", "thirdPartyNotices": ["MarkItDown, bundled Python, dependency licenses, generated release NOTICE and SBOM"] },
+      "sizeSources": { "compressedBytes": "catalog.compressedBytes", "installedBytes": "catalog.installedBytes", "modelBytes": null },
+      "recoveryActions": ["install_capability"],
+      "profiles": { "asr": [], "ocr": [] },
+      "installation": { "proactive": true, "updates": true },
+      "runtime": { "network": false, "subprocess": true, "filesystem": ["application_capability_root", "item_staging_input", "item_staging_output"] },
+      "qualification": { "status": "implemented", "entrypoint": "scripts/qualify-staged-capability.mjs" },
+      "release": { "stagingStatus": "implemented", "stagingScript": "scripts/stage-prepared-capability.mjs", "owner": "document-import" }
+    },
+    {
+      "capabilityId": "document-layout",
+      "nameKey": "importV2.capabilityName.document-layout",
+      "category": "documents",
+      "purposeKey": "importV2.capabilityPurpose.pdfLayout",
+      "routes": ["pdf.layout"],
+      "formats": { "extensions": ["pdf"], "platformContentTypes": [] },
+      "protocolVersion": "2",
+      "distributionTier": "published",
+      "supportedTargets": [
+        "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"
+      ],
+      "licensePolicy": { "expression": "MIT AND Apache-2.0 AND CDLA-Permissive-2.0 AND PSF-2.0 AND MPL-2.0 AND LicenseRef-Bundled-Third-Party-Notices", "thirdPartyNotices": ["Docling, model, bundled Python, dependency licenses, generated release NOTICE and SBOM"] },
+      "sizeSources": { "compressedBytes": "catalog.compressedBytes", "installedBytes": "catalog.installedBytes", "modelBytes": "catalog.modelBytes" },
+      "recoveryActions": ["install_capability"],
+      "profiles": { "asr": [], "ocr": [] },
+      "installation": { "proactive": true, "updates": true },
+      "runtime": { "network": false, "subprocess": true, "filesystem": ["application_capability_root", "item_staging_input", "item_staging_output"] },
+      "qualification": { "status": "implemented", "entrypoint": "scripts/qualify-staged-capability.mjs" },
+      "release": { "stagingStatus": "implemented", "stagingScript": "scripts/stage-prepared-capability.mjs", "owner": "document-import" }
+    },
+    {
+      "capabilityId": "office-legacy",
+      "nameKey": "importV2.capabilityName.office-legacy",
+      "category": "documents",
+      "purposeKey": "importV2.capabilityPurpose.documents",
+      "routes": ["pack.office-legacy"],
+      "formats": { "extensions": ["doc", "xls", "ppt"], "platformContentTypes": [] },
+      "protocolVersion": "2",
+      "distributionTier": "published",
+      "supportedTargets": [
+        "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"
+      ],
+      "licensePolicy": { "expression": "(MPL-2.0 OR LGPL-3.0-or-later) AND PSF-2.0 AND MPL-2.0", "thirdPartyNotices": ["LibreOffice, bundled Python notices and generated SBOM"] },
+      "sizeSources": { "compressedBytes": "catalog.compressedBytes", "installedBytes": "catalog.installedBytes", "modelBytes": null },
+      "recoveryActions": ["install_capability"],
+      "profiles": { "asr": [], "ocr": [] },
+      "installation": { "proactive": true, "updates": true },
+      "runtime": { "network": false, "subprocess": true, "filesystem": ["application_capability_root", "item_staging_input", "item_staging_output"] },
+      "qualification": { "status": "implemented", "entrypoint": "capabilities/office-legacy/runner/office_legacy_pack_test.py" },
+      "release": { "stagingStatus": "implemented", "stagingScript": "scripts/stage-prepared-capability.mjs", "owner": "document-import" }
+    },
+    {
+      "capabilityId": "office-oxide",
+      "nameKey": "importV2.capabilityName.office-oxide",
+      "category": "documents",
+      "purposeKey": "importV2.capabilityPurpose.documents",
+      "routes": ["pack.office-oxide"],
+      "formats": { "extensions": ["doc", "docx", "xls", "xlsx", "ppt", "pptx"], "platformContentTypes": [] },
+      "protocolVersion": "2",
+      "distributionTier": "experimental",
+      "supportedTargets": [
+        "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"
+      ],
+      "licensePolicy": { "expression": "MIT OR Apache-2.0", "thirdPartyNotices": [] },
+      "sizeSources": { "compressedBytes": null, "installedBytes": null, "modelBytes": null },
+      "recoveryActions": [],
+      "profiles": { "asr": [], "ocr": [] },
+      "installation": { "proactive": false, "updates": false },
+      "runtime": { "network": false, "subprocess": true, "filesystem": ["application_capability_root", "item_staging_input", "item_staging_output"] },
+      "qualification": { "status": "planned_batch_8", "entrypoint": "capabilities/office-oxide/office-oxide-qualification.json" },
+      "release": { "stagingStatus": "planned_batch_8", "stagingScript": "scripts/stage-office-oxide-capability.mjs", "owner": "document-import" }
+    },
+    {
+      "capabilityId": "ocr-basic",
+      "nameKey": "importV2.capabilityName.ocr-basic",
+      "category": "ocr",
+      "purposeKey": "importV2.capabilityPurpose.ocr",
+      "routes": ["ocr.basic"],
+      "formats": { "extensions": ["pdf", "png", "jpg", "jpeg", "webp", "tif", "tiff", "bmp"], "platformContentTypes": [] },
+      "protocolVersion": "2",
+      "distributionTier": "published",
+      "supportedTargets": [
+        "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"
+      ],
+      "licensePolicy": { "expression": "Apache-2.0 AND MIT AND BSD-3-Clause AND HPND AND MPL-2.0 AND PSF-2.0 AND LGPL-2.1-only AND LGPL-3.0-only", "thirdPartyNotices": ["RapidOCR, native wheel, decoder notices, and generated SBOM"] },
+      "sizeSources": { "compressedBytes": "catalog.compressedBytes", "installedBytes": "catalog.installedBytes", "modelBytes": "catalog.modelBytes" },
+      "recoveryActions": ["enable_ocr", "install_ocr_capability"],
+      "profiles": { "asr": [], "ocr": ["basic"] },
+      "installation": { "proactive": true, "updates": true },
+      "runtime": { "network": false, "subprocess": true, "filesystem": ["application_capability_root", "item_staging_input", "item_staging_output"] },
+      "qualification": { "status": "implemented", "entrypoint": "scripts/qualify-staged-capability.mjs" },
+      "release": { "stagingStatus": "implemented", "stagingScript": "scripts/stage-prepared-capability.mjs", "owner": "ocr-import" }
+    },
+    {
+      "capabilityId": "ocr-cjk-accurate",
+      "nameKey": "importV2.capabilityName.ocr-cjk-accurate",
+      "category": "ocr",
+      "purposeKey": "importV2.capabilityPurpose.ocr",
+      "routes": ["ocr.cjk-accurate"],
+      "formats": { "extensions": ["pdf", "png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "heic", "heif"], "platformContentTypes": [] },
+      "protocolVersion": "2",
+      "distributionTier": "published",
+      "supportedTargets": [
+        "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"
+      ],
+      "licensePolicy": {
+        "expression": "Apache-2.0 AND MIT AND BSD-3-Clause AND HPND AND MPL-2.0 AND PSF-2.0 AND LGPL-2.1-only AND LGPL-3.0-only",
+        "thirdPartyNotices": ["RapidOCR, native wheel, HEIC decoder notices, and generated SBOM"]
+      },
+      "sizeSources": { "compressedBytes": "catalog.compressedBytes", "installedBytes": "catalog.installedBytes", "modelBytes": "catalog.modelBytes" },
+      "recoveryActions": ["enable_ocr", "install_ocr_capability"],
+      "profiles": { "asr": [], "ocr": ["cjk_accurate"] },
+      "installation": { "proactive": true, "updates": true },
+      "runtime": { "network": false, "subprocess": true, "filesystem": ["application_capability_root", "item_staging_input", "item_staging_output"] },
+      "qualification": { "status": "implemented", "entrypoint": "capabilities/ocr-cjk-accurate/runner/qualification.py" },
+      "release": { "stagingStatus": "implemented", "stagingScript": "scripts/stage-rapidocr-capability.mjs", "owner": "ocr-import" }
+    },
+    {
+      "capabilityId": "media-runtime",
+      "nameKey": "importV2.capabilityName.media-runtime",
+      "category": "media_asr",
+      "purposeKey": "importV2.capabilityPurpose.media",
+      "routes": ["media.subtitle", "media.keyframes"],
+      "formats": { "extensions": ["gif", "wma", "wmv", "srt", "vtt", "ass", "ssa", "lrc"], "platformContentTypes": ["remote_media"] },
+      "protocolVersion": "2",
+      "distributionTier": "published",
+      "supportedTargets": [
+        "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"
+      ],
+      "licensePolicy": { "expression": "MIT AND LGPL-3.0-or-later", "thirdPartyNotices": ["Node.js, FFmpeg notices and generated SBOM"] },
+      "sizeSources": { "compressedBytes": "catalog.compressedBytes", "installedBytes": "catalog.installedBytes", "modelBytes": null },
+      "recoveryActions": ["install_media_capability"],
+      "profiles": { "asr": [], "ocr": ["keyframes"] },
+      "installation": { "proactive": true, "updates": true },
+      "runtime": { "network": false, "subprocess": true, "filesystem": ["application_capability_root", "item_staging_input", "item_staging_output"] },
+      "qualification": { "status": "implemented", "entrypoint": "scripts/qualify-staged-capability.mjs" },
+      "release": { "stagingStatus": "implemented", "stagingScript": "scripts/stage-prepared-capability.mjs", "owner": "media-import" }
+    },
+    {
+      "capabilityId": "asr-sensevoice-small",
+      "nameKey": "importV2.capabilityName.asr-sensevoice-small",
+      "category": "media_asr",
+      "purposeKey": "importV2.capabilityPurpose.asr",
+      "routes": ["media.asr"],
+      "formats": {
+        "extensions": ["mp3", "wav", "m4a", "aac", "flac", "ogg", "opus", "wma", "mp4", "mov", "mkv", "webm", "avi", "m4v", "wmv"],
+        "platformContentTypes": ["bilibili_video", "remote_media"]
+      },
+      "protocolVersion": "2",
+      "distributionTier": "published",
+      "supportedTargets": [
+        "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"
+      ],
+      "licensePolicy": { "expression": "Apache-2.0 AND LGPL-3.0-or-later AND MIT", "thirdPartyNotices": ["SenseVoice, sherpa-onnx, FFmpeg notices, and generated SBOM"] },
+      "sizeSources": { "compressedBytes": "catalog.compressedBytes", "installedBytes": "catalog.installedBytes", "modelBytes": "catalog.modelBytes" },
+      "recoveryActions": ["install_media_capability", "authorize_local_asr"],
+      "profiles": { "asr": ["fast", "balanced"], "ocr": [] },
+      "installation": { "proactive": true, "updates": true },
+      "runtime": { "network": false, "subprocess": true, "filesystem": ["application_capability_root", "item_staging_input", "item_staging_output"] },
+      "qualification": { "status": "implemented", "entrypoint": "capabilities/asr-sensevoice-small/runner/qualification.mjs" },
+      "release": { "stagingStatus": "implemented", "stagingScript": "scripts/stage-sensevoice-capability.mjs", "owner": "media-import" }
+    },
+    {
+      "capabilityId": "asr-whisper",
+      "nameKey": "importV2.capabilityName.asr-whisper",
+      "category": "media_asr",
+      "purposeKey": "importV2.capabilityPurpose.asr",
+      "routes": ["media.asr"],
+      "formats": {
+        "extensions": ["mp3", "wav", "m4a", "aac", "flac", "ogg", "opus", "wma", "mp4", "mov", "mkv", "webm", "avi", "m4v", "wmv"],
+        "platformContentTypes": ["bilibili_video", "remote_media"]
+      },
+      "protocolVersion": "2",
+      "distributionTier": "published",
+      "supportedTargets": [
+        "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"
+      ],
+      "licensePolicy": { "expression": "MIT AND LGPL-3.0-or-later", "thirdPartyNotices": ["Node.js, whisper.cpp, FFmpeg, model notices, and generated SBOM"] },
+      "sizeSources": { "compressedBytes": "catalog.compressedBytes", "installedBytes": "catalog.installedBytes", "modelBytes": "catalog.modelBytes" },
+      "recoveryActions": ["install_media_capability", "authorize_local_asr"],
+      "profiles": { "asr": ["accurate"], "ocr": [] },
+      "installation": { "proactive": true, "updates": true },
+      "runtime": { "network": false, "subprocess": true, "filesystem": ["application_capability_root", "item_staging_input", "item_staging_output"] },
+      "qualification": { "status": "implemented", "entrypoint": "scripts/qualify-staged-capability.mjs" },
+      "release": { "stagingStatus": "implemented", "stagingScript": "scripts/stage-prepared-capability.mjs", "owner": "media-import" }
+    }
+  ]
+}

@@ -1,8 +1,9 @@
 import { useEffect, useMemo } from "react";
 
 import {
+  bindProjectFactsAuthority,
   ensureProjectFacts,
-  nextProjectFactsExpiryAt,
+  projectFactsAuthorityKey,
   projectFactsKey,
   useProjectFactsStore,
   type GitRepositoryStatus,
@@ -44,19 +45,32 @@ export function useProjectStatus(
     state.currentProject.projectId === projectId
       && state.currentProject.rootPath === rootPath
       && state.authority?.projectId === projectId
-      ? `${state.authority.canonicalIdentityKey}\0${state.authority.identityRevision}`
+      ? projectFactsAuthorityKey(state.authority)
       : null
   );
   const storedEntry = useProjectFactsStore((state) => state.entries[key] ?? null);
-  const authorityMatches = !storedEntry
-    || storedEntry.authorityIdentityKey === authorityIdentityKey;
+  const authorityMatches = authorityIdentityKey === null
+    ? !storedEntry || storedEntry.authorityIdentityKey === null
+    : storedEntry?.authorityIdentityKey === authorityIdentityKey;
   const entry = storedEntry && authorityMatches
     ? storedEntry
     : null;
-  const staleSignature = requestedKinds
-    .map((kind) => `${kind}:${entry?.[kind].status ?? "idle"}`)
-    .join("|");
-  const expiryAt = nextProjectFactsExpiryAt(entry, requestedKinds);
+  const staleKindsKey = requestedKinds
+    .filter((kind) => {
+      const status = entry?.[kind].status;
+      return status === undefined || status === "idle" || status === "stale";
+    })
+    .join(",");
+  const staleKinds = useMemo(
+    () => staleKindsKey ? staleKindsKey.split(",") as ProjectFactKind[] : [],
+    [staleKindsKey],
+  );
+
+  useEffect(() => {
+    if (!enabled || !projectId || !rootPath || authorityIdentityKey === null) return;
+    if (storedEntry || authorityMatches) return;
+    bindProjectFactsAuthority(scope, authorityIdentityKey);
+  }, [authorityIdentityKey, authorityMatches, enabled, projectId, rootPath, scope, storedEntry]);
 
   useEffect(() => {
     if (!enabled || !projectId || !rootPath || requestedKinds.length === 0) return;
@@ -69,25 +83,13 @@ export function useProjectStatus(
       !enabled
       || !projectId
       || !rootPath
-      || !requestedKinds.some((kind) => {
-        const status = entry?.[kind].status;
-        return status === "idle" || status === "stale";
-      })
+      || !authorityMatches
+      || staleKinds.length === 0
     ) {
       return;
     }
-    void ensureProjectFacts(scope, requestedKinds).catch(() => undefined);
-  }, [enabled, entry, requestedKinds, scope, staleSignature]);
-
-  useEffect(() => {
-    if (!enabled) return;
-    if (expiryAt === null) return;
-    const delay = Math.max(1, expiryAt - Date.now() + 1);
-    const timeout = window.setTimeout(() => {
-      void ensureProjectFacts(scope, requestedKinds).catch(() => undefined);
-    }, delay);
-    return () => window.clearTimeout(timeout);
-  }, [enabled, expiryAt, requestedKinds, scope]);
+    void ensureProjectFacts(scope, staleKinds).catch(() => undefined);
+  }, [authorityMatches, enabled, scope, staleKinds]);
 
   if (!enabled || !entry) return null;
   const hasKnownResult = requestedKinds.length > 0 && requestedKinds.every((kind) => {

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -202,15 +203,49 @@ impl EngineRegistry {
         &self,
         engine: Arc<dyn ImportEngine>,
     ) -> Result<(), BackendError> {
-        let descriptor = describe_engine(engine.as_ref())?;
+        self.replace_registered_batch_transaction(vec![engine], || Ok(()))
+    }
+
+    pub(crate) fn replace_registered_batch_transaction<F>(
+        &self,
+        replacements: Vec<Arc<dyn ImportEngine>>,
+        commit: F,
+    ) -> Result<(), BackendError>
+    where
+        F: FnOnce() -> Result<(), BackendError>,
+    {
+        let descriptors = replacements
+            .iter()
+            .map(|engine| describe_engine(engine.as_ref()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut replacement_ids = HashSet::with_capacity(descriptors.len());
+        if descriptors
+            .iter()
+            .any(|descriptor| !replacement_ids.insert(descriptor.engine_id.clone()))
+        {
+            return Err(BackendError::new(
+                IMPORT_V2_ENGINE_UNAVAILABLE,
+                "A capability activation snapshot contains duplicate engine identifiers.",
+                true,
+                false,
+            ));
+        }
+
         let mut engines = self.engines.write().map_err(|_| registry_error())?;
-        for existing in engines.iter_mut() {
-            if describe_engine(existing.as_ref())?.engine_id == descriptor.engine_id {
-                *existing = engine;
-                return Ok(());
+        let previous = engines.clone();
+        let mut next = Vec::with_capacity(previous.len() + replacements.len());
+        for existing in previous.iter() {
+            let descriptor = describe_engine(existing.as_ref())?;
+            if !replacement_ids.contains(&descriptor.engine_id) {
+                next.push(existing.clone());
             }
         }
-        engines.push(engine);
+        next.extend(replacements);
+        *engines = next;
+        if let Err(error) = commit() {
+            *engines = previous;
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -682,6 +717,64 @@ mod tests {
                 .engine_version,
             "2.0.0-dev"
         );
+    }
+
+    #[test]
+    fn registry_publishes_all_capability_routes_or_restores_the_previous_snapshot() {
+        let registry = EngineRegistry::default();
+        let old = |route: &str| {
+            let mut engine =
+                FixtureEngine::with_route(&format!("pack.browser-runtime.{route}"), route, true);
+            engine.descriptor.engine_version = "1.0.0".into();
+            Arc::new(engine) as Arc<dyn ImportEngine>
+        };
+        let new = |route: &str| {
+            let mut engine =
+                FixtureEngine::with_route(&format!("pack.browser-runtime.{route}"), route, true);
+            engine.descriptor.engine_version = "2.0.0".into();
+            Arc::new(engine) as Arc<dyn ImportEngine>
+        };
+        let routes = ["web.generic.browser", "web.wechat.article", "web.x.post"];
+        for route in routes {
+            registry.ensure_registered(old(route)).unwrap();
+        }
+        let input = fixture_request().input;
+
+        let error = registry
+            .replace_registered_batch_transaction(routes.into_iter().map(new).collect(), || {
+                Err(BackendError::new(
+                    "ACTIVATION_JOURNAL_COMMIT_FAILED",
+                    "fixture",
+                    true,
+                    false,
+                ))
+            })
+            .unwrap_err();
+        assert_eq!(error.code, "ACTIVATION_JOURNAL_COMMIT_FAILED");
+        for route in routes {
+            assert_eq!(
+                registry
+                    .resolve_route(route, &input)
+                    .unwrap()
+                    .descriptor()
+                    .engine_version,
+                "1.0.0"
+            );
+        }
+
+        registry
+            .replace_registered_batch_transaction(routes.into_iter().map(new).collect(), || Ok(()))
+            .unwrap();
+        for route in routes {
+            assert_eq!(
+                registry
+                    .resolve_route(route, &input)
+                    .unwrap()
+                    .descriptor()
+                    .engine_version,
+                "2.0.0"
+            );
+        }
     }
 
     #[test]

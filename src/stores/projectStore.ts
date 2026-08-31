@@ -181,7 +181,7 @@ async function refreshTaskPersistence(
   ) {
     return;
   }
-  const { recoverTasksForProject } = await import("./taskStore");
+  const { recoverTasksForProject } = await import("../services/taskRecovery");
   await recoverTasksForProject(project.projectId, project.rootPath);
 }
 
@@ -247,6 +247,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       ) {
         return state;
       }
+      if (state.currentProject.agentRoute === agentRoute) return state;
       return {
         currentProject: { ...state.currentProject, agentRoute },
       };

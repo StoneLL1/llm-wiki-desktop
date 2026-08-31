@@ -1,26 +1,6 @@
-import type { ImportItem, ImportSession, ImportItemStatus } from "../../types/importV2";
-import type { ImportQueueFilter } from "../../stores/importStore";
+import type { ImportItem, ImportSession, ImportItemStatus, ImportSessionOverview } from "../../types/importV2";
+import type { ImportQueueCounts, ImportQueueFilter, ImportSessionProgress } from "../../stores/importStore";
 import { presentImportItem } from "./importStatusPresentation";
-
-export interface ImportQueueCounts {
-  all: number;
-  active: number;
-  ready: number;
-  needsAction: number;
-  failed: number;
-  completed: number;
-  waiting?: number;
-}
-
-export interface ImportSessionProgress {
-  completed: number;
-  total: number;
-  active: number;
-  processed?: number;
-  failed?: number;
-  cancelled?: number;
-  needsAction?: number;
-}
 
 export interface ImportViewModelSnapshot {
   visibleItems: ImportItem[];
@@ -72,6 +52,7 @@ export const selectVisibleItems = (
 export const selectImportViewModel = (
   session: ImportSession | null,
   filter: ImportQueueFilter,
+  overview?: ImportSessionOverview | null,
 ): ImportViewModelSnapshot => {
   const items = session?.items ?? [];
   const visibleItems: ImportItem[] = [];
@@ -134,6 +115,22 @@ export const selectImportViewModel = (
       || (filter === "needs_action" && needsAction)
       || (filter === "failed" && failed);
     if (visible) visibleItems.push(item);
+  }
+  if (overview) {
+    counts.all = overview.counts.all;
+    counts.active = overview.counts.active;
+    counts.ready = overview.counts.ready;
+    counts.needsAction = overview.counts.needsAction;
+    counts.failed = overview.counts.failed;
+    counts.completed = overview.counts.completed;
+    counts.waiting = overview.counts.waiting;
+    progress.completed = overview.counts.completed;
+    progress.total = overview.itemCount;
+    progress.active = overview.counts.active;
+    progress.processed = overview.counts.processed;
+    progress.failed = overview.counts.failed;
+    progress.cancelled = overview.counts.cancelled;
+    progress.needsAction = overview.counts.needsAction;
   }
   return { visibleItems, counts, progress };
 };

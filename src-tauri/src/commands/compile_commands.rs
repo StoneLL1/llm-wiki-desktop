@@ -440,12 +440,20 @@ fn finish_compile(
     let mut checkpoint_paths = affected_paths.clone();
     checkpoint_paths.push(".app/graph-cache.json".into());
     checkpoint_paths.push(compile_record_path);
-    checkpoint_paths.extend(
-        source_versions
-            .iter()
-            .filter(|reference| !reference.source_id.starts_with("legacy-"))
-            .map(|reference| format!(".app/sources/{}.json", reference.source_id)),
-    );
+    let source_paths = context
+        .layout
+        .source_paths()
+        .map_err(FinishCompileFailure::reversible)?;
+    for reference in source_versions
+        .iter()
+        .filter(|reference| !reference.source_id.starts_with("legacy-"))
+    {
+        checkpoint_paths.push(
+            source_paths
+                .manifest(&reference.source_id)
+                .map_err(FinishCompileFailure::reversible)?,
+        );
+    }
     checkpoint_paths.sort();
     checkpoint_paths.dedup();
     let result_checkpoint = match with_compile_git_cancellation(state, task_id, || {

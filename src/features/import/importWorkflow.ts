@@ -1,5 +1,5 @@
 import type { AgentKind } from "../../types/agent";
-import type { CommitItemDecision, ImportAsrProfile, ImportCompletion, ImportItem, ImportItemResolution, ImportRecoveryAction, ImportSession, ImportThreeWayMergeContext, MediaSaveMode } from "../../types/importV2";
+import type { CommitItemDecision, ImportAsrProfile, ImportCompletion, ImportItem, ImportItemResolution, ImportRecoveryAction, ImportSession, ImportSessionOverview, ImportThreeWayMergeContext, MediaSaveMode } from "../../types/importV2";
 import type {
   AgentAssistanceTrigger,
   AgentCandidateActionResult,
@@ -14,12 +14,14 @@ import type {
   ImportCapabilityRequirement,
   ImportFrontendReadiness,
   ImportHistoryPage,
+  ImportHistoryDetailPage,
   ImportPreviewContent,
   ImportWorkbenchPreferences,
 } from "../../types/importV2Presentation";
 import type { BackendTask } from "../../types/task";
 import type { ImportQueueFilter } from "../../stores/importStore";
-import type { ImportQueueCounts, ImportSessionProgress } from "./importViewModel";
+import type { ImportQueueCounts, ImportSessionProgress } from "../../stores/importStore";
+import type { NormalizedBackendError } from "../../lib/backendError";
 
 export type ImportBootstrapState = "loading" | "ready" | "blocked" | "error";
 export interface AsrAuthorizationOptions { profile: ImportAsrProfile; language: string | null; }
@@ -56,15 +58,23 @@ export interface ImportBatchProgress {
 export interface ImportWorkflow {
   projectKey: string;
   session: ImportSession | null;
+  overview?: ImportSessionOverview | null;
   completion: ImportCompletion | null;
   readiness: ImportFrontendReadiness | null;
   /** Readiness is advisory; a warning must not prevent V2 staging. */
-  readinessWarning?: string | null;
+  readinessWarning?: NormalizedBackendError | null;
+  readinessRetrying?: boolean;
+  retryReadiness?: () => Promise<void>;
+  recoveryWarning?: NormalizedBackendError | null;
+  recoveryRetrying?: boolean;
+  retryRecovery?: () => Promise<void>;
   /** Only session/project bootstrap failures block the import surface. */
-  bootstrapError?: string | null;
+  bootstrapError?: NormalizedBackendError | null;
   retryBootstrap?: () => void;
   bootstrapState: ImportBootstrapState;
   visibleItems: ImportItem[];
+  totalItems?: number;
+  itemIndexOffset?: number;
   counts: ImportQueueCounts;
   progress: ImportSessionProgress;
   discoveryTask?: BackendTask | null;
@@ -85,6 +95,7 @@ export interface ImportWorkflow {
   addText: (content: string, sourceName: string) => Promise<void>;
   addUrl: (url: string, mediaSaveMode?: MediaSaveMode) => Promise<void>;
   collectionPreview: ImportCollectionPreview | null;
+  restoreCollection?: (preview: ImportCollectionPreview) => void;
   loadCollectionPage: (loadAll?: boolean) => Promise<void>;
   confirmCollection: (itemRefs: readonly string[]) => Promise<void>;
   dismissCollection: () => void;
@@ -108,7 +119,7 @@ export interface ImportWorkflow {
   authorizeLocalOcr: (itemId: string) => Promise<void>;
   authorizeLocalOcrGroup?: (itemIds: readonly string[]) => Promise<void>;
   selectSubtitle: (itemId: string, fileName: string) => Promise<void>;
-  confirm: (decisions: CommitItemDecision[]) => Promise<void>;
+  confirm: (legacyDecisions?: CommitItemDecision[]) => Promise<void>;
   restrictedCommitPending: boolean;
   confirmRestrictedContent: () => Promise<void>;
   dismissRestrictedContent: () => void;
@@ -121,6 +132,9 @@ export interface ImportWorkflow {
   refreshSession: () => Promise<void>;
   selectItem: (itemId: string | null) => void;
   setFilter: (filter: ImportQueueFilter) => void;
+  hasMoreItems?: boolean;
+  isLoadingMoreItems?: boolean;
+  loadMoreItems?: () => Promise<void>;
   requestClipboard: (content: string) => Promise<void>;
   loadPreview: (identity: { sessionId: string; itemId: string; candidateId: string | null; historyBatchId?: string | null }) => Promise<ImportPreviewContent>;
   loadMergeContext: (itemId: string) => Promise<ImportThreeWayMergeContext>;
@@ -155,6 +169,7 @@ export interface ImportWorkflow {
   getMigrationStatus: () => Promise<MigrationStatusSnapshot | null>;
   resumeMigration: (plan: MigrationPlan, confirmation: MigrationConfirmation) => Promise<BackendTask | null>;
   listHistory: (cursor?: string | null) => Promise<ImportHistoryPage | null>;
+  loadHistoryDetail: (batchId: string, cursor?: string | null) => Promise<ImportHistoryDetailPage | null>;
   loadWorkbenchPreferences?: () => Promise<ImportWorkbenchPreferences>;
   saveWorkbenchPreferences?: (preferences: ImportWorkbenchPreferences) => Promise<ImportWorkbenchPreferences>;
 }

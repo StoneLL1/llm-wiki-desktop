@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::Path;
 
+use llm_wiki_desktop_lib::models::paths::ProjectContext;
 use llm_wiki_desktop_lib::services::import_v2::migration::{
     LegacyHistoryAdapter, LegacyHistoryLimits,
 };
@@ -59,7 +60,8 @@ fn legacy_history_is_a_read_only_projection_without_destructive_actions() {
     fs::write(root.join(".app/import-history/broken.json"), b"{broken").unwrap();
 
     let before = snapshot(root);
-    let view = LegacyHistoryAdapter::default().list(root).unwrap();
+    let context = ProjectContext::new("legacy", root.to_path_buf());
+    let view = LegacyHistoryAdapter::default().list(&context).unwrap();
     assert!(view.entries.iter().all(|entry| entry.legacy_read_only));
     assert!(view
         .entries
@@ -93,11 +95,12 @@ fn legacy_history_reads_are_bounded_and_corrupt_entries_do_not_hide_valid_entrie
     )
     .unwrap();
     fs::write(root.join(".app/tasks/large.json"), "x".repeat(100)).unwrap();
+    let context = ProjectContext::new("legacy-bounded", root.to_path_buf());
     let view = LegacyHistoryAdapter::new(LegacyHistoryLimits {
         max_files: 1,
         max_bytes: 20,
     })
-    .list(root)
+    .list(&context)
     .unwrap();
     assert!(view
         .warnings

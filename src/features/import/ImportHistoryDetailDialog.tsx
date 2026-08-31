@@ -3,8 +3,8 @@ import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 
 import { useModalDialog } from "../../hooks/useModalDialog";
-import type { AttemptRecord, ImportItem, ImportSession } from "../../types/importV2";
-import type { ImportHistoryEntry } from "../../types/importV2Presentation";
+import type { AttemptRecord, ImportItem } from "../../types/importV2";
+import type { ImportHistoryDetailPage } from "../../types/importV2Presentation";
 import { presentImportItem } from "./importStatusPresentation";
 
 const STATUS_KEYS: Record<string, string> = {
@@ -28,22 +28,22 @@ const STATUS_KEYS: Record<string, string> = {
 
 export interface ImportHistoryDetailDialogProps {
   open: boolean;
-  entry: ImportHistoryEntry | null;
-  session: ImportSession | null;
+  page: ImportHistoryDetailPage | null;
   onClose: () => void;
   onPreview: (itemId: string) => void;
   canViewLogs: (taskId: string) => boolean;
   onViewLogs: (taskId: string) => void;
+  onLoadMore?: (cursor: string) => void;
+  loadingMore?: boolean;
   resultUnavailable?: boolean;
 }
 
-export function ImportHistoryDetailDialog({ open, entry, session, onClose, onPreview, canViewLogs, onViewLogs, resultUnavailable = false }: ImportHistoryDetailDialogProps) {
+export function ImportHistoryDetailDialog({ open, page, onClose, onPreview, canViewLogs, onViewLogs, onLoadMore, loadingMore = false, resultUnavailable = false }: ImportHistoryDetailDialogProps) {
   const { t } = useTranslation();
   const dialogRef = useModalDialog({ open, onClose });
-  if (!open || !entry || !session) return null;
+  if (!open || !page) return null;
 
-  const itemIds = new Set(entry.itemIds);
-  const items = session.items.filter((item) => itemIds.has(item.itemId));
+  const { entry, items } = page;
 
   return (
     <div ref={dialogRef} tabIndex={-1} className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 px-4" role="dialog" aria-modal="true" aria-labelledby="import-history-detail-title">
@@ -59,7 +59,7 @@ export function ImportHistoryDetailDialog({ open, entry, session, onClose, onPre
 
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
           <div className="mb-3 flex items-center gap-2 text-[11px] text-[var(--text-muted)]">
-            <span>{t("importV2.history.itemCount", { count: items.length })}</span>
+            <span>{t("importV2.history.itemCount", { count: page.total })}</span>
             <span aria-hidden="true">·</span>
             <span>{t("importV2.history.status", { status: t(STATUS_KEYS[entry.status] ?? "importV2.history.unknownStatus") })}</span>
           </div>
@@ -69,6 +69,7 @@ export function ImportHistoryDetailDialog({ open, entry, session, onClose, onPre
             {items.map((item) => <HistoryItem key={item.itemId} item={item} onPreview={onPreview} canViewLogs={canViewLogs} onViewLogs={onViewLogs} />)}
             {items.length === 0 ? <p className="m-0 text-[12px] text-[var(--text-muted)]">{t("importV2.history.noItems")}</p> : null}
           </div>
+          {page.nextCursor && onLoadMore ? <button type="button" className="btn btn--sm mt-3" disabled={loadingMore} aria-busy={loadingMore} onClick={() => onLoadMore(page.nextCursor!)}>{t(loadingMore ? "importV2.history.loading" : "importV2.history.loadMore")}</button> : null}
         </div>
 
         <footer className="flex min-h-[52px] items-center justify-end border-t border-[var(--border)] px-4">

@@ -8,6 +8,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 import {
   bindProjectFactsAuthority,
   ensureProjectFacts,
+  invalidateProjectFacts,
   resetProjectFactsStoreForTests,
 } from "../stores/projectFactsStore";
 import { defaultProject, useProjectStore } from "../stores/projectStore";
@@ -59,19 +60,23 @@ describe("useProjectStatus", () => {
     expect(invokeMock.mock.calls.map(([command]) => command)).toEqual(["detect_agents"]);
   });
 
-  it("revalidates a continuously mounted consumer when its TTL expires", async () => {
+  it("does not poll Git after 60 idle seconds", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_000);
-    invokeMock.mockResolvedValue([]);
-    renderHook(() => useProjectStatus(projectId, rootPath, true, ["agents"]));
+    invokeMock.mockResolvedValue({
+      isRepository: true,
+      branch: "main",
+      head: "fixture-head",
+      hasChanges: false,
+    });
+    renderHook(() => useProjectStatus(projectId, rootPath, true, ["git"]));
     await act(async () => Promise.resolve());
-    expect(invokeMock).toHaveBeenCalledTimes(1);
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(30_001);
+      await vi.advanceTimersByTimeAsync(60_100);
     });
 
-    expect(invokeMock).toHaveBeenCalledTimes(2);
+    expect(invokeMock).toHaveBeenCalledTimes(1);
   });
 
   it("fails closed instead of exposing facts from a different authority identity", async () => {
@@ -90,6 +95,30 @@ describe("useProjectStatus", () => {
     const { result } = renderHook(() =>
       useProjectStatus(projectId, rootPath, true, ["agents"]),
     );
+
+    expect(result.current).toBeNull();
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not refresh a stale entry owned by another authority", async () => {
+    const scope = { projectId, rootPath };
+    bindProjectFactsAuthority(scope, "identity-a\0revision-1\0authority-1");
+    invokeMock.mockResolvedValue([]);
+    await ensureProjectFacts(scope, ["agents"]);
+    invalidateProjectFacts(scope, ["agents"], "authority_transition");
+    useProjectStore.setState({
+      authority: {
+        projectId,
+        canonicalIdentityKey: "identity-a",
+        identityRevision: "revision-1",
+        authorityRevision: "authority-2",
+      } as never,
+    });
+
+    const { result } = renderHook(() =>
+      useProjectStatus(projectId, rootPath, true, ["agents"]),
+    );
+    await act(async () => Promise.resolve());
 
     expect(result.current).toBeNull();
     expect(invokeMock).toHaveBeenCalledTimes(1);

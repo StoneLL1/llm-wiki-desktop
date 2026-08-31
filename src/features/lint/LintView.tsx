@@ -8,7 +8,7 @@ import { useLintStore } from "../../stores/lintStore";
 import { observeProjectResources } from "../../stores/projectScope";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
-import { cancelTaskRequest, useTaskStore } from "../../stores/taskStore";
+import { cancelTaskRequest, selectTaskById, useTaskStore } from "../../stores/taskStore";
 import { captureProjectScope, isProjectScopeCurrent } from "../../stores/projectScope";
 import { isAgentLintRepairEligible } from "../../types/lint";
 import type { LintIssue, LintIssueType } from "../../types/lint";
@@ -88,7 +88,7 @@ export function LintView() {
   const cancelAgentLintRepairPreparation = useLintStore((state) => state.cancelAgentLintRepairPreparation);
   const confirmAgentLintRepairStart = useLintStore((state) => state.confirmAgentLintRepairStart);
 
-  const tasks = useTaskStore((state) => state.tasks);
+  const deepTask = useTaskStore((state) => selectTaskById(state, deepTaskId));
 
   const { projectId, rootPath } = currentProject;
   const layoutRef = useRef<HTMLDivElement>(null);
@@ -161,8 +161,6 @@ export function LintView() {
       (rule) => !presentRules.has(rule) && !notApplicable.has(rule),
     );
   }, [presentRules, healthReport]);
-
-  const deepTask = deepTaskId ? tasks.find((task) => task.id === deepTaskId) ?? null : null;
 
   // Load ignored-issue entries + the persisted deep-lint report when the
   // background task lands.

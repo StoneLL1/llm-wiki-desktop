@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::models::task::TaskProgress;
+use crate::models::task::{TaskProgress, TaskStatus};
 
 pub const IMPORT_V2_SCHEMA_VERSION: u32 = 2;
 
@@ -46,6 +46,167 @@ pub enum ImportSessionStatus {
     PartiallyCommitted,
     Completed,
     Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportRecoveryReason {
+    StaleInFlightItem,
+    InterruptedTask,
+    IncompleteJournal,
+    PartialRemoteDownload,
+    PartialCapabilityDownload,
+    ResidualStaging,
+}
+
+/// Small, read-only control record for foreground session discovery. Batch 4
+/// can extend this DTO with revisioned counts without changing the full
+/// session read contract.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSessionOverview {
+    pub schema_version: u32,
+    pub session_id: String,
+    pub project_id: String,
+    pub status: ImportSessionStatus,
+    pub resource_mode: ImportResourceMode,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery_task_id: Option<String>,
+    pub item_count: u64,
+    pub semantic_revision: u64,
+    pub selection_revision: u64,
+    pub confirmation_digest: String,
+    pub counts: ImportSessionCounts,
+    pub status_counts: ImportSessionStatusCounts,
+    pub selection: ImportSelectionSummary,
+    pub index_state: ImportSessionIndexState,
+    #[serde(default)]
+    pub recovery_required: bool,
+    #[serde(default)]
+    pub recovery_reasons: Vec<ImportRecoveryReason>,
+    #[serde(default)]
+    pub action_groups: Vec<ImportSessionActionGroup>,
+    #[serde(default)]
+    pub unresolved_count: u64,
+    #[serde(default)]
+    pub remaining_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_task: Option<ImportOperationTaskSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSessionStatusCounts {
+    pub queued: u64,
+    pub inspecting: u64,
+    pub waiting_capability: u64,
+    pub waiting_login: u64,
+    pub waiting_authorization: u64,
+    pub extracting: u64,
+    pub validating: u64,
+    pub preview_ready: u64,
+    pub needs_merge: u64,
+    pub committing: u64,
+    pub completed: u64,
+    pub paused: u64,
+    pub cancelled: u64,
+    pub skipped: u64,
+    pub failed: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportSessionActionGroupKind {
+    Login,
+    Ocr,
+    Asr,
+    Capability,
+    Conflict,
+    Resume,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSessionActionGroup {
+    pub group_key: String,
+    pub kind: ImportSessionActionGroupKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_id: Option<String>,
+    pub item_count: u64,
+    pub item_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportOperationTaskSummary {
+    pub task_id: String,
+    pub status: TaskStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<TaskProgress>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportSessionIndexState {
+    Ready,
+    RebuildRequired,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSessionCounts {
+    pub all: u64,
+    pub active: u64,
+    pub ready: u64,
+    pub needs_action: u64,
+    pub failed: u64,
+    pub completed: u64,
+    pub waiting: u64,
+    pub processed: u64,
+    pub cancelled: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSelectionSummary {
+    pub selected: u64,
+    pub new_sources: u64,
+    pub updates: u64,
+    pub warnings: u64,
+    pub pending: u64,
+    pub restricted: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportItemPageFilter {
+    All,
+    Active,
+    Ready,
+    NeedsAction,
+    Failed,
+    Completed,
+}
+
+impl Default for ImportItemPageFilter {
+    fn default() -> Self {
+        Self::All
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportItemPage {
+    pub session_id: String,
+    pub snapshot_revision: u64,
+    pub items: Vec<ImportItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    pub total: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -319,7 +480,11 @@ impl ImportItemStatus {
                     Inspecting | NeedsMerge | Committing | Skipped | Cancelled
                 )
                 | (NeedsMerge, PreviewReady | Committing | Skipped | Cancelled)
-                | (Committing, Completed | Failed)
+                // A process can stop after the durable commit intent is
+                // published but before the item terminal state is visible.
+                // Reconciliation may safely restore the pre-commit preview
+                // after the transaction journal has been reconciled.
+                | (Committing, PreviewReady | NeedsMerge | Completed | Failed)
                 | (Paused, Inspecting | Extracting | Cancelled)
                 | (Cancelled | Skipped, Inspecting)
                 | (Failed, Inspecting | Skipped | Cancelled)
@@ -690,6 +855,8 @@ pub struct ImportPreviewArtifact {
 #[serde(rename_all = "camelCase")]
 pub struct ImportItem {
     pub item_id: String,
+    #[serde(default)]
+    pub item_revision: u64,
     pub input: ImportInput,
     pub status: ImportItemStatus,
     pub selected: bool,
@@ -716,6 +883,7 @@ impl ImportItem {
     pub fn queued(item_id: &str, input: ImportInput) -> Self {
         Self {
             item_id: item_id.to_string(),
+            item_revision: 1,
             input,
             status: ImportItemStatus::Queued,
             selected: true,
@@ -828,6 +996,33 @@ pub struct ImportMediaAuthorization {
     pub language: Option<String>,
 }
 
+/// Immutable execution facts captured when an Import worker claims an item.
+/// Canonical item/session JSON remains authoritative; workers must discard
+/// results when `expected_item_revision` or the durable task claim changes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportItemAuthorizationSnapshot {
+    pub local_ocr_authorized: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asr_profile: Option<ImportAsrProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recognition_language: Option<String>,
+    pub local_asr_authorized: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportWorkItemSnapshot {
+    pub item_id: String,
+    pub expected_item_revision: u64,
+    pub input: ImportInput,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_subtitle: Option<String>,
+    pub media_authorization: ImportItemAuthorizationSnapshot,
+    pub authenticated_retry: bool,
+    pub resource_mode: ImportResourceMode,
+}
+
 impl ImportSession {
     pub fn new(session_id: &str, project_id: &str, resource_mode: ImportResourceMode) -> Self {
         let now = chrono::Utc::now().to_rfc3339();
@@ -875,6 +1070,11 @@ pub struct CommitImportSessionRequest {
     pub batch_task_id: Option<String>,
     #[serde(default)]
     pub acknowledge_restricted_content: bool,
+    #[serde(default)]
+    pub expected_selection_revision: Option<u64>,
+    #[serde(default)]
+    pub expected_confirmation_digest: Option<String>,
+    #[serde(default)]
     pub decisions: Vec<CommitItemDecision>,
 }
 
