@@ -60,3 +60,38 @@
 - macOS/Linux 语义 smoke（真实退前台一次刷新、窗口框架交互不重复刷新）未在本 Windows 主机执行，不得以 Windows SendInput 脚本伪装，留待对应平台。
 - get_graph 异步迁移门未触发（本次证据未达到触发条件），延期原因在 Batch 4 交付报告中汇总。
 - 本次为 Batch 3 验收资产与脚本改动，未修改任何 Graph 或后端生产文件。
+
+## Batch 4 复核、门禁与交付（2026-08-31）
+
+### 双评审
+
+按项目评审规则执行一次双评审；本会话无子代理工具，由同一执行者以两个独立视角手动完成等效评审并在交付报告中声明：
+
+- 评审 A（共享上下文）：核对精准根因链、false-arm/true-consume 状态机（先清 arm 再读当前项目 scope）、通知权限 epoch 与资源重验证分离、CloseRequested 关闭到托盘行为原样保留、后端改动仅限 app-global 前台归一化且未扩散到 Graph 服务，以及第 5.1 节事件合同与测试矩阵逐项对应。结论：通过，无有效问题。
+- 评审 B（新鲜上下文）：专查 Win32 GetForegroundWindow/GetWindowThreadProcessId PID 判定（空句柄、PID=0、查询失败均 fail-closed 为 None；PID 比较使同进程 dialog 判前台）、跨平台 cfg 矩阵、StrictMode 重挂与延迟 listener、emit/listen 失败无 DOM focus 回退、hook 测试使用真实 projectScope/graphStore 链路而非 mock 目标函数、13 例 Node 合同（含坏基线 77/112、P95 152 拒绝与 MoveWindow 拒绝）、基准真实 SendInput 按下原生标题栏并以 GetWindowRect 逐步采样。结论：通过，无有效问题。
+
+### 门禁（从头重跑）
+
+| 门禁 | 结果 |
+| --- | --- |
+| npm run test -- src/hooks/useTaskEvents.test.tsx src/services/projectResourceInvalidation.test.ts src/features/graph/graphStore.test.ts --reporter=verbose | 3 个文件 46/46 通过 |
+| node --test scripts/graph-titlebar-drag-contract.node-test.mjs | 13/13 通过 |
+| npm run check（完整模式） | full mode passed in 16m 0.2s（frontend lane 3m 2.8s；rust lane 16m 0.1s），运行于当前工作树（HEAD 3426f470 加保留的无关本地改动） |
+
+### 安装包基准沿用判定
+
+Batch 4 未重跑安装包基准，理由：HEAD（3426f470）与已完成真实验收的干净提交 55dc5a62 之间的差异仅为 docs/evidence/progress/gotchas，生产代码逐字节一致；双评审未发现代码问题，本批次未修改任何可执行代码；且基准脚本自身强制要求干净工作树与精确源 SHA，与保留工作区无关改动的要求冲突。55dc5a62 的安装包证据（MSI SHA-256 5d8073f4…、已安装 EXE 与构建 EXE 哈希一致、3+3 测量轮、真实 Alt-Tab）因此对本批次继续有效。若后续任何批次修改生产代码，必须重新构建并在新 SHA 上重跑本基准。
+
+### get_graph 异步迁移决策
+
+延期，未触发升级门槛：
+
+- 修复后真实标题栏拖动 phase get_graph=0（不是"仍出现调用"）。
+- get_graph=0 且 Graph 原生跟随 P95 1.414px、最大 4.472px（远优于 12px/24px 门槛），无 GUI 命令线程 trace 证据。
+- 用户未将范围扩大为解决首次进入或 Alt-Tab 返回时的 GUI 冻结。
+- 本次证据未提供合法 get_graph 单次 GUI self time >=16ms 或稳定 P95 >4ms 的测量。
+
+### 完成状态
+
+- 计划第 13 节完成定义中除"macOS/Linux 语义 smoke"（外部矩阵，见上）外全部满足；两个评审视角无未处理问题；progress.txt、gotchas.txt 与 Graphify 查询记忆已更新。
+- 本批次仅修改文档与进度记录，未修改任何 Graph、前端或 Rust 生产代码。
