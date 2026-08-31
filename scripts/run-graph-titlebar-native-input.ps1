@@ -108,14 +108,31 @@ $handle = Get-MainWindowHandle $ProcessId
 Start-Sleep -Milliseconds 250
 
 if ($Mode -eq 'alt-tab') {
-  $control = Start-Process notepad.exe -PassThru
+  Add-Type -AssemblyName System.Windows.Forms
+  $control = New-Object System.Windows.Forms.Form
+  $control.Text = 'Graph titlebar Alt-Tab control'
+  $control.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+  $control.Left = 48
+  $control.Top = 48
+  $control.Width = 360
+  $control.Height = 180
+  $control.ShowInTaskbar = $true
   try {
     $controlDeadline = [DateTime]::UtcNow.AddSeconds(10)
-    while ([DateTime]::UtcNow -lt $controlDeadline -and $control.MainWindowHandle -eq [IntPtr]::Zero) {
+    $control.Show()
+    while ([DateTime]::UtcNow -lt $controlDeadline -and $control.Handle -eq [IntPtr]::Zero) {
+      [System.Windows.Forms.Application]::DoEvents()
       Start-Sleep -Milliseconds 50
-      $control.Refresh()
     }
-    if ($control.MainWindowHandle -eq [IntPtr]::Zero) { throw 'Alt-Tab control window was unavailable.' }
+    if ($control.Handle -eq [IntPtr]::Zero) { throw 'Alt-Tab control window was unavailable.' }
+    if (-not [GraphTitlebarNativeInput]::SetForegroundWindow($control.Handle)) { throw 'SetForegroundWindow failed for the Alt-Tab control window.' }
+    $controlForegroundDeadline = [DateTime]::UtcNow.AddMilliseconds(500)
+    while ([DateTime]::UtcNow -lt $controlForegroundDeadline) {
+      [System.Windows.Forms.Application]::DoEvents()
+      Start-Sleep -Milliseconds 25
+    }
+    $controlForeground = Get-ForegroundSnapshot
+    if ($controlForeground.processId -ne $PID) { throw 'The Alt-Tab control window was not foreground before focusing the tested app.' }
     if (-not [GraphTitlebarNativeInput]::SetForegroundWindow($handle)) { throw 'SetForegroundWindow failed for the tested app.' }
     Start-Sleep -Milliseconds 250
     $before = Get-ForegroundSnapshot
@@ -124,19 +141,27 @@ if ($Mode -eq 'alt-tab') {
     [GraphTitlebarNativeInput]::Key([GraphTitlebarNativeInput]::VK_TAB, $false)
     [GraphTitlebarNativeInput]::Key([GraphTitlebarNativeInput]::VK_TAB, $true)
     [GraphTitlebarNativeInput]::Key([GraphTitlebarNativeInput]::VK_MENU, $true)
-    Start-Sleep -Milliseconds 800
+    $awayDeadline = [DateTime]::UtcNow.AddMilliseconds(800)
+    while ([DateTime]::UtcNow -lt $awayDeadline) {
+      [System.Windows.Forms.Application]::DoEvents()
+      Start-Sleep -Milliseconds 25
+    }
     $away = Get-ForegroundSnapshot
     [GraphTitlebarNativeInput]::Key([GraphTitlebarNativeInput]::VK_MENU, $false)
     [GraphTitlebarNativeInput]::Key([GraphTitlebarNativeInput]::VK_TAB, $false)
     [GraphTitlebarNativeInput]::Key([GraphTitlebarNativeInput]::VK_TAB, $true)
     [GraphTitlebarNativeInput]::Key([GraphTitlebarNativeInput]::VK_MENU, $true)
-    Start-Sleep -Milliseconds 800
+    $returnDeadline = [DateTime]::UtcNow.AddMilliseconds(800)
+    while ([DateTime]::UtcNow -lt $returnDeadline) {
+      [System.Windows.Forms.Application]::DoEvents()
+      Start-Sleep -Milliseconds 25
+    }
     $returned = Get-ForegroundSnapshot
-    [pscustomobject]@{ mode = 'send-input-alt-tab'; targetProcessId = $ProcessId; targetHwnd = $handle.ToInt64(); before = $before; away = $away; returned = $returned; controlProcessId = $control.Id } |
+    [pscustomobject]@{ mode = 'send-input-alt-tab'; targetProcessId = $ProcessId; targetHwnd = $handle.ToInt64(); before = $before; away = $away; returned = $returned; controlProcessId = $PID; controlHwnd = $control.Handle.ToInt64() } |
       ConvertTo-Json -Compress -Depth 5
   }
   finally {
-    if ($control -and -not $control.HasExited) { Stop-Process -Id $control.Id -Force -ErrorAction SilentlyContinue }
+    if ($control) { $control.Close(); $control.Dispose() }
   }
   exit 0
 }
@@ -208,6 +233,7 @@ finally {
 }
 
 [pscustomobject]@{
+  stimulus = 'send-input-native-titlebar-drag'
   mode = 'send-input-native-titlebar-drag'
   positionObserver = 'GetWindowRect'
   processId = $ProcessId
