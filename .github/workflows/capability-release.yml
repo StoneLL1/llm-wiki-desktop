@@ -106,7 +106,7 @@ jobs:
         with: { node-version: 22.23.1, cache: npm }
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with: { version: "0.10.8", enable-cache: false }
 
       - name: Setup Rust
