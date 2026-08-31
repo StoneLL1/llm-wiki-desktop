@@ -46,7 +46,14 @@ public static class GraphTitlebarNativeInput {
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId);
   [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr handle);
+  [DllImport("user32.dll", SetLastError=true)] public static extern bool SetWindowPos(IntPtr handle, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
   [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr handle);
+
+  public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+  public static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
+  public const uint SWP_NOSIZE = 0x0001;
+  public const uint SWP_NOMOVE = 0x0002;
+  public const uint SWP_SHOWWINDOW = 0x0040;
 
   public static void Mouse(uint flags, int x, int y) {
     int width = Math.Max(1, GetSystemMetrics(0) - 1);
@@ -125,18 +132,37 @@ if ($Mode -eq 'alt-tab') {
       Start-Sleep -Milliseconds 50
     }
     if ($control.Handle -eq [IntPtr]::Zero) { throw 'Alt-Tab control window was unavailable.' }
-    if (-not [GraphTitlebarNativeInput]::SetForegroundWindow($control.Handle)) { throw 'SetForegroundWindow failed for the Alt-Tab control window.' }
+    $control.TopMost = $true
+    $controlCenterX = $control.Left + [int]($control.Width / 2)
+    $controlCenterY = $control.Top + [int]($control.Height / 2)
+    [GraphTitlebarNativeInput]::Mouse([GraphTitlebarNativeInput]::MOUSEEVENTF_MOVE, $controlCenterX, $controlCenterY)
+    [GraphTitlebarNativeInput]::Mouse([GraphTitlebarNativeInput]::MOUSEEVENTF_LEFTDOWN, $controlCenterX, $controlCenterY)
+    [GraphTitlebarNativeInput]::Mouse([GraphTitlebarNativeInput]::MOUSEEVENTF_LEFTUP, $controlCenterX, $controlCenterY)
     $controlForegroundDeadline = [DateTime]::UtcNow.AddMilliseconds(500)
     while ([DateTime]::UtcNow -lt $controlForegroundDeadline) {
       [System.Windows.Forms.Application]::DoEvents()
       Start-Sleep -Milliseconds 25
     }
     $controlForeground = Get-ForegroundSnapshot
-    if ($controlForeground.processId -ne $PID) { throw 'The Alt-Tab control window was not foreground before focusing the tested app.' }
-    if (-not [GraphTitlebarNativeInput]::SetForegroundWindow($handle)) { throw 'SetForegroundWindow failed for the tested app.' }
-    Start-Sleep -Milliseconds 250
+    if ($controlForeground.processId -ne $PID) { throw "The Alt-Tab control window was not activated by native input. controlForeground=$(($controlForeground | ConvertTo-Json -Compress)) pid=$PID target=$ProcessId" }
+    $control.TopMost = $false
+    $zOrderFlags = [GraphTitlebarNativeInput]::SWP_NOSIZE -bor [GraphTitlebarNativeInput]::SWP_NOMOVE -bor [GraphTitlebarNativeInput]::SWP_SHOWWINDOW
+    [GraphTitlebarNativeInput]::SetWindowPos($handle, [GraphTitlebarNativeInput]::HWND_TOPMOST, 0, 0, 0, 0, $zOrderFlags) | Out-Null
+    $targetRect = New-Object GraphTitlebarNativeInput+RECT
+    if (-not [GraphTitlebarNativeInput]::GetWindowRect($handle, [ref]$targetRect)) { throw 'GetWindowRect failed before target activation.' }
+    $targetTitlebarX = $targetRect.Left + [int](($targetRect.Right - $targetRect.Left) / 2)
+    $targetTitlebarY = $targetRect.Top + 16
+    [GraphTitlebarNativeInput]::Mouse([GraphTitlebarNativeInput]::MOUSEEVENTF_MOVE, $targetTitlebarX, $targetTitlebarY)
+    [GraphTitlebarNativeInput]::Mouse([GraphTitlebarNativeInput]::MOUSEEVENTF_LEFTDOWN, $targetTitlebarX, $targetTitlebarY)
+    [GraphTitlebarNativeInput]::Mouse([GraphTitlebarNativeInput]::MOUSEEVENTF_LEFTUP, $targetTitlebarX, $targetTitlebarY)
+    $targetForegroundDeadline = [DateTime]::UtcNow.AddMilliseconds(500)
+    while ([DateTime]::UtcNow -lt $targetForegroundDeadline) {
+      [System.Windows.Forms.Application]::DoEvents()
+      Start-Sleep -Milliseconds 25
+    }
     $before = Get-ForegroundSnapshot
-    if ($before.processId -ne $ProcessId) { throw 'The tested app was not foreground before Alt-Tab.' }
+    if ($before.processId -ne $ProcessId) { throw "The tested app was not foreground before Alt-Tab. before=$(($before | ConvertTo-Json -Compress)) target=$ProcessId targetHwnd=$($handle.ToInt64()) controlHwnd=$($control.Handle.ToInt64()) clickX=$targetTitlebarX clickY=$targetTitlebarY" }
+    [GraphTitlebarNativeInput]::SetWindowPos($handle, [GraphTitlebarNativeInput]::HWND_NOTOPMOST, 0, 0, 0, 0, $zOrderFlags) | Out-Null
     [GraphTitlebarNativeInput]::Key([GraphTitlebarNativeInput]::VK_MENU, $false)
     [GraphTitlebarNativeInput]::Key([GraphTitlebarNativeInput]::VK_TAB, $false)
     [GraphTitlebarNativeInput]::Key([GraphTitlebarNativeInput]::VK_TAB, $true)
