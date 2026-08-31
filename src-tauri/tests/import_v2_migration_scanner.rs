@@ -91,7 +91,8 @@ fn scanner_warns_on_corrupt_metadata_and_does_not_follow_links() {
 
     let outside = tempdir().unwrap();
     fs::write(outside.path().join("secret.md"), "must not be read").unwrap();
-    let link = root.join("raw/raw-link");
+    fs::create_dir(root.join("raw")).unwrap();
+    let link = root.join("raw/linked-secret.md");
     #[cfg(windows)]
     let link_result = std::os::windows::fs::symlink_file(outside.path().join("secret.md"), &link);
     #[cfg(unix)]
@@ -101,7 +102,7 @@ fn scanner_warns_on_corrupt_metadata_and_does_not_follow_links() {
         assert!(inventory
             .scanned_files
             .iter()
-            .all(|file| file.relative_path != "raw/raw-link"));
+            .all(|file| file.relative_path != "raw/linked-secret.md"));
         assert!(inventory
             .warnings
             .iter()
