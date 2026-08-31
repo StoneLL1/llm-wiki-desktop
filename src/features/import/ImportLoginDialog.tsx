@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useModalDialog } from "../../hooks/useModalDialog";
+import { translateBackendError } from "../../lib/backendError";
 import type { WebAuthState } from "../../types/importV2Web";
 import type { ConnectorSessionRef } from "../../types/importV2Presentation";
 
@@ -36,7 +37,7 @@ export function ImportLoginDialog({ open, platform, publicDomain, authState, con
       const next = await onBeginLogin();
       if (next) setCurrentSession(next);
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : t("importV2.login.error"));
+      setError(translateBackendError(nextError, t));
     } finally {
       setBusy(null);
     }
@@ -50,7 +51,7 @@ export function ImportLoginDialog({ open, platform, publicDomain, authState, con
       const next = await onCheckAgain(currentSession.sessionId);
       if (next) setCurrentSession(next);
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : t("importV2.login.error"));
+      setError(translateBackendError(nextError, t));
     } finally {
       setBusy(null);
     }
@@ -64,7 +65,7 @@ export function ImportLoginDialog({ open, platform, publicDomain, authState, con
       await onRevoke(currentSession.sessionId);
       setCurrentSession(null);
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : t("importV2.login.error"));
+      setError(translateBackendError(nextError, t));
     } finally {
       setBusy(null);
     }

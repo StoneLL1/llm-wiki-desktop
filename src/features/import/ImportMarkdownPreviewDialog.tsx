@@ -7,7 +7,9 @@ import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 
+import { ActionableErrorNotice } from "../../components/app/ActionableErrorNotice";
 import { useModalDialog } from "../../hooks/useModalDialog";
+import { normalizeBackendError, type NormalizedBackendError } from "../../lib/backendError";
 import type { ImportPreviewContent } from "../../types/importV2Presentation";
 import { previewImageUrl, safeExternalUrl } from "./importPreviewUrl";
 
@@ -37,7 +39,8 @@ export function ImportMarkdownPreviewDialog({
   const dialogRef = useModalDialog({ open, onClose });
   const [content, setContent] = useState<ImportPreviewContent | null>(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<NormalizedBackendError | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const identityKey = identity ? `${identity.sessionId}\0${identity.itemId}\0${identity.candidateId ?? ""}\0${identity.historyBatchId ?? ""}` : null;
 
@@ -61,13 +64,17 @@ export function ImportMarkdownPreviewDialog({
       })
       .catch((reason: unknown) => {
         if (!current) return;
-        setError(reason instanceof Error ? reason.message : String(reason));
+        setError(normalizeBackendError(reason, {
+          defaultSummaryKey: "backendError.summary.import",
+          defaultRecoverable: true,
+          defaultActionKind: "retry",
+        }));
         setLoading(false);
       });
     return () => {
       current = false;
     };
-  }, [identityKey, loadContent, open]);
+  }, [identityKey, loadAttempt, loadContent, open]);
 
   const title = content?.title ?? t("importV2.preview.title");
   const markdown = content?.markdown ?? "";
@@ -102,14 +109,7 @@ export function ImportMarkdownPreviewDialog({
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           {loading ? <div role="status" className="flex items-center gap-2 text-[12px] text-[var(--text-muted)]"><LoaderCircle size={15} className="animate-spin" aria-hidden="true" />{t("importV2.preview.loading")}</div> : null}
           {error ? (
-            <div role="alert" className="rounded-[var(--radius-md)] border border-[var(--danger)] bg-[var(--danger-soft)] px-3 py-2 text-[12px] text-[var(--danger-text)]">
-              <strong>{t("importV2.preview.errorTitle")}</strong>
-              <p className="m-0 mt-1">{t("importV2.preview.errorSafe")}</p>
-              <details className="mt-2 text-[10.5px]">
-                <summary>{t("importV2.preview.technicalDetails")}</summary>
-                <p className="break-all font-mono">{error}</p>
-              </details>
-            </div>
+            <ActionableErrorNotice error={error} onAction={() => setLoadAttempt((attempt) => attempt + 1)} />
           ) : null}
           {content ? (
             <>

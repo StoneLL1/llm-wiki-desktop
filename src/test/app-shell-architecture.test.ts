@@ -6,6 +6,10 @@ const shell = readFileSync(
   resolve(process.cwd(), "src/components/app/AppShell.tsx"),
   "utf8",
 );
+const workspaceController = readFileSync(
+  resolve(process.cwd(), "src/components/app/WorkspaceController.tsx"),
+  "utf8",
+);
 
 const importV2EntryPoints = [
   "ImportView.tsx",
@@ -25,7 +29,10 @@ describe("AppShell architecture", () => {
     expect(shell).not.toContain("start_deep_lint");
     expect(shell).not.toContain("start_export");
     expect(shell).toContain("<UpdateController />");
+    expect(shell).toContain("<AppCapabilityController />");
     expect(shell).not.toContain("useUpdateStore");
+    expect(shell).not.toContain("useAppCapabilityStore");
+    expect(workspaceController).not.toContain("AppCapabilityController");
   });
 
   it("keeps the active Import V2 surface off legacy mutation commands and direct IPC", () => {

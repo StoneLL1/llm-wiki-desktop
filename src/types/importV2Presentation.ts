@@ -117,7 +117,10 @@ export interface ImportHistoryEntry {
   updatedAt: string | null;
   completedAt: string | null;
   legacyReadOnly: boolean;
-  itemIds: string[];
+  itemCount: number;
+  committedCount: number;
+  failedCount: number;
+  sampleLabels: string[];
   availableActions: ImportHistoryAction[];
   snapshotAvailable?: boolean;
 }
@@ -172,6 +175,7 @@ export interface ImportCapabilityRequirement {
   modelBytes: number | null;
   license: string | null;
   fallback: string | null;
+  unavailableReasonCode: string | null;
   requirementRevision: string;
 }
 
@@ -192,6 +196,26 @@ export interface InstallImportCapabilityV2Request {
   acknowledgeInstall: boolean;
   asrProfile?: import("./importV2").ImportAsrProfile | null;
   recognitionLanguage?: string | null;
+}
+
+export interface GetImportHistoryDetailV2Request {
+  projectId: string;
+  projectRootPath: string;
+  batchId: string;
+  cursor: string | null;
+  limit?: number;
+}
+
+export interface RebuildImportHistoryIndexV2Request {
+  projectId: string;
+  projectRootPath: string;
+}
+
+export interface ImportHistoryDetailPage {
+  entry: ImportHistoryEntry;
+  items: import("./importV2").ImportItem[];
+  nextCursor: string | null;
+  total: number;
 }
 
 export interface GetImportAsrEnablementPlanV2Request {

@@ -28,6 +28,7 @@ test("stages a self-contained Node entrypoint without a preinstalled system runt
   context.after(() => fs.rm(value.root, { recursive: true, force: true }));
   const result = await stageNodeCapability({
     pack: "browser-runtime-lite",
+    target: "x86_64-pc-windows-msvc",
     nodeVersion: "22.17.0",
     nodeRoot: value.nodeRoot,
     output: value.output,
@@ -56,6 +57,7 @@ test("refuses to stage browser-runtime without a pinned Chromium payload", async
   await assert.rejects(
     stageNodeCapability({
       pack: "browser-runtime",
+      target: "x86_64-pc-windows-msvc",
       nodeVersion: "22.17.0",
       nodeRoot: value.nodeRoot,
       output: value.output,

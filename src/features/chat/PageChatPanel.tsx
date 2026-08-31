@@ -1,11 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useShallow } from "zustand/react/shallow";
 import { BookOpenText, ChevronDown, Plus } from "lucide-react";
 
 import { latestAssistantMessage, useChatStore } from "../../stores/chatStore";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useSettingsStore } from "../../stores/settingsStore";
-import { fetchTaskActivities, useTaskStore } from "../../stores/taskStore";
+import { fetchTaskActivities, selectProjectTaskById, useTaskStore } from "../../stores/taskStore";
 import type { ChatMessage } from "../../types/chat";
 import { isTerminalStatus } from "../../types/task";
 import type { WikiPageContent } from "../../types/wiki";
@@ -64,8 +65,20 @@ export function PageChatPanel({
   const reloadActive = useChatStore((state) => state.reloadActive);
   const openSettings = useNavigationStore((state) => state.openSettings);
 
-  const tasks = useTaskStore((state) => state.tasks);
-  const activities = useTaskStore((state) => state.activities);
+  const relevantTaskIds = useMemo(() => [...new Set([
+    ...(sendTaskId ? [sendTaskId] : []),
+    ...(activeSession?.messages.flatMap((message) => message.taskId ? [message.taskId] : []) ?? []),
+  ])], [activeSession?.messages, sendTaskId]);
+  const tasks = useTaskStore(useShallow((state) =>
+    relevantTaskIds
+      .map((taskId) => selectProjectTaskById(state, projectId, taskId))
+      .filter((task): task is NonNullable<typeof task> => Boolean(task)),
+  ));
+  const activities = useTaskStore(useShallow((state) => Object.fromEntries(
+    relevantTaskIds.flatMap((taskId) => state.activities[taskId]
+      ? [[taskId, state.activities[taskId]]]
+      : []),
+  )));
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
 
   const sendTask = sendTaskId ? tasks.find((task) => task.id === sendTaskId) ?? null : null;

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 use crate::models::task::{BackendTask, TaskActivity, TaskStatus};
@@ -35,22 +35,43 @@ pub struct TaskEntry {
 
 #[derive(Debug, Clone)]
 pub struct CancellationToken {
-    cancelled: Arc<AtomicBool>,
+    state: Arc<AtomicU8>,
 }
+
+const TASK_SIGNAL_RUNNING: u8 = 0;
+const TASK_SIGNAL_CANCELLED: u8 = 1;
+const TASK_SIGNAL_PAUSED: u8 = 2;
 
 impl CancellationToken {
     pub fn new() -> Self {
         Self {
-            cancelled: Arc::new(AtomicBool::new(false)),
+            state: Arc::new(AtomicU8::new(TASK_SIGNAL_RUNNING)),
         }
     }
 
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::SeqCst);
+        self.state.store(TASK_SIGNAL_CANCELLED, Ordering::SeqCst);
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::SeqCst)
+        self.state.load(Ordering::SeqCst) != TASK_SIGNAL_RUNNING
+    }
+
+    pub fn request_pause(&self) {
+        let _ = self.state.compare_exchange(
+            TASK_SIGNAL_RUNNING,
+            TASK_SIGNAL_PAUSED,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+    }
+
+    pub fn is_pause_requested(&self) -> bool {
+        self.state.load(Ordering::SeqCst) == TASK_SIGNAL_PAUSED
+    }
+
+    pub fn reset(&self) {
+        self.state.store(TASK_SIGNAL_RUNNING, Ordering::SeqCst);
     }
 }
 
@@ -64,6 +85,7 @@ pub fn validate_transition(current: &TaskStatus, next: &TaskStatus) -> Result<()
     use TaskStatus::*;
     match (current, next) {
         (Queued, Running)
+        | (Queued, Interrupted)
         | (Queued, Cancelled)
         | (Running, WaitingForConfirmation)
         | (Running, Succeeded)
@@ -74,7 +96,9 @@ pub fn validate_transition(current: &TaskStatus, next: &TaskStatus) -> Result<()
         | (WaitingForConfirmation, Cancelling)
         | (Cancelling, Cancelled)
         | (Cancelling, Failed)
-        | (Cancelling, Interrupted) => Ok(()),
+        | (Cancelling, Interrupted)
+        | (Interrupted, Queued)
+        | (Interrupted, Cancelled) => Ok(()),
         _ => Err(format!(
             "Invalid state transition: {:?} -> {:?}",
             current, next

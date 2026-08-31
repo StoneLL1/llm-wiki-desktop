@@ -27,6 +27,7 @@ function parseOptions(arguments_) {
   };
   return {
     pack: required("pack"),
+    target: required("target"),
     nodeVersion: required("node-version"),
     nodeRoot: path.resolve(required("node-root")),
     output: path.resolve(required("output")),
@@ -177,9 +178,11 @@ export async function stageNodeCapability(options) {
     `${JSON.stringify({
       schemaVersion: 1,
       packId: options.pack,
+      target: options.target,
       nodeVersion: options.nodeVersion.replace(/^v/, ""),
       browserBundled: options.pack === "browser-runtime",
       networkAtRuntime: options.pack === "browser-runtime",
+      runtimeNetwork: options.pack === "browser-runtime",
       linuxSystemLibraries: options.pack === "browser-runtime" ? LINUX_CHROMIUM_LIBRARIES : [],
       linuxSupportContract: options.pack === "browser-runtime"
         ? "A glibc desktop supported by Playwright Chromium with the listed shared libraries; system libraries are not bundled."

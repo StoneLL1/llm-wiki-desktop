@@ -8,8 +8,11 @@ import type {
   GetImportSessionV2Request,
   ImportCompletion,
   ImportItem,
+  ImportItemPage,
   ImportMergeContextV2Request,
   ImportSession,
+  ImportSessionOverview,
+  ListImportSessionItemsV2Request,
   ImportThreeWayMergeContext,
   SetImportItemResolutionV2Request,
   SetImportItemSelectionV2Request,
@@ -59,6 +62,7 @@ import type {
   GetImportAsrEnablementPlanV2Request,
   GetImportCapabilityRequirementV2Request,
   GetImportFrontendReadinessV2Request,
+  GetImportHistoryDetailV2Request,
   GetImportRestrictedContentStatusV2Request,
   GetImportPreviewContentV2Request,
   ImportCapabilityRequirement,
@@ -66,12 +70,14 @@ import type {
   ImportFrontendReadiness,
   ImportRestrictedContentStatus,
   ImportHistoryPage,
+  ImportHistoryDetailPage,
   ImportPreviewContent,
   ImportWorkbenchPreferences,
   ImportWorkbenchPreferencesRequest,
   InstallImportCapabilityV2Request,
   ListImportHistoryV2Request,
   RevokeImportLoginV2Request,
+  RebuildImportHistoryIndexV2Request,
   SaveImportWorkbenchPreferencesRequest,
   StartImportAgentAssistanceV2Request,
 } from "./importV2Presentation";
@@ -93,6 +99,9 @@ import type { BackendTask } from "./task";
 export interface ImportV2CommandNames {
   readonly createSession: "create_import_session_v2";
   readonly getSession: "get_import_session_v2";
+  readonly getSessionOverview: "get_import_session_overview_v2";
+  readonly listSessionItems: "list_import_session_items_v2";
+  readonly startSessionRecovery: "start_import_session_recovery_v2";
   readonly getHistorySession: "get_import_history_session_v2";
   readonly getCompletion: "get_import_completion_v2";
   readonly addItems: "add_import_items_v2";
@@ -126,6 +135,8 @@ export interface ImportV2CommandNames {
   readonly saveWorkbenchPreferences: "save_import_workbench_preferences_v2";
   readonly getRestrictedContentStatus: "get_import_restricted_content_status_v2";
   readonly listHistory: "list_import_history_v2";
+  readonly getHistoryDetail: "get_import_history_detail_v2";
+  readonly rebuildHistoryIndex: "rebuild_import_history_index_v2";
   readonly authorizePrivateTarget: "authorize_import_private_target_v2";
   readonly beginLogin: "begin_import_login_v2";
   readonly completeLogin: "complete_import_login_v2";
@@ -150,6 +161,9 @@ export interface ImportV2Api {
   readonly commandNames: ImportV2CommandNames;
   readonly createSession: (request: CreateImportSessionV2Request) => Promise<ImportSession>;
   readonly getSession: (request: GetImportSessionV2Request) => Promise<ImportSession>;
+  readonly getSessionOverview: (request: GetImportSessionV2Request) => Promise<ImportSessionOverview>;
+  readonly listSessionItems: (request: ListImportSessionItemsV2Request) => Promise<ImportItemPage>;
+  readonly startSessionRecovery: (request: GetImportSessionV2Request) => Promise<BackendTask>;
   readonly getHistorySession: (request: GetImportSessionV2Request) => Promise<ImportSession>;
   readonly getCompletion: (request: GetImportSessionV2Request) => Promise<ImportCompletion | null>;
   readonly addItems: (request: AddImportItemsV2Request) => Promise<ImportSession>;
@@ -183,6 +197,8 @@ export interface ImportV2Api {
   readonly saveWorkbenchPreferences: (request: SaveImportWorkbenchPreferencesRequest) => Promise<ImportWorkbenchPreferences>;
   readonly getRestrictedContentStatus: (request: GetImportRestrictedContentStatusV2Request) => Promise<ImportRestrictedContentStatus>;
   readonly listHistory: (request: ListImportHistoryV2Request) => Promise<ImportHistoryPage>;
+  readonly getHistoryDetail: (request: GetImportHistoryDetailV2Request) => Promise<ImportHistoryDetailPage>;
+  readonly rebuildHistoryIndex: (request: RebuildImportHistoryIndexV2Request) => Promise<BackendTask>;
   readonly authorizePrivateTarget: (request: AuthorizeImportPrivateTargetV2Request) => Promise<string>;
   readonly beginLogin: (request: BeginImportLoginV2Request) => Promise<ConnectorSessionRef>;
   readonly completeLogin: (request: CompleteImportLoginV2Request) => Promise<CompleteImportLoginResult>;

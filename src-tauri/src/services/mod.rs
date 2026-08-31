@@ -1,4 +1,6 @@
 mod agent_service;
+mod app_capability_coordinator;
+mod blocking_work;
 mod bookmark_service;
 mod chat_convenience_service;
 mod chat_service;
@@ -25,6 +27,13 @@ mod workflow_service;
 pub use agent_service::{
     AgentInvocation, AgentProbeTarget, AgentService, ProcessRunner, SystemProcessRunner,
 };
+pub use app_capability_coordinator::{
+    app_capability_acknowledgement_version, app_capability_archive_identity,
+    AppCapabilityCoordinator,
+};
+pub use blocking_work::{
+    BlockingWorkClass, BlockingWorkClassSnapshot, BlockingWorkCoordinator, BlockingWorkOperation,
+};
 pub use bookmark_service::BookmarkService;
 pub use chat_convenience_service::{
     audit_changed_paths, classify_chat_intent, CandidateChange, ChangedFile,
@@ -47,6 +56,8 @@ pub use compile_service::{
 pub use desktop_update_runtime::DesktopUpdateRuntime;
 pub use export_service::{ExportService, ValidatedExportArtifact};
 pub use file_store::{FileStore, WriteMode};
+#[cfg(feature = "performance-observers")]
+pub use file_store::{FileStoreObservation, FileStoreObservationSnapshot};
 pub use git_service::GitService;
 #[cfg(feature = "gui")]
 pub(crate) use graph_service::GraphCachePolicy;

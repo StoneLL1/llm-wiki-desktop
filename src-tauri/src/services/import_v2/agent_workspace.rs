@@ -96,15 +96,19 @@ impl AgentWorkspaceBuilder {
     ) -> Result<AgentWorkspace, BackendError> {
         validate_identity(context, session, item)?;
         let workspace_id = uuid::Uuid::new_v4().to_string();
-        let relative_root = format!(
-            ".app/import-sessions/{}/items/{}/staging/agent/{workspace_id}",
-            session.session_id, item.item_id
-        );
+        let import_paths = context.layout.import_paths()?;
+        let relative_root = import_paths.item_staging_child(
+            &session.session_id,
+            &item.item_id,
+            &["agent", &workspace_id],
+        )?;
         let root = context.resolve_project_path(&relative_root)?;
-        let lease_relative = format!(
-            ".app/import-sessions/{}/items/{}/staging/agent-leases/{workspace_id}.json",
-            session.session_id, item.item_id
-        );
+        let lease_file = format!("{workspace_id}.json");
+        let lease_relative = import_paths.item_staging_child(
+            &session.session_id,
+            &item.item_id,
+            &["agent-leases", &lease_file],
+        )?;
         let lease_path = context.resolve_project_path(&lease_relative)?;
         write_json_atomic_path(
             &context.root,
@@ -274,8 +278,13 @@ impl AgentWorkspaceBuilder {
         if !is_safe_component(session_id) || !is_safe_component(item_id) {
             return Err(workspace_error("Agent workspace identity is invalid."));
         }
-        let expected_prefix =
-            format!(".app/import-sessions/{session_id}/items/{item_id}/staging/agent/");
+        let expected_prefix = format!(
+            "{}/",
+            context
+                .layout
+                .import_paths()?
+                .item_staging_child(session_id, item_id, &["agent"])?
+        );
         let normalized = workspace_relative_path.replace('\\', "/");
         let workspace_id = normalized.strip_prefix(&expected_prefix).ok_or_else(|| {
             workspace_error("Recorded Agent workspace is outside the current import item.")
@@ -296,9 +305,13 @@ impl AgentWorkspaceBuilder {
             }
             remove_workspace_tree(&context.root, &root)?;
         }
-        let lease = context.resolve_project_path(&format!(
-            ".app/import-sessions/{session_id}/items/{item_id}/staging/agent-leases/{workspace_id}.json"
-        ))?;
+        let lease_file = format!("{workspace_id}.json");
+        let lease =
+            context.resolve_project_path(&context.layout.import_paths()?.item_staging_child(
+                session_id,
+                item_id,
+                &["agent-leases", &lease_file],
+            )?)?;
         if lease.exists() {
             reject_links_between(&context.root, &lease)?;
             remove_project_file(&context.root, &lease).map_err(workspace_io_error)?;
@@ -315,9 +328,12 @@ impl AgentWorkspaceBuilder {
         if !is_safe_component(session_id) || !is_safe_component(item_id) {
             return Err(workspace_error("Agent workspace identity is invalid."));
         }
-        let leases = context.resolve_project_path(&format!(
-            ".app/import-sessions/{session_id}/items/{item_id}/staging/agent-leases"
-        ))?;
+        let leases =
+            context.resolve_project_path(&context.layout.import_paths()?.item_staging_child(
+                session_id,
+                item_id,
+                &["agent-leases"],
+            )?)?;
         if !leases.exists() {
             return Ok(());
         }
@@ -366,10 +382,11 @@ impl AgentWorkspaceBuilder {
                 }
             };
             if !preserve {
-                let relative = format!(
-                    ".app/import-sessions/{session_id}/items/{item_id}/staging/agent/{}",
-                    lease.workspace_id
-                );
+                let relative = context.layout.import_paths()?.item_staging_child(
+                    session_id,
+                    item_id,
+                    &["agent", &lease.workspace_id],
+                )?;
                 Self::cleanup_recorded_workspace(context, session_id, item_id, &relative)?;
             }
         }
@@ -529,10 +546,12 @@ fn copy_hard_failure_source(
     item: &ImportItem,
     destination_dir: &Path,
 ) -> Result<(String, Vec<String>), BackendError> {
-    let staging = context.resolve_project_path(&format!(
-        ".app/import-sessions/{}/items/{}/staging",
-        session.session_id, item.item_id
-    ))?;
+    let staging = context.resolve_project_path(
+        &context
+            .layout
+            .import_paths()?
+            .item_staging(&session.session_id, &item.item_id)?,
+    )?;
     let mut candidates = vec![staging.join("source.bin")];
     let authorized = staging.join("authorized");
     if authorized.exists() {
@@ -599,8 +618,11 @@ fn copy_verified_item_artifact(
     destination: &Path,
 ) -> Result<(), BackendError> {
     let expected_prefix = format!(
-        ".app/import-sessions/{}/items/{}/",
-        session.session_id, item.item_id
+        "{}/",
+        context
+            .layout
+            .import_paths()?
+            .item_root(&session.session_id, &item.item_id)?
     );
     let normalized = artifact.relative_path.replace('\\', "/");
     if !normalized.starts_with(&expected_prefix) {

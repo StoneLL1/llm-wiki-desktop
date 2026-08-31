@@ -22,9 +22,11 @@ use crate::utils::process_lifetime::{
     configure_isolated_process, run_bounded_process, BoundedProcessError, ProcessLifetimeGuard,
 };
 
-const ROUTE_PROBE_CACHE_TTL: Duration = Duration::from_secs(30);
+const AGENT_PROBE_POSITIVE_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const AGENT_PROBE_NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(60);
 const ROUTE_PROBE_CACHE_MAX_ENTRIES: usize = 128;
 const ROUTE_PROBE_STABILITY_ATTEMPTS: usize = 3;
+const AGENT_PROBE_PROTOCOL_REVISION: u32 = 1;
 const MAX_AGENT_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_AGENT_RUNTIME: Duration = Duration::from_secs(15 * 60);
 
@@ -228,10 +230,19 @@ struct AgentRouteProbeCacheKey {
     leading_args: Vec<String>,
     executable_identities: Vec<ExecutableIdentity>,
     path_generation: u64,
-    settings_revision: String,
-    canonical_identity_key: String,
-    identity_revision: String,
+    protocol_revision: u32,
     epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct AgentRouteProbeFlightKey {
+    kind: AgentKind,
+    executable_path: Option<String>,
+    program: String,
+    leading_args: Vec<String>,
+    executable_identities: Vec<ExecutableIdentity>,
+    path_generation: u64,
+    protocol_revision: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -253,7 +264,7 @@ struct CachedAgentRouteProbe {
 struct AgentRouteProbeCache {
     epoch: u64,
     entries: HashMap<AgentRouteProbeCacheKey, CachedAgentRouteProbe>,
-    in_flight: HashSet<AgentRouteProbeCacheKey>,
+    in_flight: HashSet<AgentRouteProbeFlightKey>,
 }
 
 pub struct AgentService {
@@ -388,7 +399,8 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
     /// narrow form so a lint request never executes every installed CLI just
     /// to validate one candidate.
     pub fn detect_agent(&self, kind: AgentKind, is_default: bool) -> AgentInfo {
-        self.detect(kind, is_default)
+        let (info, _, key) = self.detect_agent_cached_at(kind, Instant::now());
+        route_info_with_readable_identity(info, &key, kind, is_default)
     }
 
     /// Reuse only the expensive Agent version/protocol probe used by Workflow
@@ -438,13 +450,32 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
         &self,
         kind: AgentKind,
         is_default: bool,
-        settings_revision: &str,
-        canonical_identity_key: &str,
-        identity_revision: &str,
+        _settings_revision: &str,
+        _canonical_identity_key: &str,
+        _identity_revision: &str,
         now: Instant,
     ) -> (AgentInfo, bool, String) {
+        let (info, probed, key) = self.detect_agent_cached_at(kind, now);
+        let target_revision = lint_target_revision_from_probe_key(&key);
+        (
+            route_info_with_readable_identity(info, &key, kind, is_default),
+            probed,
+            target_revision,
+        )
+    }
+
+    /// Cache only target-bound probe facts. Project identity and the default
+    /// Agent are presentation inputs, not executable facts, so two projects
+    /// resolving the same attested target share one probe while applying their
+    /// own `is_default` overlay on return.
+    fn detect_agent_cached_at(
+        &self,
+        kind: AgentKind,
+        now: Instant,
+    ) -> (AgentInfo, bool, AgentRouteProbeCacheKey) {
         let mut last_key = None;
-        for _ in 0..ROUTE_PROBE_STABILITY_ATTEMPTS {
+        let mut stability_attempts = 0;
+        while stability_attempts < ROUTE_PROBE_STABILITY_ATTEMPTS {
             let target = self.runner.resolve_probe_target(kind.command());
             let epoch = self
                 .route_probe_cache
@@ -454,14 +485,7 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
             // Exact executable identities may require hashing a large native
             // binary. Never hold the global route-cache mutex across disk I/O;
             // the epoch is rechecked after the attestation is built.
-            let key = agent_route_probe_cache_key(
-                kind,
-                &target,
-                settings_revision,
-                canonical_identity_key,
-                identity_revision,
-                epoch,
-            );
+            let key = agent_route_probe_cache_key(kind, &target, epoch);
             last_key = Some(key.clone());
             let mut cache = self
                 .route_probe_cache
@@ -471,40 +495,41 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
             if cache.epoch != epoch {
                 continue;
             }
-            let target_revision = lint_target_revision_from_probe_key(&key);
             if let Some(entry) = cache.entries.get(&key) {
-                return (
-                    route_info_with_readable_identity(entry.info.clone(), &key, kind, is_default),
-                    false,
-                    target_revision,
-                );
+                return (entry.info.clone(), false, key);
             }
-            if !cache.in_flight.insert(key.clone()) {
-                drop(
-                    self.route_probe_ready
-                        .wait(cache)
-                        .expect("Agent route probe cache lock poisoned"),
-                );
+            let flight_key = agent_route_probe_flight_key(&key);
+            while cache.in_flight.contains(&flight_key) {
+                cache = self
+                    .route_probe_ready
+                    .wait(cache)
+                    .expect("Agent route probe cache lock poisoned");
+            }
+            cache.entries.retain(|_, entry| entry.expires_at > now);
+            if cache.epoch != epoch {
                 continue;
             }
+            if let Some(entry) = cache.entries.get(&key) {
+                return (entry.info.clone(), false, key);
+            }
+            cache.in_flight.insert(flight_key.clone());
             drop(cache);
 
-            let info = self.detect_with_target(kind, is_default, &target);
-            let refreshed_target = self.runner.resolve_probe_target(kind.command());
-            let refreshed_key = agent_route_probe_cache_key(
+            let info = route_info_with_readable_identity(
+                self.detect_with_target(kind, false, &target),
+                &key,
                 kind,
-                &refreshed_target,
-                settings_revision,
-                canonical_identity_key,
-                identity_revision,
-                key.epoch,
+                false,
             );
+            let refreshed_target = self.runner.resolve_probe_target(kind.command());
+            let refreshed_key = agent_route_probe_cache_key(kind, &refreshed_target, key.epoch);
             let mut cache = self
                 .route_probe_cache
                 .lock()
                 .expect("Agent route probe cache lock poisoned");
-            cache.in_flight.remove(&key);
+            cache.in_flight.remove(&flight_key);
             if cache.epoch != key.epoch || refreshed_key != key {
+                stability_attempts += 1;
                 self.route_probe_ready.notify_all();
                 drop(cache);
                 continue;
@@ -513,7 +538,7 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
                 key.clone(),
                 CachedAgentRouteProbe {
                     info: info.clone(),
-                    expires_at: now + ROUTE_PROBE_CACHE_TTL,
+                    expires_at: now + agent_probe_cache_ttl(&info),
                 },
             );
             while cache.entries.len() > ROUTE_PROBE_CACHE_MAX_ENTRIES {
@@ -528,23 +553,21 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
                 cache.entries.remove(&oldest);
             }
             self.route_probe_ready.notify_all();
-            return (
-                route_info_with_readable_identity(info, &refreshed_key, kind, is_default),
-                true,
-                lint_target_revision_from_probe_key(&refreshed_key),
-            );
+            return (info, true, refreshed_key);
         }
         let key = last_key.expect("bounded route verification always records a target");
         (
-            unstable_agent_route_info(kind, is_default, key.executable_path.clone()),
+            unstable_agent_route_info(kind, false, key.executable_path.clone()),
             true,
-            lint_target_revision_from_probe_key(&key),
+            key,
         )
     }
 
-    /// Manual Agent refresh/configuration actions advance the cache epoch. A
-    /// probe already in flight is discarded and retried against the new epoch,
-    /// so neither its caller nor the cache can observe stale detection data.
+    /// Manual refreshes and target-affecting settings changes advance the
+    /// shared cache epoch before probing. A probe already in flight is
+    /// discarded and retried against the new epoch, so neither Facts nor
+    /// Workflow presentation can observe stale detection data. Default-Agent
+    /// changes deliberately do not invalidate target facts.
     pub(crate) fn invalidate_workflow_route_cache(&self) {
         let mut cache = self
             .route_probe_cache
@@ -553,11 +576,6 @@ Return only the proposed Markdown candidate on stdout.\n\n{skill}\n\n<authorized
         cache.epoch = cache.epoch.wrapping_add(1);
         cache.entries.clear();
         self.route_probe_ready.notify_all();
-    }
-
-    fn detect(&self, kind: AgentKind, is_default: bool) -> AgentInfo {
-        let target = self.runner.resolve_probe_target(kind.command());
-        self.detect_with_target(kind, is_default, &target)
     }
 
     fn detect_with_target(
@@ -2882,15 +2900,18 @@ fn unstable_agent_route_info(
 }
 
 fn route_info_with_readable_identity(
-    info: AgentInfo,
+    mut info: AgentInfo,
     key: &AgentRouteProbeCacheKey,
     kind: AgentKind,
     is_default: bool,
 ) -> AgentInfo {
-    if key
-        .executable_identities
-        .iter()
-        .all(|identity| identity.sha256.is_some())
+    info.is_default = is_default;
+    if key.executable_path.is_none()
+        || (!key.executable_identities.is_empty()
+            && key
+                .executable_identities
+                .iter()
+                .all(|identity| identity.sha256.is_some()))
     {
         return info;
     }
@@ -2941,6 +2962,7 @@ fn lint_target_revision(target: &AgentProbeTarget) -> String {
             .collect(),
         agent_probe_target_identities(target),
         process_path_generation(),
+        AGENT_PROBE_PROTOCOL_REVISION,
     )
 }
 
@@ -2951,6 +2973,7 @@ fn lint_target_revision_from_probe_key(key: &AgentRouteProbeCacheKey) -> String 
         key.leading_args.clone(),
         key.executable_identities.clone(),
         key.path_generation,
+        key.protocol_revision,
     )
 }
 
@@ -2960,6 +2983,7 @@ fn lint_target_revision_parts(
     leading_args: Vec<String>,
     executable_identities: Vec<ExecutableIdentity>,
     path_generation: u64,
+    protocol_revision: u32,
 ) -> String {
     let identities = executable_identities
         .into_iter()
@@ -2979,6 +3003,7 @@ fn lint_target_revision_parts(
         "leadingArgs": leading_args,
         "executableIdentities": identities,
         "pathGeneration": path_generation,
+        "protocolRevision": protocol_revision,
     });
     let bytes = serde_json::to_vec(&value).unwrap_or_default();
     format!("{:x}", Sha256::digest(bytes))
@@ -2987,9 +3012,6 @@ fn lint_target_revision_parts(
 fn agent_route_probe_cache_key(
     kind: AgentKind,
     target: &AgentProbeTarget,
-    settings_revision: &str,
-    canonical_identity_key: &str,
-    identity_revision: &str,
     epoch: u64,
 ) -> AgentRouteProbeCacheKey {
     AgentRouteProbeCacheKey {
@@ -3003,10 +3025,28 @@ fn agent_route_probe_cache_key(
             .collect(),
         executable_identities: agent_probe_target_identities(target),
         path_generation: process_path_generation(),
-        settings_revision: settings_revision.to_string(),
-        canonical_identity_key: canonical_identity_key.to_string(),
-        identity_revision: identity_revision.to_string(),
+        protocol_revision: AGENT_PROBE_PROTOCOL_REVISION,
         epoch,
+    }
+}
+
+fn agent_route_probe_flight_key(key: &AgentRouteProbeCacheKey) -> AgentRouteProbeFlightKey {
+    AgentRouteProbeFlightKey {
+        kind: key.kind,
+        executable_path: key.executable_path.clone(),
+        program: key.program.clone(),
+        leading_args: key.leading_args.clone(),
+        executable_identities: key.executable_identities.clone(),
+        path_generation: key.path_generation,
+        protocol_revision: key.protocol_revision,
+    }
+}
+
+fn agent_probe_cache_ttl(info: &AgentInfo) -> Duration {
+    if info.state == AgentDetectionState::Installed {
+        AGENT_PROBE_POSITIVE_CACHE_TTL
+    } else {
+        AGENT_PROBE_NEGATIVE_CACHE_TTL
     }
 }
 
@@ -3899,7 +3939,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_route_cache_keys_ttl_and_manual_epoch_are_fail_fresh() {
+    fn shared_probe_cache_reuses_target_facts_across_projects_and_overlays_defaults() {
         let executable_dir = tempfile::tempdir().unwrap();
         let executable = executable_dir.path().join("claude-test");
         std::fs::write(&executable, b"v1").unwrap();
@@ -3932,25 +3972,18 @@ mod tests {
         assert_eq!(warm, first);
         assert_eq!(runner.version_calls.load(Ordering::SeqCst), 1);
 
-        let (settings_changed, settings_probed, _) = service.detect_agent_for_workflow_route_at(
+        let (other_project, other_project_probed, _) = service.detect_agent_for_workflow_route_at(
             AgentKind::Claude,
             true,
             "settings-b",
-            "identity-a",
-            "revision-a",
+            "identity-b",
+            "revision-b",
             now + Duration::from_secs(2),
         );
-        assert!(settings_probed);
-        assert!(settings_changed.is_default);
-        let (_, identity_probed, _) = service.detect_agent_for_workflow_route_at(
-            AgentKind::Claude,
-            true,
-            "settings-b",
-            "identity-a",
-            "revision-b",
-            now + Duration::from_secs(3),
-        );
-        assert!(identity_probed);
+        assert!(!other_project_probed);
+        assert!(other_project.is_default);
+        assert!(!first.is_default);
+        assert_eq!(runner.version_calls.load(Ordering::SeqCst), 1);
 
         std::fs::write(&runner.executable, b"replacement-v2").unwrap();
         let (_, executable_probed, _) = service.detect_agent_for_workflow_route_at(
@@ -3959,10 +3992,13 @@ mod tests {
             "settings-b",
             "identity-a",
             "revision-b",
-            now + Duration::from_secs(4),
+            now + Duration::from_secs(3),
         );
         assert!(executable_probed);
 
+        // Project settings revisions that can affect target resolution advance
+        // the shared epoch at the settings command boundary. A default-only
+        // change does not call this invalidation path.
         service.invalidate_workflow_route_cache();
         let (_, manual_refresh_probed, _) = service.detect_agent_for_workflow_route_at(
             AgentKind::Claude,
@@ -3970,7 +4006,7 @@ mod tests {
             "settings-b",
             "identity-a",
             "revision-b",
-            now + Duration::from_secs(5),
+            now + Duration::from_secs(4),
         );
         assert!(manual_refresh_probed);
         let (_, ttl_expired_probed, _) = service.detect_agent_for_workflow_route_at(
@@ -3979,10 +4015,153 @@ mod tests {
             "settings-b",
             "identity-a",
             "revision-b",
-            now + Duration::from_secs(35),
+            now + Duration::from_secs(5 * 60 + 5),
         );
         assert!(ttl_expired_probed);
-        assert_eq!(runner.version_calls.load(Ordering::SeqCst), 6);
+        assert_eq!(runner.version_calls.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn facts_detection_reuses_raw_probe_and_recomputes_default_overlay() {
+        let executable_dir = tempfile::tempdir().unwrap();
+        let executable = executable_dir.path().join("claude-test");
+        std::fs::write(&executable, b"v1").unwrap();
+        let runner = Arc::new(RouteCacheProbeRunner {
+            executable,
+            version_calls: AtomicUsize::new(0),
+        });
+        let service = AgentService::with_runner(runner.clone());
+
+        let first_project = service.detect_agent(AgentKind::Claude, false);
+        let second_project = service.detect_agent(AgentKind::Claude, true);
+
+        assert_eq!(first_project.state, AgentDetectionState::Installed);
+        assert!(!first_project.is_default);
+        assert!(second_project.is_default);
+        assert_eq!(runner.version_calls.load(Ordering::SeqCst), 1);
+    }
+
+    struct NegativeProbeRunner {
+        executable: Option<PathBuf>,
+        version_calls: AtomicUsize,
+    }
+
+    impl ProcessRunner for NegativeProbeRunner {
+        fn find_executable(&self, _command: &str) -> Option<PathBuf> {
+            self.executable.clone()
+        }
+
+        fn run_with_timeout(
+            &self,
+            _command: &str,
+            args: &[&str],
+            _timeout: Duration,
+        ) -> Result<String, BackendError> {
+            if args == ["--version"] {
+                self.version_calls.fetch_add(1, Ordering::SeqCst);
+                return Err(BackendError::new(
+                    "AGENT_PROBE_TIMEOUT",
+                    "Agent probe timed out.",
+                    true,
+                    false,
+                ));
+            }
+            Ok(supported_claude_help())
+        }
+
+        fn run_capture(
+            &self,
+            _invocation: &AgentInvocation,
+        ) -> Result<(String, String), BackendError> {
+            panic!("negative probe fixture must not capture an Agent run")
+        }
+
+        fn run_task_streaming(
+            &self,
+            _invocation: &AgentInvocation,
+            _tasks: &TaskService,
+            _task_id: &str,
+        ) -> Result<String, BackendError> {
+            panic!("negative probe fixture must not stream an Agent run")
+        }
+    }
+
+    #[test]
+    fn missing_and_failed_probes_use_the_bounded_negative_ttl() {
+        let now = Instant::now();
+        let missing_runner = Arc::new(NegativeProbeRunner {
+            executable: None,
+            version_calls: AtomicUsize::new(0),
+        });
+        let missing = AgentService::with_runner(missing_runner.clone());
+        let (first_missing, first_probed, _) =
+            missing.detect_agent_cached_at(AgentKind::Claude, now);
+        let (_, warm_probed, _) = missing.detect_agent_cached_at(
+            AgentKind::Claude,
+            now + AGENT_PROBE_NEGATIVE_CACHE_TTL - Duration::from_millis(1),
+        );
+        let (_, expired_probed, _) = missing.detect_agent_cached_at(
+            AgentKind::Claude,
+            now + AGENT_PROBE_NEGATIVE_CACHE_TTL + Duration::from_millis(1),
+        );
+        assert_eq!(first_missing.state, AgentDetectionState::Missing);
+        assert!(first_probed);
+        assert!(!warm_probed);
+        assert!(expired_probed);
+        assert_eq!(missing_runner.version_calls.load(Ordering::SeqCst), 0);
+
+        let executable_dir = tempfile::tempdir().unwrap();
+        let executable = executable_dir.path().join("claude-test");
+        std::fs::write(&executable, b"v1").unwrap();
+        let failed_runner = Arc::new(NegativeProbeRunner {
+            executable: Some(executable),
+            version_calls: AtomicUsize::new(0),
+        });
+        let failed = AgentService::with_runner(failed_runner.clone());
+        let (first_failed, first_probed, _) = failed.detect_agent_cached_at(AgentKind::Claude, now);
+        let (_, warm_probed, _) = failed.detect_agent_cached_at(
+            AgentKind::Claude,
+            now + AGENT_PROBE_NEGATIVE_CACHE_TTL - Duration::from_millis(1),
+        );
+        let (_, expired_probed, _) = failed.detect_agent_cached_at(
+            AgentKind::Claude,
+            now + AGENT_PROBE_NEGATIVE_CACHE_TTL + Duration::from_millis(1),
+        );
+        assert_eq!(first_failed.state, AgentDetectionState::Failed);
+        assert!(first_probed);
+        assert!(!warm_probed);
+        assert!(expired_probed);
+        assert_eq!(failed_runner.version_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn resolved_target_without_attestation_fails_closed_on_negative_ttl() {
+        let runner = Arc::new(NegativeProbeRunner {
+            executable: Some(PathBuf::from("definitely-missing-agent-binary")),
+            version_calls: AtomicUsize::new(0),
+        });
+        let service = AgentService::with_runner(runner.clone());
+        let now = Instant::now();
+
+        let (first, first_probed, _) = service.detect_agent_cached_at(AgentKind::Claude, now);
+        let (_, warm_probed, _) = service.detect_agent_cached_at(
+            AgentKind::Claude,
+            now + AGENT_PROBE_NEGATIVE_CACHE_TTL - Duration::from_millis(1),
+        );
+        let (_, expired_probed, _) = service.detect_agent_cached_at(
+            AgentKind::Claude,
+            now + AGENT_PROBE_NEGATIVE_CACHE_TTL + Duration::from_millis(1),
+        );
+
+        assert_eq!(first.state, AgentDetectionState::Failed);
+        assert_eq!(
+            first.error.as_deref(),
+            Some("Agent launch target could not be read for exact identity verification.")
+        );
+        assert!(first_probed);
+        assert!(!warm_probed);
+        assert!(expired_probed);
+        assert_eq!(runner.version_calls.load(Ordering::SeqCst), 2);
     }
 
     struct BlockingRouteProbeRunner {
@@ -4069,21 +4248,29 @@ mod tests {
             release_ready: Condvar::new(),
         });
         let service = Arc::new(AgentService::with_runner(runner.clone()));
-        let spawn_probe = |service: Arc<AgentService>| {
+        let spawn_probe = |service: Arc<AgentService>, is_default, identity: &'static str| {
             thread::spawn(move || {
                 service.detect_agent_for_workflow_route(
                     AgentKind::Claude,
-                    false,
-                    "settings-a",
-                    "identity-a",
-                    "revision-a",
+                    is_default,
+                    if is_default {
+                        "settings-b"
+                    } else {
+                        "settings-a"
+                    },
+                    identity,
+                    if is_default {
+                        "revision-b"
+                    } else {
+                        "revision-a"
+                    },
                 )
             })
         };
 
-        let first = spawn_probe(service.clone());
+        let first = spawn_probe(service.clone(), false, "identity-a");
         wait_for_atomic_at_least(&runner.version_calls, 1);
-        let second = spawn_probe(service);
+        let second = spawn_probe(service, true, "identity-b");
         wait_for_atomic_at_least(&runner.resolve_calls, 2);
         assert_eq!(runner.version_calls.load(Ordering::SeqCst), 1);
 
@@ -4092,8 +4279,49 @@ mod tests {
         let second = second.join().unwrap();
         assert!(first.1 || second.1);
         assert!(!(first.1 && second.1));
-        assert_eq!(first.0, second.0);
+        assert_eq!(first.0.version, second.0.version);
+        assert!(!first.0.is_default);
+        assert!(second.0.is_default);
         assert_eq!(runner.version_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn unrelated_probe_notifications_do_not_exhaust_a_waiters_stability_budget() {
+        let executable_dir = tempfile::tempdir().unwrap();
+        let executable = executable_dir.path().join("claude-test");
+        std::fs::write(&executable, b"v1").unwrap();
+        let runner = Arc::new(BlockingRouteProbeRunner {
+            executable,
+            resolve_calls: AtomicUsize::new(0),
+            version_calls: AtomicUsize::new(0),
+            generation: AtomicUsize::new(1),
+            release_first: Mutex::new(false),
+            release_ready: Condvar::new(),
+        });
+        let service = Arc::new(AgentService::with_runner(runner.clone()));
+        let first_service = service.clone();
+        let first = thread::spawn(move || first_service.detect_agent(AgentKind::Claude, false));
+        wait_for_atomic_at_least(&runner.version_calls, 1);
+
+        let waiter_done = Arc::new(AtomicBool::new(false));
+        let waiter_service = service.clone();
+        let waiter_done_on_return = waiter_done.clone();
+        let waiter = thread::spawn(move || {
+            let info = waiter_service.detect_agent(AgentKind::Claude, false);
+            waiter_done_on_return.store(true, Ordering::SeqCst);
+            info
+        });
+        wait_for_atomic_at_least(&runner.resolve_calls, 2);
+
+        for kind in [AgentKind::Codex, AgentKind::Openclaw, AgentKind::Hermes] {
+            service.detect_agent(kind, false);
+            assert!(!waiter_done.load(Ordering::SeqCst));
+        }
+
+        runner.release_first_probe();
+        assert_eq!(first.join().unwrap().state, AgentDetectionState::Installed);
+        assert_eq!(waiter.join().unwrap().state, AgentDetectionState::Installed);
+        assert_eq!(runner.version_calls.load(Ordering::SeqCst), 4);
     }
 
     #[test]
@@ -4124,11 +4352,25 @@ mod tests {
 
         service.invalidate_workflow_route_cache();
         runner.generation.store(2, Ordering::SeqCst);
+        let forced_service = service.clone();
+        let forced = thread::spawn(move || {
+            forced_service.detect_agent_for_workflow_route(
+                AgentKind::Claude,
+                false,
+                "settings-a",
+                "identity-a",
+                "revision-a",
+            )
+        });
+        wait_for_atomic_at_least(&runner.resolve_calls, 2);
+        assert_eq!(runner.version_calls.load(Ordering::SeqCst), 1);
         runner.release_first_probe();
 
         let (info, probed) = probe.join().unwrap();
-        assert!(probed);
+        let (forced_info, forced_probed) = forced.join().unwrap();
+        assert!(probed || forced_probed);
         assert_eq!(info.version.as_deref(), Some("2.0.0"));
+        assert_eq!(forced_info.version.as_deref(), Some("2.0.0"));
         assert_eq!(runner.version_calls.load(Ordering::SeqCst), 2);
     }
 

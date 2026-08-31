@@ -22,8 +22,8 @@ export type FileDetectionMethod = (typeof FILE_DETECTION_METHODS)[number];
 export const FILE_SKIP_REASONS = [
   "symlink_or_reparse_point", "hidden_or_system", "ignored_directory", "project_internal",
   "unsupported_format", "cycle_detected", "depth_limit_exceeded",
-  "file_limit_exceeded", "file_too_large", "large_data_confirmation_required",
-  "duplicate", "invalid_path", "unreadable",
+  "file_limit_exceeded", "file_too_large", "insufficient_disk", "large_data_confirmation_required",
+  "duplicate", "invalid_path", "non_utf8_path", "unreadable",
 ] as const;
 export type FileSkipReason = (typeof FILE_SKIP_REASONS)[number];
 
@@ -105,7 +105,11 @@ export interface AcceptImportScanV2Request extends GetImportScanResultV2Request 
 }
 
 export interface AcceptImportScanV2Result {
-  session: import("./importV2").ImportSession;
+  sessionId: string;
+  semanticRevision: number;
+  acceptedItemCount: number;
+  operationTask?: import("./task").BackendTask | null;
+  overview: import("./importV2").ImportSessionOverview;
   scan: FileScanResult;
 }
 

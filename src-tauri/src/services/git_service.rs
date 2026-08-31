@@ -58,6 +58,16 @@ fn git_task_cancelled() -> bool {
 }
 
 impl GitService {
+    #[cfg(test)]
+    pub(crate) fn reset_process_attempts_for_test() {
+        TEST_GIT_PROCESS_ATTEMPTS.with(|count| count.set(0));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn process_attempts_for_test() -> usize {
+        TEST_GIT_PROCESS_ATTEMPTS.with(|count| count.get())
+    }
+
     /// Bind nested app-owned Git calls to the current task cancellation token.
     /// The scope is thread-local because the synchronous Git transaction must
     /// stay on the permit-owning thread, and nested scopes compose fail-closed.

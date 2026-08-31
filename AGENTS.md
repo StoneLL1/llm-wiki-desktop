@@ -94,7 +94,7 @@ Review effort must be proportional and is only required when executable code cha
 
 - **Documentation-only work** — Do not launch review subagents for Markdown/docs, research, plans, reviews, progress logs, or gotchas-only changes.
 - **Small localized code changes** — Perform a focused review of the changed code. A review subagent is optional when the change is straightforward and low risk.
-- **Features, meaningful fixes, cross-layer changes, or high-risk code** — Launch two review subagents:
+- **Features, meaningful fixes, cross-layer changes, or high-risk code** — Launch two review subagents:（Single-turn dialogue should only be used once.）
   - Subagent A with shared context: review design intent, logic, consistency, and integration with existing docs.
   - Subagent B with fresh context: review with no assumptions, looking for blind spots, missing tests, and unclear behavior.
 

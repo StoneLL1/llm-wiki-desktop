@@ -2426,8 +2426,8 @@ where
 {
     // Native libraries retain their source-artifact contract: `raw/sources`
     // contains originals of any type, not only Markdown. Compatible vaults
-    // have no app-owned evidence root, so their discovered Source roots are
-    // counted with the same Markdown policy used by the index.
+    // can additionally have isolated app-owned evidence after enablement, but
+    // their pre-existing discovered Source roots remain part of inventory.
     let Some(evidence_root) = context.layout.evidence_root.as_deref() else {
         return count_inventory_markdown_roles(
             context,
@@ -2439,7 +2439,7 @@ where
     let Some(root) = layout_root_path(context, &format!("{evidence_root}/sources")) else {
         return InventoryFileCount::default();
     };
-    count_inventory_files(
+    let evidence = count_inventory_files(
         &context.root,
         &root,
         false,
@@ -2447,7 +2447,20 @@ where
         true,
         cancelled,
         on_progress,
-    )
+    );
+    if context.layout.app_state_root.as_deref() == Some(".app") || evidence.cancelled {
+        return evidence;
+    }
+    let discovered = count_inventory_markdown_roles(
+        context,
+        &[ProjectMarkdownRootRole::Source],
+        cancelled,
+        on_progress,
+    );
+    InventoryFileCount {
+        count: evidence.count + discovered.count,
+        cancelled: discovered.cancelled,
+    }
 }
 
 fn count_inventory_tasks<C, P>(

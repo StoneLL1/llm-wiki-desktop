@@ -25,7 +25,7 @@ const line = await new Promise((resolve) => { let data = ""; process.stdin.setEn
 const rpc = JSON.parse(line);
 if (rpc?.method === "capability.health") {
   const route = rpc?.params?.route;
-  const allowedRoutes = new Set(["web.generic.browser", "web.wechat.article"]);
+  const allowedRoutes = new Set(["web.generic.browser", "web.wechat.article", "web.x.post"]);
   if (rpc?.params?.protocolVersion !== "2" || rpc?.params?.capabilityId !== "browser-runtime" || !allowedRoutes.has(route)) throw new Error("invalid health request");
   const executable = chromium.executablePath();
   if (!(await fs.stat(executable).catch(() => null))?.isFile()) throw new Error("browser runtime is unavailable");

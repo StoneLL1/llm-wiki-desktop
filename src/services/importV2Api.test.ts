@@ -12,6 +12,9 @@ describe("Import V2 presentation API", () => {
     expect(importV2Api.commandNames).toEqual({
       createSession: "create_import_session_v2",
       getSession: "get_import_session_v2",
+      getSessionOverview: "get_import_session_overview_v2",
+      listSessionItems: "list_import_session_items_v2",
+      startSessionRecovery: "start_import_session_recovery_v2",
       getHistorySession: "get_import_history_session_v2",
       getCompletion: "get_import_completion_v2",
       addItems: "add_import_items_v2",
@@ -45,6 +48,8 @@ describe("Import V2 presentation API", () => {
       saveWorkbenchPreferences: "save_import_workbench_preferences_v2",
       getRestrictedContentStatus: "get_import_restricted_content_status_v2",
       listHistory: "list_import_history_v2",
+      getHistoryDetail: "get_import_history_detail_v2",
+      rebuildHistoryIndex: "rebuild_import_history_index_v2",
       authorizePrivateTarget: "authorize_import_private_target_v2",
       beginLogin: "begin_import_login_v2",
       completeLogin: "complete_import_login_v2",
@@ -121,6 +126,24 @@ describe("Import V2 presentation API", () => {
     expect(invoke).toHaveBeenLastCalledWith("get_import_scan_result_v2", { request });
   });
 
+  it("keeps history detail paged and index rebuild project-bound", async () => {
+    const detail = {
+      projectId: "project-1",
+      projectRootPath: "D:/Wiki/项目",
+      batchId: "batch-1",
+      cursor: null,
+      limit: 50,
+    };
+    invoke.mockResolvedValueOnce({});
+    await importV2Api.getHistoryDetail(detail);
+    expect(invoke).toHaveBeenLastCalledWith("get_import_history_detail_v2", { request: detail });
+
+    const rebuild = { projectId: "project-1", projectRootPath: "D:/Wiki/项目" };
+    invoke.mockResolvedValueOnce(undefined);
+    await importV2Api.rebuildHistoryIndex(rebuild);
+    expect(invoke).toHaveBeenLastCalledWith("rebuild_import_history_index_v2", { request: rebuild });
+  });
+
   it("keeps legacy item start while exposing operation and saved-scan commands", async () => {
     const batchRequest = {
       projectId: "project-1",
@@ -159,5 +182,22 @@ describe("Import V2 presentation API", () => {
     await importV2Api.cancelBatch(request);
 
     expect(invoke).toHaveBeenLastCalledWith("cancel_import_batch_v2", { request });
+  });
+
+  it("normalizes backend failures while retaining technical diagnostics", async () => {
+    invoke.mockRejectedValueOnce({ code: "IMPORT_PREVIEW_OFFLINE", message: "raw transport detail" });
+    const failure = await importV2Api.getPreviewContent({
+      projectId: "project-1",
+      projectRootPath: "D:/Wiki/项目",
+      sessionId: "session-1",
+      itemId: "item-1",
+      candidateId: null,
+    }).catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      code: "IMPORT_PREVIEW_OFFLINE",
+      summaryKey: "backendError.summary.import",
+      recoverable: true,
+    });
+    expect((failure as { technicalDetails?: string }).technicalDetails).toContain("raw transport detail");
   });
 });

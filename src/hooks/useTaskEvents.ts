@@ -16,8 +16,13 @@ import {
 } from "../services/taskEventDispatcher";
 import {
   handleTaskEvent,
-  recoverTasksForProject,
 } from "../stores/taskStore";
+import {
+  ensureProjectFacts,
+  invalidateProjectFacts,
+  projectFactsAuthorityKey,
+  projectFactsAuthorityMatches,
+} from "../stores/projectFactsStore";
 import type { BackendEvent } from "../types/task";
 import type { ProjectSummary } from "../types/project";
 import {
@@ -27,6 +32,10 @@ import {
   isProjectScopeCurrent,
 } from "../stores/projectScope";
 import { translateBackendError } from "../lib/backendError";
+
+interface AppForegroundChangedPayload {
+  foreground: boolean;
+}
 
 const hasTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -76,19 +85,49 @@ export function useTaskEvents(): void {
     let cancelled = false;
 
     const unregisterStoreListener = registerTaskEventOwner((event) => {
-      const activeProject = useProjectStore.getState().currentProject;
+      const projectState = useProjectStore.getState();
+      const activeProject = projectState.currentProject;
       const scopeEpoch = captureProjectScope();
-      if (!isTaskEventForProject(event, activeProject.projectId)) return;
-      if (event.eventType === "project_refreshed" && isProjectSummary(event.payload)) {
-        useProjectStore.getState().setCurrentProject(event.payload);
-      }
+      // The owner records every valid task snapshot for audit/recovery. Only
+      // current-project presentation effects continue past the scope guard.
       handleTaskEvent(event);
-      void import("../services/projectResourceInvalidation").then((service) =>
-        isProjectScopeCurrent(scopeEpoch) && invalidateProjectResources(
-          { projectId: activeProject.projectId, rootPath: activeProject.rootPath },
+      if (!isTaskEventForProject(event, activeProject.projectId)) return;
+      const authority = projectState.authority;
+      const scope = { projectId: activeProject.projectId, rootPath: activeProject.rootPath };
+      const authorityKey = authority
+        && authority.projectId === activeProject.projectId
+        && activeProject.rootPath
+        ? projectFactsAuthorityKey(authority)
+        : null;
+      const factsScopeMatches = authorityKey !== null
+        && projectFactsAuthorityMatches(scope, authorityKey);
+      if (event.eventType === "project_refreshed" && isProjectSummary(event.payload)) {
+        if (
+          factsScopeMatches
+          && activeProject.rootPath === event.payload.rootPath
+        ) {
+          useProjectStore.getState().setCurrentProject(event.payload);
+          invalidateProjectFacts(scope, ["git"], "project_refreshed");
+          void ensureProjectFacts(scope, ["git"]).catch(() => undefined);
+        }
+      }
+      void import("../services/projectResourceInvalidation").then((service) => {
+        if (!isProjectScopeCurrent(scopeEpoch)) return;
+        invalidateProjectResources(
+          scope,
           service.projectResourcesForBackendEvent(event),
           true,
-        ));
+        );
+        const latestAuthority = useProjectStore.getState().authority;
+        const authorityStillMatches = factsScopeMatches
+          && latestAuthority?.projectId === scope.projectId
+          && projectFactsAuthorityKey(latestAuthority) === authorityKey
+          && projectFactsAuthorityMatches(scope, authorityKey);
+        if (authorityStillMatches && service.gitFactsChangedForBackendEvent(event)) {
+          invalidateProjectFacts(scope, ["git"], "task_affected_paths");
+          void ensureProjectFacts(scope, ["git"]).catch(() => undefined);
+        }
+      });
       if (event.eventType !== "workflow_updated") void notifyTaskEvent(event);
     });
 
@@ -96,9 +135,11 @@ export function useTaskEvents(): void {
       listen<BackendEvent>(channel, (evt) => {
         if (cancelled) return;
         const event = evt.payload as BackendEvent;
-        if (event.eventType === "workflow_updated") void notifyTaskEvent(event);
         const activeProject = useProjectStore.getState().currentProject;
-        if (!isTaskEventForProject(event, activeProject.projectId)) return;
+        if (
+          event.eventType === "workflow_updated"
+          && isTaskEventForProject(event, activeProject.projectId)
+        ) void notifyTaskEvent(event);
         dispatchTaskEvent(event);
       })
         .then((unlisten) => {
@@ -122,22 +163,40 @@ export function useTaskEvents(): void {
         // Notification actions are unavailable in browser-only development.
       });
 
-    const refreshPermissionEpoch = () => {
-      invalidateNotificationPermissionEpoch();
+    let resourceRefreshArmed = false;
+    listen<AppForegroundChangedPayload>("app://foreground-changed", (evt) => {
+      if (cancelled) return;
+      if (!evt.payload.foreground) {
+        resourceRefreshArmed = true;
+        return;
+      }
+      if (!resourceRefreshArmed) return;
+      resourceRefreshArmed = false;
       const activeProject = useProjectStore.getState().currentProject;
       invalidateObservedProjectResourcesOnFocus({
         projectId: activeProject.projectId,
         rootPath: activeProject.rootPath,
       });
+    })
+      .then((unlisten) => {
+        if (cancelled) unlisten();
+        else unlisteners.push(unlisten);
+      })
+      .catch(() => {
+        // Fail closed: DOM focus must not become a resource-refresh fallback.
+      });
+
+    const refreshNotificationPermissionEpoch = () => {
+      invalidateNotificationPermissionEpoch();
     };
-    window.addEventListener("focus", refreshPermissionEpoch);
+    window.addEventListener("focus", refreshNotificationPermissionEpoch);
 
     return () => {
       cancelled = true;
       const activeProjectId = useProjectStore.getState().currentProject.projectId;
       clearPendingTaskEvents((event) => event.projectId === activeProjectId);
       unregisterStoreListener();
-      window.removeEventListener("focus", refreshPermissionEpoch);
+      window.removeEventListener("focus", refreshNotificationPermissionEpoch);
       unlisteners.forEach((fn) => fn());
     };
   }, []);
@@ -148,12 +207,15 @@ export function useTaskEvents(): void {
 
   // Recover persisted tasks whenever the active project root changes.
   useEffect(() => {
-    if (currentProject.rootPath) {
-      recoverTasksForProject(currentProject.projectId, currentProject.rootPath).catch((error) => {
+    void import("../services/taskRecovery").then(({ recoverAppTasks, recoverTasksForProject }) => {
+      if (!currentProject.rootPath) return recoverAppTasks();
+      return recoverTasksForProject(currentProject.projectId, currentProject.rootPath);
+    }).catch((error) => {
+      if (currentProject.rootPath) {
         pushToast("error", i18next.t("task.recoverError", {
           message: translateBackendError(error, i18next.t.bind(i18next)),
         }));
-      });
-    }
+      }
+    });
   }, [currentProject.projectId, currentProject.rootPath, pushToast]);
 }

@@ -462,6 +462,23 @@ describe("projectStore bootstrap", () => {
     expect(useProjectStore.getState().currentProject).toEqual(projectB);
   });
 
+  it("does not publish a new project object for an equal agent route", () => {
+    useProjectStore.getState().setCurrentProject(summary);
+    const before = useProjectStore.getState().currentProject;
+    let publications = 0;
+    const unsubscribe = useProjectStore.subscribe(() => {
+      publications += 1;
+    });
+
+    useProjectStore
+      .getState()
+      .setAgentRoute(summary.projectId, summary.rootPath, summary.agentRoute);
+
+    unsubscribe();
+    expect(publications).toBe(0);
+    expect(useProjectStore.getState().currentProject).toBe(before);
+  });
+
   it("does not invalidate in-flight work for a metadata-only update to the same project", () => {
     useProjectStore.getState().setCurrentProject(summary);
     const scope = captureProjectScope();

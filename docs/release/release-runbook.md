@@ -9,7 +9,7 @@ Status: Batch 6 local automated acceptance is complete and the cross-platform CI
 The transaction is ordered as follows:
 
 1. `preflight` checks the canonical repository/tag/commit/version/identifier, the pinned Node and Rust toolchains, lockfiles, required protected inputs, and the complete `npm run check` gate.
-2. `capability-build` calls the reusable non-publishing capability workflow and produces 20 signed packs plus the exact catalog/trust/provenance inputs.
+2. `capability-build` calls the reusable non-publishing capability workflow and produces exactly one signed pack for every current `published definition × supported target`, plus the exact catalog/trust/provenance inputs. The count is derived from the product manifest (currently 44), never from the historical five-pack matrix.
 3. `desktop-build` builds Windows x64, macOS arm64, macOS x64, and Linux x64 from that same catalog. It verifies catalog embedding and every updater signature, and records exact machine-readable evidence that Windows Authenticode and Apple Developer ID/notarization are not required by the release policy.
 4. `manifest-and-provenance` creates exact-tag `latest.json`, deterministic CycloneDX inventories from `package-lock.json` and `Cargo.lock`, and same-run provenance.
 5. `packaged-smoke` installs and launches each packaged target and verifies the candidate fixture manifest without contacting the production endpoint. For `0.1.0`, the owner-approved one-time bootstrap policy replaces only the nonexistent prior-version upgrade with four-platform clean-install acceptance. From `0.1.1`, the real installed production-version-to-candidate update path is mandatory again. The broader recovery, security, and user-journey matrix remains Batch 6 acceptance work; Batch 5 evidence must not be described as that later acceptance.
@@ -43,7 +43,7 @@ npm run check:release-config
 npm run check
 ```
 
-The fixture rehearsal covers four desktop descriptors, exact tag/commit/run identity, 20 unique capability archives, exact-tag `latest.json`, exact OS-identity policy evidence, mandatory updater signatures, Node and Rust SBOMs, packaged-smoke evidence, provenance, exported attestation evidence, and deterministic flat checksums. Negative cases cover mutable URLs, missing platforms/assets, run drift, incomplete smoke, obsolete or altered OS-certificate evidence, duplicate public basenames, changed updater bytes, wrong updater keys, and tampering.
+The fixture rehearsal covers four desktop descriptors, exact tag/commit/run identity, the manifest-derived exact capability archive matrix, exact-tag `latest.json`, exact OS-identity policy evidence, mandatory updater signatures, Node and Rust SBOMs, packaged-smoke evidence, provenance, exported attestation evidence, and deterministic flat checksums. Negative cases cover mutable URLs, missing platforms/assets, run drift, incomplete smoke, obsolete or altered OS-certificate evidence, duplicate public basenames, changed updater bytes, wrong updater keys, and tampering.
 
 A real remote rehearsal must use a disposable stable-format tag at the current candidate commit, keep the GitHub Release as a draft until the protected publisher step, install every workflow artifact, and save the workflow URL plus artifact digests. Do not describe local fixture tests as a successful installation, upgrade, or anonymous-network rehearsal, and do not describe GitHub checksums/attestations as Windows or Apple OS identity.
 
@@ -67,7 +67,7 @@ The `desktop-release` reviewer confirms all of the following before approving `p
 - 4 desktop installers/updaters and their `.sig` files exist;
 - Windows/macOS descriptors contain the exact `not-required` OS-identity policy evidence and no certificate/account requirement has returned;
 - release notes and known limitations clearly warn that Windows SmartScreen/unknown-publisher prompts and macOS Gatekeeper manual override may occur;
-- the catalog has exactly 20 unique entries and all URLs use the same exact tag;
+- the catalog has exactly `published definitions × supported targets` unique entries derived from the product manifest and all URLs use the same exact tag;
 - `latest.json` has exactly the four supported Tauri platform keys and contains no mutable internal URL;
 - SBOMs, GitHub attestation, checksums, release notes, known limitations, and packaged-smoke summary are present;
 - Batch 6 acceptance evidence is attached when the release is intended for public stable users;

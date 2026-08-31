@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { AddImportItemsV2Request, CommitImportSessionRequest, CreateImportSessionV2Request, GetImportSessionV2Request, ImportSession, SetImportItemSelectionV2Request, StartImportItemsV2Request } from "./importV2";
+import type { AddImportItemsV2Request, CommitImportSessionRequest, CreateImportSessionV2Request, GetImportSessionV2Request, ImportSession, ImportSessionStatusCounts, SetImportItemSelectionV2Request, StartImportItemsV2Request } from "./importV2";
 import type { TaskResult, TaskResultReference } from "./task";
 
 describe("Import V2 contract", () => {
@@ -7,6 +7,27 @@ describe("Import V2 contract", () => {
     const reference = { type: "import_preview", sessionId: "session-1", itemId: "item-1" } satisfies TaskResultReference;
     const result = { summary: "Preview ready", affectedPaths: [], reference } satisfies TaskResult;
     expect(result.reference).toEqual(reference);
+  });
+
+  it("mirrors the backend-owned import operation reference", () => {
+    const reference = {
+      type: "import_operation",
+      sessionId: "session-1",
+      taskId: "operation-1",
+      itemCount: 1_001,
+    } satisfies TaskResultReference;
+    expect(reference.taskId).toBe("operation-1");
+    expect(reference.itemCount).toBe(1_001);
+  });
+
+  it("keeps every backend item status observable without loading item pages", () => {
+    const statusCounts = {
+      queued: 1, inspecting: 2, waitingCapability: 3, waitingLogin: 4,
+      waitingAuthorization: 5, extracting: 6, validating: 7, previewReady: 8,
+      needsMerge: 9, committing: 10, completed: 11, paused: 12,
+      cancelled: 13, skipped: 14, failed: 15,
+    } satisfies ImportSessionStatusCounts;
+    expect(Object.values(statusCounts).reduce((sum, count) => sum + count, 0)).toBe(120);
   });
 
   it("keeps completed V2 commit results bound to their history batch", () => {

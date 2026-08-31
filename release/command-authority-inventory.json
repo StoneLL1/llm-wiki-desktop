@@ -131,15 +131,6 @@
       "writeAuthority": "ProjectWritePermit"
     },
     {
-      "name": "add_import_paths_v2",
-      "source": "src-tauri/src/commands/import_v2_file_commands.rs",
-      "classifications": [
-        "mutation"
-      ],
-      "projectScoped": true,
-      "writeAuthority": "ProjectWritePermit"
-    },
-    {
       "name": "add_import_text_v2",
       "source": "src-tauri/src/commands/import_v2_commands.rs",
       "classifications": [
@@ -782,6 +773,14 @@
       "projectScoped": true
     },
     {
+      "name": "get_import_history_detail_v2",
+      "source": "src-tauri/src/commands/import_v2_presentation_commands.rs",
+      "classifications": [
+        "read"
+      ],
+      "projectScoped": true
+    },
+    {
       "name": "get_import_history_session_v2",
       "source": "src-tauri/src/commands/import_v2_commands.rs",
       "classifications": [
@@ -822,14 +821,20 @@
       "projectScoped": true
     },
     {
+      "name": "get_import_session_overview_v2",
+      "source": "src-tauri/src/commands/import_v2_commands.rs",
+      "classifications": [
+        "read"
+      ],
+      "projectScoped": true
+    },
+    {
       "name": "get_import_session_v2",
       "source": "src-tauri/src/commands/import_v2_commands.rs",
       "classifications": [
-        "read",
-        "mutation"
+        "read"
       ],
-      "projectScoped": true,
-      "writeAuthority": "ProjectWritePermit"
+      "projectScoped": true
     },
     {
       "name": "get_import_v2_migration_status",
@@ -979,24 +984,8 @@
         "mutation",
         "network"
       ],
-      "projectScoped": true,
-      "writeAuthority": "ProjectWritePermit",
-      "authorityPaths": [
-        {
-          "function": "install_import_capability_v2",
-          "authority": "ProjectWritePermit",
-          "requiredCalls": [
-            "start_import_items_for_state"
-          ]
-        },
-        {
-          "function": "install_import_capability_v2",
-          "authority": "ProjectExecutionLease",
-          "requiredCalls": [
-            "begin_project_external_task"
-          ]
-        }
-      ]
+      "projectScoped": false,
+      "writeAuthority": "AppCapabilityCoordinator"
     },
     {
       "name": "list_chat_sessions",
@@ -1025,6 +1014,14 @@
     {
       "name": "list_import_history_v2",
       "source": "src-tauri/src/commands/import_v2_presentation_commands.rs",
+      "classifications": [
+        "read"
+      ],
+      "projectScoped": true
+    },
+    {
+      "name": "list_import_session_items_v2",
+      "source": "src-tauri/src/commands/import_v2_commands.rs",
       "classifications": [
         "read"
       ],
@@ -1262,6 +1259,15 @@
         "read"
       ],
       "projectScoped": true
+    },
+    {
+      "name": "rebuild_import_history_index_v2",
+      "source": "src-tauri/src/commands/import_v2_presentation_commands.rs",
+      "classifications": [
+        "mutation"
+      ],
+      "projectScoped": true,
+      "writeAuthority": "ProjectWritePermit"
     },
     {
       "name": "refresh_source",
@@ -1849,6 +1855,15 @@
       ]
     },
     {
+      "name": "start_import_session_recovery_v2",
+      "source": "src-tauri/src/commands/import_v2_commands.rs",
+      "classifications": [
+        "mutation"
+      ],
+      "projectScoped": true,
+      "writeAuthority": "ProjectWritePermit"
+    },
+    {
       "name": "start_project_inventory",
       "source": "src-tauri/src/commands/project_commands.rs",
       "classifications": [
@@ -1984,6 +1999,58 @@
       ],
       "projectScoped": true,
       "writeAuthority": "ProjectWritePermit"
+    },
+    {
+      "name": "cancel_app_capability_install_v1",
+      "source": "src-tauri/src/commands/app_capability_commands.rs",
+      "classifications": ["mutation"],
+      "projectScoped": false,
+      "writeAuthority": "AppCapabilityCoordinator"
+    },
+    {
+      "name": "get_app_capability_task_activities_v1",
+      "source": "src-tauri/src/commands/app_capability_commands.rs",
+      "classifications": ["read"],
+      "projectScoped": false
+    },
+    {
+      "name": "get_app_capability_task_logs_v1",
+      "source": "src-tauri/src/commands/app_capability_commands.rs",
+      "classifications": ["read"],
+      "projectScoped": false
+    },
+    {
+      "name": "install_app_capability_v1",
+      "source": "src-tauri/src/commands/app_capability_commands.rs",
+      "classifications": ["mutation", "network"],
+      "projectScoped": false,
+      "writeAuthority": "AppCapabilityCoordinator"
+    },
+    {
+      "name": "list_app_capabilities_v1",
+      "source": "src-tauri/src/commands/app_capability_commands.rs",
+      "classifications": ["read"],
+      "projectScoped": false
+    },
+    {
+      "name": "list_app_tasks_v1",
+      "source": "src-tauri/src/commands/app_capability_commands.rs",
+      "classifications": ["read"],
+      "projectScoped": false
+    },
+    {
+      "name": "pause_app_capability_install_v1",
+      "source": "src-tauri/src/commands/app_capability_commands.rs",
+      "classifications": ["mutation"],
+      "projectScoped": false,
+      "writeAuthority": "AppCapabilityCoordinator"
+    },
+    {
+      "name": "resume_app_capability_install_v1",
+      "source": "src-tauri/src/commands/app_capability_commands.rs",
+      "classifications": ["mutation", "network"],
+      "projectScoped": false,
+      "writeAuthority": "AppCapabilityCoordinator"
     }
   ],
   "serviceAuthorityContracts": [
@@ -2033,7 +2100,7 @@
         "add_text_input_authorized",
         "set_discovery_task_id_authorized",
         "bind_item_task_ids_authorized",
-        "recover_session_authorized",
+        "recover_session_report_with_cancel_authorized",
         "set_item_selected_authorized",
         "select_subtitle_for_session_authorized"
       ],
@@ -2251,6 +2318,14 @@
     {
       "source": "src-tauri/src/services/import_v2/agent_assistance.rs",
       "function": "run_local",
+      "capability": "ProjectExecutionLease",
+      "requiredCalls": [
+        "run_local_with_before_terminal"
+      ]
+    },
+    {
+      "source": "src-tauri/src/services/import_v2/agent_assistance.rs",
+      "function": "run_local_with_before_terminal",
       "capability": "ProjectExecutionLease",
       "requiredCalls": [
         "with_current_write"

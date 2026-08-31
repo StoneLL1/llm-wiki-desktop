@@ -140,6 +140,25 @@ impl ProjectAssessmentService {
         Ok(assessment)
     }
 
+    /// Resolve only the current project health needed by an external-AI
+    /// authority gate. Git metadata does not participate in that allow/deny
+    /// decision, so this path deliberately avoids starting Git processes.
+    pub(crate) fn inspect_current_health(&self, path: &str) -> Result<ProjectHealth, BackendError> {
+        let cancelled = AtomicBool::new(false);
+        assess_project_folder_with_git(path, &self.config_dir, &cancelled, false)
+            .map(|assessment| assessment.health)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_phase_trace_for_test() {
+        ASSESSMENT_PHASE_TRACE.with(|trace| trace.borrow_mut().clear());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_phase_trace_for_test() -> Vec<&'static str> {
+        ASSESSMENT_PHASE_TRACE.with(|trace| std::mem::take(&mut *trace.borrow_mut()))
+    }
+
     pub fn get_operation(
         &self,
         operation_id: &AssessmentOperationId,
@@ -359,6 +378,15 @@ pub fn assess_project_folder(
     config_dir: &Path,
     cancelled: &AtomicBool,
 ) -> Result<ProjectOpenAssessment, BackendError> {
+    assess_project_folder_with_git(path, config_dir, cancelled, true)
+}
+
+fn assess_project_folder_with_git(
+    path: &str,
+    config_dir: &Path,
+    cancelled: &AtomicBool,
+    include_git: bool,
+) -> Result<ProjectOpenAssessment, BackendError> {
     check_cancelled(cancelled)?;
     let raw_root = PathBuf::from(path);
     let canonical_root = validate_existing_project_root(&raw_root).map_err(path_safety_error)?;
@@ -417,29 +445,41 @@ pub fn assess_project_folder(
     #[cfg(test)]
     ASSESSMENT_PHASE_TRACE.with(|trace| trace.borrow_mut().push("collision"));
     check_cancelled(cancelled)?;
-    #[cfg(test)]
-    ASSESSMENT_PHASE_TRACE.with(|trace| trace.borrow_mut().push("git"));
-    let (git, git_warning) = match GitService.repository_status_for_assessment(
-        &context,
-        assessment_deadline,
-        cancelled,
-    ) {
-        Ok(status) => (status, None),
-        Err(_) => (
+    let (git, git_warning) = if include_git {
+        #[cfg(test)]
+        ASSESSMENT_PHASE_TRACE.with(|trace| trace.borrow_mut().push("git"));
+        match GitService.repository_status_for_assessment(
+            &context,
+            assessment_deadline,
+            cancelled,
+        ) {
+            Ok(status) => (status, None),
+            Err(_) => (
+                GitRepositoryStatus {
+                    is_repository: false,
+                    branch: None,
+                    head: None,
+                    has_changes: false,
+                },
+                Some(ProjectAssessmentWarning {
+                    code: "PROJECT_GIT_UNAVAILABLE".into(),
+                    message:
+                        "Git state could not be inspected safely; Markdown access remains available."
+                            .into(),
+                    path: Some(".git".into()),
+                }),
+            ),
+        }
+    } else {
+        (
             GitRepositoryStatus {
                 is_repository: false,
                 branch: None,
                 head: None,
                 has_changes: false,
             },
-            Some(ProjectAssessmentWarning {
-                code: "PROJECT_GIT_UNAVAILABLE".into(),
-                message:
-                    "Git state could not be inspected safely; Markdown access remains available."
-                        .into(),
-                path: Some(".git".into()),
-            }),
-        ),
+            None,
+        )
     };
     check_cancelled(cancelled)?;
     let app_state_corrupt = app_state_is_corrupt(&canonical_root, cancelled)?;

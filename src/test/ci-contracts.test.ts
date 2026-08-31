@@ -86,13 +86,13 @@ describe("CI validation contract", () => {
 
     expect(packageJson.scripts.check).toBe("node scripts/run-checks.mjs");
     expect(checkOrchestrator).toContain(
-      'scripts: ["check:release-config", "test:final-four-redlines", "check:import-source-media", "test", "test:capability-tools", "lint", "build", "check:bundle", "check:console"]',
+      'scripts: ["check:release-config", "test:final-four-redlines", "check:command-execution", "check:import-source-media", "test", "test:capability-tools", "lint", "build", "check:bundle", "check:console"]',
     );
     expect(checkOrchestrator).toContain(
       'scripts: ["check:rust:gui", "test:rust"]',
     );
     expect(checkOrchestrator).toContain(
-      'scripts: ["check:release-config", "test:final-four-redlines", "lint", "build", "check:bundle", "check:console"]',
+      'scripts: ["check:release-config", "test:final-four-redlines", "check:command-execution", "lint", "build", "check:bundle", "check:console"]',
     );
     expect(checkOrchestrator).toContain(
       'scripts: ["check:rust:core"]',
@@ -107,7 +107,7 @@ describe("CI validation contract", () => {
       "node scripts/check-import-source-media-flow.mjs",
     );
     expect(packageJson.scripts["check:release-config"]).toBe(
-      "node --test --experimental-test-isolation=none scripts/check-release-config.node-test.mjs scripts/release-assets.node-test.mjs scripts/verify-capability-catalog.node-test.mjs scripts/verify-embedded-capability-catalog.node-test.mjs && npm run test:updater-signature && node scripts/check-release-version.mjs && node scripts/verify-capability-catalog.mjs --catalog capabilities/install-catalog.json --trusted-keys capabilities/trusted-keys.json --mode source",
+      "node --test --experimental-test-isolation=none scripts/check-release-config.node-test.mjs scripts/release-assets.node-test.mjs scripts/verify-product-capabilities.node-test.mjs scripts/capability-release-plan.node-test.mjs scripts/verify-capability-catalog.node-test.mjs scripts/verify-embedded-capability-catalog.node-test.mjs && npm run test:updater-signature && node scripts/check-release-version.mjs && node scripts/verify-product-capabilities.mjs --require-release-ready && node scripts/capability-release-plan.mjs && node scripts/verify-capability-catalog.mjs --catalog capabilities/install-catalog.json --trusted-keys capabilities/trusted-keys.json --mode source",
     );
     expect(packageJson.scripts["test:final-four-redlines"]).toBe(
       "node --test --experimental-test-isolation=none scripts/check-final-four-redlines.node-test.mjs",
@@ -163,7 +163,7 @@ describe("CI validation contract", () => {
     ]);
   });
 
-  it("keeps build tooling compatible without drifting the embedded capability runtime", () => {
+  it("keeps build tooling compatible while capability distribution uses the formal matrix", () => {
     const capabilityWorkflow = readRootFile(".github/workflows/capability-release.yml");
     const desktopWorkflow = readRootFile(".github/workflows/desktop-release.yml");
     const releaseSources = JSON.parse(
@@ -177,8 +177,8 @@ describe("CI validation contract", () => {
     };
 
     expect(desktopWorkflow).toContain("NODE_VERSION: 22.23.1");
-    expect(capabilityWorkflow.match(/node-version: 22\.23\.1/g)).toHaveLength(5);
-    expect(capabilityWorkflow.match(/--node-version 22\.17\.0/g)).toHaveLength(4);
+    expect(capabilityWorkflow.match(/node-version: 22\.23\.1/g)).toHaveLength(3);
+    expect(capabilityWorkflow).not.toContain("--node-version 22.17.0");
     expect(capabilityWorkflow).not.toMatch(
       /& \$(?:browserNode|liteNode|mediaNode|node) --test --(?:experimental-)?test-isolation=none/,
     );
@@ -204,24 +204,23 @@ describe("CI validation contract", () => {
     });
   });
 
-  it("keeps capability release inputs out of executable scripts", () => {
+  it("keeps capability release inputs out of executable scripts and closes the formal matrix", () => {
     const workflow = readRootFile(".github/workflows/capability-release.yml");
     const runBlocks = workflowRunBlocks(workflow);
 
     expect(runBlocks.every((block) => !block.includes("${{ inputs."))).toBe(true);
     expect(workflow).toContain("environment: capability-release");
-    expect(workflow).toContain("$PSNativeCommandUseErrorActionPreference = $true");
-    expect(workflow).toContain("merge-catalog \\");
-    expect(workflow).toContain("--trusted-keys capabilities/trusted-keys.json");
-    expect(workflow).toContain("--expected-tag \"$RELEASE_TAG\"");
-    expect(workflow).toContain("scripts/verify-capability-catalog.mjs");
-    expect(workflow).toContain("--emit-provenance capability-dist/application-integration/capabilities/catalog-provenance.json");
+    expect(workflow).toContain("verify-product-capabilities.mjs --print-matrix");
+    expect(workflow).toContain("verify-product-capabilities.mjs --require-release-ready");
+    expect(workflow).toContain("capability-release-plan.mjs");
+    expect(workflow).toContain("prepare-release-capability.mjs");
+    expect(workflow).toContain("qualify-release-corpus.mjs");
+    expect(workflow).toContain("matrix.targetTriple");
+    expect(workflow).toContain("merge-catalog --input capability-dist");
+    expect(workflow).toContain("name: capability-install-catalog");
+    expect(workflow).not.toContain("Capability publication remains quarantined");
     expect(workflow).not.toMatch(/gh release (?:create|upload)/i);
     expect(workflow).toMatch(/^ {2}workflow_call:\s*$/m);
-    expect(workflow).toContain("sensevoice-capabilities-${{ matrix.target }}");
-    expect(workflow).toContain("ocr-capabilities-${{ matrix.target }}");
-    expect(workflow).toContain("fetch-rapidocr-sources.mjs");
-    expect(workflow).toContain("runner/qualification.mjs");
     expect(workflow).not.toContain("--clobber");
     expect(workflow).not.toMatch(/uses:\s+[^\s#]+@(v\d+|stable)\b/);
   });

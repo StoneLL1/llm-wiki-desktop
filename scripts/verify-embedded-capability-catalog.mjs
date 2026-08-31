@@ -4,6 +4,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { CAPABILITY_PACKS, CAPABILITY_TARGETS } from "./verify-capability-catalog.mjs";
+import { PRODUCT_MANIFEST, expectedReleaseMatrix } from "./verify-product-capabilities.mjs";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 export const repositoryRoot = path.resolve(scriptDirectory, "..");
@@ -30,8 +31,10 @@ export function verifyEmbeddedCapabilityCatalog({ binary, catalogText, mode = "s
   }
   const entries = Array.isArray(catalog?.entries) ? catalog.entries : [];
   if (mode === "release") {
-    if (entries.length !== 20) {
-      errors.push("release binaries must embed exactly 20 catalog entries, found " + entries.length);
+    const expectedCount = expectedReleaseMatrix(PRODUCT_MANIFEST).length;
+    if (entries.length !== expectedCount) {
+      errors.push("release binaries must embed the manifest-derived exact matrix of "
+        + expectedCount + " catalog entries, found " + entries.length);
     }
     const pairs = new Set(entries
       .filter((entry) => typeof entry === "object" && entry !== null)
@@ -45,7 +48,7 @@ export function verifyEmbeddedCapabilityCatalog({ binary, catalogText, mode = "s
       errors.push("embedded release catalog must cover exactly the four supported desktop targets");
     }
     if (JSON.stringify([...packs].sort()) !== JSON.stringify([...CAPABILITY_PACKS].sort())) {
-      errors.push("embedded release catalog must cover exactly the five signed capability packs");
+      errors.push("embedded release catalog must cover exactly the product manifest's published capability packs");
     }
   }
   const exactEmbed = binaryBuffer.length > 0

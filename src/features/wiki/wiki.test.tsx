@@ -104,6 +104,9 @@ beforeEach(() => {
   useTaskStore.setState({
     activeProjectId: null,
     activeProjectRootPath: null,
+    taskById: {},
+    taskIdsByProject: {},
+    runningCountByProject: {},
     taskFacts: {},
     tasks: [],
     logs: {},

@@ -6,8 +6,8 @@ use llm_wiki_desktop_lib::{
     models::{
         import_v2::{
             CommitImportSessionRequest, CommitItemDecision, ImportBatchResult, ImportInput,
-            ImportInputKind, ImportItemResolution, ImportItemStatus, ImportResourceMode,
-            ImportSession, SourceIdentity,
+            ImportInputKind, ImportItemResolution, ImportItemStatus, ImportRecoveryReason,
+            ImportResourceMode, ImportSession, SourceIdentity,
         },
         paths::ProjectContext,
         task::TaskType,
@@ -33,6 +33,151 @@ use std::{
 };
 
 const SECRET: &str = "sk-fixture-must-never-persist";
+
+#[test]
+fn application_temp_preview_uses_non_persistent_tasks_and_leaves_read_only_project_untouched() {
+    let fixture = CoreIntegrationFixture::new();
+    let read_only_project = std::env::temp_dir().join(format!(
+        "llm-wiki-import-v2-read-only-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&read_only_project).unwrap();
+    std::fs::write(read_only_project.join("现有 笔记.md"), "# Existing\n").unwrap();
+    let before = std::fs::read(read_only_project.join("现有 笔记.md")).unwrap();
+
+    let session = fixture.create_two_item_session();
+    let item = &session.items[0];
+    let task = fixture
+        .tasks
+        .create_memory_project_task(
+            TaskType::Import,
+            fixture.context.project_id.clone(),
+            read_only_project.clone(),
+            "Temporary preview".into(),
+            true,
+        )
+        .unwrap();
+    fixture
+        .service
+        .bind_item_task_ids(
+            &fixture.context,
+            &fixture.files,
+            &session.session_id,
+            &[(item.item_id.clone(), task.id.clone())],
+        )
+        .unwrap();
+    let preview = fixture
+        .service
+        .run_item(
+            &fixture.context,
+            &fixture.files,
+            &fixture.tasks,
+            &session.session_id,
+            &item.item_id,
+            &task.id,
+        )
+        .unwrap();
+
+    assert_eq!(preview.status, ImportItemStatus::PreviewReady);
+    assert!(fixture
+        .tasks
+        .task_belongs_to_root(&task.id, &read_only_project));
+    assert!(!fixture.root.join(".app/tasks").exists());
+    assert_eq!(
+        std::fs::read(read_only_project.join("现有 笔记.md")).unwrap(),
+        before
+    );
+    assert_eq!(std::fs::read_dir(&read_only_project).unwrap().count(), 1);
+    std::fs::remove_dir_all(read_only_project).ok();
+}
+
+#[test]
+fn compatible_layout_preview_commit_and_history_never_backfill_native_roots() {
+    let mut fixture = CoreIntegrationFixture::new();
+    std::fs::create_dir_all(fixture.root.join("Notes/Sources")).unwrap();
+    let layout = &mut fixture.context.layout;
+    layout.app_state_root = Some(".app/compat".into());
+    layout.import_state_root = Some(".app/compat/import-sessions".into());
+    layout.source_state_root = Some(".app/compat/sources".into());
+    layout.task_state_root = Some(".app/compat/tasks".into());
+    layout.evidence_root = Some(".app/compat/evidence".into());
+    layout.source_write_root = Some("Notes/Sources".into());
+    layout.wiki_write_root = Some("Notes".into());
+
+    let session = fixture.create_two_item_session();
+    let item_id = session.items[0].item_id.clone();
+    fixture.run_item(&session.session_id, &item_id).unwrap();
+    let batch = fixture.commit_selected(&fixture.service, &session.session_id, &item_id);
+    assert_eq!(batch.committed_count, 1, "compatible commit: {batch:#?}");
+    assert!(fixture.root.join(".app/compat/sources").is_dir());
+    assert!(fixture
+        .root
+        .join(".app/compat/source-index-v2.json")
+        .is_file());
+    assert!(fixture.root.join(".app/compat/import-history").is_dir());
+    assert!(fixture.root.join(".app/compat/evidence/sources").is_dir());
+    assert!(fixture
+        .root
+        .join("Notes/Sources/local/研究报告.md")
+        .is_file());
+    assert!(!fixture.root.join(".app/sources").exists());
+    assert!(!fixture.root.join(".app/tasks").exists());
+    assert!(!fixture.root.join("raw/sources").exists());
+    assert!(!fixture.root.join("wiki/sources").exists());
+}
+
+#[test]
+fn overview_reports_independent_filesystem_recovery_facts() {
+    let fixture = CoreIntegrationFixture::new();
+    let session = fixture.create_two_item_session();
+    let import_paths = fixture.context.layout.import_paths().unwrap();
+    let journal_root = fixture
+        .context
+        .resolve_project_path(&import_paths.recovery_journal_root())
+        .unwrap();
+    std::fs::create_dir_all(&journal_root).unwrap();
+    let recovery_probe = import_paths
+        .item_record(&session.session_id, &session.items[0].item_id)
+        .unwrap();
+    std::fs::write(
+        journal_root.join("interrupted.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "state": "InProgress",
+            "entries": [{
+                "relative_path": recovery_probe,
+                "previous": null,
+                "desired_hash": "fixture",
+                "desired_absent": false
+            }],
+            "recovery_artifacts": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let staging = fixture
+        .context
+        .resolve_project_path(
+            &import_paths
+                .item_staging(&session.session_id, &session.items[0].item_id)
+                .unwrap(),
+        )
+        .unwrap();
+    std::fs::create_dir_all(staging.join("remote")).unwrap();
+    std::fs::write(staging.join("remote/chunk.part"), b"partial").unwrap();
+
+    let overview = fixture
+        .service
+        .read_session_overview(&fixture.context, &fixture.files, &session.session_id)
+        .unwrap();
+
+    assert!(overview.recovery_required);
+    assert!(overview
+        .recovery_reasons
+        .contains(&ImportRecoveryReason::IncompleteJournal));
+    assert!(overview
+        .recovery_reasons
+        .contains(&ImportRecoveryReason::PartialRemoteDownload));
+}
 
 #[derive(Default)]
 struct FixtureEngine {
@@ -248,12 +393,20 @@ impl CoreIntegrationFixture {
             .unwrap()
     }
     fn run_item(&self, session: &str, item: &str) -> Result<(), BackendError> {
+        let task_state_root = self
+            .context
+            .layout
+            .task_state_root
+            .as_deref()
+            .map(|relative| self.context.resolve_project_path(relative).unwrap())
+            .unwrap_or_else(|| self.root.join(".app/tasks"));
         let task = self
             .tasks
-            .create_project_task(
+            .create_project_task_at(
                 TaskType::Import,
                 self.context.project_id.clone(),
                 self.root.clone(),
+                task_state_root,
                 "fixture import".into(),
                 true,
             )
@@ -312,6 +465,8 @@ impl CoreIntegrationFixture {
                     session_id: session.into(),
                     batch_task_id: None,
                     acknowledge_restricted_content: false,
+                    expected_selection_revision: None,
+                    expected_confirmation_digest: None,
                     decisions: vec![CommitItemDecision {
                         item_id: item.into(),
                         resolution,

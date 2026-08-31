@@ -8,23 +8,86 @@
       "x86_64-pc-windows-msvc": {
         "file": "node-v22.17.0-win-x64.zip",
         "sha256": "721ab118a3aac8584348b132767eadf51379e0616f0db802cc1e66d7f0d98f85",
+        "bytes": 35506792,
         "root": "node-v22.17.0-win-x64"
       },
       "aarch64-apple-darwin": {
         "file": "node-v22.17.0-darwin-arm64.tar.xz",
         "sha256": "cc9cc294eaf782dd93c8c51f460da610cc35753c6a9947411731524d16e97914",
+        "bytes": 24898808,
         "root": "node-v22.17.0-darwin-arm64"
       },
       "x86_64-apple-darwin": {
         "file": "node-v22.17.0-darwin-x64.tar.xz",
         "sha256": "f79de1f64df4ac68493a344bb5ab7d289d0275271e87b543d1278392c9de778a",
+        "bytes": 27009768,
         "root": "node-v22.17.0-darwin-x64"
       },
       "x86_64-unknown-linux-gnu": {
         "file": "node-v22.17.0-linux-x64.tar.xz",
         "sha256": "325c0f1261e0c61bcae369a1274028e9cfb7ab7949c05512c5b1e630f7e80e12",
+        "bytes": 30482736,
         "root": "node-v22.17.0-linux-x64"
       }
+    }
+  },
+  "playwrightChromium": {
+    "version": "1.61.1",
+    "license": "Apache-2.0 AND BSD-2-Clause AND BSD-3-Clause AND ISC AND MIT",
+    "source": "capabilities/browser-runtime/package-lock.json",
+    "lockSha256": "56f671c5222a68549199b93c90edf6240ff01f6c208db04095f7294af96b97c6",
+    "install": "npm exec --prefix capabilities/browser-runtime -- playwright install chromium"
+  },
+  "browserRuntimeLiteDependencies": {
+    "version": "1.0.0",
+    "license": "MIT AND LicenseRef-Bundled-Third-Party-Notices",
+    "lock": "capabilities/browser-runtime-lite/package-lock.json",
+    "lockSha256": "265a613f0e3e84a0ff1985c4441b64f0bb99f8018ce75510d54129192c511ada"
+  },
+  "documentStandard": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "source": "capabilities/document-standard/requirements.in",
+    "lock": "capabilities/document-standard/requirements.lock",
+    "lockSha256": "9f71a18d0b200bbbd415c940343cb1df4e848892224990a2ef607f1d9929d565"
+  },
+  "documentLayout": {
+    "version": "2.48.0",
+    "license": "MIT AND Apache-2.0 AND CDLA-Permissive-2.0",
+    "source": "capabilities/document-layout/requirements.in",
+    "lock": "capabilities/document-layout/runner/requirements.lock",
+    "lockSha256": "259645397d0875e5aac471b4da7c425eb3ec854f7961856cd6b3e94723a4027d",
+    "models": {
+      "repository": "https://huggingface.co/ds4sd/docling-models",
+      "revision": "2199320848bb9a8a519d22e4b528185a4f9a6f64",
+      "download": "docling-tools models download --output-dir models layout tableformer",
+      "inventory": "BUILD-PROVENANCE.json.modelInventory",
+      "networkDisabledAtRuntime": true
+    }
+  },
+  "libreOffice": {
+    "version": "26.2.4",
+    "license": "MPL-2.0 OR LGPL-3.0-or-later",
+    "source": "https://download.documentfoundation.org/libreoffice/stable/26.2.4/",
+    "distributions": {
+      "x86_64-pc-windows-msvc": { "file": "LibreOffice_26.2.4_Win_x86-64.msi", "sha256": "202f26cda071c5aa4996a5a28412fddceb3891dceb0366982c62650456c0730f", "bytes": 372539392 },
+      "aarch64-apple-darwin": { "file": "LibreOffice_26.2.4_MacOS_aarch64.dmg", "sha256": "64e0ad05564554eeee639d49b08b20908a38d4722ec95f1620d05c99bcbe9fb1", "bytes": 295019039 },
+      "x86_64-apple-darwin": { "file": "LibreOffice_26.2.4_MacOS_x86-64.dmg", "sha256": "f92ba40fdada173232fe929bf77973a1ffcccec55ae7971957a6de84d33f0f1e", "bytes": 305573151 },
+      "x86_64-unknown-linux-gnu": { "file": "LibreOffice_26.2.4_Linux_x86-64_deb.tar.gz", "sha256": "810ef197e190d7804a60e0016052c46ff33792303a200fddda9d5216a64b9900", "bytes": 217982126 }
+    }
+  },
+  "whisper": {
+    "version": "1.8.3",
+    "license": "MIT",
+    "source": "https://github.com/ggml-org/whisper.cpp.git",
+    "tag": "v1.8.3",
+    "commit": "2eeeba56e9edd762b4b38467bab96c2517163158",
+    "model": {
+      "id": "ggml-small",
+      "source": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+      "sha256": "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
+      "bytes": 487601967,
+      "license": "MIT"
     }
   },
   "pythonStandalone": {
@@ -61,6 +124,8 @@
   "rapidOcr": {
     "version": "3.8.1",
     "license": "Apache-2.0",
+    "dependencyLock": "capabilities/ocr-cjk-accurate/requirements.lock",
+    "dependencyLockSha256": "1e96f4a1d20c42245bcfc7809baf0a4b81cba8205dbb6a1ebc6f90fac2269ff8",
     "wheel": {
       "file": "rapidocr-3.8.1-py3-none-any.whl",
       "sha256": "650044b1fbce9e6bae5cae462dcf8be754cde11e2f23fc51f65dcc08deae2c46",

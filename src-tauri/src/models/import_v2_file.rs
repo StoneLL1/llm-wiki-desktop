@@ -161,9 +161,11 @@ pub enum FileSkipReason {
     DepthLimitExceeded,
     FileLimitExceeded,
     FileTooLarge,
+    InsufficientDisk,
     LargeDataConfirmationRequired,
     Duplicate,
     InvalidPath,
+    NonUtf8Path,
     Unreadable,
 }
 

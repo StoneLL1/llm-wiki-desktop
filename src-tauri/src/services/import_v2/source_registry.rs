@@ -16,6 +16,7 @@ use crate::utils::path_utils::normalize_project_path;
 use super::source_finalization::{parse_final_source, validate_source_version_binding};
 use super::transaction::{is_project_reparse_point, read_project_file_nofollow, FileTransaction};
 
+#[cfg(test)]
 const SOURCE_INDEX_PATH: &str = ".app/source-index-v2.json";
 pub const SOURCE_REGISTRY_SCHEMA_VERSION: u32 = 3;
 const LEGACY_SOURCE_REGISTRY_SCHEMA_VERSION: u32 = 2;
@@ -357,7 +358,14 @@ pub struct SourceRegistry;
 
 impl SourceRegistry {
     pub fn validate_manifest_contract(manifest: &SourceManifest) -> Result<(), BackendError> {
-        validate_manifest(manifest)
+        validate_manifest_for_layout(manifest, &crate::models::layout::ProjectLayout::native())
+    }
+
+    pub fn validate_manifest_contract_for_layout(
+        manifest: &SourceManifest,
+        layout: &crate::models::layout::ProjectLayout,
+    ) -> Result<(), BackendError> {
+        validate_manifest_for_layout(manifest, layout)
     }
 
     pub fn resolve_compile_source_version(
@@ -379,7 +387,10 @@ impl SourceRegistry {
             return Err(compile_source_version_changed());
         }
 
-        let manifest_path = format!(".app/sources/{}.json", reference.source_id);
+        let manifest_path = context
+            .layout
+            .source_paths()?
+            .manifest(&reference.source_id)?;
         let manifest = Self::read_manifest(context, files, &manifest_path)
             .map_err(|_| compile_source_version_changed())?;
         if manifest.source_id != reference.source_id {
@@ -474,7 +485,7 @@ impl SourceRegistry {
                 compile_task_id: record.compile_task_id.clone(),
                 consumed_at: record.consumed_at.clone(),
             });
-            validate_manifest(&manifest)?;
+            validate_manifest_for_layout(&manifest, &context.layout)?;
             manifests.push((absolute, expected_hash, manifest));
             consumed.push(reference.clone());
         }
@@ -482,7 +493,7 @@ impl SourceRegistry {
             source_versions: consumed.clone(),
             ..record.clone()
         };
-        let mut transaction = FileTransaction::new_for_project(&context.root);
+        let mut transaction = FileTransaction::new_for_context(context)?;
         for (absolute, expected_hash, manifest) in manifests {
             transaction.write_if_hash_matches(
                 &absolute,
@@ -516,12 +527,13 @@ impl SourceRegistry {
         context: &ProjectContext,
         files: &FileStore,
     ) -> Result<SourceIndex, BackendError> {
-        if !files.exists(context, SOURCE_INDEX_PATH) {
+        let index_path = context.layout.source_paths()?.index();
+        if !files.exists(context, &index_path) {
             return Ok(SourceIndex::default_v2());
         }
 
         let mut index: SourceIndex = files
-            .read_json(context, SOURCE_INDEX_PATH)
+            .read_json(context, &index_path)
             .map_err(|_| invalid_index())?;
         if index.schema_version == LEGACY_SOURCE_REGISTRY_SCHEMA_VERSION {
             index.schema_version = SOURCE_REGISTRY_SCHEMA_VERSION;
@@ -545,7 +557,7 @@ impl SourceRegistry {
             Some(version) if version == u64::from(SOURCE_REGISTRY_SCHEMA_VERSION) => {
                 let manifest: SourceManifest =
                     serde_json::from_value(value).map_err(|_| invalid_index())?;
-                validate_manifest(&manifest)?;
+                validate_manifest_for_layout(&manifest, &context.layout)?;
                 Ok(manifest)
             }
             Some(version) if version == u64::from(LEGACY_SOURCE_REGISTRY_SCHEMA_VERSION) => {
@@ -565,9 +577,9 @@ impl SourceRegistry {
         context: &ProjectContext,
         files: &FileStore,
     ) -> Result<bool, BackendError> {
-        FileTransaction::reconcile_project(&context.root)?;
+        FileTransaction::reconcile_context(context)?;
         let mut writes = Vec::<(PathBuf, Vec<u8>, String)>::new();
-        let index_path = context.resolve_project_path(SOURCE_INDEX_PATH)?;
+        let index_path = context.resolve_project_path(&context.layout.source_paths()?.index())?;
         if index_path.exists() {
             let bytes = read_project_file_nofollow(&context.root, &index_path)
                 .map_err(|_| invalid_index())?;
@@ -614,7 +626,7 @@ impl SourceRegistry {
             } else if schema == u64::from(SOURCE_REGISTRY_SCHEMA_VERSION) {
                 let manifest: SourceManifest =
                     serde_json::from_value(value).map_err(|_| invalid_index())?;
-                validate_manifest(&manifest)?;
+                validate_manifest_for_layout(&manifest, &context.layout)?;
             } else {
                 return Err(invalid_index());
             }
@@ -622,7 +634,7 @@ impl SourceRegistry {
         if writes.is_empty() {
             return Ok(false);
         }
-        let mut transaction = FileTransaction::new_for_project(&context.root);
+        let mut transaction = FileTransaction::new_for_context(context)?;
         for (path, bytes, expected_hash) in writes {
             transaction.write_if_hash_matches(&path, &bytes, &expected_hash)?;
         }
@@ -686,7 +698,10 @@ impl SourceRegistry {
                     return Err(wiki_asset_not_found(&wiki_path, asset_path));
                 }
 
-                let manifest_path = format!(".app/sources/{}.json", frontmatter.source_id);
+                let manifest_path = context
+                    .layout
+                    .source_paths()?
+                    .manifest(&frontmatter.source_id)?;
                 let manifest = Self::read_manifest(context, files, &manifest_path)
                     .map_err(|_| wiki_asset_not_found(&wiki_path, asset_path))?;
                 let version = manifest
@@ -728,7 +743,7 @@ impl SourceRegistry {
         );
 
         for source_id in source_ids {
-            let manifest_path = format!(".app/sources/{source_id}.json");
+            let manifest_path = context.layout.source_paths()?.manifest(&source_id)?;
             let persisted_schema = match persisted_registry_schema(context, &manifest_path) {
                 Ok(schema) => schema,
                 Err(_) => continue,
@@ -786,9 +801,25 @@ impl SourceRegistry {
         existing_manifest: Option<&SourceManifest>,
         input: &SourceCommitInput,
     ) -> Result<SourceCommitPlan, BackendError> {
+        self.build_commit_plan_for_layout(
+            &crate::models::layout::ProjectLayout::native(),
+            index,
+            existing_manifest,
+            input,
+        )
+    }
+
+    pub fn build_commit_plan_for_layout(
+        &self,
+        layout: &crate::models::layout::ProjectLayout,
+        index: &SourceIndex,
+        existing_manifest: Option<&SourceManifest>,
+        input: &SourceCommitInput,
+    ) -> Result<SourceCommitPlan, BackendError> {
+        let paths = layout.source_paths()?;
         validate_index(index)?;
         if let Some(manifest) = existing_manifest {
-            validate_manifest(manifest)?;
+            validate_manifest_for_layout(manifest, layout)?;
         }
         let locator = normalize_locator(&input.normalized_locator);
         if locator.is_empty() || input.content_hash.trim().is_empty() {
@@ -841,9 +872,9 @@ impl SourceRegistry {
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let extension = safe_extension(&input.source_extension);
         let evidence_root_path = match input.input_kind {
-            ImportInputKind::Url => format!("raw/web/{source_id}/{version_id}"),
+            ImportInputKind::Url => paths.web_evidence_root(&source_id, &version_id)?,
             ImportInputKind::File | ImportInputKind::Folder | ImportInputKind::ClipboardText => {
-                format!("raw/sources/{source_id}/{version_id}")
+                paths.local_evidence_root(&source_id, &version_id)?
             }
         };
         let raw_name = if input.input_kind == ImportInputKind::Url {
@@ -852,10 +883,11 @@ impl SourceRegistry {
             "original"
         };
         let raw_path = format!("{evidence_root_path}/{raw_name}.{extension}");
-        let baseline_path = format!(".app/source-artifacts/{source_id}/{version_id}/baseline.md");
+        let baseline_path = paths.baseline(&source_id, &version_id)?;
         let wiki_path = existing
             .map(|manifest| manifest.wiki_path.clone())
-            .unwrap_or_else(|| derive_wiki_path(input));
+            .map(Ok)
+            .unwrap_or_else(|| derive_wiki_path_for_layout(&paths, input))?;
 
         let created_at = input.imported_at.clone();
         let previous_current_version_id =
@@ -1039,7 +1071,7 @@ impl SourceRegistry {
             next_index.by_locator.insert(canonical_url, pointer);
         }
 
-        let asset_root_path = format!("raw/assets/{source_id}/{version_id}");
+        let asset_root_path = paths.asset_root(&source_id, &version_id)?;
         let plan = SourceCommitPlan {
             resolution,
             source_id: source_id.clone(),
@@ -1050,17 +1082,22 @@ impl SourceRegistry {
             asset_root_path,
             baseline_path,
             wiki_path,
-            manifest_path: format!(".app/sources/{source_id}.json"),
+            manifest_path: paths.manifest(&source_id)?,
             next_manifest,
             next_index,
         };
-        validate_commit_plan(&plan)?;
+        validate_commit_plan_for_layout(&plan, layout)?;
         Ok(plan)
     }
 }
 
 fn manifest_paths_for_migration(context: &ProjectContext) -> Result<Vec<PathBuf>, BackendError> {
-    let root = context.resolve_project_path(".app/sources")?;
+    let source_state_root = context
+        .layout
+        .source_state_root
+        .as_deref()
+        .ok_or_else(invalid_index)?;
+    let root = context.resolve_project_path(source_state_root)?;
     let metadata = match std::fs::symlink_metadata(&root) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -1161,7 +1198,10 @@ fn migrate_legacy_manifest(
         )?];
         let assets = artifact_records_under(
             context,
-            &format!("raw/assets/{}/{}", legacy.source_id, version.version_id),
+            &context
+                .layout
+                .source_paths()?
+                .asset_root(&legacy.source_id, &version.version_id)?,
             "asset",
         )?;
         let human_edit_hash = files
@@ -1229,7 +1269,7 @@ fn migrate_legacy_manifest(
         restricted_identity_summary: None,
         timeline,
     };
-    validate_manifest(&manifest)?;
+    validate_manifest_for_layout(&manifest, &context.layout)?;
     Ok(manifest)
 }
 
@@ -1304,8 +1344,11 @@ fn resolve_manifest_asset_path(
     asset_relative: &str,
 ) -> Result<Option<PathBuf>, BackendError> {
     let raw_asset_path = format!(
-        "raw/assets/{}/{}/{asset_relative}",
-        manifest.source_id, manifest.current_version_id
+        "{}/{asset_relative}",
+        context
+            .layout
+            .source_paths()?
+            .asset_root(&manifest.source_id, &manifest.current_version_id)?
     );
     let resolved = context.resolve_project_path(&raw_asset_path)?;
     if resolved.is_file() {
@@ -1427,8 +1470,14 @@ fn normalize_locator(locator: &str) -> String {
     locator.trim().replace('\\', "/")
 }
 
-fn validate_manifest(manifest: &SourceManifest) -> Result<(), BackendError> {
-    let paths = ProjectContext::new("source-manifest-validation", std::path::PathBuf::from("."));
+fn validate_manifest_for_layout(
+    manifest: &SourceManifest,
+    layout: &crate::models::layout::ProjectLayout,
+) -> Result<(), BackendError> {
+    let mut context =
+        ProjectContext::new("source-manifest-validation", std::path::PathBuf::from("."));
+    context.layout = layout.clone();
+    let source_paths = layout.source_paths()?;
     let current_count = manifest
         .versions
         .iter()
@@ -1441,23 +1490,38 @@ fn validate_manifest(manifest: &SourceManifest) -> Result<(), BackendError> {
             || !is_sha256(&version.content_hash)
             || version.raw_evidence.is_empty()
             || version.raw_evidence.iter().any(|artifact| {
-                !valid_evidence_path(&artifact.path, &manifest.source_id, &version.version_id)
-                    || !is_sha256(&artifact.sha256)
+                !path_is_within(
+                    &artifact.path,
+                    &source_paths
+                        .local_evidence_root(&manifest.source_id, &version.version_id)
+                        .unwrap_or_default(),
+                ) && !path_is_within(
+                    &artifact.path,
+                    &source_paths
+                        .web_evidence_root(&manifest.source_id, &version.version_id)
+                        .unwrap_or_default(),
+                ) || !is_sha256(&artifact.sha256)
                     || artifact.kind.trim().is_empty()
-                    || paths.resolve_project_path(&artifact.path).is_err()
+                    || context.resolve_project_path(&artifact.path).is_err()
             })
             || version.assets.iter().any(|artifact| {
-                !valid_asset_path(&artifact.path, &manifest.source_id, &version.version_id)
-                    || !is_sha256(&artifact.sha256)
+                !path_is_within(
+                    &artifact.path,
+                    &source_paths
+                        .asset_root(&manifest.source_id, &version.version_id)
+                        .unwrap_or_default(),
+                ) || !is_sha256(&artifact.sha256)
                     || artifact.kind.trim().is_empty()
-                    || paths.resolve_project_path(&artifact.path).is_err()
+                    || context.resolve_project_path(&artifact.path).is_err()
             })
-            || version.baseline_path
-                != format!(
-                    ".app/source-artifacts/{}/{}/baseline.md",
-                    manifest.source_id, version.version_id
-                )
-            || paths.resolve_project_path(&version.baseline_path).is_err()
+            || source_paths
+                .baseline(&manifest.source_id, &version.version_id)
+                .ok()
+                .as_deref()
+                != Some(version.baseline_path.as_str())
+            || context
+                .resolve_project_path(&version.baseline_path)
+                .is_err()
             || !is_sha256(&version.candidate.markdown_hash)
             || version.candidate.title.trim().is_empty()
             || version.candidate.source_kind.trim().is_empty()
@@ -1505,28 +1569,40 @@ fn validate_manifest(manifest: &SourceManifest) -> Result<(), BackendError> {
             .any(|origin| origin.trim().is_empty())
         || consumptions_invalid
         || timeline_invalid
-        || !valid_wiki_path(&manifest.wiki_path)
-        || paths.resolve_project_path(&manifest.wiki_path).is_err()
+        || !layout
+            .source_write_root
+            .as_deref()
+            .is_some_and(|root| path_is_within(&manifest.wiki_path, root))
+        || !valid_wiki_path_for_layout(&manifest.wiki_path, layout)
+        || context.resolve_project_path(&manifest.wiki_path).is_err()
     {
         return Err(invalid_index());
     }
     Ok(())
 }
 
-fn validate_commit_plan(plan: &SourceCommitPlan) -> Result<(), BackendError> {
-    let paths = ProjectContext::new("source-plan-validation", std::path::PathBuf::from("."));
-    let manifest_path = format!(".app/sources/{}.json", plan.source_id);
+fn validate_commit_plan_for_layout(
+    plan: &SourceCommitPlan,
+    layout: &crate::models::layout::ProjectLayout,
+) -> Result<(), BackendError> {
+    let mut context = ProjectContext::new("source-plan-validation", std::path::PathBuf::from("."));
+    context.layout = layout.clone();
+    let source_paths = layout.source_paths()?;
+    let manifest_path = source_paths.manifest(&plan.source_id)?;
+    let local_evidence = source_paths.local_evidence_root(&plan.source_id, &plan.version_id)?;
+    let web_evidence = source_paths.web_evidence_root(&plan.source_id, &plan.version_id)?;
     if !is_safe_id(&plan.source_id)
         || !is_safe_id(&plan.version_id)
-        || !valid_raw_path(&plan.raw_path, &plan.source_id, &plan.version_id)
-        || !valid_evidence_root(&plan.evidence_root_path, &plan.source_id, &plan.version_id)
-        || plan.asset_root_path != format!("raw/assets/{}/{}", plan.source_id, plan.version_id)
-        || plan.baseline_path
-            != format!(
-                ".app/source-artifacts/{}/{}/baseline.md",
-                plan.source_id, plan.version_id
-            )
-        || !valid_wiki_path(&plan.wiki_path)
+        || !(path_is_within(&plan.raw_path, &local_evidence)
+            || path_is_within(&plan.raw_path, &web_evidence))
+        || !matches!(plan.evidence_root_path.as_str(), path if path == local_evidence || path == web_evidence)
+        || plan.asset_root_path != source_paths.asset_root(&plan.source_id, &plan.version_id)?
+        || plan.baseline_path != source_paths.baseline(&plan.source_id, &plan.version_id)?
+        || !layout
+            .source_write_root
+            .as_deref()
+            .is_some_and(|root| path_is_within(&plan.wiki_path, root))
+        || !valid_wiki_path_for_layout(&plan.wiki_path, layout)
         || plan.manifest_path != manifest_path
         || [
             &plan.raw_path,
@@ -1537,7 +1613,7 @@ fn validate_commit_plan(plan: &SourceCommitPlan) -> Result<(), BackendError> {
             &plan.manifest_path,
         ]
         .iter()
-        .any(|path| paths.resolve_project_path(path).is_err())
+        .any(|path| context.resolve_project_path(path).is_err())
     {
         return Err(invalid_index());
     }
@@ -1552,91 +1628,8 @@ fn is_safe_id(value: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
 }
 
-fn valid_raw_path(path: &str, source_id: &str, version_id: &str) -> bool {
-    let parts: Vec<&str> = path.split('/').collect();
-    parts.len() == 5
-        && parts[0] == "raw"
-        && matches!(parts[1], "sources" | "web")
-        && parts[2] == source_id
-        && parts[3] == version_id
-        && ((parts[1] == "sources" && parts[4].starts_with("original."))
-            || (parts[1] == "web" && parts[4].starts_with("snapshot.")))
-        && safe_extension(
-            parts[4]
-                .trim_start_matches("original.")
-                .trim_start_matches("snapshot."),
-        ) == parts[4]
-            .trim_start_matches("original.")
-            .trim_start_matches("snapshot.")
-}
-
-fn valid_evidence_root(path: &str, source_id: &str, version_id: &str) -> bool {
-    let parts: Vec<&str> = path.split('/').collect();
-    parts.len() == 4
-        && parts[0] == "raw"
-        && matches!(parts[1], "sources" | "web")
-        && parts[2] == source_id
-        && parts[3] == version_id
-}
-
-fn valid_evidence_path(path: &str, source_id: &str, version_id: &str) -> bool {
-    let parts: Vec<&str> = path.split('/').collect();
-    parts.len() >= 5
-        && parts[0] == "raw"
-        && matches!(parts[1], "sources" | "web")
-        && parts[2] == source_id
-        && parts[3] == version_id
-        && safe_path_tail(&parts[4..])
-}
-
-fn valid_asset_path(path: &str, source_id: &str, version_id: &str) -> bool {
-    let parts: Vec<&str> = path.split('/').collect();
-    parts.len() >= 5
-        && parts[0] == "raw"
-        && parts[1] == "assets"
-        && parts[2] == source_id
-        && parts[3] == version_id
-        && safe_path_tail(&parts[4..])
-}
-
-fn safe_path_tail(parts: &[&str]) -> bool {
-    !parts.is_empty()
-        && parts.iter().all(|part| {
-            !part.is_empty()
-                && *part != "."
-                && *part != ".."
-                && !part.contains(['\\', ':'])
-                && !part.chars().any(char::is_control)
-        })
-}
-
 fn is_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn valid_wiki_path(path: &str) -> bool {
-    let parts: Vec<&str> = path.split('/').collect();
-    let filename = parts.last().copied().unwrap_or_default();
-    let stem = filename.strip_suffix(".md").unwrap_or_default();
-    let canonical_local = parts.len() == 4 && parts.get(2) == Some(&"local");
-    let canonical_local_package = parts.len() == 5
-        && parts.get(2) == Some(&"local")
-        && parts.get(4) == Some(&"index.md")
-        && parts
-            .get(3)
-            .is_some_and(|directory| portable_wiki_stem(directory) == *directory);
-    let canonical_web = parts.len() == 5
-        && parts.get(2) == Some(&"web")
-        && parts.get(3).is_some_and(|host| valid_normalized_host(host));
-    let legacy = parts.len() == 4
-        && parts
-            .get(2)
-            .is_some_and(|category| matches!(*category, "files" | "web" | "video"));
-    (canonical_local || canonical_local_package || canonical_web || legacy)
-        && parts[0] == "wiki"
-        && parts[1] == "sources"
-        && !stem.is_empty()
-        && portable_wiki_stem(stem) == stem
 }
 
 fn valid_normalized_host(host: &str) -> bool {
@@ -1698,6 +1691,91 @@ fn derive_wiki_path(input: &SourceCommitInput) -> String {
         &input.normalized_locator,
         input.canonical_url.as_deref(),
     )
+}
+
+pub(crate) fn derive_wiki_path_for_input_with_layout(
+    layout: &crate::models::layout::ProjectLayout,
+    input_kind: &ImportInputKind,
+    display_name: &str,
+    normalized_locator: &str,
+    canonical_url: Option<&str>,
+) -> Result<String, BackendError> {
+    let native =
+        derive_wiki_path_for_input(input_kind, display_name, normalized_locator, canonical_url);
+    let file_name = native.rsplit('/').next().ok_or_else(invalid_index)?;
+    let paths = layout.source_paths()?;
+    match input_kind {
+        ImportInputKind::File | ImportInputKind::Folder | ImportInputKind::ClipboardText => {
+            paths.local_markdown(file_name)
+        }
+        ImportInputKind::Url => {
+            let host = canonical_url
+                .and_then(normalized_web_host)
+                .or_else(|| normalized_web_host(normalized_locator))
+                .unwrap_or_else(|| "unknown-host".into());
+            paths.web_markdown_in_host(&host, file_name)
+        }
+    }
+}
+
+fn path_is_within(path: &str, root: &str) -> bool {
+    let path = normalize_project_path(path);
+    let root = normalize_project_path(root)
+        .trim_end_matches('/')
+        .to_string();
+    !root.is_empty() && (path == root || path.starts_with(&format!("{root}/")))
+}
+
+fn valid_wiki_path_for_layout(path: &str, layout: &crate::models::layout::ProjectLayout) -> bool {
+    let Some(root) = layout.source_write_root.as_deref() else {
+        return false;
+    };
+    let normalized_path = normalize_project_path(path);
+    let normalized_root = normalize_project_path(root)
+        .trim_end_matches('/')
+        .to_string();
+    let Some(relative) = normalized_path.strip_prefix(&format!("{normalized_root}/")) else {
+        return false;
+    };
+    let parts = relative.split('/').collect::<Vec<_>>();
+    let valid_markdown_name = |name: &str| {
+        let stem = name.strip_suffix(".md").unwrap_or_default();
+        !stem.is_empty() && portable_wiki_stem(stem) == stem
+    };
+    match parts.as_slice() {
+        ["local", name] => valid_markdown_name(name),
+        ["local", package, "index.md"] => portable_wiki_stem(package) == *package,
+        ["web", host, name] => valid_normalized_host(host) && valid_markdown_name(name),
+        // Retain the v2 native manifest shapes while enforcing the same
+        // cross-platform filename rules on migrated records.
+        [category @ ("files" | "web" | "video"), name] => {
+            let _ = category;
+            valid_markdown_name(name)
+        }
+        _ => false,
+    }
+}
+
+fn derive_wiki_path_for_layout(
+    paths: &crate::models::layout::SourceLayoutPaths,
+    input: &SourceCommitInput,
+) -> Result<String, BackendError> {
+    let native = derive_wiki_path(input);
+    let file_name = native.rsplit('/').next().ok_or_else(invalid_index)?;
+    match input.input_kind {
+        ImportInputKind::File | ImportInputKind::Folder | ImportInputKind::ClipboardText => {
+            paths.local_markdown(file_name)
+        }
+        ImportInputKind::Url => {
+            let host = input
+                .canonical_url
+                .as_deref()
+                .and_then(normalized_web_host)
+                .or_else(|| normalized_web_host(&input.normalized_locator))
+                .unwrap_or_else(|| "unknown-host".into());
+            paths.web_markdown_in_host(&host, file_name)
+        }
+    }
 }
 
 pub fn normalized_web_host(value: &str) -> Option<String> {

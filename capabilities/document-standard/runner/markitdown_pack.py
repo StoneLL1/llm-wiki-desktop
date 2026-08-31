@@ -9,6 +9,12 @@ import shutil
 import sys
 from pathlib import Path
 
+PACK_ROOT = Path(__file__).resolve().parent.parent
+SITE_PACKAGES = PACK_ROOT / "runtime" / "site-packages"
+ALLOWED_EXTENSIONS = {".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".pdf"}
+if SITE_PACKAGES.is_dir():
+    sys.path.insert(0, str(SITE_PACKAGES))
+
 
 def fail(request_id, code, message):
     return {"jsonrpc": "2.0", "id": request_id, "result": None,
@@ -25,6 +31,19 @@ def contained(root, path):
 
 def handle(request):
     request_id = str(request.get("id", ""))
+    if request.get("jsonrpc") == "2.0" and request.get("method") == "capability.health":
+        params = request.get("params", {})
+        if (params.get("protocolVersion") != "2"
+                or params.get("capabilityId") != "document-standard"
+                or params.get("route") != "pack.markitdown"):
+            return fail(request_id, -32602, "invalid health request")
+        try:
+            from markitdown import MarkItDown  # noqa: F401
+        except ImportError:
+            return fail(request_id, -32020, "document-standard runtime is incomplete")
+        return {"jsonrpc": "2.0", "id": request_id, "result": {
+            "healthy": True, "protocolVersion": "2",
+            "capabilityId": "document-standard", "route": "pack.markitdown"}, "error": None}
     if request.get("jsonrpc") != "2.0" or request.get("method") != "import.execute":
         return fail(request_id, -32600, "invalid request")
     params = request.get("params", {})
@@ -41,7 +60,8 @@ def handle(request):
     if not source.is_absolute():
         source = project / source
     allowed_source = contained(staging, source) if chained else contained(project, source)
-    if not source.is_file() or not contained(project, staging) or not allowed_source:
+    if (not source.is_file() or source.suffix.lower() not in ALLOWED_EXTENSIONS
+            or not contained(project, staging) or not allowed_source):
         return fail(request_id, -32602, "unauthorized source or staging path")
     try:
         from markitdown import MarkItDown

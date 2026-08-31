@@ -2,11 +2,27 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { URL } from "node:url";
-import { bilibiliMediaPolicy, classifyPlatformPage, classifyRemoteImageKind, extractBilibiliPlayerEvidence, extractBilibiliPlayerEvidenceFromHtml, extractPlatformPayload, extractRelevantBilibiliPlayerEvidence, isBilibiliPlayerApiUrl, mergeBilibiliPlayerEvidence, platformHasVideoEvidence, renderPlatformMarkdown, resolveSubtitleReference, selectRelevantApiEvidence, xiaohongshuImageEvidenceReady, xiaohongshuImageOcrRequired } from "./platform-extract.mjs";
+import { bilibiliMediaPolicy, classifyPlatformPage, classifyRemoteImageKind, extractBilibiliPlayerEvidence, extractBilibiliPlayerEvidenceFromHtml, extractPlatformPayload, extractRelevantBilibiliPlayerEvidence, extractXPayload, isBilibiliPlayerApiUrl, mergeBilibiliPlayerEvidence, platformHasVideoEvidence, renderPlatformMarkdown, resolveSubtitleReference, selectRelevantApiEvidence, xiaohongshuImageEvidenceReady, xiaohongshuImageOcrRequired } from "./platform-extract.mjs";
 
 function fixture(name) {
   return readFileSync(new URL(`../../../tests/fixtures/import-v2/web/xiaohongshu/${name}`, import.meta.url), "utf8");
 }
+
+test("extracts the public X post route only from the requested status page", () => {
+  const html = `<meta property="og:title" content="Ada on X: release note"><meta property="og:description" content="Batch 8 is ready #release"><meta property="og:image" content="https://pbs.twimg.com/media/example.jpg">`;
+  const result = extractXPayload(html, "https://x.com/ada/status/123456789");
+  assert.equal(result.platformId, "123456789");
+  assert.equal(result.author, "Ada");
+  assert.equal(result.description, "Batch 8 is ready #release");
+  assert.deepEqual(result.hashtags, ["#release"]);
+  assert.deepEqual(result.images, ["https://pbs.twimg.com/media/example.jpg"]);
+  assert.equal(extractXPayload(html, "https://x.com/ada"), null);
+});
+
+test("classifies X login and restricted walls as typed recovery outcomes", () => {
+  assert.equal(classifyPlatformPage("x", "Login required to continue"), "IMPORT_WEB_LOGIN_REQUIRED");
+  assert.equal(classifyPlatformPage("x", "These posts are protected"), "IMPORT_WEB_CONTENT_RESTRICTED");
+});
 
 test("persists platform images only when the selected media mode allows it", () => {
   assert.equal(classifyRemoteImageKind("xiaohongshu", false, false, "preserve_original"), "image");

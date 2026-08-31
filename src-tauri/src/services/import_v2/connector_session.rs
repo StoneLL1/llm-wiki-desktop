@@ -4,7 +4,9 @@ use crate::{
     services::import_v2::{
         capability_pack::ResolvedCapabilityPack,
         media_router::TemporaryMediaWorkspace,
-        pack_engine::{terminate_tree, validate_entrypoint_unchanged},
+        pack_engine::{
+            resolve_pack_entrypoint_args, terminate_tree, validate_entrypoint_unchanged,
+        },
         url_policy::PrivateTargetGrant,
     },
     services::SecretService,
@@ -219,11 +221,13 @@ impl ConnectorSessionService {
             .filter(|value| value.is_array());
         let secrets = self.secrets.clone();
         let platform_name = platform.to_string();
+        let entrypoint_args = resolve_pack_entrypoint_args(pack)
+            .map_err(|_| e("The browser login capability arguments are invalid."))?;
         let mut command = Command::new(&pack.entrypoint);
         let runtime_temp = TemporaryMediaWorkspace::create_unique(&profile, ".login-runtime")?;
         command
-            .args(&pack.manifest.entrypoint_args)
-            .current_dir(&pack.root)
+            .args(&entrypoint_args)
+            .current_dir(&profile)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -298,6 +302,7 @@ impl ConnectorSessionService {
         }
         let sessions = self.sessions.clone();
         let id = reference.session_id.clone();
+        let pack_after_login = pack.clone();
         let reader = std::thread::spawn(move || {
             // The project epoch remains active for the complete browser and
             // stdout-reader lifetime, including cookie/status publication.
@@ -308,14 +313,15 @@ impl ConnectorSessionService {
                 serde_json::from_str::<serde_json::Value>(output.lines().last().unwrap_or(""))
                     .ok()
                     .and_then(|v| v.get("result").cloned());
-            let authenticated = login_result
+            let mut authenticated = login_result
                 .as_ref()
                 .and_then(|r| r.get("authenticated"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let account_summary = login_result.as_ref().and_then(sanitized_account_summary);
-            let verified_at = authenticated.then(|| chrono::Utc::now().to_rfc3339());
             wait_for_managed_child(&child);
+            authenticated &= validate_entrypoint_unchanged(&pack_after_login).is_ok();
+            let verified_at = authenticated.then(|| chrono::Utc::now().to_rfc3339());
             if let Ok(mut entries) = sessions.lock() {
                 if let Some(entry) = entries.get_mut(&id) {
                     let authority_current = entry.binding.is_some();
@@ -339,10 +345,12 @@ impl ConnectorSessionService {
                     } else {
                         "failed".into()
                     };
-                    entry.reference.account_summary =
-                        authority_current.then_some(account_summary).flatten();
-                    entry.reference.last_verified_at =
-                        authority_current.then_some(verified_at).flatten();
+                    entry.reference.account_summary = (authority_current && authenticated)
+                        .then_some(account_summary)
+                        .flatten();
+                    entry.reference.last_verified_at = (authority_current && authenticated)
+                        .then_some(verified_at)
+                        .flatten();
                     entry.child = None;
                 }
             }

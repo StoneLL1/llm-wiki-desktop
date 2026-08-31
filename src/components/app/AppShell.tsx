@@ -10,7 +10,10 @@ import { useModalDialog } from "../../hooks/useModalDialog";
 import { useNavigationStore } from "../../stores/navigationStore";
 import {
   bindProjectFactsAuthority,
+  ensureProjectFacts,
   invalidateProjectFacts,
+  projectFactsAuthorityKey,
+  projectFactsAuthorityMatches,
   projectFactsKey,
   pruneProjectFacts,
 } from "../../stores/projectFactsStore";
@@ -31,6 +34,11 @@ import { WorkspaceController } from "./WorkspaceController";
 const TaskLogDrawer = lazy(async () => {
   const module = await import("./TaskLogDrawer");
   return { default: module.TaskLogDrawer };
+});
+
+const AppCapabilityController = lazy(async () => {
+  const module = await import("./AppCapabilityController");
+  return { default: module.AppCapabilityController };
 });
 
 function useNarrowDesktop() {
@@ -111,30 +119,58 @@ export function AppShell() {
       projectId: currentProject.projectId,
       rootPath: currentProject.rootPath,
     };
-    const authorityIdentityKey = authority
-      ? `${authority.canonicalIdentityKey}\0${authority.identityRevision}`
-      : null;
+    const authorityIdentityKey = authority ? projectFactsAuthorityKey(authority) : null;
     bindProjectFactsAuthority(scope, authorityIdentityKey);
     pruneProjectFacts(projectFactsKey(scope));
   }, [
     authority?.canonicalIdentityKey,
     authority?.identityRevision,
+    authority?.authorityRevision,
     currentProject.projectId,
     currentProject.rootPath,
   ]);
 
   useEffect(() => {
-    const invalidateActiveProjectFacts = () => {
-      const project = useProjectStore.getState().currentProject;
+    let foregroundRefreshArmed = document.visibilityState === "hidden";
+    const armForegroundRefresh = () => {
+      foregroundRefreshArmed = true;
+    };
+    const refreshActiveProjectGit = () => {
+      if (document.visibilityState === "hidden") return;
+      // One background transition arms exactly one refresh. WebView2 may
+      // deliver visibility and focus halves arbitrarily far apart, so elapsed
+      // wall-clock time cannot safely identify a foreground cycle.
+      if (!foregroundRefreshArmed) return;
+      const state = useProjectStore.getState();
+      const project = state.currentProject;
       if (!project.projectId || !project.rootPath) return;
+      if (state.authority?.projectId !== project.projectId) return;
+      const scope = { projectId: project.projectId, rootPath: project.rootPath };
+      const authorityIdentityKey = projectFactsAuthorityKey(state.authority);
+      if (!projectFactsAuthorityMatches(scope, authorityIdentityKey)) return;
+      foregroundRefreshArmed = false;
       invalidateProjectFacts(
-        { projectId: project.projectId, rootPath: project.rootPath },
-        ["git", "agents", "providers"],
+        scope,
+        ["git"],
         "window_focus",
       );
+      void ensureProjectFacts(scope, ["git"]).catch(() => undefined);
     };
-    window.addEventListener("focus", invalidateActiveProjectFacts);
-    return () => window.removeEventListener("focus", invalidateActiveProjectFacts);
+    const refreshVisibleProjectGit = () => {
+      if (document.visibilityState === "hidden") {
+        armForegroundRefresh();
+      } else {
+        refreshActiveProjectGit();
+      }
+    };
+    window.addEventListener("blur", armForegroundRefresh);
+    window.addEventListener("focus", refreshActiveProjectGit);
+    document.addEventListener("visibilitychange", refreshVisibleProjectGit);
+    return () => {
+      window.removeEventListener("blur", armForegroundRefresh);
+      window.removeEventListener("focus", refreshActiveProjectGit);
+      document.removeEventListener("visibilitychange", refreshVisibleProjectGit);
+    };
   }, []);
 
   useEffect(() => {
@@ -243,6 +279,9 @@ export function AppShell() {
         </ViewErrorBoundary>
       ) : null}
       <UpdateController />
+      <Suspense fallback={null}>
+        <AppCapabilityController />
+      </Suspense>
       {showRightPanelDialog
         ? createPortal(
             <div

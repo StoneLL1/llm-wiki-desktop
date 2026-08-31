@@ -238,21 +238,19 @@ export function evaluateFinalFourRedlines(root) {
   const releaseWorkflow = readText(root, ".github/workflows/desktop-release.yml")
     || readText(root, ".github/workflows/release.yml");
   const capabilityWorkflow = readText(root, ".github/workflows/capability-release.yml");
+  const productManifest = readJson(root, "capabilities/product-manifest.json", null);
 
   const catalogEntries = Array.isArray(catalog?.entries) ? catalog.entries : [];
-  const expectedTargets = [
-    "aarch64-apple-darwin",
-    "x86_64-apple-darwin",
-    "x86_64-pc-windows-msvc",
-    "x86_64-unknown-linux-gnu",
-  ];
-  const expectedPacks = [
-    "asr-sensevoice-small",
-    "browser-runtime",
-    "browser-runtime-lite",
-    "media-metadata",
-    "ocr-cjk-accurate",
-  ];
+  const expectedTargets = Array.isArray(productManifest?.supportedTargets)
+    ? [...productManifest.supportedTargets].sort()
+    : [];
+  const expectedPacks = Array.isArray(productManifest?.definitions)
+    ? productManifest.definitions
+      .filter((definition) => definition?.distributionTier === "published")
+      .map((definition) => definition.capabilityId)
+      .sort()
+    : [];
+  const expectedCatalogEntries = expectedTargets.length * expectedPacks.length;
   const catalogTargets = new Set(catalogEntries.map((entry) => entry.targetTriple));
   const catalogPacks = new Set(catalogEntries.map((entry) => entry.capabilityId));
   const catalogPairs = new Set(catalogEntries.map((entry) => `${entry.capabilityId}\0${entry.targetTriple}`));
@@ -269,6 +267,7 @@ export function evaluateFinalFourRedlines(root) {
       && !/^0+$/.test(entry.archiveSha256)
       && /^[0-9a-f]{64}$/.test(entry.manifestSha256 ?? "")
       && !/^0+$/.test(entry.manifestSha256)
+      && typeof entry.signingKeyId === "string" && entry.signingKeyId.length > 0
       && Number.isSafeInteger(entry.compressedBytes) && entry.compressedBytes > 0
       && Number.isSafeInteger(entry.installedBytes) && entry.installedBytes > 0
       && typeof entry.license === "string" && entry.license.trim().length > 0;
@@ -283,8 +282,9 @@ export function evaluateFinalFourRedlines(root) {
     && /^ {2}workflow_call:\s*$/m.test(capabilityWorkflow)
     && !/gh release (?:create|upload)/i.test(capabilityWorkflow);
   const catalogReady = catalog?.schemaVersion === 1
-    && catalogEntries.length === 20
-    && catalogPairs.size === 20
+    && expectedCatalogEntries > 0
+    && catalogEntries.length === expectedCatalogEntries
+    && catalogPairs.size === expectedCatalogEntries
     && JSON.stringify([...catalogTargets].sort()) === JSON.stringify(expectedTargets)
     && JSON.stringify([...catalogPacks].sort()) === JSON.stringify(expectedPacks)
     && catalogTags.size === 1
@@ -412,7 +412,7 @@ export function evaluateFinalFourRedlines(root) {
     && readText(root, "scripts/verify-latest-json.mjs").length > 0;
 
   return [
-    result("capability-release-catalog", catalogReady, "3A", "release mode requires 4 targets × 5 signed capability packs"),
+    result("capability-release-catalog", catalogReady, "3A", "release mode requires the product-manifest-derived exact signed capability matrix"),
     result("signed-updater-foundation", updaterReady, "4A", "Tauri updater dependency, plugin, artifacts, public key, and canonical endpoint must exist"),
     result("real-update-offer", updateOfferReady, "4B", "UpdateSettings must consume the global updater offer instead of get_app_summary placeholder state"),
     result("structured-backend-error-presentation", backendErrorReady, "1", "shared normalization must cover serialized, circular, and object-shaped failures without [object Object]"),

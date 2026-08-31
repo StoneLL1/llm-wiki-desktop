@@ -1,4 +1,4 @@
-import type { TaskProgress } from "./task";
+import type { TaskProgress, TaskStatus } from "./task";
 import type { AgentRecoveryAction } from "./importV2Agent";
 
 export type {
@@ -248,16 +248,28 @@ export interface ImportPreviewArtifact {
   resolution?: ImportResolutionContext;
   manualMerge?: ImportArtifact;
 }
-export interface ImportItem { itemId: string; input: ImportInput; status: ImportItemStatus; selected: boolean; selectedSubtitle?: string | null; taskId: string | null; progress: TaskProgress | null; attempts: AttemptRecord[]; preview: ImportPreviewArtifact | null; issue: ImportIssue | null; authenticatedRetry?: boolean; authenticatedIdentitySummary?: string | null; restrictedContent?: boolean; restrictedIdentitySummary?: string | null; }
+export interface ImportItem { itemId: string; itemRevision?: number; input: ImportInput; status: ImportItemStatus; selected: boolean; selectedSubtitle?: string | null; taskId: string | null; progress: TaskProgress | null; attempts: AttemptRecord[]; preview: ImportPreviewArtifact | null; issue: ImportIssue | null; authenticatedRetry?: boolean; authenticatedIdentitySummary?: string | null; restrictedContent?: boolean; restrictedIdentitySummary?: string | null; }
 export type ImportMediaAuthorizationKind = "ocr" | "asr";
 export type ImportAsrProfile = "fast" | "balanced" | "accurate";
 export interface ImportMediaAuthorization { itemId: string; kind: ImportMediaAuthorizationKind; authorizedAt: string; asrProfile?: ImportAsrProfile | null; language?: string | null; }
 export interface ImportCollectionChildRelation { itemId: string; canonicalUrl: string; discoveryFingerprint: string; }
 export interface ImportCollectionRelation { relationId: string; sourceUrl: string; platform: string; title: string; childItemIds: string[]; children?: ImportCollectionChildRelation[]; addedAt: string; }
 export interface ImportSession { schemaVersion: 2; sessionId: string; projectId: string; status: ImportSessionStatus; resourceMode: ImportResourceMode; createdAt: string; updatedAt: string; discoveryTaskId?: string | null; mediaAuthorizations?: ImportMediaAuthorization[]; collectionRelations?: ImportCollectionRelation[]; items: ImportItem[]; }
+export type ImportSessionIndexState = "ready" | "rebuild_required";
+export interface ImportSessionCounts { all: number; active: number; ready: number; needsAction: number; failed: number; completed: number; waiting: number; processed: number; cancelled: number; }
+export interface ImportSelectionSummary { selected: number; newSources: number; updates: number; warnings: number; pending: number; restricted: number; }
+export type ImportSessionActionGroupKind = "login" | "ocr" | "asr" | "capability" | "conflict" | "resume";
+export interface ImportSessionActionGroup { groupKey: string; kind: ImportSessionActionGroupKind; subjectId?: string | null; itemCount: number; itemIds: string[]; }
+export interface ImportSessionStatusCounts { queued: number; inspecting: number; waitingCapability: number; waitingLogin: number; waitingAuthorization: number; extracting: number; validating: number; previewReady: number; needsMerge: number; committing: number; completed: number; paused: number; cancelled: number; skipped: number; failed: number; }
+export interface ImportOperationTaskSummary { taskId: string; status: TaskStatus; progress?: TaskProgress | null; }
+export type ImportRecoveryReason = "stale_in_flight_item" | "interrupted_task" | "incomplete_journal" | "partial_remote_download" | "partial_capability_download" | "residual_staging";
+export interface ImportSessionOverview { schemaVersion: 2; sessionId: string; projectId: string; status: ImportSessionStatus; resourceMode: ImportResourceMode; createdAt: string; updatedAt: string; discoveryTaskId?: string | null; itemCount: number; semanticRevision: number; selectionRevision: number; confirmationDigest: string; counts: ImportSessionCounts; statusCounts: ImportSessionStatusCounts; selection: ImportSelectionSummary; indexState: ImportSessionIndexState; recoveryRequired: boolean; recoveryReasons: ImportRecoveryReason[]; actionGroups?: ImportSessionActionGroup[]; unresolvedCount?: number; remainingCount?: number; operationTask?: ImportOperationTaskSummary | null; nextCursor?: string | null; }
+export type ImportItemPageFilter = "all" | "active" | "ready" | "needs_action" | "failed" | "completed";
+export interface ImportItemPage { sessionId: string; snapshotRevision: number; items: ImportItem[]; nextCursor?: string | null; total: number; }
 
 export interface CreateImportSessionV2Request { projectId: string; projectRootPath: string; resourceMode: ImportResourceMode; }
 export interface GetImportSessionV2Request { projectId: string; projectRootPath: string; sessionId: string; historyBatchId?: string | null; }
+export interface ListImportSessionItemsV2Request { projectId: string; projectRootPath: string; sessionId: string; filter: ImportItemPageFilter; cursor?: string | null; limit?: number; }
 export interface AddImportItemsV2Request { projectId: string; projectRootPath: string; sessionId: string; inputs: ImportInput[]; }
 export interface SetImportItemSelectionV2Request { projectId: string; projectRootPath: string; sessionId: string; itemId: string; selected: boolean; }
 export interface SelectImportSubtitleV2Request { projectId: string; projectRootPath: string; sessionId: string; itemId: string; fileName: string; }
@@ -270,7 +282,7 @@ export interface SetImportItemResolutionV2Request extends ImportMergeContextV2Re
 export interface StageImportManualMergeV2Request extends ImportMergeContextV2Request { mergedMarkdown: string; }
 
 export interface CommitItemDecision { itemId: string; resolution?: ImportItemResolution | null; }
-export interface CommitImportSessionRequest { projectId: string; projectRootPath: string; sessionId: string; batchTaskId?: string | null; acknowledgeRestrictedContent?: boolean; decisions: CommitItemDecision[]; }
+export interface CommitImportSessionRequest { projectId: string; projectRootPath: string; sessionId: string; batchTaskId?: string | null; acknowledgeRestrictedContent?: boolean; expectedSelectionRevision?: number | null; expectedConfirmationDigest?: string | null; decisions?: CommitItemDecision[]; }
 export type ImportItemCommitResult =
   | { itemId: string; sourceId: string; versionId: string; wikiPath: string; committed: true; errorCode: null }
   | { itemId: string; sourceId: null; versionId: null; wikiPath: null; committed: false; errorCode: string };

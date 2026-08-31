@@ -35,7 +35,7 @@ use crate::utils::path_safety::{
 use crate::utils::safe_project_dir::remove_project_file;
 
 const PERSISTED_TASK_SCHEMA_VERSION: u32 = 2;
-const WORKFLOW_PROGRESS_PERSISTENCE_WINDOW: Duration = Duration::from_millis(250);
+const TASK_PROGRESS_PERSISTENCE_WINDOW: Duration = Duration::from_millis(500);
 
 #[derive(Default)]
 struct WorkflowPersistenceLane {
@@ -345,6 +345,7 @@ pub struct TaskService {
     workflow_persistence_clock: Arc<WorkflowPersistenceClock>,
     workflow_history_revision: Arc<AtomicU64>,
     workflow_history_indices: Arc<RwLock<HashMap<WorkflowHistoryIndexKey, WorkflowHistoryIndex>>>,
+    import_history_task_creation_lock: Arc<Mutex<()>>,
     #[cfg(test)]
     injected_persistence_failures: Arc<Mutex<HashMap<String, usize>>>,
     #[cfg(test)]
@@ -374,6 +375,7 @@ impl Default for TaskService {
             workflow_persistence_clock: Arc::new(WorkflowPersistenceClock::default()),
             workflow_history_revision: Arc::new(AtomicU64::new(0)),
             workflow_history_indices: Arc::new(RwLock::new(HashMap::new())),
+            import_history_task_creation_lock: Arc::new(Mutex::new(())),
             #[cfg(test)]
             injected_persistence_failures: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(test)]
@@ -408,6 +410,7 @@ impl TaskService {
             workflow_persistence_clock: Arc::new(WorkflowPersistenceClock::default()),
             workflow_history_revision: Arc::new(AtomicU64::new(0)),
             workflow_history_indices: Arc::new(RwLock::new(HashMap::new())),
+            import_history_task_creation_lock: Arc::new(Mutex::new(())),
             #[cfg(test)]
             injected_persistence_failures: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(test)]
@@ -526,6 +529,25 @@ impl TaskService {
         cancellable: bool,
     ) -> Result<BackendTask, String> {
         let persistence_dir = project_root.join(".app/tasks");
+        self.create_project_task_at(
+            task_type,
+            project_id,
+            project_root,
+            persistence_dir,
+            title,
+            cancellable,
+        )
+    }
+
+    pub fn create_project_task_at(
+        &self,
+        task_type: TaskType,
+        project_id: String,
+        project_root: PathBuf,
+        persistence_dir: PathBuf,
+        title: String,
+        cancellable: bool,
+    ) -> Result<BackendTask, String> {
         self.create_task_internal(
             task_type,
             Some(project_id),
@@ -540,14 +562,70 @@ impl TaskService {
         )
     }
 
+    pub fn create_project_import_history_index_task(
+        &self,
+        project_id: String,
+        project_root: PathBuf,
+        task_state_root: PathBuf,
+        title: String,
+    ) -> Result<BackendTask, String> {
+        self.create_task_internal(
+            TaskType::Import,
+            Some(project_id),
+            Some(project_root),
+            title,
+            true,
+            None,
+            Some(TaskOperation::ImportHistoryIndexRebuild),
+            true,
+            None,
+            Some(task_state_root),
+        )
+    }
+
+    pub fn get_or_create_project_import_history_index_task(
+        &self,
+        project_id: String,
+        project_root: PathBuf,
+        task_state_root: PathBuf,
+        title: String,
+    ) -> Result<(BackendTask, bool), String> {
+        let _guard = self
+            .import_history_task_creation_lock
+            .lock()
+            .map_err(|_| "Import history task creation lock is unavailable".to_string())?;
+        if let Some(task) = self
+            .list_tasks_for_root(&project_root, None)
+            .into_iter()
+            .find(|task| {
+                matches!(
+                    task.operation,
+                    Some(TaskOperation::ImportHistoryIndexRebuild)
+                ) && matches!(
+                    task.status,
+                    TaskStatus::Queued | TaskStatus::Running | TaskStatus::Cancelling
+                )
+            })
+        {
+            return Ok((task, false));
+        }
+        self.create_project_import_history_index_task(
+            project_id,
+            project_root,
+            task_state_root,
+            title,
+        )
+        .map(|task| (task, true))
+    }
+
     pub fn create_project_import_commit_task(
         &self,
         project_id: String,
         project_root: PathBuf,
+        task_state_root: PathBuf,
         title: String,
         session_id: String,
     ) -> Result<BackendTask, String> {
-        let persistence_dir = project_root.join(".app/tasks");
         self.create_task_internal(
             TaskType::Import,
             Some(project_id),
@@ -558,7 +636,29 @@ impl TaskService {
             Some(TaskOperation::ImportCommit { session_id }),
             true,
             None,
-            Some(persistence_dir),
+            Some(task_state_root),
+        )
+    }
+
+    pub fn create_project_import_recovery_task(
+        &self,
+        project_id: String,
+        project_root: PathBuf,
+        task_state_root: PathBuf,
+        title: String,
+        session_id: String,
+    ) -> Result<BackendTask, String> {
+        self.create_task_internal(
+            TaskType::Import,
+            Some(project_id),
+            Some(project_root),
+            title,
+            true,
+            None,
+            Some(TaskOperation::ImportRecovery { session_id }),
+            true,
+            None,
+            Some(task_state_root),
         )
     }
 
@@ -612,6 +712,27 @@ impl TaskService {
         batch_id: String,
     ) -> Result<BackendTask, String> {
         let persistence_dir = project_root.join(".app/tasks");
+        self.create_project_task_with_batch_at(
+            task_type,
+            project_id,
+            project_root,
+            persistence_dir,
+            title,
+            cancellable,
+            batch_id,
+        )
+    }
+
+    pub fn create_project_task_with_batch_at(
+        &self,
+        task_type: TaskType,
+        project_id: String,
+        project_root: PathBuf,
+        persistence_dir: PathBuf,
+        title: String,
+        cancellable: bool,
+        batch_id: String,
+    ) -> Result<BackendTask, String> {
         self.create_task_internal(
             task_type,
             Some(project_id),
@@ -657,6 +778,49 @@ impl TaskService {
         )
     }
 
+    pub fn create_project_import_collection_task(
+        &self,
+        project_id: String,
+        project_root: PathBuf,
+        task_state_root: PathBuf,
+        title: String,
+        session_id: String,
+    ) -> Result<BackendTask, String> {
+        self.create_task_internal(
+            TaskType::Import,
+            Some(project_id),
+            Some(project_root),
+            title,
+            true,
+            None,
+            Some(TaskOperation::ImportCollectionDiscovery { session_id }),
+            true,
+            None,
+            Some(task_state_root),
+        )
+    }
+
+    pub fn create_memory_import_collection_task(
+        &self,
+        project_id: String,
+        project_root: PathBuf,
+        title: String,
+        session_id: String,
+    ) -> Result<BackendTask, String> {
+        self.create_task_internal(
+            TaskType::Import,
+            Some(project_id),
+            Some(project_root),
+            title,
+            true,
+            None,
+            Some(TaskOperation::ImportCollectionDiscovery { session_id }),
+            false,
+            None,
+            None,
+        )
+    }
+
     pub fn create_project_capability_install_task(
         &self,
         project_id: String,
@@ -684,6 +848,38 @@ impl TaskService {
             true,
             None,
             Some(task_state_root),
+        )
+    }
+
+    /// Create an application-scoped capability task. Its persistence root is
+    /// owned by the application data directory and is deliberately unrelated
+    /// to the currently active knowledge base.
+    pub fn create_app_capability_install_task(
+        &self,
+        app_task_root: PathBuf,
+        title: String,
+        capability_id: String,
+        version: String,
+        target_triple: String,
+        archive_identity: String,
+    ) -> Result<BackendTask, String> {
+        let persistence_dir = app_task_root.join("tasks");
+        self.create_task_internal(
+            TaskType::CapabilityInstall,
+            None,
+            Some(app_task_root),
+            title,
+            true,
+            None,
+            Some(TaskOperation::AppCapabilityInstall {
+                capability_id,
+                version,
+                target_triple,
+                archive_identity,
+            }),
+            true,
+            None,
+            Some(persistence_dir),
         )
     }
 
@@ -848,6 +1044,42 @@ impl TaskService {
             .collect::<Vec<_>>();
         list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         list
+    }
+
+    pub fn list_app_tasks(&self, status_filter: Option<TaskStatus>) -> Vec<BackendTask> {
+        let tasks = self.tasks.read().expect("lock poisoned");
+        let mut list = tasks
+            .values()
+            .filter(|entry| {
+                entry.task.project_id.is_none()
+                    && entry.task.task_type == TaskType::CapabilityInstall
+                    && status_filter
+                        .as_ref()
+                        .map(|status| &entry.task.status == status)
+                        .unwrap_or(true)
+            })
+            .map(|entry| entry.task.clone())
+            .collect::<Vec<_>>();
+        list.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        list
+    }
+
+    pub fn recover_app_tasks(&self, app_task_root: &Path) -> Result<Vec<BackendTask>, String> {
+        std::fs::create_dir_all(app_task_root)
+            .map_err(|error| format!("Failed to create app task root: {error}"))?;
+        let recovered =
+            self.recover_tasks_from(app_task_root, &app_task_root.join("tasks"), None)?;
+        if recovered.iter().any(|task| {
+            task.project_id.is_some()
+                || task.task_type != TaskType::CapabilityInstall
+                || !matches!(
+                    task.operation,
+                    Some(TaskOperation::AppCapabilityInstall { .. })
+                )
+        }) {
+            return Err("App task persistence contains a non-global task".into());
+        }
+        Ok(recovered)
     }
 
     pub fn get_workflow_run(&self, id: &str) -> Option<WorkflowRun> {
@@ -1441,7 +1673,7 @@ impl TaskService {
             .read()
             .expect("lock poisoned")
             .get(id)
-            .is_some_and(|entry| entry.workflow.is_some())
+            .is_some()
             .then(|| self.workflow_persistence_lane(id))
     }
 
@@ -1533,7 +1765,7 @@ impl TaskService {
                 persistence_dir.is_some()
                     && lane.last_observational_write_ms.is_none_or(|last| {
                         now_ms.saturating_sub(last)
-                            >= u64::try_from(WORKFLOW_PROGRESS_PERSISTENCE_WINDOW.as_millis())
+                            >= u64::try_from(TASK_PROGRESS_PERSISTENCE_WINDOW.as_millis())
                                 .unwrap_or(u64::MAX)
                     })
             }
@@ -1577,7 +1809,7 @@ impl TaskService {
                         lane.trailing_flush_generation =
                             lane.trailing_flush_generation.saturating_add(1);
                         trailing_flush = Some((
-                            WORKFLOW_PROGRESS_PERSISTENCE_WINDOW,
+                            TASK_PROGRESS_PERSISTENCE_WINDOW,
                             lane.trailing_flush_generation,
                         ));
                     }
@@ -1603,8 +1835,8 @@ impl TaskService {
             lane.pending_observational_revision = Some(revision);
             if !lane.trailing_flush_scheduled {
                 lane.trailing_flush_scheduled = true;
-                let window_ms = u64::try_from(WORKFLOW_PROGRESS_PERSISTENCE_WINDOW.as_millis())
-                    .unwrap_or(u64::MAX);
+                let window_ms =
+                    u64::try_from(TASK_PROGRESS_PERSISTENCE_WINDOW.as_millis()).unwrap_or(u64::MAX);
                 let elapsed_ms = lane
                     .last_observational_write_ms
                     .map(|last| now_ms.saturating_sub(last))
@@ -2512,6 +2744,8 @@ impl TaskService {
         id: &str,
         new_status: TaskStatus,
     ) -> Result<BackendTask, String> {
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
         let mut tasks = self.tasks.write().expect("lock poisoned");
         let entry = tasks
             .get_mut(id)
@@ -2519,6 +2753,7 @@ impl TaskService {
 
         validate_transition(&entry.task.status, &new_status)?;
 
+        let previous = entry.task.clone();
         entry.task.status = new_status.clone();
         entry.task.updated_at = Utc::now().to_rfc3339();
 
@@ -2547,9 +2782,13 @@ impl TaskService {
         };
 
         drop(tasks);
-        self.emit(event_type, pid.clone(), Some(tid.clone()), task.clone());
-
-        self.persist_current_task(&tid)?;
+        if let Err(error) = self.persist_current_task_with_lane(&tid, Some(&mut lane)) {
+            if let Some(entry) = self.tasks.write().expect("lock poisoned").get_mut(&tid) {
+                entry.task = previous;
+            }
+            return Err(error);
+        }
+        self.emit(event_type, pid, Some(tid), task.clone());
 
         Ok(task)
     }
@@ -2561,10 +2800,34 @@ impl TaskService {
         total: Option<u64>,
         label: Option<String>,
     ) -> Result<BackendTask, String> {
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
+        let project_root = self
+            .task_roots
+            .read()
+            .expect("lock poisoned")
+            .get(id)
+            .cloned();
+        let persistence_dir = self
+            .task_persistence_dirs
+            .read()
+            .expect("lock poisoned")
+            .get(id)
+            .cloned();
         let mut tasks = self.tasks.write().expect("lock poisoned");
         let entry = tasks
             .get_mut(id)
             .ok_or_else(|| format!("Task not found: {}", id))?;
+
+        if matches!(
+            entry.task.status,
+            TaskStatus::Succeeded
+                | TaskStatus::Failed
+                | TaskStatus::Cancelled
+                | TaskStatus::Interrupted
+        ) {
+            return Ok(entry.task.clone());
+        }
 
         entry.task.progress = Some(TaskProgress {
             current,
@@ -2576,11 +2839,98 @@ impl TaskService {
         let task = entry.task.clone();
         let pid = task.project_id.clone();
         let tid = task.id.clone();
+        lane.next_revision = lane.next_revision.saturating_add(1);
+        let revision = lane.next_revision;
 
         drop(tasks);
+        let now_ms = self.workflow_persistence_clock.now_ms();
+        let should_persist = persistence_dir.is_some()
+            && lane.last_observational_write_ms.is_none_or(|last| {
+                now_ms.saturating_sub(last)
+                    >= u64::try_from(TASK_PROGRESS_PERSISTENCE_WINDOW.as_millis())
+                        .unwrap_or(u64::MAX)
+            });
+        let mut trailing_flush = None;
+        if should_persist {
+            let persisted = self
+                .tasks
+                .read()
+                .expect("lock poisoned")
+                .get(id)
+                .map(|entry| PersistedTaskEntry {
+                    schema_version: PERSISTED_TASK_SCHEMA_VERSION,
+                    task: entry.task.clone(),
+                    log_lines: entry.log_lines.clone(),
+                    activities: entry.activities.clone(),
+                    workflow: entry.workflow.clone(),
+                })
+                .ok_or_else(|| format!("Task disappeared during persistence: {id}"))?;
+            let project_root = project_root
+                .as_deref()
+                .ok_or_else(|| format!("Persistent task has no project root: {id}"))?;
+            let tasks_dir = persistence_dir
+                .as_deref()
+                .expect("persistence was required only with a task-state root");
+            match self.write_persisted_task_snapshot(project_root, tasks_dir, id, &persisted) {
+                Ok(path) => {
+                    lane.persisted_revision = revision;
+                    lane.last_observational_write_ms = Some(now_ms);
+                    lane.pending_observational_revision = None;
+                    lane.trailing_flush_scheduled = false;
+                    lane.trailing_flush_generation =
+                        lane.trailing_flush_generation.saturating_add(1);
+                    lane.pending_error = None;
+                    if let Some(entry) = self.tasks.write().expect("lock poisoned").get_mut(id) {
+                        entry.persisted_path = Some(path);
+                    }
+                }
+                Err(error) => {
+                    // Progress remains a live observation. A later progress
+                    // flush or any status/result/log barrier retries the
+                    // newest complete task snapshot before it is published.
+                    lane.pending_error = Some(error);
+                    lane.pending_observational_revision = Some(revision);
+                    if !lane.trailing_flush_scheduled {
+                        lane.trailing_flush_scheduled = true;
+                        lane.trailing_flush_generation =
+                            lane.trailing_flush_generation.saturating_add(1);
+                        trailing_flush = Some((
+                            TASK_PROGRESS_PERSISTENCE_WINDOW,
+                            lane.trailing_flush_generation,
+                        ));
+                    }
+                }
+            }
+        } else if persistence_dir.is_none() {
+            lane.persisted_revision = revision;
+            lane.pending_observational_revision = None;
+            lane.trailing_flush_scheduled = false;
+            lane.trailing_flush_generation = lane.trailing_flush_generation.saturating_add(1);
+            lane.pending_error = None;
+        } else {
+            lane.pending_observational_revision = Some(revision);
+            if !lane.trailing_flush_scheduled {
+                lane.trailing_flush_scheduled = true;
+                let window_ms =
+                    u64::try_from(TASK_PROGRESS_PERSISTENCE_WINDOW.as_millis()).unwrap_or(u64::MAX);
+                let elapsed_ms = lane
+                    .last_observational_write_ms
+                    .map(|last| now_ms.saturating_sub(last))
+                    .unwrap_or_default();
+                lane.trailing_flush_generation = lane.trailing_flush_generation.saturating_add(1);
+                trailing_flush = Some((
+                    Duration::from_millis(window_ms.saturating_sub(elapsed_ms)),
+                    lane.trailing_flush_generation,
+                ));
+            }
+        }
+
         use crate::models::task::BackendEventType::TaskUpdated;
         self.emit(TaskUpdated, pid, Some(tid), task.clone());
-        self.persist_current_task(id)?;
+        drop(lane);
+        if let Some((delay, generation)) = trailing_flush {
+            self.schedule_workflow_progress_flush(id.to_string(), delay, generation);
+        }
 
         Ok(task)
     }
@@ -2732,6 +3082,209 @@ impl TaskService {
             .map(|(task, _)| task)
     }
 
+    pub fn request_app_task_pause(
+        &self,
+        id: &str,
+        expected_revision: &str,
+    ) -> Result<BackendTask, String> {
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
+        let mut tasks = self.tasks.write().expect("lock poisoned");
+        let entry = tasks
+            .get_mut(id)
+            .ok_or_else(|| format!("Task not found: {id}"))?;
+        require_app_capability_task_revision(&entry.task, expected_revision)?;
+        if entry.task.status == TaskStatus::Interrupted {
+            return Ok(entry.task.clone());
+        }
+        if !matches!(entry.task.status, TaskStatus::Queued | TaskStatus::Running) {
+            return Err(format!(
+                "Task cannot be paused from its current state: {id}"
+            ));
+        }
+        let previous = entry.task.clone();
+        entry.cancellation.request_pause();
+        if entry.task.status == TaskStatus::Queued {
+            entry.task.status = TaskStatus::Interrupted;
+            entry.task.completed_at = Some(Utc::now().to_rfc3339());
+        }
+        entry.task.updated_at = Utc::now().to_rfc3339();
+        let task = entry.task.clone();
+        let pid = task.project_id.clone();
+        let tid = task.id.clone();
+        drop(tasks);
+        if let Err(error) = self.persist_current_task_with_lane(id, Some(&mut lane)) {
+            if let Some(entry) = self.tasks.write().expect("lock poisoned").get_mut(id) {
+                entry.task = previous;
+                entry.cancellation.reset();
+            }
+            return Err(error);
+        }
+        self.emit(
+            crate::models::task::BackendEventType::TaskUpdated,
+            pid,
+            Some(tid),
+            task.clone(),
+        );
+        Ok(task)
+    }
+
+    pub fn finalize_app_task_pause(&self, id: &str) -> Result<BackendTask, String> {
+        let token = self
+            .get_cancellation_token(id)
+            .ok_or_else(|| format!("Task has no cancellation signal: {id}"))?;
+        if !token.is_pause_requested() {
+            return Err(format!("Task pause was not requested: {id}"));
+        }
+        let task = self
+            .get_task(id)
+            .ok_or_else(|| format!("Task not found: {id}"))?;
+        if task.status == TaskStatus::Interrupted {
+            return Ok(task);
+        }
+        self.transition_status(id, TaskStatus::Interrupted)
+    }
+
+    pub fn resume_app_task(
+        &self,
+        id: &str,
+        expected_revision: &str,
+    ) -> Result<BackendTask, String> {
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
+        let mut tasks = self.tasks.write().expect("lock poisoned");
+        let entry = tasks
+            .get_mut(id)
+            .ok_or_else(|| format!("Task not found: {id}"))?;
+        require_app_capability_task_revision(&entry.task, expected_revision)?;
+        if entry.task.status != TaskStatus::Interrupted {
+            return Err(format!(
+                "Task is not a paused application capability install: {id}"
+            ));
+        }
+        let previous = entry.task.clone();
+        entry.cancellation.reset();
+        entry.task.status = TaskStatus::Queued;
+        entry.task.error = None;
+        entry.task.completed_at = None;
+        entry.task.updated_at = Utc::now().to_rfc3339();
+        let task = entry.task.clone();
+        let pid = task.project_id.clone();
+        let tid = task.id.clone();
+        drop(tasks);
+        if let Err(error) = self.persist_current_task_with_lane(id, Some(&mut lane)) {
+            if let Some(entry) = self.tasks.write().expect("lock poisoned").get_mut(id) {
+                entry.task = previous;
+                entry.cancellation.request_pause();
+            }
+            return Err(error);
+        }
+        self.emit(
+            crate::models::task::BackendEventType::TaskUpdated,
+            pid,
+            Some(tid),
+            task.clone(),
+        );
+        Ok(task)
+    }
+
+    pub fn cancel_paused_app_task(
+        &self,
+        id: &str,
+        expected_revision: &str,
+    ) -> Result<BackendTask, String> {
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
+        let mut tasks = self.tasks.write().expect("lock poisoned");
+        let entry = tasks
+            .get_mut(id)
+            .ok_or_else(|| format!("Task not found: {id}"))?;
+        require_app_capability_task_revision(&entry.task, expected_revision)?;
+        if entry.task.status != TaskStatus::Interrupted {
+            return Err(format!(
+                "Task is not a paused application capability install: {id}"
+            ));
+        }
+        let previous = entry.task.clone();
+        entry.cancellation.cancel();
+        entry.task.status = TaskStatus::Cancelled;
+        let now = Utc::now().to_rfc3339();
+        entry.task.updated_at = now.clone();
+        entry.task.completed_at = Some(now);
+        let task = entry.task.clone();
+        let pid = task.project_id.clone();
+        let tid = task.id.clone();
+        drop(tasks);
+        if let Err(error) = self.persist_current_task_with_lane(id, Some(&mut lane)) {
+            if let Some(entry) = self.tasks.write().expect("lock poisoned").get_mut(id) {
+                entry.task = previous;
+                entry.cancellation.request_pause();
+            }
+            return Err(error);
+        }
+        self.emit(
+            crate::models::task::BackendEventType::TaskCancelled,
+            pid,
+            Some(tid),
+            task.clone(),
+        );
+        Ok(task)
+    }
+
+    pub fn request_app_task_cancel(
+        &self,
+        id: &str,
+        expected_revision: &str,
+    ) -> Result<BackendTask, String> {
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
+        let mut tasks = self.tasks.write().expect("lock poisoned");
+        let entry = tasks
+            .get_mut(id)
+            .ok_or_else(|| format!("Task not found: {id}"))?;
+        require_app_capability_task_revision(&entry.task, expected_revision)?;
+        if matches!(
+            entry.task.status,
+            TaskStatus::Succeeded
+                | TaskStatus::Failed
+                | TaskStatus::Cancelled
+                | TaskStatus::Interrupted
+        ) {
+            return Ok(entry.task.clone());
+        }
+        let previous = entry.task.clone();
+        entry.cancellation.cancel();
+        let next_status = if entry.task.status == TaskStatus::Queued {
+            TaskStatus::Cancelled
+        } else {
+            TaskStatus::Cancelling
+        };
+        entry.task.status = next_status.clone();
+        let now = Utc::now().to_rfc3339();
+        entry.task.updated_at = now.clone();
+        if next_status == TaskStatus::Cancelled {
+            entry.task.completed_at = Some(now);
+        }
+        let task = entry.task.clone();
+        let pid = task.project_id.clone();
+        let tid = task.id.clone();
+        drop(tasks);
+        if let Err(error) = self.persist_current_task_with_lane(id, Some(&mut lane)) {
+            if let Some(entry) = self.tasks.write().expect("lock poisoned").get_mut(id) {
+                entry.task = previous;
+                entry.cancellation.reset();
+            }
+            return Err(error);
+        }
+        let event_type = if next_status == TaskStatus::Cancelled {
+            crate::models::task::BackendEventType::TaskCancelled
+        } else {
+            crate::models::task::BackendEventType::TaskUpdated
+        };
+        self.emit(event_type, pid, Some(tid), task.clone());
+        Ok(task)
+    }
+
     /// Atomic cancellation request plus the status observed before the
     /// request. Domain coordinators use the previous status to distinguish an
     /// active worker (which must finish cleanup) from an already-drained
@@ -2740,6 +3293,8 @@ impl TaskService {
         &self,
         id: &str,
     ) -> Result<(BackendTask, TaskStatus), String> {
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
         let mut tasks = self.tasks.write().expect("lock poisoned");
         let entry = tasks
             .get_mut(id)
@@ -2775,7 +3330,7 @@ impl TaskService {
         let pid = task.project_id.clone();
         let tid = task.id.clone();
         drop(tasks);
-        self.persist_current_task(id)?;
+        self.persist_current_task_with_lane(id, Some(&mut lane))?;
         let event_type = if next_status == TaskStatus::Cancelled {
             crate::models::task::BackendEventType::TaskCancelled
         } else {
@@ -2811,23 +3366,31 @@ impl TaskService {
     }
 
     pub fn set_result(&self, id: &str, result: TaskResult) -> Result<BackendTask, String> {
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
         let mut tasks = self.tasks.write().expect("lock poisoned");
         let entry = tasks
             .get_mut(id)
             .ok_or_else(|| format!("Task not found: {}", id))?;
+        let previous = entry.task.clone();
         entry.task.result = Some(result);
         entry.task.updated_at = Utc::now().to_rfc3339();
         let task = entry.task.clone();
         let pid = task.project_id.clone();
         let tid = task.id.clone();
         drop(tasks);
+        if let Err(error) = self.persist_current_task_with_lane(id, Some(&mut lane)) {
+            if let Some(entry) = self.tasks.write().expect("lock poisoned").get_mut(id) {
+                entry.task = previous;
+            }
+            return Err(error);
+        }
         self.emit(
             crate::models::task::BackendEventType::TaskUpdated,
             pid,
             Some(tid),
             task.clone(),
         );
-        self.persist_current_task(id)?;
         Ok(task)
     }
 
@@ -2840,6 +3403,8 @@ impl TaskService {
         id: &str,
         result: TaskResult,
     ) -> Result<BackendTask, String> {
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
         let mut tasks = self.tasks.write().expect("lock poisoned");
         let entry = tasks
             .get_mut(id)
@@ -2857,13 +3422,88 @@ impl TaskService {
         let pid = task.project_id.clone();
         let tid = task.id.clone();
         drop(tasks);
-        if let Err(error) = self.persist_current_task(id) {
+        if let Err(error) = self.persist_current_task_with_lane(id, Some(&mut lane)) {
             let mut tasks = self.tasks.write().expect("lock poisoned");
             if let Some(entry) = tasks.get_mut(id) {
                 entry.task = previous;
             }
-            drop(tasks);
-            let _ = self.persist_current_task(id);
+            return Err(error);
+        }
+        self.emit(
+            crate::models::task::BackendEventType::TaskCompleted,
+            pid,
+            Some(tid),
+            task.clone(),
+        );
+        Ok(task)
+    }
+
+    /// Persist the final result while the task is still running, and close
+    /// cancellation before a domain object derived from that result is
+    /// published. A crash after this seal leaves enough durable evidence for
+    /// domain recovery, without exposing a terminal event too early.
+    pub(crate) fn seal_running_with_result(
+        &self,
+        id: &str,
+        result: TaskResult,
+    ) -> Result<BackendTask, String> {
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
+        let mut tasks = self.tasks.write().expect("lock poisoned");
+        let entry = tasks
+            .get_mut(id)
+            .ok_or_else(|| format!("Task not found: {id}"))?;
+        if entry.task.status != TaskStatus::Running || entry.cancellation.is_cancelled() {
+            return Err(format!("Task is no longer running: {id}"));
+        }
+        let previous = entry.task.clone();
+        entry.task.result = Some(result);
+        entry.task.cancellable = false;
+        entry.task.updated_at = Utc::now().to_rfc3339();
+        let task = entry.task.clone();
+        drop(tasks);
+        if let Err(error) = self.persist_current_task_with_lane(id, Some(&mut lane)) {
+            let mut tasks = self.tasks.write().expect("lock poisoned");
+            if let Some(entry) = tasks.get_mut(id) {
+                entry.task = previous;
+            }
+            return Err(error);
+        }
+        Ok(task)
+    }
+
+    /// Correct a task that crashed after its sealed result and successful
+    /// Import attempt were durable but before the terminal status was written.
+    pub(crate) fn recover_sealed_agent_completion(&self, id: &str) -> Result<BackendTask, String> {
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
+        let mut tasks = self.tasks.write().expect("lock poisoned");
+        let entry = tasks
+            .get_mut(id)
+            .ok_or_else(|| format!("Task not found: {id}"))?;
+        if entry.task.status != TaskStatus::Failed
+            || entry.task.task_type != TaskType::AgentRun
+            || entry.task.result.is_none()
+        {
+            return Err(format!(
+                "Task is not a recoverable sealed Agent completion: {id}"
+            ));
+        }
+        let previous = entry.task.clone();
+        let now = Utc::now().to_rfc3339();
+        entry.task.status = TaskStatus::Succeeded;
+        entry.task.error = None;
+        entry.task.updated_at = now.clone();
+        entry.task.completed_at = Some(now);
+        let task = entry.task.clone();
+        let pid = task.project_id.clone();
+        let tid = task.id.clone();
+        drop(tasks);
+        if let Err(error) = self.persist_current_task_with_lane(id, Some(&mut lane)) {
+            let mut tasks = self.tasks.write().expect("lock poisoned");
+            if let Some(entry) = tasks.get_mut(id) {
+                entry.task = previous;
+            }
             return Err(error);
         }
         self.emit(
@@ -2895,6 +3535,8 @@ impl TaskService {
             return Err("Operation failure status and error must agree".into());
         }
 
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
         let mut tasks = self.tasks.write().expect("lock poisoned");
         let entry = tasks
             .get_mut(id)
@@ -2925,13 +3567,11 @@ impl TaskService {
         let tid = task.id.clone();
         drop(tasks);
 
-        if let Err(error) = self.persist_current_task(id) {
+        if let Err(error) = self.persist_current_task_with_lane(id, Some(&mut lane)) {
             let mut tasks = self.tasks.write().expect("lock poisoned");
             if let Some(entry) = tasks.get_mut(id) {
                 entry.task = previous;
             }
-            drop(tasks);
-            let _ = self.persist_current_task(id);
             return Err(error);
         }
         let event_type = match task.status {
@@ -3419,11 +4059,23 @@ impl TaskService {
             .get(id)
             .cloned();
         let Some(project_root) = project_root else {
+            if let Some(lane) = lane.as_mut() {
+                lane.pending_observational_revision = None;
+                lane.trailing_flush_scheduled = false;
+                lane.trailing_flush_generation = lane.trailing_flush_generation.saturating_add(1);
+                lane.pending_error = None;
+            }
             return Ok(());
         };
         let tasks = self.tasks.read().expect("lock poisoned");
         let persistence = self.task_persistence_dirs.read().expect("lock poisoned");
         let Some(dir) = persistence.get(id) else {
+            if let Some(lane) = lane.as_mut() {
+                lane.pending_observational_revision = None;
+                lane.trailing_flush_scheduled = false;
+                lane.trailing_flush_generation = lane.trailing_flush_generation.saturating_add(1);
+                lane.pending_error = None;
+            }
             return Ok(());
         };
         let entry = tasks
@@ -3554,13 +4206,15 @@ impl TaskService {
                                 ) || (task.status == TaskStatus::WaitingForConfirmation
                                     && !task.is_import_operation())
                                 {
-                                    let capability_install = matches!(
+                                    let recoverable_interruption = task.is_import_operation()
+                                        || matches!(
                                         task.operation.as_ref(),
                                         Some(
                                             crate::models::task::TaskOperation::CapabilityInstall { .. }
+                                                | crate::models::task::TaskOperation::AppCapabilityInstall { .. }
                                         )
                                     );
-                                    task.status = if capability_install {
+                                    task.status = if recoverable_interruption {
                                         TaskStatus::Interrupted
                                     } else {
                                         TaskStatus::Failed
@@ -3571,8 +4225,8 @@ impl TaskService {
                                         true,
                                         false,
                                     ));
-                                    task.completed_at =
-                                        (!capability_install).then(|| Utc::now().to_rfc3339());
+                                    task.completed_at = (!recoverable_interruption)
+                                        .then(|| Utc::now().to_rfc3339());
                                     task.updated_at = Utc::now().to_rfc3339();
                                 }
 
@@ -3786,6 +4440,28 @@ fn remove_persisted_task_snapshot(
 fn require_current_stage(workflow: &WorkflowExecutionState, stage_id: &str) -> Result<(), String> {
     if workflow.current_stage_id.as_deref() != Some(stage_id) {
         return Err(format!("Workflow stage is not current: {stage_id}"));
+    }
+    Ok(())
+}
+
+fn require_app_capability_task_revision(
+    task: &BackendTask,
+    expected_revision: &str,
+) -> Result<(), String> {
+    if task.task_type != TaskType::CapabilityInstall
+        || !matches!(
+            task.operation.as_ref(),
+            Some(TaskOperation::AppCapabilityInstall { .. })
+        )
+        || task.project_id.is_some()
+    {
+        return Err(format!(
+            "Task is not an application capability install: {}",
+            task.id
+        ));
+    }
+    if task.updated_at != expected_revision {
+        return Err(format!("Task revision is stale: {}", task.id));
     }
     Ok(())
 }
@@ -4037,6 +4713,224 @@ mod tests {
                 && candidate.operation == task.operation
                 && candidate.status == TaskStatus::WaitingForConfirmation
         }));
+    }
+
+    #[test]
+    fn import_progress_persistence_is_bounded_to_two_hz_without_hiding_live_events() {
+        let project = tempfile::tempdir().unwrap();
+        let tasks_root = project.path().join(".app/tasks");
+        let (service, events) = make_service();
+        let task = service
+            .create_project_import_operation_task(
+                "progress-budget".into(),
+                project.path().to_path_buf(),
+                tasks_root,
+                "Import 10k fixture".into(),
+                "session-progress".into(),
+                10_000,
+                None,
+            )
+            .unwrap();
+        service
+            .transition_status(&task.id, TaskStatus::Running)
+            .unwrap();
+        service.reset_workflow_progress_persistence_window(&task.id);
+        events.lock().unwrap().clear();
+        reset_task_costs();
+
+        for current in 1..=600 {
+            service
+                .update_progress(
+                    &task.id,
+                    current,
+                    Some(600),
+                    Some(format!("item-{current}")),
+                )
+                .unwrap();
+            service.advance_workflow_persistence_clock(Duration::from_millis(100));
+        }
+
+        let (persistence_writes, event_emissions) = task_costs();
+        assert_eq!(
+            persistence_writes, 120,
+            "60 seconds of 10 Hz Import progress must persist exactly at the 2 Hz boundary"
+        );
+        assert_eq!(event_emissions, 600);
+        assert_eq!(events.lock().unwrap().len(), 600);
+    }
+
+    #[test]
+    fn import_progress_trailing_flush_bounds_idle_crash_loss_to_one_window() {
+        let project = tempfile::tempdir().unwrap();
+        let tasks_root = project.path().join(".app/tasks");
+        let (service, _) = make_service();
+        let task = service
+            .create_project_import_operation_task(
+                "progress-trailing-flush".into(),
+                project.path().to_path_buf(),
+                tasks_root.clone(),
+                "Import trailing flush".into(),
+                "session-trailing".into(),
+                2,
+                None,
+            )
+            .unwrap();
+        service
+            .transition_status(&task.id, TaskStatus::Running)
+            .unwrap();
+        service
+            .update_progress(&task.id, 1, Some(2), Some("first".into()))
+            .unwrap();
+        service
+            .update_progress(&task.id, 2, Some(2), Some("latest".into()))
+            .unwrap();
+
+        service.wait_for_trailing_flush(&task.id, Duration::from_secs(2));
+
+        let restarted = TaskService::default();
+        restarted
+            .recover_tasks_from(project.path(), &tasks_root, None)
+            .unwrap();
+        let recovered = restarted.get_task(&task.id).unwrap();
+        assert_eq!(recovered.status, TaskStatus::Interrupted);
+        let progress = recovered.progress.unwrap();
+        assert_eq!(progress.current, 2);
+        assert_eq!(progress.label.as_deref(), Some("latest"));
+    }
+
+    #[test]
+    fn import_finish_barrier_is_durable_before_publication_and_rolls_back_on_failure() {
+        let project = tempfile::tempdir().unwrap();
+        let tasks_root = project.path().join(".app/tasks");
+        let (service, events) = make_service();
+        let task = service
+            .create_project_import_operation_task(
+                "terminal-barrier".into(),
+                project.path().to_path_buf(),
+                tasks_root.clone(),
+                "Import terminal barrier".into(),
+                "session-terminal".into(),
+                1,
+                None,
+            )
+            .unwrap();
+        service
+            .transition_status(&task.id, TaskStatus::Running)
+            .unwrap();
+        service.reset_workflow_progress_persistence_window(&task.id);
+        service
+            .update_progress(&task.id, 41, Some(100), Some("first".into()))
+            .unwrap();
+        service
+            .update_progress(&task.id, 42, Some(100), Some("latest".into()))
+            .unwrap();
+        events.lock().unwrap().clear();
+        service.inject_task_persistence_failures(&task.id, 1);
+
+        let result = TaskResult {
+            summary: "complete".into(),
+            affected_paths: vec!["wiki/final.md".into()],
+            reference: None,
+            pending_action: None,
+        };
+        assert!(service
+            .finish_running_operation(&task.id, result.clone(), TaskStatus::Succeeded, None,)
+            .is_err());
+        assert_eq!(
+            service.get_task(&task.id).unwrap().status,
+            TaskStatus::Running
+        );
+        assert!(service.get_task(&task.id).unwrap().result.is_none());
+        assert!(events.lock().unwrap().is_empty());
+
+        let completed = service
+            .finish_running_operation(&task.id, result, TaskStatus::Succeeded, None)
+            .unwrap();
+        assert_eq!(completed.status, TaskStatus::Succeeded);
+        assert_eq!(events.lock().unwrap().len(), 1);
+        assert_eq!(
+            events.lock().unwrap()[0].event_type,
+            BackendEventType::TaskCompleted
+        );
+
+        let json = std::fs::read_to_string(tasks_root.join(format!("{}.json", task.id))).unwrap();
+        let (persisted, _, _, _) = parse_persisted_task(&json, &task.id).unwrap();
+        assert_eq!(persisted.status, TaskStatus::Succeeded);
+        assert_eq!(persisted.progress.unwrap().current, 42);
+        assert_eq!(persisted.result.unwrap().summary, "complete");
+    }
+
+    #[test]
+    fn paused_import_progress_writer_serializes_before_the_finish_barrier() {
+        let project = tempfile::tempdir().unwrap();
+        let tasks_root = project.path().join(".app/tasks");
+        let service = TaskService::default();
+        let task = service
+            .create_project_import_operation_task(
+                "progress-finish-race".into(),
+                project.path().to_path_buf(),
+                tasks_root.clone(),
+                "Import progress finish race".into(),
+                "session-finish-race".into(),
+                1,
+                None,
+            )
+            .unwrap();
+        service
+            .transition_status(&task.id, TaskStatus::Running)
+            .unwrap();
+        service.reset_workflow_progress_persistence_window(&task.id);
+        let (writer_gate, writer_entered) = service.gate_next_persistence_write(&task.id);
+        let progress_service = service.clone();
+        let progress_id = task.id.clone();
+        let progress = std::thread::spawn(move || {
+            progress_service.update_progress(
+                &progress_id,
+                1,
+                Some(1),
+                Some("latest-progress".into()),
+            )
+        });
+        writer_entered
+            .recv_timeout(Duration::from_secs(2))
+            .expect("Import progress writer did not reach the deterministic gate");
+
+        let (finish_started_tx, finish_started_rx) = std::sync::mpsc::channel();
+        let (finish_done_tx, finish_done_rx) = std::sync::mpsc::channel();
+        let finish_service = service.clone();
+        let finish_id = task.id.clone();
+        let finish = std::thread::spawn(move || {
+            finish_started_tx.send(()).unwrap();
+            let result = finish_service.finish_running_operation(
+                &finish_id,
+                TaskResult {
+                    summary: "complete".into(),
+                    affected_paths: Vec::new(),
+                    reference: None,
+                    pending_action: None,
+                },
+                TaskStatus::Succeeded,
+                None,
+            );
+            finish_done_tx.send(()).unwrap();
+            result
+        });
+        finish_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert!(finish_done_rx.try_recv().is_err());
+
+        writer_gate.release();
+        progress.join().unwrap().unwrap();
+        let completed = finish.join().unwrap().unwrap();
+        finish_done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(completed.status, TaskStatus::Succeeded);
+
+        let json = std::fs::read_to_string(tasks_root.join(format!("{}.json", task.id))).unwrap();
+        let (persisted, _, _, _) = parse_persisted_task(&json, &task.id).unwrap();
+        assert_eq!(persisted.status, TaskStatus::Succeeded);
+        assert_eq!(persisted.progress.unwrap().current, 1);
+        assert_eq!(service.persistence_writer_metrics(&task.id), (1, 0));
     }
 
     #[test]
@@ -4374,6 +5268,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sealed_agent_completion_closes_cancellation_and_recovers_after_interruption() {
+        let service = TaskService::default();
+        let task = service.create_task(TaskType::AgentRun, None, "agent".into(), true);
+        service
+            .transition_status(&task.id, TaskStatus::Running)
+            .unwrap();
+        let result = TaskResult {
+            summary: "candidate".into(),
+            affected_paths: vec![".app/agent/output".into()],
+            reference: None,
+            pending_action: None,
+        };
+
+        let sealed = service
+            .seal_running_with_result(&task.id, result.clone())
+            .unwrap();
+        assert_eq!(sealed.status, TaskStatus::Running);
+        assert!(!sealed.cancellable);
+        assert_eq!(sealed.result, Some(result));
+        assert!(service.request_cancel(&task.id).is_err());
+
+        service
+            .transition_status(&task.id, TaskStatus::Failed)
+            .unwrap();
+        let recovered = service.recover_sealed_agent_completion(&task.id).unwrap();
+        assert_eq!(recovered.status, TaskStatus::Succeeded);
+        assert!(recovered.result.is_some());
+        assert!(recovered.error.is_none());
+    }
+
     fn make_service() -> (TaskService, Arc<Mutex<Vec<CapturedEvent>>>) {
         let (event_bus, events) = EventBus::new_test_capture();
         let service = TaskService::with_event_bus(event_bus);
@@ -4433,7 +5358,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_progress_uses_the_250ms_window_and_stage_barrier_flushes_latest_snapshot() {
+    fn workflow_progress_uses_the_500ms_window_and_stage_barrier_flushes_latest_snapshot() {
         let root = tempfile::tempdir().unwrap();
         let (service, _) = make_service();
         let run = created_workflow(
@@ -4463,8 +5388,8 @@ mod tests {
 
         let progress_writes = task_costs().0;
         assert!(
-            progress_writes <= 41,
-            "10 seconds of progress exceeded the 250ms persistence budget: {progress_writes}"
+            progress_writes <= 21,
+            "10 seconds of progress exceeded the 500ms persistence budget: {progress_writes}"
         );
         service
             .complete_workflow_stage(&run.task_id, "read")
@@ -5553,7 +6478,8 @@ mod tests {
             let recovered = service2.recover_tasks(&temp).unwrap();
             assert_eq!(recovered.len(), 2);
 
-            // Running task should be marked as Failed after recovery
+            // Legacy Import tasks without typed operation metadata retain the
+            // historical terminal recovery behavior.
             let r1 = service2
                 .get_task(
                     &recovered
@@ -5594,13 +6520,17 @@ mod tests {
         std::fs::create_dir_all(&temp).unwrap();
 
         let (service, _events) = make_service();
-        service.set_project_root(Some(temp.clone())).unwrap();
-        let task = service.create_task(
-            TaskType::Import,
-            Some("project-live".to_string()),
-            "Live import".to_string(),
-            true,
-        );
+        let task = service
+            .create_project_import_operation_task(
+                "project-live".to_string(),
+                temp.clone(),
+                temp.join(".app/tasks"),
+                "Live import".to_string(),
+                "session-live".to_string(),
+                1,
+                None,
+            )
+            .unwrap();
         service
             .transition_status(&task.id, TaskStatus::Running)
             .unwrap();
@@ -5618,7 +6548,7 @@ mod tests {
         restarted.recover_tasks(&temp).unwrap();
         assert_eq!(
             restarted.get_task(&task.id).unwrap().status,
-            TaskStatus::Failed
+            TaskStatus::Interrupted
         );
         assert_eq!(
             restarted.get_logs(&task.id).unwrap()[0].message,
@@ -5633,19 +6563,22 @@ mod tests {
         let root = std::env::temp_dir().join(format!("task-recover-queued-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let (service, _) = make_service();
-        service.set_project_root(Some(root.clone())).unwrap();
-        let queued = service.create_task(
-            TaskType::Import,
-            Some("p".into()),
-            "Queued import".into(),
-            true,
-        );
-        service.persist_task(&queued.id, &root).unwrap();
+        let queued = service
+            .create_project_import_operation_task(
+                "p".into(),
+                root.clone(),
+                root.join(".app/tasks"),
+                "Queued import".into(),
+                "session-queued".into(),
+                1,
+                None,
+            )
+            .unwrap();
 
         let (restarted, _) = make_service();
         restarted.recover_tasks(&root).unwrap();
         let recovered = restarted.get_task(&queued.id).unwrap();
-        assert_eq!(recovered.status, TaskStatus::Failed);
+        assert_eq!(recovered.status, TaskStatus::Interrupted);
         let error = recovered.error.unwrap();
         assert_eq!(error.code, "TASK_RECOVERY");
         assert!(error.recoverable);
@@ -6147,6 +7080,41 @@ mod tests {
             },
         );
         assert!(events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn concurrent_history_rebuild_requests_create_one_project_root_task() {
+        let root = tempfile::tempdir().unwrap();
+        let task_root = root.path().join(".app/tasks");
+        std::fs::create_dir_all(&task_root).unwrap();
+        let service = TaskService::default();
+        let barrier = Arc::new(Barrier::new(8));
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let service = service.clone();
+            let barrier = barrier.clone();
+            let project_root = root.path().to_path_buf();
+            let task_root = task_root.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                service
+                    .get_or_create_project_import_history_index_task(
+                        "history-project".into(),
+                        project_root,
+                        task_root,
+                        "Prepare import history".into(),
+                    )
+                    .unwrap()
+            }));
+        }
+        let outcomes = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        let task_id = outcomes[0].0.id.clone();
+        assert!(outcomes.iter().all(|(task, _)| task.id == task_id));
+        assert_eq!(outcomes.iter().filter(|(_, created)| *created).count(), 1);
+        assert_eq!(service.list_tasks_for_root(root.path(), None).len(), 1);
     }
 
     #[test]

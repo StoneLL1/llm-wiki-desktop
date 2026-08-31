@@ -107,6 +107,7 @@ export function LeftSidebar() {
       return (
         <button
           key={item.view}
+          data-app-view={item.view}
           aria-label={t(item.labelKey)}
           aria-current={active ? "page" : undefined}
           className={`flex h-[30px] w-full items-center gap-2 rounded-[var(--radius-md)] px-2 text-left text-[13px] font-medium ${

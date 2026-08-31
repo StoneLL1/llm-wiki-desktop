@@ -112,7 +112,13 @@ function migrationTask(status: BackendTask["status"]): BackendTask {
 }
 
 beforeEach(() => {
-  useTaskStore.setState({ tasks: [] });
+  useTaskStore.setState({
+    taskById: {},
+    taskIdsByProject: {},
+    runningCountByProject: {},
+    taskFacts: {},
+    tasks: [],
+  });
 });
 
 describe("Import compatibility settings", () => {

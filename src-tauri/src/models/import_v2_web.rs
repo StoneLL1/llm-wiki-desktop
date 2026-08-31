@@ -110,6 +110,7 @@ pub struct ImportCollectionItemPreview {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportCollectionPreview {
+    pub task_id: String,
     pub collection_ref: String,
     pub source_url: String,
     pub platform: String,

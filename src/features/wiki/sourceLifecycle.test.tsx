@@ -196,6 +196,10 @@ beforeEach(async () => {
   useSourceStore.getState().reset();
   useWikiStore.getState().reset();
   useTaskStore.setState({
+    taskById: {},
+    taskIdsByProject: {},
+    runningCountByProject: {},
+    taskFacts: {},
     tasks: [],
     drawerOpen: false,
     selectedTaskId: null,
@@ -1252,7 +1256,7 @@ describe("Source reader and lifecycle boundaries", () => {
     );
     await waitFor(() => {
       expect(
-        useTaskStore.getState().tasks.some((task) => task.id === "task-source-ai"),
+        Boolean(useTaskStore.getState().taskById["task-source-ai"]),
       ).toBe(true);
       expect(useTaskStore.getState().drawerOpen).toBe(false);
       expect(useTaskStore.getState().selectedTaskId).toBeNull();
@@ -1385,9 +1389,7 @@ describe("Source reader and lifecycle boundaries", () => {
     );
     await waitFor(() =>
       expect(
-        useTaskStore
-          .getState()
-          .tasks.some((task) => task.id === "retried-current-failure"),
+        useTaskStore.getState().taskById["retried-current-failure"] !== undefined,
       ).toBe(true),
     );
     expect(useTaskStore.getState().selectedTaskId).toBe("current-failure");
@@ -1523,9 +1525,7 @@ describe("Source reader and lifecycle boundaries", () => {
     await start;
     expect(useSourceStore.getState().aiOrganizeStarting).toBe(false);
     expect(
-      useTaskStore
-        .getState()
-        .tasks.some((task) => task.id === "task-after-navigation"),
+      useTaskStore.getState().taskById["task-after-navigation"] !== undefined,
     ).toBe(true);
     expect(useTaskStore.getState().drawerOpen).toBe(false);
     expect(useTaskStore.getState().selectedTaskId).toBeNull();

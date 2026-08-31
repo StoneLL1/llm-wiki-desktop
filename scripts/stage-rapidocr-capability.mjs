@@ -20,9 +20,11 @@ const DEPENDENCY_LICENSES = new Map(Object.entries({
   "opencv-python": "Apache-2.0 AND LGPL-2.1-only AND LGPL-3.0-only",
   packaging: "Apache-2.0 OR BSD-2-Clause",
   pillow: "HPND",
+  "pillow-heif": "BSD-3-Clause",
   protobuf: "BSD-3-Clause",
   pyclipper: "MIT",
   pyreadline3: "BSD-3-Clause",
+  pypdfium2: "BSD-3-Clause AND Apache-2.0",
   pyyaml: "MIT",
   rapidocr: "Apache-2.0",
   requests: "Apache-2.0",
@@ -48,6 +50,7 @@ function parse(arguments_) {
     return value;
   };
   return {
+    pack: values.get("pack") || "ocr-cjk-accurate",
     target: required("target"),
     sourcesRoot: path.resolve(required("sources-root")),
     output: path.resolve(required("output")),
@@ -151,6 +154,9 @@ async function writeCompliance(output, provenance, dependencyLock, modelBytes, e
 }
 
 export async function stageRapidOcrCapability(options) {
+  if (!["ocr-basic", "ocr-cjk-accurate"].includes(options.pack || "ocr-cjk-accurate")) {
+    throw new Error("unsupported RapidOCR pack");
+  }
   if (await fs.stat(options.output).catch(() => null)) throw new Error(`output must not already exist: ${options.output}`);
   const source = path.join(options.repositoryRoot, "capabilities", "ocr-cjk-accurate");
   const pythonSource = path.join(options.sourcesRoot, "python");
@@ -180,7 +186,11 @@ export async function stageRapidOcrCapability(options) {
   const lockSha256 = createHash("sha256").update(dependencyLock).digest("hex");
   if (lockSha256 !== provenance.rapidOcr.dependencyLockSha256) throw new Error("OCR dependency lock differs from source provenance");
   await fs.writeFile(path.join(options.output, "DEPENDENCY-LOCK.txt"), dependencyLock, { encoding: "utf8", flag: "wx" });
-  await fs.writeFile(path.join(options.output, "BUILD-PROVENANCE.json"), `${JSON.stringify(provenance, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
+  await fs.writeFile(
+    path.join(options.output, "BUILD-PROVENANCE.json"),
+    `${JSON.stringify({ ...provenance, packId: options.pack || "ocr-cjk-accurate" }, null, 2)}\n`,
+    { encoding: "utf8", flag: "wx" },
+  );
 
   const modelNames = [
     "ch_PP-OCRv5_det_mobile.onnx",

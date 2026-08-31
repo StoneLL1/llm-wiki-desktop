@@ -122,6 +122,47 @@ describe("TaskLogDrawer", () => {
     await waitFor(() => expect(cancelButton).toBeDisabled());
   });
 
+  it("shows and controls the same app-global capability task", async () => {
+    const capabilityTask: BackendTask = {
+      ...runningTask,
+      id: "capability-task-a",
+      taskType: "capability_install",
+      projectId: null,
+      title: "Install browser runtime",
+      progress: { current: 6_000, total: 12_000, label: "capability.verifying" },
+      operation: {
+        kind: "app_capability_install",
+        capabilityId: "browser-runtime",
+        version: "1.4.0",
+        targetTriple: "x86_64-pc-windows-msvc",
+        archiveIdentity: "archive-a",
+      },
+    };
+    useTaskStore.setState({
+      tasks: [capabilityTask],
+      taskById: { [capabilityTask.id]: capabilityTask },
+      selectedTaskId: capabilityTask.id,
+    });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "cancel_app_capability_install_v1") {
+        return Promise.resolve({ ...capabilityTask, status: "cancelled", cancellable: false });
+      }
+      if (command === "get_app_capability_task_logs_v1" || command === "get_app_capability_task_activities_v1") {
+        return Promise.resolve([]);
+      }
+      return Promise.resolve(null);
+    });
+
+    render(<TaskLogDrawer />);
+
+    expect(screen.getByText("importV2.capabilityManagement.state.verifying")).toBeVisible();
+    fireEvent.click(screen.getAllByRole("button", { name: "task.action.cancel" })[0]);
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith(
+      "cancel_app_capability_install_v1",
+      { request: { taskId: capabilityTask.id, taskRevision: capabilityTask.updatedAt, scope: "app_global" } },
+    ));
+  });
+
   it("shows latest execution tasks first by default regardless of status", () => {
     const oldRunning = {
       ...runningTask,

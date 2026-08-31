@@ -22,7 +22,7 @@ import { useExportStore } from "../../stores/exportStore";
 import { observeProjectResources } from "../../stores/projectScope";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
-import { cancelTaskRequest, useTaskStore } from "../../stores/taskStore";
+import { cancelTaskRequest, selectTaskById, useTaskStore } from "../../stores/taskStore";
 import { isTerminalStatus } from "../../types/task";
 import { type ExportRecord, type ExportType } from "../../types/export";
 import { HtmlPreviewPane } from "./HtmlPreviewPane";
@@ -69,7 +69,6 @@ export function ExportsView() {
   const focusWorkspace = useNavigationStore((state) => state.focusWorkspace);
   const clearWorkspaceFocus = useNavigationStore((state) => state.clearWorkspaceFocus);
 
-  const tasks = useTaskStore((state) => state.tasks);
   const openTaskDrawer = useTaskStore((state) => state.openDrawer);
 
   const { projectId, rootPath } = currentProject;
@@ -97,9 +96,7 @@ export function ExportsView() {
     };
   }, [projectId, rootPath]);
 
-  const runningTask = runningTaskId
-    ? tasks.find((task) => task.id === runningTaskId) ?? null
-    : null;
+  const runningTask = useTaskStore((state) => selectTaskById(state, runningTaskId));
 
   // When the background export task lands, refresh the list + clear the running
   // id. If the user asked to open the preview, load the just-written record.

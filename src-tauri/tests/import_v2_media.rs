@@ -1,4 +1,4 @@
-use std::fs;
+use std::{fs, fs::OpenOptions};
 
 use llm_wiki_desktop_lib::models::import_v2::{
     ImportInput, ImportInputKind, MediaSaveMode, SourceIdentity,
@@ -6,6 +6,7 @@ use llm_wiki_desktop_lib::models::import_v2::{
 use llm_wiki_desktop_lib::services::import_v2::engine::{
     EngineContinuation, EngineOperation, EngineRequest, ImportEngine,
 };
+use llm_wiki_desktop_lib::services::import_v2::file_discovery::FileDiscoveryService;
 use llm_wiki_desktop_lib::services::import_v2::local_media_engine::NativeMediaCompanionEngine;
 use llm_wiki_desktop_lib::services::import_v2::media_router::{
     recover_media_temp_root, render_timestamped_markdown, AsrModelCatalog, MediaArtifactPlan,
@@ -13,6 +14,7 @@ use llm_wiki_desktop_lib::services::import_v2::media_router::{
     TemporaryMediaWorkspace, TranscriptSegment,
 };
 use llm_wiki_desktop_lib::tasks::task_model::CancellationToken;
+use llm_wiki_desktop_lib::{models::import_v2_file::FileScanPolicy, models::paths::ProjectContext};
 use sha2::{Digest, Sha256};
 
 #[test]
@@ -113,7 +115,7 @@ fn asr_runtime_requires_qualified_lgpl_m4a_decoding() {
     assert!(value["licenseExpression"]
         .as_str()
         .unwrap()
-        .contains("LGPL-2.1-or-later"));
+        .contains("LGPL-3.0-or-later"));
     assert!(value["audioDecoding"]["componentInventory"]
         .as_array()
         .unwrap()
@@ -142,7 +144,7 @@ fn temporary_media_is_removed_on_success_failure_and_restart() {
 }
 
 #[test]
-fn media_manifest_is_strict_lgpl_and_does_not_promise_installed_binaries() {
+fn media_manifest_is_strict_lgpl_and_declares_only_release_targets() {
     let value: serde_json::Value = serde_json::from_str(include_str!(
         "../../capabilities/media-runtime/manifest.json"
     ))
@@ -152,7 +154,18 @@ fn media_manifest_is_strict_lgpl_and_does_not_promise_installed_binaries() {
         .unwrap();
     assert!(flags.iter().any(|flag| flag == "--disable-gpl"));
     assert!(flags.iter().any(|flag| flag == "--disable-nonfree"));
-    assert_eq!(value["targetTriples"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        value["targetTriples"].as_array().unwrap(),
+        &[
+            "x86_64-pc-windows-msvc",
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin",
+            "x86_64-unknown-linux-gnu",
+        ]
+    );
+    assert_eq!(value["payloadStatus"], "release_ci_required");
+    assert_eq!(value["compressedBytes"], 0);
+    assert_eq!(value["installedBytes"], 0);
     assert!(
         value["buildProvenance"]["componentInventory"]
             .as_array()
@@ -290,4 +303,137 @@ fn multiple_companion_subtitles_require_and_honor_an_explicit_selection() {
     .unwrap();
     assert!(markdown.contains("中文内容"));
     assert!(!markdown.contains("English"));
+}
+
+#[test]
+fn media_larger_than_the_legacy_document_limit_streams_through_discovery_and_staging() {
+    let project = tempfile::tempdir().unwrap();
+    let sources = tempfile::tempdir().unwrap();
+    let media = sources.path().join("long-interview.mp3");
+    let file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&media)
+        .unwrap();
+    file.set_len(65 * 1024 * 1024).unwrap();
+    drop(file);
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut file = OpenOptions::new().write(true).open(&media).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(b"ID3\x04\0\0\0\0\0\0").unwrap();
+        file.sync_all().unwrap();
+    }
+
+    let context = ProjectContext::new("project", project.path().to_path_buf());
+    let scan = FileDiscoveryService
+        .scan(
+            &context,
+            std::slice::from_ref(&media),
+            FileScanPolicy::default(),
+            |_| {},
+            || false,
+        )
+        .unwrap();
+    assert_eq!(
+        scan.files.len(),
+        1,
+        "large media must not inherit the 64 MiB document cap"
+    );
+    assert!(scan.skipped.is_empty());
+    let discovered = scan.files.into_iter().next().unwrap();
+    let request = EngineRequest {
+        protocol_version: "2".into(),
+        request_id: "large-media".into(),
+        project_id: "project".into(),
+        session_id: "session".into(),
+        item_id: "item".into(),
+        task_id: "task".into(),
+        operation: EngineOperation::Extract,
+        input: ImportInput {
+            kind: ImportInputKind::File,
+            display_name: discovered.display_name,
+            locator: discovered.source_path,
+            normalized_locator: None,
+            source_identity: Some(discovered.source_identity),
+            media_save_mode: MediaSaveMode::ExtractOnly,
+        },
+        project_root: project.path().to_string_lossy().into_owned(),
+        staging_root: "staging".into(),
+        chained_input: None,
+        local_asr_authorized: false,
+        asr_probe_only: false,
+        asr_profile: None,
+        recognition_language: None,
+        selected_subtitle: None,
+        local_ocr_authorized: false,
+        media_save_mode: MediaSaveMode::ExtractOnly,
+    };
+
+    let result = NativeMediaCompanionEngine
+        .execute(&request, &CancellationToken::new())
+        .unwrap();
+    assert!(matches!(
+        result.continuation,
+        Some(EngineContinuation::LocalAsr { .. })
+    ));
+    assert_eq!(
+        fs::metadata(project.path().join("staging/source.bin"))
+            .unwrap()
+            .len(),
+        65 * 1024 * 1024
+    );
+    fs::write(
+        project.path().join("staging/.media-copy-crash.tmp"),
+        b"interrupted",
+    )
+    .unwrap();
+    NativeMediaCompanionEngine
+        .execute(&request, &CancellationToken::new())
+        .expect("a verified source.bin from a pre-activation crash must be reusable");
+    assert!(!project
+        .path()
+        .join("staging/.media-copy-crash.tmp")
+        .exists());
+}
+
+#[test]
+fn video_larger_than_the_legacy_document_limit_is_discovered_by_bounded_header() {
+    let project = tempfile::tempdir().unwrap();
+    let sources = tempfile::tempdir().unwrap();
+    let media = sources.path().join("long-recording.mp4");
+    let file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&media)
+        .unwrap();
+    file.set_len(65 * 1024 * 1024).unwrap();
+    drop(file);
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut file = OpenOptions::new().write(true).open(&media).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(b"\0\0\0\x18ftypisom\0\0\0\0isomiso2")
+            .unwrap();
+        file.sync_all().unwrap();
+    }
+    let context = ProjectContext::new("project", project.path().to_path_buf());
+    let scan = FileDiscoveryService
+        .scan(
+            &context,
+            std::slice::from_ref(&media),
+            FileScanPolicy::default(),
+            |_| {},
+            || false,
+        )
+        .unwrap();
+    assert_eq!(scan.files.len(), 1);
+    assert_eq!(
+        scan.files[0].format,
+        llm_wiki_desktop_lib::models::import_v2_file::FileFormat::Mp4
+    );
+    assert!(scan.files[0]
+        .large_data
+        .as_ref()
+        .is_some_and(|estimate| estimate.requires_confirmation));
 }

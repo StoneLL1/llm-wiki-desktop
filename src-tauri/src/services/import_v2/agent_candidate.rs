@@ -57,17 +57,21 @@ impl<'a> AgentCandidateService<'a> {
         session_id: &str,
         item_id: &str,
         task_id: &str,
+        allow_running: bool,
+        allow_interrupted: bool,
     ) -> Result<AgentCandidate, BackendError> {
         let task = self
             .tasks
             .get_task(task_id)
             .ok_or_else(|| candidate_error("Agent task was not found."))?;
-        if task.status != TaskStatus::Succeeded
+        if (!matches!(task.status, TaskStatus::Succeeded)
+            && !(allow_running && task.status == TaskStatus::Running))
+            && !(allow_interrupted && task.status == TaskStatus::Failed)
             || task.task_type != TaskType::AgentRun
             || task.project_id.as_deref() != Some(context.project_id.as_str())
         {
             return Err(candidate_error(
-                "Only a succeeded task bound to this project may be validated.",
+                "Only an eligible task bound to this project may be validated.",
             ));
         }
         let result = task
@@ -94,7 +98,14 @@ impl<'a> AgentCandidateService<'a> {
         let previous = self.imports.begin_agent_candidate_validation_unchecked(
             context, self.files, session_id, item_id, task_id,
         )?;
-        match self.accept_staged_output_validating(context, session_id, item_id, task_id) {
+        match self.accept_staged_output_validating(
+            context,
+            session_id,
+            item_id,
+            task_id,
+            allow_running,
+            allow_interrupted,
+        ) {
             Ok(candidate) => Ok(candidate),
             Err(validation_error) => {
                 self.imports.reject_agent_candidate_validation(
@@ -111,12 +122,16 @@ impl<'a> AgentCandidateService<'a> {
         session_id: &str,
         item_id: &str,
         task_id: &str,
+        allow_running: bool,
+        allow_interrupted: bool,
     ) -> Result<AgentCandidate, BackendError> {
         let task = self
             .tasks
             .get_task(task_id)
             .ok_or_else(|| candidate_error("Agent task was not found."))?;
-        if task.status != TaskStatus::Succeeded
+        if (!matches!(task.status, TaskStatus::Succeeded)
+            && !(allow_running && task.status == TaskStatus::Running))
+            && !(allow_interrupted && task.status == TaskStatus::Failed)
             || task.task_type != TaskType::AgentRun
             || task.project_id.as_deref() != Some(context.project_id.as_str())
         {
@@ -148,7 +163,7 @@ impl<'a> AgentCandidateService<'a> {
         let workspace = output_dir
             .parent()
             .ok_or_else(|| candidate_error("Agent workspace is invalid."))?;
-        validate_workspace_identity(workspace, session_id, item_id)?;
+        validate_workspace_identity(context, workspace, session_id, item_id)?;
 
         let bundle: AgentTaskBundle =
             read_json_limited(&workspace.join("task.json"), MAX_MANIFEST_BYTES)?;
@@ -217,10 +232,11 @@ impl<'a> AgentCandidateService<'a> {
         self.ensure_not_cancelled(task_id)?;
         let candidate_id =
             hash_bytes(format!("{task_id}:{source_hash}:{}", manifest.markdown_sha256).as_bytes());
-        let candidate_root_relative = candidate_root_path(session_id, item_id, &candidate_id)?;
+        let candidate_root_relative =
+            candidate_root_path(context, session_id, item_id, &candidate_id)?;
         let candidate_artifact_prefix = candidate_artifact_prefix(&candidate_id)?;
         let candidate_root = context.resolve_project_path(&candidate_root_relative)?;
-        let record_relative = candidate_record_path(session_id, item_id, &candidate_id)?;
+        let record_relative = candidate_record_path(context, session_id, item_id, &candidate_id)?;
         if candidate_root.exists() && !self.files.exists(context, &record_relative) {
             reject_links_between(&context.root, &candidate_root)?;
             let metadata = fs::symlink_metadata(&candidate_root).map_err(io_error)?;
@@ -287,8 +303,12 @@ impl<'a> AgentCandidateService<'a> {
             .as_ref()
             .is_some_and(|current| current != &baseline_markdown);
         let unified_diff = GitService::diff_candidate_files(context, &baseline_path, &agent_path)?;
-        let audit_path =
-            format!(".app/import-sessions/{session_id}/items/{item_id}/agent-audit/{task_id}.json");
+        let audit_file = format!("{task_id}.json");
+        let audit_path = context.layout.import_paths()?.item_child(
+            session_id,
+            item_id,
+            &["agent-audit", &audit_file],
+        )?;
         let mut audit: AgentAuditRecord =
             self.files.read_json(context, &audit_path).map_err(|_| {
                 candidate_error("Agent candidate provenance audit is missing or invalid.")
@@ -381,7 +401,31 @@ impl<'a> AgentCandidateService<'a> {
         item_id: &str,
         task_id: &str,
     ) -> Result<AgentCandidate, BackendError> {
-        self.accept_staged_output_unchecked(permit.context(), session_id, item_id, task_id)
+        self.accept_staged_output_unchecked(
+            permit.context(),
+            session_id,
+            item_id,
+            task_id,
+            false,
+            false,
+        )
+    }
+
+    pub(crate) fn accept_staged_output_before_terminal_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+    ) -> Result<AgentCandidate, BackendError> {
+        self.accept_staged_output_unchecked(
+            permit.context(),
+            session_id,
+            item_id,
+            task_id,
+            true,
+            false,
+        )
     }
 
     #[cfg(debug_assertions)]
@@ -392,7 +436,7 @@ impl<'a> AgentCandidateService<'a> {
         item_id: &str,
         task_id: &str,
     ) -> Result<AgentCandidate, BackendError> {
-        self.accept_staged_output_unchecked(context, session_id, item_id, task_id)
+        self.accept_staged_output_unchecked(context, session_id, item_id, task_id, false, false)
     }
 
     pub fn load_candidate(
@@ -402,7 +446,7 @@ impl<'a> AgentCandidateService<'a> {
         item_id: &str,
         candidate_id: &str,
     ) -> Result<(AgentCandidate, AgentCandidateDiff), BackendError> {
-        let relative = candidate_record_path(session_id, item_id, candidate_id)?;
+        let relative = candidate_record_path(context, session_id, item_id, candidate_id)?;
         let stored: StoredAgentCandidate = self.files.read_json(context, &relative)?;
         Ok((stored.candidate, stored.diff))
     }
@@ -507,7 +551,7 @@ impl<'a> AgentCandidateService<'a> {
                 "Candidate is no longer bound to this import item task.",
             ));
         }
-        let root_relative = candidate_root_path(session_id, item_id, candidate_id)?;
+        let root_relative = candidate_root_path(context, session_id, item_id, candidate_id)?;
         let artifact_prefix = candidate_artifact_prefix(candidate_id)?;
         let root = context.resolve_project_path(&root_relative)?;
         reject_links_between(&context.root, &root)?;
@@ -653,7 +697,7 @@ impl<'a> AgentCandidateService<'a> {
             &stored.candidate.task_id,
             stored.deterministic_preview,
         )?;
-        let root_relative = candidate_root_path(session_id, item_id, candidate_id)?;
+        let root_relative = candidate_root_path(context, session_id, item_id, candidate_id)?;
         let root = context.resolve_project_path(&root_relative)?;
         reject_links_between(&context.root, &root)?;
         fs::remove_dir_all(&root).map_err(io_error)?;
@@ -687,15 +731,70 @@ impl<'a> AgentCandidateService<'a> {
         context: &ProjectContext,
         session_id: &str,
     ) -> Result<crate::models::import_v2::ImportSession, BackendError> {
+        self.recover_completed_outputs_with_cancel_unchecked(context, session_id, || false)
+    }
+
+    fn recover_completed_outputs_with_cancel_unchecked<F>(
+        &self,
+        context: &ProjectContext,
+        session_id: &str,
+        should_cancel: F,
+    ) -> Result<crate::models::import_v2::ImportSession, BackendError>
+    where
+        F: FnMut() -> bool,
+    {
         let session = self.imports.load_session(context, self.files, session_id)?;
+        self.recover_completed_outputs_from_session_with_cancel_unchecked(
+            context,
+            session,
+            should_cancel,
+        )
+    }
+
+    fn recover_completed_outputs_from_session_with_cancel_unchecked<F>(
+        &self,
+        context: &ProjectContext,
+        session: crate::models::import_v2::ImportSession,
+        mut should_cancel: F,
+    ) -> Result<crate::models::import_v2::ImportSession, BackendError>
+    where
+        F: FnMut() -> bool,
+    {
+        let session_id = session.session_id.clone();
         for item in &session.items {
+            if should_cancel() {
+                return Err(BackendError::new(
+                    crate::errors::IMPORT_V2_CANCELLED,
+                    "Import recovery was cancelled.",
+                    true,
+                    false,
+                ));
+            }
+            let recoverable_sealed_output = |task_id: &str| {
+                let exact_attempt = item.attempts.iter().any(|attempt| {
+                    attempt.route == format!("agent_assistance/{task_id}")
+                        && attempt.outcome == crate::models::import_v2::AttemptOutcome::Succeeded
+                });
+                self.tasks.get_task(task_id).is_some_and(|task| {
+                    task.status == TaskStatus::Failed
+                        && exact_attempt
+                        && matches!(
+                            task.result.as_ref().and_then(|result| result.reference.as_ref()),
+                            Some(TaskResultReference::ImportPreview {
+                                session_id: bound_session,
+                                item_id: bound_item,
+                            }) if bound_session == &session_id && bound_item == &item.item_id
+                        )
+                })
+            };
             super::agent_workspace::AgentWorkspaceBuilder::cleanup_abandoned_leases(
                 context,
-                session_id,
+                &session_id,
                 &item.item_id,
                 |task_id| {
                     self.tasks.get_task(task_id).is_some_and(|task| {
                         !matches!(task.status, TaskStatus::Failed | TaskStatus::Cancelled)
+                            || recoverable_sealed_output(task_id)
                     })
                 },
             )?;
@@ -709,7 +808,7 @@ impl<'a> AgentCandidateService<'a> {
                 let exact_reference = matches!(
                     task.result.as_ref().and_then(|result| result.reference.as_ref()),
                     Some(TaskResultReference::ImportPreview { session_id: bound_session, item_id: bound_item })
-                        if bound_session == session_id && bound_item == &item.item_id
+                        if bound_session == &session_id && bound_item == &item.item_id
                 );
                 let exact_attempt = item.attempts.iter().any(|attempt| {
                     attempt.route == format!("agent_assistance/{task_id}")
@@ -722,18 +821,38 @@ impl<'a> AgentCandidateService<'a> {
                                     || warning == "AGENT_CANDIDATE_DISCARDED"
                             })
                 });
-                (task.status == TaskStatus::Succeeded
+                (matches!(task.status, TaskStatus::Succeeded | TaskStatus::Failed)
                     && task.task_type == TaskType::AgentRun
                     && exact_reference
                     && exact_attempt)
                     .then(|| (item.item_id.clone(), task_id.to_owned()))
             })
             .collect::<Vec<_>>();
+        let has_completed = !completed.is_empty();
         for (item_id, task_id) in completed {
-            if let Err(error) =
-                self.accept_staged_output_unchecked(context, session_id, &item_id, &task_id)
-            {
-                let latest = self.imports.load_session(context, self.files, session_id)?;
+            if should_cancel() {
+                return Err(BackendError::new(
+                    crate::errors::IMPORT_V2_CANCELLED,
+                    "Import recovery was cancelled.",
+                    true,
+                    false,
+                ));
+            }
+            let interrupted = self
+                .tasks
+                .get_task(&task_id)
+                .is_some_and(|task| task.status == TaskStatus::Failed);
+            if let Err(error) = self.accept_staged_output_unchecked(
+                context,
+                &session_id,
+                &item_id,
+                &task_id,
+                false,
+                interrupted,
+            ) {
+                let latest = self
+                    .imports
+                    .load_session(context, self.files, &session_id)?;
                 let rejection_persisted = latest
                     .items
                     .iter()
@@ -750,9 +869,18 @@ impl<'a> AgentCandidateService<'a> {
                 if !rejection_persisted {
                     return Err(error);
                 }
+            } else if interrupted {
+                self.tasks
+                    .recover_sealed_agent_completion(&task_id)
+                    .map_err(|message| candidate_error(&message))?;
             }
         }
-        let latest = self.imports.load_session(context, self.files, session_id)?;
+        let latest = if has_completed {
+            self.imports
+                .load_session(context, self.files, &session_id)?
+        } else {
+            session
+        };
         for item in &latest.items {
             let has_agent_attempt = item
                 .attempts
@@ -776,19 +904,27 @@ impl<'a> AgentCandidateService<'a> {
                 );
             if registered_candidate || terminal_without_candidate {
                 if let Some(task_id) = item.task_id.as_deref() {
-                    self.cleanup_task_workspace(context, session_id, &item.item_id, task_id)?;
+                    self.cleanup_task_workspace(context, &session_id, &item.item_id, task_id)?;
                 }
             }
         }
         Ok(latest)
     }
 
-    pub(crate) fn recover_completed_outputs_authorized(
+    pub(crate) fn recover_completed_outputs_from_session_with_cancel_authorized<F>(
         &self,
         permit: &ProjectWritePermit<'_>,
-        session_id: &str,
-    ) -> Result<crate::models::import_v2::ImportSession, BackendError> {
-        self.recover_completed_outputs_unchecked(permit.context(), session_id)
+        session: crate::models::import_v2::ImportSession,
+        should_cancel: F,
+    ) -> Result<crate::models::import_v2::ImportSession, BackendError>
+    where
+        F: FnMut() -> bool,
+    {
+        self.recover_completed_outputs_from_session_with_cancel_unchecked(
+            permit.context(),
+            session,
+            should_cancel,
+        )
     }
 
     #[cfg(debug_assertions)]
@@ -807,7 +943,7 @@ impl<'a> AgentCandidateService<'a> {
         item_id: &str,
         candidate_id: &str,
     ) -> Result<StoredAgentCandidate, BackendError> {
-        let relative = candidate_record_path(session_id, item_id, candidate_id)?;
+        let relative = candidate_record_path(context, session_id, item_id, candidate_id)?;
         self.files.read_json(context, &relative)
     }
 
@@ -828,8 +964,12 @@ impl<'a> AgentCandidateService<'a> {
         item_id: &str,
         task_id: &str,
     ) -> Result<(), BackendError> {
-        let audit_path =
-            format!(".app/import-sessions/{session_id}/items/{item_id}/agent-audit/{task_id}.json");
+        let audit_file = format!("{task_id}.json");
+        let audit_path = context.layout.import_paths()?.item_child(
+            session_id,
+            item_id,
+            &["agent-audit", &audit_file],
+        )?;
         if !self.files.exists(context, &audit_path) {
             return Ok(());
         }
@@ -894,6 +1034,7 @@ fn strip_candidate_prefix(path: &str, root: &str) -> Result<String, BackendError
 }
 
 fn candidate_record_path(
+    context: &ProjectContext,
     session_id: &str,
     item_id: &str,
     candidate_id: &str,
@@ -907,17 +1048,20 @@ fn candidate_record_path(
             return Err(candidate_error("Candidate identity is invalid."));
         }
     }
-    Ok(format!(
-        ".app/import-sessions/{session_id}/items/{item_id}/staging/agent-candidates/{candidate_id}/candidate.json"
-    ))
+    context.layout.import_paths()?.item_staging_child(
+        session_id,
+        item_id,
+        &["agent-candidates", candidate_id, "candidate.json"],
+    )
 }
 
 fn candidate_root_path(
+    context: &ProjectContext,
     session_id: &str,
     item_id: &str,
     candidate_id: &str,
 ) -> Result<String, BackendError> {
-    let record = candidate_record_path(session_id, item_id, candidate_id)?;
+    let record = candidate_record_path(context, session_id, item_id, candidate_id)?;
     Ok(record.trim_end_matches("/candidate.json").into())
 }
 
@@ -1094,7 +1238,10 @@ fn registry_markdown_views(
     let Some(pointer) = pointer else {
         return Ok((None, None));
     };
-    let manifest_path = format!(".app/sources/{}.json", pointer.source_id);
+    let manifest_path = context
+        .layout
+        .source_paths()?
+        .manifest(&pointer.source_id)?;
     if !files.exists(context, &manifest_path) {
         return Ok((None, None));
     }
@@ -1248,13 +1395,20 @@ fn safe_project_directory(
 }
 
 fn validate_workspace_identity(
+    context: &ProjectContext,
     workspace: &Path,
     session_id: &str,
     item_id: &str,
 ) -> Result<(), BackendError> {
-    let normalized = workspace.to_string_lossy().replace('\\', "/");
-    let marker = format!("/.app/import-sessions/{session_id}/items/{item_id}/staging/agent/");
-    if !normalized.contains(&marker) {
+    let agent_root = context.resolve_project_path(
+        &context
+            .layout
+            .import_paths()?
+            .item_staging_child(session_id, item_id, &["agent"])?,
+    )?
+    .canonicalize()
+    .map_err(io_error)?;
+    if !workspace.starts_with(&agent_root) || workspace == agent_root {
         return Err(candidate_error("Workspace belongs to another item."));
     }
     Ok(())

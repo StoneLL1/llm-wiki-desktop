@@ -211,7 +211,11 @@ pub struct ImportHistoryEntry {
     pub updated_at: Option<String>,
     pub completed_at: Option<String>,
     pub legacy_read_only: bool,
-    pub item_ids: Vec<String>,
+    pub item_count: u64,
+    pub committed_count: u64,
+    pub failed_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sample_labels: Vec<String>,
     pub available_actions: Vec<ImportHistoryAction>,
     /// False for pre-snapshot records that can only be shown through a
     /// best-effort live-session compatibility fallback.
@@ -226,6 +230,32 @@ pub struct ImportHistoryPage {
     pub legacy_read_only: Vec<LegacyHistoryEntry>,
     pub next_cursor: Option<String>,
     pub warnings: Vec<LegacyHistoryWarning>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GetImportHistoryDetailV2Request {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub batch_id: String,
+    pub cursor: Option<String>,
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RebuildImportHistoryIndexV2Request {
+    pub project_id: String,
+    pub project_root_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportHistoryDetailPage {
+    pub entry: ImportHistoryEntry,
+    pub items: Vec<crate::models::import_v2::ImportItem>,
+    pub next_cursor: Option<String>,
+    pub total: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -249,6 +279,7 @@ pub struct ImportCapabilityRequirement {
     pub model_bytes: Option<u64>,
     pub license: Option<String>,
     pub fallback: Option<String>,
+    pub unavailable_reason_code: Option<String>,
     pub requirement_revision: String,
 }
 

@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import { latestAssistantMessage, useChatStore } from "../../../stores/chatStore";
 import { useNavigationStore } from "../../../stores/navigationStore";
-import { useTaskStore } from "../../../stores/taskStore";
+import { selectTaskById, useTaskStore } from "../../../stores/taskStore";
 import { useWikiStore } from "../../../features/wiki/wikiStore";
 import { RightPanelHeader } from "../RightPanelHeader";
 import type { RightPanelHostProps } from "./types";
@@ -11,7 +11,6 @@ import type { RightPanelHostProps } from "./types";
 export function ChatRightPanelHost({ currentProject }: RightPanelHostProps) {
   const { t } = useTranslation();
   const setActiveView = useNavigationStore((state) => state.setActiveView);
-  const tasks = useTaskStore((state) => state.tasks);
   const openWikiPage = useWikiStore((state) => state.openPage);
   const chatSession = useChatStore((state) => state.activeSession);
   const chatLoadingSession = useChatStore((state) => state.loadingSession);
@@ -24,9 +23,7 @@ export function ChatRightPanelHost({ currentProject }: RightPanelHostProps) {
   const chatSaveAnswer = useChatStore((state) => state.saveAnswer);
   const chatOverwriteRequest = useChatStore((state) => state.overwriteRequest);
   const [chatCopied, setChatCopied] = useState(false);
-  const chatSendTask = chatSendTaskId
-    ? tasks.find((task) => task.id === chatSendTaskId) ?? null
-    : null;
+  const chatSendTask = useTaskStore((state) => selectTaskById(state, chatSendTaskId));
   const chatGenerating = chatLoadingSession || chatSendStarting || Boolean(
     chatSession?.id
       && chatSendSessionId === chatSession.id

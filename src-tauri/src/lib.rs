@@ -12,7 +12,87 @@ use tasks::task_events::EventBus;
 #[cfg(feature = "gui")]
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 #[cfg(feature = "gui")]
-use tauri::Manager;
+use tauri::{Emitter, Manager};
+
+#[cfg(feature = "gui")]
+const APP_FOREGROUND_CHANGED_EVENT: &str = "app://foreground-changed";
+
+#[cfg(any(feature = "gui", test))]
+#[derive(Clone, serde::Serialize)]
+struct AppForegroundChangedPayload {
+    foreground: bool,
+}
+
+#[cfg(all(windows, any(feature = "gui", test)))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowsForegroundObservation {
+    NoWindow,
+    ProcessLookupFailed,
+    Process(u32),
+}
+
+#[cfg(all(windows, any(feature = "gui", test)))]
+fn foreground_process_matches(foreground_process_id: u32, current_process_id: u32) -> Option<bool> {
+    if foreground_process_id == 0 || current_process_id == 0 {
+        return None;
+    }
+    Some(foreground_process_id == current_process_id)
+}
+
+#[cfg(all(windows, any(feature = "gui", test)))]
+fn normalized_windows_foreground(
+    observation: WindowsForegroundObservation,
+    current_process_id: u32,
+) -> Option<bool> {
+    match observation {
+        WindowsForegroundObservation::NoWindow
+        | WindowsForegroundObservation::ProcessLookupFailed => None,
+        WindowsForegroundObservation::Process(foreground_process_id) => {
+            foreground_process_matches(foreground_process_id, current_process_id)
+        }
+    }
+}
+
+#[cfg(any(test, all(feature = "gui", not(windows))))]
+fn normalized_non_windows_foreground(focused: bool) -> Option<bool> {
+    Some(focused)
+}
+
+#[cfg(all(feature = "gui", windows))]
+fn normalized_app_foreground(_focused: bool) -> Option<bool> {
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId,
+    };
+
+    // SAFETY: both APIs are read-only process/window queries. The HWND is
+    // checked before use and the PID out-parameter is valid for the call.
+    unsafe {
+        let foreground_window = GetForegroundWindow();
+        if foreground_window.is_null() {
+            return normalized_windows_foreground(
+                WindowsForegroundObservation::NoWindow,
+                GetCurrentProcessId(),
+            );
+        }
+        let mut foreground_process_id = 0;
+        if GetWindowThreadProcessId(foreground_window, &mut foreground_process_id) == 0 {
+            return normalized_windows_foreground(
+                WindowsForegroundObservation::ProcessLookupFailed,
+                GetCurrentProcessId(),
+            );
+        }
+        normalized_windows_foreground(
+            WindowsForegroundObservation::Process(foreground_process_id),
+            GetCurrentProcessId(),
+        )
+    }
+}
+
+#[cfg(all(feature = "gui", not(windows)))]
+fn normalized_app_foreground(focused: bool) -> Option<bool> {
+    normalized_non_windows_foreground(focused)
+}
 
 #[cfg(feature = "gui")]
 fn startup_backend_error(error: errors::BackendError) -> String {
@@ -503,6 +583,10 @@ pub fn run() {
                 .map_err(startup_backend_error)?;
             if let Ok(app_data) = app.path().app_local_data_dir() {
                 let install_root = app_data.join("installed-capabilities");
+                state
+                    .app_capability_coordinator
+                    .initialize(&app_data.join("capability-control"), &state.task_service)
+                    .map_err(startup_backend_error)?;
                 #[cfg(debug_assertions)]
                 {
                     let development_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -611,6 +695,19 @@ pub fn run() {
                             let _ = window_clone.hide();
                         }
                     }
+                    if let tauri::WindowEvent::Focused(focused) = event {
+                        if let Some(foreground) = normalized_app_foreground(*focused) {
+                            if let Err(error) = window_clone.emit(
+                                APP_FOREGROUND_CHANGED_EVENT,
+                                AppForegroundChangedPayload { foreground },
+                            ) {
+                                eprintln!(
+                                    "foreground_event_emit_error event={} message={error}",
+                                    APP_FOREGROUND_CHANGED_EVENT
+                                );
+                            }
+                        }
+                    }
                 });
             }
 
@@ -618,6 +715,14 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::agent_commands::detect_agents,
+            commands::app_capability_commands::list_app_capabilities_v1,
+            commands::app_capability_commands::list_app_tasks_v1,
+            commands::app_capability_commands::get_app_capability_task_logs_v1,
+            commands::app_capability_commands::get_app_capability_task_activities_v1,
+            commands::app_capability_commands::install_app_capability_v1,
+            commands::app_capability_commands::pause_app_capability_install_v1,
+            commands::app_capability_commands::resume_app_capability_install_v1,
+            commands::app_capability_commands::cancel_app_capability_install_v1,
             commands::update_commands::get_update_state,
             commands::update_commands::get_global_update_preferences,
             commands::update_commands::save_global_update_preferences,
@@ -674,61 +779,66 @@ pub fn run() {
             commands::git_commands::request_assessed_git_checkpoint,
             commands::git_commands::create_git_checkpoint,
             commands::git_commands::git_diff_markdown,
-            commands::import_v2_commands::create_import_session_v2,
-            commands::import_v2_commands::get_import_session_v2,
-            commands::import_v2_commands::get_import_restricted_content_status_v2,
-            commands::import_v2_commands::get_import_history_session_v2,
-            commands::import_v2_commands::get_import_completion_v2,
-            commands::import_v2_commands::add_import_items_v2,
-            commands::import_v2_commands::add_import_text_v2,
-            commands::import_v2_commands::set_import_item_selection_v2,
-            commands::import_v2_commands::select_import_subtitle_v2,
-            commands::import_v2_commands::get_import_merge_context_v2,
-            commands::import_v2_commands::set_import_item_resolution_v2,
-            commands::import_v2_commands::stage_import_manual_merge_v2,
-            commands::import_v2_commands::cancel_import_item_v2,
-            commands::import_v2_commands::cancel_import_batch_v2,
-            commands::import_v2_commands::skip_import_item_v2,
-            commands::import_v2_commands::start_import_items_v2,
-            commands::import_v2_commands::start_import_batch_v2,
-            commands::import_v2_commands::confirm_import_session_v2,
-            commands::import_v2_agent_commands::start_import_agent_assistance_v2,
-            commands::import_v2_agent_commands::accept_import_agent_candidate_v2,
-            commands::import_v2_agent_commands::select_import_agent_candidate_v2,
-            commands::import_v2_agent_commands::discard_import_agent_candidate_v2,
-            commands::import_v2_file_commands::start_add_import_paths_v2,
-            commands::import_v2_file_commands::get_import_capability_statuses,
-            commands::import_v2_file_commands::get_import_scan_result_v2,
-            commands::import_v2_file_commands::accept_import_scan_v2,
-            commands::import_v2_file_commands::discard_import_scan_v2,
-            commands::import_v2_web_commands::add_import_url_v2,
-            commands::import_v2_web_commands::discover_import_collection_v2,
-            commands::import_v2_web_commands::load_import_collection_page_v2,
-            commands::import_v2_web_commands::add_import_collection_items_v2,
-            commands::import_v2_web_commands::get_remote_media_retention_plan_v2,
-            commands::import_v2_web_commands::confirm_remote_media_retention_v2,
-            commands::import_v2_web_commands::begin_import_login_v2,
-            commands::import_v2_web_commands::complete_import_login_v2,
-            commands::import_v2_web_commands::revoke_import_login_v2,
-            commands::import_v2_web_commands::authorize_import_private_target_v2,
-            commands::import_v2_web_commands::authorize_local_asr_v2,
-            commands::import_v2_web_commands::authorize_local_ocr_v2,
-            commands::import_v2_web_commands::authorize_bilibili_asr_v2,
-            commands::import_v2_migration::scan_import_v2_migration,
-            commands::import_v2_migration::plan_import_v2_migration,
-            commands::import_v2_migration::apply_import_v2_migration,
-            commands::import_v2_migration::get_import_v2_migration_status,
-            commands::import_v2_migration::resume_import_v2_migration,
-            commands::import_v2_activation::activate_import_v2,
-            commands::import_v2_activation::get_import_backend_activation,
-            commands::import_v2_presentation_commands::get_import_preview_content_v2,
-            commands::import_v2_presentation_commands::get_import_frontend_readiness_v2,
-            commands::import_v2_presentation_commands::get_import_workbench_preferences_v2,
-            commands::import_v2_presentation_commands::save_import_workbench_preferences_v2,
-            commands::import_v2_presentation_commands::list_import_history_v2,
-            commands::import_v2_presentation_commands::get_import_capability_requirement_v2,
-            commands::import_v2_presentation_commands::get_import_asr_enablement_plan_v2,
-            commands::import_v2_presentation_commands::install_import_capability_v2,
+            commands::import_v2_async_commands::create_import_session_v2,
+            commands::import_v2_async_commands::get_import_session_v2,
+            commands::import_v2_async_commands::get_import_session_overview_v2,
+            commands::import_v2_async_commands::list_import_session_items_v2,
+            commands::import_v2_async_commands::start_import_session_recovery_v2,
+            commands::import_v2_async_commands::get_import_restricted_content_status_v2,
+            commands::import_v2_async_commands::get_import_history_session_v2,
+            commands::import_v2_async_commands::get_import_completion_v2,
+            commands::import_v2_async_commands::add_import_items_v2,
+            commands::import_v2_async_commands::add_import_text_v2,
+            commands::import_v2_async_commands::set_import_item_selection_v2,
+            commands::import_v2_async_commands::select_import_subtitle_v2,
+            commands::import_v2_async_commands::get_import_merge_context_v2,
+            commands::import_v2_async_commands::set_import_item_resolution_v2,
+            commands::import_v2_async_commands::stage_import_manual_merge_v2,
+            commands::import_v2_async_commands::cancel_import_item_v2,
+            commands::import_v2_async_commands::cancel_import_batch_v2,
+            commands::import_v2_async_commands::skip_import_item_v2,
+            commands::import_v2_async_commands::start_import_items_v2,
+            commands::import_v2_async_commands::start_import_batch_v2,
+            commands::import_v2_async_commands::confirm_import_session_v2,
+            commands::import_v2_async_commands::start_import_agent_assistance_v2,
+            commands::import_v2_async_commands::accept_import_agent_candidate_v2,
+            commands::import_v2_async_commands::select_import_agent_candidate_v2,
+            commands::import_v2_async_commands::discard_import_agent_candidate_v2,
+            commands::import_v2_async_commands::start_add_import_paths_v2,
+            commands::import_v2_async_commands::get_import_capability_statuses,
+            commands::import_v2_async_commands::get_import_scan_result_v2,
+            commands::import_v2_async_commands::accept_import_scan_v2,
+            commands::import_v2_async_commands::discard_import_scan_v2,
+            commands::import_v2_async_commands::add_import_url_v2,
+            commands::import_v2_async_commands::discover_import_collection_v2,
+            commands::import_v2_async_commands::load_import_collection_page_v2,
+            commands::import_v2_async_commands::add_import_collection_items_v2,
+            commands::import_v2_async_commands::get_remote_media_retention_plan_v2,
+            commands::import_v2_async_commands::confirm_remote_media_retention_v2,
+            commands::import_v2_async_commands::begin_import_login_v2,
+            commands::import_v2_async_commands::complete_import_login_v2,
+            commands::import_v2_async_commands::revoke_import_login_v2,
+            commands::import_v2_async_commands::authorize_import_private_target_v2,
+            commands::import_v2_async_commands::authorize_local_asr_v2,
+            commands::import_v2_async_commands::authorize_local_ocr_v2,
+            commands::import_v2_async_commands::authorize_bilibili_asr_v2,
+            commands::import_v2_async_commands::scan_import_v2_migration,
+            commands::import_v2_async_commands::plan_import_v2_migration,
+            commands::import_v2_async_commands::apply_import_v2_migration,
+            commands::import_v2_async_commands::get_import_v2_migration_status,
+            commands::import_v2_async_commands::resume_import_v2_migration,
+            commands::import_v2_async_commands::activate_import_v2,
+            commands::import_v2_async_commands::get_import_backend_activation,
+            commands::import_v2_async_commands::get_import_preview_content_v2,
+            commands::import_v2_async_commands::get_import_frontend_readiness_v2,
+            commands::import_v2_async_commands::get_import_workbench_preferences_v2,
+            commands::import_v2_async_commands::save_import_workbench_preferences_v2,
+            commands::import_v2_async_commands::list_import_history_v2,
+            commands::import_v2_async_commands::get_import_history_detail_v2,
+            commands::import_v2_async_commands::rebuild_import_history_index_v2,
+            commands::import_v2_async_commands::get_import_capability_requirement_v2,
+            commands::import_v2_async_commands::get_import_asr_enablement_plan_v2,
+            commands::import_v2_async_commands::install_import_capability_v2,
             commands::task_commands::create_task,
             commands::task_commands::list_tasks,
             commands::task_commands::get_task,
@@ -820,4 +930,84 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run LLM Wiki Desktop");
+}
+
+#[cfg(test)]
+mod foreground_contract_tests {
+    use super::{normalized_non_windows_foreground, AppForegroundChangedPayload};
+
+    #[test]
+    fn foreground_payload_serializes_with_a_stable_field_name() {
+        assert_eq!(
+            serde_json::to_value(AppForegroundChangedPayload { foreground: true }).unwrap(),
+            serde_json::json!({ "foreground": true })
+        );
+    }
+
+    #[test]
+    fn non_windows_normalization_preserves_the_focused_value() {
+        assert_eq!(normalized_non_windows_foreground(true), Some(true));
+        assert_eq!(normalized_non_windows_foreground(false), Some(false));
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_foreground_tests {
+    use super::{normalized_windows_foreground, WindowsForegroundObservation};
+
+    #[test]
+    fn current_process_foreground_is_true() {
+        assert_eq!(
+            normalized_windows_foreground(WindowsForegroundObservation::Process(42), 42),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn another_process_foreground_is_false() {
+        assert_eq!(
+            normalized_windows_foreground(WindowsForegroundObservation::Process(42), 7),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn missing_foreground_window_is_unknown() {
+        assert_eq!(
+            normalized_windows_foreground(WindowsForegroundObservation::NoWindow, 7),
+            None
+        );
+    }
+
+    #[test]
+    fn failed_process_lookup_is_unknown() {
+        assert_eq!(
+            normalized_windows_foreground(WindowsForegroundObservation::ProcessLookupFailed, 7,),
+            None
+        );
+    }
+
+    #[test]
+    fn zero_foreground_process_identity_is_unknown() {
+        assert_eq!(
+            normalized_windows_foreground(WindowsForegroundObservation::Process(0), 7),
+            None
+        );
+    }
+
+    #[test]
+    fn same_process_dialog_is_still_foreground() {
+        assert_eq!(
+            normalized_windows_foreground(WindowsForegroundObservation::Process(42), 42),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn missing_current_process_identity_is_unknown() {
+        assert_eq!(
+            normalized_windows_foreground(WindowsForegroundObservation::Process(42), 0),
+            None
+        );
+    }
 }

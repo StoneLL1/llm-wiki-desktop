@@ -5,7 +5,7 @@
   "protocolVersion": "2",
   "targetTriples": [],
   "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",
-  "licenseExpression": "MIT AND LGPL-2.1-or-later",
+  "licenseExpression": "MIT AND LGPL-3.0-or-later",
   "entrypoint": "runner/index.mjs",
   "compressedBytes": 0,
   "installedBytes": 0,
@@ -24,11 +24,11 @@
     "acceptedContainers": ["m4a", "mp4", "mp3", "ogg", "opus", "flac", "wav"],
     "qualificationFixture": "bilibili-m4a-to-transcript-v1",
     "componentInventory": [
-      {"name": "FFmpeg", "license": "LGPL-2.1-or-later", "gpl": false, "nonfree": false},
-      {"name": "libavformat", "license": "LGPL-2.1-or-later"},
-      {"name": "libavcodec", "license": "LGPL-2.1-or-later"},
-      {"name": "libavutil", "license": "LGPL-2.1-or-later"},
-      {"name": "libswresample", "license": "LGPL-2.1-or-later"}
+      {"name": "FFmpeg", "license": "LGPL-3.0-or-later", "gpl": false, "nonfree": false},
+      {"name": "libavformat", "license": "LGPL-3.0-or-later"},
+      {"name": "libavcodec", "license": "LGPL-3.0-or-later"},
+      {"name": "libavutil", "license": "LGPL-3.0-or-later"},
+      {"name": "libswresample", "license": "LGPL-3.0-or-later"}
     ]
   },
   "models": [

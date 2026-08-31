@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 
 import {
+  bindProjectFactsAuthority,
   ensureProjectFacts,
-  nextProjectFactsExpiryAt,
+  projectFactsAuthorityKey,
   projectFactsKey,
   refreshProjectFacts,
   useProjectFactsStore,
+  type ProjectFactKind,
 } from "../stores/projectFactsStore";
 import { useProjectStore } from "../stores/projectStore";
 import type { AgentInfo } from "../types/agent";
@@ -16,7 +18,10 @@ export interface AiCapabilitiesWorkflow {
   agents: AgentInfo[];
   providers: ProviderStatus[];
   refreshing: boolean;
-  refresh: (forceRefresh?: boolean) => Promise<void>;
+  refresh: (
+    forceRefresh?: boolean,
+    kinds?: readonly ProjectFactKind[],
+  ) => Promise<void>;
 }
 
 const EMPTY_AGENTS: AgentInfo[] = [];
@@ -53,12 +58,13 @@ export function useAiCapabilities(
     state.currentProject.projectId === projectId
       && state.currentProject.rootPath === rootPath
       && state.authority?.projectId === projectId
-      ? `${state.authority.canonicalIdentityKey}\0${state.authority.identityRevision}`
+      ? projectFactsAuthorityKey(state.authority)
       : null
   );
   const storedEntry = useProjectFactsStore((state) => state.entries[projectKey] ?? null);
-  const authorityMatches = !storedEntry
-    || storedEntry.authorityIdentityKey === authorityIdentityKey;
+  const authorityMatches = authorityIdentityKey === null
+    ? !storedEntry || storedEntry.authorityIdentityKey === null
+    : storedEntry?.authorityIdentityKey === authorityIdentityKey;
   const entry = storedEntry && authorityMatches
     ? storedEntry
     : null;
@@ -66,17 +72,25 @@ export function useAiCapabilities(
   const visibleRef = useRef(refreshWhenVisible);
   const agents = entry?.agents.value ?? EMPTY_AGENTS;
   const providers = entry?.providers.value ?? EMPTY_PROVIDERS;
-  const expiryAt = nextProjectFactsExpiryAt(entry, CAPABILITY_FACTS);
   const refreshing = entry?.agents.status === "loading"
     || entry?.agents.status === "stale"
     || entry?.providers.status === "loading"
     || entry?.providers.status === "stale";
 
-  const refresh = useCallback((forceRefresh = false) => {
+  const refresh = useCallback((
+    forceRefresh = false,
+    kinds: readonly ProjectFactKind[] = CAPABILITY_FACTS,
+  ) => {
+    if (!authorityMatches) return Promise.resolve();
     return forceRefresh
-      ? refreshProjectFacts(scope, CAPABILITY_FACTS)
-      : ensureProjectFacts(scope, CAPABILITY_FACTS);
-  }, [scope]);
+      ? refreshProjectFacts(scope, kinds)
+      : ensureProjectFacts(scope, kinds);
+  }, [authorityMatches, scope]);
+
+  useEffect(() => {
+    if (authorityIdentityKey === null || storedEntry || authorityMatches) return;
+    bindProjectFactsAuthority(scope, authorityIdentityKey);
+  }, [authorityIdentityKey, authorityMatches, scope, storedEntry]);
 
   useEffect(() => {
     if (!authorityMatches) return;
@@ -84,6 +98,7 @@ export function useAiCapabilities(
   }, [authorityMatches, scope]);
 
   useEffect(() => {
+    if (!authorityMatches) return;
     if (
       entry?.agents.status !== "idle"
       && entry?.agents.status !== "stale"
@@ -91,24 +106,15 @@ export function useAiCapabilities(
       && entry?.providers.status !== "stale"
     ) return;
     void ensureProjectFacts(scope, CAPABILITY_FACTS).catch(() => undefined);
-  }, [entry?.agents.status, entry?.providers.status, scope]);
-
-  useEffect(() => {
-    if (expiryAt === null) return;
-    const delay = Math.max(1, expiryAt - Date.now() + 1);
-    const timeout = window.setTimeout(() => {
-      void ensureProjectFacts(scope, CAPABILITY_FACTS).catch(() => undefined);
-    }, delay);
-    return () => window.clearTimeout(timeout);
-  }, [expiryAt, scope]);
+  }, [authorityMatches, entry?.agents.status, entry?.providers.status, scope]);
 
   useEffect(() => {
     const wasVisible = visibleRef.current;
     visibleRef.current = refreshWhenVisible;
-    if (refreshWhenVisible && !wasVisible) {
+    if (authorityMatches && refreshWhenVisible && !wasVisible) {
       void ensureProjectFacts(scope, CAPABILITY_FACTS).catch(() => undefined);
     }
-  }, [refreshWhenVisible, scope]);
+  }, [authorityMatches, refreshWhenVisible, scope]);
 
   useEffect(() => {
     if (!entry) return;

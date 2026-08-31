@@ -107,6 +107,7 @@ function makeWorkflow(items: ImportItem[]): ImportWorkflow {
     getMigrationStatus: vi.fn(),
     resumeMigration: vi.fn(),
     listHistory: vi.fn().mockResolvedValue({ entries: [], legacyReadOnly: [], nextCursor: null, warnings: [] }),
+    loadHistoryDetail: vi.fn(),
     isConfirming: false,
     requestClipboard: vi.fn(),
   };
@@ -127,9 +128,7 @@ describe("Import V2 end-to-end presentation boundary", () => {
 
     expect(screen.getByRole("button", { name: /import to source library/i })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: /import to source library/i }));
-    expect(workflow.confirm).toHaveBeenCalledWith([
-      { itemId: "notes.md", resolution: null },
-    ]);
+    expect(workflow.confirm).toHaveBeenCalledWith();
 
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     fireEvent.click(screen.getByRole("button", { name: "More actions for processing.pdf" }));
@@ -161,12 +160,15 @@ describe("Import V2 end-to-end presentation boundary", () => {
   });
 
   it("bounds a large queue and exposes incremental loading", () => {
-    const workflow = makeWorkflow(Array.from({ length: 2_000 }, (_, index) => makeItem(`item-${index}.md`, "preview_ready")));
+    const workflow = makeWorkflow(Array.from({ length: 200 }, (_, index) => makeItem(`item-${index}.md`, "preview_ready")));
+    workflow.totalItems = 2_000;
+    workflow.hasMoreItems = true;
+    workflow.loadMoreItems = vi.fn();
     render(<ImportView workflow={workflow} />);
 
-    expect(screen.getAllByRole("listitem")).toHaveLength(200);
+    expect(screen.getAllByRole("option").length).toBeLessThanOrEqual(80);
     expect(screen.getByText(/showing 200 of 2000 items/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /load more/i }));
-    expect(screen.getAllByRole("listitem")).toHaveLength(400);
+    expect(workflow.loadMoreItems).toHaveBeenCalledOnce();
   }, 10_000);
 });

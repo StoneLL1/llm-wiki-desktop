@@ -26,6 +26,9 @@ export interface ImportSourceMethodsProps {
   matrixExpanded?: boolean;
   onMatrixExpandedChange?: (expanded: boolean) => void;
   onManageCapabilities?: () => void;
+  readinessUnavailable?: boolean;
+  readinessRetrying?: boolean;
+  onRetryReadiness?: () => void | Promise<void>;
 }
 
 function hasTauri(): boolean {
@@ -41,22 +44,17 @@ export function ImportSourceMethods({
   addingUrl = false,
   sessionSyncing = false,
   onError,
-  files = ["DOCX", "PDF", "XLSX", "PPT", "MD", "TXT", "CSV"].map((label) => ({ id: label.toLowerCase(), label, available: true })),
-  platforms = [
-    { id: "http", label: "HTTP", available: true },
-    { id: "wechat", label: "WeChat", available: true },
-    { id: "zhihu", label: "Zhihu", available: false },
-    { id: "bilibili", label: "Bilibili", available: false },
-    { id: "xiaohongshu", label: "Xiaohongshu", available: false },
-    { id: "douyin", label: "Douyin", available: false },
-    { id: "x", label: "X", available: false },
-  ],
+  files = [],
+  platforms = [],
   abilities = [],
   expanded: controlledExpanded,
   onExpandedChange,
   matrixExpanded: controlledMatrixExpanded,
   onMatrixExpandedChange,
   onManageCapabilities,
+  readinessUnavailable = false,
+  readinessRetrying = false,
+  onRetryReadiness,
 }: ImportSourceMethodsProps) {
   const { t } = useTranslation();
   const [url, setUrl] = useState("");
@@ -82,6 +80,10 @@ export function ImportSourceMethods({
     if (heading) return heading.replace(/^#\s+/, "").trim();
     return textSourceName.replace(/\.(md|markdown|txt)$/i, "") || t("importV2.clipboard.fallbackTitle");
   }, [t, text, textSourceName]);
+  const pastedUrl = useMemo(() => {
+    const value = text.trim();
+    return value && !/\s/u.test(value) && isValidPublicHttpImportUrl(value) ? value : null;
+  }, [text]);
 
   const importPathsFrom = useCallback(async (selectPaths: () => Promise<string[]>) => {
     if (pathBusy) return;
@@ -153,10 +155,10 @@ export function ImportSourceMethods({
   };
 
   const submitText = () => {
-    if (!onAddText || !text.trim() || textBusy) return;
+    if ((!onAddText && !pastedUrl) || !text.trim() || textBusy) return;
     setInputError(null);
     setSubmittingText(true);
-    void Promise.resolve(onAddText(text, textSourceName))
+    void Promise.resolve(pastedUrl ? onAddUrl(pastedUrl) : onAddText!(text, textSourceName))
       .then(() => {
         setText("");
         setTextSourceName("clipboard.md");
@@ -367,7 +369,7 @@ export function ImportSourceMethods({
                     className="input input--mono w-full"
                     value={textSourceName}
                     maxLength={160}
-                    disabled={textBusy}
+                    disabled={textBusy || Boolean(pastedUrl)}
                     onChange={(event) => setTextSourceName(event.target.value)}
                   />
                   <p className="m-0 mt-2 text-[10.5px] text-[var(--text-muted)]">{t("importV2.clipboard.privacy")}</p>
@@ -376,8 +378,8 @@ export function ImportSourceMethods({
               {text.trim() ? (
                 <section className="import-v2-clipboard-preview" aria-label={t("importV2.clipboard.preview")}>
                   <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-[var(--border-subtle)] px-3 py-2 text-[11px]">
-                    <span className="font-medium text-[var(--text-primary)]">{textTitle}</span>
-                    <span className="text-[var(--text-secondary)]">{t("importV2.clipboard.route")}</span>
+                    <span className="font-medium text-[var(--text-primary)]">{pastedUrl ?? textTitle}</span>
+                    <span className="text-[var(--text-secondary)]">{t(pastedUrl ? "importV2.clipboard.routeUrl" : "importV2.clipboard.route")}</span>
                   </div>
                   <pre className="m-0 max-h-24 overflow-auto whitespace-pre-wrap break-words px-3 py-2 font-mono text-[11px] text-[var(--text-secondary)]">{text}</pre>
                 </section>
@@ -387,7 +389,7 @@ export function ImportSourceMethods({
               <button
                 type="button"
                 className="btn btn--sm btn--primary self-start"
-                disabled={!onAddText || !text.trim() || textBusy}
+                disabled={(!onAddText && !pastedUrl) || !text.trim() || textBusy}
                 aria-busy={submittingText || addingText}
                 onClick={submitText}
               >
@@ -402,6 +404,12 @@ export function ImportSourceMethods({
         className={`import-v2-source-matrix ${matrixExpanded ? "is-expanded" : "is-collapsed"}`}
         aria-label={t("importV2.matrix.label")}
       >
+        {readinessUnavailable ? (
+          <div role="status" className="flex items-center justify-between gap-3 border-b border-[var(--border-subtle)] px-3 py-2 text-[11px] text-[var(--warning-text)]">
+            <span>{t("importV2.matrix.unavailable")}</span>
+            {onRetryReadiness ? <button type="button" className="btn btn--sm" disabled={readinessRetrying} onClick={() => void onRetryReadiness()}>{t(readinessRetrying ? "importV2.matrix.retrying" : "importV2.matrix.retry")}</button> : null}
+          </div>
+        ) : null}
         <button
           type="button"
           className="import-v2-source-matrix__summary"

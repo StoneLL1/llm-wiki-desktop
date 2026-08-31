@@ -1,19 +1,19 @@
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::app_state::{ProjectExecutionLease, ProjectTaskMutationPermit, ProjectWritePermit};
 use crate::errors::{
     BackendError, IMPORT_V2_CANCELLED, IMPORT_V2_ENGINE_PANICKED, IMPORT_V2_ITEM_NOT_FOUND,
-    IMPORT_V2_STATE_INVALID,
+    IMPORT_V2_STATE_INVALID, IMPORT_V2_WORK_ITEM_STALE,
 };
 use crate::models::import_v2::{
     AttemptOutcome, AttemptRecord, ImportAsrProfile, ImportInput, ImportInputKind, ImportIssue,
-    ImportItem, ImportItemStatus, ImportMediaAuthorization, ImportMediaAuthorizationKind,
-    ImportRecoveryAction, ImportResourceMode, ImportSession, ImportSessionStatus, ImportStage,
-    SourceIdentity,
+    ImportItem, ImportItemAuthorizationSnapshot, ImportItemPage, ImportItemPageFilter,
+    ImportItemStatus, ImportMediaAuthorization, ImportMediaAuthorizationKind, ImportRecoveryAction,
+    ImportResourceMode, ImportSession, ImportSessionOverview, ImportSessionStatus, ImportStage,
+    ImportWorkItemSnapshot, SourceIdentity,
 };
 use crate::models::import_v2_agent::AgentAssistanceTrigger;
 use crate::models::import_v2_agent::AgentCandidate;
@@ -33,6 +33,7 @@ use crate::services::import_v2::generic_web_engine::GenericWebEngine;
 use crate::services::import_v2::local_media_engine::{
     NativeMediaCompanionEngine, NativeSubtitleEngine,
 };
+use crate::services::import_v2::lock_registry::{ImportLockRegistry, ProjectImportLocks};
 use crate::services::import_v2::native_file_engine::{
     NativeCsvPackageEngine, NativeFileEngine, NativeStructuredFileEngine,
 };
@@ -57,16 +58,130 @@ pub(crate) fn is_import_batch_operation_task(task: &BackendTask) -> bool {
     task.is_import_operation()
 }
 
+#[cfg(feature = "performance-observers")]
+#[derive(Debug, Clone, Default, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportLockWaitSnapshot {
+    pub acquisitions: u64,
+    pub total_wait_nanos: u64,
+    pub max_wait_nanos: u64,
+    pub waits_over_50_ms: u64,
+}
+
+#[cfg(feature = "performance-observers")]
+pub struct ImportLockWaitObservation {
+    snapshot: Arc<Mutex<ImportLockWaitSnapshot>>,
+}
+
+#[cfg(feature = "performance-observers")]
+impl ImportLockWaitObservation {
+    pub fn snapshot(&self) -> ImportLockWaitSnapshot {
+        self.snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
 pub struct ImportV2Service {
     pub(super) sessions: SessionStore,
     pub(super) engines: EngineRegistry,
     quality: QualityGate,
-    pub(super) mutation_lock: Mutex<()>,
+    pub(super) lock_registry: ImportLockRegistry,
     agent_candidate_action_lock: Mutex<()>,
     #[cfg_attr(not(feature = "gui"), allow(dead_code))]
     source_ai_active: Mutex<HashSet<String>>,
     pub(super) web_targets: Arc<WebTargetStore>,
     connector_profiles_root: Arc<RwLock<Option<PathBuf>>>,
+    target_reservation_registry: Mutex<
+        HashMap<
+            String,
+            std::sync::Weak<Mutex<crate::services::import_v2::NewSourceTargetReservations>>,
+        >,
+    >,
+    #[cfg(feature = "performance-observers")]
+    lock_wait_observer: Mutex<Option<Arc<Mutex<ImportLockWaitSnapshot>>>>,
+}
+
+pub(crate) struct ImportSessionRecovery {
+    pub session: ImportSession,
+    pub changed_items: Vec<ImportItem>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BatchOperationPreparation {
+    pub replaced_task_ids: Vec<String>,
+    pub snapshots: Vec<ImportWorkItemSnapshot>,
+    pub(crate) target_reservations:
+        Arc<Mutex<crate::services::import_v2::NewSourceTargetReservations>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AcceptedImportOperation {
+    pub task: BackendTask,
+    pub item_ids: Vec<String>,
+}
+
+fn work_item_snapshots(
+    session: &ImportSession,
+    item_ids: &[String],
+    revision_increment: u64,
+) -> Result<Vec<ImportWorkItemSnapshot>, BackendError> {
+    let item_by_id = session
+        .items
+        .iter()
+        .map(|item| (item.item_id.as_str(), item))
+        .collect::<HashMap<_, _>>();
+    let authorization_by_item = session.media_authorizations.iter().fold(
+        HashMap::<&str, ImportItemAuthorizationSnapshot>::new(),
+        |mut index, authorization| {
+            let entry = index
+                .entry(authorization.item_id.as_str())
+                .or_insert_with(|| ImportItemAuthorizationSnapshot {
+                    local_ocr_authorized: false,
+                    asr_profile: None,
+                    recognition_language: None,
+                    local_asr_authorized: false,
+                });
+            match authorization.kind {
+                ImportMediaAuthorizationKind::Ocr => entry.local_ocr_authorized = true,
+                ImportMediaAuthorizationKind::Asr => {
+                    entry.local_asr_authorized = true;
+                    entry.asr_profile.clone_from(&authorization.asr_profile);
+                    entry
+                        .recognition_language
+                        .clone_from(&authorization.language);
+                }
+            }
+            index
+        },
+    );
+    item_ids
+        .iter()
+        .map(|item_id| {
+            let item = item_by_id
+                .get(item_id.as_str())
+                .copied()
+                .ok_or_else(item_not_found)?;
+            Ok(ImportWorkItemSnapshot {
+                item_id: item.item_id.clone(),
+                expected_item_revision: item.item_revision.saturating_add(revision_increment),
+                input: item.input.clone(),
+                selected_subtitle: item.selected_subtitle.clone(),
+                media_authorization: authorization_by_item
+                    .get(item_id.as_str())
+                    .cloned()
+                    .unwrap_or(ImportItemAuthorizationSnapshot {
+                        local_ocr_authorized: false,
+                        asr_profile: None,
+                        recognition_language: None,
+                        local_asr_authorized: false,
+                    }),
+                authenticated_retry: item.authenticated_retry,
+                resource_mode: session.resource_mode.clone(),
+            })
+        })
+        .collect()
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -133,7 +248,9 @@ impl ImportV2Service {
                 true,
             ));
         }
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         let item = session
@@ -183,93 +300,33 @@ impl ImportV2Service {
         context: &ProjectContext,
         files: &FileStore,
     ) -> Result<Option<String>, BackendError> {
-        let import_state_root = context.layout.import_state_root.as_deref().ok_or_else(|| {
-            BackendError::new(
-                IMPORT_V2_STATE_INVALID,
-                "Import state is unavailable for this project layout.",
-                true,
-                false,
-            )
-        })?;
-        let root = context.resolve_project_path(import_state_root)?;
-        let metadata = match fs::symlink_metadata(&root) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => {
-                return Err(BackendError::new(
-                    "IMPORT_V2_SESSION_SCAN_FAILED",
-                    error.to_string(),
-                    true,
-                    true,
-                ))
-            }
+        self.sessions.find_unfinished_session(context, files)
+    }
+
+    /// Project-open reconciliation is intentionally bounded to the single
+    /// active unfinished Import session. It only reconciles durable state and
+    /// maps interrupted work to resumable facts; it never restarts expensive
+    /// extraction, OCR, ASR, or network work.
+    pub(crate) fn recover_unfinished_session_on_open_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        tasks: &TaskService,
+    ) -> Result<Option<String>, BackendError> {
+        let context = permit.context();
+        FileTransaction::reconcile_context(context)?;
+        let Some(session_id) = self.find_unfinished_session(context, files)? else {
+            return Ok(None);
         };
-        if !metadata.is_dir()
-            || metadata.file_type().is_symlink()
-            || crate::services::import_v2::transaction::is_project_reparse_point(&metadata)
-        {
-            return Err(BackendError::new(
-                "IMPORT_V2_SESSION_SCAN_FAILED",
-                "Import session directory is not safe.",
-                false,
-                true,
-            ));
-        }
-        let mut ids = fs::read_dir(root)
-            .map_err(|error| {
-                BackendError::new(
-                    "IMPORT_V2_SESSION_SCAN_FAILED",
-                    error.to_string(),
-                    true,
-                    true,
-                )
-            })?
-            .flatten()
-            .filter_map(|entry| {
-                let metadata = fs::symlink_metadata(entry.path()).ok()?;
-                if metadata.is_dir()
-                    && !metadata.file_type().is_symlink()
-                    && !crate::services::import_v2::transaction::is_project_reparse_point(&metadata)
-                {
-                    let id = entry.file_name().to_string_lossy().into_owned();
-                    (id.len() <= 64
-                        && id
-                            .bytes()
-                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
-                    .then_some(id)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-        ids.sort();
-        for id in ids {
-            let session = match self.sessions.load(context, files, &id) {
-                Ok(session) => session,
-                // A stale or partially written session is evidence to leave
-                // untouched, not a reason to make every new V2 import
-                // unavailable. Unsafe session roots still fail above.
-                Err(error)
-                    if matches!(
-                        error.code.as_str(),
-                        crate::errors::IMPORT_V2_SESSION_INVALID
-                            | crate::errors::IMPORT_V2_SESSION_NOT_FOUND
-                            | "JSON_PARSE_FAILED"
-                            | "FILE_READ_FAILED"
-                    ) =>
-                {
-                    continue
-                }
-                Err(error) => return Err(error),
-            };
-            if !matches!(
-                derive_session_status(&session.items),
-                ImportSessionStatus::Completed | ImportSessionStatus::Cancelled
-            ) {
-                return Ok(Some(id));
-            }
-        }
-        Ok(None)
+        self.recover_session_report_with_cancel_authorized(
+            permit,
+            files,
+            tasks,
+            &session_id,
+            || false,
+            |_, _| {},
+        )?;
+        Ok(Some(session_id))
     }
 
     pub fn with_secret_service(secrets: SecretService) -> Self {
@@ -319,12 +376,97 @@ impl ImportV2Service {
             sessions: SessionStore::default(),
             engines,
             quality: QualityGate::default(),
-            mutation_lock: Mutex::new(()),
+            lock_registry: ImportLockRegistry::default(),
             agent_candidate_action_lock: Mutex::new(()),
             source_ai_active: Mutex::new(HashSet::new()),
             web_targets,
             connector_profiles_root,
+            target_reservation_registry: Mutex::new(HashMap::new()),
+            #[cfg(feature = "performance-observers")]
+            lock_wait_observer: Mutex::new(None),
         }
+    }
+
+    pub(crate) fn target_reservations_for_session(
+        &self,
+        context: &ProjectContext,
+        session: &ImportSession,
+    ) -> Result<Arc<Mutex<crate::services::import_v2::NewSourceTargetReservations>>, BackendError>
+    {
+        let project_identity = crate::services::project_identity(&context.root)
+            .map_err(|error| BackendError::new("PROJECT_IDENTITY_FAILED", error, true, false))?;
+        let registry_key = format!(
+            "{}:{}",
+            project_identity.canonical_identity_key, session.session_id
+        );
+        let mut registry = self
+            .target_reservation_registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        registry.retain(|_, reservations| reservations.strong_count() > 0);
+        if let Some(reservations) = registry
+            .get(&registry_key)
+            .and_then(std::sync::Weak::upgrade)
+        {
+            reservations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .absorb_session(session)?;
+            return Ok(reservations);
+        }
+        let reservations = Arc::new(Mutex::new(
+            crate::services::import_v2::NewSourceTargetReservations::from_session(session)?,
+        ));
+        registry.insert(registry_key, Arc::downgrade(&reservations));
+        Ok(reservations)
+    }
+
+    #[cfg(feature = "performance-observers")]
+    pub fn observe_lock_waits(&self) -> ImportLockWaitObservation {
+        let snapshot = Arc::new(Mutex::new(ImportLockWaitSnapshot::default()));
+        *self
+            .lock_wait_observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(snapshot.clone());
+        ImportLockWaitObservation { snapshot }
+    }
+
+    #[cfg(feature = "performance-observers")]
+    pub fn hold_project_lock_for_observation(
+        &self,
+        context: &ProjectContext,
+        duration: std::time::Duration,
+        acquired: Option<&std::sync::Barrier>,
+    ) {
+        let project_locks = self
+            .project_locks(context)
+            .expect("synthetic project lock must be available");
+        let _guard = self.lock_project(&project_locks);
+        if let Some(acquired) = acquired {
+            acquired.wait();
+        }
+        std::thread::sleep(duration);
+    }
+
+    #[cfg(feature = "performance-observers")]
+    pub fn hold_session_lock_for_observation(
+        &self,
+        context: &ProjectContext,
+        session_id: &str,
+        duration: std::time::Duration,
+        acquired: Option<&std::sync::Barrier>,
+    ) {
+        let project_locks = self
+            .project_locks(context)
+            .expect("synthetic project lock must be available");
+        let session_lock = project_locks
+            .session(session_id)
+            .expect("synthetic session lock must be available");
+        let _guard = self.lock_session(&session_lock);
+        if let Some(acquired) = acquired {
+            acquired.wait();
+        }
+        std::thread::sleep(duration);
     }
 
     /// Configure the app-owned persistent connector profile root once the
@@ -374,6 +516,33 @@ impl ImportV2Service {
         self.web_targets
             .store_collection(project_id, session_id, source_url, platform, title, items)
     }
+    #[allow(clippy::too_many_arguments)]
+    pub fn store_web_collection_durable(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        task_id: &str,
+        project_id: &str,
+        session_id: &str,
+        source_url: String,
+        platform: String,
+        title: String,
+        items: Vec<(
+            String,
+            crate::services::import_v2::url_policy::SessionWebTarget,
+            String,
+        )>,
+    ) -> Result<
+        (
+            String,
+            crate::services::import_v2::web_target_store::CollectionPage,
+        ),
+        BackendError,
+    > {
+        self.web_targets.store_collection_durable(
+            context, files, task_id, project_id, session_id, source_url, platform, title, items,
+        )
+    }
     pub fn load_web_collection_page(
         &self,
         collection_ref: &str,
@@ -383,6 +552,32 @@ impl ImportV2Service {
         load_all: bool,
     ) -> Result<crate::services::import_v2::web_target_store::CollectionPage, BackendError> {
         self.web_targets.load_collection_page(
+            collection_ref,
+            project_id,
+            session_id,
+            cursor,
+            load_all,
+        )
+    }
+    pub fn load_web_collection_page_durable(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        collection_ref: &str,
+        project_id: &str,
+        session_id: &str,
+        cursor: &str,
+        load_all: bool,
+    ) -> Result<
+        (
+            crate::services::import_v2::web_target_store::CollectionPage,
+            String,
+        ),
+        BackendError,
+    > {
+        self.web_targets.load_collection_page_durable(
+            context,
+            files,
             collection_ref,
             project_id,
             session_id,
@@ -405,8 +600,36 @@ impl ImportV2Service {
             selected_item_refs,
         )
     }
+    pub fn resolve_web_collection_selection_durable(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        collection_ref: &str,
+        project_id: &str,
+        session_id: &str,
+        selected_item_refs: &[String],
+    ) -> Result<crate::services::import_v2::web_target_store::CollectionSelection, BackendError>
+    {
+        self.web_targets.resolve_collection_selection_durable(
+            context,
+            files,
+            collection_ref,
+            project_id,
+            session_id,
+            selected_item_refs,
+        )
+    }
     pub fn delete_web_collection(&self, collection_ref: &str) -> Result<(), BackendError> {
         self.web_targets.delete_collection(collection_ref)
+    }
+    pub fn delete_web_collection_durable(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        collection_ref: &str,
+    ) -> Result<(), BackendError> {
+        self.web_targets
+            .delete_collection_durable(context, files, collection_ref)
     }
     pub fn authorize_private_target(
         &self,
@@ -491,7 +714,9 @@ impl ImportV2Service {
         item_ids: &[String],
         account_summary: Option<&str>,
     ) -> Result<ImportSession, BackendError> {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         if item_ids.is_empty() {
@@ -544,7 +769,9 @@ impl ImportV2Service {
         session_id: &str,
         item_ids: &[String],
     ) -> Result<ImportSession, BackendError> {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         for item in session
@@ -611,6 +838,49 @@ impl ImportV2Service {
         })
     }
 
+    fn cancel_batch_item_cohort_for_task_unchecked(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        task_id: &str,
+        item_ids: &[String],
+    ) -> Result<Vec<ImportItem>, BackendError> {
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
+        self.preflight_locked(context)?;
+        let session = self.sessions.load(context, files, session_id)?;
+        let requested = item_ids.iter().map(String::as_str).collect::<HashSet<_>>();
+        let originals = session
+            .items
+            .iter()
+            .filter(|item| {
+                requested.contains(item.item_id.as_str())
+                    && item.task_id.as_deref() == Some(task_id)
+                    && !matches!(
+                        item.status,
+                        ImportItemStatus::Completed | ImportItemStatus::Committing
+                    )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut replacements = originals.clone();
+        for item in &mut replacements {
+            transition_item(item, ImportItemStatus::Cancelled)?;
+            item.task_id = None;
+            item.progress = None;
+        }
+        self.sessions.write_item_cohort_if_unchanged(
+            context,
+            files,
+            session_id,
+            &originals,
+            &replacements,
+        )?;
+        Ok(replacements)
+    }
+
     fn skip_item_unchecked(
         &self,
         context: &ProjectContext,
@@ -619,38 +889,37 @@ impl ImportV2Service {
         session_id: &str,
         item_id: &str,
     ) -> Result<ImportItem, BackendError> {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let task_to_cancel = {
+            let _guard = self.lock_session(&session_lock);
+            self.preflight_locked(context)?;
+            let session = self.sessions.load(context, files, session_id)?;
+            let item = session
+                .items
+                .iter()
+                .find(|item| item.item_id == item_id)
+                .ok_or_else(item_not_found)?;
+            validate_item_can_skip(item)?;
+            item.task_id.clone().filter(|task_id| {
+                !is_batch_operation_task(tasks, task_id)
+                    && tasks.get_task(task_id).is_some_and(|task| {
+                        !matches!(
+                            task.status,
+                            TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Cancelled
+                        )
+                    })
+            })
+        };
+        if let Some(task_id) = task_to_cancel {
+            task_call(tasks.cancel_task(&task_id))?;
+        }
+
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         let item = find_item_mut(&mut session, item_id)?;
-        if !matches!(
-            item.status,
-            ImportItemStatus::Queued
-                | ImportItemStatus::WaitingCapability
-                | ImportItemStatus::WaitingLogin
-                | ImportItemStatus::PreviewReady
-                | ImportItemStatus::NeedsMerge
-                | ImportItemStatus::Failed
-        ) {
-            return Err(BackendError::new(
-                IMPORT_V2_STATE_INVALID,
-                "Only queued, waiting, ready, or failed import items can be skipped.",
-                false,
-                true,
-            ));
-        }
-        if let Some(task_id) = item.task_id.as_deref() {
-            if !is_batch_operation_task(tasks, task_id)
-                && tasks.get_task(task_id).is_some_and(|task| {
-                    !matches!(
-                        task.status,
-                        TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Cancelled
-                    )
-                })
-            {
-                task_call(tasks.cancel_task(task_id))?;
-            }
-        }
+        validate_item_can_skip(item)?;
         transition_item(item, ImportItemStatus::Skipped)?;
         item.selected = false;
         item.task_id = None;
@@ -678,7 +947,8 @@ impl ImportV2Service {
         files: &FileStore,
         mode: ImportResourceMode,
     ) -> Result<ImportSession, BackendError> {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let _guard = self.lock_project(&project_locks);
         self.preflight_locked(context)?;
         if let Some(session_id) = self.find_unfinished_session(context, files)? {
             return self.sessions.load(context, files, &session_id);
@@ -692,9 +962,57 @@ impl ImportV2Service {
         session_id: &str,
         inputs: Vec<ImportInput>,
     ) -> Result<ImportSession, BackendError> {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         self.sessions.add_inputs(context, files, session_id, inputs)
+    }
+
+    fn accept_scan_inputs_with_operation_unchecked(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        inputs: Vec<ImportInput>,
+    ) -> Result<Option<AcceptedImportOperation>, BackendError> {
+        if inputs.is_empty() {
+            return Ok(None);
+        }
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
+        self.preflight_locked(context)?;
+        let session = self.sessions.load(context, files, session_id)?;
+        SessionStore::ensure_accepts_new_items(&session)?;
+        let source_label = (inputs.len() == 1).then(|| inputs[0].display_name.clone());
+        let title = source_label
+            .as_ref()
+            .map(|label| format!("Import {label}"))
+            .unwrap_or_else(|| format!("Import {} sources", inputs.len()));
+        let task = tasks
+            .create_project_import_operation_task(
+                context.project_id.clone(),
+                context.root.clone(),
+                import_operation_task_state_root(context)?,
+                title,
+                session_id.to_string(),
+                inputs.len() as u64,
+                source_label,
+            )
+            .map_err(|error| task_error(&error))?;
+        match self
+            .sessions
+            .add_inputs_claimed(context, files, session_id, inputs, &task.id)
+        {
+            Ok((_session, item_ids)) => Ok(Some(AcceptedImportOperation { task, item_ids })),
+            Err(error) => {
+                let _ = tasks.set_error(&task.id, error.clone());
+                let _ = tasks.transition_status(&task.id, TaskStatus::Failed);
+                Err(error)
+            }
+        }
     }
 
     pub fn completed_collection_fingerprints(
@@ -718,7 +1036,9 @@ impl ImportV2Service {
         platform: String,
         title: String,
     ) -> Result<ImportSession, BackendError> {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         self.sessions.add_collection_inputs(
             context, files, session_id, inputs, source_url, platform, title,
@@ -737,7 +1057,9 @@ impl ImportV2Service {
         display_name: &str,
         content: &str,
     ) -> Result<ImportSession, BackendError> {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let session = self.sessions.load(context, files, session_id)?;
         SessionStore::ensure_accepts_new_items(&session)?;
@@ -759,7 +1081,7 @@ impl ImportV2Service {
         );
         let path = context.resolve_project_path(&relative)?;
         let bytes = content.as_bytes();
-        let mut transaction = FileTransaction::new_for_project(&context.root);
+        let mut transaction = FileTransaction::new_for_context(context)?;
         transaction.write_new(&path, bytes)?;
         transaction.commit()?;
         let canonical_path = path.canonicalize().map_err(|error| {
@@ -814,7 +1136,9 @@ impl ImportV2Service {
         files: &FileStore,
         session_id: &str,
     ) -> Result<ImportSession, BackendError> {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         if crate::services::import_v2::commit::backfill_missing_new_source_wiki_targets(
@@ -828,6 +1152,51 @@ impl ImportV2Service {
         // authoritative lifecycle fact and can advance between summary writes.
         session.status = derive_session_status(&session.items);
         Ok(session)
+    }
+
+    /// Read the durable session snapshot without migration, recovery, or
+    /// timestamp side effects. Maintenance belongs to an explicit task.
+    pub fn read_session(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+    ) -> Result<ImportSession, BackendError> {
+        let mut session = self.sessions.load(context, files, session_id)?;
+        session.status = derive_session_status(&session.items);
+        Ok(session)
+    }
+
+    pub fn read_session_overview(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+    ) -> Result<ImportSessionOverview, BackendError> {
+        self.sessions.read_overview(context, files, session_id)
+    }
+
+    pub(crate) fn refresh_session_action_groups_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        session_id: &str,
+    ) -> Result<(), BackendError> {
+        self.sessions
+            .refresh_action_groups_if_dirty(permit.context(), files, session_id)
+    }
+
+    pub fn list_session_items(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        filter: ImportItemPageFilter,
+        cursor: Option<&str>,
+        limit: u16,
+    ) -> Result<ImportItemPage, BackendError> {
+        self.sessions
+            .list_items(context, files, session_id, filter, cursor, limit)
     }
 
     /// Focused item read for worker safe points. It deliberately avoids
@@ -848,7 +1217,9 @@ impl ImportV2Service {
         files: &FileStore,
         session_id: &str,
     ) -> Result<(), BackendError> {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let session = self.sessions.load(context, files, session_id)?;
         SessionStore::ensure_accepts_new_items(&session)
@@ -861,7 +1232,9 @@ impl ImportV2Service {
         session_id: &str,
         task_id: Option<String>,
     ) -> Result<ImportSession, BackendError> {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         if task_id.is_some() {
@@ -882,8 +1255,10 @@ impl ImportV2Service {
         files: &FileStore,
         session_id: &str,
         bindings: &[(String, String)],
-    ) -> Result<(), BackendError> {
-        let _guard = self.lock()?;
+    ) -> Result<Vec<ImportWorkItemSnapshot>, BackendError> {
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         let index = session
@@ -910,7 +1285,7 @@ impl ImportV2Service {
         session: &mut ImportSession,
         index: &HashMap<String, usize>,
         bindings: &[(String, String)],
-    ) -> Result<(), BackendError> {
+    ) -> Result<Vec<ImportWorkItemSnapshot>, BackendError> {
         self.bind_item_task_ids_from_snapshot_with_cancel(
             context,
             files,
@@ -931,7 +1306,7 @@ impl ImportV2Service {
         index: &HashMap<String, usize>,
         bindings: &[(String, String)],
         mut should_cancel: F,
-    ) -> Result<(), BackendError>
+    ) -> Result<Vec<ImportWorkItemSnapshot>, BackendError>
     where
         F: FnMut() -> bool,
     {
@@ -983,7 +1358,14 @@ impl ImportV2Service {
             &replacements,
             should_cancel,
         )?;
-        Ok(())
+        work_item_snapshots(
+            session,
+            &bindings
+                .iter()
+                .map(|(item_id, _)| item_id.clone())
+                .collect::<Vec<_>>(),
+            1,
+        )
     }
 
     /// Create the persisted operation before expensive cohort preparation so
@@ -1043,14 +1425,16 @@ impl ImportV2Service {
         task_id: &str,
         item_ids: &[String],
         mut should_cancel: F,
-    ) -> Result<Vec<String>, BackendError>
+    ) -> Result<BatchOperationPreparation, BackendError>
     where
         F: FnMut() -> bool,
     {
         if should_cancel() {
             return Err(cancelled_error());
         }
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         if should_cancel() {
@@ -1113,7 +1497,8 @@ impl ImportV2Service {
             .cloned()
             .map(|item_id| (item_id, task_id.to_string()))
             .collect::<Vec<_>>();
-        self.bind_item_task_ids_from_snapshot_with_cancel(
+        let target_reservations = self.target_reservations_for_session(context, &session)?;
+        let snapshots = self.bind_item_task_ids_from_snapshot_with_cancel(
             context,
             files,
             session_id,
@@ -1122,7 +1507,11 @@ impl ImportV2Service {
             &bindings,
             should_cancel,
         )?;
-        Ok(replaced_task_ids.into_iter().collect())
+        Ok(BatchOperationPreparation {
+            replaced_task_ids: replaced_task_ids.into_iter().collect(),
+            snapshots,
+            target_reservations,
+        })
     }
 
     /// Create the one persistent control-plane task for a bulk import and
@@ -1145,36 +1534,20 @@ impl ImportV2Service {
                 true,
             ));
         }
-        let _guard = self.lock()?;
-        self.preflight_locked(context)?;
-        let mut session = self.sessions.load(context, files, session_id)?;
-        let index = session
-            .items
-            .iter()
-            .enumerate()
-            .map(|(position, item)| (item.item_id.clone(), position))
-            .collect::<HashMap<_, _>>();
-        let mut unique = HashSet::with_capacity(item_ids.len());
-        for item_id in item_ids {
-            if !unique.insert(item_id.as_str()) {
-                return Err(task_error("Import item ids must be unique."));
-            }
-            let Some(position) = index.get(item_id) else {
-                return Err(item_not_found());
-            };
-            if !is_batch_claimable(&session.items[*position]) {
-                return Err(task_error(
-                    "Import item is already claimed by another operation.",
-                ));
-            }
-        }
-
-        let source_label = (item_ids.len() == 1).then(|| {
-            session.items[*index.get(&item_ids[0]).expect("validated item")]
-                .input
-                .display_name
-                .clone()
-        });
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let source_label = {
+            let _guard = self.lock_session(&session_lock);
+            self.preflight_locked(context)?;
+            let session = self.sessions.load(context, files, session_id)?;
+            let index = validate_batch_claims(&session, item_ids)?;
+            (item_ids.len() == 1).then(|| {
+                session.items[*index.get(&item_ids[0]).expect("validated item")]
+                    .input
+                    .display_name
+                    .clone()
+            })
+        };
         let title = source_label
             .as_ref()
             .map(|label| format!("Import {label}"))
@@ -1195,14 +1568,21 @@ impl ImportV2Service {
             .cloned()
             .map(|item_id| (item_id, task.id.clone()))
             .collect::<Vec<_>>();
-        if let Err(error) = self.bind_item_task_ids_from_snapshot(
-            context,
-            files,
-            session_id,
-            &mut session,
-            &index,
-            &bindings,
-        ) {
+        let bind_result = (|| {
+            let _guard = self.lock_session(&session_lock);
+            self.preflight_locked(context)?;
+            let mut session = self.sessions.load(context, files, session_id)?;
+            let index = validate_batch_claims(&session, item_ids)?;
+            self.bind_item_task_ids_from_snapshot(
+                context,
+                files,
+                session_id,
+                &mut session,
+                &index,
+                &bindings,
+            )
+        })();
+        if let Err(error) = bind_result {
             let _ = tasks.set_error(&task.id, error.clone());
             let _ = tasks.transition_status(&task.id, TaskStatus::Failed);
             return Err(error);
@@ -1463,7 +1843,9 @@ impl ImportV2Service {
         preview: crate::models::import_v2::ImportPreviewArtifact,
         explicit_merge_current_hash: Option<&str>,
     ) -> Result<ImportItem, BackendError> {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         let item_position = session
@@ -1556,7 +1938,9 @@ impl ImportV2Service {
         task_id: &str,
         deterministic_preview: Option<crate::models::import_v2::ImportPreviewArtifact>,
     ) -> Result<ImportItem, BackendError> {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         let item_position = session
@@ -1728,6 +2112,33 @@ impl ImportV2Service {
         self.cancel_batch_item_unchecked(permit.context(), files, session_id, item_id)
     }
 
+    pub(crate) fn cancel_batch_item_cohort_for_task_authorized(
+        &self,
+        permit: &ProjectTaskMutationPermit<'_>,
+        files: &FileStore,
+        session_id: &str,
+        task_id: &str,
+        item_ids: &[String],
+    ) -> Result<Vec<ImportItem>, BackendError> {
+        if permit.workflow_access().persistence
+            != crate::models::workflow::WorkflowPersistenceMode::Persistent
+        {
+            return Err(BackendError::new(
+                "PROJECT_TASK_PERSISTENCE_REVOKED",
+                "Project task persistence is no longer available.",
+                true,
+                false,
+            ));
+        }
+        self.cancel_batch_item_cohort_for_task_unchecked(
+            permit.context(),
+            files,
+            session_id,
+            task_id,
+            item_ids,
+        )
+    }
+
     pub(crate) fn skip_item_authorized(
         &self,
         permit: &ProjectWritePermit<'_>,
@@ -1746,6 +2157,63 @@ impl ImportV2Service {
         mode: ImportResourceMode,
     ) -> Result<ImportSession, BackendError> {
         self.create_session_unchecked(permit.context(), files, mode)
+    }
+
+    /// Application-temp preview facade. The command layer supplies an
+    /// isolated native-layout context whose root is never the project root.
+    pub(crate) fn create_temporary_preview_session(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        mode: ImportResourceMode,
+    ) -> Result<ImportSession, BackendError> {
+        self.create_session_unchecked(context, files, mode)
+    }
+
+    pub(crate) fn add_temporary_preview_inputs(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        inputs: Vec<ImportInput>,
+    ) -> Result<ImportSession, BackendError> {
+        self.add_inputs_unchecked(context, files, session_id, inputs)
+    }
+
+    pub(crate) fn add_temporary_preview_collection_inputs(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        inputs: Vec<crate::services::import_v2::session_store::CollectionImportInput>,
+        source_url: String,
+        platform: String,
+        title: String,
+    ) -> Result<ImportSession, BackendError> {
+        self.add_collection_inputs_unchecked(
+            context, files, session_id, inputs, source_url, platform, title,
+        )
+    }
+
+    pub(crate) fn add_temporary_preview_text(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        display_name: &str,
+        content: &str,
+    ) -> Result<ImportSession, BackendError> {
+        self.add_text_input_unchecked(context, files, session_id, display_name, content)
+    }
+
+    pub(crate) fn bind_temporary_preview_tasks(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        bindings: &[(String, String)],
+    ) -> Result<Vec<ImportWorkItemSnapshot>, BackendError> {
+        self.bind_item_task_ids_unchecked(context, files, session_id, bindings)
     }
 
     pub(crate) fn create_batch_operation_task_authorized(
@@ -1774,7 +2242,7 @@ impl ImportV2Service {
         task_id: &str,
         item_ids: &[String],
         should_cancel: F,
-    ) -> Result<Vec<String>, BackendError>
+    ) -> Result<BatchOperationPreparation, BackendError>
     where
         F: FnMut() -> bool,
     {
@@ -1797,6 +2265,23 @@ impl ImportV2Service {
         inputs: Vec<ImportInput>,
     ) -> Result<ImportSession, BackendError> {
         self.add_inputs_unchecked(permit.context(), files, session_id, inputs)
+    }
+
+    pub(crate) fn accept_scan_inputs_with_operation_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        inputs: Vec<ImportInput>,
+    ) -> Result<Option<AcceptedImportOperation>, BackendError> {
+        self.accept_scan_inputs_with_operation_unchecked(
+            permit.context(),
+            files,
+            tasks,
+            session_id,
+            inputs,
+        )
     }
 
     pub(crate) fn add_collection_inputs_authorized(
@@ -1847,7 +2332,7 @@ impl ImportV2Service {
         files: &FileStore,
         session_id: &str,
         bindings: &[(String, String)],
-    ) -> Result<(), BackendError> {
+    ) -> Result<Vec<ImportWorkItemSnapshot>, BackendError> {
         self.bind_item_task_ids_unchecked(permit.context(), files, session_id, bindings)
     }
 
@@ -1859,11 +2344,13 @@ impl ImportV2Service {
         bindings: &[(String, String)],
         expected_items: &[ImportItem],
         mut should_cancel: F,
-    ) -> Result<(), BackendError>
+    ) -> Result<Vec<ImportWorkItemSnapshot>, BackendError>
     where
         F: FnMut() -> bool,
     {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(permit.context())?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(permit.context())?;
         let mut session = self.sessions.load(permit.context(), files, session_id)?;
         if should_cancel() {
@@ -1900,14 +2387,27 @@ impl ImportV2Service {
         )
     }
 
-    pub(crate) fn recover_session_authorized(
+    pub(crate) fn recover_session_report_with_cancel_authorized<F, P>(
         &self,
         permit: &ProjectWritePermit<'_>,
         files: &FileStore,
         tasks: &TaskService,
         session_id: &str,
-    ) -> Result<ImportSession, BackendError> {
-        self.recover_session_unchecked(permit.context(), files, tasks, session_id)
+        should_cancel: F,
+        on_progress: P,
+    ) -> Result<ImportSessionRecovery, BackendError>
+    where
+        F: FnMut() -> bool,
+        P: FnMut(u64, u64),
+    {
+        self.recover_session_report_with_cancel_unchecked(
+            permit.context(),
+            files,
+            tasks,
+            session_id,
+            should_cancel,
+            on_progress,
+        )
     }
 
     pub(crate) fn set_item_selected_authorized(
@@ -2067,7 +2567,7 @@ impl ImportV2Service {
         task_id: &str,
         item_ids: &[String],
         should_cancel: F,
-    ) -> Result<Vec<String>, BackendError>
+    ) -> Result<BatchOperationPreparation, BackendError>
     where
         F: FnMut() -> bool,
     {
@@ -2103,6 +2603,19 @@ impl ImportV2Service {
         inputs: Vec<ImportInput>,
     ) -> Result<ImportSession, BackendError> {
         self.add_inputs_unchecked(context, files, session_id, inputs)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn accept_scan_inputs_with_operation(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        inputs: Vec<ImportInput>,
+    ) -> Result<Option<(BackendTask, Vec<String>)>, BackendError> {
+        self.accept_scan_inputs_with_operation_unchecked(context, files, tasks, session_id, inputs)
+            .map(|operation| operation.map(|operation| (operation.task, operation.item_ids)))
     }
 
     #[cfg(debug_assertions)]
@@ -2151,7 +2664,7 @@ impl ImportV2Service {
         files: &FileStore,
         session_id: &str,
         bindings: &[(String, String)],
-    ) -> Result<(), BackendError> {
+    ) -> Result<Vec<ImportWorkItemSnapshot>, BackendError> {
         self.bind_item_task_ids_unchecked(context, files, session_id, bindings)
     }
 
@@ -2164,6 +2677,21 @@ impl ImportV2Service {
         session_id: &str,
     ) -> Result<ImportSession, BackendError> {
         self.recover_session_unchecked(context, files, tasks, session_id)
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn recover_session_with_cancel<F>(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        should_cancel: F,
+    ) -> Result<ImportSession, BackendError>
+    where
+        F: FnMut() -> bool,
+    {
+        self.recover_session_with_cancel_unchecked(context, files, tasks, session_id, should_cancel)
     }
 
     #[cfg(debug_assertions)]
@@ -2266,80 +2794,164 @@ impl ImportV2Service {
         tasks: &TaskService,
         session_id: &str,
     ) -> Result<ImportSession, BackendError> {
-        let _guard = self.lock()?;
-        self.preflight_locked(context)?;
-        let mut session = self.sessions.load(context, files, session_id)?;
-        for item in &mut session.items {
-            for attempt in &mut item.attempts {
-                let Some(task_id) = attempt
-                    .route
-                    .strip_prefix("agent_assistance/")
-                    .filter(|_| attempt.completed_at.is_none())
-                    .map(str::to_owned)
-                else {
-                    continue;
-                };
-                let task_status = tasks.get_task(&task_id).map(|task| task.status);
-                if matches!(
-                    task_status,
-                    Some(
-                        TaskStatus::Queued
-                            | TaskStatus::Running
-                            | TaskStatus::WaitingForConfirmation
-                            | TaskStatus::Cancelling
-                    )
-                ) {
-                    continue;
-                }
-                attempt.completed_at = Some(chrono::Utc::now().to_rfc3339());
-                match task_status {
-                    Some(TaskStatus::Succeeded) => {
-                        attempt.outcome = AttemptOutcome::Succeeded;
-                        attempt.warnings.clear();
+        self.recover_session_with_cancel_unchecked(context, files, tasks, session_id, || false)
+    }
+
+    fn recover_session_with_cancel_unchecked<F>(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        should_cancel: F,
+    ) -> Result<ImportSession, BackendError>
+    where
+        F: FnMut() -> bool,
+    {
+        self.recover_session_report_with_cancel_unchecked(
+            context,
+            files,
+            tasks,
+            session_id,
+            should_cancel,
+            |_, _| {},
+        )
+        .map(|report| report.session)
+    }
+
+    fn recover_session_report_with_cancel_unchecked<F, P>(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        mut should_cancel: F,
+        mut on_progress: P,
+    ) -> Result<ImportSessionRecovery, BackendError>
+    where
+        F: FnMut() -> bool,
+        P: FnMut(u64, u64),
+    {
+        let mut progress_updates = Vec::new();
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let result = {
+            let _guard = self.lock_session(&session_lock);
+            (|| {
+                self.preflight_locked(context)?;
+                let needs_index_rebuild = matches!(
+                    self.sessions
+                        .read_overview(context, files, session_id)?
+                        .index_state,
+                    crate::models::import_v2::ImportSessionIndexState::RebuildRequired
+                );
+                let mut session = self.sessions.load(context, files, session_id)?;
+                let before_session = session.clone();
+                let mut staging_to_reconcile = Vec::new();
+                let total_items = session.items.len() as u64;
+                let progress_stride = (total_items.saturating_add(99) / 100).max(1);
+                for (position, item) in session.items.iter_mut().enumerate() {
+                    if should_cancel() {
+                        return Err(BackendError::new(
+                            crate::errors::IMPORT_V2_CANCELLED,
+                            "Import recovery was cancelled.",
+                            true,
+                            false,
+                        ));
                     }
-                    Some(TaskStatus::Cancelled) => {
-                        attempt.outcome = AttemptOutcome::Cancelled;
-                        attempt.warnings = vec![
-                            "Agent assistance was cancelled before recovery completed.".into(),
-                        ];
+                    for attempt in &mut item.attempts {
+                        let Some(task_id) = attempt
+                            .route
+                            .strip_prefix("agent_assistance/")
+                            .filter(|_| attempt.completed_at.is_none())
+                            .map(str::to_owned)
+                        else {
+                            continue;
+                        };
+                        let task = tasks.get_task(&task_id);
+                        let sealed_agent_output = task.as_ref().is_some_and(|task| {
+                    task.status == TaskStatus::Failed
+                        && task.task_type == TaskType::AgentRun
+                        && matches!(
+                            task.result.as_ref().and_then(|result| result.reference.as_ref()),
+                            Some(TaskResultReference::ImportPreview {
+                                session_id: bound_session,
+                                item_id: bound_item,
+                            }) if bound_session == session_id && bound_item == &item.item_id
+                        )
+                });
+                        let task_status = task.map(|task| task.status);
+                        if matches!(
+                            task_status,
+                            Some(
+                                TaskStatus::Queued
+                                    | TaskStatus::Running
+                                    | TaskStatus::WaitingForConfirmation
+                                    | TaskStatus::Cancelling
+                            )
+                        ) {
+                            continue;
+                        }
+                        attempt.completed_at = Some(chrono::Utc::now().to_rfc3339());
+                        match task_status {
+                            Some(TaskStatus::Succeeded) => {
+                                attempt.outcome = AttemptOutcome::Succeeded;
+                                attempt.warnings.clear();
+                            }
+                            Some(TaskStatus::Cancelled) => {
+                                attempt.outcome = AttemptOutcome::Cancelled;
+                                attempt.warnings = vec![
+                                    "Agent assistance was cancelled before recovery completed."
+                                        .into(),
+                                ];
+                            }
+                            _ if sealed_agent_output => {
+                                attempt.outcome = AttemptOutcome::Succeeded;
+                                attempt.warnings.clear();
+                            }
+                            _ => {
+                                attempt.outcome = AttemptOutcome::Failed;
+                                attempt.warnings = vec![
+                                    "Interrupted Agent assistance was closed during recovery."
+                                        .into(),
+                                ];
+                            }
+                        }
                     }
-                    _ => {
-                        attempt.outcome = AttemptOutcome::Failed;
-                        attempt.warnings =
-                            vec!["Interrupted Agent assistance was closed during recovery.".into()];
+                    if item.status == ImportItemStatus::Queued {
+                        let recovered_status = item
+                            .task_id
+                            .as_deref()
+                            .and_then(|id| tasks.get_task(id))
+                            .map(|task| task.status);
+                        if matches!(
+                            recovered_status,
+                            Some(
+                                TaskStatus::Failed
+                                    | TaskStatus::Cancelled
+                                    | TaskStatus::Interrupted
+                            ) | None
+                        ) {
+                            // A pre-bound queued task can be persisted before its
+                            // worker claims the item. If that task was interrupted,
+                            // release the stale identity so the normal retry path
+                            // can bind a fresh task after restart.
+                            item.task_id = None;
+                            item.progress = None;
+                        }
                     }
-                }
-            }
-            if item.status == ImportItemStatus::Queued {
-                let recovered_status = item
-                    .task_id
-                    .as_deref()
-                    .and_then(|id| tasks.get_task(id))
-                    .map(|task| task.status);
-                if matches!(
-                    recovered_status,
-                    Some(TaskStatus::Failed | TaskStatus::Cancelled) | None
-                ) {
-                    // A pre-bound queued task can be persisted before its
-                    // worker claims the item. If that task was interrupted,
-                    // release the stale identity so the normal retry path
-                    // can bind a fresh task after restart.
-                    item.task_id = None;
-                    item.progress = None;
-                }
-            }
-            if matches!(
-                item.status,
-                ImportItemStatus::WaitingCapability
-                    | ImportItemStatus::WaitingLogin
-                    | ImportItemStatus::WaitingAuthorization
-            ) {
-                let recovered_status = item
-                    .task_id
-                    .as_deref()
-                    .and_then(|id| tasks.get_task(id))
-                    .map(|task| task.status);
-                match recovered_status {
+                    if matches!(
+                        item.status,
+                        ImportItemStatus::WaitingCapability
+                            | ImportItemStatus::WaitingLogin
+                            | ImportItemStatus::WaitingAuthorization
+                    ) {
+                        let recovered_status = item
+                            .task_id
+                            .as_deref()
+                            .and_then(|id| tasks.get_task(id))
+                            .map(|task| task.status);
+                        match recovered_status {
                     Some(TaskStatus::Cancelled)
                         if !item
                             .task_id
@@ -2385,70 +2997,166 @@ impl ImportV2Service {
                         | TaskStatus::Interrupted,
                     ) => {}
                 }
-            }
-            if matches!(
-                item.status,
-                ImportItemStatus::Inspecting
-                    | ImportItemStatus::Extracting
-                    | ImportItemStatus::Validating
-            ) {
-                let recovered_status = item
-                    .task_id
-                    .as_deref()
-                    .and_then(|id| tasks.get_task(id))
-                    .map(|task| task.status);
-                if recovered_status == Some(TaskStatus::Cancelled) {
-                    let staging = context.resolve_project_path(&item_staging_relative_path(
-                        context,
-                        session_id,
-                        &item.item_id,
-                    )?)?;
-                    crate::services::import_v2::media_router::recover_item_staging_temporary_workspaces(
-                        &staging,
-                    )?;
-                    transition_item(item, ImportItemStatus::Cancelled)?;
-                    item.task_id = None;
-                    item.progress = None;
-                    continue;
+                    }
+                    if matches!(
+                        item.status,
+                        ImportItemStatus::Inspecting
+                            | ImportItemStatus::Extracting
+                            | ImportItemStatus::Validating
+                    ) {
+                        let recovered_status = item
+                            .task_id
+                            .as_deref()
+                            .and_then(|id| tasks.get_task(id))
+                            .map(|task| task.status);
+                        if recovered_status == Some(TaskStatus::Cancelled) {
+                            let staging = context.resolve_project_path(
+                                &item_staging_relative_path(context, session_id, &item.item_id)?,
+                            )?;
+                            staging_to_reconcile.push(staging);
+                            transition_item(item, ImportItemStatus::Cancelled)?;
+                            item.task_id = None;
+                            item.progress = None;
+                            continue;
+                        }
+                        let interrupted = recovered_status.is_none_or(|status| {
+                            matches!(
+                                status,
+                                TaskStatus::Failed
+                                    | TaskStatus::Succeeded
+                                    | TaskStatus::Interrupted
+                            )
+                        });
+                        if interrupted {
+                            let staging = context.resolve_project_path(
+                                &item_staging_relative_path(context, session_id, &item.item_id)?,
+                            )?;
+                            staging_to_reconcile.push(staging);
+                            transition_item(item, ImportItemStatus::Paused)?;
+                            item.task_id = None;
+                            item.progress = None;
+                            item.issue = Some(ImportIssue {
+                                code: "TASK_PAUSED".into(),
+                                message:
+                                    "Import was paused after the app stopped and can continue."
+                                        .into(),
+                                stage: ImportStage::Extract,
+                                retryable: true,
+                                user_action_required: false,
+                                recovery_actions: vec![
+                                    crate::models::import_v2::ImportRecoveryAction::Retry,
+                                    crate::models::import_v2::ImportRecoveryAction::ViewLog,
+                                ],
+                                available_actions: Vec::new(),
+                                subtitle_candidates: Vec::new(),
+                            });
+                        }
+                    }
+                    if item.status == ImportItemStatus::Committing {
+                        // `preflight_locked` reconciles the durable journal
+                        // before loading the session. If the transaction had
+                        // reached its terminal item write, the loaded state is
+                        // already Completed. A surviving Committing state
+                        // therefore represents a rolled-back/incomplete commit
+                        // and must return to its durable preview.
+                        let recovered_status = item
+                            .task_id
+                            .as_deref()
+                            .and_then(|id| tasks.get_task(id))
+                            .map(|task| task.status);
+                        if recovered_status.is_none_or(|status| {
+                            matches!(
+                                status,
+                                TaskStatus::Failed
+                                    | TaskStatus::Succeeded
+                                    | TaskStatus::Interrupted
+                                    | TaskStatus::Cancelled
+                            )
+                        }) {
+                            let next = if item.preview.as_ref().is_some_and(|preview| {
+                                preview.resolution.as_ref().is_some_and(|resolution| {
+                                    resolution.kind
+                                        == crate::models::import_v2::ImportResolutionKind::NeedsThreeWayMerge
+                                        && resolution.default_resolution.is_none()
+                                })
+                            }) {
+                                ImportItemStatus::NeedsMerge
+                            } else {
+                                ImportItemStatus::PreviewReady
+                            };
+                            transition_item(item, next)?;
+                            item.task_id = None;
+                            item.progress = None;
+                            item.issue = None;
+                        }
+                    }
+                    let completed = position as u64 + 1;
+                    if completed == total_items || completed % progress_stride == 0 {
+                        progress_updates.push((completed, total_items));
+                    }
                 }
-                let interrupted = recovered_status.is_none_or(|status| {
-                    matches!(
-                        status,
-                        TaskStatus::Failed | TaskStatus::Succeeded | TaskStatus::Interrupted
-                    )
-                });
-                if interrupted {
-                    let staging = context.resolve_project_path(&item_staging_relative_path(
-                        context,
-                        session_id,
-                        &item.item_id,
-                    )?)?;
-                    crate::services::import_v2::media_router::recover_item_staging_temporary_workspaces(
-                        &staging,
-                    )?;
-                    transition_item(item, ImportItemStatus::Paused)?;
-                    item.task_id = None;
-                    item.progress = None;
-                    item.issue = Some(ImportIssue {
-                        code: "TASK_PAUSED".into(),
-                        message: "Import was paused after the app stopped and can continue.".into(),
-                        stage: ImportStage::Extract,
-                        retryable: true,
-                        user_action_required: false,
-                        recovery_actions: vec![
-                            crate::models::import_v2::ImportRecoveryAction::Retry,
-                            crate::models::import_v2::ImportRecoveryAction::ViewLog,
-                        ],
-                        available_actions: Vec::new(),
-                        subtitle_candidates: Vec::new(),
+                session.status = derive_session_status(&session.items);
+                let mut originals = Vec::new();
+                let mut replacements = Vec::new();
+                for (before, after) in before_session.items.iter().zip(&session.items) {
+                    if before != after {
+                        originals.push(before.clone());
+                        replacements.push(after.clone());
+                    }
+                }
+                let session_record_changed =
+                    before_session.status != session.status || !originals.is_empty();
+                if !session_record_changed {
+                    if needs_index_rebuild {
+                        if should_cancel() {
+                            return Err(BackendError::new(
+                                crate::errors::IMPORT_V2_CANCELLED,
+                                "Import recovery was cancelled.",
+                                true,
+                                false,
+                            ));
+                        }
+                        self.sessions.rebuild_sidecars(context, files, &session)?;
+                    }
+                    return Ok(ImportSessionRecovery {
+                        session,
+                        changed_items: Vec::new(),
                     });
                 }
-            }
+                if should_cancel() {
+                    return Err(BackendError::new(
+                        crate::errors::IMPORT_V2_CANCELLED,
+                        "Import recovery was cancelled.",
+                        true,
+                        false,
+                    ));
+                }
+                session.updated_at = chrono::Utc::now().to_rfc3339();
+                self.sessions
+                    .write_recovery_cohort_if_unchanged_with_cancel(
+                        context,
+                        files,
+                        &before_session,
+                        &session,
+                        &originals,
+                        &replacements,
+                        should_cancel,
+                    )?;
+                for staging in staging_to_reconcile {
+                    crate::services::import_v2::media_router::recover_item_staging_temporary_workspaces(
+                &staging,
+            )?;
+                }
+                Ok(ImportSessionRecovery {
+                    session,
+                    changed_items: replacements,
+                })
+            })()
+        };
+        for (completed, total) in progress_updates {
+            on_progress(completed, total);
         }
-        session.status = derive_session_status(&session.items);
-        session.updated_at = chrono::Utc::now().to_rfc3339();
-        self.sessions.save(context, files, &session)?;
-        Ok(session)
+        result
     }
     pub fn register_engine(&self, engine: Arc<dyn ImportEngine>) -> Result<(), BackendError> {
         self.engines.register(engine)
@@ -2493,6 +3201,36 @@ impl ImportV2Service {
                 self.connector_profiles_root.clone(),
             )))
     }
+
+    pub(crate) fn replace_capability_packs_atomically<F>(
+        &self,
+        replacements: Vec<(
+            ResolvedCapabilityPack,
+            String,
+            Vec<String>,
+            std::time::Duration,
+        )>,
+        commit: F,
+    ) -> Result<(), BackendError>
+    where
+        F: FnOnce() -> Result<(), BackendError>,
+    {
+        let engines = replacements
+            .into_iter()
+            .map(|(pack, route, supported_extensions, timeout)| {
+                Arc::new(PackProcessEngine::new(
+                    pack,
+                    route,
+                    supported_extensions,
+                    timeout,
+                    self.web_targets.clone(),
+                    self.connector_profiles_root.clone(),
+                )) as Arc<dyn ImportEngine>
+            })
+            .collect();
+        self.engines
+            .replace_registered_batch_transaction(engines, commit)
+    }
     fn set_item_selected_unchecked(
         &self,
         context: &ProjectContext,
@@ -2501,7 +3239,9 @@ impl ImportV2Service {
         item_id: &str,
         selected: bool,
     ) -> Result<ImportItem, BackendError> {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         find_item_mut(&mut session, item_id)?.selected = selected;
@@ -2541,7 +3281,9 @@ impl ImportV2Service {
                 true,
             ));
         }
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         let item = find_item_mut(&mut session, item_id)?;
@@ -2619,12 +3361,36 @@ impl ImportV2Service {
         files: &FileStore,
         tasks: &TaskService,
         session_id: &str,
+        task_id: &str,
+        snapshot: ImportWorkItemSnapshot,
+        target_reservations: &Arc<Mutex<crate::services::import_v2::NewSourceTargetReservations>>,
+        recovery_action: Option<&ImportRecoveryAction>,
+    ) -> Result<ImportItem, BackendError> {
+        self.run_work_item_snapshot_mode(
+            execution.task_context(task_id)?,
+            files,
+            tasks,
+            session_id,
+            task_id,
+            snapshot,
+            target_reservations,
+            recovery_action,
+            true,
+        )
+    }
+
+    pub(crate) fn run_temporary_preview_item(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
         item_id: &str,
         task_id: &str,
         recovery_action: Option<&ImportRecoveryAction>,
     ) -> Result<ImportItem, BackendError> {
         self.run_item_with_recovery_mode(
-            execution.task_context(task_id)?,
+            context,
             files,
             tasks,
             session_id,
@@ -2667,17 +3433,19 @@ impl ImportV2Service {
         files: &FileStore,
         tasks: &TaskService,
         session_id: &str,
-        item_id: &str,
         operation_id: &str,
+        snapshot: ImportWorkItemSnapshot,
+        target_reservations: &Arc<Mutex<crate::services::import_v2::NewSourceTargetReservations>>,
         recovery_action: Option<&ImportRecoveryAction>,
     ) -> Result<ImportItem, BackendError> {
-        self.run_item_with_recovery_mode(
+        self.run_work_item_snapshot_mode(
             execution.task_context(operation_id)?,
             files,
             tasks,
             session_id,
-            item_id,
             operation_id,
+            snapshot,
+            target_reservations,
             recovery_action,
             false,
         )
@@ -2695,14 +3463,56 @@ impl ImportV2Service {
         recovery_action: Option<&ImportRecoveryAction>,
         task_lifecycle: bool,
     ) -> Result<ImportItem, BackendError> {
+        self.validate_worker_task(context, tasks, task_id, task_lifecycle)?;
+        let session = self.load_session(context, files, session_id)?;
+        let snapshot = self
+            .bind_item_task_ids_unchecked(
+                context,
+                files,
+                session_id,
+                &[(item_id.to_string(), task_id.to_string())],
+            )?
+            .pop()
+            .ok_or_else(item_not_found)?;
+        let target_reservations = self.target_reservations_for_session(context, &session)?;
+        self.run_work_item_snapshot_mode(
+            context,
+            files,
+            tasks,
+            session_id,
+            task_id,
+            snapshot,
+            &target_reservations,
+            recovery_action,
+            task_lifecycle,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_work_item_snapshot_mode(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        tasks: &TaskService,
+        session_id: &str,
+        task_id: &str,
+        snapshot: ImportWorkItemSnapshot,
+        target_reservations: &Arc<Mutex<crate::services::import_v2::NewSourceTargetReservations>>,
+        recovery_action: Option<&ImportRecoveryAction>,
+        task_lifecycle: bool,
+    ) -> Result<ImportItem, BackendError> {
+        let item_id = snapshot.item_id.clone();
+        let worker_revision = Cell::new(snapshot.expected_item_revision);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.run_item_with_recovery_inner(
+            self.run_work_item_snapshot_inner(
                 context,
                 files,
                 tasks,
                 session_id,
-                item_id,
                 task_id,
+                snapshot,
+                &worker_revision,
+                target_reservations,
                 recovery_action,
                 task_lifecycle,
             )
@@ -2711,41 +3521,53 @@ impl ImportV2Service {
         if let Err(error) = &result {
             if error.code == IMPORT_V2_ENGINE_PANICKED {
                 self.terminalize_in_flight_worker_error(
-                    context, files, tasks, session_id, item_id, task_id, error,
+                    context,
+                    files,
+                    tasks,
+                    session_id,
+                    &item_id,
+                    task_id,
+                    worker_revision.get(),
+                    error,
                 );
             }
         }
         self.web_targets
-            .release_private_operation(item_id, task_id)?;
+            .release_private_operation(&item_id, task_id)?;
         result
     }
 
-    fn run_item_with_recovery_inner(
+    #[allow(clippy::too_many_arguments)]
+    fn run_work_item_snapshot_inner(
         &self,
         context: &ProjectContext,
         files: &FileStore,
         tasks: &TaskService,
         session_id: &str,
-        item_id: &str,
         task_id: &str,
+        snapshot: ImportWorkItemSnapshot,
+        worker_revision: &Cell<u64>,
+        target_reservations: &Arc<Mutex<crate::services::import_v2::NewSourceTargetReservations>>,
         recovery_action: Option<&ImportRecoveryAction>,
         task_lifecycle: bool,
     ) -> Result<ImportItem, BackendError> {
-        let task = tasks
-            .get_task(task_id)
-            .ok_or_else(|| task_error("Import task was not found."))?;
-        if task.task_type != TaskType::Import
-            || task.project_id.as_deref() != Some(context.project_id.as_str())
-            || !(matches!(task.status, TaskStatus::Queued | TaskStatus::Cancelled)
-                || (!task_lifecycle
-                    && matches!(task.status, TaskStatus::Running | TaskStatus::Cancelling)))
-        {
-            return Err(task_error("Task is not compatible with this import item."));
-        }
+        self.validate_worker_task(context, tasks, task_id, task_lifecycle)?;
         let pre_cancelled = tasks.is_cancelled(task_id);
-        self.claim_item_for_run(context, files, session_id, item_id, task_id, pre_cancelled)?;
+        let mut snapshot =
+            self.claim_item_for_run(context, files, session_id, task_id, snapshot, pre_cancelled)?;
+        worker_revision.set(snapshot.expected_item_revision);
+        let item_id_owned = snapshot.item_id.clone();
+        let item_id = item_id_owned.as_str();
         if pre_cancelled {
-            return self.finish_cancelled(context, files, tasks, session_id, item_id, task_id);
+            return self.finish_cancelled(
+                context,
+                files,
+                tasks,
+                session_id,
+                item_id,
+                task_id,
+                snapshot.expected_item_revision,
+            );
         }
         // A private-target confirmation is single-use. Consume it once at the
         // operation boundary, then let only this operation's bounded route
@@ -2753,7 +3575,15 @@ impl ImportV2Service {
         self.web_targets
             .claim_private_for_operation(item_id, task_id)?;
         if task_lifecycle {
-            self.start_claimed_task(context, files, tasks, session_id, item_id, task_id)?;
+            self.start_claimed_task(
+                context,
+                files,
+                tasks,
+                session_id,
+                item_id,
+                task_id,
+                snapshot.expected_item_revision,
+            )?;
             task_call(tasks.update_progress(
                 task_id,
                 0,
@@ -2761,13 +3591,7 @@ impl ImportV2Service {
                 Some("Inspecting input".into()),
             ))?;
         }
-        let input = self
-            .load_session(context, files, session_id)?
-            .items
-            .into_iter()
-            .find(|item| item.item_id == item_id)
-            .ok_or_else(item_not_found)?
-            .input;
+        let input = snapshot.input.clone();
         if matches!(recovery_action, Some(ImportRecoveryAction::EnableOcr))
             && input.kind == crate::models::import_v2::ImportInputKind::Url
             && !self
@@ -2783,6 +3607,7 @@ impl ImportV2Service {
                 session_id,
                 item_id,
                 task_id,
+                snapshot.expected_item_revision,
                 ocr_unavailable(),
                 ImportStage::Extract,
             );
@@ -2815,17 +3640,29 @@ impl ImportV2Service {
                 true,
                 true,
             );
-            self.mutate_item(context, files, session_id, item_id, |item| {
-                transition_item(item, ImportItemStatus::WaitingCapability)?;
-                let mut issue =
-                    issue_from_engine_error_for_input(&error, ImportStage::Route, &item.input.kind);
-                if x_capability_missing {
-                    issue.available_actions =
-                        vec![crate::models::import_v2_agent::AgentRecoveryAction::InvokeLocalAgent];
-                }
-                item.issue = Some(issue);
-                Ok(())
-            })?;
+            self.mutate_claimed_item(
+                context,
+                files,
+                session_id,
+                item_id,
+                task_id,
+                snapshot.expected_item_revision,
+                |item| {
+                    transition_item(item, ImportItemStatus::WaitingCapability)?;
+                    let mut issue = issue_from_engine_error_for_input(
+                        &error,
+                        ImportStage::Route,
+                        &item.input.kind,
+                    );
+                    if x_capability_missing {
+                        issue.available_actions = vec![
+                            crate::models::import_v2_agent::AgentRecoveryAction::InvokeLocalAgent,
+                        ];
+                    }
+                    item.issue = Some(issue);
+                    Ok(())
+                },
+            )?;
             if task_lifecycle {
                 task_call(tasks.append_log(
                     task_id,
@@ -2836,9 +3673,17 @@ impl ImportV2Service {
             }
             return Err(error);
         }
-        self.mutate_item(context, files, session_id, item_id, |item| {
-            transition_item(item, ImportItemStatus::Extracting)
-        })?;
+        let extracting_item = self.mutate_claimed_item(
+            context,
+            files,
+            session_id,
+            item_id,
+            task_id,
+            snapshot.expected_item_revision,
+            |item| transition_item(item, ImportItemStatus::Extracting),
+        )?;
+        snapshot.expected_item_revision = extracting_item.item_revision;
+        worker_revision.set(snapshot.expected_item_revision);
         if task_lifecycle {
             task_call(tasks.update_progress(
                 task_id,
@@ -2848,28 +3693,10 @@ impl ImportV2Service {
             ))?;
         }
         let staging_root = item_staging_relative_path(context, session_id, item_id)?;
-        let authorization_session = self.sessions.load(context, files, session_id)?;
-        let asr_authorization =
-            authorization_session
-                .media_authorizations
-                .iter()
-                .find(|authorization| {
-                    authorization.item_id == item_id
-                        && authorization.kind == ImportMediaAuthorizationKind::Asr
-                });
-        let local_asr_authorized = asr_authorization.is_some();
-        let local_ocr_authorized = authorization_session
-            .has_media_authorization(item_id, ImportMediaAuthorizationKind::Ocr);
-        let selected_subtitle = authorization_session
-            .items
-            .iter()
-            .find(|item| item.item_id == item_id)
-            .and_then(|item| item.selected_subtitle.clone());
-        let authenticated_retry = authorization_session
-            .items
-            .iter()
-            .find(|item| item.item_id == item_id)
-            .is_some_and(|item| item.authenticated_retry);
+        let local_asr_authorized = snapshot.media_authorization.local_asr_authorized;
+        let local_ocr_authorized = snapshot.media_authorization.local_ocr_authorized;
+        let selected_subtitle = snapshot.selected_subtitle.clone();
+        let authenticated_retry = snapshot.authenticated_retry;
         let media_save_mode = input.media_save_mode.clone();
         let request = EngineRequest {
             protocol_version: "2".into(),
@@ -2885,8 +3712,8 @@ impl ImportV2Service {
             chained_input: None,
             local_asr_authorized,
             asr_probe_only: false,
-            asr_profile: asr_authorization.and_then(|value| value.asr_profile.clone()),
-            recognition_language: asr_authorization.and_then(|value| value.language.clone()),
+            asr_profile: snapshot.media_authorization.asr_profile.clone(),
+            recognition_language: snapshot.media_authorization.recognition_language.clone(),
             selected_subtitle,
             local_ocr_authorized,
             media_save_mode,
@@ -2912,6 +3739,7 @@ impl ImportV2Service {
                     session_id,
                     item_id,
                     task_id,
+                    snapshot.expected_item_revision,
                     ocr_unavailable(),
                     ImportStage::Extract,
                 );
@@ -2950,25 +3778,44 @@ impl ImportV2Service {
             ) {
                 Ok(result) if !token.is_cancelled() => result,
                 Ok(_) => {
-                    return self
-                        .finish_cancelled(context, files, tasks, session_id, item_id, task_id)
-                }
-                Err(_) if token.is_cancelled() => {
-                    return self
-                        .finish_cancelled(context, files, tasks, session_id, item_id, task_id)
-                }
-                Err(error) => {
-                    self.record_attempt(
+                    return self.finish_cancelled(
                         context,
                         files,
+                        tasks,
                         session_id,
                         item_id,
-                        &descriptor,
-                        started_at,
-                        crate::models::import_v2::AttemptOutcome::Failed,
-                        Some(error.code.clone()),
-                        Vec::new(),
-                    )?;
+                        task_id,
+                        snapshot.expected_item_revision,
+                    )
+                }
+                Err(_) if token.is_cancelled() => {
+                    return self.finish_cancelled(
+                        context,
+                        files,
+                        tasks,
+                        session_id,
+                        item_id,
+                        task_id,
+                        snapshot.expected_item_revision,
+                    )
+                }
+                Err(error) => {
+                    snapshot.expected_item_revision = self
+                        .record_attempt_claimed(
+                            context,
+                            files,
+                            session_id,
+                            item_id,
+                            task_id,
+                            snapshot.expected_item_revision,
+                            &descriptor,
+                            started_at,
+                            crate::models::import_v2::AttemptOutcome::Failed,
+                            Some(error.code.clone()),
+                            Vec::new(),
+                        )?
+                        .item_revision;
+                    worker_revision.set(snapshot.expected_item_revision);
                     if is_web_user_wait(&error) {
                         if authenticated_retry {
                             return self.finish_failed(
@@ -2978,6 +3825,7 @@ impl ImportV2Service {
                                 session_id,
                                 item_id,
                                 task_id,
+                                snapshot.expected_item_revision,
                                 BackendError::new(
                                     "IMPORT_WEB_ACCOUNT_PERMISSION_DENIED",
                                     "The current account cannot access this content.",
@@ -2994,6 +3842,7 @@ impl ImportV2Service {
                             session_id,
                             item_id,
                             task_id,
+                            snapshot.expected_item_revision,
                             error,
                             ImportStage::Extract,
                         );
@@ -3008,6 +3857,7 @@ impl ImportV2Service {
                             session_id,
                             item_id,
                             task_id,
+                            snapshot.expected_item_revision,
                             error,
                             ImportStage::Extract,
                         );
@@ -3020,6 +3870,7 @@ impl ImportV2Service {
                             session_id,
                             item_id,
                             task_id,
+                            snapshot.expected_item_revision,
                             error,
                             ImportStage::Extract,
                         );
@@ -3032,6 +3883,7 @@ impl ImportV2Service {
                             session_id,
                             item_id,
                             task_id,
+                            snapshot.expected_item_revision,
                             error,
                             ImportStage::Extract,
                         );
@@ -3053,6 +3905,7 @@ impl ImportV2Service {
                             session_id,
                             item_id,
                             task_id,
+                            snapshot.expected_item_revision,
                             error,
                             ImportStage::Extract,
                         );
@@ -3082,6 +3935,7 @@ impl ImportV2Service {
                         session_id,
                         item_id,
                         task_id,
+                        snapshot.expected_item_revision,
                         ocr_no_text(),
                         ImportStage::Extract,
                     );
@@ -3097,17 +3951,22 @@ impl ImportV2Service {
                 }
             }
             if let Err(error) = validate_engine_result(&staging_root, &candidate) {
-                self.record_attempt(
-                    context,
-                    files,
-                    session_id,
-                    item_id,
-                    &descriptor,
-                    started_at.clone(),
-                    crate::models::import_v2::AttemptOutcome::Failed,
-                    Some(error.code.clone()),
-                    candidate.warnings.clone(),
-                )?;
+                snapshot.expected_item_revision = self
+                    .record_attempt_claimed(
+                        context,
+                        files,
+                        session_id,
+                        item_id,
+                        task_id,
+                        snapshot.expected_item_revision,
+                        &descriptor,
+                        started_at.clone(),
+                        crate::models::import_v2::AttemptOutcome::Failed,
+                        Some(error.code.clone()),
+                        candidate.warnings.clone(),
+                    )?
+                    .item_revision;
+                worker_revision.set(snapshot.expected_item_revision);
                 last_error = Some(error);
                 continue;
             }
@@ -3125,13 +3984,21 @@ impl ImportV2Service {
                     tasks,
                     task_id,
                     &max_task_progress,
+                    &mut snapshot.expected_item_revision,
+                    worker_revision,
                 ) {
                     Ok(candidate) => candidate,
                     Err(error) => {
                         if token.is_cancelled() || error.code == crate::errors::IMPORT_V2_CANCELLED
                         {
                             return self.finish_cancelled(
-                                context, files, tasks, session_id, item_id, task_id,
+                                context,
+                                files,
+                                tasks,
+                                session_id,
+                                item_id,
+                                task_id,
+                                snapshot.expected_item_revision,
                             );
                         }
                         if requires_explicit_video_frame_ocr(&error.code) {
@@ -3142,6 +4009,7 @@ impl ImportV2Service {
                                 session_id,
                                 item_id,
                                 task_id,
+                                snapshot.expected_item_revision,
                                 error,
                                 ImportStage::Extract,
                             );
@@ -3159,6 +4027,7 @@ impl ImportV2Service {
                                 session_id,
                                 item_id,
                                 task_id,
+                                snapshot.expected_item_revision,
                                 error,
                                 ImportStage::Extract,
                             );
@@ -3177,6 +4046,7 @@ impl ImportV2Service {
                                 session_id,
                                 item_id,
                                 task_id,
+                                snapshot.expected_item_revision,
                                 error,
                                 ImportStage::Extract,
                             );
@@ -3188,6 +4058,7 @@ impl ImportV2Service {
                             session_id,
                             item_id,
                             task_id,
+                            snapshot.expected_item_revision,
                             error,
                             ImportStage::Extract,
                         );
@@ -3195,34 +4066,44 @@ impl ImportV2Service {
                 };
             }
             if let Err(error) = validate_engine_result(&staging_root, &candidate) {
-                self.record_attempt(
-                    context,
-                    files,
-                    session_id,
-                    item_id,
-                    &descriptor,
-                    started_at.clone(),
-                    crate::models::import_v2::AttemptOutcome::Failed,
-                    Some(error.code.clone()),
-                    candidate.warnings.clone(),
-                )?;
+                snapshot.expected_item_revision = self
+                    .record_attempt_claimed(
+                        context,
+                        files,
+                        session_id,
+                        item_id,
+                        task_id,
+                        snapshot.expected_item_revision,
+                        &descriptor,
+                        started_at.clone(),
+                        crate::models::import_v2::AttemptOutcome::Failed,
+                        Some(error.code.clone()),
+                        candidate.warnings.clone(),
+                    )?
+                    .item_revision;
+                worker_revision.set(snapshot.expected_item_revision);
                 last_error = Some(error);
                 continue;
             }
             // Attempt-level precheck selects a candidate; the formal QualityGate still runs once.
             let required_coverage = quality_floor.requirements().minimum_text_coverage as f64;
             if !candidate_meets_floor(&request.input, &candidate, *quality_floor) {
-                self.record_attempt(
-                    context,
-                    files,
-                    session_id,
-                    item_id,
-                    &descriptor,
-                    started_at.clone(),
-                    crate::models::import_v2::AttemptOutcome::Failed,
-                    Some(crate::errors::IMPORT_V2_QUALITY_FAILED.into()),
-                    candidate.warnings.clone(),
-                )?;
+                snapshot.expected_item_revision = self
+                    .record_attempt_claimed(
+                        context,
+                        files,
+                        session_id,
+                        item_id,
+                        task_id,
+                        snapshot.expected_item_revision,
+                        &descriptor,
+                        started_at.clone(),
+                        crate::models::import_v2::AttemptOutcome::Failed,
+                        Some(crate::errors::IMPORT_V2_QUALITY_FAILED.into()),
+                        candidate.warnings.clone(),
+                    )?
+                    .item_revision;
+                worker_revision.set(snapshot.expected_item_revision);
                 last_error = Some(BackendError::new(
                     crate::errors::IMPORT_V2_QUALITY_FAILED,
                     "Candidate failed the route precheck.",
@@ -3246,17 +4127,22 @@ impl ImportV2Service {
                     .iter()
                     .find(|path| path.starts_with("converted/"))
                 {
-                    self.record_attempt(
-                        context,
-                        files,
-                        session_id,
-                        item_id,
-                        &descriptor,
-                        started_at,
-                        crate::models::import_v2::AttemptOutcome::Succeeded,
-                        None,
-                        candidate.warnings.clone(),
-                    )?;
+                    snapshot.expected_item_revision = self
+                        .record_attempt_claimed(
+                            context,
+                            files,
+                            session_id,
+                            item_id,
+                            task_id,
+                            snapshot.expected_item_revision,
+                            &descriptor,
+                            started_at,
+                            crate::models::import_v2::AttemptOutcome::Succeeded,
+                            None,
+                            candidate.warnings.clone(),
+                        )?
+                        .item_revision;
+                    worker_revision.set(snapshot.expected_item_revision);
                     request.chained_input = Some(converted.clone());
                     continue;
                 }
@@ -3273,6 +4159,7 @@ impl ImportV2Service {
                     session_id,
                     item_id,
                     task_id,
+                    snapshot.expected_item_revision,
                     error,
                     ImportStage::Extract,
                 );
@@ -3285,6 +4172,7 @@ impl ImportV2Service {
                     session_id,
                     item_id,
                     task_id,
+                    snapshot.expected_item_revision,
                     error,
                     ImportStage::Extract,
                 );
@@ -3296,6 +4184,7 @@ impl ImportV2Service {
                 session_id,
                 item_id,
                 task_id,
+                snapshot.expected_item_revision,
                 last_error.unwrap_or_else(|| {
                     BackendError::new(
                         crate::errors::IMPORT_V2_ENGINE_UNAVAILABLE,
@@ -3307,9 +4196,25 @@ impl ImportV2Service {
                 ImportStage::Extract,
             );
         };
-        self.mutate_item(context, files, session_id, item_id, |item| {
-            transition_item(item, ImportItemStatus::Validating)
-        })?;
+        let current = self
+            .sessions
+            .load_item(context, files, session_id, item_id)?;
+        if current.item_revision != snapshot.expected_item_revision
+            || current.task_id.as_deref() != Some(task_id)
+        {
+            return Err(work_item_stale_error());
+        }
+        let validating_item = self.mutate_claimed_item(
+            context,
+            files,
+            session_id,
+            item_id,
+            task_id,
+            snapshot.expected_item_revision,
+            |item| transition_item(item, ImportItemStatus::Validating),
+        )?;
+        snapshot.expected_item_revision = validating_item.item_revision;
+        worker_revision.set(snapshot.expected_item_revision);
         if task_lifecycle {
             task_call(tasks.update_progress(
                 task_id,
@@ -3324,17 +4229,22 @@ impl ImportV2Service {
         {
             Ok(preview) => preview,
             Err(error) => {
-                self.record_attempt(
-                    context,
-                    files,
-                    session_id,
-                    item_id,
-                    &descriptor,
-                    started_at,
-                    crate::models::import_v2::AttemptOutcome::Failed,
-                    Some(error.code.clone()),
-                    result.warnings.clone(),
-                )?;
+                snapshot.expected_item_revision = self
+                    .record_attempt_claimed(
+                        context,
+                        files,
+                        session_id,
+                        item_id,
+                        task_id,
+                        snapshot.expected_item_revision,
+                        &descriptor,
+                        started_at,
+                        crate::models::import_v2::AttemptOutcome::Failed,
+                        Some(error.code.clone()),
+                        result.warnings.clone(),
+                    )?
+                    .item_revision;
+                worker_revision.set(snapshot.expected_item_revision);
                 return self.finish_failed(
                     context,
                     files,
@@ -3342,18 +4252,13 @@ impl ImportV2Service {
                     session_id,
                     item_id,
                     task_id,
+                    snapshot.expected_item_revision,
                     error,
                     ImportStage::Validate,
                 );
             }
         };
-        let mut resolution_session = self.load_session(context, files, session_id)?;
-        let resolution_position = resolution_session
-            .items
-            .iter()
-            .position(|item| item.item_id == item_id)
-            .ok_or_else(item_not_found)?;
-        let mut resolution_item = resolution_session.items[resolution_position].clone();
+        let mut resolution_item = validating_item;
         resolution_item.preview = Some(preview.clone());
         let mut resolution =
             self.derive_resolution_context(context, files, session_id, &resolution_item)?;
@@ -3364,50 +4269,59 @@ impl ImportV2Service {
             .as_mut()
             .expect("preview was installed")
             .resolution = Some(resolution.clone());
-        resolution_session.items[resolution_position] = resolution_item;
         if resolution.kind == crate::models::import_v2::ImportResolutionKind::NewSource {
-            resolution.target_wiki_path =
-                crate::services::import_v2::commit::planned_new_source_wiki_path(
-                    context,
-                    files,
-                    &resolution_session,
-                    item_id,
-                )?;
+            resolution_item
+                .preview
+                .as_mut()
+                .expect("preview was installed")
+                .resolution = Some(resolution.clone());
+            resolution.target_wiki_path = target_reservations
+                .lock()
+                .map_err(|_| task_error("Import target reservation index is unavailable."))?
+                .reserve(context, files, session_id, &resolution_item)?;
         }
         preview.resolution = Some(resolution);
         let restricted_content = web_result_marks_restricted_content(
             &context.root.join(Path::new(&staging_root)),
             result.metadata_path.as_deref(),
         );
-        let item = self.mutate_preview_item(context, files, session_id, item_id, |item| {
-            transition_item(
-                item,
-                if needs_merge {
-                    ImportItemStatus::NeedsMerge
-                } else {
-                    ImportItemStatus::PreviewReady
-                },
-            )?;
-            item.preview = Some(preview);
-            item.issue = None;
-            if restricted_content {
-                item.restricted_content = true;
-                item.restricted_identity_summary
-                    .clone_from(&item.authenticated_identity_summary);
-            }
-            item.attempts.push(crate::models::import_v2::AttemptRecord {
-                route: descriptor.route.clone(),
-                engine_id: descriptor.engine_id.clone(),
-                engine_version: descriptor.engine_version.clone(),
-                stage: ImportStage::Validate,
-                started_at,
-                completed_at: Some(chrono::Utc::now().to_rfc3339()),
-                outcome: crate::models::import_v2::AttemptOutcome::Succeeded,
-                error_code: None,
-                warnings: result.warnings.clone(),
-            });
-            Ok(())
-        })?;
+        let item = self.mutate_claimed_item(
+            context,
+            files,
+            session_id,
+            item_id,
+            task_id,
+            snapshot.expected_item_revision,
+            |item| {
+                transition_item(
+                    item,
+                    if needs_merge {
+                        ImportItemStatus::NeedsMerge
+                    } else {
+                        ImportItemStatus::PreviewReady
+                    },
+                )?;
+                item.preview = Some(preview);
+                item.issue = None;
+                if restricted_content {
+                    item.restricted_content = true;
+                    item.restricted_identity_summary
+                        .clone_from(&item.authenticated_identity_summary);
+                }
+                item.attempts.push(crate::models::import_v2::AttemptRecord {
+                    route: descriptor.route.clone(),
+                    engine_id: descriptor.engine_id.clone(),
+                    engine_version: descriptor.engine_version.clone(),
+                    stage: ImportStage::Validate,
+                    started_at,
+                    completed_at: Some(chrono::Utc::now().to_rfc3339()),
+                    outcome: crate::models::import_v2::AttemptOutcome::Succeeded,
+                    error_code: None,
+                    warnings: result.warnings.clone(),
+                });
+                Ok(())
+            },
+        )?;
         if task_lifecycle {
             task_call(tasks.update_progress(
                 task_id,
@@ -3432,6 +4346,27 @@ impl ImportV2Service {
         Ok(item)
     }
 
+    fn validate_worker_task(
+        &self,
+        context: &ProjectContext,
+        tasks: &TaskService,
+        task_id: &str,
+        task_lifecycle: bool,
+    ) -> Result<(), BackendError> {
+        let task = tasks
+            .get_task(task_id)
+            .ok_or_else(|| task_error("Import task was not found."))?;
+        if task.task_type != TaskType::Import
+            || task.project_id.as_deref() != Some(context.project_id.as_str())
+            || !(matches!(task.status, TaskStatus::Queued | TaskStatus::Cancelled)
+                || (!task_lifecycle
+                    && matches!(task.status, TaskStatus::Running | TaskStatus::Cancelling)))
+        {
+            return Err(task_error("Task is not compatible with this import item."));
+        }
+        Ok(())
+    }
+
     fn execute_local_continuation(
         &self,
         context: &ProjectContext,
@@ -3445,6 +4380,8 @@ impl ImportV2Service {
         tasks: &TaskService,
         task_id: &str,
         max_task_progress: &Cell<u64>,
+        expected_item_revision: &mut u64,
+        worker_revision: &Cell<u64>,
     ) -> Result<EngineResult, BackendError> {
         match web_result.continuation.as_ref() {
             Some(EngineContinuation::LocalAsr { .. }) => {
@@ -3460,6 +4397,8 @@ impl ImportV2Service {
                     tasks,
                     task_id,
                     max_task_progress,
+                    expected_item_revision,
+                    worker_revision,
                 )?;
                 if matches!(
                     &result.continuation,
@@ -3477,6 +4416,8 @@ impl ImportV2Service {
                         tasks,
                         task_id,
                         max_task_progress,
+                        expected_item_revision,
+                        worker_revision,
                     )
                 } else {
                     Ok(result)
@@ -3494,6 +4435,8 @@ impl ImportV2Service {
                 tasks,
                 task_id,
                 max_task_progress,
+                expected_item_revision,
+                worker_revision,
             ),
             None => Ok(web_result),
         }
@@ -3512,6 +4455,8 @@ impl ImportV2Service {
         tasks: &TaskService,
         task_id: &str,
         max_task_progress: &Cell<u64>,
+        expected_item_revision: &mut u64,
+        worker_revision: &Cell<u64>,
     ) -> Result<EngineResult, BackendError> {
         let Some(EngineContinuation::LocalAsr {
             temporary_input_path,
@@ -3802,17 +4747,22 @@ impl ImportV2Service {
             Err(_) => (crate::models::import_v2::AttemptOutcome::Failed, Vec::new()),
         };
         let error_code = outcome.as_ref().err().map(|error| error.code.clone());
-        self.record_attempt(
-            context,
-            files,
-            session_id,
-            item_id,
-            &descriptor,
-            started_at,
-            outcome_kind,
-            error_code,
-            warnings,
-        )?;
+        *expected_item_revision = self
+            .record_attempt_claimed(
+                context,
+                files,
+                session_id,
+                item_id,
+                task_id,
+                *expected_item_revision,
+                &descriptor,
+                started_at,
+                outcome_kind,
+                error_code,
+                warnings,
+            )?
+            .item_revision;
+        worker_revision.set(*expected_item_revision);
         outcome.map(|(result, _)| result)
     }
 
@@ -3829,6 +4779,8 @@ impl ImportV2Service {
         tasks: &TaskService,
         task_id: &str,
         max_task_progress: &Cell<u64>,
+        expected_item_revision: &mut u64,
+        worker_revision: &Cell<u64>,
     ) -> Result<EngineResult, BackendError> {
         let Some(EngineContinuation::LocalOcr {
             temporary_input_paths,
@@ -4032,31 +4984,41 @@ impl ImportV2Service {
             })();
             let (ocr_markdown, ocr_result) = match outcome {
                 Ok(value) => {
-                    self.record_attempt(
-                        context,
-                        files,
-                        session_id,
-                        item_id,
-                        &descriptor,
-                        started_at,
-                        crate::models::import_v2::AttemptOutcome::Succeeded,
-                        None,
-                        value.1.warnings.clone(),
-                    )?;
+                    *expected_item_revision = self
+                        .record_attempt_claimed(
+                            context,
+                            files,
+                            session_id,
+                            item_id,
+                            task_id,
+                            *expected_item_revision,
+                            &descriptor,
+                            started_at,
+                            crate::models::import_v2::AttemptOutcome::Succeeded,
+                            None,
+                            value.1.warnings.clone(),
+                        )?
+                        .item_revision;
+                    worker_revision.set(*expected_item_revision);
                     value
                 }
                 Err(error) => {
-                    self.record_attempt(
-                        context,
-                        files,
-                        session_id,
-                        item_id,
-                        &descriptor,
-                        started_at,
-                        crate::models::import_v2::AttemptOutcome::Failed,
-                        Some(error.code.clone()),
-                        Vec::new(),
-                    )?;
+                    *expected_item_revision = self
+                        .record_attempt_claimed(
+                            context,
+                            files,
+                            session_id,
+                            item_id,
+                            task_id,
+                            *expected_item_revision,
+                            &descriptor,
+                            started_at,
+                            crate::models::import_v2::AttemptOutcome::Failed,
+                            Some(error.code.clone()),
+                            Vec::new(),
+                        )?
+                        .item_revision;
+                    worker_revision.set(*expected_item_revision);
                     first_ocr_error.get_or_insert_with(|| error.clone());
                     web_result.warnings.push(format!(
                         "Local OCR failed for source image {source_image_number}: {}",
@@ -4238,69 +5200,107 @@ impl ImportV2Service {
         })
     }
 
-    fn claim_item_for_run(
+    #[allow(clippy::too_many_arguments)]
+    fn record_attempt_claimed(
         &self,
         context: &ProjectContext,
         files: &FileStore,
         session_id: &str,
         item_id: &str,
         task_id: &str,
-        pre_cancelled: bool,
+        expected_item_revision: u64,
+        descriptor: &crate::services::import_v2::engine::EngineDescriptor,
+        started_at: String,
+        outcome: crate::models::import_v2::AttemptOutcome,
+        error_code: Option<String>,
+        warnings: Vec<String>,
     ) -> Result<ImportItem, BackendError> {
-        self.mutate_item(context, files, session_id, item_id, |item| {
-            if !matches!(
-                item.status,
-                ImportItemStatus::Queued
-                    | ImportItemStatus::Failed
-                    | ImportItemStatus::WaitingCapability
-                    | ImportItemStatus::WaitingLogin
-                    | ImportItemStatus::WaitingAuthorization
-                    | ImportItemStatus::Cancelled
-                    | ImportItemStatus::Skipped
-                    | ImportItemStatus::Paused
-                    | ImportItemStatus::PreviewReady
-            ) || !matches!(
-                item.status,
-                ImportItemStatus::Failed
-                    | ImportItemStatus::WaitingCapability
-                    | ImportItemStatus::WaitingLogin
-                    | ImportItemStatus::WaitingAuthorization
-            ) && item
-                .task_id
-                .as_deref()
-                .is_some_and(|bound| bound != task_id)
-            {
-                return Err(task_error(
-                    "Import item is already claimed by another task.",
-                ));
-            }
-            if pre_cancelled
-                && matches!(
+        self.mutate_claimed_item(
+            context,
+            files,
+            session_id,
+            item_id,
+            task_id,
+            expected_item_revision,
+            |item| {
+                item.attempts.push(crate::models::import_v2::AttemptRecord {
+                    route: descriptor.route.clone(),
+                    engine_id: descriptor.engine_id.clone(),
+                    engine_version: descriptor.engine_version.clone(),
+                    stage: ImportStage::Extract,
+                    started_at,
+                    completed_at: Some(chrono::Utc::now().to_rfc3339()),
+                    outcome,
+                    error_code,
+                    warnings,
+                });
+                Ok(())
+            },
+        )
+    }
+
+    fn claim_item_for_run(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        task_id: &str,
+        mut snapshot: ImportWorkItemSnapshot,
+        pre_cancelled: bool,
+    ) -> Result<ImportWorkItemSnapshot, BackendError> {
+        let item_id = snapshot.item_id.clone();
+        let claimed = self.mutate_claimed_item(
+            context,
+            files,
+            session_id,
+            &item_id,
+            task_id,
+            snapshot.expected_item_revision,
+            |item| {
+                if !matches!(
                     item.status,
-                    ImportItemStatus::Cancelled | ImportItemStatus::Skipped
-                )
-            {
-                item.task_id = None;
-                return Ok(());
-            }
-            item.task_id = Some(task_id.to_string());
-            item.issue = None;
-            if item.status == ImportItemStatus::Skipped {
-                item.selected = true;
-            }
-            transition_item(
-                item,
+                    ImportItemStatus::Queued
+                        | ImportItemStatus::Failed
+                        | ImportItemStatus::WaitingCapability
+                        | ImportItemStatus::WaitingLogin
+                        | ImportItemStatus::WaitingAuthorization
+                        | ImportItemStatus::Cancelled
+                        | ImportItemStatus::Skipped
+                        | ImportItemStatus::Paused
+                        | ImportItemStatus::PreviewReady
+                ) || !matches!(
+                    item.status,
+                    ImportItemStatus::Failed
+                        | ImportItemStatus::WaitingCapability
+                        | ImportItemStatus::WaitingLogin
+                        | ImportItemStatus::WaitingAuthorization
+                ) && item
+                    .task_id
+                    .as_deref()
+                    .is_some_and(|bound| bound != task_id)
+                {
+                    return Err(task_error(
+                        "Import item is already claimed by another task.",
+                    ));
+                }
+                item.task_id = Some(task_id.to_string());
+                item.issue = None;
+                if item.status == ImportItemStatus::Skipped {
+                    item.selected = true;
+                }
                 if pre_cancelled {
-                    ImportItemStatus::Cancelled
-                } else {
-                    ImportItemStatus::Inspecting
-                },
-            )?;
-            if pre_cancelled {
-                item.task_id = None;
-            }
-            Ok(())
-        })
+                    // Keep the claim live until `finish_cancelled` performs the
+                    // single terminal transition and cleanup with this revised
+                    // snapshot. Clearing the claim here would make that CAS
+                    // look stale and misreport a pre-cancelled task.
+                    return Ok(());
+                }
+                transition_item(item, ImportItemStatus::Inspecting)?;
+                Ok(())
+            },
+        )?;
+        snapshot.expected_item_revision = claimed.item_revision;
+        Ok(snapshot)
     }
 
     fn start_claimed_task(
@@ -4311,10 +5311,19 @@ impl ImportV2Service {
         session_id: &str,
         item_id: &str,
         task_id: &str,
+        expected_item_revision: u64,
     ) -> Result<(), BackendError> {
         if tasks.is_cancelled(task_id) {
             return self
-                .finish_cancelled(context, files, tasks, session_id, item_id, task_id)
+                .finish_cancelled(
+                    context,
+                    files,
+                    tasks,
+                    session_id,
+                    item_id,
+                    task_id,
+                    expected_item_revision,
+                )
                 .map(|_| ());
         }
         if let Err(error) = tasks.transition_status(task_id, TaskStatus::Running) {
@@ -4324,7 +5333,15 @@ impl ImportV2Service {
                     .is_some_and(|task| task.status == TaskStatus::Cancelled)
             {
                 return self
-                    .finish_cancelled(context, files, tasks, session_id, item_id, task_id)
+                    .finish_cancelled(
+                        context,
+                        files,
+                        tasks,
+                        session_id,
+                        item_id,
+                        task_id,
+                        expected_item_revision,
+                    )
                     .map(|_| ());
             }
             return Err(task_call::<()>(Err(error)).unwrap_err());
@@ -4340,6 +5357,7 @@ impl ImportV2Service {
         session_id: &str,
         item_id: &str,
         task_id: &str,
+        expected_item_revision: u64,
     ) -> Result<ImportItem, BackendError> {
         let staging = context
             .resolve_project_path(&item_staging_relative_path(context, session_id, item_id)?)?;
@@ -4359,18 +5377,29 @@ impl ImportV2Service {
                 ))?;
             }
         }
-        let item = self.mutate_item(context, files, session_id, item_id, |item| {
-            if item.status == ImportItemStatus::Skipped {
-                return Ok(());
-            }
-            if item.status != ImportItemStatus::Cancelled {
-                transition_item(item, ImportItemStatus::Cancelled)?;
-            }
-            item.task_id = None;
-            item.progress = None;
-            Ok(())
-        })?;
+        let item = self.mutate_claimed_item(
+            context,
+            files,
+            session_id,
+            item_id,
+            task_id,
+            expected_item_revision,
+            |item| {
+                if item.status == ImportItemStatus::Skipped {
+                    return Ok(());
+                }
+                if item.status != ImportItemStatus::Cancelled {
+                    transition_item(item, ImportItemStatus::Cancelled)?;
+                }
+                item.task_id = None;
+                item.progress = None;
+                Ok(())
+            },
+        )?;
         remove_clipboard_session_input(context, session_id, &item.input);
+        if item.input.kind == ImportInputKind::Url {
+            let _ = self.web_targets.delete(&item.input.locator);
+        }
         if !batch_operation
             && tasks
                 .get_task(task_id)
@@ -4389,21 +5418,18 @@ impl ImportV2Service {
         session_id: &str,
         item_id: &str,
         task_id: &str,
+        expected_item_revision: u64,
         error: &BackendError,
     ) {
         let item = self
-            .load_session(context, files, session_id)
-            .ok()
-            .and_then(|session| {
-                session
-                    .items
-                    .into_iter()
-                    .find(|item| item.item_id == item_id)
-            });
+            .sessions
+            .load_item(context, files, session_id, item_id)
+            .ok();
         let Some(item) = item else {
             return;
         };
-        if item.task_id.as_deref() != Some(task_id) {
+        if item.item_revision != expected_item_revision || item.task_id.as_deref() != Some(task_id)
+        {
             return;
         }
         let batch_operation = is_batch_operation_task(tasks, task_id);
@@ -4414,7 +5440,15 @@ impl ImportV2Service {
                 | ImportItemStatus::Validating
         ) {
             if tasks.is_cancelled(task_id) || error.code == IMPORT_V2_CANCELLED {
-                let _ = self.finish_cancelled(context, files, tasks, session_id, item_id, task_id);
+                let _ = self.finish_cancelled(
+                    context,
+                    files,
+                    tasks,
+                    session_id,
+                    item_id,
+                    task_id,
+                    expected_item_revision,
+                );
             } else {
                 let _ = self.finish_failed(
                     context,
@@ -4423,6 +5457,7 @@ impl ImportV2Service {
                     session_id,
                     item_id,
                     task_id,
+                    expected_item_revision,
                     error.clone(),
                     ImportStage::Extract,
                 );
@@ -4451,6 +5486,7 @@ impl ImportV2Service {
         session_id: &str,
         item_id: &str,
         task_id: &str,
+        expected_item_revision: u64,
         error: BackendError,
         stage: ImportStage,
     ) -> Result<ImportItem, BackendError> {
@@ -4469,16 +5505,24 @@ impl ImportV2Service {
                 ))?;
             }
         }
-        self.mutate_item(context, files, session_id, item_id, |item| {
-            transition_item(item, ImportItemStatus::Failed)?;
-            let mut issue = issue_from_engine_error_for_input(&error, stage, &item.input.kind);
-            if is_agent_eligible_failure(&error.code, &issue) {
-                issue.available_actions =
-                    vec![crate::models::import_v2_agent::AgentRecoveryAction::InvokeLocalAgent];
-            }
-            item.issue = Some(issue);
-            Ok(())
-        })?;
+        self.mutate_claimed_item(
+            context,
+            files,
+            session_id,
+            item_id,
+            task_id,
+            expected_item_revision,
+            |item| {
+                transition_item(item, ImportItemStatus::Failed)?;
+                let mut issue = issue_from_engine_error_for_input(&error, stage, &item.input.kind);
+                if is_agent_eligible_failure(&error.code, &issue) {
+                    issue.available_actions =
+                        vec![crate::models::import_v2_agent::AgentRecoveryAction::InvokeLocalAgent];
+                }
+                item.issue = Some(issue);
+                Ok(())
+            },
+        )?;
         if !batch_operation {
             task_call(tasks.append_log(task_id, LogLevel::Error, "Import engine failed.".into()))?;
             task_call(tasks.set_error(task_id, issue_safe_error(&error)))?;
@@ -4494,14 +5538,23 @@ impl ImportV2Service {
         session_id: &str,
         item_id: &str,
         task_id: &str,
+        expected_item_revision: u64,
         error: BackendError,
         stage: ImportStage,
     ) -> Result<ImportItem, BackendError> {
-        let item = self.mutate_item(context, files, session_id, item_id, |item| {
-            transition_item(item, ImportItemStatus::WaitingLogin)?;
-            item.issue = Some(ImportIssue::for_web_code(&error.code, stage));
-            Ok(())
-        })?;
+        let item = self.mutate_claimed_item(
+            context,
+            files,
+            session_id,
+            item_id,
+            task_id,
+            expected_item_revision,
+            |item| {
+                transition_item(item, ImportItemStatus::WaitingLogin)?;
+                item.issue = Some(ImportIssue::for_web_code(&error.code, stage));
+                Ok(())
+            },
+        )?;
         if !is_batch_operation_task(tasks, task_id) {
             task_call(tasks.append_log(
                 task_id,
@@ -4521,6 +5574,7 @@ impl ImportV2Service {
         session_id: &str,
         item_id: &str,
         task_id: &str,
+        expected_item_revision: u64,
         error: BackendError,
         stage: ImportStage,
     ) -> Result<ImportItem, BackendError> {
@@ -4529,26 +5583,34 @@ impl ImportV2Service {
             .registered_routes()?
             .iter()
             .any(|route| route == "media.asr");
-        let item = self.mutate_item(context, files, session_id, item_id, |item| {
-            transition_item(
-                item,
-                if asr_available {
-                    ImportItemStatus::WaitingAuthorization
-                } else {
-                    ImportItemStatus::WaitingCapability
-                },
-            )?;
-            let mut issue = ImportIssue::for_web_code(&error.code, stage);
-            issue.recovery_actions.retain(|action| {
-                if asr_available {
-                    !matches!(action, ImportRecoveryAction::InstallMediaCapability)
-                } else {
-                    !matches!(action, ImportRecoveryAction::AuthorizeLocalAsr)
-                }
-            });
-            item.issue = Some(issue);
-            Ok(())
-        })?;
+        let item = self.mutate_claimed_item(
+            context,
+            files,
+            session_id,
+            item_id,
+            task_id,
+            expected_item_revision,
+            |item| {
+                transition_item(
+                    item,
+                    if asr_available {
+                        ImportItemStatus::WaitingAuthorization
+                    } else {
+                        ImportItemStatus::WaitingCapability
+                    },
+                )?;
+                let mut issue = ImportIssue::for_web_code(&error.code, stage);
+                issue.recovery_actions.retain(|action| {
+                    if asr_available {
+                        !matches!(action, ImportRecoveryAction::InstallMediaCapability)
+                    } else {
+                        !matches!(action, ImportRecoveryAction::AuthorizeLocalAsr)
+                    }
+                });
+                item.issue = Some(issue);
+                Ok(())
+            },
+        )?;
         if !is_batch_operation_task(tasks, task_id) {
             task_call(tasks.append_log(
                 task_id,
@@ -4572,15 +5634,24 @@ impl ImportV2Service {
         session_id: &str,
         item_id: &str,
         task_id: &str,
+        expected_item_revision: u64,
         error: BackendError,
         stage: ImportStage,
     ) -> Result<ImportItem, BackendError> {
-        let item = self.mutate_item(context, files, session_id, item_id, |item| {
-            transition_item(item, ImportItemStatus::WaitingAuthorization)?;
-            item.selected_subtitle = None;
-            item.issue = Some(issue_from_engine_error(&error, stage));
-            Ok(())
-        })?;
+        let item = self.mutate_claimed_item(
+            context,
+            files,
+            session_id,
+            item_id,
+            task_id,
+            expected_item_revision,
+            |item| {
+                transition_item(item, ImportItemStatus::WaitingAuthorization)?;
+                item.selected_subtitle = None;
+                item.issue = Some(issue_from_engine_error(&error, stage));
+                Ok(())
+            },
+        )?;
         if !is_batch_operation_task(tasks, task_id) {
             task_call(tasks.append_log(
                 task_id,
@@ -4601,6 +5672,7 @@ impl ImportV2Service {
         session_id: &str,
         item_id: &str,
         task_id: &str,
+        expected_item_revision: u64,
         error: BackendError,
         stage: ImportStage,
     ) -> Result<ImportItem, BackendError> {
@@ -4609,35 +5681,43 @@ impl ImportV2Service {
             .registered_routes()?
             .iter()
             .any(|route| route == "ocr.cjk-accurate" || route == "ocr.basic");
-        let item = self.mutate_item(context, files, session_id, item_id, |item| {
-            transition_item(
-                item,
-                if ocr_available {
-                    ImportItemStatus::WaitingAuthorization
-                } else {
-                    ImportItemStatus::WaitingCapability
-                },
-            )?;
-            let mut issue = ImportIssue::for_web_code(&error.code, stage);
-            issue.recovery_actions.retain(|action| {
-                if ocr_available {
-                    !matches!(action, ImportRecoveryAction::InstallOcrCapability)
-                } else {
-                    !matches!(action, ImportRecoveryAction::EnableOcr)
+        let item = self.mutate_claimed_item(
+            context,
+            files,
+            session_id,
+            item_id,
+            task_id,
+            expected_item_revision,
+            |item| {
+                transition_item(
+                    item,
+                    if ocr_available {
+                        ImportItemStatus::WaitingAuthorization
+                    } else {
+                        ImportItemStatus::WaitingCapability
+                    },
+                )?;
+                let mut issue = ImportIssue::for_web_code(&error.code, stage);
+                issue.recovery_actions.retain(|action| {
+                    if ocr_available {
+                        !matches!(action, ImportRecoveryAction::InstallOcrCapability)
+                    } else {
+                        !matches!(action, ImportRecoveryAction::EnableOcr)
+                    }
+                });
+                if ocr_available
+                    && !issue
+                        .recovery_actions
+                        .contains(&ImportRecoveryAction::EnableOcr)
+                {
+                    issue
+                        .recovery_actions
+                        .insert(0, ImportRecoveryAction::EnableOcr);
                 }
-            });
-            if ocr_available
-                && !issue
-                    .recovery_actions
-                    .contains(&ImportRecoveryAction::EnableOcr)
-            {
-                issue
-                    .recovery_actions
-                    .insert(0, ImportRecoveryAction::EnableOcr);
-            }
-            item.issue = Some(issue);
-            Ok(())
-        })?;
+                item.issue = Some(issue);
+                Ok(())
+            },
+        )?;
         if !is_batch_operation_task(tasks, task_id) {
             task_call(tasks.append_log(
                 task_id,
@@ -4660,7 +5740,9 @@ impl ImportV2Service {
     where
         F: FnOnce(&mut ImportItem) -> Result<(), BackendError>,
     {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut item = self
             .sessions
@@ -4682,7 +5764,79 @@ impl ImportV2Service {
         }
         self.sessions
             .write_item(context, files, session_id, &item)?;
-        Ok(item)
+        self.sessions.load_item(context, files, session_id, item_id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn mutate_claimed_item<F>(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+        expected_item_revision: u64,
+        mutation: F,
+    ) -> Result<ImportItem, BackendError>
+    where
+        F: FnOnce(&mut ImportItem) -> Result<(), BackendError>,
+    {
+        self.mutate_claimed_item_with_before_write(
+            context,
+            files,
+            session_id,
+            item_id,
+            task_id,
+            expected_item_revision,
+            mutation,
+            |_| Ok(()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn mutate_claimed_item_with_before_write<F, H>(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        session_id: &str,
+        item_id: &str,
+        task_id: &str,
+        expected_item_revision: u64,
+        mutation: F,
+        before_write: H,
+    ) -> Result<ImportItem, BackendError>
+    where
+        F: FnOnce(&mut ImportItem) -> Result<(), BackendError>,
+        H: FnOnce(&ImportItem) -> Result<(), BackendError>,
+    {
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
+        self.preflight_locked(context)?;
+        let before = self
+            .sessions
+            .load_item(context, files, session_id, item_id)?;
+        if before.item_revision != expected_item_revision
+            || before.task_id.as_deref() != Some(task_id)
+        {
+            return Err(work_item_stale_error());
+        }
+        let mut item = before.clone();
+        mutation(&mut item)?;
+        before_write(&before)?;
+        if let Err(error) = self.sessions.write_item_cohort_if_unchanged(
+            context,
+            files,
+            session_id,
+            std::slice::from_ref(&before),
+            std::slice::from_ref(&item),
+        ) {
+            if error.code == crate::errors::IMPORT_V2_COMMIT_CONFLICT {
+                return Err(work_item_stale_error());
+            }
+            return Err(error);
+        }
+        self.sessions.load_item(context, files, session_id, item_id)
     }
 
     fn mutate_preview_item<F>(
@@ -4696,7 +5850,9 @@ impl ImportV2Service {
     where
         F: FnOnce(&mut ImportItem) -> Result<(), BackendError>,
     {
-        let _guard = self.lock()?;
+        let project_locks = self.project_locks(context)?;
+        let session_lock = project_locks.session(session_id)?;
+        let _guard = self.lock_session(&session_lock);
         self.preflight_locked(context)?;
         let mut session = self.sessions.load(context, files, session_id)?;
         let item_position = session
@@ -4714,15 +5870,55 @@ impl ImportV2Service {
         persist_derived(&self.sessions, context, files, session)?;
         Ok(item)
     }
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, ()>, BackendError> {
-        // This lock serializes durable filesystem transactions; it does not
+    pub(crate) fn project_locks(
+        &self,
+        context: &ProjectContext,
+    ) -> Result<Arc<ProjectImportLocks>, BackendError> {
+        self.lock_registry.project(context)
+    }
+
+    pub(crate) fn lock_project<'a>(
+        &self,
+        locks: &'a ProjectImportLocks,
+    ) -> std::sync::MutexGuard<'a, ()> {
+        self.lock_observed(locks.project())
+    }
+
+    pub(super) fn lock_session<'a>(&self, lock: &'a Mutex<()>) -> std::sync::MutexGuard<'a, ()> {
+        self.lock_observed(lock)
+    }
+
+    fn lock_observed<'a>(&self, lock: &'a Mutex<()>) -> std::sync::MutexGuard<'a, ()> {
+        // These locks serialize durable filesystem transactions; they do not
         // protect an in-memory invariant. FileTransaction rolls back during
         // unwind, so recovering a poisoned guard keeps later imports usable
         // after a worker panic without exposing a half-applied cohort.
-        Ok(self
-            .mutation_lock
+        #[cfg(feature = "performance-observers")]
+        let wait_started = std::time::Instant::now();
+        let guard = lock
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner))
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        #[cfg(feature = "performance-observers")]
+        {
+            let wait = wait_started.elapsed();
+            let observer = self
+                .lock_wait_observer
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(observer) = observer {
+                let mut snapshot = observer
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let nanos = wait.as_nanos().min(u64::MAX as u128) as u64;
+                snapshot.acquisitions += 1;
+                snapshot.total_wait_nanos = snapshot.total_wait_nanos.saturating_add(nanos);
+                snapshot.max_wait_nanos = snapshot.max_wait_nanos.max(nanos);
+                snapshot.waits_over_50_ms +=
+                    u64::from(wait >= std::time::Duration::from_millis(50));
+            }
+        }
+        guard
     }
 
     pub(crate) fn with_agent_candidate_action_lock<T>(
@@ -4768,13 +5964,7 @@ impl ImportV2Service {
     }
 
     fn preflight_locked(&self, context: &ProjectContext) -> Result<(), BackendError> {
-        FileTransaction::reconcile_project(&context.root)
-    }
-
-    pub(crate) fn acquire_migration_lock(
-        &self,
-    ) -> Result<std::sync::MutexGuard<'_, ()>, BackendError> {
-        self.lock()
+        FileTransaction::reconcile_context(context)
     }
 
     pub(crate) fn preflight_migration_locked(
@@ -4897,7 +6087,12 @@ pub fn routes_for_format(format: FileFormat) -> Vec<&'static str> {
             "agent.office",
         ],
         FileFormat::Doc | FileFormat::Xls | FileFormat::Ppt => {
-            vec!["pack.office-legacy", "pack.office-oxide", "agent.office"]
+            vec![
+                "pack.office-legacy",
+                "pack.markitdown",
+                "pack.office-oxide",
+                "agent.office",
+            ]
         }
         FileFormat::Pdf => vec![
             "pdf.text",
@@ -4924,7 +6119,9 @@ pub fn routes_for_format(format: FileFormat) -> Vec<&'static str> {
         | FileFormat::Avi
         | FileFormat::M4v
         | FileFormat::Wmv
-        | FileFormat::AnimatedGif => vec!["media.companion", "media.asr"],
+        | FileFormat::AnimatedGif => {
+            vec!["media.companion", "media.subtitle", "media.keyframes", "media.asr"]
+        }
         FileFormat::Png
         | FileFormat::Jpeg
         | FileFormat::Webp
@@ -5764,6 +6961,36 @@ fn item_not_found() -> BackendError {
         false,
     )
 }
+
+fn validate_item_can_skip(item: &ImportItem) -> Result<(), BackendError> {
+    if matches!(
+        item.status,
+        ImportItemStatus::Queued
+            | ImportItemStatus::WaitingCapability
+            | ImportItemStatus::WaitingLogin
+            | ImportItemStatus::PreviewReady
+            | ImportItemStatus::NeedsMerge
+            | ImportItemStatus::Failed
+    ) {
+        Ok(())
+    } else {
+        Err(BackendError::new(
+            IMPORT_V2_STATE_INVALID,
+            "Only queued, waiting, ready, or failed import items can be skipped.",
+            false,
+            true,
+        ))
+    }
+}
+
+fn work_item_stale_error() -> BackendError {
+    BackendError::new(
+        IMPORT_V2_WORK_ITEM_STALE,
+        "The import item changed after this worker snapshot was claimed.",
+        true,
+        false,
+    )
+}
 fn task_error(message: &str) -> BackendError {
     BackendError::new(IMPORT_V2_STATE_INVALID, message, true, false)
 }
@@ -5860,30 +7087,49 @@ fn is_batch_claimable(item: &ImportItem) -> bool {
     )
 }
 
+fn validate_batch_claims(
+    session: &ImportSession,
+    item_ids: &[String],
+) -> Result<HashMap<String, usize>, BackendError> {
+    let index = session
+        .items
+        .iter()
+        .enumerate()
+        .map(|(position, item)| (item.item_id.clone(), position))
+        .collect::<HashMap<_, _>>();
+    let mut unique = HashSet::with_capacity(item_ids.len());
+    for item_id in item_ids {
+        if !unique.insert(item_id.as_str()) {
+            return Err(task_error("Import item ids must be unique."));
+        }
+        let Some(position) = index.get(item_id) else {
+            return Err(item_not_found());
+        };
+        if !is_batch_claimable(&session.items[*position]) {
+            return Err(task_error(
+                "Import item is already claimed by another operation.",
+            ));
+        }
+    }
+    Ok(index)
+}
+
 fn item_staging_relative_path(
     context: &ProjectContext,
     session_id: &str,
     item_id: &str,
 ) -> Result<String, BackendError> {
-    Ok(format!(
-        "{}/items/{item_id}/staging",
-        session_relative_root(context, session_id)?
-    ))
+    context
+        .layout
+        .import_paths()?
+        .item_staging(session_id, item_id)
 }
 
 fn session_relative_root(
     context: &ProjectContext,
     session_id: &str,
 ) -> Result<String, BackendError> {
-    let root = context.layout.import_state_root.as_deref().ok_or_else(|| {
-        BackendError::new(
-            IMPORT_V2_STATE_INVALID,
-            "Import state is unavailable for this project layout.",
-            true,
-            false,
-        )
-    })?;
-    Ok(format!("{root}/{session_id}"))
+    context.layout.import_paths()?.session_root(session_id)
 }
 
 fn web_result_marks_restricted_content(staging: &Path, metadata_path: Option<&str>) -> bool {
@@ -6171,14 +7417,15 @@ mod tests {
     #[test]
     fn a_panicked_mutation_does_not_disable_later_imports() {
         let service = ImportV2Service::default();
+        let (context, root) = test_context("mutation-lock-panic-recovery");
+        let project_locks = service.project_locks(&context).unwrap();
         let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = service.mutation_lock.lock().unwrap();
+            let _guard = project_locks.project().lock().unwrap();
             panic!("simulated mutation panic");
         }));
         assert!(poisoned.is_err());
-        assert!(service.mutation_lock.is_poisoned());
+        assert!(project_locks.project().is_poisoned());
 
-        let (context, root) = test_context("mutation-lock-panic-recovery");
         let session = service
             .create_session(
                 &context,
@@ -6352,7 +7599,8 @@ mod tests {
             )
             .unwrap();
 
-        assert!(fully_replaced.is_empty());
+        assert!(fully_replaced.replaced_task_ids.is_empty());
+        assert_eq!(fully_replaced.snapshots.len(), 1);
         let reopened = service
             .load_session(&context, &files, &session.session_id)
             .unwrap();
@@ -6579,6 +7827,8 @@ mod tests {
         assert_eq!(second.resource_mode, ImportResourceMode::Balanced);
         let session_dirs = std::fs::read_dir(context.app_dir.join("import-sessions"))
             .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
             .count();
         assert_eq!(session_dirs, 1);
         std::fs::remove_dir_all(root).ok();
@@ -7227,11 +8477,24 @@ mod tests {
                 .unwrap();
             (session, item, task)
         }
+        fn create_import_operation_task(&self, session: &ImportSession) -> BackendTask {
+            self.tasks
+                .create_project_import_operation_task(
+                    self.context.project_id.clone(),
+                    self.root.clone(),
+                    import_operation_task_state_root(&self.context).unwrap(),
+                    "Fixture import operation".into(),
+                    session.session_id.clone(),
+                    session.items.len() as u64,
+                    None,
+                )
+                .unwrap()
+        }
         fn reopen(&self) -> ImportSession {
             let sessions = std::fs::read_dir(self.context.app_dir.join("import-sessions")).unwrap();
             let session_id = sessions
                 .flatten()
-                .next()
+                .find(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
                 .unwrap()
                 .file_name()
                 .to_string_lossy()
@@ -7276,6 +8539,310 @@ mod tests {
             fixture.tasks.get_task(&task.id).unwrap().status,
             TaskStatus::WaitingForConfirmation
         );
+    }
+
+    #[test]
+    #[cfg(feature = "performance-observers")]
+    fn production_snapshot_worker_performs_no_full_session_loads() {
+        let fixture = OrchestratorFixture::new("snapshot-worker-no-full-load");
+        fixture
+            .service
+            .register_engine(Arc::new(FixtureEngine::success(fixture.root.clone())))
+            .unwrap();
+        let (session, item, task) = fixture.seed_one_item();
+        let snapshot = fixture
+            .service
+            .bind_item_task_ids(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &[(item.item_id.clone(), task.id.clone())],
+            )
+            .unwrap()
+            .remove(0);
+        let canonical = fixture
+            .service
+            .load_session(&fixture.context, &fixture.files, &session.session_id)
+            .unwrap();
+        let reservations = fixture
+            .service
+            .target_reservations_for_session(&fixture.context, &canonical)
+            .unwrap();
+        let worker_revision = Cell::new(snapshot.expected_item_revision);
+
+        crate::services::import_v2::session_store::reset_full_session_load_observer();
+        let result = fixture
+            .service
+            .run_work_item_snapshot_inner(
+                &fixture.context,
+                &fixture.files,
+                &fixture.tasks,
+                &session.session_id,
+                &task.id,
+                snapshot,
+                &worker_revision,
+                &reservations,
+                None,
+                true,
+            )
+            .unwrap();
+
+        assert_eq!(result.status, ImportItemStatus::PreviewReady);
+        assert_eq!(
+            crate::services::import_v2::session_store::observed_full_session_loads(),
+            0
+        );
+    }
+
+    #[test]
+    fn target_reservations_are_shared_for_concurrent_operations_in_one_session() {
+        let fixture = OrchestratorFixture::new("shared-target-reservations");
+        let (session, _, _) = fixture.seed_one_item();
+
+        let first = fixture
+            .service
+            .target_reservations_for_session(&fixture.context, &session)
+            .unwrap();
+        let second = fixture
+            .service
+            .target_reservations_for_session(&fixture.context, &session)
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn frozen_worker_snapshot_rejects_stale_revision_without_overwriting_user_state() {
+        let fixture = OrchestratorFixture::new("stale-worker-snapshot");
+        let (session, item, task) = fixture.seed_one_item();
+        let snapshot = fixture
+            .service
+            .bind_item_task_ids(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &[(item.item_id.clone(), task.id.clone())],
+            )
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+
+        let mut concurrent = fixture
+            .service
+            .sessions
+            .load_item(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &item.item_id,
+            )
+            .unwrap();
+        concurrent.selected = false;
+        fixture
+            .service
+            .sessions
+            .write_item(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &concurrent,
+            )
+            .unwrap();
+        let changed = fixture
+            .service
+            .sessions
+            .load_item(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &item.item_id,
+            )
+            .unwrap();
+        assert!(
+            changed.item_revision > snapshot.expected_item_revision,
+            "changed={} snapshot={}",
+            changed.item_revision,
+            snapshot.expected_item_revision
+        );
+
+        let error = fixture
+            .service
+            .claim_item_for_run(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &task.id,
+                snapshot,
+                false,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, IMPORT_V2_WORK_ITEM_STALE);
+        let persisted = fixture
+            .service
+            .sessions
+            .load_item(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &item.item_id,
+            )
+            .unwrap();
+        assert!(!persisted.selected);
+        assert_eq!(persisted.item_revision, changed.item_revision);
+    }
+
+    #[test]
+    fn claimed_worker_compare_and_swap_rejects_a_concurrent_item_change() {
+        let fixture = OrchestratorFixture::new("claimed-worker-cas");
+        let (session, item, task) = fixture.seed_one_item();
+        let snapshot = fixture
+            .service
+            .bind_item_task_ids(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &[(item.item_id.clone(), task.id.clone())],
+            )
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let claimed = fixture
+            .service
+            .claim_item_for_run(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &task.id,
+                snapshot,
+                false,
+            )
+            .unwrap();
+        let mut concurrent = fixture
+            .service
+            .sessions
+            .load_item(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &item.item_id,
+            )
+            .unwrap();
+        concurrent.selected = false;
+        fixture
+            .service
+            .sessions
+            .write_item(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &concurrent,
+            )
+            .unwrap();
+        let changed = fixture
+            .service
+            .sessions
+            .load_item(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &item.item_id,
+            )
+            .unwrap();
+
+        let error = fixture
+            .service
+            .mutate_claimed_item(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &item.item_id,
+                &task.id,
+                claimed.expected_item_revision,
+                |item| {
+                    item.selected = true;
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.code, IMPORT_V2_WORK_ITEM_STALE);
+        let persisted = fixture
+            .service
+            .sessions
+            .load_item(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &item.item_id,
+            )
+            .unwrap();
+        assert!(!persisted.selected);
+        assert_eq!(persisted.item_revision, changed.item_revision);
+    }
+
+    #[test]
+    fn claimed_worker_cas_rejects_an_edit_between_read_and_transaction() {
+        let fixture = OrchestratorFixture::new("claimed-worker-cas-interleaving");
+        let (session, item, task) = fixture.seed_one_item();
+        let snapshot = fixture
+            .service
+            .bind_item_task_ids(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &[(item.item_id.clone(), task.id.clone())],
+            )
+            .unwrap()
+            .remove(0);
+        let claimed = fixture
+            .service
+            .claim_item_for_run(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &task.id,
+                snapshot,
+                false,
+            )
+            .unwrap();
+
+        let error = fixture
+            .service
+            .mutate_claimed_item_with_before_write(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &item.item_id,
+                &task.id,
+                claimed.expected_item_revision,
+                |item| transition_item(item, ImportItemStatus::Extracting),
+                |before| {
+                    let mut concurrent = before.clone();
+                    concurrent.selected = false;
+                    fixture.service.sessions.write_item(
+                        &fixture.context,
+                        &fixture.files,
+                        &session.session_id,
+                        &concurrent,
+                    )
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, IMPORT_V2_WORK_ITEM_STALE);
+        let persisted = fixture
+            .service
+            .sessions
+            .load_item(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &item.item_id,
+            )
+            .unwrap();
+        assert!(!persisted.selected);
+        assert_eq!(persisted.status, ImportItemStatus::Inspecting);
     }
 
     #[test]
@@ -7395,6 +8962,8 @@ mod tests {
                     session_id: session.session_id,
                     batch_task_id: None,
                     acknowledge_restricted_content: false,
+                    expected_selection_revision: None,
+                    expected_confirmation_digest: None,
                     decisions: vec![CommitItemDecision {
                         item_id: item.item_id,
                         resolution: Some(ImportItemResolution::NewSource),
@@ -8163,7 +9732,8 @@ mod tests {
     #[test]
     fn recovery_releases_interrupted_prebound_queued_item() {
         let fixture = OrchestratorFixture::new("prebind-recovery");
-        let (session, item, task) = fixture.seed_one_item();
+        let (session, item, _legacy_task) = fixture.seed_one_item();
+        let task = fixture.create_import_operation_task(&session);
         fixture
             .service
             .bind_item_task_ids(
@@ -8178,7 +9748,7 @@ mod tests {
         recovered_tasks.recover_tasks(&fixture.root).unwrap();
         assert_eq!(
             recovered_tasks.get_task(&task.id).unwrap().status,
-            TaskStatus::Failed
+            TaskStatus::Interrupted
         );
 
         let recovered = ImportV2Service::default()
@@ -8191,6 +9761,27 @@ mod tests {
             .unwrap();
         assert_eq!(recovered.items[0].status, ImportItemStatus::Queued);
         assert!(recovered.items[0].task_id.is_none());
+        let retry = recovered_tasks
+            .create_project_task(
+                TaskType::Import,
+                fixture.context.project_id.clone(),
+                fixture.root.clone(),
+                "Retry queued import".into(),
+                true,
+            )
+            .unwrap();
+        ImportV2Service::default()
+            .bind_item_task_ids(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &[(item.item_id, retry.id.clone())],
+            )
+            .unwrap();
+        let rebound = ImportV2Service::default()
+            .read_session(&fixture.context, &fixture.files, &session.session_id)
+            .unwrap();
+        assert_eq!(rebound.items[0].task_id.as_deref(), Some(retry.id.as_str()));
     }
 
     #[test]
@@ -8266,7 +9857,8 @@ mod tests {
             ImportItemStatus::Validating,
         ] {
             let fixture = OrchestratorFixture::new(&format!("recovery-{status:?}"));
-            let (session, item, task) = fixture.seed_one_item();
+            let (session, item, _legacy_task) = fixture.seed_one_item();
+            let task = fixture.create_import_operation_task(&session);
             fixture
                 .tasks
                 .transition_status(&task.id, TaskStatus::Running)
@@ -8301,7 +9893,7 @@ mod tests {
             recovered_tasks.recover_tasks(&fixture.root).unwrap();
             assert_eq!(
                 recovered_tasks.get_task(&task.id).unwrap().status,
-                TaskStatus::Failed
+                TaskStatus::Interrupted
             );
             let restarted = ImportV2Service::default();
             let reconciled = restarted
@@ -8348,6 +9940,68 @@ mod tests {
                 ImportItemStatus::PreviewReady
             );
         }
+    }
+
+    #[test]
+    fn restart_restores_interrupted_commit_to_durable_preview() {
+        let fixture = OrchestratorFixture::new("commit-recovery");
+        fixture
+            .service
+            .register_engine(Arc::new(FixtureEngine::success(fixture.root.clone())))
+            .unwrap();
+        let (session, item, preview_task) = fixture.seed_one_item();
+        let preview = fixture
+            .service
+            .run_item(
+                &fixture.context,
+                &fixture.files,
+                &fixture.tasks,
+                &session.session_id,
+                &item.item_id,
+                &preview_task.id,
+            )
+            .unwrap();
+        assert_eq!(preview.status, ImportItemStatus::PreviewReady);
+        let commit_task = fixture
+            .tasks
+            .create_project_import_commit_task(
+                fixture.context.project_id.clone(),
+                fixture.root.clone(),
+                fixture.root.join(".app/tasks"),
+                "Interrupted commit".into(),
+                session.session_id.clone(),
+            )
+            .unwrap();
+        fixture
+            .tasks
+            .transition_status(&commit_task.id, TaskStatus::Running)
+            .unwrap();
+        let mut persisted = fixture.reopen();
+        persisted.items[0].status = ImportItemStatus::Committing;
+        persisted.items[0].task_id = Some(commit_task.id.clone());
+        fixture
+            .service
+            .sessions
+            .save(&fixture.context, &fixture.files, &persisted)
+            .unwrap();
+
+        let recovered_tasks = TaskService::default();
+        recovered_tasks.recover_tasks(&fixture.root).unwrap();
+        assert_eq!(
+            recovered_tasks.get_task(&commit_task.id).unwrap().status,
+            TaskStatus::Interrupted
+        );
+        let recovered = ImportV2Service::default()
+            .recover_session(
+                &fixture.context,
+                &fixture.files,
+                &recovered_tasks,
+                &session.session_id,
+            )
+            .unwrap();
+        assert_eq!(recovered.items[0].status, ImportItemStatus::PreviewReady);
+        assert!(recovered.items[0].task_id.is_none());
+        assert!(recovered.items[0].preview.is_some());
     }
 
     #[test]
@@ -8708,14 +10362,24 @@ mod tests {
     fn cancellation_after_claim_cannot_leave_item_processing() {
         let fixture = OrchestratorFixture::new("cancel-race");
         let (session, item, task) = fixture.seed_one_item();
-        fixture
+        let snapshot = fixture
+            .service
+            .bind_item_task_ids(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &[(item.item_id.clone(), task.id.clone())],
+            )
+            .unwrap()
+            .remove(0);
+        let claimed = fixture
             .service
             .claim_item_for_run(
                 &fixture.context,
                 &fixture.files,
                 &session.session_id,
-                &item.item_id,
                 &task.id,
+                snapshot,
                 false,
             )
             .unwrap();
@@ -8729,6 +10393,7 @@ mod tests {
                 &session.session_id,
                 &item.item_id,
                 &task.id,
+                claimed.expected_item_revision,
             )
             .unwrap_err();
         assert_eq!(error.code, IMPORT_V2_CANCELLED);
@@ -8747,14 +10412,24 @@ mod tests {
             .register_engine(Arc::new(FixtureEngine::success(fixture.root.clone())))
             .unwrap();
         let (session, item, first_task) = fixture.seed_one_item();
-        fixture
+        let snapshot = fixture
+            .service
+            .bind_item_task_ids(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &[(item.item_id.clone(), first_task.id.clone())],
+            )
+            .unwrap()
+            .remove(0);
+        let claimed = fixture
             .service
             .claim_item_for_run(
                 &fixture.context,
                 &fixture.files,
                 &session.session_id,
-                &item.item_id,
                 &first_task.id,
+                snapshot,
                 false,
             )
             .unwrap();
@@ -8768,6 +10443,7 @@ mod tests {
                 &session.session_id,
                 &item.item_id,
                 &first_task.id,
+                claimed.expected_item_revision,
             )
             .unwrap_err();
         assert_eq!(
@@ -8925,6 +10601,17 @@ mod tests {
             }))
             .unwrap();
         let (session, item, task) = fixture.seed_one_item_named("reuse.mp4");
+        let mut expected_item_revision = fixture
+            .service
+            .bind_item_task_ids(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &[(item.item_id.clone(), task.id.clone())],
+            )
+            .unwrap()
+            .remove(0)
+            .expected_item_revision;
         fixture
             .tasks
             .transition_status(&task.id, TaskStatus::Running)
@@ -9002,6 +10689,8 @@ mod tests {
                 &fixture.tasks,
                 &task.id,
                 &Cell::new(0),
+                &mut expected_item_revision,
+                &Cell::new(0),
             )
             .unwrap();
         assert_eq!(executions.load(Ordering::SeqCst), 1);
@@ -9028,6 +10717,8 @@ mod tests {
                 &token,
                 &fixture.tasks,
                 &task.id,
+                &Cell::new(0),
+                &mut expected_item_revision,
                 &Cell::new(0),
             )
             .unwrap();
@@ -9057,6 +10748,8 @@ mod tests {
                 &token,
                 &fixture.tasks,
                 &task.id,
+                &Cell::new(0),
+                &mut expected_item_revision,
                 &Cell::new(0),
             )
             .unwrap();
@@ -9164,6 +10857,17 @@ mod tests {
             }))
             .unwrap();
         let (session, item, task) = fixture.seed_one_item_named("two-images.png");
+        let mut expected_item_revision = fixture
+            .service
+            .bind_item_task_ids(
+                &fixture.context,
+                &fixture.files,
+                &session.session_id,
+                &[(item.item_id.clone(), task.id.clone())],
+            )
+            .unwrap()
+            .remove(0)
+            .expected_item_revision;
         fixture
             .tasks
             .transition_status(&task.id, TaskStatus::Running)
@@ -9232,6 +10936,8 @@ mod tests {
             &token,
             &fixture.tasks,
             &task.id,
+            &Cell::new(0),
+            &mut expected_item_revision,
             &Cell::new(0),
         )?;
         Ok((result, staging))

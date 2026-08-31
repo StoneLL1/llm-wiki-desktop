@@ -671,6 +671,65 @@ function normalizePublishedAt(value) {
   return Number.isNaN(date.valueOf()) ? value : date.toISOString();
 }
 
+function htmlAttribute(value, name) {
+  const match = String(value).match(new RegExp(`\\b${name}\\s*=\\s*(["'])(.*?)\\1`, "iu"));
+  return match?.[2] || null;
+}
+
+function decodeHtmlAttribute(value) {
+  return String(value || "")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&#39;", "'")
+    .replaceAll("&amp;", "&")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">");
+}
+
+/**
+ * Extract the public X post contract from server-rendered OpenGraph/Twitter
+ * metadata. The signed runner intentionally does not call an undocumented API:
+ * login walls and restricted posts remain typed recovery outcomes.
+ */
+export function extractXPayload(html, baseUrl) {
+  let target;
+  try { target = new URL(baseUrl); } catch { return null; }
+  const identity = target.pathname.match(/^\/(?:i\/web\/status|[^/]+\/status)\/(\d+)/iu)?.[1];
+  if (!identity) return null;
+  const metadata = new Map();
+  for (const tag of String(html || "").match(/<meta\b[^>]*>/giu) || []) {
+    const key = htmlAttribute(tag, "property") || htmlAttribute(tag, "name");
+    const content = htmlAttribute(tag, "content");
+    if (key && content && !metadata.has(key.toLowerCase())) {
+      metadata.set(key.toLowerCase(), decodeHtmlAttribute(content).trim());
+    }
+  }
+  const description = metadata.get("og:description") || metadata.get("twitter:description") || "";
+  const rawTitle = metadata.get("og:title") || metadata.get("twitter:title") || "";
+  if (!description && !rawTitle) return null;
+  const author = metadata.get("twitter:creator") || rawTitle.match(/^(.+?)\s+on\s+X:/iu)?.[1] || null;
+  const title = inferTitle(description) || rawTitle || `X post ${identity}`;
+  const images = [metadata.get("og:image"), metadata.get("twitter:image")]
+    .filter(Boolean)
+    .filter((value, index, values) => values.indexOf(value) === index);
+  const mediaUrl = metadata.get("og:video:url") || metadata.get("og:video") || null;
+  return {
+    title,
+    titleSource: description ? "inferred" : "platform",
+    description,
+    author,
+    publishedAt: null,
+    platformId: identity,
+    targetAliases: null,
+    contentType: mediaUrl ? "video" : images.length ? "image_post" : "article",
+    images,
+    mediaUrl,
+    asrMediaUrl: mediaUrl,
+    subtitleCandidates: [],
+    subtitles: [],
+    hashtags: hashtagsFrom(description),
+  };
+}
+
 function looksLike(platform, value) {
   if (platform === "bilibili") return Boolean(firstString(value, ["bvid", "aid"]) && firstString(value, ["title"]));
   if (platform === "xiaohongshu") return Boolean(firstString(value, ["noteId", "note_id", "xsecToken", "userId"]) && firstString(value, ["title", "desc", "description"]));
@@ -835,6 +894,7 @@ export function extractPlatformPayloadFromValue(platform, value, baseUrl) {
 }
 
 export function extractPlatformPayload(platform, html, baseUrl) {
+  if (platform === "x") return extractXPayload(html, baseUrl);
   if (!["bilibili", "xiaohongshu", "douyin"].includes(platform)) return null;
   for (const value of scriptValues(html)) {
     const payload = extractPlatformPayloadFromValue(platform, value, baseUrl);
@@ -850,6 +910,9 @@ export function classifyPlatformPage(platform, pageText) {
   }
   if (/login required|signflow|请先登录|登录后查看|登录后浏览/i.test(text)) {
     return "IMPORT_WEB_LOGIN_REQUIRED";
+  }
+  if (platform === "x" && /this post is from an account you don.t follow|these posts are protected|account suspended|post unavailable|page doesn.t exist/iu.test(text)) {
+    return "IMPORT_WEB_CONTENT_RESTRICTED";
   }
   if (platform === "xiaohongshu"
     && /note has been deleted|note not found|笔记已删除|该笔记已被删除|内容不存在|当前内容无法展示/i.test(text)) {

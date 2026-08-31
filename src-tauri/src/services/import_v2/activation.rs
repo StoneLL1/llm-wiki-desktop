@@ -45,7 +45,8 @@ impl ImportV2ActivationService {
         release_version: &str,
         confirmation: ActivationConfirmation,
     ) -> Result<ActivationResult, BackendError> {
-        let _guard = core.acquire_migration_lock()?;
+        let project_locks = core.project_locks(context)?;
+        let _guard = core.lock_project(&project_locks);
         core.preflight_migration_locked(context)?;
         if release_version.trim().is_empty() {
             return Err(BackendError::new(
@@ -126,7 +127,7 @@ impl ImportV2ActivationService {
             BackendError::new("JSON_SERIALIZE_FAILED", error.to_string(), false, true)
         })?;
         let path = context.resolve_project_path(ACTIVATION_PATH)?;
-        let mut transaction = FileTransaction::new_for_project(&context.root);
+        let mut transaction = FileTransaction::new_for_context(context)?;
         transaction.write_new(&path, &bytes)?;
         transaction.commit()?;
         Ok(ActivationResult { record, checkpoint })

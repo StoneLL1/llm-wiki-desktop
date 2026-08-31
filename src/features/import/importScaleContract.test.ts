@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import importStoreSource from "../../stores/importStore.ts?raw";
+import importTaskCoordinatorSource from "./useImportTaskCoordinator.ts?raw";
+import importBatchControllerSource from "./useImportBatchController.ts?raw";
+import importViewSource from "./ImportView.tsx?raw";
+import importWorkflowSource from "./useImportWorkflow.ts?raw";
+import importActionGroupsSource from "./ImportActionGroups.tsx?raw";
 import { importProjectKey, useImportStore } from "../../stores/importStore";
 import type { ImportItem, ImportSession } from "../../types/importV2";
 
@@ -46,13 +51,47 @@ describe("Batch F Import scale contract", () => {
     unsubscribe();
     expect(publications).toBe(1);
     expect(publications).toBeLessThanOrEqual(GREEN_TARGETS.maxFrontendPublicationsFor10_000TerminalItems);
-    expect(useImportStore.getState().session?.items.every((value) => value.status === "completed")).toBe(true);
+    expect(useImportStore.getState().session?.items.length).toBeLessThanOrEqual(600);
+    expect(Object.values(useImportStore.getState().itemById).every((value) => value.status === "completed")).toBe(true);
   }, 15_000);
 
   it("freezes the one-map, one-traversal bulk patch implementation", () => {
     expect(importStoreSource).toContain("patchItems:");
-    expect(importStoreSource).toContain("const patches = new Map");
-    expect(importStoreSource).toContain("items: state.session.items.map");
+    expect(importStoreSource).toContain("const current = itemById[item.itemId]");
+    expect(importStoreSource).toContain("applyProjectionDelta");
+    expect(importStoreSource).toContain("itemById");
+    expect(importStoreSource).not.toContain("items: state.session.items.map");
+    expect(importStoreSource).not.toContain("authoritativeCounts");
+  });
+
+  it("freezes pending-task reconciliation on normalized indexes", () => {
+    expect(importTaskCoordinatorSource).toContain("itemIdsByTaskId");
+    expect(importTaskCoordinatorSource).not.toContain("session.items.some");
+    expect(importBatchControllerSource).toContain("itemIdsByTaskId");
+    expect(importBatchControllerSource).not.toContain("taskList.some");
+    expect(importViewSource).toContain("onSetItemSelected={handleQueueSelection}");
+    expect(importViewSource).toContain("onAction={handleQueueAction}");
+    expect(importWorkflowSource).toContain("loadMoreRequestRef");
+  });
+
+  it("keeps discovery work scope and action groups independent from the loaded page window", () => {
+    expect(importTaskCoordinatorSource).not.toContain("startNewQueuedItems");
+    expect(importTaskCoordinatorSource).not.toContain("Object.values(current.itemById)");
+    expect(importActionGroupsSource).toContain("groups: readonly ImportSessionActionGroup[]");
+    expect(importActionGroupsSource).not.toContain("capabilityIdForItem");
+    const startItemsBoundary = importWorkflowSource
+      .split("const startItems = useCallback")[1]
+      .split("const retryItem = useCallback")[0];
+    const asrGroupBoundary = importWorkflowSource
+      .split("const authorizeLocalAsrGroup = useCallback")[1]
+      .split("const authorizeLocalAsr = useCallback")[0];
+    const ocrGroupBoundary = importWorkflowSource
+      .split("const authorizeLocalOcrGroup = useCallback")[1]
+      .split("const authorizeLocalOcr = useCallback")[0];
+    expect(startItemsBoundary).not.toContain("knownItemIds");
+    expect(asrGroupBoundary).not.toContain("knownItemIds");
+    expect(ocrGroupBoundary).not.toContain("knownItemIds");
+    expect(importWorkflowSource).toContain('item.status === "queued" && !item.taskId');
   });
 
 });

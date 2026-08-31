@@ -65,11 +65,13 @@ use std::time::Duration;
 /// A `ProcessRunner` that pretends an Agent CLI is installed and returns a
 /// canned, well-formed answer for every invocation. This is the only seam a
 /// real Agent CLI would fill; everything else uses real services.
-struct FakeAgentRunner;
+struct FakeAgentRunner {
+    executable: PathBuf,
+}
 
 impl ProcessRunner for FakeAgentRunner {
     fn find_executable(&self, command: &str) -> Option<PathBuf> {
-        (command == "claude").then(|| "C:/fake/claude.exe".into())
+        (command == "claude").then(|| self.executable.clone())
     }
 
     fn run_with_timeout(
@@ -203,6 +205,8 @@ fn import_markdown_source(context: &ProjectContext, root: &Path) -> String {
                 session_id: session.session_id,
                 batch_task_id: None,
                 acknowledge_restricted_content: false,
+                expected_selection_revision: None,
+                expected_confirmation_digest: None,
                 decisions: vec![CommitItemDecision {
                     item_id: item.item_id.clone(),
                     resolution: preview
@@ -439,7 +443,12 @@ fn copy_markdown_slice_inner(
 #[test]
 fn ai_assisted_loop_fake_agent_detected_and_byok_runs() {
     // Fake Agent CLI is detected via the replaceable runner boundary.
-    let agent = AgentService::with_runner(Arc::new(FakeAgentRunner));
+    let fake_agent_dir = tempfile::tempdir().unwrap();
+    let fake_agent_executable = fake_agent_dir.path().join("claude-test");
+    std::fs::write(&fake_agent_executable, b"attested fake Agent fixture").unwrap();
+    let agent = AgentService::with_runner(Arc::new(FakeAgentRunner {
+        executable: fake_agent_executable,
+    }));
     let detected = agent.detect_agents(Some(AgentKind::Claude));
     let claude = detected
         .iter()

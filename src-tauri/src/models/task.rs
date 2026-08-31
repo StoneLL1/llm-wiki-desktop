@@ -39,9 +39,16 @@ impl BackendTask {
         }
         match self.operation.as_ref() {
             Some(TaskOperation::ImportBatch { session_id, .. }) => Some(session_id.as_str()),
-            Some(TaskOperation::CapabilityInstall { .. } | TaskOperation::ImportCommit { .. }) => {
-                None
+            Some(TaskOperation::ImportCollectionDiscovery { session_id }) => {
+                Some(session_id.as_str())
             }
+            Some(
+                TaskOperation::CapabilityInstall { .. }
+                | TaskOperation::AppCapabilityInstall { .. }
+                | TaskOperation::ImportCommit { .. }
+                | TaskOperation::ImportRecovery { .. }
+                | TaskOperation::ImportHistoryIndexRebuild,
+            ) => None,
             None => self
                 .batch_id
                 .as_deref()
@@ -50,7 +57,12 @@ impl BackendTask {
     }
 
     pub(crate) fn is_import_operation(&self) -> bool {
-        self.import_operation_session_id().is_some()
+        self.task_type == TaskType::Import
+            && (self.operation.is_some()
+                || self
+                    .batch_id
+                    .as_deref()
+                    .is_some_and(|value| value.starts_with(LEGACY_IMPORT_OPERATION_PREFIX)))
     }
 
     pub(crate) fn is_import_commit(&self) -> bool {
@@ -79,6 +91,7 @@ pub enum TaskType {
     SourceAiOrganize,
     ProjectInventory,
     Workflow,
+    CapabilityInstall,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -107,18 +120,31 @@ pub enum TaskOperation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_label: Option<String>,
     },
+    ImportCollectionDiscovery {
+        session_id: String,
+    },
     CapabilityInstall {
         session_id: String,
         item_id: String,
         capability_id: String,
         requirement_revision: String,
     },
+    AppCapabilityInstall {
+        capability_id: String,
+        version: String,
+        target_triple: String,
+        archive_identity: String,
+    },
     ImportCommit {
         session_id: String,
     },
+    ImportRecovery {
+        session_id: String,
+    },
+    ImportHistoryIndexRebuild,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskProgress {
     pub current: u64,
@@ -144,9 +170,21 @@ pub struct TaskResult {
     rename_all_fields = "camelCase"
 )]
 pub enum TaskResultReference {
+    AppCapabilityInstall {
+        capability_id: String,
+        version: String,
+        resumed_continuations: u64,
+        deferred_continuations: u64,
+        failed_continuations: u64,
+    },
     ImportPreview {
         session_id: String,
         item_id: String,
+    },
+    ImportOperation {
+        session_id: String,
+        task_id: String,
+        item_count: u64,
     },
     ImportV2SessionPreview {
         session_id: String,
@@ -154,6 +192,11 @@ pub enum TaskResultReference {
         batch_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         completion: Option<crate::models::import_v2::ImportCompletion>,
+    },
+    ImportCollectionPreview {
+        session_id: String,
+        collection_ref: String,
+        preview: crate::models::import_v2_web::ImportCollectionPreview,
     },
     Compile {
         result: crate::models::compile::CompileResult,
@@ -469,6 +512,41 @@ mod tests {
                 batch_id: None,
                 completion: None,
             }
+        );
+    }
+
+    #[test]
+    fn import_operation_reference_returns_the_backend_owned_cohort() {
+        let reference = TaskResultReference::ImportOperation {
+            session_id: "session-1".into(),
+            task_id: "operation-1".into(),
+            item_count: 1_001,
+        };
+        let value = serde_json::to_value(&reference).unwrap();
+        assert_eq!(value["type"], json!("import_operation"));
+        assert_eq!(value["sessionId"], json!("session-1"));
+        assert_eq!(value["taskId"], json!("operation-1"));
+        assert_eq!(value["itemCount"], json!(1_001));
+    }
+
+    #[test]
+    fn app_capability_result_reference_preserves_continuation_outcomes() {
+        let reference = TaskResultReference::AppCapabilityInstall {
+            capability_id: "browser-runtime".into(),
+            version: "1.4.0".into(),
+            resumed_continuations: 2,
+            deferred_continuations: 1,
+            failed_continuations: 1,
+        };
+        let value = serde_json::to_value(&reference).unwrap();
+        assert_eq!(value["type"], json!("app_capability_install"));
+        assert_eq!(value["capabilityId"], json!("browser-runtime"));
+        assert_eq!(value["resumedContinuations"], json!(2));
+        assert_eq!(value["deferredContinuations"], json!(1));
+        assert_eq!(value["failedContinuations"], json!(1));
+        assert_eq!(
+            serde_json::from_value::<TaskResultReference>(value).unwrap(),
+            reference
         );
     }
 

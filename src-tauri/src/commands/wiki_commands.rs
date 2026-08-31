@@ -158,9 +158,10 @@ pub fn save_wiki_page(
     state.with_current_project_write_access(
         &request.project_id,
         &request.project_root_path,
-        |permit, _context| {
+        |permit, context| {
             if request.expected_hash.is_none() {
                 reject_generic_source_create(
+                    context,
                     &request.relative_path,
                     None,
                     Some(&request.contents),
@@ -207,8 +208,9 @@ pub fn create_wiki_page(
     state.with_current_project_write_access(
         &request.project_id,
         &request.project_root_path,
-        |permit, _context| {
+        |permit, context| {
             reject_generic_source_create(
+                context,
                 &request.relative_path,
                 request.page_type.as_deref(),
                 None,
@@ -235,7 +237,7 @@ pub fn rename_wiki_page(
         &request.project_root_path,
         |permit, context| {
             reject_generic_source_path(context, &state.file_store, &request.relative_path)?;
-            reject_generic_source_create(&request.new_relative_path, None, None)?;
+            reject_generic_source_create(context, &request.new_relative_path, None, None)?;
             state.git_service.create_checkpoint(
                 context,
                 CheckpointPurpose::HighRiskOperation,
