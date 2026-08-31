@@ -394,7 +394,7 @@ async function activateRoute(client, route) {
 
 async function runNativeHelper(helper, processId, mode, parameters = {}) {
   const args = [
-    "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", helper,
+    "-NoProfile", "-NonInteractive", "-STA", "-ExecutionPolicy", "Bypass", "-File", helper,
     "-ProcessId", String(processId), "-Mode", mode,
   ];
   if (mode === "drag") {
@@ -443,12 +443,18 @@ function enrichNativeSamples(native, browser, route) {
   };
 }
 
-function roundDiagnostics(browser) {
+function roundDiagnostics(browser, native) {
+  const firstSampleAt = native.samples.at(0)?.timestampUnixMs ?? Number.POSITIVE_INFINITY;
+  const lastSampleAt = native.samples.at(-1)?.timestampUnixMs ?? Number.NEGATIVE_INFINITY;
+  const resizeDuringMeasurement = browser.resizeTimeline.filter((event) => (
+    event.timestampUnixMs >= firstSampleAt && event.timestampUnixMs <= lastSampleAt
+  ));
   return {
     getGraphObserverMode: browser.getGraphObserverMode,
     getGraphObserverErrors: browser.getGraphObserverErrors,
     getGraphDelta: browser.getGraphCount,
-    resizeEvents: browser.resizeTimeline.length,
+    resizeEvents: resizeDuringMeasurement.length,
+    resizeEventsBeforeMeasurement: browser.resizeTimeline.length - resizeDuringMeasurement.length,
     domFocusEvents: browser.domFocusTimeline,
     rawFocusEvents: browser.rawFocusTimeline,
     rawFocusedSource: "Tauri tauri://focus and tauri://blur",
@@ -487,7 +493,26 @@ async function captureDragRound(client, invokeObserver, helper, processId, route
     endedAtUnixMs: browser.phaseEndedAtUnixMs,
     actualRoute: browser.route,
     native: enrichNativeSamples(native, browser, browser.route),
-    diagnostics: roundDiagnostics(browser),
+    diagnostics: roundDiagnostics(browser, native),
+  };
+}
+
+async function captureDragWarmUp(client, invokeObserver, helper, processId, route, parameters) {
+  await resetBrowserPhase(client, `${route}-warmup`);
+  invokeObserver.reset();
+  const native = await runNativeHelper(helper, processId, "drag", parameters);
+  await delay(250);
+  const browser = await browserPhaseSnapshot(client);
+  const invokes = invokeObserver.snapshot();
+  return {
+    phase: browser.phase,
+    route,
+    actualRoute: browser.route,
+    sampleCount: native.sampleCount,
+    observerErrors: invokes.errors,
+    getGraphDelta: invokes.count,
+    normalizedForegroundFalseCount: browser.normalizedForegroundTimeline
+      .filter((event) => event.foreground === false).length,
   };
 }
 
@@ -600,6 +625,7 @@ export async function runGraphTitlebarDragPackagedBenchmark(argv = process.argv)
     invokeObserver = await installGetGraphInvokeObserver(client);
     const groups = { dashboard: { route: "dashboard", rounds: [] }, graph: { route: "graph", rounds: [] } };
     await activateRoute(client, "dashboard");
+    groups.dashboard.warmUp = await captureDragWarmUp(client, invokeObserver, helper, processId, "dashboard", parameters);
     for (let round = 1; round <= 3; round += 1) {
       groups.dashboard.rounds.push(await captureDragRound(client, invokeObserver, helper, processId, "dashboard", round, parameters));
     }
@@ -610,6 +636,7 @@ export async function runGraphTitlebarDragPackagedBenchmark(argv = process.argv)
     if (prewarm.count !== 1 || prewarm.errors.length !== 0) {
       throw new Error(`Graph prewarm must invoke get_graph exactly once without observer errors: ${JSON.stringify(prewarm)}.`);
     }
+    groups.graph.warmUp = await captureDragWarmUp(client, invokeObserver, helper, processId, "graph", parameters);
     for (let round = 1; round <= 3; round += 1) {
       groups.graph.rounds.push(await captureDragRound(client, invokeObserver, helper, processId, "graph", round, parameters));
     }
@@ -659,6 +686,7 @@ export async function runGraphTitlebarDragPackagedBenchmark(argv = process.argv)
         dragStimulus: "Win32 SendInput native non-client titlebar",
         positionObserver: "GetWindowRect",
         roundsPerGroup: 3,
+        warmUpRoundsPerGroup: 1,
         samplesPerRound: parameters.samples,
         stepX: parameters.stepX,
         stepY: parameters.stepY,
