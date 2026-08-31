@@ -4977,10 +4977,12 @@ source_url: https://www.xiaohongshu.com/explore/other-note
         );
         let history_path = std::fs::read_dir(fixture.root.join(".app/import-history"))
             .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
+            .map(|entry| entry.unwrap().path())
+            // Cancelled batches leave a `working/` subdirectory behind and
+            // directory iteration order differs per platform, so pick the
+            // first regular file instead of trusting the first entry.
+            .find(|path| path.is_file())
+            .unwrap();
         let history: ImportBatchResult =
             serde_json::from_slice(&std::fs::read(history_path).unwrap()).unwrap();
         let snapshot = history.history_snapshot.expect("history snapshot");
@@ -5011,10 +5013,12 @@ source_url: https://www.xiaohongshu.com/explore/other-note
         );
         let history_path = std::fs::read_dir(fixture.root.join(".app/import-history"))
             .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
+            .map(|entry| entry.unwrap().path())
+            // Cancelled batches leave a `working/` subdirectory behind and
+            // directory iteration order differs per platform, so pick the
+            // first regular file instead of trusting the first entry.
+            .find(|path| path.is_file())
+            .unwrap();
         let history: ImportBatchResult =
             serde_json::from_slice(&std::fs::read(history_path).unwrap()).unwrap();
         assert_eq!(history.completion, result.completion);
@@ -5081,10 +5085,12 @@ source_url: https://www.xiaohongshu.com/explore/other-note
         assert_eq!(error.code, crate::errors::IMPORT_V2_CANCELLED);
         let history = std::fs::read_dir(fixture.root.join(".app/import-history"))
             .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
+            .map(|entry| entry.unwrap().path())
+            // Cancelled batches leave a `working/` subdirectory behind and
+            // directory iteration order differs per platform, so pick the
+            // first regular file instead of trusting the first entry.
+            .find(|path| path.is_file())
+            .unwrap();
         let batch: crate::models::import_v2::ImportBatchResult =
             serde_json::from_slice(&std::fs::read(history).unwrap()).unwrap();
         assert_eq!(batch.items.len(), 2);
@@ -5136,10 +5142,12 @@ source_url: https://www.xiaohongshu.com/explore/other-note
         assert_eq!(error.code, crate::errors::IMPORT_V2_CANCELLED);
         let history = std::fs::read_dir(fixture.root.join(".app/import-history"))
             .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
+            .map(|entry| entry.unwrap().path())
+            // Cancelled batches leave a `working/` subdirectory behind and
+            // directory iteration order differs per platform, so pick the
+            // first regular file instead of trusting the first entry.
+            .find(|path| path.is_file())
+            .unwrap();
         let batch: crate::models::import_v2::ImportBatchResult =
             serde_json::from_slice(&std::fs::read(history).unwrap()).unwrap();
         assert_eq!(batch.items.len(), 2);
