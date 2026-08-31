@@ -95,11 +95,7 @@ jobs:
         run: npm run check:rust:gui
 
       - name: Verify committed Tauri schemas match regeneration
-        run: |
-          git diff --exit-code -- src-tauri/gen/schemas || {
-            echo "::error::src-tauri/gen/schemas is stale. Run 'npm run check:rust:gui' locally and commit the regenerated schemas in the same change."
-            exit 1
-          }
+        run: node scripts/check-schema-parity.mjs
 
       - name: Run Rust service tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
