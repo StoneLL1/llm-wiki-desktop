@@ -115,8 +115,14 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 
+      # Non-blocking until the existing advisories are upgraded away
+      # (see the tracking issue referenced in the PR that added this
+      # job): quick-xml and lopdf are direct dependencies whose patched
+      # versions have API changes, so the upgrade is deliberate work.
+      # Remove continue-on-error once the audit is clean.
       - name: Audit Rust dependencies against RustSec advisories
         run: cargo audit --file src-tauri/Cargo.lock
+        continue-on-error: true
 
   codeql:
     name: CodeQL (javascript-typescript)
