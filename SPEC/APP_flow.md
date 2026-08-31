@@ -202,6 +202,8 @@ project-root/
 
 文件 / 文件夹扫描若超过后端定义的总文件数、总字节数或预计输出数软阈值，流程停在“确认扫描总量”：session item 数保持不变，状态区同时展示 aggregate totals、原因、跳过项和每个超大表格的独立估算。总量确认先放行普通文件，超大表格仍停留等待独立确认；两次确认都消费同一 saved scan，并在 trusted + writable authority 临界区重验当前 layout import-state root、项目 / session / task identity、token、totals 和全部来源 fingerprint，不重扫原目录。hard file limit 直接 typed 拒绝且不产生可接受的截断扫描；取消只丢弃 app-state scan result，不触碰来源。
 
+扫描加入 session 后，由后端立即创建覆盖全部新增普通 item 的 operation task；返回 task identity、item 总数与 session patch。前端分页只负责显示，不能根据首 200 项、当前筛选或已加载 map 决定哪些 item 会开始。媒体先用有界头部识别类型，再应用媒体专用的大小 / 磁盘策略；不得用统一 64 MiB 文档上限在识别前跳过正常音视频，也不得整文件读入内存后双份 staging。
+
 ### 7.2 候选预览必须包含
 
 - 来源名称、类型和定位信息
@@ -233,11 +235,24 @@ OCR 和 ASR 在导入阶段按正文缺口启用，并且必须由用户主动�
 - 页面切换和最小化不停止后台任务。
 - 应用重启后耗时下载、OCR、ASR 显示“已暂停，可继续”，由用户恢复。
 - 批次状态区聚合登录、OCR、ASR 和能力安装待办，不连续弹出模态框。
+- 聚合待办、总数和 subject / capability id 由后端 session overview 返回，不从当前筛选页或已加载窗口遍历推导。
 - 未解决项只阻断自身，其他可确认项可以部分提交。
 - 一次批量处理在任务抽屉中只显示一个 operation task；逐项状态由 Import session/item 事实呈现，不能用 operation terminal 状态替代 waiting、preview、失败、跳过或取消项。
 - `import://session-patch` 先通过 project/root/session/epoch/authority guards，再一次性 patch 当前 cohort；terminal patch 或 terminal task 竞态最终只触发一次 session summary refresh。
+- 项目打开时依据独立 `recoveryRequired` 做轻量 reconciliation；普通进程中断、OCR / ASR / 下载中断都可触发，不要求 index 恰好进入 rebuild 状态。结果显示“已暂停，可继续”，不会自动恢复耗时工作。
 
-### 7.5 导入完成
+### 7.5 能力管理页下载流程
+
+1. 用户进入 Import → 能力管理。页面读取应用级产品能力快照，即使当前会话没有 `waiting_capability` 条目，也显示已安装、可下载、可更新、进行中、问题和当前平台未发布的能力。
+2. 列表只包含当前应用版本冻结的官方能力定义；source fallback 空 catalog、当前 target 未发布或不受当前应用支持时显示明确原因，不显示无效安装按钮。
+3. 用户点击“下载并安装”，确认页展示用途与覆盖范围、固定版本 / target / publisher key / 来源、包体与模型及安装占用、许可证、运行权限和会继续的当前 Import 项数量。
+4. React 只提交能力 id、目标版本与确认 revision。后端从嵌入 catalog 解析固定 URL、hash、签名与 manifest，创建应用级 task，并按能力 / 版本 / target / archive identity 合并并发请求。
+5. 下载显示真实 bytes，支持 Range 续传与不安全响应后的完整重下；随后按阶段展示验签、事务安装、全部声明路线的真实 runner 健康检查和整体激活。
+6. 切换页签、知识库和窗口最小化不取消任务；任务继续显示在应用任务抽屉。进程中断后显示“已暂停，可继续”，用户主动取消才清理 partial。
+7. 首次安装任一步失败都不激活；更新失败保留或恢复旧健康版本。hash / 签名 / manifest / target / 路径安全失败不能由用户绕过。
+8. 安装成功后，对当前活动项目中登记该能力的所有 continuation 分别重验 project、root、session、item、requirement revision、trust 与 writable authority，再继续符合条件的条目。不活动或已撤权项目只更新能力可用事实，重新打开并复核后再继续。
+
+### 7.6 导入完成
 
 完成摘要显示已导入、已更新、重复和仍待处理数量。
 
