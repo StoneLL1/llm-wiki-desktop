@@ -1,6 +1,6 @@
 [package]
 name = "llm-wiki-desktop"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local-first desktop app for turning personal sources into a Markdown wiki."
 authors = ["LLM Wiki Desktop Contributors"]
 license = "Apache-2.0"

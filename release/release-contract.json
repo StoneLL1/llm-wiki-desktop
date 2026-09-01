@@ -10,12 +10,12 @@
   "application": {
     "productName": "LLM Wiki Desktop",
     "identifier": "com.llmwiki.desktop",
-    "firstPublicVersion": "0.1.0"
+    "firstPublicVersion": "0.2.0"
   },
   "tags": {
     "stablePattern": "^app-v([0-9]+\\.[0-9]+\\.[0-9]+)$",
     "prereleasePattern": "^app-v([0-9]+\\.[0-9]+\\.[0-9]+)-rc\\.([1-9][0-9]*)$",
-    "firstStable": "app-v0.1.0"
+    "firstStable": "app-v0.2.0"
   },
   "endpoints": {
     "stableUpdaterManifest": "https://github.com/StoneLL1/llm-wiki-desktop/releases/latest/download/latest.json",
@@ -34,16 +34,16 @@
   },
   "acceptance": {
     "firstStable": {
-      "version": "0.1.0",
-      "tag": "app-v0.1.0",
+      "version": "0.2.0",
+      "tag": "app-v0.2.0",
       "priorVersionUpgradeGate": "waived-once-no-prior-production-release",
       "replacementGate": "four-platform-clean-install-required",
       "scope": "first-stable-only",
       "approvedBy": "StoneLL1",
-      "approvedOn": "2026-08-26"
+      "approvedOn": "2026-08-31"
     },
     "subsequentStable": {
-      "firstRequiredVersion": "0.1.1",
+      "firstRequiredVersion": "0.2.1",
       "priorVersionUpgradeGate": "real-prior-production-to-candidate-required"
     }
   },

@@ -1,6 +1,6 @@
 # Release identity, repository access, and signing ownership
 
-Status: Batch 6 local automated acceptance and cross-platform CI complete; updater and capability signing inputs are configured; the capability public trust anchor and `0.1.0` one-time bootstrap policy are prepared on a review branch; Public beta No-Go pending merge/same-SHA CI, sealed artifacts, and deferred four-platform clean-install acceptance
+Status: Batch 6 local automated acceptance and cross-platform CI complete; updater and capability signing inputs are configured; the capability public trust anchor and the `0.2.0` one-time bootstrap policy (re-approved 2026-08-31) are merged to `master`; Public beta No-Go pending the sealed `app-v0.2.0-rc.1` candidate and the deferred four-platform clean-install acceptance
 Last verified: 2026-08-26
 
 ## Frozen public release coordinate
@@ -11,10 +11,10 @@ Last verified: 2026-08-26
 | Visibility | Public |
 | Local origin | `https://github.com/StoneLL1/llm-wiki-desktop.git` |
 | Default branch | `master` |
-| First public version | `0.1.0` |
+| First public version | `0.2.0` |
 | Stable tag | `app-vX.Y.Z` |
 | Prerelease tag | `app-vX.Y.Z-rc.N` |
-| First stable tag | `app-v0.1.0` |
+| First stable tag | `app-v0.2.0` |
 | Stable updater manifest | `https://github.com/StoneLL1/llm-wiki-desktop/releases/latest/download/latest.json` |
 | Capability asset base | `https://github.com/StoneLL1/llm-wiki-desktop/releases/download/<exact-tag>/` |
 
