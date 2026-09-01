@@ -1,6 +1,6 @@
 # First updater/capability-signed draft and packaged acceptance checklist
 
-Status: **Blocked pending a separately approved tag, sealed candidate, deferred four-platform clean-install acceptance, and separate final publication approval**
+Status: **`app-v0.2.0-rc.1` sealed and Windows x64 accepted; owner approved on 2026-09-01 to create `app-v0.2.0` and publish stable with the macOS arm64 / macOS x64 / Ubuntu 24.04 x64 rows executed post-publication (tracked in [#34](https://github.com/StoneLL1/llm-wiki-desktop/issues/34))**
 
 Prepared: 2026-08-26
 
@@ -20,6 +20,13 @@ The owner retired the 0.1.0 coordinate and re-approved the release baseline for 
 - The machine rebaseline shipped as one review: `release/release-contract.json`, package/Tauri/Cargo versions, `scripts/check-release-version.mjs`, the contract tests, release notes, known limitations, runbook, and identity record; SPEC carries no version coordinate.
 
 The `0.1.0`-specific prerequisites, waiver text, workflow steps, and matrix below remain historical evidence and must not be executed as a current checklist. The current checklist is the same sequence at the `0.2.0` coordinate: review → full local gate from a clean exact commit → same-SHA three-platform CI → separate explicit user approval before creating/pushing the immutable `app-v0.2.0-rc.1` tag → sealed candidate bundle → real-machine acceptance → Go/No-Go → separate publisher approval.
+
+## 2026-09-01 Owner publication decision (publish-first for the remaining rows)
+
+- The immutable `app-v0.2.0-rc.1` tag sealed its candidate through workflow run [33481891948](https://github.com/StoneLL1/llm-wiki-desktop/actions/runs/33481891948), and the Windows x64 real-machine acceptance completed with no blocker ([evidence](2026-09-01-app-v0.2.0-rc.1-windows-x64-acceptance.md)).
+- The owner then revised the 2026-08-31 execution order for the remaining rows only: publish the stable `app-v0.2.0` transaction first, then execute the macOS arm64, macOS x64, and Ubuntu 24.04 x64 clean-install acceptance rows post-publication, tracked as Pending in [#34](https://github.com/StoneLL1/llm-wiki-desktop/issues/34).
+- This decision does not waive the four-platform clean-install gate, updater or capability signature verification, packaged smoke, or the protected `publish-stable` environment review; it changes only the execution order. The pending rows must still be executed and recorded, and `0.2.1` still requires the real prior-production upgrade matrix.
+- Tag-creation approval for the immutable `app-v0.2.0` tag was given explicitly on 2026-09-01, conditioned on: this release-coordinate documentation review merging through the protected branch, same-SHA three-platform CI, and the full local gate from a clean exact commit.
 
 ## 2026-08-30 Batch 9 preflight correction
 
