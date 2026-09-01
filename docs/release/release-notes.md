@@ -14,7 +14,7 @@ Release highlights:
 First-release acceptance policy:
 
 - `0.2.0` has no prior production release from which to exercise the real updater path, so that single upgrade row is waived once (re-approved by the owner on 2026-08-31 for the 0.2.0 line) and replaced by mandatory clean-install, launch/restart, uninstall, project-preservation, signature, and OS-warning acceptance on all four targets;
-- the owner-approved execution order for the candidate runs real-machine acceptance on Windows x64 and macOS arm64 first, while macOS x64 and Linux x64 are built, published, and tracked as Pending in a tracking issue; the four-platform gate itself is not waived and closes before `0.2.0` is declared stable beyond the candidate;
+- real-machine acceptance order, revised by the owner on 2026-09-01: the Windows x64 clean-install row completed before publication with no blocker (see `2026-09-01-app-v0.2.0-rc.1-windows-x64-acceptance.md`); the owner then explicitly approved publishing this stable release before the remaining rows execute, so macOS arm64, macOS x64, and Linux x64 are built and published here with their acceptance rows tracked as Pending in the owner-approved tracking issue [#34](https://github.com/StoneLL1/llm-wiki-desktop/issues/34); the four-platform gate itself is not waived, and the pending rows must be executed and recorded;
 - beginning with `0.2.1`, release acceptance again requires a real installed production-signed predecessor to upgrade to the candidate on Windows x64, macOS arm64, macOS x64, and Linux x64.
 
 See `known-limitations.md` in the release assets before installing.
