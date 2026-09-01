@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 仓库现状
 
 - SPEC 文件夹内文档：`SPEC/PRD.md`（产品需求）、`SPEC/SPEC.md`（规格）、`SPEC/TECH_STACK.md`（技术栈与架构边界）、`SPEC/BACKEND_STRUCTURE.md`（Rust 后端架构）、`SPEC/APP_flow.md`（视图/数据流/确认规则）、`SPEC/FRONTEND_GUIDELINES.md`（前端设计系统）、`SPEC/DESIGN.md`（视觉主题）。
-- 样本数据：`wiki/wiki/` 是一个**真实的 Obsidian 兼容知识库**（约数百页面），用于验证真实规模、Obsidian 兼容性和图谱性能。**不要把它当作应用源码**，也不要在它里面实验代码。
+- 样本数据：真实 Obsidian 兼容知识库样本**在仓库外维护**（历史与获取方式见 `docs/testing/sample-knowledge-base.md`；原生知识库结构以 `SPEC/SPEC.md` §5 为准），用于验证真实规模、Obsidian 兼容性和图谱性能。**不要把它当作应用源码**。
 
 动手写代码前，先按顺序读：`SPEC/PRD.md` → `SPEC/SPEC.md` → `SPEC/APP_flow.md` → `SPEC/TECH_STACK.md` → `SPEC/BACKEND_STRUCTURE.md` → `SPEC/FRONTEND_GUIDELINES.md`。
 
@@ -129,7 +129,7 @@ Workflows 例外：原 Agent 主页面的产品职责、信息架构、三个内
 ## 工作纪律
 
 - 动手前先读文档，不要在没有用户确认时大规模重写产品决策。
-- 样本库 `wiki/wiki/` 是验证数据，不是测试场；需要测试导入/编译时，复制一份另开目录。
+- 样本库（仓库外维护，见 `docs/testing/sample-knowledge-base.md`）是验证数据，不是测试场；需要测试导入/编译时，复制一份另开目录。本机若仍有本地副本，同样适用。
 - 实现 `raw/sources/` 替换/删除、批量迁移、Agent 自动修复时，必须接入 Git 检查点。
 - 实现任何密钥相关代码，必须走系统凭据管理。
 - 实现任何跨平台路径逻辑，必须测 Windows/macOS/Linux 风格路径和 CJK 文件名。

@@ -73,7 +73,7 @@ Workflows exception: `docs/superpowers/specs/2026-07-30-workflows-panel-redesign
 - Show what changed, what paths are affected, and whether a Git checkpoint exists.
 - Preserve external Markdown edits; never silently overwrite user changes.
 - CJK filenames, Unicode paths, Windows/macOS/Linux path styles, and case-sensitivity edge cases are required test concerns.
-- The sample `wiki/wiki/` is validation data, not app source code.
+- The sample knowledge base is maintained outside this repository (see `docs/testing/sample-knowledge-base.md`); it is validation data, not app source code. Any local copy follows the same rule: never test in place.
 
 ## Required Checks
 
