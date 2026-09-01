@@ -720,7 +720,7 @@ npm install @milkdown/core @milkdown/react @milkdown/plugin-math
 - 后台任务、流式输出、取消、日志抽屉和通知已经成为核心交互的一部分。新增长任务必须接入统一 task 状态，而不是只在单个组件中放本地 loading。
 - 工作流任务在前端只按当前项目展示；其他项目的持久任务可继续运行，但必须切换到对应项目后才可查看。Workflows 迁移需在现有 task 事件之上补齐结构化阶段、关联重试、输入指纹去重和“已中断”语义。
 - 根目录 `progress.txt` 与 `gotchas.txt` 是项目级协作账本。重要里程碑和易踩坑必须继续记录，并保持历史可追溯。
-- 样本 `wiki/wiki/` 仍是验证数据，不是应用源码；但其中 `.app/graph-cache.json` 等应用状态可作为测试真实项目行为的样本数据，提交前必须确认不含密钥或私人内容。
+- 样本库（仓库外维护，见 `docs/testing/sample-knowledge-base.md`）仍是验证数据，不是应用源码；如需用其中 `.app/graph-cache.json` 等应用状态测试真实项目行为，先复制到仓库外的测试目录，并确认不含密钥或私人内容。
 
 ### 16.7 首次使用与项目打开的当前实现
 

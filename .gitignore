@@ -12,8 +12,12 @@ __pycache__/
 .DS_Store
 __MACOSX/
 ._*
-wiki/wiki/raw/GitHubDaily/
-wiki/wiki/.app/
+# Sample knowledge base — maintained outside the repository (verified
+# backup 2026-09-01, owner-approved removal). The in-repo structure
+# note lives at docs/testing/sample-knowledge-base.md; the native
+# layout itself is defined by SPEC/SPEC.md §5.
+wiki/
+
 .dev-capabilities/
 target-codex-*/
 .impeccable/

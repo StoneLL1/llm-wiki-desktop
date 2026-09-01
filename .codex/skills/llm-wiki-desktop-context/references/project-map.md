@@ -59,7 +59,7 @@ Use this reference only after `llm-wiki-desktop-context/SKILL.md` triggers and t
 - Search/wiki scanning uses local indexes and local files, not a database.
 - Graph visual scale is centralized in `src/features/graph/graphVisualScale.ts`; keep graph changes testable.
 - Export list path display uses `src/lib/pathDisplay.ts`; show basename inline and preserve full path in title/tooltip where implemented.
-- Sample `wiki/wiki/` is validation data, not app source. `.app` state inside samples may be useful but must be checked for private content before commit.
+- The sample knowledge base is maintained outside the repository (see `docs/testing/sample-knowledge-base.md`); it is validation data, not app source. `.app` state inside samples may be useful but must be checked for private content before commit.
 
 ## Build And Verification
 

@@ -593,8 +593,8 @@ Agent 生成内容时，应根据用户语言偏好输出对应语言。
 - 先读 `PRD.md`、`SPEC.md`、`APP_flow.md`、`TECH_STACK.md`。
 - 当前仓库包含已初始化的 React 19 + Tauri v2 应用源码；修改架构文档前先核对 `src/`、`src-tauri/src/` 和现有契约测试。
 - 不要在没有用户确认时大规模重写产品决策。
-- 不要把样本 `wiki/wiki/` 当成应用源码。
-- 样本 `wiki/wiki/` 是验证真实规模、Obsidian 兼容性和图谱性能的重要数据。
+- 不要把样本库（仓库外维护，见 `docs/testing/sample-knowledge-base.md`）当成应用源码。
+- 样本库是验证真实规模、Obsidian 兼容性和图谱性能的重要数据，结构以 `SPEC.md` §5 为准。
 - 任何涉及删除、覆盖、批量迁移、Agent 自动修复的实现，都必须接入 Git 检查点。
 - 任何密钥相关实现都必须走系统凭据管理。
 - 任何长任务都必须可取消、可后台运行、可报告进度。
