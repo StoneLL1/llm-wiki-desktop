@@ -40,14 +40,14 @@ test("version drift is a deterministic release failure", () => {
 });
 
 test("the first public version remains historical while later synchronized versions are valid", () => {
-  const nextCargo = cargoToml.replace('version = "0.1.0"', 'version = "0.1.1"');
+  const nextCargo = cargoToml.replace('version = "0.2.0"', 'version = "0.2.1"');
   const result = validateReleaseState({
     contract,
-    packageJson: { ...packageJson, version: "0.1.1" },
+    packageJson: { ...packageJson, version: "0.2.1" },
     cargoToml: nextCargo,
-    tauriConfig: { ...tauriConfig, version: "0.1.1" },
+    tauriConfig: { ...tauriConfig, version: "0.2.1" },
     trustedKeys,
-    tag: "app-v0.1.1",
+    tag: "app-v0.2.1",
   });
   assert.deepEqual(result.errors, []);
 
@@ -55,7 +55,7 @@ test("the first public version remains historical while later synchronized versi
   const invalidResult = validateReleaseState({
     contract,
     packageJson: { ...packageJson, version: invalidPrerelease },
-    cargoToml: cargoToml.replace('version = "0.1.0"', `version = "${invalidPrerelease}"`),
+    cargoToml: cargoToml.replace('version = "0.2.0"', `version = "${invalidPrerelease}"`),
     tauriConfig: { ...tauriConfig, version: invalidPrerelease },
     trustedKeys,
   });
@@ -80,14 +80,14 @@ test("stable and prerelease tags use the frozen app-v SemVer grammar", () => {
   assert.throws(() => parseReleaseTag("app-v00.1.0", contract), /frozen app-v SemVer policy/);
   assert.equal(state({ tag: "app-v0.1.1" }).errors.some((error) => error.includes("does not match configured version")), true);
 
-  const rcVersion = "0.1.0-rc.2";
+  const rcVersion = "0.2.0-rc.2";
   const rcResult = validateReleaseState({
     contract,
     packageJson: { ...packageJson, version: rcVersion },
-    cargoToml: cargoToml.replace('version = "0.1.0"', `version = "${rcVersion}"`),
+    cargoToml: cargoToml.replace('version = "0.2.0"', `version = "${rcVersion}"`),
     tauriConfig: { ...tauriConfig, version: rcVersion },
     trustedKeys,
-    tag: "app-v0.1.0-rc.2",
+    tag: "app-v0.2.0-rc.2",
   });
   assert.deepEqual(rcResult.errors, []);
 });
@@ -169,12 +169,12 @@ test("the committed capability key ID resolves to the reviewed public trust anch
   assert.equal(state({ contract: missingRecoveryEvidence }).errors.some((error) => error.includes("recovery copy")), true);
 });
 
-test("the 0.1.0 upgrade waiver is one-time and 0.1.1 restores the real upgrade gate", () => {
+test("the 0.2.0 upgrade waiver is one-time and 0.2.1 restores the real upgrade gate", () => {
   assert.deepEqual(state().errors, []);
 
   const widenedWaiver = structuredClone(contract);
   widenedWaiver.acceptance.subsequentStable.firstRequiredVersion = "0.2.0";
-  assert.equal(state({ contract: widenedWaiver }).errors.some((error) => error.includes("mandatory from 0.1.1")), true);
+  assert.equal(state({ contract: widenedWaiver }).errors.some((error) => error.includes("mandatory from 0.2.1")), true);
 
   const missingReplacementGate = structuredClone(contract);
   missingReplacementGate.acceptance.firstStable.replacementGate = "source-tests-only";

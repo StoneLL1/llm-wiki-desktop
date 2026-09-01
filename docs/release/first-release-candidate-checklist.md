@@ -10,6 +10,17 @@ Reviewed signing-contract merge: `41dee7207778222c8b4e44c5cf7da25e87cc6ec9` — 
 
 Historical intended version/tag as recorded on 2026-08-26: `0.1.0` / `app-v0.1.0` — **recorded then as not created; superseded by the correction below**
 
+## 2026-09-01 Rebaseline to the 0.2.0 coordinate (owner-approved)
+
+The owner retired the 0.1.0 coordinate and re-approved the release baseline for the 0.2.0 line (decisions dated 2026-08-31):
+
+- The repository history was rewritten (git-filter-repo) and the tags `app-v0.1.0`, `app-v0.1.0-rc.1` through `-rc.3` were deleted; no 0.1.0 stable release ever existed (see `CHANGELOG.md`). `app-v0.2.0` is therefore the first stable tag, and `app-v0.2.0-rc.1` is the current candidate coordinate.
+- The one-time no-predecessor upgrade waiver is re-approved for `0.2.0` (`release/release-contract.json`, approved on 2026-08-31); it waives only the impossible prior-production upgrade row. The four-platform clean-install replacement gate is not waived.
+- Owner-approved execution order for the candidate: run real-machine acceptance on Windows x64 and macOS arm64 first; build and publish macOS x64 and Linux x64 artifacts but track their acceptance rows as Pending in a tracking issue. The deviation is recorded as evidence and does not weaken the four-platform gate required to declare stability beyond the candidate.
+- The machine rebaseline shipped as one review: `release/release-contract.json`, package/Tauri/Cargo versions, `scripts/check-release-version.mjs`, the contract tests, release notes, known limitations, runbook, and identity record; SPEC carries no version coordinate.
+
+The `0.1.0`-specific prerequisites, waiver text, workflow steps, and matrix below remain historical evidence and must not be executed as a current checklist. The current checklist is the same sequence at the `0.2.0` coordinate: review → full local gate from a clean exact commit → same-SHA three-platform CI → separate explicit user approval before creating/pushing the immutable `app-v0.2.0-rc.1` tag → sealed candidate bundle → real-machine acceptance → Go/No-Go → separate publisher approval.
+
 ## 2026-08-30 Batch 9 preflight correction
 
 Public read-only inspection now shows that `app-v0.1.0` exists and dereferences to `43cf323572f9e43cd59be93dfec8053fba6b3d8d`; its release workflow failed preflight, so this immutable tag must not be moved or reused. Local Batch 8 baseline `6dbd92c85ca5a670b5e8e4f1724813fbbb275b8b` is not public `master` (`df0e709ffb1a2571db4d96c459fd053a511ba24e`) and has no same-SHA hosted CI.

@@ -145,20 +145,20 @@ export function validateReleaseState({
   }
   const firstStableAcceptance = contract.acceptance?.firstStable;
   const subsequentStableAcceptance = contract.acceptance?.subsequentStable;
-  if (firstStableAcceptance?.version !== "0.1.0"
-    || firstStableAcceptance?.tag !== "app-v0.1.0"
+  if (firstStableAcceptance?.version !== "0.2.0"
+    || firstStableAcceptance?.tag !== "app-v0.2.0"
     || firstStableAcceptance?.priorVersionUpgradeGate !== "waived-once-no-prior-production-release"
     || firstStableAcceptance?.replacementGate !== "four-platform-clean-install-required"
     || firstStableAcceptance?.scope !== "first-stable-only"
     || firstStableAcceptance?.approvedBy !== "StoneLL1"
-    || firstStableAcceptance?.approvedOn !== "2026-08-26"
+    || firstStableAcceptance?.approvedOn !== "2026-08-31"
     || firstStableAcceptance.version !== contract.application.firstPublicVersion
     || firstStableAcceptance.tag !== contract.tags.firstStable) {
-    errors.push("the 0.1.0 upgrade waiver must remain one-time, owner-approved, and replaced by four-platform clean-install acceptance");
+    errors.push("the 0.2.0 upgrade waiver must remain one-time, owner-approved, and replaced by four-platform clean-install acceptance");
   }
-  if (subsequentStableAcceptance?.firstRequiredVersion !== "0.1.1"
+  if (subsequentStableAcceptance?.firstRequiredVersion !== "0.2.1"
     || subsequentStableAcceptance?.priorVersionUpgradeGate !== "real-prior-production-to-candidate-required") {
-    errors.push("real prior-production-to-candidate upgrade acceptance must be mandatory from 0.1.1");
+    errors.push("real prior-production-to-candidate upgrade acceptance must be mandatory from 0.2.1");
   }
   if (contract.signing?.privateKeyPolicy !== "protected-environment-secrets-only"
     || contract.signing?.continuity?.backupCustodianRequired !== false
