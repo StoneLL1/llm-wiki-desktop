@@ -1332,4 +1332,4 @@ Agent 和 LLM 应提供可替换 adapter：
 - 不要在 quick assessment 或打开外部目录时初始化 Git、创建 `.app`、执行项目内容或发送外部 AI。
 - 不要把路径注册当成用户信任，或绕过 restricted / read-only access policy。
 - 不要强行指定尚未验证的 PDF / Office 解析库。
-- 不要把样本 `wiki/wiki/` 当成应用源码。
+- 不要把样本库（仓库外维护，见 `docs/testing/sample-knowledge-base.md`）当成应用源码。

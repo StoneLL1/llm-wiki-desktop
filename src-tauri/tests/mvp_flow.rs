@@ -327,8 +327,9 @@ fn project_to_wiki_loop_compiles_searches_and_graphs() {
 
 #[test]
 fn sample_wiki_loop_scans_searches_and_caches_graph() {
-    // Per CLAUDE.md: wiki/wiki/ is validation data, not a test fixture in
-    // place. Copy a small slice into a temp project and open it.
+    // The sample vault is optional and maintained outside the repository
+    // (docs/testing/sample-knowledge-base.md). When a local copy exists,
+    // copy a small slice into a temp project and open it; never in place.
     let sample_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../wiki/wiki");
     if !sample_root.exists() {
         eprintln!("[mvp_flow] sample wiki not present at {sample_root:?}; skipping loop 2");
