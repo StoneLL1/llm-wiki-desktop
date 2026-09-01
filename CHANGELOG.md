@@ -31,8 +31,14 @@ v2, capability packs with signed catalogs, performance remediation, Graph
 focus handling, release-contract tooling). Those changes are not enumerated
 per-commit here; `0.2.0` will summarize user-visible behavior at its release.
 
-## [0.2.0-rc.1] — pending
+## [0.2.0-rc.1] — 2026-09-01
 
-First release candidate of the 0.2.0 line. See the release notes attached to
-the eventual GitHub Release for the acceptance evidence and known
-limitations; this section will be filled in when the candidate is sealed.
+First release candidate of the 0.2.0 line, sealed and published as a public
+GitHub prerelease from `98cdbc5` by workflow run 33481891948 (Windows x64
+setup + updater signature, macOS arm64 and macOS x64 DMGs + updater archives,
+flat checksums). The global `latest` channel was not touched. Candidate
+acceptance: the Windows x64 clean-install row is complete with no blocker
+(`docs/release/2026-09-01-app-v0.2.0-rc.1-windows-x64-acceptance.md`);
+macOS arm64 runs next, and macOS x64 / Ubuntu 24.04 x64 are tracked as
+Pending in issue #34. See the release notes and known limitations attached
+to the prerelease for the acceptance policy and platform-warning disclosure.
