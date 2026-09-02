@@ -13,7 +13,11 @@ use crate::errors::{BackendError, IMPORT_V2_CAPABILITY_INVALID, IMPORT_V2_CAPABI
 use crate::models::import_v2_file::CapabilityRequirement;
 
 const MAX_RUNTIME_DIRECTORY_DEPTH: usize = 64;
-const MAX_RUNTIME_ENTRIES: usize = 40_000;
+// Keep the file budget aligned with the release archive and installer. Directories
+// are bounded separately so a valid file inventory is not rejected merely because
+// the extracted runtime has a non-trivial directory structure.
+const MAX_RUNTIME_FILES: usize = 50_000;
+const MAX_RUNTIME_DIRECTORIES: usize = 50_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -367,19 +371,14 @@ fn validate_executable_files(manifest: &CapabilityPackManifest) -> Result<(), Ba
 fn collect_runtime_files(root: &Path) -> Result<Vec<(String, PathBuf)>, BackendError> {
     let mut output = Vec::new();
     let mut pending = vec![(root.to_path_buf(), 0_usize)];
-    let mut visited_entries = 0_usize;
+    let mut visited_files = 0_usize;
+    let mut visited_directories = 0_usize;
     while let Some((directory, depth)) = pending.pop() {
         let entries = fs::read_dir(directory)
             .map_err(|_| invalid("The capability runtime directory cannot be read."))?;
         for entry in entries {
             let entry =
                 entry.map_err(|_| invalid("The capability runtime directory cannot be read."))?;
-            visited_entries = visited_entries
-                .checked_add(1)
-                .ok_or_else(|| invalid("The capability runtime contains too many entries."))?;
-            if visited_entries > MAX_RUNTIME_ENTRIES {
-                return Err(invalid("The capability runtime contains too many entries."));
-            }
             let path = entry.path();
             let metadata = fs::symlink_metadata(&path)
                 .map_err(|_| invalid("A capability runtime file cannot be inspected."))?;
@@ -389,6 +388,14 @@ fn collect_runtime_files(root: &Path) -> Result<Vec<(String, PathBuf)>, BackendE
                 ));
             }
             if metadata.is_dir() {
+                visited_directories = visited_directories.checked_add(1).ok_or_else(|| {
+                    invalid("The capability runtime contains too many directories.")
+                })?;
+                if visited_directories > MAX_RUNTIME_DIRECTORIES {
+                    return Err(invalid(
+                        "The capability runtime contains too many directories.",
+                    ));
+                }
                 if depth >= MAX_RUNTIME_DIRECTORY_DEPTH {
                     return Err(invalid(
                         "The capability runtime directory nesting is too deep.",
@@ -396,6 +403,12 @@ fn collect_runtime_files(root: &Path) -> Result<Vec<(String, PathBuf)>, BackendE
                 }
                 pending.push((path, depth + 1));
             } else if metadata.is_file() {
+                visited_files = visited_files
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("The capability runtime contains too many files."))?;
+                if visited_files > MAX_RUNTIME_FILES {
+                    return Err(invalid("The capability runtime contains too many files."));
+                }
                 let relative = path.strip_prefix(root).map_err(|_| {
                     invalid("A capability runtime file escapes its install directory.")
                 })?;
@@ -510,5 +523,11 @@ mod tests {
         assert_eq!(error.code, IMPORT_V2_CAPABILITY_INVALID);
         assert!(error.message.contains("nesting is too deep"));
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn runtime_inventory_limits_match_the_release_file_budget() {
+        assert_eq!(MAX_RUNTIME_FILES, 50_000);
+        assert_eq!(MAX_RUNTIME_DIRECTORIES, 50_000);
     }
 }

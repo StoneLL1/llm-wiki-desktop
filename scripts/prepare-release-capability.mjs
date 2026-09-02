@@ -218,6 +218,34 @@ async function findDirectory(root, predicate) {
   return null;
 }
 
+export async function findDirectoryContaining(root, relativeFile) {
+  const pending = [root];
+  while (pending.length) {
+    const directory = pending.pop();
+    if ((await fs.stat(path.join(directory, relativeFile)).catch(() => null))?.isFile()) return directory;
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+      if (entry.isDirectory()) pending.push(path.join(directory, entry.name));
+    }
+  }
+  return null;
+}
+
+export async function copyTreePreservingExecutables(source, destination) {
+  await fs.cp(source, destination, { recursive: true, dereference: true });
+  if (process.platform === "win32") return;
+  const pending = [[source, destination]];
+  while (pending.length) {
+    const [sourceDirectory, destinationDirectory] = pending.pop();
+    for (const entry of await fs.readdir(sourceDirectory, { withFileTypes: true })) {
+      const sourcePath = path.join(sourceDirectory, entry.name);
+      const destinationPath = path.join(destinationDirectory, entry.name);
+      const status = await fs.stat(sourcePath);
+      if (status.isDirectory()) pending.push([sourcePath, destinationPath]);
+      else if (status.mode & 0o111) await fs.chmod(destinationPath, 0o755);
+    }
+  }
+}
+
 async function prepareOffice(target, work, prepared, sources) {
   const python = await fetchPython(sources, target, work);
   await stagePythonRuntime(python, prepared);
@@ -228,14 +256,14 @@ async function prepareOffice(target, work, prepared, sources) {
     const extracted = path.join(work, "office-msi");
     await fs.mkdir(extracted);
     await run("msiexec.exe", ["/a", archive, "/qn", `TARGETDIR=${extracted}`], work);
-    const office = await findDirectory(extracted, (candidate) => candidate.endsWith(`${path.sep}LibreOffice`));
+    const office = await findDirectoryContaining(extracted, path.join("program", "soffice.exe"));
     if (!office) throw new Error("LibreOffice MSI omitted the application root");
-    await fs.cp(office, path.join(prepared, "runtime", "libreoffice"), { recursive: true, dereference: true });
+    await copyTreePreservingExecutables(office, path.join(prepared, "runtime", "libreoffice"));
   } else if (process.platform === "darwin") {
     const mount = path.join(work, "office-mount");
     await fs.mkdir(mount);
     await run("hdiutil", ["attach", "-nobrowse", "-readonly", "-mountpoint", mount, archive], work);
-    try { await fs.cp(path.join(mount, "LibreOffice.app"), path.join(prepared, "runtime", "LibreOffice.app"), { recursive: true, dereference: true }); }
+    try { await copyTreePreservingExecutables(path.join(mount, "LibreOffice.app"), path.join(prepared, "runtime", "LibreOffice.app")); }
     finally { await run("hdiutil", ["detach", mount], work); }
   } else {
     const extracted = path.join(work, "office-debs");
@@ -247,7 +275,7 @@ async function prepareOffice(target, work, prepared, sources) {
     for (const name of (await fs.readdir(debRoot)).filter((item) => item.endsWith(".deb")).sort()) {
       await run("dpkg-deb", ["-x", path.join(debRoot, name), installed], work);
     }
-    await fs.cp(path.join(installed, "opt", "libreoffice26.2"), path.join(prepared, "runtime", "libreoffice"), { recursive: true, dereference: true });
+    await copyTreePreservingExecutables(path.join(installed, "opt", "libreoffice26.2"), path.join(prepared, "runtime", "libreoffice"));
   }
   await copyRunner("office-legacy", prepared);
   await writeCompliance(prepared, "office-legacy", target, false, ["pythonStandalone", "libreOffice"], sources);
@@ -275,10 +303,15 @@ async function fetchFfmpeg(target, work, prepared, sources) {
     ], sourceRoot);
     await run("make", ["-j2"], sourceRoot);
     await run("make", ["install"], sourceRoot);
+    const materialized = path.join(work, "ffmpeg-materialized");
+    await copyTreePreservingExecutables(destination, materialized);
+    await fs.rm(destination, { recursive: true });
+    await fs.rename(materialized, destination);
     await fs.copyFile(path.join(sourceRoot, "COPYING.LGPLv3"), path.join(destination, "FFMPEG-LICENSE"));
   } else {
-    await fs.cp(sourceRoot, destination, { recursive: true, dereference: true });
+    await copyTreePreservingExecutables(sourceRoot, destination);
   }
+  if (process.platform !== "win32") await fs.chmod(path.join(destination, "bin", "ffmpeg"), 0o755);
   return destination;
 }
 
@@ -289,6 +322,7 @@ async function installNodeRuntime(target, work, prepared) {
   const node = process.platform === "win32" ? path.join(nodeRoot, nodeName) : path.join(nodeRoot, "bin", nodeName);
   await fs.mkdir(path.join(prepared, "runtime"), { recursive: true });
   await fs.copyFile(node, path.join(prepared, "runtime", nodeName));
+  if (process.platform !== "win32") await fs.chmod(path.join(prepared, "runtime", nodeName), 0o755);
   await fs.copyFile(path.join(nodeRoot, "LICENSE"), path.join(prepared, "runtime", "NODE-LICENSE"));
   return `runtime/${nodeName}`;
 }
@@ -303,6 +337,9 @@ async function prepareMedia(pack, target, work, prepared, sources) {
     await run("git", ["-C", source, "remote", "add", "origin", sources.whisper.source], work);
     await run("git", ["-C", source, "fetch", "--depth", "1", "origin", sources.whisper.commit], work);
     await run("git", ["-C", source, "checkout", "--detach", "FETCH_HEAD"], work);
+    if (process.platform === "win32") {
+      await run("git", ["-C", source, "apply", "--recount", "--unidiff-zero", "--whitespace=error-all", path.join(repositoryRoot, "capabilities", "asr-whisper", "patches", "whisper-v1.8.3-ffmpeg-windows.patch")], work);
+    }
     const build = path.join(work, "whisper-build");
     // Point both cmake prefixes and pkg-config exclusively at the payload ffmpeg so the
     // CLI links the shipped runtime instead of any system-wide FFmpeg dev packages.
@@ -326,6 +363,7 @@ async function prepareMedia(pack, target, work, prepared, sources) {
     if (!binary) throw new Error("whisper.cpp build omitted whisper-cli");
     await fs.mkdir(path.join(prepared, "bin"));
     await fs.copyFile(binary, path.join(prepared, "bin", binaryName));
+    if (process.platform !== "win32") await fs.chmod(path.join(prepared, "bin", binaryName), 0o755);
     await fs.mkdir(path.join(prepared, "models"));
     await download(sources.whisper.model.source, sources.whisper.model, path.join(prepared, "models", "ggml-small.bin"));
     await fs.copyFile(path.join(source, "LICENSE"), path.join(prepared, "WHISPER-LICENSE"));

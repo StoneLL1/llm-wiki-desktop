@@ -14,6 +14,7 @@ import {
   classifyExecutionError,
   ffmpegRelativePath,
   isNoAudioExecutionError,
+  isVideoMedia,
   nativeToolPath,
   parseTimedText,
   parseWhisperJson,
@@ -47,6 +48,17 @@ test("resolves only regular supported media contained by staging", async (t) => 
   await assert.rejects(resolveStagingMedia(value.root, "staging", "../outside.mp4"), /IMPORT_ASR_POLICY_BLOCKED/);
   await fs.writeFile(path.join(value.staging, "flags.txt"), "--model evil");
   await assert.rejects(resolveStagingMedia(value.root, "staging", "flags.txt"), /IMPORT_ASR_UNSUPPORTED_MEDIA/);
+});
+
+test("accepts the manifest-declared WMA and WMV inputs", async (t) => {
+  const value = await fixture();
+  t.after(value.cleanup);
+  for (const name of ["audio.wma", "video.wmv"]) {
+    await fs.writeFile(path.join(value.staging, name), "media");
+    assert.equal((await resolveStagingMedia(value.root, "staging", name)).mediaPath, await fs.realpath(path.join(value.staging, name)));
+  }
+  assert.equal(isVideoMedia("audio.wma"), false);
+  assert.equal(isVideoMedia("video.wmv"), true);
 });
 
 test("fixed argv does not accept caller flags", () => {
