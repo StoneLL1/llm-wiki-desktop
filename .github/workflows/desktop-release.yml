@@ -101,6 +101,22 @@ jobs:
             test -n "${!name:-}" || { echo "required protected release input is missing: $name" >&2; exit 1; }
           done
 
+      - name: Install Linux Tauri dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            wget
+
       - name: Install exact locked dependencies
         run: npm ci
 

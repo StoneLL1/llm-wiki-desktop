@@ -48,6 +48,22 @@ jobs:
         with:
           node-version: 22.23.1
 
+      - name: Install Linux Tauri dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            wget
+
       - name: Require the canonical repository and exact coordinate
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
@@ -121,7 +137,24 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake pkg-config nasm libavcodec-dev libavformat-dev libavutil-dev libswresample-dev
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            libavcodec-dev \
+            libavformat-dev \
+            libavutil-dev \
+            libswresample-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            nasm \
+            patchelf \
+            pkg-config \
+            wget
           npm ci --ignore-scripts --prefix capabilities/browser-runtime
           npm exec --prefix capabilities/browser-runtime -- playwright install-deps chromium
 
@@ -212,6 +245,22 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: 22.23.1 }
+
+      - name: Install Linux Tauri dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            wget
 
       - name: Setup Rust
         run: |
