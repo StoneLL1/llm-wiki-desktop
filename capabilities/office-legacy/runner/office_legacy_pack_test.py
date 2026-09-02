@@ -27,6 +27,13 @@ def request_for(project, staging, source):
     }
 
 
+def chained_request_for(project, staging, source):
+    request = request_for(project, staging, source)
+    request["params"]["input"]["locator"] = source
+    request["params"]["chainedInput"] = source
+    return request
+
+
 def write_docx(_executable, source, output_dir, _profile, _timeout_seconds):
     converted = output_dir / (source.stem + ".docx")
     with zipfile.ZipFile(converted, "w") as archive:
@@ -36,6 +43,50 @@ def write_docx(_executable, source, output_dir, _profile, _timeout_seconds):
 
 
 class OfficeLegacyPackRetryTests(unittest.TestCase):
+    def test_chained_input_is_resolved_relative_to_staging(self):
+        with tempfile.TemporaryDirectory(prefix="office-legacy-chained-") as temporary:
+            project = Path(temporary)
+            staging = project / "staging"
+            staging.mkdir()
+            source = staging / "legacy.doc"
+            executable = project / "soffice"
+            source.write_bytes(b"\xd0\xcf\x11\xe0legacy-original")
+            executable.write_bytes(b"fixture")
+            native = tempfile.TemporaryDirectory(
+                prefix="native-office-", dir=temporary
+            )
+
+            with (
+                patch.dict(os.environ, {"LLM_WIKI_LIBREOFFICE": str(executable)}),
+                patch.object(RUNNER, "execute_libreoffice", side_effect=write_docx),
+                patch.object(
+                    RUNNER,
+                    "short_native_temporary_directory",
+                    return_value=native,
+                ),
+            ):
+                response = RUNNER.handle(
+                    chained_request_for(project, staging, "legacy.doc")
+                )
+
+            self.assertIsNone(response["error"])
+            self.assertTrue((staging / "source.bin").is_file())
+
+    def test_chained_input_cannot_escape_staging(self):
+        with tempfile.TemporaryDirectory(prefix="office-legacy-chained-policy-") as temporary:
+            project = Path(temporary)
+            staging = project / "staging"
+            staging.mkdir()
+            source = project / "outside.doc"
+            source.write_bytes(b"\xd0\xcf\x11\xe0legacy-original")
+
+            response = RUNNER.handle(
+                chained_request_for(project, staging, source)
+            )
+
+            self.assertIsNotNone(response["error"])
+            self.assertEqual(response["error"]["code"], -32602)
+
     def test_libreoffice_profile_argument_uses_rfc8089_file_uri(self):
         profile = RUNNER_PATH.parents[3] / ".superpowers" / "配置 profile"
         process = MagicMock()

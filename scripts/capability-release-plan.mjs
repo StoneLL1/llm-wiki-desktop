@@ -6,6 +6,14 @@ import { fileURLToPath } from "node:url";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
+// These are route-union formats, not inputs that the named pack can consume
+// without the preceding capability in the product pipeline. Keep this allowlist
+// in executable release policy so corpus data alone cannot weaken qualification.
+const approvedIndirectExtensions = Object.freeze({
+  "document-standard": ["doc", "ppt", "xls"],
+  "media-runtime": ["wma"],
+});
+
 async function readJson(relativePath, root = repositoryRoot) {
   return JSON.parse(await fs.readFile(path.join(root, relativePath), "utf8"));
 }
@@ -89,6 +97,17 @@ export async function buildCapabilityReleasePlan(root = repositoryRoot) {
     readJson("capabilities/qualification-corpus.json", root),
   ]);
   const errors = [];
+  const indirectCapabilityIds = new Set([
+    ...Object.keys(approvedIndirectExtensions),
+    ...Object.keys(corpus.indirectExtensionsByCapability ?? {}),
+  ]);
+  for (const capabilityId of indirectCapabilityIds) {
+    const declared = [...(corpus.indirectExtensionsByCapability?.[capabilityId] ?? [])].sort();
+    const approved = [...(approvedIndirectExtensions[capabilityId] ?? [])].sort();
+    if (JSON.stringify(declared) !== JSON.stringify(approved)) {
+      errors.push(`${capabilityId} indirect qualification extensions are not approved`);
+    }
+  }
   const published = manifest.definitions
     .filter((definition) => definition.distributionTier === "published")
     .sort((left, right) => left.capabilityId.localeCompare(right.capabilityId));
@@ -120,9 +139,16 @@ export async function buildCapabilityReleasePlan(root = repositoryRoot) {
     }
     if (recipe?.modelSource && !lookup(sources, recipe.modelSource)) errors.push(`${definition.capabilityId} model source is not locked`);
     for (const extension of definition.formats.extensions) {
-      const fixture = corpus.fixtureByExtension?.[extension];
-      if (!fixture || !(await exists(path.join(corpus.root, fixture), root))) {
+      const capabilityFixture = corpus.fixtureByCapability?.[definition.capabilityId]?.[extension];
+      const fixture = capabilityFixture ?? corpus.fixtureByExtension?.[extension];
+      const fixtureRoot = capabilityFixture ? corpus.capabilityFixtureRoot : corpus.root;
+      if (!fixtureRoot || !fixture || !(await exists(path.join(fixtureRoot, fixture), root))) {
         errors.push(`${definition.capabilityId} format ${extension} has no real qualification fixture`);
+      }
+    }
+    for (const extension of corpus.indirectExtensionsByCapability?.[definition.capabilityId] ?? []) {
+      if (!definition.formats.extensions.includes(extension)) {
+        errors.push(`${definition.capabilityId} marks undeclared format ${extension} as indirect`);
       }
     }
     // Each published provider ships exactly its declared target subset; the

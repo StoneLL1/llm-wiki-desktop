@@ -187,13 +187,16 @@ def handle(request):
         return fail(request_id, -32602, "unsupported protocol version")
     project = Path(params.get("projectRoot", "")).resolve()
     staging = Path(params.get("stagingRoot", ""))
-    source = Path(params.get("input", {}).get("locator", ""))
+    chained = params.get("chainedInput")
+    source = Path(chained) if chained else Path(params.get("input", {}).get("locator", ""))
     if not staging.is_absolute():
         staging = project / staging
     if not source.is_absolute():
-        source = project / source
+        source = (staging if chained else project) / source
     suffix = source.suffix.lower()
-    if not source.is_file() or not contained(project, staging) or suffix not in TARGETS:
+    allowed_source = contained(staging, source) if chained else contained(project, source)
+    if (not source.is_file() or not contained(project, staging)
+            or not allowed_source or suffix not in TARGETS):
         return fail(request_id, -32602, "unauthorized or unsupported source")
     executable = bundled_executable()
     if not executable:

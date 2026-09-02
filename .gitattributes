@@ -1,2 +1,3 @@
 *.pdf binary
 src-tauri/templates/skills/wiki-lint/SKILL.md text eol=lf
+capabilities/asr-whisper/patches/*.patch text eol=lf
