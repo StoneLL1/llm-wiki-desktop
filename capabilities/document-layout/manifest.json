@@ -3,7 +3,7 @@
   "packId": "document-layout",
   "version": "2.48.0",
   "protocolVersion": "2",
-  "targetTriples": ["x86_64-pc-windows-msvc", "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"],
+  "targetTriples": ["x86_64-pc-windows-msvc", "aarch64-apple-darwin", "x86_64-unknown-linux-gnu"],
   "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",
   "licenseExpression": "MIT AND Apache-2.0 AND CDLA-Permissive-2.0 AND PSF-2.0 AND MPL-2.0 AND LicenseRef-Bundled-Third-Party-Notices",
   "entrypoint": "runner/document-layout-pack",

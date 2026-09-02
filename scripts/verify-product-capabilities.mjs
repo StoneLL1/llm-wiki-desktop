@@ -22,6 +22,10 @@ const PRODUCT_SURFACES = ["routes", "formats", "platformContentTypes", "recovery
 const isObject = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 const sorted = (values) => [...values].sort();
 const sameSet = (left, right) => JSON.stringify(sorted(new Set(left))) === JSON.stringify(sorted(new Set(right)));
+const isSubset = (left, right) => {
+  const superset = new Set(right);
+  return left.length > 0 && left.every((item) => superset.has(item));
+};
 const readJson = (target) => JSON.parse(fs.readFileSync(target, "utf8"));
 export const PRODUCT_SCHEMA = readJson(productSchemaPath);
 
@@ -111,7 +115,9 @@ export function expectedReleaseMatrix(manifest = PRODUCT_MANIFEST) {
   const published = manifest.definitions
     .filter((definition) => definition.distributionTier === "published")
     .sort((left, right) => left.capabilityId.localeCompare(right.capabilityId));
-  return manifest.supportedTargets.flatMap((targetTriple) => published.map((definition) => ({
+  // Each published provider ships its own declared target subset; the product
+  // target set is the union surface, not a per-capability obligation.
+  return published.flatMap((definition) => (definition.supportedTargets ?? []).map((targetTriple) => ({
     capabilityId: definition.capabilityId,
     targetTriple,
     stagingStatus: definition.release.stagingStatus,
@@ -177,8 +183,8 @@ const definitionErrors = (definition, index, manifest, root) => {
     errors.push(`${label}.release.stagingStatus is invalid`);
   }
   if (definition.distributionTier === "published") {
-    if (!sameSet(definition.supportedTargets ?? [], manifest.supportedTargets ?? [])) {
-      errors.push(`${label} published provider must support every product target`);
+    if (!isSubset(definition.supportedTargets ?? [], manifest.supportedTargets ?? [])) {
+      errors.push(`${label} published provider must support at least one product target`);
     }
     if (!definition.installation?.proactive || !definition.installation?.updates) {
       errors.push(`${label} published provider must allow proactive install and updates`);

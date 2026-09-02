@@ -514,7 +514,9 @@ fn write_archive(
         .write_all(manifest_bytes)
         .map_err(|error| format!("cannot write manifest to archive: {error}"))?;
     for item in &manifest.files {
-        let permissions = if item.path == manifest.entrypoint {
+        // Executable members keep their exec bit so unix qualification extraction can run them;
+        // install-time extraction restores permissions from this same signed list.
+        let permissions = if manifest.executable_files.contains(&item.path) {
             0o755
         } else {
             0o644
@@ -585,7 +587,8 @@ fn verify_archive(
                     "archive contains a file outside the signed inventory".to_string()
                 })?;
             let mut hasher = Sha256::new();
-            let mut buffer = [0_u8; 1024 * 1024];
+            // Windows main threads get a 1MB stack; a fixed 1MB buffer would overflow it.
+            let mut buffer = vec![0_u8; 1024 * 1024];
             loop {
                 let read = file
                     .read(&mut buffer)
@@ -889,7 +892,8 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     let mut file =
         File::open(path).map_err(|error| format!("cannot hash {}: {error}", path.display()))?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 1024 * 1024];
+    // Windows main threads get a 1MB stack; a fixed 1MB buffer would overflow it.
+    let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
         let read = file
             .read(&mut buffer)

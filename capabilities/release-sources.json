@@ -68,7 +68,7 @@
   "libreOffice": {
     "version": "26.2.4",
     "license": "MPL-2.0 OR LGPL-3.0-or-later",
-    "source": "https://download.documentfoundation.org/libreoffice/stable/26.2.4/",
+    "source": "https://mirrors.ocf.berkeley.edu/tdf/libreoffice/stable/26.2.4/",
     "distributions": {
       "x86_64-pc-windows-msvc": { "file": "LibreOffice_26.2.4_Win_x86-64.msi", "sha256": "202f26cda071c5aa4996a5a28412fddceb3891dceb0366982c62650456c0730f", "bytes": 372539392 },
       "aarch64-apple-darwin": { "file": "LibreOffice_26.2.4_MacOS_aarch64.dmg", "sha256": "64e0ad05564554eeee639d49b08b20908a38d4722ec95f1620d05c99bcbe9fb1", "bytes": 295019039 },
@@ -196,8 +196,8 @@
       },
       "x86_64-unknown-linux-gnu": {
         "file": "sherpa-onnx-v1.13.4-cuda-12.x-cudnn-9.x-linux-x64-gpu.tar.bz2",
-        "sha256": "2ba80dd4df761b8de58d578190846f6f2349523685e33bcb24f65ba586c43563",
-        "bytes": 201655924,
+        "sha256": "75bfb51f58a3f7e0e1be66f702ddb509463444f0f4b11a823f85039b6e3b9119",
+        "bytes": 238512873,
         "root": "sherpa-onnx-v1.13.4-cuda-12.x-cudnn-9.x-linux-x64-gpu",
         "accelerator": "cuda",
         "cpuFallback": true

@@ -39,7 +39,7 @@ export function currentRuntimeKey(platform = process.platform, arch = process.ar
 }
 
 export function ffmpegRelativePath(platform = process.platform) {
-  return platform === "win32" ? "bin/ffmpeg.exe" : "bin/ffmpeg";
+  return platform === "win32" ? "runtime/ffmpeg/bin/ffmpeg.exe" : "runtime/ffmpeg/bin/ffmpeg";
 }
 
 export function nativeToolPath(value, platform = process.platform) {

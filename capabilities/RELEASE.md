@@ -57,7 +57,7 @@ On Linux, Node and Chromium application bytes are bundled, but desktop shared li
 
 ## Document, OCR, media, and ASR packs
 
-The protected workflow also builds document-standard, document-layout, office-legacy, both OCR profiles, media-runtime, SenseVoice, and Whisper on the same four targets. Source folders and placeholder manifests remain fail-closed; the desktop binary cannot install a capability until the protected workflow succeeds, qualification uses the staged runtime, and the same-run catalog/trust/provenance inputs are embedded in the desktop build.
+The protected workflow also builds document-standard, office-legacy, both OCR profiles, media-runtime, SenseVoice, and Whisper on all four desktop targets. document-layout ships three targets: PyTorch has published no x86_64 macOS wheels since 2.2.2, so `pdf.layout` is unavailable on Intel macOS and document-standard remains installable there. Each capability publishes exactly its product-manifest `supportedTargets` subset, and the release catalog records that per-capability matrix. Source folders and placeholder manifests remain fail-closed; the desktop binary cannot install a capability until the protected workflow succeeds, qualification uses the staged runtime, and the same-run catalog/trust/provenance inputs are embedded in the desktop build.
 
 SenseVoice release jobs:
 

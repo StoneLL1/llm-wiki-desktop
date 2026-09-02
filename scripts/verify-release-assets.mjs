@@ -16,7 +16,7 @@ import {
   safeAssetName,
   STABLE_TAG_PATTERN,
 } from "./release-assets-contract.mjs";
-import { CAPABILITY_PACKS, CAPABILITY_TARGETS, verifyCapabilityCatalog } from "./verify-capability-catalog.mjs";
+import { expectedReleaseMatrix, verifyCapabilityCatalog } from "./verify-capability-catalog.mjs";
 import { validateLatestJson } from "./verify-latest-json.mjs";
 
 const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
@@ -154,7 +154,7 @@ export function verifyReleaseAssets({ root, tag, version, commitSha, workflowRun
         expectedRunId: String(workflowRunId),
       }).errors);
       const archives = collectRegularFiles(capabilityRoot).filter((file) => file.endsWith(".zip"));
-      const expectedArchiveCount = CAPABILITY_TARGETS.length * CAPABILITY_PACKS.length;
+      const expectedArchiveCount = expectedReleaseMatrix().length;
       if (archives.length !== expectedArchiveCount) {
         errors.push(`release bundle must contain the manifest-derived exact matrix of ${expectedArchiveCount} capability archives, found ${archives.length}`);
       }

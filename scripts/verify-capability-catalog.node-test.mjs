@@ -9,6 +9,7 @@ import {
   CAPABILITY_TARGETS,
   MODEL_CAPABILITY_PACKS,
   emitCatalogProvenance,
+  expectedReleaseMatrix,
   repositoryRoot,
   verifyCapabilityCatalog,
 } from "./verify-capability-catalog.mjs";
@@ -36,8 +37,10 @@ const releaseEntry = (capabilityId, targetTriple, overrides = {}) => ({
 });
 
 const releaseCatalog = (entries) => ({ schemaVersion: 1, entries });
-const fullMatrix = () => CAPABILITY_TARGETS.flatMap(
-  (targetTriple) => CAPABILITY_PACKS.map((capabilityId) => releaseEntry(capabilityId, targetTriple)),
+// The release matrix is per-definition (document-layout ships three targets),
+// so fixtures are derived from the manifest instead of a cartesian product.
+const fullMatrix = () => expectedReleaseMatrix().map(
+  ({ capabilityId, targetTriple }) => releaseEntry(capabilityId, targetTriple),
 );
 
 const verify = (overrides = {}) => verifyCapabilityCatalog({

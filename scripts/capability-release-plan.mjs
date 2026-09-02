@@ -125,8 +125,10 @@ export async function buildCapabilityReleasePlan(root = repositoryRoot) {
         errors.push(`${definition.capabilityId} format ${extension} has no real qualification fixture`);
       }
     }
-    for (const targetTriple of manifest.supportedTargets) {
-      if (!definition.supportedTargets.includes(targetTriple)) errors.push(`${definition.capabilityId} does not support ${targetTriple}`);
+    // Each published provider ships exactly its declared target subset; the
+    // product target set is the union surface, not a per-capability obligation.
+    for (const targetTriple of definition.supportedTargets) {
+      if (!manifest.supportedTargets.includes(targetTriple)) errors.push(`${definition.capabilityId} declares unknown target ${targetTriple}`);
       entries.push({
         capabilityId: definition.capabilityId,
         targetTriple,
@@ -141,10 +143,11 @@ export async function buildCapabilityReleasePlan(root = repositoryRoot) {
     }
   }
   const unique = new Set(entries.map((entry) => `${entry.capabilityId}\0${entry.targetTriple}`));
+  const expectedEntryCount = published.reduce((total, definition) => total + definition.supportedTargets.length, 0);
   if (unique.size !== entries.length) errors.push("release plan contains duplicate pack × target entries");
-  if (entries.length !== published.length * manifest.supportedTargets.length) errors.push("release plan is not an exact manifest-derived cartesian product");
+  if (entries.length !== expectedEntryCount) errors.push("release plan is not the exact sum of per-capability target sets");
   if (!Array.isArray(corpus.generatedCases) || corpus.generatedCases.length !== 5) errors.push("qualification corpus must define the five required generated cases");
-  return { errors, manifest, entries, expectedEntryCount: published.length * manifest.supportedTargets.length };
+  return { errors, manifest, entries, expectedEntryCount };
 }
 
 async function main() {

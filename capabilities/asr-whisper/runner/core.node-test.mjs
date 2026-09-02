@@ -161,6 +161,6 @@ test("renders sparse anchors and exposes only bounded local video probe argument
   assert.deepEqual(selectStableTextFrameIndexes([pgm, Buffer.from(pgm)]), [1]);
   assert.equal(buildVideoTextProbeArguments("clip.mp4", "probe-%03d.pgm").at(-2), "180");
   assert.equal(buildVideoOcrFrameArguments("clip.mp4", 20, "frame.png").at(-1), "frame.png");
-  assert.equal(ffmpegRelativePath("win32"), "bin/ffmpeg.exe");
-  assert.equal(ffmpegRelativePath("linux"), "bin/ffmpeg");
+  assert.equal(ffmpegRelativePath("win32"), "runtime/ffmpeg/bin/ffmpeg.exe");
+  assert.equal(ffmpegRelativePath("linux"), "runtime/ffmpeg/bin/ffmpeg");
 });

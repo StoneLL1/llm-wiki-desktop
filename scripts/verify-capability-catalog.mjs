@@ -11,7 +11,7 @@ import {
   expectedReleaseMatrix,
 } from "./verify-product-capabilities.mjs";
 
-export { CAPABILITY_PACKS, CAPABILITY_TARGETS, MODEL_CAPABILITY_PACKS };
+export { CAPABILITY_PACKS, CAPABILITY_TARGETS, MODEL_CAPABILITY_PACKS, expectedReleaseMatrix };
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 export const repositoryRoot = path.resolve(scriptDirectory, "..");

@@ -16,7 +16,7 @@ import { stageDesktopRelease } from "./stage-desktop-release.mjs";
 import { verifyReleaseAssets } from "./verify-release-assets.mjs";
 import { generateLatestJson, validateLatestJson } from "./verify-latest-json.mjs";
 import { publishedUpdaterPairs } from "./verify-updater-signatures.mjs";
-import { CAPABILITY_PACKS, CAPABILITY_TARGETS, MODEL_CAPABILITY_PACKS } from "./verify-capability-catalog.mjs";
+import { MODEL_CAPABILITY_PACKS, expectedReleaseMatrix } from "./verify-capability-catalog.mjs";
 import { PRODUCT_MANIFEST } from "./verify-product-capabilities.mjs";
 
 const TAG = "app-v0.1.0";
@@ -72,7 +72,9 @@ function createReleaseBundle(root) {
     descriptors.push(descriptor);
   }
 
-  const entries = CAPABILITY_TARGETS.flatMap((target) => CAPABILITY_PACKS.map((pack) => releaseEntry(pack, target)));
+  // Release archives follow the per-definition target matrix (43 packs), not a
+  // cartesian product with the product target set.
+  const entries = expectedReleaseMatrix().map(({ capabilityId, targetTriple }) => releaseEntry(capabilityId, targetTriple));
   const capabilityRoot = path.join(root, "capabilities");
   fs.mkdirSync(capabilityRoot, { recursive: true });
   for (const entry of entries) fs.writeFileSync(path.join(capabilityRoot, path.basename(new URL(entry.url).pathname)), "zip");

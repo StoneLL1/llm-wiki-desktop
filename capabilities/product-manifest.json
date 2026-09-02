@@ -188,7 +188,7 @@
       "protocolVersion": "2",
       "distributionTier": "published",
       "supportedTargets": [
-        "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"
+        "aarch64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"
       ],
       "licensePolicy": { "expression": "MIT AND Apache-2.0 AND CDLA-Permissive-2.0 AND PSF-2.0 AND MPL-2.0 AND LicenseRef-Bundled-Third-Party-Notices", "thirdPartyNotices": ["Docling, model, bundled Python, dependency licenses, generated release NOTICE and SBOM"] },
       "sizeSources": { "compressedBytes": "catalog.compressedBytes", "installedBytes": "catalog.installedBytes", "modelBytes": "catalog.modelBytes" },

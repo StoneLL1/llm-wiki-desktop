@@ -173,7 +173,21 @@ fn document_layout_pack_is_pinned_cross_platform_and_offline_at_runtime() {
         manifest["licenseExpression"],
         "MIT AND Apache-2.0 AND CDLA-Permissive-2.0 AND PSF-2.0 AND MPL-2.0 AND LicenseRef-Bundled-Third-Party-Notices"
     );
-    assert_eq!(manifest["targetTriples"].as_array().unwrap().len(), 4);
+    // PyTorch ships no x86_64 macOS wheels, so document-layout publishes exactly
+    // three targets and Intel macOS keeps the document-standard fallback.
+    assert_eq!(
+        manifest["targetTriples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            "x86_64-pc-windows-msvc",
+            "aarch64-apple-darwin",
+            "x86_64-unknown-linux-gnu",
+        ]
+    );
     let runner =
         std::fs::read_to_string(root.join("capabilities/document-layout/runner/docling_pack.py"))
             .unwrap();

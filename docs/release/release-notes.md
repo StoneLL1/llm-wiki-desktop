@@ -5,7 +5,7 @@ This first public release establishes the local-first desktop foundation for imp
 Release highlights:
 
 - project trust, writable-access, Git checkpoint, provider-origin, and process-lifetime guards are enforced in the backend;
-- optional OCR, ASR, browser, and media capabilities are distributed as a signed four-platform catalog;
+- optional OCR, ASR, browser, and media capabilities are distributed as a signed cross-platform catalog (every capability covers Windows x64, macOS arm64, macOS x64, and Linux x64 except document-layout, which does not ship on Intel macOS because current PyTorch releases no longer provide x86_64 macOS wheels; pdf.layout falls back to document-standard there);
 - global update checks, release notes, cancellable downloads, install blockers, and restart-to-update are available from the desktop shell;
 - Windows x64, macOS arm64, macOS x64, and Linux x64 artifacts are built from one tag and one commit;
 - installers, updater signatures, capability packs, SBOMs, checksums, provenance, and packaged-smoke evidence are published atomically;

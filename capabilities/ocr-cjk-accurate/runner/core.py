@@ -102,8 +102,8 @@ def resolve_staging_image(
     if not candidate.is_absolute():
         candidate = staging_root / candidate
     candidate = Path(os.path.abspath(candidate))
-    if not is_contained(staging_root, candidate):
-        _fail("IMPORT_OCR_POLICY_BLOCKED")
+    # Containment is enforced on the resolved path below; checking the unresolved
+    # form here would false-block macOS TMPDIR (/var -> /private/var) style roots.
     try:
         status = candidate.lstat()
     except OSError:
