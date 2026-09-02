@@ -167,7 +167,7 @@ def execute_libreoffice(executable, source, output_dir, profile, timeout_seconds
 
 
 def handle(request):
-    request_id = str(request.get("id", ""))
+    request_id = request.get("id")
     if request.get("jsonrpc") == "2.0" and request.get("method") == "capability.health":
         params = request.get("params", {})
         executable = bundled_executable()

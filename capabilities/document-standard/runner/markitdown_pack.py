@@ -30,7 +30,7 @@ def contained(root, path):
 
 
 def handle(request):
-    request_id = str(request.get("id", ""))
+    request_id = request.get("id")
     if request.get("jsonrpc") == "2.0" and request.get("method") == "capability.health":
         params = request.get("params", {})
         if (params.get("protocolVersion") != "2"

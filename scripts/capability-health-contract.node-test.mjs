@@ -33,3 +33,40 @@ test("every Batch 3A published capability implements the Batch 3B health protoco
     assert.match(source, /protocolVersion/u, `${capabilityId} does not bind protocol v2`);
   }
 });
+
+test("qualification runners preserve numeric JSON-RPC request IDs", () => {
+  for (const relativePath of [
+    "capabilities/document-standard/runner/markitdown_pack.py",
+    "capabilities/document-layout/runner/docling_pack.py",
+    "capabilities/office-legacy/runner/office_legacy_pack.py",
+  ]) {
+    const source = fs.readFileSync(path.join(root, relativePath), "utf8");
+    assert.match(source, /request_id\s*=\s*request\.get\("id"\)/u, `${relativePath} does not preserve the request ID`);
+    assert.doesNotMatch(source, /request_id\s*=\s*str\(/u, `${relativePath} coerces the request ID to text`);
+  }
+  const mediaRunner = fs.readFileSync(path.join(root, "capabilities/media-runtime/runner/index.mjs"), "utf8");
+  assert.match(mediaRunner, /rpc\s*=\s*await readRpc\(\)/u);
+  assert.doesNotMatch(mediaRunner, /readFile\(0,/u);
+});
+
+test("release producer and installer keep the same bounded file-count budget", () => {
+  const releaseSource = fs.readFileSync(path.join(root, "src-tauri/src/bin/capability_release.rs"), "utf8");
+  const installerSource = fs.readFileSync(path.join(root, "src-tauri/src/services/import_v2/capability_installer.rs"), "utf8");
+  const packSource = fs.readFileSync(path.join(root, "src-tauri/src/services/import_v2/capability_pack.rs"), "utf8");
+  const limit = (source) => Number(source.match(/const MAX_ARCHIVE_FILES: usize = ([\d_]+);/u)?.[1].replaceAll("_", ""));
+  const runtimeLimit = Number(packSource.match(/const MAX_RUNTIME_FILES: usize = ([\d_]+);/u)?.[1].replaceAll("_", ""));
+  assert.equal(limit(releaseSource), 50_000);
+  assert.equal(limit(installerSource), limit(releaseSource));
+  assert.equal(runtimeLimit, limit(releaseSource));
+});
+
+test("Windows whisper backport maps large media instead of buffering it in memory", () => {
+  const patchSource = fs.readFileSync(
+    path.join(root, "capabilities/asr-whisper/patches/whisper-v1.8.3-ffmpeg-windows.patch"),
+    "utf8",
+  );
+  assert.match(patchSource, /CreateFileMappingW/u);
+  assert.match(patchSource, /^\+\s*size_t size; \/\* size left in the buffer \*\//mu);
+  assert.doesNotMatch(patchSource, /^\+.*std::vector<u8> input_data/mu);
+  assert.doesNotMatch(patchSource, /numeric_limits<int>/u);
+});

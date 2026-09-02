@@ -16,11 +16,11 @@ export const MAX_SENSEVOICE_CHUNKS = Math.ceil(7_200 / SENSEVOICE_CHUNK_SECONDS)
 export const MAX_SENSEVOICE_BATCH_CHUNKS = 24;
 
 const MEDIA_EXTENSIONS = new Set([
-  ".aac", ".flac", ".m4a", ".mka", ".mp3", ".ogg", ".opus", ".wav",
-  ".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".webm",
+  ".aac", ".flac", ".m4a", ".mka", ".mp3", ".ogg", ".opus", ".wav", ".wma",
+  ".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".webm", ".wmv",
 ]);
 const VIDEO_EXTENSIONS = new Set([
-  ".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".webm",
+  ".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".webm", ".wmv",
 ]);
 
 function asError(code) {

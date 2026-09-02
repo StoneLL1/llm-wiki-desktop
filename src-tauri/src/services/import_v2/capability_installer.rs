@@ -18,7 +18,8 @@ use super::capability_pack::CapabilityPackManager;
 
 const MAX_ARCHIVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_INSTALLED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-const MAX_ARCHIVE_FILES: usize = 20_000;
+// This must mirror capability_release so every emitted archive is installable.
+const MAX_ARCHIVE_FILES: usize = 50_000;
 const MAX_PARTIAL_METADATA_BYTES: u64 = 64 * 1024;
 const MAX_REAPER_PREFIX_VERIFY_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ARCHIVE_DEPTH: usize = 24;
@@ -1363,7 +1364,7 @@ fn extract_and_verify_with_keys_cancellable(
         .map_err(|_| install_error("Capability archive cannot be rewound."))?;
     let mut archive = zip::ZipArchive::new(archive_file)
         .map_err(|_| install_error("Capability archive is invalid."))?;
-    if archive.len() == 0 || archive.len() > MAX_ARCHIVE_FILES {
+    if !valid_archive_file_count(archive.len()) {
         return Err(install_error("Capability archive file count is invalid."));
     }
     let mut installed = 0_u64;
@@ -1455,6 +1456,10 @@ fn extract_and_verify_with_keys_cancellable(
     let pack = verify_installed_root_with_keys(staging_root, entry, keys)?;
     restore_executable_permissions(&pack)?;
     Ok(())
+}
+
+fn valid_archive_file_count(file_count: usize) -> bool {
+    (1..=MAX_ARCHIVE_FILES).contains(&file_count)
 }
 
 fn prepare_staging_root(install_root: &Path, staging_root: &Path) -> Result<(), BackendError> {
@@ -1973,6 +1978,13 @@ mod tests {
         };
         assert!(!valid_catalog_entry(&entry));
         assert!(catalog_entry("asr-sensevoice-small", &entry.target_triple).is_none());
+    }
+
+    #[test]
+    fn installer_file_count_limit_matches_large_release_payloads() {
+        assert!(!valid_archive_file_count(0));
+        assert!(valid_archive_file_count(50_000));
+        assert!(!valid_archive_file_count(50_001));
     }
 
     #[test]

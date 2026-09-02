@@ -18,7 +18,9 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 const PRIVATE_KEY_ENV: &str = "LLM_WIKI_CAPABILITY_SIGNING_KEY_PKCS8_HEX";
 const MAX_ARCHIVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_INSTALLED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-const MAX_ARCHIVE_FILES: usize = 20_000;
+// Pinned document runtimes currently exceed 31,700 files; keep a finite margin
+// while retaining the byte and depth limits as independent archive-bomb guards.
+const MAX_ARCHIVE_FILES: usize = 50_000;
 const SUPPORTED_TARGETS: &[&str] = &[
     "x86_64-pc-windows-msvc",
     "aarch64-apple-darwin",
@@ -385,9 +387,7 @@ fn collect_payload_files(root: &Path) -> Result<Vec<CapabilityPackFile>, String>
     if paths.is_empty() {
         return Err("payload contains no files".into());
     }
-    if paths.len() + 1 > MAX_ARCHIVE_FILES {
-        return Err("payload exceeds the release file-count limit".into());
-    }
+    validate_release_file_count(paths.len())?;
     paths
         .into_iter()
         .map(|(relative, path)| {
@@ -400,6 +400,18 @@ fn collect_payload_files(root: &Path) -> Result<Vec<CapabilityPackFile>, String>
             })
         })
         .collect()
+}
+
+fn validate_release_file_count(payload_files: usize) -> Result<usize, String> {
+    let archive_files = payload_files
+        .checked_add(1)
+        .ok_or_else(|| "payload file count overflowed the release limit".to_string())?;
+    if archive_files > MAX_ARCHIVE_FILES {
+        return Err(format!(
+            "payload exceeds the release file-count limit ({archive_files} files; limit {MAX_ARCHIVE_FILES})"
+        ));
+    }
+    Ok(archive_files)
 }
 
 #[cfg(unix)]
@@ -1175,5 +1187,12 @@ mod tests {
                 "expected {tag} to be rejected"
             );
         }
+    }
+
+    #[test]
+    fn release_file_count_limit_covers_large_pinned_runtimes_and_still_fails_closed() {
+        assert_eq!(validate_release_file_count(49_999).unwrap(), 50_000);
+        let error = validate_release_file_count(50_000).unwrap_err();
+        assert!(error.contains("50001 files; limit 50000"));
     }
 }
