@@ -20,8 +20,17 @@ test("the repository product capability manifest is the valid release source of 
 
   const published = manifest.definitions.filter((definition) => definition.distributionTier === "published");
   const matrix = expectedReleaseMatrix(manifest);
-  assert.equal(matrix.length, published.length * manifest.supportedTargets.length);
+  const expectedCount = published.reduce((total, definition) => total + definition.supportedTargets.length, 0);
+  assert.equal(matrix.length, expectedCount);
   assert.equal(new Set(matrix.map(({ capabilityId, targetTriple }) => `${capabilityId}\0${targetTriple}`)).size, matrix.length);
+  // document-layout ships three targets (Intel macOS has no PyTorch wheels);
+  // every other published provider still covers the full product target set.
+  for (const definition of published) {
+    if (definition.capabilityId === "document-layout") continue;
+    assert.deepEqual([...definition.supportedTargets].sort(), [...manifest.supportedTargets].sort());
+  }
+  const layoutTargets = matrix.filter((entry) => entry.capabilityId === "document-layout").map((entry) => entry.targetTriple);
+  assert.equal(layoutTargets.includes("x86_64-apple-darwin"), false);
 });
 
 test("the product manifest closes the release-blocking routes, formats, and profiles", async () => {

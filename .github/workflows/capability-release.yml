@@ -205,7 +205,7 @@ jobs:
           $archive = Get-ChildItem -LiteralPath capability-dist -Filter '*.zip' -File | Select-Object -ExpandProperty FullName
           $qualified = Join-Path $env:RUNNER_TEMP 'signed-qualification'
           New-Item -ItemType Directory -Path $qualified | Out-Null
-          tar -xf $archive -C $qualified
+          if ($IsLinux) { unzip -q $archive -d $qualified } else { tar -xf $archive -C $qualified }
           node scripts/qualify-staged-capability.mjs --payload $qualified
           $evidence = Join-Path $env:GITHUB_WORKSPACE 'capability-dist/${{ matrix.capabilityId }}-${{ matrix.targetTriple }}.qualification.json'
           node scripts/qualify-release-corpus.mjs --payload $qualified --evidence $evidence

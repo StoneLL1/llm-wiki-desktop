@@ -250,7 +250,13 @@ export function evaluateFinalFourRedlines(root) {
       .map((definition) => definition.capabilityId)
       .sort()
     : [];
-  const expectedCatalogEntries = expectedTargets.length * expectedPacks.length;
+  // Each published provider ships its declared target subset; expected size is
+  // the sum over definitions, not a cartesian product with the product targets.
+  const expectedCatalogEntries = Array.isArray(productManifest?.definitions)
+    ? productManifest.definitions
+      .filter((definition) => definition?.distributionTier === "published")
+      .reduce((total, definition) => total + (Array.isArray(definition.supportedTargets) ? definition.supportedTargets.length : 0), 0)
+    : 0;
   const catalogTargets = new Set(catalogEntries.map((entry) => entry.targetTriple));
   const catalogPacks = new Set(catalogEntries.map((entry) => entry.capabilityId));
   const catalogPairs = new Set(catalogEntries.map((entry) => `${entry.capabilityId}\0${entry.targetTriple}`));

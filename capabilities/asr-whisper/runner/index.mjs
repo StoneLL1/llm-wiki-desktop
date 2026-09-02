@@ -77,6 +77,15 @@ function restrictedEnvironment() {
   for (const name of ["SystemRoot", "WINDIR", "TEMP", "TMP", "TMPDIR"]) {
     if (typeof process.env[name] === "string") result[name] = process.env[name];
   }
+  // whisper-cli and the ffmpeg CLI dynamically link the payload FFmpeg libraries
+  // staged under runtime/ffmpeg; the restricted environment must still resolve them.
+  const ffmpegLib = path.join(packRoot, "runtime", "ffmpeg", "lib");
+  if (process.platform === "linux") result.LD_LIBRARY_PATH = ffmpegLib;
+  if (process.platform === "darwin") result.DYLD_LIBRARY_PATH = ffmpegLib;
+  if (process.platform === "win32") {
+    const ffmpegBin = path.join(packRoot, "runtime", "ffmpeg", "bin");
+    result.PATH = `${ffmpegBin}${path.delimiter}${process.env.PATH ?? ""}`;
+  }
   return result;
 }
 

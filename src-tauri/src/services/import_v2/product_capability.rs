@@ -219,12 +219,12 @@ impl ProductCapabilityManifest {
                 ));
             }
             if definition.distribution_tier == "published" {
-                if !same_set(
+                if !nonempty_subset(
                     &definition.supported_targets,
                     self.supported_targets.iter().map(String::as_str),
                 ) {
                     return Err(format!(
-                        "published product capability {} must support every product target",
+                        "published product capability {} must support at least one product target",
                         definition.capability_id
                     ));
                 }
@@ -310,7 +310,11 @@ impl ProductCapabilityManifest {
     }
 
     pub fn expected_release_entry_count(&self) -> usize {
-        self.published_definitions().count() * self.supported_targets.len()
+        // Each published capability ships its declared target subset, so the
+        // expected matrix size is the sum over definitions, not a cartesian product.
+        self.published_definitions()
+            .map(|definition| definition.supported_targets.len())
+            .sum()
     }
 
     pub fn validate_catalog(
@@ -373,7 +377,7 @@ impl ProductCapabilityManifest {
                 ));
             }
             for definition in self.published_definitions() {
-                for target in &self.supported_targets {
+                for target in &definition.supported_targets {
                     if !pairs.contains(&(definition.capability_id.as_str(), target.as_str())) {
                         return Err(format!(
                             "distributable catalog is missing {} for {}",
@@ -511,6 +515,11 @@ fn same_set<'a>(left: &[String], right: impl Iterator<Item = &'a str>) -> bool {
     left.iter().map(String::as_str).collect::<HashSet<_>>() == right.collect::<HashSet<_>>()
 }
 
+fn nonempty_subset<'a>(left: &[String], right: impl Iterator<Item = &'a str>) -> bool {
+    let superset = right.collect::<HashSet<_>>();
+    !left.is_empty() && left.iter().map(String::as_str).all(|value| superset.contains(value))
+}
+
 fn all_unique<'a>(values: impl Iterator<Item = &'a str>) -> bool {
     let mut seen = HashSet::new();
     values.into_iter().all(|value| seen.insert(value))
@@ -556,9 +565,20 @@ mod tests {
                 Some("published")
             );
         }
+        // document-layout ships three targets (no Intel-macOS PyTorch wheels);
+        // every other published provider still covers the full target set.
+        assert_eq!(
+            manifest
+                .definition("document-layout")
+                .map(|definition| definition.supported_targets.len()),
+            Some(3)
+        );
         assert_eq!(
             manifest.expected_release_entry_count(),
-            manifest.published_definitions().count() * REQUIRED_TARGETS.len()
+            manifest
+                .published_definitions()
+                .map(|definition| definition.supported_targets.len())
+                .sum::<usize>()
         );
     }
 

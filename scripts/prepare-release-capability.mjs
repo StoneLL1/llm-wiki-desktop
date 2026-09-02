@@ -26,20 +26,42 @@ function parse(values) {
   return { pack: required("pack"), target: required("target"), output: path.resolve(required("output")) };
 }
 
+function shellQuoteWindows(value) {
+  return /[\s"&|<>^%]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
+}
+
 function run(program, arguments_, cwd = repositoryRoot, extraEnv = {}) {
+  // npm is npm.cmd on Windows and cannot be spawned with shell:false directly.
+  const throughCmd = process.platform === "win32" && program === "npm";
+  const command = throughCmd ? (process.env.ComSpec ?? "cmd.exe") : program;
+  const commandArguments = throughCmd
+    ? ["/d", "/s", "/c", `npm ${arguments_.map(shellQuoteWindows).join(" ")}`]
+    : arguments_;
   return new Promise((resolve, reject) => {
-    const child = spawn(program, arguments_, {
-      cwd, shell: false, windowsHide: true, stdio: "inherit",
+    const child = spawn(command, commandArguments, {
+      cwd, shell: false, windowsHide: true,
+      // Child stdout is forwarded to stderr so the JSON result on stdout stays parseable.
+      stdio: ["inherit", "pipe", "inherit"],
       env: { ...process.env, ...extraEnv, UV_LINK_MODE: "copy", UV_NO_CONFIG: "1", UV_NO_PROGRESS: "1" },
     });
+    child.stdout?.on("data", (chunk) => process.stderr.write(chunk));
     child.once("error", reject);
     child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`${program} exited with ${code}`)));
   });
 }
 
-async function download(url, declaration, destination) {
-  const response = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(45 * 60 * 1000) });
-  if (!response.ok || !response.body || new URL(response.url).protocol !== "https:") throw new Error(`download failed: ${url}`);
+function downloadFailureReason(error) {
+  return error?.cause?.code ?? error?.cause?.message ?? error?.message ?? "unknown error";
+}
+
+async function downloadOnce(url, declaration, destination) {
+  let response;
+  try {
+    response = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(45 * 60 * 1000) });
+  } catch (error) {
+    throw new Error(`fetch failed (${downloadFailureReason(error)})`);
+  }
+  if (!response.ok || !response.body || new URL(response.url).protocol !== "https:") throw new Error(`download failed with HTTP ${response.status}`);
   const handle = await fs.open(destination, "wx");
   const hash = createHash("sha256");
   let bytes = 0;
@@ -57,6 +79,24 @@ async function download(url, declaration, destination) {
     await fs.rm(destination, { force: true });
     throw new Error("download differs from the locked SHA-256 or byte count");
   }
+}
+
+async function download(url, declaration, destination) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      await downloadOnce(url, declaration, destination);
+      return;
+    } catch (error) {
+      lastError = error;
+      await fs.rm(destination, { force: true }).catch(() => {});
+      if (attempt < 3) {
+        process.stderr.write(`prepare-release-capability: download attempt ${attempt} of 3 failed: ${error.message}; retrying\n`);
+        await new Promise((resolve) => { setTimeout(resolve, 5000 * attempt); });
+      }
+    }
+  }
+  throw new Error(`download failed after 3 attempts: ${url} (${lastError?.message})`);
 }
 
 async function fetchPython(sources, target, work) {
@@ -98,7 +138,7 @@ async function fileInventory(root) {
 }
 
 async function writeCompliance(prepared, pack, target, runtimeNetwork, sourceNames, sources, details = {}) {
-  const evidence = (await fileInventory(prepared)).filter((item) => /(?:^|\/)(?:copying|license|notice)[^/]*$/iu.test(item.path));
+  const evidence = (await fileInventory(prepared)).filter((item) => /(?:^|\/)[^/]*(?:copying|license|notice)[^/]*$/iu.test(item.path));
   if (!evidence.length) throw new Error(`${pack} contains no redistributed license evidence`);
   const packages = sourceNames.map((name, index) => ({
     name, SPDXID: `SPDXRef-Source-${index + 1}`, versionInfo: sources[name].version,
@@ -121,13 +161,20 @@ async function writeCompliance(prepared, pack, target, runtimeNetwork, sourceNam
   }, null, 2)}\n`);
 }
 
+async function stagePythonRuntime(python, prepared) {
+  await fs.mkdir(path.join(prepared, "runtime"), { recursive: true });
+  const destination = path.join(prepared, "runtime", "python");
+  // Copy with dereference: python-build-standalone ships symlinks on unix which the
+  // release payload inventory rejects, so the staged runtime must contain regular files only.
+  await fs.cp(python.root, destination, { recursive: true, dereference: true });
+  return process.platform === "win32"
+    ? path.join(destination, "python.exe")
+    : path.join(destination, "bin", "python3");
+}
+
 async function preparePythonPack(pack, target, work, prepared, sources) {
   const python = await fetchPython(sources, target, work);
-  await fs.mkdir(path.join(prepared, "runtime"), { recursive: true });
-  await fs.rename(python.root, path.join(prepared, "runtime", "python"));
-  const executable = process.platform === "win32"
-    ? path.join(prepared, "runtime", "python", "python.exe")
-    : path.join(prepared, "runtime", "python", "bin", "python3");
+  const executable = await stagePythonRuntime(python, prepared);
   const layout = pack === "document-layout";
   const lock = path.join(repositoryRoot, layout
     ? "capabilities/document-layout/runner/requirements.lock"
@@ -137,10 +184,11 @@ async function preparePythonPack(pack, target, work, prepared, sources) {
   await copyRunner(pack, prepared);
   if (layout) {
     const model = sources.documentLayout.models;
+    // uv installs into --target, which the bare interpreter does not see without PYTHONPATH.
     await run(executable, ["-c", [
       "from huggingface_hub import snapshot_download",
       `snapshot_download(repo_id='ds4sd/docling-models',revision='${model.revision}',local_dir=r'${path.join(prepared, "models").replaceAll("'", "\\'")}')`,
-    ].join(";")], prepared);
+    ].join(";")], prepared, { PYTHONPATH: sitePackages });
   }
   await writeCompliance(
     prepared, pack, target, false,
@@ -172,8 +220,7 @@ async function findDirectory(root, predicate) {
 
 async function prepareOffice(target, work, prepared, sources) {
   const python = await fetchPython(sources, target, work);
-  await fs.mkdir(path.join(prepared, "runtime"), { recursive: true });
-  await fs.rename(python.root, path.join(prepared, "runtime", "python"));
+  await stagePythonRuntime(python, prepared);
   const declaration = sources.libreOffice.distributions[target];
   const archive = path.join(work, declaration.file);
   await download(libreOfficeUrl(sources.libreOffice.source, target, declaration.file), declaration, archive);
@@ -217,13 +264,22 @@ async function fetchFfmpeg(target, work, prepared, sources) {
   const sourceRoot = path.join(extracted, declaration.root);
   const destination = path.join(prepared, "runtime", "ffmpeg");
   if (declaration.kind === "source") {
-    await run("./configure", ["--disable-doc", "--disable-debug", "--disable-programs", "--enable-ffmpeg", "--disable-gpl", "--disable-nonfree", `--prefix=${destination}`], sourceRoot);
+    await run("./configure", [
+      "--disable-doc", "--disable-debug", "--disable-programs", "--enable-ffmpeg",
+      "--disable-gpl", "--disable-nonfree",
+      // Shared dylibs with loader-relative install names keep whisper-cli and the
+      // ffmpeg CLI runnable straight from the extracted payload on macOS.
+      "--disable-static", "--enable-shared", "--install-name-dir=@loader_path/../lib",
+      "--disable-x86asm",
+      `--prefix=${destination}`,
+    ], sourceRoot);
     await run("make", ["-j2"], sourceRoot);
     await run("make", ["install"], sourceRoot);
     await fs.copyFile(path.join(sourceRoot, "COPYING.LGPLv3"), path.join(destination, "FFMPEG-LICENSE"));
   } else {
     await fs.cp(sourceRoot, destination, { recursive: true, dereference: true });
   }
+  return destination;
 }
 
 async function installNodeRuntime(target, work, prepared) {
@@ -239,7 +295,7 @@ async function installNodeRuntime(target, work, prepared) {
 
 async function prepareMedia(pack, target, work, prepared, sources) {
   const entrypoint = await installNodeRuntime(target, work, prepared);
-  await fetchFfmpeg(target, work, prepared, sources);
+  const ffmpegRoot = await fetchFfmpeg(target, work, prepared, sources);
   await copyRunner(pack, prepared);
   if (pack === "asr-whisper") {
     const source = path.join(work, "whisper-src");
@@ -248,8 +304,15 @@ async function prepareMedia(pack, target, work, prepared, sources) {
     await run("git", ["-C", source, "fetch", "--depth", "1", "origin", sources.whisper.commit], work);
     await run("git", ["-C", source, "checkout", "--detach", "FETCH_HEAD"], work);
     const build = path.join(work, "whisper-build");
-    await run("cmake", ["-S", source, "-B", build, "-DWHISPER_FFMPEG=ON", "-DWHISPER_BUILD_TESTS=OFF", "-DWHISPER_BUILD_EXAMPLES=ON", "-DCMAKE_BUILD_TYPE=Release"], work);
-    await run("cmake", ["--build", build, "--config", "Release", "--target", "whisper-cli", "--parallel", "2"], work);
+    // Point both cmake prefixes and pkg-config exclusively at the payload ffmpeg so the
+    // CLI links the shipped runtime instead of any system-wide FFmpeg dev packages.
+    const ffmpegPkgConfig = path.join(ffmpegRoot, "lib", "pkgconfig");
+    const cmakeEnvironment = process.platform === "win32" ? {} : {
+      PKG_CONFIG_LIBDIR: ffmpegPkgConfig,
+      PKG_CONFIG_PATH: ffmpegPkgConfig,
+    };
+    await run("cmake", ["-S", source, "-B", build, "-DWHISPER_FFMPEG=ON", "-DWHISPER_BUILD_TESTS=OFF", "-DWHISPER_BUILD_EXAMPLES=ON", "-DCMAKE_BUILD_TYPE=Release", `-DCMAKE_PREFIX_PATH=${ffmpegRoot}`], work, cmakeEnvironment);
+    await run("cmake", ["--build", build, "--config", "Release", "--target", "whisper-cli", "--parallel", "2"], work, cmakeEnvironment);
     const binaryName = process.platform === "win32" ? "whisper-cli.exe" : "whisper-cli";
     const pending = [build]; let binary = null;
     while (pending.length && !binary) {

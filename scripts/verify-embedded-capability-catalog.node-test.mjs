@@ -2,8 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  CAPABILITY_PACKS,
-  CAPABILITY_TARGETS,
+  expectedReleaseMatrix,
 } from "./verify-capability-catalog.mjs";
 import { verifyEmbeddedCapabilityCatalog } from "./verify-embedded-capability-catalog.mjs";
 
@@ -24,9 +23,11 @@ const entry = (capabilityId, targetTriple) => ({
   license: "MIT",
 });
 
+// The release matrix is per-definition (document-layout ships three targets),
+// so the fixture mirrors the manifest instead of a cartesian product.
 const fullCatalogText = () => catalogText(
-  CAPABILITY_TARGETS.flatMap(
-    (targetTriple) => CAPABILITY_PACKS.map((capabilityId) => entry(capabilityId, targetTriple)),
+  expectedReleaseMatrix().map(
+    ({ capabilityId, targetTriple }) => entry(capabilityId, targetTriple),
   ),
 );
 

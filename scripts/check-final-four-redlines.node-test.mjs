@@ -53,25 +53,23 @@ test("the strict checker can turn every owned contract green", async (context) =
     await fs.mkdir(path.dirname(target), { recursive: true });
     await fs.writeFile(target, contents);
   };
-  const targets = PRODUCT_MANIFEST.supportedTargets;
   const definitions = PRODUCT_MANIFEST.definitions
     .filter((definition) => definition.distributionTier === "published");
-  const packs = definitions.map((definition) => definition.capabilityId);
   const licenses = new Map(definitions.map((definition) => [definition.capabilityId, definition.licensePolicy.expression]));
   await write("capabilities/product-manifest.json", JSON.stringify(PRODUCT_MANIFEST));
   await write("capabilities/install-catalog.json", JSON.stringify({
     schemaVersion: 1,
-    entries: targets.flatMap((targetTriple) => packs.map((capabilityId) => ({
+    entries: definitions.flatMap((definition) => definition.supportedTargets.map((targetTriple) => ({
       targetTriple,
-      capabilityId,
+      capabilityId: definition.capabilityId,
       version: "1.0.0",
-      url: `https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v1.0.0/${capabilityId}-${targetTriple}.zip`,
+      url: `https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v1.0.0/${definition.capabilityId}-${targetTriple}.zip`,
       archiveSha256: "a".repeat(64),
       manifestSha256: "b".repeat(64),
       signingKeyId: "release-key",
       compressedBytes: 1,
       installedBytes: 2,
-      license: licenses.get(capabilityId),
+      license: licenses.get(definition.capabilityId),
     }))),
   }));
   await write("capabilities/trusted-keys.json", JSON.stringify({ release: "c".repeat(64) }));

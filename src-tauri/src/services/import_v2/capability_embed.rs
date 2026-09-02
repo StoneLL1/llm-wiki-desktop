@@ -173,7 +173,7 @@ mod tests {
         let entries = manifest
             .published_definitions()
             .flat_map(|definition| {
-                manifest.supported_targets.iter().map(move |target| {
+                definition.supported_targets.iter().map(move |target| {
                     serde_json::json!({
                         "capabilityId": definition.capability_id,
                         "version": "1.0.0",

@@ -33,8 +33,10 @@ function run(program, arguments_, cwd, capture = false) {
       cwd,
       shell: false,
       windowsHide: true,
-      stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
+      // Non-captured child stdout is forwarded to stderr so caller stdout stays parseable.
+      stdio: capture ? ["ignore", "pipe", "pipe"] : ["inherit", "pipe", "inherit"],
     });
+    if (!capture) child.stdout.on("data", (chunk) => { process.stderr.write(chunk); });
     let stdout = "";
     let stderr = "";
     if (capture) {
@@ -151,7 +153,7 @@ async function buildMacFfmpeg(sourceRoot, destination) {
     "--disable-static", "--enable-shared", "--enable-small",
     "--disable-network", "--disable-autodetect", "--disable-gpl", "--disable-nonfree",
     "--disable-sdl2", "--disable-vulkan", "--disable-videotoolbox", "--disable-audiotoolbox",
-    "--disable-avdevice", "--disable-postproc", "--disable-swscale", "--disable-x86asm",
+    "--disable-avdevice", "--disable-swscale", "--disable-x86asm",
     "--install-name-dir=@loader_path/../lib",
   ], sourceRoot);
   await run("make", ["-j2"], sourceRoot);
