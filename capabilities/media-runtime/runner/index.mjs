@@ -67,7 +67,7 @@ try {
   } else {
     const frames = path.join(output, "frames");
     await fs.mkdir(frames);
-    await execFileAsync(ffmpeg, ["-nostdin", "-hide_banner", "-loglevel", "error", "-i", source, "-vf", "fps=1/10,scale='min(1280,iw)':-2", "-frames:v", "6", path.join(frames, "frame-%03d.png")], { shell: false, windowsHide: true, timeout: 10 * 60 * 1000, maxBuffer: 1024 * 1024 });
+    await execFileAsync(ffmpeg, ["-nostdin", "-hide_banner", "-loglevel", "error", "-i", source, "-vf", "select='eq(n,0)+gte(t-prev_selected_t,10)',scale='min(1280,iw)':-2", "-fps_mode", "vfr", "-frames:v", "6", path.join(frames, "frame-%03d.png")], { shell: false, windowsHide: true, timeout: 10 * 60 * 1000, maxBuffer: 1024 * 1024 });
     const framePaths = (await fs.readdir(frames)).filter((name) => /^frame-\d{3}\.png$/u.test(name)).sort().map((name) => path.relative(stagingRoot, path.join(frames, name)).split(path.sep).join("/"));
     if (!framePaths.length) throw new Error("IMPORT_MEDIA_NO_STABLE_FRAMES");
     assets.push(...framePaths);

@@ -172,6 +172,44 @@ async function stagePythonRuntime(python, prepared) {
     : path.join(destination, "bin", "python3");
 }
 
+const linuxCpuWheels = {
+  torch: {
+    url: "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl",
+    sha256: "4ca4a9394b0c771238a4f73590fdbbc4debad85ed0fa63d026ae1b085da7d6e2",
+  },
+  torchvision: {
+    url: "https://download-r2.pytorch.org/whl/cpu/torchvision-0.28.0%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl",
+    sha256: "b545d46f4d2f9d30381281cf22874bfe1d32a8a7b0ee8396fccde89f30c6a9d9",
+  },
+};
+
+function requirementBlockPattern(packageExpression) {
+  return new RegExp(`^${packageExpression}==[^\\r\\n]*(?:\\\\\\r?\\n[ \\t]+[^\\r\\n]*)*\\r?\\n?`, "gmu");
+}
+
+export function linuxCpuRequirements(lock) {
+  let result = lock.replace(requirementBlockPattern("(?:cuda-[A-Za-z0-9._-]+|nvidia-[A-Za-z0-9._-]+|triton)"), "");
+  for (const [name, wheel] of Object.entries(linuxCpuWheels)) {
+    const pattern = requirementBlockPattern(name);
+    if (!pattern.test(result)) throw new Error(`document-layout lock omitted ${name}`);
+    pattern.lastIndex = 0;
+    result = result.replace(pattern, `${name} @ ${wheel.url} \\\n    --hash=sha256:${wheel.sha256}\n`);
+  }
+  return result.endsWith("\n") ? result : `${result}\n`;
+}
+
+export async function materializeDoclingModels(downloadedRoot, outputRoot) {
+  const repositoryModelRoot = path.join(outputRoot, "ds4sd--docling-models");
+  const layoutSource = path.join(downloadedRoot, "model_artifacts", "layout");
+  const legacyLayoutRoot = path.join(outputRoot, "ds4sd--docling-layout-old");
+  if (!(await fs.stat(path.join(layoutSource, "model.safetensors")).catch(() => null))?.isFile()) {
+    throw new Error("pinned Docling model snapshot omitted the layout model");
+  }
+  await fs.mkdir(outputRoot, { recursive: true });
+  await fs.cp(downloadedRoot, repositoryModelRoot, { recursive: true, dereference: true, errorOnExist: true, force: false });
+  await fs.cp(layoutSource, legacyLayoutRoot, { recursive: true, dereference: true, errorOnExist: true, force: false });
+}
+
 async function preparePythonPack(pack, target, work, prepared, sources) {
   const python = await fetchPython(sources, target, work);
   const executable = await stagePythonRuntime(python, prepared);
@@ -179,16 +217,27 @@ async function preparePythonPack(pack, target, work, prepared, sources) {
   const lock = path.join(repositoryRoot, layout
     ? "capabilities/document-layout/runner/requirements.lock"
     : "capabilities/document-standard/requirements.lock");
+  let installLock = lock;
+  const linuxCpuLayout = layout && target === "x86_64-unknown-linux-gnu";
+  if (linuxCpuLayout) {
+    installLock = path.join(work, "document-layout-linux-cpu.lock");
+    await fs.writeFile(installLock, linuxCpuRequirements(await fs.readFile(lock, "utf8")));
+  }
   const sitePackages = path.join(prepared, "runtime", "site-packages");
-  await run("uv", ["pip", "install", "--python", executable, "--target", sitePackages, "--require-hashes", "-r", lock]);
+  const installArguments = ["pip", "install", "--python", executable, "--target", sitePackages, "--require-hashes"];
+  if (linuxCpuLayout) installArguments.push("--torch-backend", "cpu");
+  installArguments.push("-r", installLock);
+  await run("uv", installArguments);
   await copyRunner(pack, prepared);
   if (layout) {
     const model = sources.documentLayout.models;
+    const downloadedModels = path.join(work, "docling-model-download");
     // uv installs into --target, which the bare interpreter does not see without PYTHONPATH.
     await run(executable, ["-c", [
       "from huggingface_hub import snapshot_download",
-      `snapshot_download(repo_id='ds4sd/docling-models',revision='${model.revision}',local_dir=r'${path.join(prepared, "models").replaceAll("'", "\\'")}')`,
+      `snapshot_download(repo_id='ds4sd/docling-models',revision='${model.revision}',local_dir=r'${downloadedModels.replaceAll("'", "\\'")}')`,
     ].join(";")], prepared, { PYTHONPATH: sitePackages });
+    await materializeDoclingModels(downloadedModels, path.join(prepared, "models"));
   }
   await writeCompliance(
     prepared, pack, target, false,

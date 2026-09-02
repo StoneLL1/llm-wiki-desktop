@@ -1,6 +1,7 @@
 {
   "schemaVersion": 1,
   "root": "tests/fixtures/import-v2/local/batch3/matrix",
+  "capabilityFixtureRoot": "tests/fixtures/import-v2/local/batch3/qualification",
   "fixtureByExtension": {
     "aac": "audio.aac", "ass": "subtitle.ass", "avi": "video.avi", "bmp": "image.bmp",
     "doc": "legacy.doc", "docx": "document.docx", "flac": "audio.flac", "gif": "animated.gif",
@@ -12,6 +13,32 @@
     "tiff": "image.tiff", "vtt": "subtitle.vtt", "wav": "audio.wav", "webm": "video.webm",
     "webp": "image.webp", "wma": "audio.wma", "wmv": "video.wmv", "xls": "legacy.xls",
     "xlsx": "workbook.xlsx"
+  },
+  "fixtureByCapability": {
+    "asr-sensevoice-small": {
+      "aac": "asr/speech.aac", "avi": "asr/speech.avi",
+      "flac": "asr/speech.flac", "m4a": "asr/speech.m4a",
+      "m4v": "asr/speech.m4v", "mkv": "asr/speech.mkv",
+      "mov": "asr/speech.mov", "mp3": "asr/speech.mp3",
+      "mp4": "asr/speech.mp4", "ogg": "asr/speech.ogg",
+      "opus": "asr/speech.opus", "wav": "asr/speech.wav",
+      "webm": "asr/speech.webm", "wma": "asr/speech.wma",
+      "wmv": "asr/speech.wmv"
+    },
+    "asr-whisper": {
+      "aac": "asr/speech.aac", "avi": "asr/speech.avi",
+      "flac": "asr/speech.flac", "m4a": "asr/speech.m4a",
+      "m4v": "asr/speech.m4v", "mkv": "asr/speech.mkv",
+      "mov": "asr/speech.mov", "mp3": "asr/speech.mp3",
+      "mp4": "asr/speech.mp4", "ogg": "asr/speech.ogg",
+      "opus": "asr/speech.opus", "wav": "asr/speech.wav",
+      "webm": "asr/speech.webm", "wma": "asr/speech.wma",
+      "wmv": "asr/speech.wmv"
+    }
+  },
+  "indirectExtensionsByCapability": {
+    "document-standard": ["doc", "xls", "ppt"],
+    "media-runtime": ["wma"]
   },
   "generatedCases": [
     { "id": "normal", "operation": "copy" },
