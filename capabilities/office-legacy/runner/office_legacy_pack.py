@@ -28,6 +28,7 @@ WARNING_BY_EXTENSION = {
              "LEGACY_OFFICE_ANIMATION_MAY_BE_LOST",
              "LEGACY_OFFICE_UNIT_COUNT_REQUIRES_MODERN_ROUTE_COMPARISON"],
 }
+OLE_COMPOUND_FILE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
 
 def contained(root, path):
@@ -143,6 +144,12 @@ def validate_ooxml(path, expected_part):
     return count
 
 
+def validate_legacy_office(path):
+    with path.open("rb") as source:
+        if source.read(len(OLE_COMPOUND_FILE_MAGIC)) != OLE_COMPOUND_FILE_MAGIC:
+            raise ValueError("legacy Office input is not an OLE compound file")
+
+
 def execute_libreoffice(executable, source, output_dir, profile, timeout_seconds):
     extension, _ = TARGETS[source.suffix.lower()]
     args = [str(executable), "--headless", "--invisible", "--nologo", "--nodefault",
@@ -202,6 +209,7 @@ def handle(request):
     if not executable:
         return fail(request_id, -32020, "office-legacy capability is not installed")
     try:
+        validate_legacy_office(source)
         staging.mkdir(parents=True, exist_ok=True)
         converted_dir = staging / "converted"
         if converted_dir.exists():

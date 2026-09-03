@@ -183,31 +183,72 @@ const linuxCpuWheels = {
   },
 };
 
-function requirementBlockPattern(packageExpression) {
-  return new RegExp(`^${packageExpression}==[^\\r\\n]*(?:\\\\\\r?\\n[ \\t]+[^\\r\\n]*)*\\r?\\n?`, "gmu");
-}
-
 export function linuxCpuRequirements(lock) {
-  let result = lock.replace(requirementBlockPattern("(?:cuda-[A-Za-z0-9._-]+|nvidia-[A-Za-z0-9._-]+|triton)"), "");
-  for (const [name, wheel] of Object.entries(linuxCpuWheels)) {
-    const pattern = requirementBlockPattern(name);
-    if (!pattern.test(result)) throw new Error(`document-layout lock omitted ${name}`);
-    pattern.lastIndex = 0;
-    result = result.replace(pattern, `${name} @ ${wheel.url} \\\n    --hash=sha256:${wheel.sha256}\n`);
+  const lines = lock.replace(/\r\n/gu, "\n").split("\n");
+  const foundCpuWheel = new Set();
+  const output = [];
+  for (let index = 0; index < lines.length;) {
+    const packageName = lines[index].match(/^([A-Za-z0-9._-]+)==/u)?.[1];
+    if (!packageName) {
+      output.push(lines[index]);
+      index += 1;
+      continue;
+    }
+    const block = [lines[index]];
+    index += 1;
+    while (block.at(-1).trimEnd().endsWith("\\") && index < lines.length && /^[ \t]+/u.test(lines[index])) {
+      block.push(lines[index]);
+      index += 1;
+    }
+    if (/^(?:cuda-|nvidia-)/u.test(packageName) || packageName === "triton") continue;
+    const wheel = linuxCpuWheels[packageName];
+    if (wheel) {
+      foundCpuWheel.add(packageName);
+      output.push(`${packageName} @ ${wheel.url} \\`, `    --hash=sha256:${wheel.sha256}`);
+    } else {
+      output.push(...block);
+    }
   }
-  return result.endsWith("\n") ? result : `${result}\n`;
+  for (const name of Object.keys(linuxCpuWheels)) {
+    if (!foundCpuWheel.has(name)) throw new Error(`document-layout lock omitted ${name}`);
+  }
+  return `${output.join("\n").replace(/\n+$/u, "")}\n`;
 }
 
-export async function materializeDoclingModels(downloadedRoot, outputRoot) {
-  const repositoryModelRoot = path.join(outputRoot, "ds4sd--docling-models");
-  const layoutSource = path.join(downloadedRoot, "model_artifacts", "layout");
+export async function materializeDoclingModels(tableformerDownload, layoutDownload, outputRoot) {
+  const tableformerSource = path.join(tableformerDownload, "model_artifacts", "tableformer");
+  const repositoryModelRoot = path.join(outputRoot, "ds4sd--docling-models", "model_artifacts", "tableformer");
   const legacyLayoutRoot = path.join(outputRoot, "ds4sd--docling-layout-old");
-  if (!(await fs.stat(path.join(layoutSource, "model.safetensors")).catch(() => null))?.isFile()) {
-    throw new Error("pinned Docling model snapshot omitted the layout model");
+  for (const required of [
+    path.join(tableformerSource, "accurate", "tableformer_accurate.safetensors"),
+    path.join(tableformerSource, "accurate", "tm_config.json"),
+    path.join(tableformerSource, "fast", "tableformer_fast.safetensors"),
+    path.join(tableformerSource, "fast", "tm_config.json"),
+    path.join(layoutDownload, "config.json"),
+    path.join(layoutDownload, "model.safetensors"),
+    path.join(layoutDownload, "preprocessor_config.json"),
+  ]) {
+    if (!(await fs.stat(required).catch(() => null))?.isFile()) {
+      throw new Error(`pinned Docling model snapshot omitted ${path.basename(required)}`);
+    }
   }
   await fs.mkdir(outputRoot, { recursive: true });
-  await fs.cp(downloadedRoot, repositoryModelRoot, { recursive: true, dereference: true, errorOnExist: true, force: false });
-  await fs.cp(layoutSource, legacyLayoutRoot, { recursive: true, dereference: true, errorOnExist: true, force: false });
+  await fs.mkdir(path.dirname(repositoryModelRoot), { recursive: true });
+  await fs.cp(tableformerSource, repositoryModelRoot, { recursive: true, dereference: true, errorOnExist: true, force: false });
+  await fs.mkdir(legacyLayoutRoot);
+  for (const name of ["config.json", "model.safetensors", "preprocessor_config.json"]) {
+    await fs.copyFile(path.join(layoutDownload, name), path.join(legacyLayoutRoot, name), fs.constants.COPYFILE_EXCL);
+  }
+}
+
+function huggingFaceRepositoryId(repository) {
+  const source = new URL(repository);
+  const repositoryId = source.pathname.replace(/^\/+|\/+$/gu, "");
+  if (source.protocol !== "https:" || source.hostname !== "huggingface.co" || source.username || source.password ||
+      source.search || source.hash || !/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/u.test(repositoryId)) {
+    throw new Error("Docling model repository must be an exact public Hugging Face repository URL");
+  }
+  return repositoryId;
 }
 
 async function preparePythonPack(pack, target, work, prepared, sources) {
@@ -231,18 +272,26 @@ async function preparePythonPack(pack, target, work, prepared, sources) {
   await copyRunner(pack, prepared);
   if (layout) {
     const model = sources.documentLayout.models;
-    const downloadedModels = path.join(work, "docling-model-download");
+    const tableformerRepositoryId = huggingFaceRepositoryId(model.repository);
+    const layoutRepositoryId = huggingFaceRepositoryId(model.layoutRepository);
+    const downloadedTableformer = path.join(work, "docling-tableformer-download");
+    const downloadedLayout = path.join(work, "docling-layout-download");
     // uv installs into --target, which the bare interpreter does not see without PYTHONPATH.
     await run(executable, ["-c", [
       "from huggingface_hub import snapshot_download",
-      `snapshot_download(repo_id='ds4sd/docling-models',revision='${model.revision}',local_dir=r'${downloadedModels.replaceAll("'", "\\'")}')`,
+      `snapshot_download(repo_id='${tableformerRepositoryId}',revision='${model.revision}',local_dir=r'${downloadedTableformer.replaceAll("'", "\\'")}',allow_patterns=['model_artifacts/tableformer/**'])`,
+      `snapshot_download(repo_id='${layoutRepositoryId}',revision='${model.layoutRevision}',local_dir=r'${downloadedLayout.replaceAll("'", "\\'")}',allow_patterns=['config.json','model.safetensors','preprocessor_config.json'])`,
     ].join(";")], prepared, { PYTHONPATH: sitePackages });
-    await materializeDoclingModels(downloadedModels, path.join(prepared, "models"));
+    await materializeDoclingModels(downloadedTableformer, downloadedLayout, path.join(prepared, "models"));
   }
   await writeCompliance(
     prepared, pack, target, false,
     ["pythonStandalone", layout ? "documentLayout" : "documentStandard"], sources,
-    layout ? { modelRevision: sources.documentLayout.models.revision, modelInventory: await fileInventory(path.join(prepared, "models")) } : {},
+    layout ? {
+      modelRevision: sources.documentLayout.models.revision,
+      layoutModelRevision: sources.documentLayout.models.layoutRevision,
+      modelInventory: await fileInventory(path.join(prepared, "models")),
+    } : {},
   );
   return { entrypoint: process.platform === "win32" ? "runtime/python/python.exe" : "runtime/python/bin/python3", entrypointArgs: [layout ? "runner/docling_pack.py" : "runner/markitdown_pack.py"] };
 }
@@ -376,6 +425,19 @@ async function installNodeRuntime(target, work, prepared) {
   return `runtime/${nodeName}`;
 }
 
+export function whisperCmakeArguments(source, build, ffmpegRoot) {
+  return [
+    "-S", source,
+    "-B", build,
+    "-DWHISPER_FFMPEG=ON",
+    "-DBUILD_SHARED_LIBS=OFF",
+    "-DWHISPER_BUILD_TESTS=OFF",
+    "-DWHISPER_BUILD_EXAMPLES=ON",
+    "-DCMAKE_BUILD_TYPE=Release",
+    `-DCMAKE_PREFIX_PATH=${ffmpegRoot}`,
+  ];
+}
+
 async function prepareMedia(pack, target, work, prepared, sources) {
   const entrypoint = await installNodeRuntime(target, work, prepared);
   const ffmpegRoot = await fetchFfmpeg(target, work, prepared, sources);
@@ -397,7 +459,7 @@ async function prepareMedia(pack, target, work, prepared, sources) {
       PKG_CONFIG_LIBDIR: ffmpegPkgConfig,
       PKG_CONFIG_PATH: ffmpegPkgConfig,
     };
-    await run("cmake", ["-S", source, "-B", build, "-DWHISPER_FFMPEG=ON", "-DWHISPER_BUILD_TESTS=OFF", "-DWHISPER_BUILD_EXAMPLES=ON", "-DCMAKE_BUILD_TYPE=Release", `-DCMAKE_PREFIX_PATH=${ffmpegRoot}`], work, cmakeEnvironment);
+    await run("cmake", whisperCmakeArguments(source, build, ffmpegRoot), work, cmakeEnvironment);
     await run("cmake", ["--build", build, "--config", "Release", "--target", "whisper-cli", "--parallel", "2"], work, cmakeEnvironment);
     const binaryName = process.platform === "win32" ? "whisper-cli.exe" : "whisper-cli";
     const pending = [build]; let binary = null;

@@ -60,6 +60,8 @@
     "models": {
       "repository": "https://huggingface.co/ds4sd/docling-models",
       "revision": "2199320848bb9a8a519d22e4b528185a4f9a6f64",
+      "layoutRepository": "https://huggingface.co/ds4sd/docling-layout-old",
+      "layoutRevision": "b5b4bd59ad2b69aab715e9b1f1dfd74394c45fd4",
       "download": "docling-tools models download --output-dir models layout tableformer",
       "inventory": "BUILD-PROVENANCE.json.modelInventory",
       "networkDisabledAtRuntime": true
