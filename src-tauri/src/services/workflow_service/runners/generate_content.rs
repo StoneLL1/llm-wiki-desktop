@@ -1492,17 +1492,22 @@ fn candidate_root() -> PathBuf {
 fn ensure_candidate_root_safe() -> Result<(), BackendError> {
     let temp = std::env::temp_dir();
     let root = candidate_root();
-    if root.exists() {
-        let metadata = std::fs::symlink_metadata(&root).map_err(candidate_path_error)?;
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            return Err(candidate_path_error(
-                "Candidate root must be a real directory, not a link or file.",
-            ));
-        }
-    } else {
-        std::fs::create_dir(&root).map_err(candidate_path_error)?;
+    ensure_candidate_root_safe_at(&temp, &root)
+}
+
+fn ensure_candidate_root_safe_at(temp: &Path, root: &Path) -> Result<(), BackendError> {
+    match std::fs::create_dir(root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(candidate_path_error(error)),
     }
-    secure_candidate_directory(&root)?;
+    let metadata = std::fs::symlink_metadata(root).map_err(candidate_path_error)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(candidate_path_error(
+            "Candidate root must be a real directory, not a link or file.",
+        ));
+    }
+    secure_candidate_directory(root)?;
     let canonical_temp = temp.canonicalize().map_err(candidate_path_error)?;
     let canonical_root = root.canonicalize().map_err(candidate_path_error)?;
     if canonical_root.parent() != Some(canonical_temp.as_path()) {
@@ -1747,4 +1752,38 @@ fn candidate_path_error(error: impl std::fmt::Display) -> BackendError {
         false,
         true,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Barrier};
+
+    use super::ensure_candidate_root_safe_at;
+
+    #[test]
+    fn candidate_root_creation_allows_concurrent_first_use() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_path = temp.path().to_path_buf();
+        let root = temp.path().join("candidate-root");
+        let barrier = Arc::new(Barrier::new(16));
+        let handles = (0..16)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                let temp_path = temp_path.clone();
+                let root = root.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    ensure_candidate_root_safe_at(&temp_path, &root)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            handle
+                .join()
+                .expect("candidate root worker should not panic")
+                .expect("concurrent candidate root initialization should succeed");
+        }
+        assert!(root.is_dir());
+    }
 }
