@@ -167,13 +167,13 @@ export function buildEmbeddedSubtitleArguments(mediaPath, subtitlePath) {
   ];
 }
 
-export function buildAudioDecodeProbeArguments(mediaPath, outputPath) {
+export function buildAudioDecodeArguments(mediaPath, outputPath) {
   return [
     "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
     "-protocol_whitelist", "file,pipe",
     "-i", nativeToolPath(mediaPath),
-    "-map", "0:a:0", "-vn", "-sn", "-dn", "-frames:a", "1",
-    "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-f", "s16le",
+    "-map", "0:a:0", "-vn", "-sn", "-dn",
+    "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-f", "wav",
     nativeToolPath(outputPath),
   ];
 }

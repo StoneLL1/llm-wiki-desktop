@@ -5,9 +5,9 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import * as whisperCore from "./core.mjs";
 import {
   FIXED_ARGUMENTS,
-  buildAudioDecodeProbeArguments,
   buildArguments,
   buildEmbeddedSubtitleArguments,
   buildVideoOcrFrameArguments,
@@ -75,14 +75,15 @@ test("fixed argv does not accept caller flags", () => {
   assert.throws(() => buildArguments("model", "audio.wav", "out", "--inject"), /IMPORT_ASR_INVALID_REQUEST/u);
 });
 
-test("builds a bounded local decode probe before invoking whisper", () => {
-  assert.deepEqual(buildAudioDecodeProbeArguments("input.mp3", "probe.pcm"), [
+test("fully decodes local media to WAV before invoking whisper", () => {
+  assert.equal(typeof whisperCore.buildAudioDecodeArguments, "function");
+  assert.deepEqual(whisperCore.buildAudioDecodeArguments("input.m4a", "decoded.wav"), [
     "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
     "-protocol_whitelist", "file,pipe",
-    "-i", "input.mp3",
-    "-map", "0:a:0", "-vn", "-sn", "-dn", "-frames:a", "1",
-    "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-f", "s16le",
-    "probe.pcm",
+    "-i", "input.m4a",
+    "-map", "0:a:0", "-vn", "-sn", "-dn",
+    "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-f", "wav",
+    "decoded.wav",
   ]);
   assert.equal(
     classifyAudioProbeError({ cause: { stderr: "Invalid data found when processing input" } }),
