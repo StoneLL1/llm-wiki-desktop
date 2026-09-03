@@ -83,16 +83,45 @@ export async function sha256File(filePath) {
 }
 
 export function classifyExecutionError(error) {
-  if (error?.killed || error?.code === "ETIMEDOUT" || error?.signal === "SIGKILL") return "IMPORT_ASR_TIMEOUT";
+  if (executionTimedOut(error)) return "IMPORT_ASR_TIMEOUT";
   return "IMPORT_ASR_ENGINE_FAILED";
 }
 
 export function isNoAudioExecutionError(error) {
-  const details = [error?.message, error?.stderr, error?.stdout]
-    .filter((value) => typeof value === "string")
-    .join("\n");
-  return /(?:does not contain any audio stream|no audio stream|audio stream.*not found|failed to find.*audio|failed to load audio)/iu
+  const details = executionErrorDetails(error);
+  return /(?:stream map.*0:a:0.*matches no streams|does not contain any audio stream|no audio stream|audio stream.*not found|failed to find.*audio|failed to load audio)/iu
     .test(details);
+}
+
+function executionErrorDetails(error) {
+  const details = [];
+  let current = error;
+  for (let depth = 0; current && depth < 3; depth += 1) {
+    for (const value of [current.message, current.stderr, current.stdout]) {
+      if (typeof value === "string") details.push(value);
+    }
+    current = current.cause;
+  }
+  return details.join("\n");
+}
+
+function executionTimedOut(error) {
+  let current = error;
+  for (let depth = 0; current && depth < 3; depth += 1) {
+    if (current.killed || current.code === "ETIMEDOUT" || current.signal === "SIGKILL") return true;
+    current = current.cause;
+  }
+  return false;
+}
+
+export function classifyAudioProbeError(error) {
+  if (error?.message === "IMPORT_ASR_INVALID_MEDIA") return "IMPORT_ASR_INVALID_MEDIA";
+  if (executionTimedOut(error)) return "IMPORT_ASR_TIMEOUT";
+  const details = executionErrorDetails(error);
+  return /(?:invalid data|invalid argument|error opening input|could not find codec parameters|failed to read frame|end of file)/iu
+    .test(details)
+    ? "IMPORT_ASR_INVALID_MEDIA"
+    : "IMPORT_ASR_ENGINE_FAILED";
 }
 
 export async function verifyArtifact(packRoot, declaration, expectedFile) {
@@ -135,6 +164,17 @@ export function buildEmbeddedSubtitleArguments(mediaPath, subtitlePath) {
     "-i", nativeToolPath(mediaPath),
     "-map", "0:s:0", "-vn", "-an", "-dn", "-c:s", "srt", "-f", "srt",
     nativeToolPath(subtitlePath),
+  ];
+}
+
+export function buildAudioDecodeProbeArguments(mediaPath, outputPath) {
+  return [
+    "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+    "-protocol_whitelist", "file,pipe",
+    "-i", nativeToolPath(mediaPath),
+    "-map", "0:a:0", "-vn", "-sn", "-dn", "-frames:a", "1",
+    "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-f", "s16le",
+    nativeToolPath(outputPath),
   ];
 }
 

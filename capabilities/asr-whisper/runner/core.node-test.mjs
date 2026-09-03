@@ -7,10 +7,12 @@ import path from "node:path";
 import test from "node:test";
 import {
   FIXED_ARGUMENTS,
+  buildAudioDecodeProbeArguments,
   buildArguments,
   buildEmbeddedSubtitleArguments,
   buildVideoOcrFrameArguments,
   buildVideoTextProbeArguments,
+  classifyAudioProbeError,
   classifyExecutionError,
   ffmpegRelativePath,
   isNoAudioExecutionError,
@@ -71,6 +73,30 @@ test("fixed argv does not accept caller flags", () => {
   assert.equal(args.filter((arg) => arg === "--model").length, 1);
   assert.ok(buildArguments("model", "audio.wav", "out", "ZH_cn").includes("zh-cn"));
   assert.throws(() => buildArguments("model", "audio.wav", "out", "--inject"), /IMPORT_ASR_INVALID_REQUEST/u);
+});
+
+test("builds a bounded local decode probe before invoking whisper", () => {
+  assert.deepEqual(buildAudioDecodeProbeArguments("input.mp3", "probe.pcm"), [
+    "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+    "-protocol_whitelist", "file,pipe",
+    "-i", "input.mp3",
+    "-map", "0:a:0", "-vn", "-sn", "-dn", "-frames:a", "1",
+    "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-f", "s16le",
+    "probe.pcm",
+  ]);
+  assert.equal(
+    classifyAudioProbeError({ cause: { stderr: "Invalid data found when processing input" } }),
+    "IMPORT_ASR_INVALID_MEDIA",
+  );
+  assert.equal(
+    classifyAudioProbeError({ cause: { stderr: "error while loading shared libraries" } }),
+    "IMPORT_ASR_ENGINE_FAILED",
+  );
+  assert.equal(classifyAudioProbeError({ cause: { code: "ETIMEDOUT" } }), "IMPORT_ASR_TIMEOUT");
+  assert.equal(
+    isNoAudioExecutionError({ cause: { stderr: "Stream map '0:a:0' matches no streams" } }),
+    true,
+  );
 });
 
 test("uses Windows extended paths for every absolute native-tool argument", () => {

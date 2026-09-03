@@ -5,6 +5,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { restrictedEnvironment as mediaRuntimeEnvironment } from "../capabilities/media-runtime/runner/core.mjs";
+import { restrictedEnvironment as senseVoiceEnvironment } from "../capabilities/asr-sensevoice-small/runner/core.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const runnerByPack = {
@@ -51,10 +52,41 @@ test("qualification runners preserve numeric JSON-RPC request IDs", () => {
   assert.doesNotMatch(mediaRunner, /readFile\(0,/u);
 });
 
-test("document-standard forces UTF-8 JSON-RPC streams for Windows CJK paths", () => {
-  const source = fs.readFileSync(path.join(root, "capabilities/document-standard/runner/markitdown_pack.py"), "utf8");
-  assert.match(source, /sys\.stdin\.reconfigure\(encoding="utf-8", errors="strict"\)/u);
-  assert.match(source, /sys\.stdout\.reconfigure\(encoding="utf-8", errors="strict"\)/u);
+test("Python qualification runners force UTF-8 JSON-RPC streams for Windows CJK paths", () => {
+  for (const relativePath of [
+    "capabilities/document-standard/runner/markitdown_pack.py",
+    "capabilities/document-layout/runner/docling_pack.py",
+    "capabilities/office-legacy/runner/office_legacy_pack.py",
+  ]) {
+    const source = fs.readFileSync(path.join(root, relativePath), "utf8");
+    assert.match(source, /sys\.stdin\.reconfigure\(encoding="utf-8", errors="strict"\)/u, relativePath);
+    assert.match(source, /sys\.stdout\.reconfigure\(encoding="utf-8", errors="strict"\)/u, relativePath);
+  }
+});
+
+test("document-layout keeps OCR in its separately authorized capability", () => {
+  const source = fs.readFileSync(path.join(root, "capabilities/document-layout/runner/docling_pack.py"), "utf8");
+  assert.match(source, /options\.artifacts_path\s*=\s*MODEL_ROOT[\s\S]*options\.do_ocr\s*=\s*False/u);
+});
+
+test("release cancellation qualification uses a fresh staging root", () => {
+  const source = fs.readFileSync(path.join(root, "scripts/qualify-release-corpus.mjs"), "utf8");
+  assert.match(source, /const cancellationStagingName = path\.join\("cancellation", extension\)/u);
+  assert.match(source, /requestFor\(root, normal, `\$\{extension\}-cancel`, cancellationStagingName\)/u);
+  assert.match(source, /path\.join\(cancellationStaging, "candidate\.md"\)/u);
+});
+
+test("SenseVoice release qualification reuses the bundled runtime library environment", () => {
+  const packRoot = path.join("payload", "asr-sensevoice-small");
+  const temporaryRoot = path.join("temporary", "qualification");
+  assert.match(senseVoiceEnvironment(packRoot, temporaryRoot, "linux", {}).LD_LIBRARY_PATH, /sherpa.*ffmpeg/u);
+  assert.match(senseVoiceEnvironment(packRoot, temporaryRoot, "darwin", {}).DYLD_LIBRARY_PATH, /sherpa.*ffmpeg/u);
+  const source = fs.readFileSync(
+    path.join(root, "capabilities/asr-sensevoice-small/runner/qualification.mjs"),
+    "utf8",
+  );
+  assert.match(source, /const environment = restrictedEnvironment\(packRoot, root\)/u);
+  assert.match(source, /env: environment/u);
 });
 
 test("media-runtime resolves the payload FFmpeg shared libraries", () => {
