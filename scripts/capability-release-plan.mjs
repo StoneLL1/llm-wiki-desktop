@@ -60,6 +60,10 @@ async function validateSourceLock(name, source, root, targets) {
   if (source.models?.repository && !/^[0-9a-f]{40}$/u.test(source.models.revision || "")) {
     errors.push(`${name} model repository revision is not an exact commit`);
   }
+  if (source.models?.repository && (typeof source.models.layoutRepository !== "string" ||
+      !/^[0-9a-f]{40}$/u.test(source.models.layoutRevision || ""))) {
+    errors.push(`${name} layout model repository revision is not an exact commit`);
+  }
   for (const [lockField, digestField] of [["dependencyLock", "dependencyLockSha256"]]) {
     if (source[lockField]) {
       const bytes = await fs.readFile(path.join(root, source[lockField])).catch(() => null);

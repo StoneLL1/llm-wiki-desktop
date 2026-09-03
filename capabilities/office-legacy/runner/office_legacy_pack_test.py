@@ -13,6 +13,10 @@ RUNNER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUNNER)
 
 
+def legacy_bytes(payload=b"legacy-original"):
+    return RUNNER.OLE_COMPOUND_FILE_MAGIC + payload
+
+
 def request_for(project, staging, source):
     return {
         "jsonrpc": "2.0",
@@ -50,7 +54,7 @@ class OfficeLegacyPackRetryTests(unittest.TestCase):
             staging.mkdir()
             source = staging / "legacy.doc"
             executable = project / "soffice"
-            source.write_bytes(b"\xd0\xcf\x11\xe0legacy-original")
+            source.write_bytes(legacy_bytes())
             executable.write_bytes(b"fixture")
             native = tempfile.TemporaryDirectory(
                 prefix="native-office-", dir=temporary
@@ -78,7 +82,7 @@ class OfficeLegacyPackRetryTests(unittest.TestCase):
             staging = project / "staging"
             staging.mkdir()
             source = project / "outside.doc"
-            source.write_bytes(b"\xd0\xcf\x11\xe0legacy-original")
+            source.write_bytes(legacy_bytes())
 
             response = RUNNER.handle(
                 chained_request_for(project, staging, source)
@@ -118,7 +122,7 @@ class OfficeLegacyPackRetryTests(unittest.TestCase):
             source = project / "旧文档.doc"
             staging = project / ".app" / "import" / "item"
             executable = project / "soffice"
-            original = b"\xd0\xcf\x11\xe0legacy-original"
+            original = legacy_bytes()
             source.write_bytes(original)
             executable.write_bytes(b"fixture")
             request = request_for(project, staging, source)
@@ -153,7 +157,7 @@ class OfficeLegacyPackRetryTests(unittest.TestCase):
             source = project / "旧文档.doc"
             staging = project / "staging"
             executable = project / "soffice"
-            source.write_bytes(b"\xd0\xcf\x11\xe0legacy-original")
+            source.write_bytes(legacy_bytes())
             self.assertGreater(len(str(source)), 260)
             executable.write_bytes(b"fixture")
             observed = {}
@@ -175,6 +179,24 @@ class OfficeLegacyPackRetryTests(unittest.TestCase):
             self.assertFalse(observed["source"].is_relative_to(project))
             self.assertLessEqual(len(str(observed["source"].resolve())), 220)
             self.assertTrue((staging / "converted" / "旧文档.docx").is_file())
+
+    def test_corrupt_legacy_input_is_rejected_before_libreoffice(self):
+        with tempfile.TemporaryDirectory(prefix="office-legacy-corrupt-") as temporary:
+            project = Path(temporary)
+            staging = project / "staging"
+            source = project / "corrupt.doc"
+            executable = project / "soffice"
+            source.write_bytes(b"\x00\xff\x00\xff")
+            executable.write_bytes(b"fixture")
+
+            with (
+                patch.dict(os.environ, {"LLM_WIKI_LIBREOFFICE": str(executable)}),
+                patch.object(RUNNER, "execute_libreoffice") as execute,
+            ):
+                response = RUNNER.handle(request_for(project, staging, source))
+
+            self.assertEqual(response["error"]["code"], -32010)
+            execute.assert_not_called()
 
 
 if __name__ == "__main__":

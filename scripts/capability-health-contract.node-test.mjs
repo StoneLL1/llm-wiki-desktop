@@ -4,6 +4,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { restrictedEnvironment as mediaRuntimeEnvironment } from "../capabilities/media-runtime/runner/core.mjs";
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const runnerByPack = {
   "asr-sensevoice-small": "capabilities/asr-sensevoice-small/runner/index.mjs",
@@ -47,6 +49,25 @@ test("qualification runners preserve numeric JSON-RPC request IDs", () => {
   const mediaRunner = fs.readFileSync(path.join(root, "capabilities/media-runtime/runner/index.mjs"), "utf8");
   assert.match(mediaRunner, /rpc\s*=\s*await readRpc\(\)/u);
   assert.doesNotMatch(mediaRunner, /readFile\(0,/u);
+});
+
+test("document-standard forces UTF-8 JSON-RPC streams for Windows CJK paths", () => {
+  const source = fs.readFileSync(path.join(root, "capabilities/document-standard/runner/markitdown_pack.py"), "utf8");
+  assert.match(source, /sys\.stdin\.reconfigure\(encoding="utf-8", errors="strict"\)/u);
+  assert.match(source, /sys\.stdout\.reconfigure\(encoding="utf-8", errors="strict"\)/u);
+});
+
+test("media-runtime resolves the payload FFmpeg shared libraries", () => {
+  const packRoot = path.join("payload", "media-runtime");
+  assert.equal(
+    mediaRuntimeEnvironment(packRoot, "linux", {}).LD_LIBRARY_PATH,
+    path.join(packRoot, "runtime", "ffmpeg", "lib"),
+  );
+  assert.equal(
+    mediaRuntimeEnvironment(packRoot, "darwin", {}).DYLD_LIBRARY_PATH,
+    path.join(packRoot, "runtime", "ffmpeg", "lib"),
+  );
+  assert.match(mediaRuntimeEnvironment(packRoot, "win32", { PATH: "system" }).PATH, /ffmpeg.*system/u);
 });
 
 test("release producer and installer keep the same bounded file-count budget", () => {
