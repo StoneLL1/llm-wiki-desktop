@@ -68,6 +68,9 @@ def handle(request):
         InputFormat, PdfPipelineOptions, DocumentConverter, PdfFormatOption = dependencies()
         options = PdfPipelineOptions()
         options.artifacts_path = MODEL_ROOT
+        # OCR is a separate, explicitly authorized capability. This offline layout
+        # pack intentionally contains only the pinned layout and table models.
+        options.do_ocr = False
         options.enable_remote_services = False
         options.allow_external_plugins = False
         converter = DocumentConverter(format_options={
@@ -92,11 +95,18 @@ def handle(request):
 
 
 def main():
+    # JSON-RPC is always UTF-8. Windows otherwise decodes redirected stdin with
+    # the active ANSI code page, corrupting CJK paths before containment checks.
+    if hasattr(sys.stdin, "reconfigure"):
+        sys.stdin.reconfigure(encoding="utf-8", errors="strict")
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="strict")
     try:
         response = handle(json.loads(sys.stdin.readline()))
     except (ValueError, TypeError, json.JSONDecodeError):
         response = fail("", -32700, "parse error")
     sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
 
 
 if __name__ == "__main__":

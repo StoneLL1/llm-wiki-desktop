@@ -36,14 +36,14 @@ function response(result, id) {
   }).find((message) => message?.id === id);
 }
 
-function requestFor(projectRoot, relative, id) {
+function requestFor(projectRoot, relative, id, stagingRoot = "staging") {
   return {
     jsonrpc: "2.0", id, method: "import.execute",
     params: {
       protocolVersion: "2", requestId: id, sessionId: "release-qualification",
       itemId: id, taskId: "release-qualification", operation: "extract",
       input: { kind: "file", displayName: relative, locator: relative, normalizedLocator: relative, sourceIdentity: null },
-      projectRoot, stagingRoot: "staging", chainedInput: relative,
+      projectRoot, stagingRoot, chainedInput: relative,
       localAsrAuthorized: true, localOcrAuthorized: true, asrProbeOnly: false,
       recognitionLanguage: "auto", asrProfile: "balanced",
     },
@@ -133,8 +133,17 @@ try {
       cases.push({ extension, case: "boundary", status: "passed" });
     }
 
-    await killForCancellation(program, contract.entrypointArgs, requestFor(root, normal, `${extension}-cancel`), payload);
-    assert.equal((await fs.stat(path.join(staging, "candidate.md")).catch(() => null)), null);
+    const cancellationStagingName = path.join("cancellation", extension);
+    const cancellationStaging = path.join(root, cancellationStagingName);
+    await fs.mkdir(cancellationStaging, { recursive: true });
+    await fs.copyFile(source, path.join(cancellationStaging, normal));
+    await killForCancellation(
+      program,
+      contract.entrypointArgs,
+      requestFor(root, normal, `${extension}-cancel`, cancellationStagingName),
+      payload,
+    );
+    assert.equal((await fs.stat(path.join(cancellationStaging, "candidate.md")).catch(() => null)), null);
     cases.push({ extension, case: "cancel", status: "passed" });
   }
   const evidence = {

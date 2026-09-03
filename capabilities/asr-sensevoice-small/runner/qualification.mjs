@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { MODEL_ID } from "./core.mjs";
+import { MODEL_ID, restrictedEnvironment } from "./core.mjs";
 
 // This file is executed only by release CI against the fully staged payload.
 const packRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -45,10 +45,11 @@ function runNode(nodePath, request) {
   });
 }
 
-function runTool(program, arguments_) {
+function runTool(program, arguments_, environment) {
   return new Promise((resolve, reject) => {
     const child = spawn(program, arguments_, {
       cwd: packRoot,
+      env: environment,
       shell: false,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
@@ -65,6 +66,7 @@ function runTool(program, arguments_) {
 
 const manifestPath = path.join(packRoot, "manifest.json");
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "llm-wiki-sensevoice-qualification-"));
+const environment = restrictedEnvironment(packRoot, root);
 let createdQualificationManifest = false;
 try {
   const platform = process.platform;
@@ -105,13 +107,13 @@ try {
     "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
     "-i", path.join(staging, "zh.wav"), "-c:a", "aac", "-b:a", "64k",
     path.join(staging, "zh.m4a"),
-  ]);
+  ], environment);
   await runTool(ffmpegPath, [
     "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
     "-stream_loop", "4", "-i", path.join(staging, "zh.wav"), "-t", "27",
     "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
     path.join(staging, "zh-long.wav"),
-  ]);
+  ], environment);
   const nodePath = platform === "win32" ? path.join(packRoot, "runtime", "node.exe") : path.join(packRoot, "runtime", "node");
   let qualifiedProvider;
   const fixtures = [
