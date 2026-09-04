@@ -20,6 +20,7 @@ const packageJson = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "packag
 const cargoToml = fs.readFileSync(path.join(repositoryRoot, "src-tauri/Cargo.toml"), "utf8");
 const tauriConfig = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "src-tauri/tauri.conf.json"), "utf8"));
 const trustedKeys = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "capabilities/trusted-keys.json"), "utf8"));
+const releaseSources = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "capabilities/release-sources.json"), "utf8"));
 
 const state = (overrides = {}) => validateReleaseState({
   contract,
@@ -32,6 +33,22 @@ const state = (overrides = {}) => validateReleaseState({
 
 test("repository versions and frozen application identity agree", () => {
   assert.deepEqual(state().errors, []);
+});
+
+test("LibreOffice release inputs use the immutable build-qualified archive", () => {
+  assert.equal(
+    releaseSources.libreOffice.source,
+    "https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.4.2/",
+  );
+  assert.deepEqual(
+    Object.values(releaseSources.libreOffice.distributions).map(({ file }) => file).sort(),
+    [
+      "LibreOffice_26.2.4.2_Linux_x86-64_deb.tar.gz",
+      "LibreOffice_26.2.4.2_MacOS_aarch64.dmg",
+      "LibreOffice_26.2.4.2_MacOS_x86-64.dmg",
+      "LibreOffice_26.2.4.2_Win_x86-64.msi",
+    ],
+  );
 });
 
 test("version drift is a deterministic release failure", () => {
