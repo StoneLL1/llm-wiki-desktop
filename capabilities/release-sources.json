@@ -70,12 +70,12 @@
   "libreOffice": {
     "version": "26.2.4",
     "license": "MPL-2.0 OR LGPL-3.0-or-later",
-    "source": "https://mirrors.ocf.berkeley.edu/tdf/libreoffice/stable/26.2.4/",
+    "source": "https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.4.2/",
     "distributions": {
-      "x86_64-pc-windows-msvc": { "file": "LibreOffice_26.2.4_Win_x86-64.msi", "sha256": "202f26cda071c5aa4996a5a28412fddceb3891dceb0366982c62650456c0730f", "bytes": 372539392 },
-      "aarch64-apple-darwin": { "file": "LibreOffice_26.2.4_MacOS_aarch64.dmg", "sha256": "64e0ad05564554eeee639d49b08b20908a38d4722ec95f1620d05c99bcbe9fb1", "bytes": 295019039 },
-      "x86_64-apple-darwin": { "file": "LibreOffice_26.2.4_MacOS_x86-64.dmg", "sha256": "f92ba40fdada173232fe929bf77973a1ffcccec55ae7971957a6de84d33f0f1e", "bytes": 305573151 },
-      "x86_64-unknown-linux-gnu": { "file": "LibreOffice_26.2.4_Linux_x86-64_deb.tar.gz", "sha256": "810ef197e190d7804a60e0016052c46ff33792303a200fddda9d5216a64b9900", "bytes": 217982126 }
+      "x86_64-pc-windows-msvc": { "file": "LibreOffice_26.2.4.2_Win_x86-64.msi", "sha256": "202f26cda071c5aa4996a5a28412fddceb3891dceb0366982c62650456c0730f", "bytes": 372539392 },
+      "aarch64-apple-darwin": { "file": "LibreOffice_26.2.4.2_MacOS_aarch64.dmg", "sha256": "64e0ad05564554eeee639d49b08b20908a38d4722ec95f1620d05c99bcbe9fb1", "bytes": 295019039 },
+      "x86_64-apple-darwin": { "file": "LibreOffice_26.2.4.2_MacOS_x86-64.dmg", "sha256": "f92ba40fdada173232fe929bf77973a1ffcccec55ae7971957a6de84d33f0f1e", "bytes": 305573151 },
+      "x86_64-unknown-linux-gnu": { "file": "LibreOffice_26.2.4.2_Linux_x86-64_deb.tar.gz", "sha256": "810ef197e190d7804a60e0016052c46ff33792303a200fddda9d5216a64b9900", "bytes": 217982126 }
     }
   },
   "whisper": {
