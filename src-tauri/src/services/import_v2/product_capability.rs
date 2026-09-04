@@ -140,6 +140,8 @@ struct ProductCatalogEntry {
     url: String,
     archive_sha256: String,
     manifest_sha256: String,
+    #[serde(rename = "signingKeyId")]
+    _signing_key_id: String,
     compressed_bytes: u64,
     installed_bytes: u64,
     model_bytes: Option<u64>,
@@ -550,6 +552,32 @@ fn require_coverage(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_validation_accepts_release_signing_key_binding() {
+        let manifest = ProductCapabilityManifest::embedded().unwrap();
+        let catalog = r#"{
+          "schemaVersion": 1,
+          "entries": [{
+            "capabilityId": "browser-runtime",
+            "version": "1.0.0",
+            "targetTriple": "x86_64-pc-windows-msvc",
+            "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v0.2.0/browser-runtime-1.0.0-x86_64-pc-windows-msvc.zip",
+            "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "manifestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "signingKeyId": "llm-wiki-capability-v1",
+            "compressedBytes": 1,
+            "installedBytes": 1,
+            "modelBytes": null,
+            "license": "Apache-2.0 AND MIT AND BSD-2-Clause AND BSD-3-Clause AND ISC AND MIT-0 AND LicenseRef-Bundled-Third-Party-Notices"
+          }]
+        }"#;
+
+        assert_eq!(
+            manifest.validate_catalog_for_tag(catalog, false, Some("app-v0.2.0")),
+            Ok(1)
+        );
+    }
 
     #[test]
     fn embedded_manifest_closes_release_blockers_and_derives_the_matrix() {
