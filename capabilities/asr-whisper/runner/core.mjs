@@ -13,8 +13,8 @@ export const MAX_TRANSCRIPT_BYTES = 32 * 1024 * 1024;
 export const MAX_SEGMENTS = 250_000;
 
 const MEDIA_EXTENSIONS = new Set([
-  ".aac", ".flac", ".m4a", ".mka", ".mp3", ".ogg", ".opus", ".wav",
-  ".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".webm",
+  ".aac", ".flac", ".m4a", ".mka", ".mp3", ".ogg", ".opus", ".wav", ".wma",
+  ".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".webm", ".wmv",
 ]);
 
 export const FIXED_ARGUMENTS = Object.freeze([
@@ -22,7 +22,7 @@ export const FIXED_ARGUMENTS = Object.freeze([
   "--no-prints",
 ]);
 const VIDEO_EXTENSIONS = new Set([
-  ".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".webm",
+  ".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".webm", ".wmv",
 ]);
 
 function asError(code) {

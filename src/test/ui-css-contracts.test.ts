@@ -107,12 +107,12 @@ describe("responsive UI CSS contracts", () => {
   it("wires shell grid columns to persisted pane width variables", () => {
     expect(styles).toContain("--sidebar-w-current");
     expect(styles).toContain("--rightpanel-w-current");
-    expect(styles).toMatch(/grid-template-columns:\s*var\(--sidebar-w-current\) 6px minmax\(0, 1fr\) 6px var\(--rightpanel-w-current\)/s);
+    expect(styles).toMatch(/grid-template-columns:\s*var\(--sidebar-w-current\) var\(--splitter-w\) minmax\(0, 1fr\) var\(--splitter-w\) var\(--rightpanel-w-current\)/s);
     expect(styles).toContain(".app-shell.is-sidebar-collapsed .app-sidebar");
     expect(styles).toContain(".app-shell.is-sidebar-collapsed .app-sidebar button");
     expect(styles).not.toContain(".app-sidebar nav button");
     expect(styles).not.toContain('.resize-handle[data-pane-id="sidebar"] { display: none; }');
-    expect(styles).toMatch(/@media \(max-width: 820px\)[\s\S]*grid-template-columns:\s*var\(--sidebar-w-current\) 6px minmax\(0, 1fr\)/s);
+    expect(styles).toMatch(/@media \(max-width: 820px\)[\s\S]*grid-template-columns:\s*var\(--sidebar-w-current\) var\(--splitter-w\) minmax\(0, 1fr\)/s);
     expect(styles).toMatch(/@media \(max-width: 820px\)[\s\S]*\.app-shell\s*\{[^}]*--sidebar-w-current:\s*var\(--sidebar-collapsed-w\)/s);
   });
 
@@ -131,6 +131,13 @@ describe("responsive UI CSS contracts", () => {
     expect(styles).not.toMatch(/\.resize-handle:hover::before,[\s\S]*inset:\s*0 1px/s);
   });
 
+  it("keeps fixed clear space on both sides of every splitter hairline", () => {
+    expect(styles).toContain("--splitter-w: 13px");
+    expect(styles).toMatch(/\.resize-handle\s*\{[^}]*width:\s*var\(--splitter-w\)/s);
+    expect(styles).toMatch(/\.resize-handle\s*\{[^}]*min-width:\s*var\(--splitter-w\)/s);
+    expect(styles).toMatch(/\.resize-handle::before\s*\{[^}]*left:\s*calc\(\(var\(--splitter-w\) - 1px\) \/ 2\)/s);
+  });
+
   it("routes accent focus and ambient states through theme tokens", () => {
     expect(styles).toContain("--accent-ring");
     expect(styles).toContain("--accent-ring-soft");
@@ -144,8 +151,8 @@ describe("responsive UI CSS contracts", () => {
     expect(styles).toContain("--wiki-tree-w-current");
     expect(styles).toContain("--exports-list-w-current");
     expect(styles).toContain("--lint-details-w-current");
-    expect(styles).toMatch(/\.exports-view-layout\s*\{[^}]*grid-template-columns:\s*var\(--exports-list-w-current, 360px\) 6px minmax\(320px, 1fr\)/s);
-    expect(styles).toMatch(/\.lint-view-layout\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) 6px var\(--lint-details-w-current, 320px\)/s);
+    expect(styles).toMatch(/\.exports-view-layout\s*\{[^}]*grid-template-columns:\s*var\(--exports-list-w-current, 360px\) var\(--splitter-w\) minmax\(320px, 1fr\)/s);
+    expect(styles).toMatch(/\.lint-view-layout\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) var\(--splitter-w\) var\(--lint-details-w-current, 320px\)/s);
     expect(styles).toMatch(/@media \(max-width: 980px\)[\s\S]*\.resize-handle\[data-pane-id="exportsList"\][\s\S]*\.resize-handle\[data-pane-id="lintDetails"\]/s);
   });
 

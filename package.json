@@ -25,6 +25,7 @@
     "check:import-v2-cutover": "node scripts/check-import-v2-cutover.mjs",
     "lint": "eslint . --max-warnings=0",
     "check:console": "node scripts/check-console-log.mjs",
+    "check:tailwind-coverage": "node --test --experimental-test-isolation=none scripts/check-tailwind-coverage.node-test.mjs && node scripts/check-tailwind-coverage.mjs",
     "check:rust:gui": "cargo check --manifest-path src-tauri/Cargo.toml",
     "check:rust:core": "cargo check --manifest-path src-tauri/Cargo.toml --no-default-features",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --no-default-features",

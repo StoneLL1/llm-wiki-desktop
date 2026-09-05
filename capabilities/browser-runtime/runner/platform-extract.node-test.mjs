@@ -5,7 +5,7 @@ import { URL } from "node:url";
 import { bilibiliMediaPolicy, classifyPlatformPage, classifyRemoteImageKind, extractBilibiliPlayerEvidence, extractBilibiliPlayerEvidenceFromHtml, extractPlatformPayload, extractRelevantBilibiliPlayerEvidence, extractXPayload, isBilibiliPlayerApiUrl, mergeBilibiliPlayerEvidence, platformHasVideoEvidence, renderPlatformMarkdown, resolveSubtitleReference, selectRelevantApiEvidence, xiaohongshuImageEvidenceReady, xiaohongshuImageOcrRequired } from "./platform-extract.mjs";
 
 function fixture(name) {
-  return readFileSync(new URL(`../../../tests/fixtures/import-v2/web/xiaohongshu/${name}`, import.meta.url), "utf8");
+  return readFileSync(new URL(`./fixtures/xiaohongshu/${name}`, import.meta.url), "utf8");
 }
 
 test("extracts the public X post route only from the requested status page", () => {

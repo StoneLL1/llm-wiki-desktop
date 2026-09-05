@@ -277,7 +277,7 @@ function TreeRow({
         <button
           type="button"
           onClick={() => onSelect(node.path)}
-          className={`flex min-w-0 flex-1 items-center gap-1.5 rounded-[var(--radius-sm)] py-[3px] pr-7 text-left text-[12.5px] transition-colors ${
+          className={`flex min-w-0 flex-1 items-center gap-1.5 rounded-[var(--radius-sm)] py-[4px] pr-7 text-left text-[12.5px] transition-colors ${
             selected
               ? "bg-[var(--accent-soft)] text-[var(--accent-hover)]"
               : "text-[var(--text-primary)] hover:bg-[var(--surface-muted)]"
@@ -345,7 +345,7 @@ function TreeRow({
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
-        className="flex w-full items-center gap-1.5 rounded-[var(--radius-sm)] py-[3px] pr-2 text-left text-[12.5px] text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)]"
+        className="flex w-full items-center gap-1.5 rounded-[var(--radius-sm)] py-[4px] pr-2 text-left text-[12.5px] text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-muted)]"
         style={{ paddingLeft: depth * 12 + 4 }}
       >
         {open ? (

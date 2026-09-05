@@ -1,0 +1,139 @@
+diff --git a/examples/common-whisper.cpp b/examples/common-whisper.cpp
+index cb8a6bc..04e885b 100644
+--- a/examples/common-whisper.cpp
++++ b/examples/common-whisper.cpp
+@@ -39 +39 @@
+-extern bool ffmpeg_decode_audio(const std::string & ifname, std::vector<uint8_t> & wav_data);
++extern int ffmpeg_decode_audio(const std::string & ifname, std::vector<uint8_t> & wav_data);
+diff --git a/examples/ffmpeg-transcode.cpp b/examples/ffmpeg-transcode.cpp
+index 1fae58a..153c353 100644
+--- a/examples/ffmpeg-transcode.cpp
++++ b/examples/ffmpeg-transcode.cpp
+@@ -19,0 +20,6 @@
++#ifdef _WIN32
++#define WIN32_LEAN_AND_MEAN
++#define NOMINMAX
++#include <windows.h>
++#include <limits>
++#else
+@@ -24,0 +31 @@
++#endif
+@@ -56,0 +64 @@ static const char* ffmpegLog = getenv("FFMPEG_LOG");
++#pragma pack(push, 1)
+@@ -92 +100,2 @@ struct wave_hdr {
+-} __attribute__((__packed__));
++};
++#pragma pack(pop)
+@@ -96 +105 @@ struct audio_buffer {
+-	int size; /* size left in the buffer */
++	size_t size; /* size left in the buffer */
+@@ -114,0 +124,62 @@ static void set_wave_hdr(wave_hdr& wh, size_t size) {
++#ifdef _WIN32
++static std::wstring wide_path(const std::string &path) {
++    unsigned int code_page = CP_UTF8;
++    int length = MultiByteToWideChar(code_page, MB_ERR_INVALID_CHARS, path.c_str(), -1, NULL, 0);
++    if (length == 0) {
++        code_page = CP_ACP;
++        length = MultiByteToWideChar(code_page, 0, path.c_str(), -1, NULL, 0);
++    }
++    if (length == 0) {
++        return {};
++    }
++    std::wstring result(static_cast<size_t>(length), L'\0');
++    if (MultiByteToWideChar(code_page, code_page == CP_UTF8 ? MB_ERR_INVALID_CHARS : 0,
++                            path.c_str(), -1, &result[0], length) == 0) {
++        return {};
++    }
++    result.pop_back();
++    return result;
++}
++
++static int map_file(const std::string &path, HANDLE *file, HANDLE *mapping, u8 **ptr, size_t *size) {
++    const std::wstring native_path = wide_path(path);
++    if (native_path.empty()) {
++        return -1;
++    }
++    *file = CreateFileW(native_path.c_str(), GENERIC_READ,
++                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
++                        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
++    if (*file == INVALID_HANDLE_VALUE) {
++        return -1;
++    }
++    LARGE_INTEGER file_size;
++    if (!GetFileSizeEx(*file, &file_size) || file_size.QuadPart <= 0 ||
++        static_cast<unsigned long long>(file_size.QuadPart) > std::numeric_limits<size_t>::max()) {
++        CloseHandle(*file);
++        *file = INVALID_HANDLE_VALUE;
++        return -1;
++    }
++    *mapping = CreateFileMappingW(*file, NULL, PAGE_READONLY, 0, 0, NULL);
++    if (*mapping == NULL) {
++        CloseHandle(*file);
++        *file = INVALID_HANDLE_VALUE;
++        return -1;
++    }
++    *ptr = static_cast<u8 *>(MapViewOfFile(*mapping, FILE_MAP_READ, 0, 0, 0));
++    if (*ptr == NULL) {
++        CloseHandle(*mapping);
++        CloseHandle(*file);
++        *mapping = NULL;
++        *file = INVALID_HANDLE_VALUE;
++        return -1;
++    }
++    *size = static_cast<size_t>(file_size.QuadPart);
++    return 0;
++}
++
++static void unmap_file(HANDLE file, HANDLE mapping, u8 *ptr) {
++    UnmapViewOfFile(ptr);
++    CloseHandle(mapping);
++    CloseHandle(file);
++}
++#else
+@@ -135,0 +207 @@ static int map_file(int fd, u8 **ptr, size_t *size)
++#endif
+@@ -141 +213,3 @@ static int read_packet(void *opaque, u8 *buf, int buf_size)
+-	buf_size = FFMIN(buf_size, audio_buf->size);
++	size_t read_size = static_cast<size_t>(buf_size);
++	if (read_size > audio_buf->size)
++		read_size = audio_buf->size;
+@@ -144,3 +218,3 @@ static int read_packet(void *opaque, u8 *buf, int buf_size)
+-	memcpy(buf, audio_buf->ptr, buf_size);
+-	audio_buf->ptr += buf_size;
+-	audio_buf->size -= buf_size;
++	memcpy(buf, audio_buf->ptr, read_size);
++	audio_buf->ptr += read_size;
++	audio_buf->size -= read_size;
+@@ -148 +222 @@ static int read_packet(void *opaque, u8 *buf, int buf_size)
+-	return buf_size;
++	return static_cast<int>(read_size);
+@@ -192 +266 @@ static int decode_audio(struct audio_buffer *audio_buf, s16 **data, int *size)
+-    LOG("decode_audio: input size: %d\n", audio_buf->size);
++    LOG("decode_audio: input size: %zu\n", audio_buf->size);
+@@ -329,0 +404,12 @@ int ffmpeg_decode_audio(const std::string &ifname, std::vector<uint8_t>& owav_da
++    int err = 0;
++#ifdef _WIN32
++    HANDLE ifd = INVALID_HANDLE_VALUE;
++    HANDLE mapping = NULL;
++    u8 *ibuf = NULL;
++    size_t ibuf_size = 0;
++    err = map_file(ifname, &ifd, &mapping, &ibuf, &ibuf_size);
++    if (err) {
++        fprintf(stderr, "Couldn't map input file %s\n", ifname.c_str());
++        return err;
++    }
++#else
+@@ -337 +423 @@ int ffmpeg_decode_audio(const std::string &ifname, std::vector<uint8_t>& owav_da
+-    int err = map_file(ifd, &ibuf, &ibuf_size);
++    err = map_file(ifd, &ibuf, &ibuf_size);
+@@ -342 +428,2 @@ int ffmpeg_decode_audio(const std::string &ifname, std::vector<uint8_t>& owav_da
+-    LOG("Mapped input file: %s size: %d\n", ibuf, (int) ibuf_size);
++#endif
++    LOG("Mapped input file %s: size: %zu\n", ifname.c_str(), ibuf_size);
+@@ -350,0 +438,6 @@ int ffmpeg_decode_audio(const std::string &ifname, std::vector<uint8_t>& owav_da
++#ifdef _WIN32
++    unmap_file(ifd, mapping, ibuf);
++#else
++    munmap(ibuf, ibuf_size);
++    close(ifd);
++#endif

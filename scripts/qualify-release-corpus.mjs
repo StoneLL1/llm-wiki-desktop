@@ -82,17 +82,29 @@ const cases = [];
 try {
   const staging = path.join(root, "staging");
   await fs.mkdir(staging);
+  const indirectExtensions = new Set(corpus.indirectExtensionsByCapability?.[contract.capabilityId] ?? []);
   for (const extension of contract.formats.extensions) {
-    const fixture = corpus.fixtureByExtension[extension];
+    const capabilityFixture = corpus.fixtureByCapability?.[contract.capabilityId]?.[extension];
+    const fixture = capabilityFixture ?? corpus.fixtureByExtension[extension];
     assert.ok(fixture, `${extension} has no redistributable fixture`);
-    const source = path.join(corpusRoot, fixture);
+    const sourceRoot = capabilityFixture
+      ? path.join(repositoryRoot, corpus.capabilityFixtureRoot)
+      : corpusRoot;
+    const source = path.join(sourceRoot, fixture);
     assert.equal((await fs.stat(source)).isFile(), true);
 
     const normal = `normal.${extension}`;
     await fs.copyFile(source, path.join(staging, normal));
     const normalResult = await invoke(program, contract.entrypointArgs, requestFor(root, normal, `${extension}-normal`), payload);
-    await assertContainedOutputs(response(normalResult, `${extension}-normal`), staging);
-    cases.push({ extension, case: "normal", status: "passed" });
+    const normalResponse = response(normalResult, `${extension}-normal`);
+    if (indirectExtensions.has(extension)) {
+      assert.ok(normalResponse?.error, `${extension} direct input was accepted despite requiring an upstream conversion route`);
+      assert.equal(typeof normalResponse.error.code, "number", `${extension} direct rejection was not a typed JSON-RPC error`);
+      cases.push({ extension, case: "normal", status: "passed-indirect-rejection" });
+    } else {
+      await assertContainedOutputs(normalResponse, staging);
+      cases.push({ extension, case: "normal", status: "passed" });
+    }
 
     const masquerade = `${extension}-masquerade.txt`;
     await fs.copyFile(source, path.join(staging, masquerade));
@@ -111,8 +123,15 @@ try {
     const boundary = path.join("边界-qualification", extension, `source.${extension}`);
     await fs.copyFile(source, path.join(staging, boundary));
     const boundaryResult = await invoke(program, contract.entrypointArgs, requestFor(root, boundary, `${extension}-boundary`), payload);
-    await assertContainedOutputs(response(boundaryResult, `${extension}-boundary`), staging);
-    cases.push({ extension, case: "boundary", status: "passed" });
+    const boundaryResponse = response(boundaryResult, `${extension}-boundary`);
+    if (indirectExtensions.has(extension)) {
+      assert.ok(boundaryResponse?.error, `${extension} boundary input bypassed its upstream conversion route`);
+      assert.equal(typeof boundaryResponse.error.code, "number", `${extension} boundary rejection was not a typed JSON-RPC error`);
+      cases.push({ extension, case: "boundary", status: "passed-indirect-rejection" });
+    } else {
+      await assertContainedOutputs(boundaryResponse, staging);
+      cases.push({ extension, case: "boundary", status: "passed" });
+    }
 
     await killForCancellation(program, contract.entrypointArgs, requestFor(root, normal, `${extension}-cancel`), payload);
     assert.equal((await fs.stat(path.join(staging, "candidate.md")).catch(() => null)), null);

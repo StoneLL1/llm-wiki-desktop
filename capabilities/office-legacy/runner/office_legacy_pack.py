@@ -28,6 +28,7 @@ WARNING_BY_EXTENSION = {
              "LEGACY_OFFICE_ANIMATION_MAY_BE_LOST",
              "LEGACY_OFFICE_UNIT_COUNT_REQUIRES_MODERN_ROUTE_COMPARISON"],
 }
+OLE_COMPOUND_FILE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
 
 def contained(root, path):
@@ -143,6 +144,12 @@ def validate_ooxml(path, expected_part):
     return count
 
 
+def validate_legacy_office(path):
+    with path.open("rb") as source:
+        if source.read(len(OLE_COMPOUND_FILE_MAGIC)) != OLE_COMPOUND_FILE_MAGIC:
+            raise ValueError("legacy Office input is not an OLE compound file")
+
+
 def execute_libreoffice(executable, source, output_dir, profile, timeout_seconds):
     extension, _ = TARGETS[source.suffix.lower()]
     args = [str(executable), "--headless", "--invisible", "--nologo", "--nodefault",
@@ -167,7 +174,7 @@ def execute_libreoffice(executable, source, output_dir, profile, timeout_seconds
 
 
 def handle(request):
-    request_id = str(request.get("id", ""))
+    request_id = request.get("id")
     if request.get("jsonrpc") == "2.0" and request.get("method") == "capability.health":
         params = request.get("params", {})
         executable = bundled_executable()
@@ -187,18 +194,22 @@ def handle(request):
         return fail(request_id, -32602, "unsupported protocol version")
     project = Path(params.get("projectRoot", "")).resolve()
     staging = Path(params.get("stagingRoot", ""))
-    source = Path(params.get("input", {}).get("locator", ""))
+    chained = params.get("chainedInput")
+    source = Path(chained) if chained else Path(params.get("input", {}).get("locator", ""))
     if not staging.is_absolute():
         staging = project / staging
     if not source.is_absolute():
-        source = project / source
+        source = (staging if chained else project) / source
     suffix = source.suffix.lower()
-    if not source.is_file() or not contained(project, staging) or suffix not in TARGETS:
+    allowed_source = contained(staging, source) if chained else contained(project, source)
+    if (not source.is_file() or not contained(project, staging)
+            or not allowed_source or suffix not in TARGETS):
         return fail(request_id, -32602, "unauthorized or unsupported source")
     executable = bundled_executable()
     if not executable:
         return fail(request_id, -32020, "office-legacy capability is not installed")
     try:
+        validate_legacy_office(source)
         staging.mkdir(parents=True, exist_ok=True)
         converted_dir = staging / "converted"
         if converted_dir.exists():

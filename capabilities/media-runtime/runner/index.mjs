@@ -1,14 +1,28 @@
 import { execFile } from "node:child_process";
+import { Buffer } from "node:buffer";
 import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { promisify, TextDecoder } from "node:util";
 
+import { restrictedEnvironment } from "./core.mjs";
+
 const execFileAsync = promisify(execFile);
 const packRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ffmpeg = path.join(packRoot, "runtime", "ffmpeg", "bin", process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg");
 const allowedExtensions = new Set(["gif", "wma", "wmv", "srt", "vtt", "ass", "ssa", "lrc"]);
+const MAX_RPC_BYTES = 1024 * 1024;
+
+async function readRpc() {
+  process.stdin.setEncoding("utf8");
+  let input = "";
+  for await (const chunk of process.stdin) {
+    input += chunk;
+    if (Buffer.byteLength(input, "utf8") > MAX_RPC_BYTES) throw new Error("IMPORT_MEDIA_INVALID_REQUEST");
+  }
+  return JSON.parse(input.trim());
+}
 
 function failure(id, code) {
   return { jsonrpc: "2.0", id: id ?? null, result: null, error: { code: -32020, message: "The local media helper could not complete the request.", data: { code } } };
@@ -27,7 +41,7 @@ function subtitleMarkdown(text) {
 
 let rpc;
 try {
-  rpc = JSON.parse(await fs.readFile(0, "utf8"));
+  rpc = await readRpc();
   const params = rpc?.params;
   if (rpc?.method === "capability.health") {
     if (params?.protocolVersion !== "2" || params?.capabilityId !== "media-runtime" || !["media.subtitle", "media.keyframes"].includes(params?.route)) throw new Error("IMPORT_MEDIA_INVALID_REQUEST");
@@ -55,7 +69,7 @@ try {
   } else {
     const frames = path.join(output, "frames");
     await fs.mkdir(frames);
-    await execFileAsync(ffmpeg, ["-nostdin", "-hide_banner", "-loglevel", "error", "-i", source, "-vf", "fps=1/10,scale='min(1280,iw)':-2", "-frames:v", "6", path.join(frames, "frame-%03d.png")], { shell: false, windowsHide: true, timeout: 10 * 60 * 1000, maxBuffer: 1024 * 1024 });
+    await execFileAsync(ffmpeg, ["-nostdin", "-hide_banner", "-loglevel", "error", "-i", source, "-vf", "select='eq(n,0)+gte(t-prev_selected_t,10)',scale='min(1280,iw)':-2", "-fps_mode", "vfr", "-frames:v", "6", path.join(frames, "frame-%03d.png")], { shell: false, env: restrictedEnvironment(packRoot), windowsHide: true, timeout: 10 * 60 * 1000, maxBuffer: 1024 * 1024 });
     const framePaths = (await fs.readdir(frames)).filter((name) => /^frame-\d{3}\.png$/u.test(name)).sort().map((name) => path.relative(stagingRoot, path.join(frames, name)).split(path.sep).join("/"));
     if (!framePaths.length) throw new Error("IMPORT_MEDIA_NO_STABLE_FRAMES");
     assets.push(...framePaths);

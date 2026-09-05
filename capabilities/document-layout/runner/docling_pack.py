@@ -33,7 +33,7 @@ def dependencies():
 
 
 def handle(request):
-    request_id = str(request.get("id", ""))
+    request_id = request.get("id")
     params = request.get("params", {})
     if request.get("jsonrpc") == "2.0" and request.get("method") == "capability.health":
         if (params.get("protocolVersion") != "2"

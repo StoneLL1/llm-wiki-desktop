@@ -30,7 +30,7 @@ def contained(root, path):
 
 
 def handle(request):
-    request_id = str(request.get("id", ""))
+    request_id = request.get("id")
     if request.get("jsonrpc") == "2.0" and request.get("method") == "capability.health":
         params = request.get("params", {})
         if (params.get("protocolVersion") != "2"
@@ -83,6 +83,12 @@ def handle(request):
 
 
 def main():
+    # JSON-RPC is always UTF-8. Windows otherwise decodes redirected stdin with
+    # the active ANSI code page, corrupting CJK paths before containment checks.
+    if hasattr(sys.stdin, "reconfigure"):
+        sys.stdin.reconfigure(encoding="utf-8", errors="strict")
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="strict")
     line = sys.stdin.readline()
     try:
         response = handle(json.loads(line))

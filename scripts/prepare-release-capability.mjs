@@ -172,6 +172,85 @@ async function stagePythonRuntime(python, prepared) {
     : path.join(destination, "bin", "python3");
 }
 
+const linuxCpuWheels = {
+  torch: {
+    url: "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl",
+    sha256: "4ca4a9394b0c771238a4f73590fdbbc4debad85ed0fa63d026ae1b085da7d6e2",
+  },
+  torchvision: {
+    url: "https://download-r2.pytorch.org/whl/cpu/torchvision-0.28.0%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl",
+    sha256: "b545d46f4d2f9d30381281cf22874bfe1d32a8a7b0ee8396fccde89f30c6a9d9",
+  },
+};
+
+export function linuxCpuRequirements(lock) {
+  const lines = lock.replace(/\r\n/gu, "\n").split("\n");
+  const foundCpuWheel = new Set();
+  const output = [];
+  for (let index = 0; index < lines.length;) {
+    const packageName = lines[index].match(/^([A-Za-z0-9._-]+)==/u)?.[1];
+    if (!packageName) {
+      output.push(lines[index]);
+      index += 1;
+      continue;
+    }
+    const block = [lines[index]];
+    index += 1;
+    while (block.at(-1).trimEnd().endsWith("\\") && index < lines.length && /^[ \t]+/u.test(lines[index])) {
+      block.push(lines[index]);
+      index += 1;
+    }
+    if (/^(?:cuda-|nvidia-)/u.test(packageName) || packageName === "triton") continue;
+    const wheel = linuxCpuWheels[packageName];
+    if (wheel) {
+      foundCpuWheel.add(packageName);
+      output.push(`${packageName} @ ${wheel.url} \\`, `    --hash=sha256:${wheel.sha256}`);
+    } else {
+      output.push(...block);
+    }
+  }
+  for (const name of Object.keys(linuxCpuWheels)) {
+    if (!foundCpuWheel.has(name)) throw new Error(`document-layout lock omitted ${name}`);
+  }
+  return `${output.join("\n").replace(/\n+$/u, "")}\n`;
+}
+
+export async function materializeDoclingModels(tableformerDownload, layoutDownload, outputRoot) {
+  const tableformerSource = path.join(tableformerDownload, "model_artifacts", "tableformer");
+  const repositoryModelRoot = path.join(outputRoot, "ds4sd--docling-models", "model_artifacts", "tableformer");
+  const legacyLayoutRoot = path.join(outputRoot, "ds4sd--docling-layout-old");
+  for (const required of [
+    path.join(tableformerSource, "accurate", "tableformer_accurate.safetensors"),
+    path.join(tableformerSource, "accurate", "tm_config.json"),
+    path.join(tableformerSource, "fast", "tableformer_fast.safetensors"),
+    path.join(tableformerSource, "fast", "tm_config.json"),
+    path.join(layoutDownload, "config.json"),
+    path.join(layoutDownload, "model.safetensors"),
+    path.join(layoutDownload, "preprocessor_config.json"),
+  ]) {
+    if (!(await fs.stat(required).catch(() => null))?.isFile()) {
+      throw new Error(`pinned Docling model snapshot omitted ${path.basename(required)}`);
+    }
+  }
+  await fs.mkdir(outputRoot, { recursive: true });
+  await fs.mkdir(path.dirname(repositoryModelRoot), { recursive: true });
+  await fs.cp(tableformerSource, repositoryModelRoot, { recursive: true, dereference: true, errorOnExist: true, force: false });
+  await fs.mkdir(legacyLayoutRoot);
+  for (const name of ["config.json", "model.safetensors", "preprocessor_config.json"]) {
+    await fs.copyFile(path.join(layoutDownload, name), path.join(legacyLayoutRoot, name), fs.constants.COPYFILE_EXCL);
+  }
+}
+
+function huggingFaceRepositoryId(repository) {
+  const source = new URL(repository);
+  const repositoryId = source.pathname.replace(/^\/+|\/+$/gu, "");
+  if (source.protocol !== "https:" || source.hostname !== "huggingface.co" || source.username || source.password ||
+      source.search || source.hash || !/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/u.test(repositoryId)) {
+    throw new Error("Docling model repository must be an exact public Hugging Face repository URL");
+  }
+  return repositoryId;
+}
+
 async function preparePythonPack(pack, target, work, prepared, sources) {
   const python = await fetchPython(sources, target, work);
   const executable = await stagePythonRuntime(python, prepared);
@@ -179,21 +258,40 @@ async function preparePythonPack(pack, target, work, prepared, sources) {
   const lock = path.join(repositoryRoot, layout
     ? "capabilities/document-layout/runner/requirements.lock"
     : "capabilities/document-standard/requirements.lock");
+  let installLock = lock;
+  const linuxCpuLayout = layout && target === "x86_64-unknown-linux-gnu";
+  if (linuxCpuLayout) {
+    installLock = path.join(work, "document-layout-linux-cpu.lock");
+    await fs.writeFile(installLock, linuxCpuRequirements(await fs.readFile(lock, "utf8")));
+  }
   const sitePackages = path.join(prepared, "runtime", "site-packages");
-  await run("uv", ["pip", "install", "--python", executable, "--target", sitePackages, "--require-hashes", "-r", lock]);
+  const installArguments = ["pip", "install", "--python", executable, "--target", sitePackages, "--require-hashes"];
+  if (linuxCpuLayout) installArguments.push("--torch-backend", "cpu");
+  installArguments.push("-r", installLock);
+  await run("uv", installArguments);
   await copyRunner(pack, prepared);
   if (layout) {
     const model = sources.documentLayout.models;
+    const tableformerRepositoryId = huggingFaceRepositoryId(model.repository);
+    const layoutRepositoryId = huggingFaceRepositoryId(model.layoutRepository);
+    const downloadedTableformer = path.join(work, "docling-tableformer-download");
+    const downloadedLayout = path.join(work, "docling-layout-download");
     // uv installs into --target, which the bare interpreter does not see without PYTHONPATH.
     await run(executable, ["-c", [
       "from huggingface_hub import snapshot_download",
-      `snapshot_download(repo_id='ds4sd/docling-models',revision='${model.revision}',local_dir=r'${path.join(prepared, "models").replaceAll("'", "\\'")}')`,
+      `snapshot_download(repo_id='${tableformerRepositoryId}',revision='${model.revision}',local_dir=r'${downloadedTableformer.replaceAll("'", "\\'")}',allow_patterns=['model_artifacts/tableformer/**'])`,
+      `snapshot_download(repo_id='${layoutRepositoryId}',revision='${model.layoutRevision}',local_dir=r'${downloadedLayout.replaceAll("'", "\\'")}',allow_patterns=['config.json','model.safetensors','preprocessor_config.json'])`,
     ].join(";")], prepared, { PYTHONPATH: sitePackages });
+    await materializeDoclingModels(downloadedTableformer, downloadedLayout, path.join(prepared, "models"));
   }
   await writeCompliance(
     prepared, pack, target, false,
     ["pythonStandalone", layout ? "documentLayout" : "documentStandard"], sources,
-    layout ? { modelRevision: sources.documentLayout.models.revision, modelInventory: await fileInventory(path.join(prepared, "models")) } : {},
+    layout ? {
+      modelRevision: sources.documentLayout.models.revision,
+      layoutModelRevision: sources.documentLayout.models.layoutRevision,
+      modelInventory: await fileInventory(path.join(prepared, "models")),
+    } : {},
   );
   return { entrypoint: process.platform === "win32" ? "runtime/python/python.exe" : "runtime/python/bin/python3", entrypointArgs: [layout ? "runner/docling_pack.py" : "runner/markitdown_pack.py"] };
 }
@@ -218,6 +316,34 @@ async function findDirectory(root, predicate) {
   return null;
 }
 
+export async function findDirectoryContaining(root, relativeFile) {
+  const pending = [root];
+  while (pending.length) {
+    const directory = pending.pop();
+    if ((await fs.stat(path.join(directory, relativeFile)).catch(() => null))?.isFile()) return directory;
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+      if (entry.isDirectory()) pending.push(path.join(directory, entry.name));
+    }
+  }
+  return null;
+}
+
+export async function copyTreePreservingExecutables(source, destination) {
+  await fs.cp(source, destination, { recursive: true, dereference: true });
+  if (process.platform === "win32") return;
+  const pending = [[source, destination]];
+  while (pending.length) {
+    const [sourceDirectory, destinationDirectory] = pending.pop();
+    for (const entry of await fs.readdir(sourceDirectory, { withFileTypes: true })) {
+      const sourcePath = path.join(sourceDirectory, entry.name);
+      const destinationPath = path.join(destinationDirectory, entry.name);
+      const status = await fs.stat(sourcePath);
+      if (status.isDirectory()) pending.push([sourcePath, destinationPath]);
+      else if (status.mode & 0o111) await fs.chmod(destinationPath, 0o755);
+    }
+  }
+}
+
 async function prepareOffice(target, work, prepared, sources) {
   const python = await fetchPython(sources, target, work);
   await stagePythonRuntime(python, prepared);
@@ -228,14 +354,14 @@ async function prepareOffice(target, work, prepared, sources) {
     const extracted = path.join(work, "office-msi");
     await fs.mkdir(extracted);
     await run("msiexec.exe", ["/a", archive, "/qn", `TARGETDIR=${extracted}`], work);
-    const office = await findDirectory(extracted, (candidate) => candidate.endsWith(`${path.sep}LibreOffice`));
+    const office = await findDirectoryContaining(extracted, path.join("program", "soffice.exe"));
     if (!office) throw new Error("LibreOffice MSI omitted the application root");
-    await fs.cp(office, path.join(prepared, "runtime", "libreoffice"), { recursive: true, dereference: true });
+    await copyTreePreservingExecutables(office, path.join(prepared, "runtime", "libreoffice"));
   } else if (process.platform === "darwin") {
     const mount = path.join(work, "office-mount");
     await fs.mkdir(mount);
     await run("hdiutil", ["attach", "-nobrowse", "-readonly", "-mountpoint", mount, archive], work);
-    try { await fs.cp(path.join(mount, "LibreOffice.app"), path.join(prepared, "runtime", "LibreOffice.app"), { recursive: true, dereference: true }); }
+    try { await copyTreePreservingExecutables(path.join(mount, "LibreOffice.app"), path.join(prepared, "runtime", "LibreOffice.app")); }
     finally { await run("hdiutil", ["detach", mount], work); }
   } else {
     const extracted = path.join(work, "office-debs");
@@ -247,7 +373,7 @@ async function prepareOffice(target, work, prepared, sources) {
     for (const name of (await fs.readdir(debRoot)).filter((item) => item.endsWith(".deb")).sort()) {
       await run("dpkg-deb", ["-x", path.join(debRoot, name), installed], work);
     }
-    await fs.cp(path.join(installed, "opt", "libreoffice26.2"), path.join(prepared, "runtime", "libreoffice"), { recursive: true, dereference: true });
+    await copyTreePreservingExecutables(path.join(installed, "opt", "libreoffice26.2"), path.join(prepared, "runtime", "libreoffice"));
   }
   await copyRunner("office-legacy", prepared);
   await writeCompliance(prepared, "office-legacy", target, false, ["pythonStandalone", "libreOffice"], sources);
@@ -275,10 +401,15 @@ async function fetchFfmpeg(target, work, prepared, sources) {
     ], sourceRoot);
     await run("make", ["-j2"], sourceRoot);
     await run("make", ["install"], sourceRoot);
+    const materialized = path.join(work, "ffmpeg-materialized");
+    await copyTreePreservingExecutables(destination, materialized);
+    await fs.rm(destination, { recursive: true });
+    await fs.rename(materialized, destination);
     await fs.copyFile(path.join(sourceRoot, "COPYING.LGPLv3"), path.join(destination, "FFMPEG-LICENSE"));
   } else {
-    await fs.cp(sourceRoot, destination, { recursive: true, dereference: true });
+    await copyTreePreservingExecutables(sourceRoot, destination);
   }
+  if (process.platform !== "win32") await fs.chmod(path.join(destination, "bin", "ffmpeg"), 0o755);
   return destination;
 }
 
@@ -289,8 +420,22 @@ async function installNodeRuntime(target, work, prepared) {
   const node = process.platform === "win32" ? path.join(nodeRoot, nodeName) : path.join(nodeRoot, "bin", nodeName);
   await fs.mkdir(path.join(prepared, "runtime"), { recursive: true });
   await fs.copyFile(node, path.join(prepared, "runtime", nodeName));
+  if (process.platform !== "win32") await fs.chmod(path.join(prepared, "runtime", nodeName), 0o755);
   await fs.copyFile(path.join(nodeRoot, "LICENSE"), path.join(prepared, "runtime", "NODE-LICENSE"));
   return `runtime/${nodeName}`;
+}
+
+export function whisperCmakeArguments(source, build, ffmpegRoot) {
+  return [
+    "-S", source,
+    "-B", build,
+    "-DWHISPER_FFMPEG=ON",
+    "-DBUILD_SHARED_LIBS=OFF",
+    "-DWHISPER_BUILD_TESTS=OFF",
+    "-DWHISPER_BUILD_EXAMPLES=ON",
+    "-DCMAKE_BUILD_TYPE=Release",
+    `-DCMAKE_PREFIX_PATH=${ffmpegRoot}`,
+  ];
 }
 
 async function prepareMedia(pack, target, work, prepared, sources) {
@@ -303,6 +448,9 @@ async function prepareMedia(pack, target, work, prepared, sources) {
     await run("git", ["-C", source, "remote", "add", "origin", sources.whisper.source], work);
     await run("git", ["-C", source, "fetch", "--depth", "1", "origin", sources.whisper.commit], work);
     await run("git", ["-C", source, "checkout", "--detach", "FETCH_HEAD"], work);
+    if (process.platform === "win32") {
+      await run("git", ["-C", source, "apply", "--recount", "--unidiff-zero", "--whitespace=error-all", path.join(repositoryRoot, "capabilities", "asr-whisper", "patches", "whisper-v1.8.3-ffmpeg-windows.patch")], work);
+    }
     const build = path.join(work, "whisper-build");
     // Point both cmake prefixes and pkg-config exclusively at the payload ffmpeg so the
     // CLI links the shipped runtime instead of any system-wide FFmpeg dev packages.
@@ -311,7 +459,7 @@ async function prepareMedia(pack, target, work, prepared, sources) {
       PKG_CONFIG_LIBDIR: ffmpegPkgConfig,
       PKG_CONFIG_PATH: ffmpegPkgConfig,
     };
-    await run("cmake", ["-S", source, "-B", build, "-DWHISPER_FFMPEG=ON", "-DWHISPER_BUILD_TESTS=OFF", "-DWHISPER_BUILD_EXAMPLES=ON", "-DCMAKE_BUILD_TYPE=Release", `-DCMAKE_PREFIX_PATH=${ffmpegRoot}`], work, cmakeEnvironment);
+    await run("cmake", whisperCmakeArguments(source, build, ffmpegRoot), work, cmakeEnvironment);
     await run("cmake", ["--build", build, "--config", "Release", "--target", "whisper-cli", "--parallel", "2"], work, cmakeEnvironment);
     const binaryName = process.platform === "win32" ? "whisper-cli.exe" : "whisper-cli";
     const pending = [build]; let binary = null;
@@ -326,6 +474,7 @@ async function prepareMedia(pack, target, work, prepared, sources) {
     if (!binary) throw new Error("whisper.cpp build omitted whisper-cli");
     await fs.mkdir(path.join(prepared, "bin"));
     await fs.copyFile(binary, path.join(prepared, "bin", binaryName));
+    if (process.platform !== "win32") await fs.chmod(path.join(prepared, "bin", binaryName), 0o755);
     await fs.mkdir(path.join(prepared, "models"));
     await download(sources.whisper.model.source, sources.whisper.model, path.join(prepared, "models", "ggml-small.bin"));
     await fs.copyFile(path.join(source, "LICENSE"), path.join(prepared, "WHISPER-LICENSE"));

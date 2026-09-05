@@ -10,7 +10,7 @@ const activeChildren = new Set();
 const fullLanes = [
   {
     name: "frontend",
-    scripts: ["check:release-config", "test:final-four-redlines", "check:command-execution", "check:import-source-media", "test", "test:capability-tools", "lint", "build", "check:bundle", "check:console"],
+    scripts: ["check:release-config", "test:final-four-redlines", "check:command-execution", "check:import-source-media", "test", "test:capability-tools", "lint", "build", "check:bundle", "check:tailwind-coverage", "check:console"],
   },
   {
     name: "rust",
@@ -21,7 +21,7 @@ const fullLanes = [
 const quickLanes = [
   {
     name: "frontend",
-    scripts: ["check:release-config", "test:final-four-redlines", "check:command-execution", "lint", "build", "check:bundle", "check:console"],
+    scripts: ["check:release-config", "test:final-four-redlines", "check:command-execution", "lint", "build", "check:bundle", "check:tailwind-coverage", "check:console"],
   },
   {
     name: "rust",

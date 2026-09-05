@@ -17,6 +17,7 @@ import {
   buildVideoTextProbeArguments,
   executeWithProviderFallback,
   isNoAudioExecutionError,
+  isVideoMedia,
   mergeSenseVoiceTranscripts,
   nativeToolPath,
   parseSenseVoiceBatchStdout,
@@ -36,6 +37,19 @@ test("production ASR wrapper has no network client", async () => {
   assert.match(source, /"asr\.recognizing"/u);
   assert.match(source, /cwd:\s*packRoot/u);
   assert.doesNotMatch(source, /cwd:\s*(?:probeRoot|ocrRoot|temporaryRoot|shardRoot)/u);
+});
+
+test("accepts the manifest-declared WMA and WMV inputs", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "llm-wiki-sensevoice-windows-media-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const staging = path.join(root, "staging");
+  await fs.mkdir(staging);
+  for (const name of ["audio.wma", "video.wmv"]) {
+    await fs.writeFile(path.join(staging, name), "media");
+    assert.equal((await resolveStagingMedia(root, "staging", name)).mediaPath, await fs.realpath(path.join(staging, name)));
+  }
+  assert.equal(isVideoMedia("audio.wma"), false);
+  assert.equal(isVideoMedia("video.wmv"), true);
 });
 
 test("accepts the staging-relative chained media handoff and rejects escaping inputs", async (context) => {
