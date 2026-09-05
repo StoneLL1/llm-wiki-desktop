@@ -299,6 +299,19 @@ test("the committed desktop workflow is the only atomic publisher and pins every
     true,
     "resume mode must verify the reused candidate against its original provenance run",
   );
+  const assembleReleaseJob = desktopWorkflow.match(
+    /^ {2}assemble-release:[\s\S]*?(?=^ {2}publish-stable:)/m,
+  )?.[0] ?? "";
+  const publishStableJob = desktopWorkflow.match(
+    /^ {2}publish-stable:[\s\S]*/m,
+  )?.[0] ?? "";
+  for (const [jobName, job] of [["assemble-release", assembleReleaseJob], ["publish-stable", publishStableJob]]) {
+    assert.match(
+      job,
+      /Install updater verifier system dependencies[\s\S]*libdbus-1-dev[\s\S]*pkg-config/,
+      `${jobName} must install the Linux libraries required by the Rust updater verifier`,
+    );
+  }
 
   const unpinned = desktopWorkflow.replace(
     /actions\/checkout@[0-9a-f]{40}/,
