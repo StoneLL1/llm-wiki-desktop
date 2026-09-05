@@ -312,6 +312,16 @@ test("the committed desktop workflow is the only atomic publisher and pins every
       `${jobName} must install the Linux libraries required by the Rust updater verifier`,
     );
   }
+  assert.match(
+    publishStableJob,
+    /test "\$\(git rev-parse '[^']+\^\{commit\}'\)" = "\$\{\{ needs\.preflight\.outputs\.commit_sha \}\}"/,
+    "the publisher must verify the existing tag resolves to the frozen release commit",
+  );
+  assert.doesNotMatch(
+    publishStableJob,
+    /gh release create[^\n]*--target/,
+    "an existing validated tag must not pass target_commitish because GITHUB_TOKEN cannot request workflows:write",
+  );
 
   const unpinned = desktopWorkflow.replace(
     /actions\/checkout@[0-9a-f]{40}/,

@@ -689,7 +689,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse '${{ needs.preflight.outputs.release_tag }}^{commit}')" = "${{ needs.preflight.outputs.commit_sha }}"
           gh release view "$RELEASE_TAG" >/dev/null 2>&1 && { echo "release already exists: $RELEASE_TAG" >&2; exit 1; }
-          gh release create "$RELEASE_TAG" --target "${{ needs.preflight.outputs.commit_sha }}" --title "LLM Wiki Desktop ${RELEASE_TAG#app-v}" --notes-file candidate/release-notes.md --draft
+          gh release create "$RELEASE_TAG" --title "LLM Wiki Desktop ${RELEASE_TAG#app-v}" --notes-file candidate/release-notes.md --draft
           mapfile -d '' assets < <(find candidate -type f ! -name release-entry.json -print0)
           gh release upload "$RELEASE_TAG" "${assets[@]}"
           expected="$(find candidate -type f ! -name release-entry.json | wc -l | tr -d ' ')"
