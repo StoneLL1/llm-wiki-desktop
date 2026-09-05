@@ -107,7 +107,9 @@ function createReleaseBundle(root) {
     platforms: Object.keys(RELEASE_PLATFORMS).map((platform) => ({
       platform,
       status: "passed",
-      journeys: ["install-launch", "packaged-process-alive", "updater-fixture-manifest-verified"],
+      journeys: platform.startsWith("darwin-")
+        ? ["install-launch", "bundle-architecture-verified", "launchservices-accepted", "updater-fixture-manifest-verified"]
+        : ["install-launch", "packaged-process-alive", "updater-fixture-manifest-verified"],
     })),
   });
   writeJson(path.join(root, "sbom", "node.cdx.json"), { bomFormat: "CycloneDX", specVersion: "1.5" });
@@ -146,6 +148,21 @@ test("release verification rejects coordinate drift, incomplete smoke, and tampe
   assert.equal(errors.some((error) => error.includes("same workflow run")), true);
   assert.equal(errors.some((error) => error.includes("smoke is incomplete")), true);
   assert.equal(errors.some((error) => error.includes("CHECKSUMS")), true);
+});
+
+test("release verification rejects legacy macOS process evidence without bundle and LaunchServices checks", (context) => {
+  const root = fixture(context);
+  const smokePath = path.join(root, "smoke", "packaged-smoke-summary.json");
+  const smoke = JSON.parse(fs.readFileSync(smokePath));
+  const mac = smoke.platforms.find(({ platform }) => platform === "darwin-aarch64");
+  mac.journeys = ["install-launch", "packaged-process-alive", "updater-fixture-manifest-verified"];
+  writeJson(smokePath, smoke);
+  writeChecksums(root, path.join(root, "CHECKSUMS.sha256"));
+
+  const errors = verifyReleaseAssets({
+    root, tag: TAG, version: VERSION, commitSha: COMMIT, workflowRunId: RUN_ID,
+  }).errors;
+  assert.equal(errors.some((error) => error.includes("darwin-aarch64 packaged smoke is incomplete")), true);
 });
 
 test("latest.json rejects mutable, cross-tag, incomplete, and missing asset entries", () => {
