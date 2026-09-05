@@ -602,6 +602,16 @@ jobs:
           mkdir -p candidate/smoke
           node -e 'const fs=require("fs"),path=require("path"); const platforms=fs.readdirSync("smoke-fragments").sort().map(name=>JSON.parse(fs.readFileSync(path.join("smoke-fragments",name)))); if(platforms.some(x=>x.productionEndpointAccessed!==false)) process.exit(1); fs.writeFileSync("candidate/smoke/packaged-smoke-summary.json",JSON.stringify({schemaVersion:1,fixtureEndpointProductionUntouched:true,platforms},null,2)+"\n")'
 
+      - name: Normalize desktop asset names for GitHub Release
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          PUBLISHED_AT: ${{ needs.preflight.outputs.published_at }}
+        run: |
+          set -euo pipefail
+          node scripts/normalize-github-release-assets.mjs --root candidate
+          node scripts/verify-latest-json.mjs --generate true --root candidate --manifest candidate/latest.json --tag "$RELEASE_TAG" --version "$VERSION" --notes candidate/release-notes.md --pubDate "$PUBLISHED_AT"
+
       - name: Generate GitHub artifact attestation for the complete candidate payload
         id: attest
         uses: actions/attest-build-provenance@00014ed6ed5efc5b1ab7f7f34a39eb55d41aa4f8 # v3.1.0

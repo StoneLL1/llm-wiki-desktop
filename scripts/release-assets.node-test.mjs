@@ -7,6 +7,7 @@ import test from "node:test";
 
 import { verifyChecksums, writeChecksums } from "./generate-release-checksums.mjs";
 import { nodeSbom, rustSbom } from "./generate-release-sbom.mjs";
+import { normalizeGitHubReleaseAssets } from "./normalize-github-release-assets.mjs";
 import {
   exactReleaseAssetUrl,
   OS_IDENTITY_EVIDENCE,
@@ -253,7 +254,7 @@ test("desktop staging ignores transient Linux AppDir links and stages the final 
     source, output, platform: "linux-x86_64", releaseTag: TAG, version: VERSION, commitSha: COMMIT, signingEvidence: evidence,
   });
 
-  assert.equal(descriptor.installer.file, "linux-x86_64-LLM Wiki Desktop_0.2.0_amd64.AppImage");
+  assert.equal(descriptor.installer.file, "linux-x86_64-LLM.Wiki.Desktop_0.2.0_amd64.AppImage");
   assert.equal(descriptor.updater.file, descriptor.installer.file);
   assert.equal(fs.readFileSync(path.join(output, descriptor.installer.file), "utf8"), "appimage");
 });
@@ -279,6 +280,52 @@ test("desktop staging selects the macOS DMG and updater archive", (context) => {
 
   assert.match(descriptor.installer.file, /\.dmg$/);
   assert.match(descriptor.updater.file, /\.app\.tar\.gz$/);
+  assert.doesNotMatch(descriptor.installer.file, /\s/u);
+  assert.doesNotMatch(descriptor.updater.file, /\s/u);
+});
+
+test("reused desktop candidates normalize GitHub asset names before regenerating latest.json", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "llm-wiki-github-assets-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const platform of Object.keys(RELEASE_PLATFORMS)) {
+    const directory = path.join(root, "desktop", platform);
+    const installer = `${platform}-LLM Wiki Desktop-installer.bin`;
+    const updater = `${platform}-LLM Wiki Desktop-updater.bin`;
+    const signatureFile = `${updater}.sig`;
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, installer), `installer-${platform}`);
+    fs.writeFileSync(path.join(directory, updater), `updater-${platform}`);
+    fs.writeFileSync(path.join(directory, signatureFile), MINISIGN_SIGNATURE);
+    writeJson(path.join(directory, "release-entry.json"), {
+      schemaVersion: 1,
+      releaseTag: TAG,
+      version: VERSION,
+      commitSha: COMMIT,
+      platform,
+      targetTriple: RELEASE_PLATFORMS[platform],
+      installer: { file: installer },
+      updater: { file: updater, signatureFile, signature: MINISIGN_SIGNATURE },
+      osSigning: OS_IDENTITY_EVIDENCE[platform],
+    });
+  }
+
+  assert.deepEqual(normalizeGitHubReleaseAssets(root), { renamedAssets: 12, updatedDescriptors: 4 });
+  const descriptors = Object.keys(RELEASE_PLATFORMS).map((platform) =>
+    JSON.parse(fs.readFileSync(path.join(root, "desktop", platform, "release-entry.json"), "utf8")));
+  const manifest = generateLatestJson({
+    descriptors,
+    tag: TAG,
+    version: VERSION,
+    notes: "notes",
+    pubDate: "2026-09-05T00:00:00Z",
+  });
+  for (const descriptor of descriptors) {
+    assert.doesNotMatch(descriptor.installer.file, /\s/u);
+    assert.doesNotMatch(descriptor.updater.file, /\s/u);
+    assert.equal(fs.readFileSync(path.join(root, "desktop", descriptor.platform, descriptor.updater.file), "utf8"), `updater-${descriptor.platform}`);
+    assert.equal(decodeURIComponent(new URL(manifest.platforms[descriptor.platform].url).pathname).includes(" "), false);
+  }
+  assert.deepEqual(normalizeGitHubReleaseAssets(root), { renamedAssets: 0, updatedDescriptors: 4 });
 });
 
 test("release verification rejects obsolete OS certificate evidence without weakening updater signatures", (context) => {

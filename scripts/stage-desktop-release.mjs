@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   COMMIT_PATTERN,
+  githubReleaseAssetName,
   osIdentityEvidenceErrors,
   parseNamedArguments,
   RELEASE_PLATFORMS,
@@ -64,7 +65,7 @@ export function stageDesktopRelease({ source, output, platform, releaseTag, vers
 
   const absoluteOutput = path.resolve(output);
   fs.mkdirSync(absoluteOutput, { recursive: true });
-  const stagedName = (file) => `${platform}-${path.basename(file)}`;
+  const stagedName = (file) => githubReleaseAssetName(`${platform}-${path.basename(file)}`);
   const installerName = stagedName(installer);
   const updaterName = stagedName(updater);
   const signatureName = `${updaterName}.sig`;
