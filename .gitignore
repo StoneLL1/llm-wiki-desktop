@@ -16,10 +16,15 @@ __MACOSX/
 # backup 2026-09-01, owner-approved removal). The in-repo structure
 # note lives at docs/testing/sample-knowledge-base.md; the native
 # layout itself is defined by SPEC/SPEC.md §5.
-wiki/
+# Root-anchored on purpose: an unanchored `wiki/` also matched
+# src/features/wiki/ and silently removed those files from Tailwind
+# v4's automatic source scanning (which honors .gitignore), dropping
+# every utility class only used there from all builds.
+/wiki/
 
 .dev-capabilities/
 target-codex-*/
+/.tmp-cap-fix*/
 .impeccable/
 .superpowers/
 UI-Frontend-design/import-v2-reference.html

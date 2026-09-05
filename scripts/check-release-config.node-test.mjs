@@ -313,6 +313,17 @@ test("the committed desktop workflow is the only atomic publisher and pins every
     );
   }
   assert.match(
+    assembleReleaseJob,
+    /Normalize desktop asset names for GitHub Release[\s\S]*normalize-github-release-assets\.mjs --root candidate[\s\S]*verify-latest-json\.mjs --generate true/,
+    "the sealed candidate must use the same space-free desktop asset names that GitHub preserves",
+  );
+  assert.equal(
+    assembleReleaseJob.indexOf("Normalize desktop asset names for GitHub Release")
+      < assembleReleaseJob.indexOf("Generate GitHub artifact attestation for the complete candidate payload"),
+    true,
+    "GitHub-compatible asset names and latest.json must be finalized before attestation and checksums",
+  );
+  assert.match(
     publishStableJob,
     /test "\$\(git rev-parse '[^']+\^\{commit\}'\)" = "\$\{\{ needs\.preflight\.outputs\.commit_sha \}\}"/,
     "the publisher must verify the existing tag resolves to the frozen release commit",

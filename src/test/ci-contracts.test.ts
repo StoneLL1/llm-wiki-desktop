@@ -86,13 +86,13 @@ describe("CI validation contract", () => {
 
     expect(packageJson.scripts.check).toBe("node scripts/run-checks.mjs");
     expect(checkOrchestrator).toContain(
-      'scripts: ["check:release-config", "test:final-four-redlines", "check:command-execution", "check:import-source-media", "test", "test:capability-tools", "lint", "build", "check:bundle", "check:console"]',
+      'scripts: ["check:release-config", "test:final-four-redlines", "check:command-execution", "check:import-source-media", "test", "test:capability-tools", "lint", "build", "check:bundle", "check:tailwind-coverage", "check:console"]',
     );
     expect(checkOrchestrator).toContain(
       'scripts: ["check:rust:gui", "test:rust"]',
     );
     expect(checkOrchestrator).toContain(
-      'scripts: ["check:release-config", "test:final-four-redlines", "check:command-execution", "lint", "build", "check:bundle", "check:console"]',
+      'scripts: ["check:release-config", "test:final-four-redlines", "check:command-execution", "lint", "build", "check:bundle", "check:tailwind-coverage", "check:console"]',
     );
     expect(checkOrchestrator).toContain(
       'scripts: ["check:rust:core"]',
@@ -102,6 +102,9 @@ describe("CI validation contract", () => {
     );
     expect(packageJson.scripts["check:bundle"]).toBe(
       "node --test --experimental-test-isolation=none scripts/check-initial-bundle.node-test.mjs && node scripts/check-initial-bundle.mjs",
+    );
+    expect(packageJson.scripts["check:tailwind-coverage"]).toBe(
+      "node --test --experimental-test-isolation=none scripts/check-tailwind-coverage.node-test.mjs && node scripts/check-tailwind-coverage.mjs",
     );
     expect(packageJson.scripts["check:import-source-media"]).toBe(
       "node scripts/check-import-source-media-flow.mjs",

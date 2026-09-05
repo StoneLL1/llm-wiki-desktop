@@ -45,6 +45,7 @@
   --radius-md: 6px;
   --radius-lg: 8px;
   --radius-pill: 9999px;
+  --splitter-w: 13px;
   --sp-1: 4px;
   --sp-2: 8px;
   --sp-3: 12px;
@@ -194,15 +195,15 @@ body {
   display: grid;
   min-width: 0;
   min-height: 0;
-  grid-template-columns: var(--sidebar-w-current) 6px minmax(0, 1fr) 6px var(--rightpanel-w-current);
+  grid-template-columns: var(--sidebar-w-current) var(--splitter-w) minmax(0, 1fr) var(--splitter-w) var(--rightpanel-w-current);
 }
 
 .app-shell.is-right-collapsed .app-shell__workbench {
-  grid-template-columns: var(--sidebar-w-current) 6px minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-w-current) var(--splitter-w) minmax(0, 1fr);
 }
 
 .app-shell.is-workspace-focused .app-shell__workbench {
-  grid-template-columns: var(--sidebar-w-current) 6px minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-w-current) var(--splitter-w) minmax(0, 1fr);
 }
 
 .app-shell__main {
@@ -248,8 +249,8 @@ body {
 
 .resize-handle {
   position: relative;
-  width: 6px;
-  min-width: 6px;
+  width: var(--splitter-w);
+  min-width: var(--splitter-w);
   cursor: col-resize;
   background: transparent;
   outline: none;
@@ -260,7 +261,7 @@ body {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: 2px;
+  left: calc((var(--splitter-w) - 1px) / 2);
   width: 1px;
   content: "";
   background: var(--border);
@@ -2957,13 +2958,13 @@ select:focus-visible {
 }
 
 .chat-view-layout { grid-template-columns: minmax(220px, 260px) minmax(0, 1fr); }
-.exports-view-layout { grid-template-columns: var(--exports-list-w-current, 360px) 6px minmax(320px, 1fr); }
+.exports-view-layout { grid-template-columns: var(--exports-list-w-current, 360px) var(--splitter-w) minmax(320px, 1fr); }
 .exports-view-layout.is-preview-focused { grid-template-columns: minmax(0, 1fr); }
 .exports-view-layout.is-preview-focused .exports-view__list-pane,
 .exports-view-layout.is-preview-focused > .resize-handle[data-pane-id="exportsList"] {
   display: none;
 }
-.lint-view-layout { grid-template-columns: minmax(0, 1fr) 6px var(--lint-details-w-current, 320px); }
+.lint-view-layout { grid-template-columns: minmax(0, 1fr) var(--splitter-w) var(--lint-details-w-current, 320px); }
 .settings-view-layout { grid-template-columns: 240px minmax(0, 1fr); }
 .wiki-view-layout { display: flex; height: 100%; min-width: 0; min-height: 0; }
 .wiki-tree { display: flex; width: var(--wiki-tree-w-current, 260px); min-width: 0; flex-shrink: 0; flex-direction: column; background: var(--surface); }
@@ -3338,7 +3339,7 @@ select:focus-visible {
 @media (max-width: 1180px) {
   .app-shell__workbench,
   .app-shell.is-right-collapsed .app-shell__workbench {
-    grid-template-columns: var(--sidebar-w-current) 6px minmax(0, 1fr);
+    grid-template-columns: var(--sidebar-w-current) var(--splitter-w) minmax(0, 1fr);
   }
 
   .resize-handle[data-pane-id="rightPanel"] {
@@ -3427,7 +3428,7 @@ select:focus-visible {
   .app-shell__workbench,
   .app-shell.is-right-collapsed .app-shell__workbench,
   .app-shell.is-sidebar-collapsed .app-shell__workbench,
-  .app-shell.is-sidebar-collapsed.is-right-collapsed .app-shell__workbench { grid-template-columns: var(--sidebar-w-current) 6px minmax(0, 1fr); }
+  .app-shell.is-sidebar-collapsed.is-right-collapsed .app-shell__workbench { grid-template-columns: var(--sidebar-w-current) var(--splitter-w) minmax(0, 1fr); }
   .app-sidebar { width: var(--sidebar-w-current); }
   .app-sidebar__section-label,
   .app-sidebar__favorites,

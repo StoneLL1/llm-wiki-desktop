@@ -80,6 +80,15 @@ export function safeAssetName(value) {
     && [...value].every((character) => character.codePointAt(0) >= 32);
 }
 
+export function githubReleaseAssetName(value) {
+  if (!safeAssetName(value)) throw new Error(`invalid public release asset name: ${value}`);
+  const normalized = value.replace(/\s+/gu, ".");
+  if (!safeAssetName(normalized) || /\s/u.test(normalized)) {
+    throw new Error(`cannot normalize public release asset name: ${value}`);
+  }
+  return normalized;
+}
+
 export function exactReleaseAssetUrl(tag, fileName) {
   return `https://github.com/${RELEASE_REPOSITORY}/releases/download/${tag}/${encodeURIComponent(fileName)}`;
 }
