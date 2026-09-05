@@ -246,6 +246,16 @@ test("the committed desktop workflow is the only atomic publisher and pins every
   const desktopWorkflow = fs.readFileSync(path.join(repositoryRoot, ".github/workflows/desktop-release.yml"), "utf8");
   const capabilityWorkflow = fs.readFileSync(path.join(repositoryRoot, ".github/workflows/capability-release.yml"), "utf8");
   assert.deepEqual(validateDesktopReleaseWorkflow({ desktopWorkflow, capabilityWorkflow }), []);
+  assert.equal(
+    (desktopWorkflow.match(/^\s+bundles:\s*app,dmg\s*$/gm) ?? []).length,
+    2,
+    "both macOS targets must build the app updater target alongside the DMG",
+  );
+  assert.match(
+    desktopWorkflow,
+    /test -n "\$dmg"\r?\n\s+test -n "\$updater"\r?\n\s+test -s "\$updater\.sig"/,
+    "macOS artifact checks must fail independently instead of hiding a failed middle && command",
+  );
 
   const unpinned = desktopWorkflow.replace(
     /actions\/checkout@[0-9a-f]{40}/,

@@ -4,7 +4,6 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import {
-  collectRegularFiles,
   COMMIT_PATTERN,
   osIdentityEvidenceErrors,
   parseNamedArguments,
@@ -25,6 +24,28 @@ const exactlyOne = (files, pattern, label) => {
   return matches[0];
 };
 
+const isTransientBundleDirectory = (name) => name.endsWith(".app") || name.endsWith(".AppDir");
+
+function collectBundleArtifacts(root) {
+  const absoluteRoot = path.resolve(root);
+  const pending = [absoluteRoot];
+  const files = [];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const target = path.join(current, entry.name);
+      const stats = fs.lstatSync(target);
+      if (stats.isSymbolicLink()) continue;
+      if (stats.isDirectory()) {
+        if (!isTransientBundleDirectory(entry.name)) pending.push(target);
+      } else if (stats.isFile()) {
+        files.push(target);
+      }
+    }
+  }
+  return files.sort((left, right) => left.localeCompare(right, "en"));
+}
+
 export function stageDesktopRelease({ source, output, platform, releaseTag, version, commitSha, signingEvidence }) {
   const patterns = BUNDLE_PATTERNS[platform];
   if (!patterns) throw new Error(`unsupported desktop platform: ${platform}`);
@@ -33,11 +54,11 @@ export function stageDesktopRelease({ source, output, platform, releaseTag, vers
   const evidence = JSON.parse(fs.readFileSync(path.resolve(signingEvidence), "utf8"));
   const evidenceErrors = osIdentityEvidenceErrors(evidence, platform);
   if (evidenceErrors.length > 0) throw new Error(evidenceErrors.join("; "));
-  const files = collectRegularFiles(source);
+  const files = collectBundleArtifacts(source);
   const installer = exactlyOne(files, patterns.installer, `${platform} installer`);
   const updater = exactlyOne(files, patterns.updater, `${platform} updater`);
   const signature = `${updater}.sig`;
-  if (!fs.existsSync(signature) || !fs.statSync(signature).isFile()) throw new Error(`missing updater signature: ${signature}`);
+  if (!fs.existsSync(signature) || !fs.lstatSync(signature).isFile()) throw new Error(`missing updater signature: ${signature}`);
   const signatureText = fs.readFileSync(signature, "utf8").trim();
   if (signatureText.length < 32 || signatureText.length > 16_384) throw new Error("updater signature has an invalid length");
 

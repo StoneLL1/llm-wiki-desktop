@@ -216,6 +216,54 @@ test("desktop staging selects one canonical updater and requires exact OS-identi
   }), /invalid required/);
 });
 
+test("desktop staging ignores transient Linux AppDir links and stages the final AppImage", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "llm-wiki-stage-linux-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const source = path.join(root, "source");
+  const output = path.join(root, "output");
+  const appDir = path.join(source, "appimage", "LLM Wiki Desktop.AppDir");
+  const iconTarget = path.join(root, "icon-target");
+  fs.mkdirSync(appDir, { recursive: true });
+  fs.mkdirSync(iconTarget);
+  fs.symlinkSync(iconTarget, path.join(appDir, ".DirIcon"), process.platform === "win32" ? "junction" : "dir");
+  const appImage = path.join(source, "appimage", "LLM Wiki Desktop_0.2.0_amd64.AppImage");
+  fs.writeFileSync(appImage, "appimage");
+  fs.writeFileSync(`${appImage}.sig`, MINISIGN_SIGNATURE);
+  const evidence = path.join(root, "evidence.json");
+  writeJson(evidence, OS_IDENTITY_EVIDENCE["linux-x86_64"]);
+
+  const descriptor = stageDesktopRelease({
+    source, output, platform: "linux-x86_64", releaseTag: TAG, version: VERSION, commitSha: COMMIT, signingEvidence: evidence,
+  });
+
+  assert.equal(descriptor.installer.file, "linux-x86_64-LLM Wiki Desktop_0.2.0_amd64.AppImage");
+  assert.equal(descriptor.updater.file, descriptor.installer.file);
+  assert.equal(fs.readFileSync(path.join(output, descriptor.installer.file), "utf8"), "appimage");
+});
+
+test("desktop staging selects the macOS DMG and updater archive", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "llm-wiki-stage-macos-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const source = path.join(root, "source");
+  const output = path.join(root, "output");
+  fs.mkdirSync(path.join(source, "dmg"), { recursive: true });
+  fs.mkdirSync(path.join(source, "macos"), { recursive: true });
+  const dmg = path.join(source, "dmg", "LLM Wiki Desktop_0.2.0_aarch64.dmg");
+  const updater = path.join(source, "macos", "LLM Wiki Desktop.app.tar.gz");
+  fs.writeFileSync(dmg, "dmg");
+  fs.writeFileSync(updater, "updater");
+  fs.writeFileSync(`${updater}.sig`, MINISIGN_SIGNATURE);
+  const evidence = path.join(root, "evidence.json");
+  writeJson(evidence, OS_IDENTITY_EVIDENCE["darwin-aarch64"]);
+
+  const descriptor = stageDesktopRelease({
+    source, output, platform: "darwin-aarch64", releaseTag: TAG, version: VERSION, commitSha: COMMIT, signingEvidence: evidence,
+  });
+
+  assert.match(descriptor.installer.file, /\.dmg$/);
+  assert.match(descriptor.updater.file, /\.app\.tar\.gz$/);
+});
+
 test("release verification rejects obsolete OS certificate evidence without weakening updater signatures", (context) => {
   const root = fixture(context);
   const descriptorPath = path.join(root, "desktop", "windows-x86_64", "release-entry.json");

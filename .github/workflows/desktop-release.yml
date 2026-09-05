@@ -151,11 +151,11 @@ jobs:
           - platform: darwin-aarch64
             os: macos-15
             target: aarch64-apple-darwin
-            bundles: dmg
+            bundles: app,dmg
           - platform: darwin-x86_64
             os: macos-15-intel
             target: x86_64-apple-darwin
-            bundles: dmg
+            bundles: app,dmg
           - platform: linux-x86_64
             os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
@@ -266,7 +266,9 @@ jobs:
           bundle="src-tauri/target/${{ matrix.target }}/release/bundle"
           dmg="$(find "$bundle" -type f -name '*.dmg' -print -quit)"
           updater="$(find "$bundle" -type f -name '*.app.tar.gz' -print -quit)"
-          test -n "$dmg" && test -n "$updater" && test -s "$updater.sig"
+          test -n "$dmg"
+          test -n "$updater"
+          test -s "$updater.sig"
           printf '%s\n' "{\"schemaVersion\":1,\"kind\":\"apple-developer-id-not-required\",\"platform\":\"${{ matrix.platform }}\",\"required\":false,\"verified\":true,\"updaterSignatureRequired\":true,\"userNotice\":\"gatekeeper-manual-override-may-be-required\"}" > "$RUNNER_TEMP/signing-evidence.json"
 
       - name: Record Linux OS-code-signing-not-applicable policy
