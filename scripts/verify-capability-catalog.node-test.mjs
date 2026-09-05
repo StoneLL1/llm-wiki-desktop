@@ -102,6 +102,24 @@ test("catalog urls must pin one exact immutable canonical tag", () => {
   }
 });
 
+test("catalog accepts SemVer build metadata in an exact asset name", () => {
+  const capabilityId = "asr-sensevoice-small";
+  const targetTriple = CAPABILITY_TARGETS[0];
+  const version = "1.13.4+2024.07.17";
+  const entry = releaseEntry(capabilityId, targetTriple, {
+    version,
+    url: "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v0.1.0/"
+      + capabilityId + "-" + version + "-" + targetTriple + ".zip",
+  });
+  const index = fullMatrix().findIndex((candidate) => candidate.capabilityId === capabilityId
+    && candidate.targetTriple === targetTriple);
+
+  assert.deepEqual(
+    verify({ catalog: releaseCatalog(fullMatrix().with(index, entry)) }).errors,
+    [],
+  );
+});
+
 test("entry measurements and identities must be complete", () => {
   const invalidEntries = [
     { archiveSha256: "z".repeat(64) },

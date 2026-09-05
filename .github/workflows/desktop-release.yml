@@ -11,6 +11,10 @@ on:
         description: Existing stable app-v tag selected at the current commit
         required: true
         type: string
+      source_run_id:
+        description: Optional failed release run whose validated build artifacts should be reused
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -33,6 +37,8 @@ jobs:
       version: ${{ steps.coordinate.outputs.version }}
       commit_sha: ${{ steps.coordinate.outputs.commit_sha }}
       published_at: ${{ steps.coordinate.outputs.published_at }}
+      artifact_run_id: ${{ steps.coordinate.outputs.artifact_run_id }}
+      evidence_run_id: ${{ steps.coordinate.outputs.evidence_run_id }}
     steps:
       - name: Checkout the exact release tag with full history
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -47,6 +53,7 @@ jobs:
           cache: npm
 
       - name: Setup pinned Rust
+        if: inputs.source_run_id == ''
         run: |
           set -euo pipefail
           rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update
@@ -57,11 +64,31 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
         run: |
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = "StoneLL1/llm-wiki-desktop"
           [[ "$RELEASE_TAG" =~ ^app-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$GITHUB_SHA"
+          commit_sha="$(git rev-parse "$RELEASE_TAG^{commit}")"
+          test "$(git rev-parse HEAD)" = "$commit_sha"
+          if [ "$GITHUB_EVENT_NAME" = 'push' ]; then
+            test "$commit_sha" = "$GITHUB_SHA"
+          fi
+          artifact_run_id="$GITHUB_RUN_ID"
+          evidence_run_id="$GITHUB_RUN_ID"
+          if [ -n "$SOURCE_RUN_ID" ]; then
+            [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
+            source_head_sha="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq '.head_sha')"
+            source_workflow_path="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq '.path')"
+            test "$source_head_sha" = "$commit_sha"
+            test "$source_workflow_path" = '.github/workflows/desktop-release.yml'
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100" --paginate --jq '.artifacts[] | select(.expired == false) | .name' > source-artifacts.txt
+            for name in release-candidate-base updater-fixture-manifest desktop-windows-x86_64 desktop-darwin-aarch64 desktop-darwin-x86_64 desktop-linux-x86_64; do
+              test "$(grep -Fxc "$name" source-artifacts.txt)" -eq 1 || { echo "reusable source artifact is missing or ambiguous: $name" >&2; exit 1; }
+            done
+            artifact_run_id="$SOURCE_RUN_ID"
+            evidence_run_id="$SOURCE_RUN_ID"
+          fi
           latest_response="$(mktemp)"
           trap 'rm -f "$latest_response"' EXIT
           latest_status="$(curl --silent --show-error --location --output "$latest_response" --write-out '%{http_code}' \
@@ -87,8 +114,10 @@ jobs:
           version="${RELEASE_TAG#app-v}"
           echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=$commit_sha" >> "$GITHUB_OUTPUT"
           echo "published_at=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" >> "$GITHUB_OUTPUT"
+          echo "artifact_run_id=$artifact_run_id" >> "$GITHUB_OUTPUT"
+          echo "evidence_run_id=$evidence_run_id" >> "$GITHUB_OUTPUT"
 
       - name: Require protected release inputs without printing values
         env:
@@ -102,7 +131,7 @@ jobs:
           done
 
       - name: Install Linux Tauri dependencies
-        if: runner.os == 'Linux'
+        if: inputs.source_run_id == ''
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -118,17 +147,21 @@ jobs:
             wget
 
       - name: Install exact locked dependencies
+        if: inputs.source_run_id == ''
         run: npm ci
 
       - name: Require the committed Rust lock without resolving updates
+        if: inputs.source_run_id == ''
         run: cargo metadata --locked --no-deps --manifest-path src-tauri/Cargo.toml --format-version 1 >/dev/null
 
       - name: Run the complete repository gate
+        if: inputs.source_run_id == ''
         run: npm run check
 
   capability-build:
     name: Build signed capability matrix without publishing
     needs: preflight
+    if: inputs.source_run_id == ''
     uses: ./.github/workflows/capability-release.yml
     with:
       release_tag: ${{ needs.preflight.outputs.release_tag }}
@@ -138,6 +171,7 @@ jobs:
   desktop-build:
     name: Build updater-signed ${{ matrix.platform }} without OS vendor identity signing
     needs: [preflight, capability-build]
+    if: inputs.source_run_id == ''
     runs-on: ${{ matrix.os }}
     environment: desktop-release
     strategy:
@@ -151,11 +185,11 @@ jobs:
           - platform: darwin-aarch64
             os: macos-15
             target: aarch64-apple-darwin
-            bundles: dmg
+            bundles: app,dmg
           - platform: darwin-x86_64
             os: macos-15-intel
             target: x86_64-apple-darwin
-            bundles: dmg
+            bundles: app,dmg
           - platform: linux-x86_64
             os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
@@ -266,7 +300,9 @@ jobs:
           bundle="src-tauri/target/${{ matrix.target }}/release/bundle"
           dmg="$(find "$bundle" -type f -name '*.dmg' -print -quit)"
           updater="$(find "$bundle" -type f -name '*.app.tar.gz' -print -quit)"
-          test -n "$dmg" && test -n "$updater" && test -s "$updater.sig"
+          test -n "$dmg"
+          test -n "$updater"
+          test -s "$updater.sig"
           printf '%s\n' "{\"schemaVersion\":1,\"kind\":\"apple-developer-id-not-required\",\"platform\":\"${{ matrix.platform }}\",\"required\":false,\"verified\":true,\"updaterSignatureRequired\":true,\"userNotice\":\"gatekeeper-manual-override-may-be-required\"}" > "$RUNNER_TEMP/signing-evidence.json"
 
       - name: Record Linux OS-code-signing-not-applicable policy
@@ -316,6 +352,7 @@ jobs:
   manifest-and-provenance:
     name: Assemble exact-tag manifest, SBOM, and transaction provenance
     needs: [preflight, desktop-build]
+    if: inputs.source_run_id == ''
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout exact release commit
@@ -390,6 +427,7 @@ jobs:
   packaged-smoke:
     name: Install and launch ${{ matrix.platform }} candidate
     needs: [preflight, manifest-and-provenance]
+    if: always() && needs.preflight.result == 'success' && (inputs.source_run_id != '' || needs.manifest-and-provenance.result == 'success')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -407,7 +445,7 @@ jobs:
       - name: Checkout exact release commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ needs.preflight.outputs.commit_sha }}
+          ref: ${{ inputs.source_run_id && github.sha || needs.preflight.outputs.commit_sha }}
 
       - name: Setup pinned Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -419,12 +457,16 @@ jobs:
         with:
           name: desktop-${{ matrix.platform }}
           path: smoke-input
+          run-id: ${{ needs.preflight.outputs.artifact_run_id }}
+          github-token: ${{ github.token }}
 
       - name: Download and verify the controlled updater fixture without production access
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: updater-fixture-manifest
           path: updater-fixture
+          run-id: ${{ needs.preflight.outputs.artifact_run_id }}
+          github-token: ${{ github.token }}
 
       - name: Verify the exact-tag updater fixture contract
         shell: pwsh
@@ -456,13 +498,26 @@ jobs:
           mount="$RUNNER_TEMP/desktop-release-mount"
           mkdir -p "$mount" "$RUNNER_TEMP/Applications"
           hdiutil attach "$dmg" -nobrowse -mountpoint "$mount"
-          cp -R "$(find "$mount" -maxdepth 1 -type d -name '*.app' -print -quit)" "$RUNNER_TEMP/Applications/"
+          source_app="$(find "$mount" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -n "$source_app"
+          app="$RUNNER_TEMP/Applications/$(basename "$source_app")"
+          ditto "$source_app" "$app"
           hdiutil detach "$mount"
-          executable="$(find "$RUNNER_TEMP/Applications" -path '*/Contents/MacOS/*' -type f -perm -111 -print -quit)"
-          "$executable" >/dev/null 2>&1 & pid=$!
-          sleep 10
-          kill -0 "$pid"
-          kill "$pid"
+          plutil -lint "$app/Contents/Info.plist"
+          executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
+          executable="$app/Contents/MacOS/$executable_name"
+          test -x "$executable"
+          case '${{ matrix.platform }}' in
+            darwin-aarch64) expected_arch='arm64' ;;
+            darwin-x86_64) expected_arch='x86_64' ;;
+            *) echo 'unsupported Apple smoke platform' >&2; exit 1 ;;
+          esac
+          actual_arches="$(lipo -archs "$executable")"
+          case " $actual_arches " in
+            *" $expected_arch "*) ;;
+            *) echo "packaged executable lacks $expected_arch: $actual_arches" >&2; exit 1 ;;
+          esac
+          open -n -g "$app"
 
       - name: Install and launch Linux AppImage candidate
         if: runner.os == 'Linux'
@@ -481,7 +536,12 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force smoke-fragment | Out-Null
-          @{ platform = '${{ matrix.platform }}'; status = 'passed'; journeys = @('install-launch','packaged-process-alive','updater-fixture-manifest-verified'); productionEndpointAccessed = $false } | ConvertTo-Json | Set-Content 'smoke-fragment/${{ matrix.platform }}.json' -Encoding utf8
+          $journeys = if ('${{ runner.os }}' -eq 'macOS') {
+            @('install-launch','bundle-architecture-verified','launchservices-accepted','updater-fixture-manifest-verified')
+          } else {
+            @('install-launch','packaged-process-alive','updater-fixture-manifest-verified')
+          }
+          @{ platform = '${{ matrix.platform }}'; status = 'passed'; journeys = $journeys; productionEndpointAccessed = $false } | ConvertTo-Json | Set-Content 'smoke-fragment/${{ matrix.platform }}.json' -Encoding utf8
 
       - name: Upload packaged smoke fragment
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -493,7 +553,8 @@ jobs:
 
   assemble-release:
     name: Seal the draft release bundle and attest provenance
-    needs: [preflight, packaged-smoke]
+    needs: [preflight, manifest-and-provenance, packaged-smoke]
+    if: always() && needs.preflight.result == 'success' && needs.packaged-smoke.result == 'success' && (inputs.source_run_id != '' || needs.manifest-and-provenance.result == 'success')
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -503,7 +564,7 @@ jobs:
       - name: Checkout exact release commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ needs.preflight.outputs.commit_sha }}
+          ref: ${{ inputs.source_run_id && github.sha || needs.preflight.outputs.commit_sha }}
 
       - name: Setup pinned Node.js for release sealing
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -515,9 +576,18 @@ jobs:
           rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update
           rustup default "$RUST_VERSION"
 
+      - name: Install updater verifier system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+
       - name: Download immutable pre-smoke candidate
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with: { name: release-candidate-base, path: candidate }
+        with:
+          name: release-candidate-base
+          path: candidate
+          run-id: ${{ needs.preflight.outputs.artifact_run_id }}
+          github-token: ${{ github.token }}
 
       - name: Download all packaged smoke fragments
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -543,7 +613,7 @@ jobs:
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
           VERSION: ${{ needs.preflight.outputs.version }}
           COMMIT_SHA: ${{ needs.preflight.outputs.commit_sha }}
-          RUN_ID: ${{ github.run_id }}
+          RUN_ID: ${{ needs.preflight.outputs.evidence_run_id }}
           ATTESTATION_BUNDLE: ${{ steps.attest.outputs.bundle-path }}
         run: |
           set -euo pipefail
@@ -564,6 +634,7 @@ jobs:
   publish-stable:
     name: Human-approved atomic stable publisher
     needs: [preflight, capability-build, desktop-build, manifest-and-provenance, packaged-smoke, assemble-release]
+    if: always() && needs.preflight.result == 'success' && needs.packaged-smoke.result == 'success' && needs.assemble-release.result == 'success'
     runs-on: ubuntu-24.04
     environment: desktop-release
     permissions:
@@ -573,7 +644,8 @@ jobs:
       - name: Checkout exact release commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ needs.preflight.outputs.commit_sha }}
+          ref: ${{ inputs.source_run_id && github.sha || needs.preflight.outputs.commit_sha }}
+          fetch-depth: 0
 
       - name: Setup pinned Node.js for protected publication
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -585,6 +657,11 @@ jobs:
           rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update
           rustup default "$RUST_VERSION"
 
+      - name: Install updater verifier system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+
       - name: Download sealed draft release bundle
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with: { name: draft-release-bundle, path: candidate }
@@ -595,7 +672,7 @@ jobs:
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
           VERSION: ${{ needs.preflight.outputs.version }}
           COMMIT_SHA: ${{ needs.preflight.outputs.commit_sha }}
-          RUN_ID: ${{ github.run_id }}
+          RUN_ID: ${{ needs.preflight.outputs.evidence_run_id }}
         run: |
           set -euo pipefail
           node scripts/verify-updater-signatures.mjs --root candidate --updaterConfig src-tauri/tauri.conf.json
@@ -610,9 +687,9 @@ jobs:
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "${{ needs.preflight.outputs.commit_sha }}"
+          test "$(git rev-parse '${{ needs.preflight.outputs.release_tag }}^{commit}')" = "${{ needs.preflight.outputs.commit_sha }}"
           gh release view "$RELEASE_TAG" >/dev/null 2>&1 && { echo "release already exists: $RELEASE_TAG" >&2; exit 1; }
-          gh release create "$RELEASE_TAG" --target "${{ needs.preflight.outputs.commit_sha }}" --title "LLM Wiki Desktop ${RELEASE_TAG#app-v}" --notes-file candidate/release-notes.md --draft
+          gh release create "$RELEASE_TAG" --title "LLM Wiki Desktop ${RELEASE_TAG#app-v}" --notes-file candidate/release-notes.md --draft
           mapfile -d '' assets < <(find candidate -type f ! -name release-entry.json -print0)
           gh release upload "$RELEASE_TAG" "${assets[@]}"
           expected="$(find candidate -type f ! -name release-entry.json | wc -l | tr -d ' ')"

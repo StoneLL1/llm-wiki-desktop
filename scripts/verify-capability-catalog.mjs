@@ -19,10 +19,10 @@ export const repositoryRoot = path.resolve(scriptDirectory, "..");
 const MODEL_PACK_SET = new Set(MODEL_CAPABILITY_PACKS);
 const PRODUCT_DEFINITIONS = new Map(PRODUCT_MANIFEST.definitions.map((definition) => [definition.capabilityId, definition]));
 const CAPABILITY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
-const SEMVER_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+const SEMVER_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const RELEASE_TAG_PATTERN = /^app-v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-rc\.[1-9]\d*)?$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
-const CANONICAL_ASSET_URL_PATTERN = /^https:\/\/github\.com\/StoneLL1\/llm-wiki-desktop\/releases\/download\/([A-Za-z0-9._-]+)\/([A-Za-z0-9][A-Za-z0-9._-]*\.zip)$/;
+const CANONICAL_ASSET_URL_PATTERN = /^https:\/\/github\.com\/StoneLL1\/llm-wiki-desktop\/releases\/download\/([A-Za-z0-9._-]+)\/([A-Za-z0-9][A-Za-z0-9._+-]*\.zip)$/;
 const FORBIDDEN_URL_DIAGNOSTICS = [
   [/\/releases\/latest\//, "mutable latest release URL"],
   [/(?:^|\/)localhost(?::|\/)/, "localhost URL"],

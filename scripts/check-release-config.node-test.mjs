@@ -20,6 +20,7 @@ const packageJson = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "packag
 const cargoToml = fs.readFileSync(path.join(repositoryRoot, "src-tauri/Cargo.toml"), "utf8");
 const tauriConfig = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "src-tauri/tauri.conf.json"), "utf8"));
 const trustedKeys = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "capabilities/trusted-keys.json"), "utf8"));
+const releaseSources = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "capabilities/release-sources.json"), "utf8"));
 
 const state = (overrides = {}) => validateReleaseState({
   contract,
@@ -32,6 +33,22 @@ const state = (overrides = {}) => validateReleaseState({
 
 test("repository versions and frozen application identity agree", () => {
   assert.deepEqual(state().errors, []);
+});
+
+test("LibreOffice release inputs use the immutable build-qualified archive", () => {
+  assert.equal(
+    releaseSources.libreOffice.source,
+    "https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.4.2/",
+  );
+  assert.deepEqual(
+    Object.values(releaseSources.libreOffice.distributions).map(({ file }) => file).sort(),
+    [
+      "LibreOffice_26.2.4.2_Linux_x86-64_deb.tar.gz",
+      "LibreOffice_26.2.4.2_MacOS_aarch64.dmg",
+      "LibreOffice_26.2.4.2_MacOS_x86-64.dmg",
+      "LibreOffice_26.2.4.2_Win_x86-64.msi",
+    ],
+  );
 });
 
 test("version drift is a deterministic release failure", () => {
@@ -229,6 +246,82 @@ test("the committed desktop workflow is the only atomic publisher and pins every
   const desktopWorkflow = fs.readFileSync(path.join(repositoryRoot, ".github/workflows/desktop-release.yml"), "utf8");
   const capabilityWorkflow = fs.readFileSync(path.join(repositoryRoot, ".github/workflows/capability-release.yml"), "utf8");
   assert.deepEqual(validateDesktopReleaseWorkflow({ desktopWorkflow, capabilityWorkflow }), []);
+  assert.equal(
+    (desktopWorkflow.match(/^\s+bundles:\s*app,dmg\s*$/gm) ?? []).length,
+    2,
+    "both macOS targets must build the app updater target alongside the DMG",
+  );
+  assert.match(
+    desktopWorkflow,
+    /test -n "\$dmg"\r?\n\s+test -n "\$updater"\r?\n\s+test -s "\$updater\.sig"/,
+    "macOS artifact checks must fail independently instead of hiding a failed middle && command",
+  );
+  assert.match(
+    desktopWorkflow,
+    /plutil -lint "\$app\/Contents\/Info\.plist"[\s\S]*lipo -archs "\$executable"[\s\S]*open -n -g "\$app"/,
+    "macOS smoke must validate the installed bundle and use the Finder-equivalent LaunchServices path",
+  );
+  const appleSmoke = desktopWorkflow.match(
+    /- name: Install and launch Apple candidate[\s\S]*?(?=\n\s+- name: Install and launch Linux AppImage candidate)/,
+  )?.[0] ?? "";
+  assert.doesNotMatch(
+    appleSmoke,
+    /kill -0/,
+    "macOS smoke must not equate a headless direct-binary lifetime with normal app-bundle launchability",
+  );
+  assert.match(
+    desktopWorkflow,
+    /bundle-architecture-verified[\s\S]*launchservices-accepted/,
+    "macOS smoke evidence must describe the relaxed checks truthfully",
+  );
+  assert.match(
+    desktopWorkflow,
+    /source_run_id:[\s\S]*required:\s*false/,
+    "a failed late release must support an explicit artifact-source run",
+  );
+  assert.match(
+    desktopWorkflow,
+    /source_head_sha[\s\S]*commit_sha[\s\S]*release-candidate-base[\s\S]*updater-fixture-manifest/,
+    "resume mode must bind reused artifacts to the exact release commit and required candidate artifacts",
+  );
+  assert.match(
+    desktopWorkflow,
+    /- name: Run the complete repository gate\r?\n\s+if: inputs\.source_run_id == ''/,
+    "resume mode must skip the already-passed full gate",
+  );
+  assert.equal(
+    (desktopWorkflow.match(/run-id:\s*\$\{\{ needs\.preflight\.outputs\.artifact_run_id \}\}/g) ?? []).length >= 3,
+    true,
+    "resume mode must reuse the source run's desktop, manifest, and candidate artifacts",
+  );
+  assert.equal(
+    (desktopWorkflow.match(/RUN_ID:\s*\$\{\{ needs\.preflight\.outputs\.evidence_run_id \}\}/g) ?? []).length >= 2,
+    true,
+    "resume mode must verify the reused candidate against its original provenance run",
+  );
+  const assembleReleaseJob = desktopWorkflow.match(
+    /^ {2}assemble-release:[\s\S]*?(?=^ {2}publish-stable:)/m,
+  )?.[0] ?? "";
+  const publishStableJob = desktopWorkflow.match(
+    /^ {2}publish-stable:[\s\S]*/m,
+  )?.[0] ?? "";
+  for (const [jobName, job] of [["assemble-release", assembleReleaseJob], ["publish-stable", publishStableJob]]) {
+    assert.match(
+      job,
+      /Install updater verifier system dependencies[\s\S]*libdbus-1-dev[\s\S]*pkg-config/,
+      `${jobName} must install the Linux libraries required by the Rust updater verifier`,
+    );
+  }
+  assert.match(
+    publishStableJob,
+    /test "\$\(git rev-parse '[^']+\^\{commit\}'\)" = "\$\{\{ needs\.preflight\.outputs\.commit_sha \}\}"/,
+    "the publisher must verify the existing tag resolves to the frozen release commit",
+  );
+  assert.doesNotMatch(
+    publishStableJob,
+    /gh release create[^\n]*--target/,
+    "an existing validated tag must not pass target_commitish because GITHUB_TOKEN cannot request workflows:write",
+  );
 
   const unpinned = desktopWorkflow.replace(
     /actions\/checkout@[0-9a-f]{40}/,

@@ -10,10 +10,12 @@ import {
   MAX_TRANSCRIPT_BYTES,
   MODEL_ID,
   MODEL_SHA256,
+  buildAudioDecodeArguments,
   buildArguments,
   buildEmbeddedSubtitleArguments,
   buildVideoOcrFrameArguments,
   buildVideoTextProbeArguments,
+  classifyAudioProbeError,
   classifyExecutionError,
   ffmpegRelativePath,
   isNoAudioExecutionError,
@@ -116,7 +118,7 @@ async function runFfmpeg(binary, args, options) {
       encoding: "utf8",
     });
   } catch (error) {
-    throw new Error(classifyExecutionError(error));
+    throw new Error(classifyExecutionError(error), { cause: error });
   }
 }
 
@@ -278,50 +280,100 @@ try {
       transcript?.mediaSha256 === mediaSha256 && transcript?.recognitionLanguage === recognitionLanguage) {
     transcript = transcript.transcript;
   } else {
+    const ffmpeg = await verifyArtifact(
+      packRoot,
+      runtimeDeclaration.ffmpeg,
+      ffmpegRelativePath(),
+    );
+    const decodedAudioPath = path.join(temporaryRoot, "decoded-audio.wav");
     try {
-      await execFileAsync(binary, buildArguments(model, mediaPath, outputPrefix, recognitionLanguage), {
-        cwd: packRoot,
-        env: restrictedEnvironment(),
-        windowsHide: true,
-        timeout: EXECUTION_TIMEOUT_MS,
-        killSignal: "SIGKILL",
-        maxBuffer: 1024 * 1024,
-        encoding: "utf8",
-      });
-    } catch (error) {
-      if (isVideoMedia(mediaPath) && isNoAudioExecutionError(error)) {
-        const ffmpeg = await verifyArtifact(
-          packRoot,
-          runtimeDeclaration.ffmpeg,
-          ffmpegRelativePath(),
-        );
-        const temporaryInputPaths = await prepareVideoOcrContinuation(
+      try {
+        await runFfmpeg(
           ffmpeg,
-          mediaPath,
-          stagingRoot,
-          temporaryRoot,
-          params.localOcrAuthorized === true,
+          buildAudioDecodeArguments(mediaPath, decodedAudioPath),
+          { cwd: packRoot, env: restrictedEnvironment(), timeout: EXECUTION_TIMEOUT_MS },
         );
-        markdown = "# Video text\n\nNo audio track was present. Stable frame text candidates were selected without running hidden OCR.\n";
-        safeMetadata = {
-          engine: ENGINE_VERSION,
-          model: MODEL_ID,
-          language: "unknown",
-          requestedLanguage: recognitionLanguage,
-          profile: asrProfile,
-          speechDetected: false,
-          audioTrackPresent: false,
-          stableFrameCandidates: temporaryInputPaths.length,
-          provenance: "authorized-local-video-text-probe",
-        };
-        continuation = {
-          type: "local_ocr",
-          temporary_input_paths: temporaryInputPaths,
-        };
-        warnings = ["IMPORT_ASR_NO_AUDIO_TRACK_VIDEO_OCR"];
-      } else {
-        throw new Error(classifyExecutionError(error));
+        const decodedAudio = await fs.stat(decodedAudioPath).catch(() => null);
+        if (!decodedAudio?.isFile() || decodedAudio.size <= 44) throw new Error("IMPORT_ASR_INVALID_MEDIA");
+      } catch (error) {
+        if (isVideoMedia(mediaPath) && isNoAudioExecutionError(error)) {
+          const temporaryInputPaths = await prepareVideoOcrContinuation(
+            ffmpeg,
+            mediaPath,
+            stagingRoot,
+            temporaryRoot,
+            params.localOcrAuthorized === true,
+          );
+          markdown = "# Video text\n\nNo audio track was present. Stable frame text candidates were selected without running hidden OCR.\n";
+          safeMetadata = {
+            engine: ENGINE_VERSION,
+            model: MODEL_ID,
+            language: "unknown",
+            requestedLanguage: recognitionLanguage,
+            profile: asrProfile,
+            speechDetected: false,
+            audioTrackPresent: false,
+            stableFrameCandidates: temporaryInputPaths.length,
+            provenance: "authorized-local-video-text-probe",
+          };
+          continuation = {
+            type: "local_ocr",
+            temporary_input_paths: temporaryInputPaths,
+          };
+          warnings = ["IMPORT_ASR_NO_AUDIO_TRACK_VIDEO_OCR"];
+        } else {
+          throw new Error(classifyAudioProbeError(error), { cause: error });
+        }
       }
+      if (!continuation) {
+        try {
+          await execFileAsync(binary, buildArguments(model, decodedAudioPath, outputPrefix, recognitionLanguage), {
+            cwd: packRoot,
+            env: restrictedEnvironment(),
+            windowsHide: true,
+            timeout: EXECUTION_TIMEOUT_MS,
+            killSignal: "SIGKILL",
+            maxBuffer: 1024 * 1024,
+            encoding: "utf8",
+          });
+        } catch (error) {
+          if (isVideoMedia(mediaPath) && isNoAudioExecutionError(error)) {
+            const ffmpeg = await verifyArtifact(
+              packRoot,
+              runtimeDeclaration.ffmpeg,
+              ffmpegRelativePath(),
+            );
+            const temporaryInputPaths = await prepareVideoOcrContinuation(
+              ffmpeg,
+              mediaPath,
+              stagingRoot,
+              temporaryRoot,
+              params.localOcrAuthorized === true,
+            );
+            markdown = "# Video text\n\nNo audio track was present. Stable frame text candidates were selected without running hidden OCR.\n";
+            safeMetadata = {
+              engine: ENGINE_VERSION,
+              model: MODEL_ID,
+              language: "unknown",
+              requestedLanguage: recognitionLanguage,
+              profile: asrProfile,
+              speechDetected: false,
+              audioTrackPresent: false,
+              stableFrameCandidates: temporaryInputPaths.length,
+              provenance: "authorized-local-video-text-probe",
+            };
+            continuation = {
+              type: "local_ocr",
+              temporary_input_paths: temporaryInputPaths,
+            };
+            warnings = ["IMPORT_ASR_NO_AUDIO_TRACK_VIDEO_OCR"];
+          } else {
+            throw new Error(classifyExecutionError(error));
+          }
+        }
+      }
+    } finally {
+      await fs.rm(decodedAudioPath, { force: true }).catch(() => {});
     }
     if (!continuation) try {
       try {

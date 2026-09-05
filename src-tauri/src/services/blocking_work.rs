@@ -771,9 +771,11 @@ fn update_max(value: &AtomicU64, candidate: u64) {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::future::{poll_fn, Future};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
+    use std::task::Poll;
     use std::time::Duration;
 
     use super::{
@@ -1081,19 +1083,17 @@ mod tests {
         };
         entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
 
-        let project_a = {
-            let coordinator = coordinator.clone();
+        let coordinator_a = coordinator.clone();
+        let mut project_a = {
             let order = Arc::clone(&order);
-            tokio::spawn(async move {
-                coordinator
-                    .run_project_activation(move || {
-                        order.lock().unwrap().push("project-a");
-                        Ok(())
-                    })
-                    .await
-            })
+            Box::pin(coordinator_a.run_project_activation(move || {
+                order.lock().unwrap().push("project-a");
+                Ok(())
+            }))
         };
-        tokio::time::sleep(Duration::from_millis(15)).await;
+        let project_a_poll =
+            poll_fn(|context| Poll::Ready(project_a.as_mut().poll(context))).await;
+        assert!(project_a_poll.is_pending());
         let project_b = {
             let coordinator = coordinator.clone();
             let order = Arc::clone(&order);
@@ -1109,7 +1109,7 @@ mod tests {
 
         release_tx.send(()).unwrap();
         holder.await.unwrap().unwrap();
-        project_a.await.unwrap().unwrap();
+        project_a.await.unwrap();
         project_b.await.unwrap().unwrap();
         assert_eq!(*order.lock().unwrap(), ["project-a", "project-b"]);
     }

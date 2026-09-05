@@ -5,12 +5,14 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import * as whisperCore from "./core.mjs";
 import {
   FIXED_ARGUMENTS,
   buildArguments,
   buildEmbeddedSubtitleArguments,
   buildVideoOcrFrameArguments,
   buildVideoTextProbeArguments,
+  classifyAudioProbeError,
   classifyExecutionError,
   ffmpegRelativePath,
   isNoAudioExecutionError,
@@ -71,6 +73,31 @@ test("fixed argv does not accept caller flags", () => {
   assert.equal(args.filter((arg) => arg === "--model").length, 1);
   assert.ok(buildArguments("model", "audio.wav", "out", "ZH_cn").includes("zh-cn"));
   assert.throws(() => buildArguments("model", "audio.wav", "out", "--inject"), /IMPORT_ASR_INVALID_REQUEST/u);
+});
+
+test("fully decodes local media to WAV before invoking whisper", () => {
+  assert.equal(typeof whisperCore.buildAudioDecodeArguments, "function");
+  assert.deepEqual(whisperCore.buildAudioDecodeArguments("input.m4a", "decoded.wav"), [
+    "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+    "-protocol_whitelist", "file,pipe",
+    "-i", "input.m4a",
+    "-map", "0:a:0", "-vn", "-sn", "-dn",
+    "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-f", "wav",
+    "decoded.wav",
+  ]);
+  assert.equal(
+    classifyAudioProbeError({ cause: { stderr: "Invalid data found when processing input" } }),
+    "IMPORT_ASR_INVALID_MEDIA",
+  );
+  assert.equal(
+    classifyAudioProbeError({ cause: { stderr: "error while loading shared libraries" } }),
+    "IMPORT_ASR_ENGINE_FAILED",
+  );
+  assert.equal(classifyAudioProbeError({ cause: { code: "ETIMEDOUT" } }), "IMPORT_ASR_TIMEOUT");
+  assert.equal(
+    isNoAudioExecutionError({ cause: { stderr: "Stream map '0:a:0' matches no streams" } }),
+    true,
+  );
 });
 
 test("uses Windows extended paths for every absolute native-tool argument", () => {

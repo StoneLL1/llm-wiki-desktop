@@ -184,6 +184,7 @@ mod tests {
                         ),
                         "archiveSha256": "a".repeat(64),
                         "manifestSha256": "b".repeat(64),
+                        "signingKeyId": "release",
                         "compressedBytes": 1,
                         "installedBytes": 1,
                         "modelBytes": definition.size_sources.model_bytes.as_ref().map(|_| 1),

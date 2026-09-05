@@ -81,8 +81,10 @@ function smokeErrors(smoke) {
   if (JSON.stringify(keys) !== JSON.stringify(Object.keys(RELEASE_PLATFORMS).sort())) {
     errors.push("packaged smoke must cover exactly the four desktop platforms");
   }
-  const requiredJourneys = ["install-launch", "packaged-process-alive", "updater-fixture-manifest-verified"];
   for (const result of results) {
+    const requiredJourneys = result?.platform?.startsWith("darwin-")
+      ? ["install-launch", "bundle-architecture-verified", "launchservices-accepted", "updater-fixture-manifest-verified"]
+      : ["install-launch", "packaged-process-alive", "updater-fixture-manifest-verified"];
     if (result?.status !== "passed" || !requiredJourneys.every((journey) => result.journeys?.includes(journey))) {
       errors.push(`${result?.platform ?? "unknown platform"} packaged smoke is incomplete`);
     }

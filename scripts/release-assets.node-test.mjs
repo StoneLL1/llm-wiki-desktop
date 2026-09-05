@@ -107,7 +107,9 @@ function createReleaseBundle(root) {
     platforms: Object.keys(RELEASE_PLATFORMS).map((platform) => ({
       platform,
       status: "passed",
-      journeys: ["install-launch", "packaged-process-alive", "updater-fixture-manifest-verified"],
+      journeys: platform.startsWith("darwin-")
+        ? ["install-launch", "bundle-architecture-verified", "launchservices-accepted", "updater-fixture-manifest-verified"]
+        : ["install-launch", "packaged-process-alive", "updater-fixture-manifest-verified"],
     })),
   });
   writeJson(path.join(root, "sbom", "node.cdx.json"), { bomFormat: "CycloneDX", specVersion: "1.5" });
@@ -146,6 +148,21 @@ test("release verification rejects coordinate drift, incomplete smoke, and tampe
   assert.equal(errors.some((error) => error.includes("same workflow run")), true);
   assert.equal(errors.some((error) => error.includes("smoke is incomplete")), true);
   assert.equal(errors.some((error) => error.includes("CHECKSUMS")), true);
+});
+
+test("release verification rejects legacy macOS process evidence without bundle and LaunchServices checks", (context) => {
+  const root = fixture(context);
+  const smokePath = path.join(root, "smoke", "packaged-smoke-summary.json");
+  const smoke = JSON.parse(fs.readFileSync(smokePath));
+  const mac = smoke.platforms.find(({ platform }) => platform === "darwin-aarch64");
+  mac.journeys = ["install-launch", "packaged-process-alive", "updater-fixture-manifest-verified"];
+  writeJson(smokePath, smoke);
+  writeChecksums(root, path.join(root, "CHECKSUMS.sha256"));
+
+  const errors = verifyReleaseAssets({
+    root, tag: TAG, version: VERSION, commitSha: COMMIT, workflowRunId: RUN_ID,
+  }).errors;
+  assert.equal(errors.some((error) => error.includes("darwin-aarch64 packaged smoke is incomplete")), true);
 });
 
 test("latest.json rejects mutable, cross-tag, incomplete, and missing asset entries", () => {
@@ -214,6 +231,54 @@ test("desktop staging selects one canonical updater and requires exact OS-identi
   assert.throws(() => stageDesktopRelease({
     source, output, platform: "windows-x86_64", releaseTag: TAG, version: VERSION, commitSha: COMMIT, signingEvidence: evidence,
   }), /invalid required/);
+});
+
+test("desktop staging ignores transient Linux AppDir links and stages the final AppImage", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "llm-wiki-stage-linux-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const source = path.join(root, "source");
+  const output = path.join(root, "output");
+  const appDir = path.join(source, "appimage", "LLM Wiki Desktop.AppDir");
+  const iconTarget = path.join(root, "icon-target");
+  fs.mkdirSync(appDir, { recursive: true });
+  fs.mkdirSync(iconTarget);
+  fs.symlinkSync(iconTarget, path.join(appDir, ".DirIcon"), process.platform === "win32" ? "junction" : "dir");
+  const appImage = path.join(source, "appimage", "LLM Wiki Desktop_0.2.0_amd64.AppImage");
+  fs.writeFileSync(appImage, "appimage");
+  fs.writeFileSync(`${appImage}.sig`, MINISIGN_SIGNATURE);
+  const evidence = path.join(root, "evidence.json");
+  writeJson(evidence, OS_IDENTITY_EVIDENCE["linux-x86_64"]);
+
+  const descriptor = stageDesktopRelease({
+    source, output, platform: "linux-x86_64", releaseTag: TAG, version: VERSION, commitSha: COMMIT, signingEvidence: evidence,
+  });
+
+  assert.equal(descriptor.installer.file, "linux-x86_64-LLM Wiki Desktop_0.2.0_amd64.AppImage");
+  assert.equal(descriptor.updater.file, descriptor.installer.file);
+  assert.equal(fs.readFileSync(path.join(output, descriptor.installer.file), "utf8"), "appimage");
+});
+
+test("desktop staging selects the macOS DMG and updater archive", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "llm-wiki-stage-macos-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const source = path.join(root, "source");
+  const output = path.join(root, "output");
+  fs.mkdirSync(path.join(source, "dmg"), { recursive: true });
+  fs.mkdirSync(path.join(source, "macos"), { recursive: true });
+  const dmg = path.join(source, "dmg", "LLM Wiki Desktop_0.2.0_aarch64.dmg");
+  const updater = path.join(source, "macos", "LLM Wiki Desktop.app.tar.gz");
+  fs.writeFileSync(dmg, "dmg");
+  fs.writeFileSync(updater, "updater");
+  fs.writeFileSync(`${updater}.sig`, MINISIGN_SIGNATURE);
+  const evidence = path.join(root, "evidence.json");
+  writeJson(evidence, OS_IDENTITY_EVIDENCE["darwin-aarch64"]);
+
+  const descriptor = stageDesktopRelease({
+    source, output, platform: "darwin-aarch64", releaseTag: TAG, version: VERSION, commitSha: COMMIT, signingEvidence: evidence,
+  });
+
+  assert.match(descriptor.installer.file, /\.dmg$/);
+  assert.match(descriptor.updater.file, /\.app\.tar\.gz$/);
 });
 
 test("release verification rejects obsolete OS certificate evidence without weakening updater signatures", (context) => {
