@@ -256,6 +256,49 @@ test("the committed desktop workflow is the only atomic publisher and pins every
     /test -n "\$dmg"\r?\n\s+test -n "\$updater"\r?\n\s+test -s "\$updater\.sig"/,
     "macOS artifact checks must fail independently instead of hiding a failed middle && command",
   );
+  assert.match(
+    desktopWorkflow,
+    /plutil -lint "\$app\/Contents\/Info\.plist"[\s\S]*lipo -archs "\$executable"[\s\S]*open -n -g "\$app"/,
+    "macOS smoke must validate the installed bundle and use the Finder-equivalent LaunchServices path",
+  );
+  const appleSmoke = desktopWorkflow.match(
+    /- name: Install and launch Apple candidate[\s\S]*?(?=\n\s+- name: Install and launch Linux AppImage candidate)/,
+  )?.[0] ?? "";
+  assert.doesNotMatch(
+    appleSmoke,
+    /kill -0/,
+    "macOS smoke must not equate a headless direct-binary lifetime with normal app-bundle launchability",
+  );
+  assert.match(
+    desktopWorkflow,
+    /bundle-architecture-verified[\s\S]*launchservices-accepted/,
+    "macOS smoke evidence must describe the relaxed checks truthfully",
+  );
+  assert.match(
+    desktopWorkflow,
+    /source_run_id:[\s\S]*required:\s*false/,
+    "a failed late release must support an explicit artifact-source run",
+  );
+  assert.match(
+    desktopWorkflow,
+    /source_head_sha[\s\S]*commit_sha[\s\S]*release-candidate-base[\s\S]*updater-fixture-manifest/,
+    "resume mode must bind reused artifacts to the exact release commit and required candidate artifacts",
+  );
+  assert.match(
+    desktopWorkflow,
+    /- name: Run the complete repository gate\r?\n\s+if: inputs\.source_run_id == ''/,
+    "resume mode must skip the already-passed full gate",
+  );
+  assert.equal(
+    (desktopWorkflow.match(/run-id:\s*\$\{\{ needs\.preflight\.outputs\.artifact_run_id \}\}/g) ?? []).length >= 3,
+    true,
+    "resume mode must reuse the source run's desktop, manifest, and candidate artifacts",
+  );
+  assert.equal(
+    (desktopWorkflow.match(/RUN_ID:\s*\$\{\{ needs\.preflight\.outputs\.evidence_run_id \}\}/g) ?? []).length >= 2,
+    true,
+    "resume mode must verify the reused candidate against its original provenance run",
+  );
 
   const unpinned = desktopWorkflow.replace(
     /actions\/checkout@[0-9a-f]{40}/,
