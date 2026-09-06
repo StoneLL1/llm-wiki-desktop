@@ -6,6 +6,18 @@
 > 决策权威：当本文件与旧版 PRD、SPEC、APP flow、技术说明、Import V2 设计或实现计划冲突时，以本文件为准；旧文档只保留不冲突的背景、非本范围设计和历史信息。
 > 交叉边界：Import 只在已经打开的当前知识库内添加资料。知识库的新建、识别、打开、信任、兼容、修复与 `ProjectContext.layout` 合同由 [`2026-07-30-first-run-project-open-workbench-design.md`](2026-07-30-first-run-project-open-workbench-design.md) 负责；选择一个文件夹作为 Import 输入绝不表示打开或原地初始化该文件夹。Import 写入要求 trusted + writable，且 layout 必须提供 app state、evidence 与 Source write roots；缺少任一写根时返回 typed prerequisite，不自行创建原生目录。
 
+## 2026-09-06 Import 架构与准备交互修订
+
+本节落实用户确认的重构方向，并优先于下文历史的逐包确认和活动项目限制：
+
+- 文字、PDF 文本层、现代 Office、轻量网页获取随应用；识别引擎、模型和完整浏览器按需准备。能力管理是辅助入口。
+- 缺能力时，当前导入任务只需一次“准备并继续”。首屏说明用途、新增下载估算和将继续的条目；版本、许可证、运行权限、来源与技术错误收在详情中。此操作同时保存明确的 OCR 或 ASR 意图，不在安装后再次询问同一意图。OCR 与 ASR 仍分别授权。
+- 准备属于应用级共享任务。关闭对话框、切换项目不会取消下载；任务完成后逐项复核原项目的 identity、authority、写权限与条目状态，并接续此前已授权的导入。已取消、已提交或权限发生变化的条目不会被重新启动。应用重启后显示保留的断点，由用户继续一次。
+- 混合 PDF 可以先保存已有文字页，也可以补充扫描页。扫描页使用整页渲染；页码不算正文，空白页不触发 OCR。部分识别失败保留可读正文和成功页，并定位缺失页；完全没有正文仍不能保存为 Source。
+- 预览、提交和重读使用相同候选。Source 阅读默认折叠内部元数据，文章不混入 ASR/OCR 的运行参数、坐标和置信度报告；完整报告仍作为原始证据保存。
+- 大证据以文件引用与流式校验进入事务。正文大小限制不套在音视频原件上；原件、外部编辑、来源身份与事务恢复保持现有保护。
+- 组件兼容依据已签名的协议、平台、路线和权限合同，不把当前桌面构建的依赖版本当作所有已装包的唯一合法版本。程序更新复用相同模型/运行时载荷：新 catalog 提供 ZIP 成员边界的摘要分块，安装后共享不可变大文件；旧 catalog 继续使用原有 Range 下载。首次从旧资产迁移仍可能需要完整下载。
+
 ## 1. 设计结论
 
 导入与编译是两个独立流程。
@@ -323,7 +335,7 @@ install_app_capability_v1(
 
 一个 pack 可以提供多条 route。健康检查与激活必须以产品清单中的整组 routes 为单位，而不是只检查触发安装的 `requestedRoute`；整组成功后一次性发布新 runtime snapshot，任一路线失败则整组不激活并回滚。这样从管理页主动安装时不需要虚构某个 Import route，也不会出现“包已安装但同包另一条路线仍不可用”。
 
-保留条目级 `install_import_capability_v2` 作为 Import-linked facade：它先校验当前项目、root、session、item、requirement revision 与用户确认，再向应用级协调器登记 continuation。全局任务成功后，对当前活动项目里所有匹配的等待条目做 fan-out；每个条目都必须在 trusted + writable authority 临界区重新校验原 identity、revision 和当前状态，符合时才继续。不活动项目只获得应用级能力事实，重新打开并复核后再继续，不能跨项目静默写入。
+保留条目级 `install_import_capability_v2` 作为 Import-linked facade：它先校验当前项目、root、session、item、requirement revision 与用户确认，再向应用级协调器登记 continuation。全局任务成功后，对已登记且已获用户授权的匹配等待条目逐项续接；每个条目都必须在 trusted + writable authority 临界区重新校验原 identity、revision 和当前状态，符合时才继续。前台显示哪个项目不决定后台任务是否有效；未授权、已取消、已提交或权限已变化的条目不会自动执行。
 
 下载失败需要区分并给出下一步：离线 / 代理、服务器不支持续传、签名或哈希不匹配、磁盘不足、杀毒软件或文件占用、当前平台未发布、健康检查失败并回滚。技术 URL、临时目录和 runner 输出只放在脱敏后的折叠详情中。
 

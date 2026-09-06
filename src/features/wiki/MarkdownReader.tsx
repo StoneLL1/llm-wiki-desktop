@@ -371,14 +371,15 @@ export const MarkdownReader = memo(function MarkdownReader({
   return (
     <article className="wiki-prose" role="article">
       {frontmatterRows.length > 0 ? (
-        <div className="frontmatter">
+        <details className="frontmatter" open={frontmatterRows.some((row) => row.key === "type" && row.value.replace(/["']/g, "") === "source") ? undefined : true}>
+          <summary className="cursor-pointer text-[11px] text-[var(--text-muted)]">{t("wiki.sourceMetadata")}</summary>
           {frontmatterRows.map((row, index) => (
             <div className="frontmatter__row" key={`${row.key}-${index}`}>
               <span className="frontmatter__k">{row.key ? `${row.key}:` : ""}</span>
               <span className="frontmatter__v">{row.value}</span>
             </div>
           ))}
-        </div>
+        </details>
       ) : null}
       <ReactMarkdown
         remarkPlugins={REMARK_PLUGINS}

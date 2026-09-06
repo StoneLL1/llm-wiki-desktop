@@ -304,6 +304,10 @@ fn assemble(options: &AssembleOptions) -> Result<AssembleResult, String> {
         compressed_bytes,
         installed_bytes,
         model_bytes: options.model_bytes,
+        archive_chunks:
+            llm_wiki_desktop_lib::services::import_v2::capability_payload::archive_chunks(
+                &archive_path,
+            )?,
         license: template.license_expression,
     };
     verify_archive(&archive_path, &manifest, &manifest_bytes, &entry)?;

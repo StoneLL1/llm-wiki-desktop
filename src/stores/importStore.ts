@@ -406,7 +406,13 @@ export const useImportStore = create<ImportState>((set, get) => ({
   setCompletion: (projectKey, completion, epoch) => {
     const state = get();
     if (!scopeAccepts(state, projectKey, epoch)) return false;
-    set({ completion });
+    const selected = state.selectedItemId ? state.itemById[state.selectedItemId] : null;
+    const target = selected?.preview?.resolution?.targetWikiPath;
+    const selectedWasCommitted = completion && selected && (
+      completion.duplicateSkips.some((item) => item.itemId === selected.itemId)
+      || [...completion.newSources, ...completion.updatedSources].some((source) => source.wikiPath === target)
+    );
+    set({ completion, ...(selectedWasCommitted ? { selectedItemId: null } : {}) });
     return true;
   },
   attachSession: (projectKey, session, epoch) => {

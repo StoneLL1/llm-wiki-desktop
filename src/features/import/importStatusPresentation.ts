@@ -240,7 +240,9 @@ function toUserIssue(
 ): UserIssue | null {
   if (!item.issue) return null;
   const typedPrimaryAction = primaryAction ? ITEM_TO_ISSUE_ACTION[primaryAction] ?? null : null;
-  const copyKey = issueCopyKey(typedPrimaryAction, item.status);
+  const optionalOcr = item.status === "preview_ready"
+    && item.issue.recoveryActions?.some((action) => action === "enable_ocr" || action === "install_ocr_capability");
+  const copyKey = optionalOcr ? "optionalOcr" : issueCopyKey(typedPrimaryAction, item.status);
   const latestAttempt = item.attempts.at(-1);
   return {
     code: copyKey,

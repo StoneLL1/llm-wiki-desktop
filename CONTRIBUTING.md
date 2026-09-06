@@ -81,3 +81,24 @@ instead.
 
 PRs prepared with AI assistance are welcome; the author is accountable for
 the change. Describe what was machine-generated and what you verified.
+
+### Import capabilities in development
+
+`npm run prepare:import` prepares the current version's official capability catalog
+under ignored `.dev-capabilities/catalog`; it keeps the repository's publisher
+keys and never installs a new trust source. Source/debug builds embed that catalog
+when present. A clean source checkout can still build without it, but on-demand
+component installation will report that its catalog is unavailable.
+
+`npm run prepare:asr` explicitly prepares and qualifies the development SenseVoice
+pack. `tauri dev` no longer implicitly downloads an ASR model. The development
+runner uses the same product contract as release staging, with a local development
+key accepted only by debug builds. macOS native signatures are normalized before
+pack inventory signing; Python runners do not write bytecode into signed packs.
+`npm run tauri -- dev` opts into the local pack directory using
+`LLM_WIKI_DEV_CAPABILITIES`. Packaged applications do not read the build checkout;
+an explicit value for that environment variable enables isolated debug validation.
+
+Live model/platform tests are opt-in (`import_real_capability_journey` and
+`import_live_url_journey`); ordinary checks do not download models. Use disposable
+knowledge bases, as described in the Import acceptance record.

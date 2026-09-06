@@ -39,8 +39,7 @@ use crate::models::paths::ProjectContext;
 use crate::models::task::{BackendTask, TaskResult, TaskStatus};
 use crate::services::import_v2::activation::ImportV2ActivationService;
 use crate::services::import_v2::capability_installer::{
-    catalog_availability, catalog_entry, install_catalog_entry, CapabilityCatalogAvailability,
-    CapabilityInstallPhase,
+    catalog_availability, catalog_entry, CapabilityCatalogAvailability,
 };
 use crate::services::import_v2::capability_runtime::CapabilityRuntimeStatus;
 use crate::services::import_v2::migration::{
@@ -726,7 +725,9 @@ fn platform_readiness(
         ("generic_web", "http", "web.generic.readability"),
         ("wechat_article", "wechat", "web.wechat.article"),
         ("zhihu_content", "zhihu", "web.zhihu.content"),
-        ("bilibili_video", "bilibili", "web.bilibili.metadata"),
+        ("bilibili_video", "bilibili", "web.bilibili.video"),
+        ("xiaohongshu_note", "xiaohongshu", "web.xiaohongshu.note"),
+        ("douyin_video", "douyin", "web.douyin.video"),
         ("x_post", "x", "web.x.post"),
     ];
     ids.into_iter()
@@ -988,6 +989,7 @@ pub fn get_import_capability_requirement_v2(
         available,
         installable,
         compressed_bytes: catalog.as_ref().map(|entry| entry.compressed_bytes),
+        download_bytes: if available { Some(0) } else { catalog.as_ref().map(|entry| state.import_capability_runtime.install_root().as_deref().map_or(entry.compressed_bytes, |root| crate::services::import_v2::capability_installer::remaining_download_bytes(root, entry))) },
         installed_bytes: catalog.as_ref().map(|entry| entry.installed_bytes),
         model_bytes: catalog.as_ref().and_then(|entry| entry.model_bytes),
         license: Some(license.into()),
@@ -1053,8 +1055,6 @@ pub fn get_import_asr_enablement_plan_v2(
             model_name: "SenseVoiceSmall int8",
             source: "https://github.com/k2-fsa/sherpa-onnx",
             license: "Apache-2.0 AND LGPL-3.0-or-later AND MIT",
-            speed_numerator: 1,
-            speed_denominator: 2,
         },
         AsrProfileSpec {
             profile: ImportAsrProfile::Balanced,
@@ -1063,8 +1063,6 @@ pub fn get_import_asr_enablement_plan_v2(
             model_name: "SenseVoiceSmall int8",
             source: "https://github.com/k2-fsa/sherpa-onnx",
             license: "Apache-2.0 AND LGPL-3.0-or-later AND MIT",
-            speed_numerator: 3,
-            speed_denominator: 4,
         },
         AsrProfileSpec {
             profile: ImportAsrProfile::Accurate,
@@ -1072,13 +1070,11 @@ pub fn get_import_asr_enablement_plan_v2(
             engine_name: "whisper.cpp",
             model_name: "Whisper small",
             source: "https://github.com/ggml-org/whisper.cpp",
-            license: "MIT AND LGPL-2.1-or-later",
-            speed_numerator: 5,
-            speed_denominator: 4,
+            license: "MIT AND LGPL-3.0-or-later",
         },
     ]
     .into_iter()
-    .map(|spec| build_asr_profile_plan(spec, &statuses, &target, media_duration_seconds))
+    .map(|spec| build_asr_profile_plan(spec, &statuses, &target, install_root.as_deref()))
     .collect::<Vec<_>>();
     let recommended_profile = recommend_asr_profile(
         &profiles,
@@ -1133,109 +1129,154 @@ pub fn install_import_capability_v2(
         .ok_or_else(|| {
             presentation_error("IMPORT_V2_ITEM_NOT_FOUND", "Import item was not found.")
         })?;
-    let asr_choice_allowed = item.issue.as_ref().is_some_and(|issue| {
-        issue
-            .recovery_actions
-            .contains(&ImportRecoveryAction::AuthorizeLocalAsr)
-            || issue
-                .recovery_actions
-                .contains(&ImportRecoveryAction::InstallMediaCapability)
-    }) && matches!(
-        request.capability_id.as_str(),
-        "asr-sensevoice-small" | "asr-whisper"
-    );
-    if asr_choice_allowed {
-        let profile = request.asr_profile.as_ref().ok_or_else(|| {
-            presentation_error(
-                "IMPORT_V2_ASR_SELECTION_REQUIRED",
-                "Select an ASR profile before installing its capability.",
-            )
-        })?;
-        let expected = match profile {
-            ImportAsrProfile::Fast | ImportAsrProfile::Balanced => "asr-sensevoice-small",
-            ImportAsrProfile::Accurate => "asr-whisper",
-        };
-        if request.capability_id != expected {
+    let mut selected_items = vec![item];
+    for id in &request.additional_item_ids {
+        if selected_items.iter().any(|item| &item.item_id == id) {
+            continue;
+        }
+        selected_items.push(
+            session
+                .items
+                .iter()
+                .find(|item| &item.item_id == id)
+                .ok_or_else(|| {
+                    presentation_error("IMPORT_V2_ITEM_NOT_FOUND", "An import item was not found.")
+                })?,
+        );
+    }
+    // Validate the entire explicit selection before registering any intent.
+    let mut requirements = Vec::with_capacity(selected_items.len());
+    for item in selected_items {
+        if !matches!(
+            item.status,
+            ImportItemStatus::WaitingCapability | ImportItemStatus::WaitingAuthorization
+        ) && !(item.status == ImportItemStatus::PreviewReady
+            && item
+                .issue
+                .as_ref()
+                .is_some_and(|issue| issue.code == "IMPORT_WEB_OCR_UNAVAILABLE"))
+        {
             return Err(presentation_error(
-                "IMPORT_V2_CAPABILITY_MISMATCH",
-                "The requested ASR capability does not match the selected profile.",
+                "IMPORT_V2_CAPABILITY_REQUIREMENT_STALE",
+                "The item no longer needs preparation.",
             ));
         }
-    } else if request.asr_profile.is_some() || request.recognition_language.is_some() {
-        return Err(presentation_error(
-            "IMPORT_V2_CAPABILITY_MISMATCH",
-            "ASR options are valid only for an item waiting for local recognition.",
-        ));
-    }
-    let required_capability = capability_for_item(item);
-    if required_capability.is_none() && !asr_choice_allowed {
-        return Err(presentation_error(
-            "IMPORT_V2_CAPABILITY_NOT_REQUIRED",
-            "This import item does not currently require a capability pack.",
-        ));
-    }
-    if required_capability.is_some_and(|(expected, _, _)| request.capability_id != expected)
-        && !asr_choice_allowed
-    {
-        return Err(presentation_error(
-            "IMPORT_V2_CAPABILITY_MISMATCH",
-            "The requested capability does not match this import item.",
-        ));
-    }
-    let route = required_capability
-        .map(|(_, route, _)| route)
-        .unwrap_or("media.asr");
-    let current_revision = capability_requirement_revision(item, &request.capability_id, route);
-    if request.requirement_revision != current_revision {
-        return Err(presentation_error(
-            "IMPORT_V2_CAPABILITY_REQUIREMENT_STALE",
-            "The import item capability requirement changed. Reload it before installing.",
-        ));
+        let asr_choice_allowed = item.issue.as_ref().is_some_and(|issue| {
+            issue
+                .recovery_actions
+                .contains(&ImportRecoveryAction::AuthorizeLocalAsr)
+                || issue
+                    .recovery_actions
+                    .contains(&ImportRecoveryAction::InstallMediaCapability)
+        }) && matches!(
+            request.capability_id.as_str(),
+            "asr-sensevoice-small" | "asr-whisper"
+        );
+        if asr_choice_allowed {
+            let profile = request.asr_profile.as_ref().ok_or_else(|| {
+                presentation_error(
+                    "IMPORT_V2_ASR_SELECTION_REQUIRED",
+                    "Select an ASR profile before installing its capability.",
+                )
+            })?;
+            let expected = match profile {
+                ImportAsrProfile::Fast | ImportAsrProfile::Balanced => "asr-sensevoice-small",
+                ImportAsrProfile::Accurate => "asr-whisper",
+            };
+            if request.capability_id != expected {
+                return Err(presentation_error(
+                    "IMPORT_V2_CAPABILITY_MISMATCH",
+                    "The requested ASR capability does not match the selected profile.",
+                ));
+            }
+        } else if request.asr_profile.is_some() || request.recognition_language.is_some() {
+            return Err(presentation_error(
+                "IMPORT_V2_CAPABILITY_MISMATCH",
+                "ASR options are valid only for an item waiting for local recognition.",
+            ));
+        }
+        let required_capability = capability_for_item(item);
+        if required_capability.is_none() && !asr_choice_allowed {
+            return Err(presentation_error(
+                "IMPORT_V2_CAPABILITY_NOT_REQUIRED",
+                "This import item does not currently require a capability pack.",
+            ));
+        }
+        if required_capability.is_some_and(|(expected, _, _)| request.capability_id != expected)
+            && !asr_choice_allowed
+        {
+            return Err(presentation_error(
+                "IMPORT_V2_CAPABILITY_MISMATCH",
+                "The requested capability does not match this import item.",
+            ));
+        }
+        let route = required_capability
+            .map(|(_, route, _)| route)
+            .unwrap_or("media.asr");
+        let current_revision = capability_requirement_revision(item, &request.capability_id, route);
+        let presented_revision = if asr_choice_allowed {
+            capability_requirement_revision(item, "asr-sensevoice-small", "media.asr")
+        } else {
+            current_revision.clone()
+        };
+        if item.item_id == request.item_id && request.requirement_revision != presented_revision {
+            return Err(presentation_error(
+                "IMPORT_V2_CAPABILITY_REQUIREMENT_STALE",
+                "The import item capability requirement changed. Reload it before installing.",
+            ));
+        }
+        requirements.push((item, route, current_revision));
     }
     let authority = state
         .project_registry
         .resolve_authority(&request.project_id, &context.root)?;
     let identity = project_identity(&context.root)
         .map_err(|message| presentation_error("PROJECT_IDENTITY_UNAVAILABLE", &message))?;
-    let continuation =
-        state
-            .app_capability_coordinator
-            .register_continuation(AppCapabilityContinuation {
-                schema_version: APP_CAPABILITY_CONTINUATION_SCHEMA_VERSION,
-                continuation_id: uuid::Uuid::new_v4().to_string(),
-                capability_id: request.capability_id.clone(),
-                project_id: request.project_id.clone(),
-                project_root_path: context.root.to_string_lossy().into_owned(),
-                canonical_identity_key: identity.canonical_identity_key,
-                identity_revision: identity.identity_revision,
-                authority_revision: authority.authority_revision,
-                session_id: request.session_id.clone(),
-                item_id: request.item_id.clone(),
-                requirement_revision: current_revision,
-                requested_route: route.to_owned(),
-                recovery_action: if request.asr_profile.is_some() {
-                    Some(ImportRecoveryAction::AuthorizeLocalAsr)
-                } else if request.capability_id == "ocr-cjk-accurate" {
-                    Some(ImportRecoveryAction::EnableOcr)
-                } else {
-                    None
-                },
-                asr_profile: request.asr_profile.clone(),
-                recognition_language: request.recognition_language.clone(),
-                created_at: chrono::Utc::now().to_rfc3339(),
-                state: AppCapabilityContinuationState::Registered,
-                task_id: None,
-                detail_code: None,
-            })?;
+    let mut continuations = Vec::with_capacity(requirements.len());
+    for (item, route, current_revision) in requirements {
+        let continuation =
+            state
+                .app_capability_coordinator
+                .register_continuation(AppCapabilityContinuation {
+                    schema_version: APP_CAPABILITY_CONTINUATION_SCHEMA_VERSION,
+                    continuation_id: uuid::Uuid::new_v4().to_string(),
+                    capability_id: request.capability_id.clone(),
+                    project_id: request.project_id.clone(),
+                    project_root_path: context.root.to_string_lossy().into_owned(),
+                    canonical_identity_key: identity.canonical_identity_key.clone(),
+                    identity_revision: identity.identity_revision.clone(),
+                    authority_revision: authority.authority_revision.clone(),
+                    session_id: request.session_id.clone(),
+                    item_id: item.item_id.clone(),
+                    requirement_revision: current_revision,
+                    requested_route: route.to_owned(),
+                    recovery_action: if request.asr_profile.is_some() {
+                        Some(ImportRecoveryAction::AuthorizeLocalAsr)
+                    } else if request.capability_id == "ocr-cjk-accurate" {
+                        Some(ImportRecoveryAction::EnableOcr)
+                    } else {
+                        None
+                    },
+                    asr_profile: request.asr_profile.clone(),
+                    recognition_language: request.recognition_language.clone(),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    state: AppCapabilityContinuationState::Registered,
+                    task_id: None,
+                    detail_code: None,
+                })?;
+        continuations.push(continuation);
+    }
     let install_request = InstallAppCapabilityV1Request {
         capability_id: entry.capability_id.clone(),
         expected_version: entry.version.clone(),
         acknowledgement_version: app_capability_acknowledgement_version(&entry),
     };
-    let task = match crate::commands::app_capability_commands::begin_app_capability_install_for_continuation(
-        app,
+    let mut installed_task = None;
+    for continuation in continuations {
+        let task = match crate::commands::app_capability_commands::begin_app_capability_install_for_continuation(
+        app.clone(),
         &state,
-        install_request,
+        install_request.clone(),
         &continuation.continuation_id,
     ) {
         Ok(task) => task,
@@ -1248,490 +1289,9 @@ pub fn install_import_capability_v2(
             return Err(error);
         }
     };
-    Ok(task)
-}
-
-#[allow(dead_code)]
-pub fn install_import_capability_v2_legacy(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    request: InstallImportCapabilityV2Request,
-) -> Result<BackendTask, BackendError> {
-    if !request.acknowledge_install {
-        return Err(presentation_error(
-            "IMPORT_V2_CAPABILITY_CONFIRMATION_REQUIRED",
-            "Capability installation requires explicit confirmation.",
-        ));
+        installed_task = Some(task);
     }
-    let target = target_triple();
-    let entry = catalog_entry(&request.capability_id, &target).ok_or_else(|| {
-        presentation_error(
-            "IMPORT_V2_CAPABILITY_INSTALL_UNAVAILABLE",
-            "No signed capability release is available for this target.",
-        )
-    })?;
-    let install_root = state.import_capability_runtime.install_root().ok_or_else(|| {
-        presentation_error(
-            "IMPORT_V2_CAPABILITY_INSTALL_UNAVAILABLE",
-            "Capability installation is unavailable before the application data directory is initialized.",
-        )
-    })?;
-    let (task, context, expected_item) = state.with_current_project_write_access(
-        &request.project_id,
-        &request.project_root_path,
-        |_permit, context| {
-            let session = state.import_v2_service.load_session(
-                context,
-                &state.file_store,
-                &request.session_id,
-            )?;
-            let item = session
-                .items
-                .iter()
-                .find(|item| item.item_id == request.item_id)
-                .ok_or_else(|| {
-                    presentation_error("IMPORT_V2_ITEM_NOT_FOUND", "Import item was not found.")
-                })?;
-            let asr_choice_allowed = item.issue.as_ref().is_some_and(|issue| {
-                issue
-                    .recovery_actions
-                    .contains(&ImportRecoveryAction::AuthorizeLocalAsr)
-                    || issue
-                        .recovery_actions
-                        .contains(&ImportRecoveryAction::InstallMediaCapability)
-            }) && matches!(
-                request.capability_id.as_str(),
-                "asr-sensevoice-small" | "asr-whisper"
-            );
-            if asr_choice_allowed {
-                let profile = request.asr_profile.as_ref().ok_or_else(|| {
-                    presentation_error(
-                        "IMPORT_V2_ASR_SELECTION_REQUIRED",
-                        "Select an ASR profile before installing its capability.",
-                    )
-                })?;
-                let expected = match profile {
-                    ImportAsrProfile::Fast | ImportAsrProfile::Balanced => {
-                        "asr-sensevoice-small"
-                    }
-                    ImportAsrProfile::Accurate => "asr-whisper",
-                };
-                if request.capability_id != expected {
-                    return Err(presentation_error(
-                        "IMPORT_V2_CAPABILITY_MISMATCH",
-                        "The requested ASR capability does not match the selected profile.",
-                    ));
-                }
-            } else if request.asr_profile.is_some() || request.recognition_language.is_some() {
-                return Err(presentation_error(
-                    "IMPORT_V2_CAPABILITY_MISMATCH",
-                    "ASR options are valid only for an item waiting for local recognition.",
-                ));
-            }
-            let required_capability = capability_for_item(item);
-            if required_capability.is_none() && !asr_choice_allowed {
-                return Err(presentation_error(
-                    "IMPORT_V2_CAPABILITY_NOT_REQUIRED",
-                    "This import item does not currently require a capability pack.",
-                ));
-            }
-            if required_capability.is_some_and(|(expected_capability_id, _, _)| {
-                request.capability_id != expected_capability_id
-            }) && !asr_choice_allowed
-            {
-                return Err(presentation_error(
-                    "IMPORT_V2_CAPABILITY_MISMATCH",
-                    "The requested capability does not match this import item.",
-                ));
-            }
-            let requested_route = required_capability
-                .map(|(_, route, _)| route)
-                .unwrap_or("media.asr");
-            let current_revision = capability_requirement_revision(
-                item,
-                &request.capability_id,
-                requested_route,
-            );
-            if request.requirement_revision != current_revision {
-                return Err(presentation_error(
-                    "IMPORT_V2_CAPABILITY_REQUIREMENT_STALE",
-                    "The import item capability requirement changed. Reload it before installing.",
-                ));
-            }
-            let task_state_root = context
-                .layout
-                .task_state_root
-                .as_deref()
-                .ok_or_else(|| {
-                    presentation_error(
-                        "IMPORT_V2_TASK_FAILED",
-                        "The project does not provide a writable task state root for capability installation.",
-                    )
-                })
-                .and_then(|relative| context.resolve_project_path(relative))?;
-            let task = state
-                .task_service
-                .create_project_capability_install_task(
-                    request.project_id.clone(),
-                    context.root.clone(),
-                    task_state_root,
-                    format!("Install {}", request.capability_id),
-                    request.session_id.clone(),
-                    request.item_id.clone(),
-                    request.capability_id.clone(),
-                    current_revision,
-                )
-                .map_err(|error| presentation_error("IMPORT_V2_TASK_FAILED", &error))?;
-            Ok((task, context.clone(), item.clone()))
-        },
-    )?;
-    let task_id = task.id.clone();
-    let execution_lease = match state.begin_project_external_task(&context, &task_id) {
-        Ok(lease) => lease,
-        Err(error) => {
-            let _ = state
-                .task_service
-                .discard_unstarted_tasks(std::slice::from_ref(&task_id));
-            return Err(error);
-        }
-    };
-    let project_id = request.project_id.clone();
-    let project_root_path = request.project_root_path.clone();
-    let session_id = request.session_id.clone();
-    let item_id = request.item_id.clone();
-    let requirement_revision = request.requirement_revision.clone();
-    let asr_profile = request.asr_profile.clone();
-    let recognition_language = request.recognition_language.clone();
-    tauri::async_runtime::spawn(async move {
-        let state = app.state::<AppState>();
-        let _execution_lease = execution_lease;
-        if state
-            .task_service
-            .transition_status(&task_id, TaskStatus::Running)
-            .is_err()
-        {
-            return;
-        }
-        let Some(token) = state.task_service.get_cancellation_token(&task_id) else {
-            return;
-        };
-        let install_outcome = install_catalog_entry(
-            &state.blocking_work,
-            &install_root,
-            &entry,
-            &task_id,
-            &token,
-            |phase, current, total| {
-                let label = match phase {
-                    CapabilityInstallPhase::Downloading => "capability.downloading",
-                    CapabilityInstallPhase::Verifying => "capability.verifying",
-                    CapabilityInstallPhase::Installing => "capability.installing",
-                };
-                let _ = state.task_service.update_progress(
-                    &task_id,
-                    current,
-                    Some(total),
-                    Some(label.into()),
-                );
-            },
-        )
-        .await;
-        let install_outcome = match install_outcome {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                finish_capability_install_error(&state, &task_id, error);
-                return;
-            }
-        };
-        if token.is_cancelled() {
-            let rollback_root = install_root.clone();
-            let rollback_entry = entry.clone();
-            let _ = state
-                .blocking_work
-                .run(BlockingWorkClass::HeavyIo, move || {
-                    install_outcome.rollback(&rollback_root, &rollback_entry)
-                })
-                .await;
-            let _ = state
-                .task_service
-                .transition_status(&task_id, TaskStatus::Cancelled);
-            return;
-        }
-        let _ = state.task_service.update_progress(
-            &task_id,
-            entry.compressed_bytes,
-            Some(entry.compressed_bytes),
-            Some("capability.health_check".into()),
-        );
-        let health_app = app.clone();
-        let health_root = install_root.clone();
-        let health_entry = entry.clone();
-        let health_token = token.clone();
-        let health_result = state
-            .blocking_work
-            .run_cancellable(BlockingWorkClass::HeavyIo, token.clone(), move || {
-                let state = health_app.state::<AppState>();
-                let mut install_outcome = install_outcome;
-                let probed = match state.import_capability_runtime.probe_version_routes(
-                    &health_root,
-                    &health_entry.capability_id,
-                    &health_entry.version,
-                    &health_token,
-                ) {
-                    Ok(pack) => pack,
-                    Err(error) => {
-                        return Err(install_outcome.rollback_with_receipt(
-                            &health_root,
-                            &health_entry,
-                            error,
-                        ));
-                    }
-                };
-                if health_token.is_cancelled() {
-                    return Err(install_outcome.rollback_with_receipt(
-                        &health_root,
-                        &health_entry,
-                        BackendError::new(
-                            crate::errors::IMPORT_V2_CANCELLED,
-                            "Capability activation was cancelled.",
-                            true,
-                            false,
-                        ),
-                    ));
-                }
-                if let Err(error) = install_outcome.mark_probed(&health_root) {
-                    return Err(install_outcome.rollback_with_receipt(
-                        &health_root,
-                        &health_entry,
-                        error,
-                    ));
-                }
-                let activation = state
-                    .import_capability_runtime
-                    .activate_probed_version_atomically(
-                        probed,
-                        &health_entry.capability_id,
-                        &state.import_v2_service,
-                        || install_outcome.activate(&health_root),
-                    );
-                match activation {
-                    Ok(()) => Ok(()),
-                    Err(error) => Err(install_outcome.rollback_with_receipt(
-                        &health_root,
-                        &health_entry,
-                        error,
-                    )),
-                }
-            })
-            .await;
-        if let Err(error) = health_result {
-            finish_capability_install_error(&state, &task_id, error);
-            return;
-        }
-        // The capability is active once the atomic activation above returns.
-        // Cancellation from here only stops/defer the originating Import
-        // continuation; the installation task remains a committed success.
-        if let Some(profile) = asr_profile.clone() {
-            let authorization_app = app.clone();
-            let authorization_expected_item = expected_item.clone();
-            let authorization_request = AuthorizeLocalAsrV2Request {
-                project_id: project_id.clone(),
-                project_root_path: project_root_path.clone(),
-                session_id: session_id.clone(),
-                item_id: item_id.clone(),
-                profile,
-                language: recognition_language.clone(),
-            };
-            let authorization_result = state
-                .blocking_work
-                .run_cancellable(BlockingWorkClass::HeavyIo, token.clone(), move || {
-                    let state = authorization_app.state::<AppState>();
-                    crate::commands::import_v2_web_commands::authorize_local_asr(
-                        &state,
-                        authorization_request,
-                        Some(&authorization_expected_item),
-                    )
-                })
-                .await;
-            if let Err(error) = authorization_result {
-                if token.is_cancelled() || error.code.starts_with("PROJECT_") {
-                    let _ = state.task_service.complete_running_with_result(
-                        &task_id,
-                        TaskResult {
-                            summary: format!(
-                                "Installed {}; ASR authorization was deferred.",
-                                entry.capability_id
-                            ),
-                            affected_paths: Vec::new(),
-                            reference: None,
-                            pending_action: None,
-                        },
-                    );
-                } else {
-                    finish_capability_install_error(&state, &task_id, error);
-                }
-                return;
-            }
-        }
-        let resume_action = if asr_profile.is_some() {
-            Some(ImportRecoveryAction::AuthorizeLocalAsr)
-        } else {
-            (entry.capability_id == "ocr-cjk-accurate").then_some(ImportRecoveryAction::EnableOcr)
-        };
-        let resume_app = app.clone();
-        let resume_token = token.clone();
-        let continuation_entry = entry.clone();
-        let continuation_task_id = task_id.clone();
-        let resume_result = state
-            .blocking_work
-            .run_cancellable(BlockingWorkClass::HeavyIo, token.clone(), move || {
-                let state = resume_app.state::<AppState>();
-                state.with_current_project_write_access(
-                    &project_id,
-                    &project_root_path,
-                    |permit, context| {
-                let loaded_session = state.import_v2_service.load_session(
-                    context,
-                    &state.file_store,
-                    &session_id,
-                )?;
-                let asr_capability = matches!(
-                    continuation_entry.capability_id.as_str(),
-                    "asr-sensevoice-small" | "asr-whisper"
-                );
-                let current_item = loaded_session
-                    .items
-                    .iter()
-                    .find(|candidate| candidate.item_id == item_id);
-                let still_waiting = current_item.is_some_and(|candidate| {
-                    let required = capability_for_item(candidate);
-                    let route = required
-                        .map(|(_, route, _)| route)
-                        .unwrap_or("media.asr");
-                    let same_capability = required.is_some_and(|(capability_id, _, _)| {
-                        capability_id == continuation_entry.capability_id.as_str()
-                    }) || (asr_capability
-                        && candidate.issue.as_ref().is_some_and(|issue| {
-                            issue
-                                .recovery_actions
-                                .contains(&ImportRecoveryAction::AuthorizeLocalAsr)
-                                || issue
-                                    .recovery_actions
-                                    .contains(&ImportRecoveryAction::InstallMediaCapability)
-                        }));
-                    same_capability
-                        && candidate.status == ImportItemStatus::WaitingCapability
-                        && capability_requirement_revision(
-                            candidate,
-                            &continuation_entry.capability_id,
-                            route,
-                        )
-                            == requirement_revision
-                });
-                if !still_waiting {
-                    state
-                        .task_service
-                        .complete_running_with_result(
-                            &continuation_task_id,
-                            TaskResult {
-                                summary: format!(
-                                    "Installed {}; the original import item changed, so no UI continuation was started.",
-                                    continuation_entry.capability_id
-                                ),
-                                affected_paths: Vec::new(),
-                                reference: None,
-                                pending_action: None,
-                            },
-                        )
-                        .map_err(|error| presentation_error("IMPORT_V2_TASK_FAILED", &error))?;
-                    return Ok(());
-                }
-                if resume_token.is_cancelled() {
-                    return Err(presentation_error(
-                        "TASK_CANCELLED",
-                        "Capability installation was cancelled before import continuation.",
-                    ));
-                }
-                let expected_continuation_item = current_item
-                    .cloned()
-                    .expect("the continuation item was verified above");
-                let resume_tasks = start_import_items_for_state(
-                    resume_app.clone(),
-                    &state,
-                    permit,
-                    StartImportItemsV2Request {
-                        project_id: project_id.clone(),
-                        project_root_path: project_root_path.clone(),
-                        session_id: session_id.clone(),
-                        item_ids: vec![item_id.clone()],
-                        recovery_action: resume_action.clone(),
-                    },
-                    Some(std::slice::from_ref(&expected_continuation_item)),
-                    Some(&resume_token),
-                )?;
-                if resume_token.is_cancelled() {
-                    for resume_task in &resume_tasks {
-                        let _ = state.task_service.cancel_task(&resume_task.id);
-                    }
-                    return Err(presentation_error(
-                        "TASK_CANCELLED",
-                        "Capability installation was cancelled while import continuation was being prepared.",
-                    ));
-                }
-                state
-                    .task_service
-                    .complete_running_with_result(
-                        &continuation_task_id,
-                        TaskResult {
-                            summary: format!(
-                                "Installed {} and created {} automatic resume task(s).",
-                                continuation_entry.capability_id,
-                                resume_tasks.len()
-                            ),
-                            affected_paths: Vec::new(),
-                            reference: None,
-                            pending_action: None,
-                        },
-                    )
-                    .map_err(|error| presentation_error("IMPORT_V2_TASK_FAILED", &error))?;
-                        Ok(())
-                    },
-                )
-            })
-            .await;
-        if let Err(error) = resume_result {
-            if token.is_cancelled() || error.code.starts_with("PROJECT_") {
-                let _ = state.task_service.complete_running_with_result(
-                    &task_id,
-                    TaskResult {
-                        summary: format!(
-                            "Installed {}; the originating Import continuation was deferred.",
-                            entry.capability_id
-                        ),
-                        affected_paths: Vec::new(),
-                        reference: None,
-                        pending_action: None,
-                    },
-                );
-            } else {
-                finish_capability_install_error(&state, &task_id, error);
-            }
-        }
-    });
-    Ok(task)
-}
-
-fn finish_capability_install_error(state: &AppState, task_id: &str, error: BackendError) {
-    if state.task_service.is_cancelled(task_id) {
-        let _ = state
-            .task_service
-            .transition_status(task_id, TaskStatus::Cancelled);
-    } else {
-        let _ = state.task_service.set_error(task_id, error);
-        let _ = state
-            .task_service
-            .transition_status(task_id, TaskStatus::Failed);
-    }
+    Ok(installed_task.expect("selection always includes the primary item"))
 }
 
 pub(crate) fn resume_import_capability_continuation(
@@ -1740,19 +1300,11 @@ pub(crate) fn resume_import_capability_continuation(
     continuation: &AppCapabilityContinuation,
     token: &crate::tasks::task_model::CancellationToken,
 ) -> Result<bool, BackendError> {
-    let Some(active_root) = state.task_service.current_project_root() else {
-        return Ok(false);
-    };
-    let expected_root = PathBuf::from(&continuation.project_root_path);
-    let active_root = active_root.canonicalize().map_err(|_| {
-        presentation_error("PROJECT_CONTEXT_MISMATCH", "Project is no longer active.")
-    })?;
-    let expected_root = expected_root
+    // Continuations belong to their bound project, independently of the visible
+    // workbench. Authority/identity are revalidated below before any write.
+    let expected_root = PathBuf::from(&continuation.project_root_path)
         .canonicalize()
         .map_err(|_| presentation_error("PROJECT_CONTEXT_MISMATCH", "Project is unavailable."))?;
-    if active_root != expected_root {
-        return Ok(false);
-    }
     let authority = state
         .project_registry
         .resolve_authority(&continuation.project_id, &expected_root)?;
@@ -1779,7 +1331,16 @@ pub(crate) fn resume_import_capability_continuation(
         .ok_or_else(|| {
             presentation_error("IMPORT_V2_ITEM_NOT_FOUND", "Import item was not found.")
         })?;
-    if item.status != ImportItemStatus::WaitingCapability
+    let can_continue = matches!(
+        item.status,
+        ImportItemStatus::WaitingCapability | ImportItemStatus::WaitingAuthorization
+    ) || (item.status == ImportItemStatus::PreviewReady
+        && continuation.recovery_action == Some(ImportRecoveryAction::EnableOcr)
+        && item
+            .issue
+            .as_ref()
+            .is_some_and(|issue| issue.code == "IMPORT_WEB_OCR_UNAVAILABLE"));
+    if !can_continue
         || capability_requirement_revision(
             &item,
             &continuation.capability_id,
@@ -1825,6 +1386,20 @@ pub(crate) fn resume_import_capability_continuation(
                     "TASK_CANCELLED",
                     "Capability installation was stopped before import continuation.",
                 ));
+            }
+            if continuation.recovery_action == Some(ImportRecoveryAction::EnableOcr) {
+                state
+                    .import_v2_service
+                    .authorize_media_for_session_if_unchanged_authorized(
+                        permit,
+                        &state.file_store,
+                        &continuation.session_id,
+                        &continuation.item_id,
+                        crate::models::import_v2::ImportMediaAuthorizationKind::Ocr,
+                        None,
+                        None,
+                        &expected_item,
+                    )?;
             }
             start_import_items_for_state(
                 app.clone(),
@@ -1992,7 +1567,19 @@ fn capability_for_item(item: &ImportItem) -> Option<(&'static str, &'static str,
             "media.asr",
             "Apache-2.0 AND LGPL-3.0-or-later AND MIT",
         ))
-    } else if actions.contains(&ImportRecoveryAction::InstallOcrCapability) {
+    } else if actions.contains(&ImportRecoveryAction::InstallOcrCapability)
+        || (actions.contains(&ImportRecoveryAction::InstallCapability)
+            && item.input.kind == crate::models::import_v2::ImportInputKind::File
+            && Path::new(&item.input.locator)
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|extension| {
+                    matches!(
+                        extension.to_ascii_lowercase().as_str(),
+                        "png" | "jpg" | "jpeg" | "webp" | "bmp" | "tif" | "tiff" | "heic" | "heif"
+                    )
+                }))
+    {
         Some((
             "ocr-cjk-accurate",
             "ocr.cjk-accurate",
@@ -2018,15 +1605,13 @@ struct AsrProfileSpec {
     model_name: &'static str,
     source: &'static str,
     license: &'static str,
-    speed_numerator: u64,
-    speed_denominator: u64,
 }
 
 fn build_asr_profile_plan(
     spec: AsrProfileSpec,
     statuses: &[CapabilityRuntimeStatus],
     target: &str,
-    media_duration_seconds: Option<u64>,
+    install_root: Option<&Path>,
 ) -> ImportAsrProfilePlan {
     let runtime = statuses
         .iter()
@@ -2048,7 +1633,7 @@ fn build_asr_profile_plan(
             ImportAsrDependencyKind::MediaRuntime,
             "FFmpeg local media runtime",
             "https://ffmpeg.org/",
-            "LGPL-2.1-or-later",
+            "LGPL-3.0-or-later",
         ),
         dependency(
             ImportAsrDependencyKind::Engine,
@@ -2069,12 +1654,6 @@ fn build_asr_profile_plan(
             spec.license,
         ),
     ];
-    let estimated_seconds = media_duration_seconds.map(|duration| {
-        duration
-            .saturating_mul(spec.speed_numerator)
-            .div_ceil(spec.speed_denominator)
-            .max(1)
-    });
     let unavailable_reason_code = (!available).then(|| {
         if installable {
             "not_installed".into()
@@ -2094,12 +1673,22 @@ fn build_asr_profile_plan(
         available,
         installable,
         download_bytes: (!available)
-            .then(|| catalog.as_ref().map(|entry| entry.compressed_bytes))
+            .then(|| {
+                catalog.as_ref().map(|entry| {
+                    install_root.map_or(entry.compressed_bytes, |root| {
+                        crate::services::import_v2::capability_installer::remaining_download_bytes(
+                            root, entry,
+                        )
+                    })
+                })
+            })
             .flatten(),
         installed_bytes: catalog.as_ref().map(|entry| entry.installed_bytes),
         model_bytes: catalog.as_ref().and_then(|entry| entry.model_bytes),
-        device: "cpu".into(),
-        estimated_seconds,
+        device: "auto".into(),
+        // Startup and provider selection dominate short clips; duration ratios
+        // alone are not a measured estimate for this user's device.
+        estimated_seconds: None,
         unavailable_reason_code,
         dependencies,
     }
@@ -2385,6 +1974,30 @@ mod tests {
         let bounded = bounded_preview_markdown(repeated.into_bytes()).unwrap();
         assert!(bounded.len() <= IMPORT_V2_PREVIEW_MAX_BYTES as usize);
         assert!(bounded.ends_with('界'));
+    }
+
+    #[test]
+    fn persisted_image_wait_from_an_older_build_selects_ocr() {
+        let mut item = ImportItem::queued(
+            "old-image",
+            ImportInput {
+                kind: ImportInputKind::File,
+                display_name: "扫描.PNG".into(),
+                locator: "扫描.PNG".into(),
+                normalized_locator: None,
+                source_identity: None,
+                media_save_mode: MediaSaveMode::ExtractOnly,
+            },
+        );
+        item.status = ImportItemStatus::WaitingCapability;
+        item.issue = Some(crate::models::import_v2::ImportIssue::for_file_code(
+            "IMPORT_FILE_CAPABILITY_MISSING",
+            ImportStage::Route,
+        ));
+        assert_eq!(
+            super::capability_for_item(&item).unwrap().0,
+            "ocr-cjk-accurate"
+        );
     }
 
     #[test]

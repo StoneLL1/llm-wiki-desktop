@@ -13,6 +13,8 @@ mod export_service;
 mod file_store;
 mod git_service;
 mod graph_service;
+#[cfg(feature = "gui")]
+pub(crate) mod import_execution;
 pub mod import_v2;
 mod lint_service;
 mod llm_service;

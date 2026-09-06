@@ -720,6 +720,14 @@ describe("wikiStore", () => {
 });
 
 describe("MarkdownReader", () => {
+  it("starts Source reading with metadata collapsed and preserves the article", () => {
+    const { container } = render(<MarkdownReader bodyMarkdown={"# Original article\n\nReadable source text."}
+      frontmatterYaml={'type: source\nsourceId: "original-id"'} pages={[]} onOpenPage={vi.fn()} />);
+    expect(container.querySelector("details.frontmatter")).not.toHaveAttribute("open");
+    expect(screen.getByRole("heading", { name: "Original article" })).toBeVisible();
+    expect(container.querySelector(".frontmatter")?.textContent).toContain("original-id");
+  });
+
   it("renders frontmatter as ordered key-value rows instead of raw YAML", () => {
     const { container } = render(
       <MarkdownReader

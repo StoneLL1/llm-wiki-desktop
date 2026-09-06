@@ -46,7 +46,7 @@ fn authenticated_login_resumption_uses_the_unbounded_operation_launcher() {
 fn batch_workers_finalize_exact_duplicates_before_aggregating_outcomes() {
     let source = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/src/commands/import_v2_commands.rs"
+        "/src/services/import_execution.rs"
     ))
     .unwrap();
     let worker = source

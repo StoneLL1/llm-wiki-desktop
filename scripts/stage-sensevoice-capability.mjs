@@ -1,3 +1,4 @@
+import { prepareMacosRuntime } from "./prepare-macos-runtime.mjs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -178,6 +179,7 @@ export async function stageSenseVoiceCapability(options) {
       fs.chmod(path.join(options.output, "runtime", "ffmpeg", "bin", "ffmpeg"), 0o755),
     ]);
   }
+  await prepareMacosRuntime(options.output);
   await assertNoLinks(options.output);
   return { entrypoint: `runtime/${nodeName}`, entrypointArgs: ["runner/index.mjs"], modelBytes: modelStatus.size };
 }

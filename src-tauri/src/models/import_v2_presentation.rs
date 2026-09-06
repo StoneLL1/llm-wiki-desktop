@@ -275,6 +275,8 @@ pub struct ImportCapabilityRequirement {
     pub available: bool,
     pub installable: bool,
     pub compressed_bytes: Option<u64>,
+    #[serde(default)]
+    pub download_bytes: Option<u64>,
     pub installed_bytes: Option<u64>,
     pub model_bytes: Option<u64>,
     pub license: Option<String>,
@@ -290,6 +292,8 @@ pub struct InstallImportCapabilityV2Request {
     pub project_root_path: String,
     pub session_id: String,
     pub item_id: String,
+    #[serde(default)]
+    pub additional_item_ids: Vec<String>,
     pub capability_id: String,
     pub requirement_revision: String,
     pub acknowledge_install: bool,

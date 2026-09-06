@@ -202,7 +202,7 @@ impl ImportEngine for WechatWebEngine {
             asset_paths,
             metadata_path: Some("metadata.json".into()),
             title: document.title,
-            text_coverage: Some(1.0),
+            text_coverage: None,
             table_cell_accuracy: None,
             sheet_count_exact: None,
             slide_count_exact: None,

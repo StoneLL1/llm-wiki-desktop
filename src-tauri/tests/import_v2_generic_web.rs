@@ -107,5 +107,8 @@ fn generic_engine_consumes_an_item_bound_private_target_grant() {
 
     server.join().unwrap();
     assert_eq!(result.title, "Private fixture");
-    assert!(result.text_coverage.is_some_and(|coverage| coverage > 0.0));
+    assert_eq!(
+        result.text_coverage, None,
+        "HTTP success cannot establish source text coverage"
+    );
 }

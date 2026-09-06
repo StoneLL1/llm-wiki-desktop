@@ -335,6 +335,19 @@ of its hard bugs were ordering bugs.
 
 ### Signing and integrity
 
+- **A Python import can mutate an otherwise verified pack.** Disable bytecode
+  writes for both health probes and execution (`PYTHONDONTWRITEBYTECODE=1`);
+  validate a second run against the same signed inventory.
+- **A macOS helper can be killed before it produces any output.** Inspect the
+  native library's code signature before classifying SIGKILL as a timeout.
+  Normalize signatures in staging, then create/sign the capability inventory;
+  do not patch a published signed pack in place.
+- **Packaged debug apps must not read the build checkout during startup.**
+  A checkout under a protected Desktop/Documents folder can trigger an OS
+  permission wait before the main window is ready. Development overlays are
+  explicitly enabled by `LLM_WIKI_DEV_CAPABILITIES`; normal packaged startup
+  uses the app's installed capability directory.
+
 - **A capability ZIP's own hash cannot live inside its signed
   manifest** — the digest must be distributed alongside, in a layer
   that covers it.

@@ -1,13 +1,9 @@
 use std::path::Path;
 
-use image::{DynamicImage, GrayImage, RgbImage};
 use lopdf::{Document, Object};
 use serde::{Deserialize, Serialize};
 
 use crate::errors::BackendError;
-
-const TEXT_LAYER_CHARACTERS: u32 = 500;
-const LOW_TEXT_CHARACTERS: u32 = 32;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -108,15 +104,25 @@ pub fn inspect_pdf(
             .chars()
             .filter(|character| !character.is_whitespace())
             .count() as u32;
-        if count == 0 {
+        // Inspect painting operations, not only top-level image resources: a
+        // scan may be inside a Form XObject or use inherited resources. A small
+        // page number does not make the underlying scanned page readable.
+        let painted = document
+            .get_page_content(pages[&page_number])
+            .and_then(|bytes| lopdf::content::Content::decode(&bytes))
+            .map(|content| {
+                content
+                    .operations
+                    .iter()
+                    .any(|operation| matches!(operation.operator.as_str(), "Do" | "BI" | "ID"))
+            })
+            .unwrap_or(true);
+        if count < 32 && painted {
             image_only_pages.push(page_number - 1);
         }
         counts.push(count);
     }
-    let estimated_ocr_pages = counts
-        .iter()
-        .filter(|count| **count < LOW_TEXT_CHARACTERS)
-        .count() as u32;
+    let estimated_ocr_pages = image_only_pages.len() as u32;
     Ok(PdfInspection {
         page_count: pages.len() as u32,
         text_characters_per_page: counts,
@@ -143,18 +149,14 @@ pub fn plan_pdf_pages(
         .text_characters_per_page
         .iter()
         .enumerate()
-        .map(|(index, count)| {
-            let (route, reason) = if *count >= TEXT_LAYER_CHARACTERS {
+        .map(|(index, _count)| {
+            let needs_ocr = inspection.image_only_pages.contains(&(index as u32));
+            let (route, reason) = if !needs_ocr {
                 (
                     PdfPageRoute::TextLayer,
-                    "safe text layer has sufficient content",
+                    "preserve readable text or a blank page",
                 )
-            } else if *count >= LOW_TEXT_CHARACTERS && capabilities.document_layout {
-                (
-                    PdfPageRoute::DocumentLayout,
-                    "layout recovery required for sparse or complex text",
-                )
-            } else if *count < LOW_TEXT_CHARACTERS && capabilities.ocr {
+            } else if capabilities.ocr {
                 (
                     PdfPageRoute::SelectiveOcr,
                     "page has insufficient text and requires selective OCR",
@@ -204,20 +206,24 @@ pub fn prepare_selective_ocr(
         )?;
     let mut markdown = String::new();
     let mut temporary_input_paths = Vec::new();
-    for ((page_number, page_id), plan) in pages.iter().zip(page_plan) {
+    for ((page_number, _page_id), plan) in pages.iter().zip(page_plan) {
         markdown.push_str(&format!("## Page {page_number}\n\n"));
         if plan.route == PdfPageRoute::SelectiveOcr {
-            let images = document
-                .get_page_images(*page_id)
-                .map_err(|_| pdf_stage_error("A PDF OCR page image could not be inspected."))?;
-            let image = images
-                .into_iter()
-                .max_by_key(|image| image.width.saturating_mul(image.height))
-                .ok_or_else(|| {
-                    pdf_stage_error("A PDF page selected for OCR has no usable page image.")
-                })?;
-            let output = workspace.path().join(format!("page-{page_number:03}.png"));
-            decode_pdf_image(&document, &image, &output)?;
+            // Preserve the entire page, including transforms, overlays and all
+            // images. The existing OCR runtime renders this one-page PDF with
+            // PDFium; the largest embedded image is not a page rendering.
+            let output = workspace.path().join(format!("page-{page_number:03}.pdf"));
+            let mut page_document = document.clone();
+            let other_pages = pages
+                .iter()
+                .map(|(number, _)| *number)
+                .filter(|number| number != page_number)
+                .collect::<Vec<_>>();
+            page_document.delete_pages(&other_pages);
+            page_document.prune_objects();
+            page_document
+                .save(&output)
+                .map_err(|_| pdf_stage_error("The PDF OCR page could not be staged."))?;
             let relative = output
                 .strip_prefix(staging)
                 .map_err(|_| pdf_stage_error("The PDF OCR page path escaped staging."))?
@@ -241,68 +247,6 @@ pub fn prepare_selective_ocr(
     })
 }
 
-fn decode_pdf_image(
-    document: &Document,
-    image: &lopdf::xobject::PdfImage<'_>,
-    output: &Path,
-) -> Result<(), BackendError> {
-    let stream = document
-        .get_object(image.id)
-        .and_then(Object::as_stream)
-        .map_err(|_| pdf_stage_error("The PDF OCR image stream is invalid."))?;
-    let filters = image.filters.as_deref().unwrap_or_default();
-    let decoded = if filters
-        .iter()
-        .any(|filter| matches!(filter.as_str(), "DCTDecode" | "JPXDecode"))
-    {
-        image::load_from_memory(image.content)
-            .map_err(|_| pdf_stage_error("The compressed PDF OCR image is unsupported."))?
-    } else {
-        let bytes = stream
-            .decompressed_content()
-            .map_err(|_| pdf_stage_error("The PDF OCR image could not be decompressed."))?;
-        raw_pdf_image(
-            bytes,
-            image.width,
-            image.height,
-            image.color_space.as_deref(),
-            image.bits_per_component,
-        )?
-    };
-    decoded
-        .save_with_format(output, image::ImageFormat::Png)
-        .map_err(|_| pdf_stage_error("The PDF OCR page image could not be staged."))
-}
-
-fn raw_pdf_image(
-    bytes: Vec<u8>,
-    width: i64,
-    height: i64,
-    color_space: Option<&str>,
-    bits_per_component: Option<i64>,
-) -> Result<DynamicImage, BackendError> {
-    let width =
-        u32::try_from(width).map_err(|_| pdf_stage_error("The PDF OCR image width is invalid."))?;
-    let height = u32::try_from(height)
-        .map_err(|_| pdf_stage_error("The PDF OCR image height is invalid."))?;
-    if width == 0 || height == 0 || bits_per_component != Some(8) {
-        return Err(pdf_stage_error(
-            "Only 8-bit PDF page images are supported for local OCR.",
-        ));
-    }
-    match color_space.unwrap_or("DeviceRGB") {
-        "DeviceGray" | "G" => GrayImage::from_raw(width, height, bytes)
-            .map(DynamicImage::ImageLuma8)
-            .ok_or_else(|| pdf_stage_error("The grayscale PDF OCR image length is invalid.")),
-        "DeviceRGB" | "RGB" => RgbImage::from_raw(width, height, bytes)
-            .map(DynamicImage::ImageRgb8)
-            .ok_or_else(|| pdf_stage_error("The RGB PDF OCR image length is invalid.")),
-        _ => Err(pdf_stage_error(
-            "The PDF OCR image color space is unsupported.",
-        )),
-    }
-}
-
 fn pdf_stage_error(message: &str) -> BackendError {
     BackendError::new("IMPORT_PDF_SELECTIVE_OCR_FAILED", message, true, true)
 }
@@ -314,13 +258,19 @@ fn has_active_content(object: &Object) -> bool {
                 key.as_slice(),
                 b"OpenAction"
                     | b"AA"
-                    | b"A"
                     | b"JS"
                     | b"JavaScript"
                     | b"Launch"
                     | b"RichMedia"
                     | b"EmbeddedFiles"
-            ) || has_active_content(value)
+            ) || (key.as_slice() == b"S"
+                && value.as_name().is_ok_and(|name| {
+                    matches!(
+                        name,
+                        b"JavaScript" | b"Launch" | b"SubmitForm" | b"ImportData"
+                    )
+                }))
+                || has_active_content(value)
         }),
         Object::Stream(stream) => has_active_content(&Object::Dictionary(stream.dict.clone())),
         Object::Array(values) => values.iter().any(has_active_content),

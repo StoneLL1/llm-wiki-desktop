@@ -667,6 +667,8 @@ pub struct BackendTask {
 - `SourceVersionService`：管理别名、版本、人工编辑基线、时间线和恢复。
 - `CompileService`：消费显式 `sourceId + versionId` change set，不属于导入提交事务。
 
+当前生产实现（2026-09-06）：`ImportV2Service` 继续作为稳定 facade；`services/import_execution.rs` 拥有 worker queue、轻文本保留通道、逐项执行与 batch 收尾，command 只提交项目意图。`import_v2/routing.rs` 集中格式与平台路线排序；`artifact.rs` 提供有界摘要与复制时校验，`commit.rs`/`transaction.rs` 以文件流提交大证据。`capability_payload.rs` 提供可选分块传输和已验签不可变文件的物理复用，不替代现有能力协调器、Source registry 或事务。
+
 Import V2 的批量控制面合同：
 
 - `start_import_batch_v2` 为一个 item cohort 创建并返回一个持久化 operation `BackendTask`；operation marker 是 `import-v2-operation:<session_id>`，共享一个 cancellation token，聚合进度 / 日志与 `import://session-patch` 最多每 100ms flush 一次，terminal 强制 flush。

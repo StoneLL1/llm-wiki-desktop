@@ -160,7 +160,7 @@ test("development preparation refreshes changed runner sources instead of reusin
   }));
   await writeFile(publicKeyPath, "a".repeat(64));
   await writeFile(statePath, JSON.stringify({
-    revision: 5,
+    revision: 6,
     version: "1.13.4+2024.07.17",
     target: "x86_64-pc-windows-msvc",
     runnerSha256,

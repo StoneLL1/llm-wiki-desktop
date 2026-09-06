@@ -71,3 +71,24 @@ index; it does not cross-scan the complete task and item collections. History
 page 1 is requested only while the History section is active. A commit marks
 the cached page stale, and an inactive History section performs no hidden
 prefetch; a remount may show its scoped cached page while revalidating it.
+
+## Preparation and article pipeline (2026-09)
+
+The Import-linked preparation dialog submits the current requirement revision and
+optional additional item IDs. One action also records the OCR/ASR intent. The
+application capability coordinator owns the shared download and durable
+continuations; React does not wait for installation to finish before scheduling
+another recovery call. Closing the dialog does not cancel shared preparation.
+
+Readable mixed PDFs remain selectable while exposing optional OCR for their
+scanned pages. Partial OCR preserves completed pages and explains missing ones.
+Preparation progress is application-scoped; queue and inspector updates remain
+project/session-scoped. After a commit, the inspector releases the completed
+selection rather than retaining stale preparation actions.
+
+Backend production queue/worker ownership is in `services/import_execution.rs`;
+format/platform ordering is in `import_v2/routing.rs`. `ImportV2Service` remains the
+stable facade, and the existing Source registry/transaction stays authoritative.
+Large artifacts use verified file streams. See
+[`../../../docs/testing/import-architecture-refactor-acceptance.md`](../../../docs/testing/import-architecture-refactor-acceptance.md)
+for actual samples, limitations and measurements.

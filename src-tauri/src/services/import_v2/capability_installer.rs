@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -142,6 +142,8 @@ pub struct CapabilityCatalogEntry {
     pub target_triple: String,
     pub url: String,
     pub archive_sha256: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub archive_chunks: Vec<super::capability_payload::ArchiveChunk>,
     pub manifest_sha256: String,
     pub signing_key_id: String,
     pub compressed_bytes: u64,
@@ -197,6 +199,39 @@ fn select_catalog_entry(
         .max_by_key(|entry| semver::Version::parse(&entry.version).ok())
 }
 
+/// A cheap preparation estimate. Installation revalidates every reused byte.
+/// Corrupt or concurrently evicted cache entries can increase the actual download.
+pub fn remaining_download_bytes(root: &Path, entry: &CapabilityCatalogEntry) -> u64 {
+    if !entry.archive_chunks.is_empty() {
+        let cached: u64 = entry
+            .archive_chunks
+            .iter()
+            .filter(|chunk| {
+                let path = root.join(".payload-cache").join(&chunk.sha256);
+                BoundProjectMutationRoot::bind(root, &path)
+                    .and_then(|binding| binding.open_regular(&path))
+                    .and_then(|file| file.metadata())
+                    .is_ok_and(|m| m.len() == chunk.bytes)
+            })
+            .map(|chunk| chunk.bytes)
+            .sum();
+        return entry.compressed_bytes.saturating_sub(cached);
+    }
+    let Ok(paths) = partial_paths(root, entry) else {
+        return entry.compressed_bytes;
+    };
+    let cached = std::fs::read(&paths.metadata)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<PartialDownloadMetadata>(&bytes).ok())
+        .filter(|metadata| metadata.matches_entry(entry))
+        .filter(|metadata| {
+            std::fs::symlink_metadata(&paths.archive)
+                .is_ok_and(|file| file.is_file() && file.len() >= metadata.downloaded_bytes)
+        })
+        .map_or(0, |metadata| metadata.downloaded_bytes);
+    entry.compressed_bytes.saturating_sub(cached)
+}
+
 pub async fn install_catalog_entry(
     blocking_work: &BlockingWorkCoordinator,
     install_root: &Path,
@@ -208,44 +243,71 @@ pub async fn install_catalog_entry(
     let preflight_root = install_root.to_path_buf();
     let preflight_entry = entry.clone();
     let preflight_owner = owner_task_id.to_owned();
-    let (install_root, paths, install_identity, staging_root, release_lock) = blocking_work
-        .run_cancellable(BlockingWorkClass::HeavyIo, token.clone(), move || {
-            if !valid_catalog_entry(&preflight_entry) {
-                return Err(install_error("Capability catalog entry is invalid."));
-            }
-            std::fs::create_dir_all(&preflight_root)
-                .map_err(|_| install_error("Capability install directory is unavailable."))?;
-            let install_root = preflight_root
-                .canonicalize()
-                .map_err(|_| install_error("Capability install directory cannot be resolved."))?;
-            let paths = partial_paths(&install_root, &preflight_entry)?;
-            let install_identity = release_identity(&preflight_entry);
-            let staging_root = install_root.join(format!(".installing-{install_identity}"));
-            let release_lock =
-                acquire_release_lock(&install_root, &install_identity, &preflight_owner)?;
-            recover_pending_activation_for_release(
-                &install_root,
-                &install_identity,
-                &preflight_entry,
-            )?;
-            Ok((
-                install_root,
-                paths,
-                install_identity,
-                staging_root,
-                release_lock,
-            ))
-        })
-        .await?;
-    download_archive(
-        blocking_work,
+    let (install_root, paths, install_identity, staging_root, release_lock, reusable) =
+        blocking_work
+            .run_cancellable(BlockingWorkClass::HeavyIo, token.clone(), move || {
+                if !valid_catalog_entry(&preflight_entry) {
+                    return Err(install_error("Capability catalog entry is invalid."));
+                }
+                std::fs::create_dir_all(&preflight_root)
+                    .map_err(|_| install_error("Capability install directory is unavailable."))?;
+                let install_root = preflight_root.canonicalize().map_err(|_| {
+                    install_error("Capability install directory cannot be resolved.")
+                })?;
+                let paths = partial_paths(&install_root, &preflight_entry)?;
+                let install_identity = release_identity(&preflight_entry);
+                let staging_root = install_root.join(format!(".installing-{install_identity}"));
+                let release_lock =
+                    acquire_release_lock(&install_root, &install_identity, &preflight_owner)?;
+                recover_pending_activation_for_release(
+                    &install_root,
+                    &install_identity,
+                    &preflight_entry,
+                )?;
+                let reusable = verify_installed_root(&install_root, &preflight_entry)
+                    .and_then(|pack| restore_executable_permissions(&pack))
+                    .is_ok();
+                Ok((
+                    install_root,
+                    paths,
+                    install_identity,
+                    staging_root,
+                    release_lock,
+                    reusable,
+                ))
+            })
+            .await?;
+    if reusable {
+        if token.is_cancelled() {
+            return Err(stopped(token));
+        }
+        // Revalidate and health-probe the existing signed version without
+        // fetching its archive again, including after a waiting item restarts.
+        return Ok(CapabilityInstallOutcome {
+            created_by_this_call: false,
+            release_lock,
+            pending_activation: None,
+        });
+    }
+    if !super::capability_payload::download_chunks(
+        &install_root,
         entry,
-        &paths,
-        owner_task_id,
+        &paths.archive,
         token,
         &mut progress,
     )
-    .await?;
+    .await?
+    {
+        download_archive(
+            blocking_work,
+            entry,
+            &paths,
+            owner_task_id,
+            token,
+            &mut progress,
+        )
+        .await?;
+    }
     if token.is_cancelled() {
         if !token.is_pause_requested() {
             let paths_for_cleanup = paths.clone();
@@ -474,8 +536,38 @@ async fn download_archive(
     token: &CancellationToken,
     progress: &mut impl FnMut(CapabilityInstallPhase, u64, u64),
 ) -> Result<(), BackendError> {
-    let result =
-        download_archive_inner(blocking_work, entry, paths, owner_task_id, token, progress).await;
+    // A retry reopens the verified Range checkpoint. A transient failure never
+    // discards downloaded bytes or asks the user to prepare the same tool again.
+    let mut retry = 0u32;
+    let result = loop {
+        let result =
+            download_archive_inner(blocking_work, entry, paths, owner_task_id, token, progress)
+                .await;
+        let Some(error) = result.as_ref().err() else {
+            break result;
+        };
+        if error.code != "APP_CAPABILITY_NETWORK_UNAVAILABLE" || retry >= 3 || token.is_cancelled()
+        {
+            break result;
+        }
+        let seconds = error
+            .details
+            .as_ref()
+            .and_then(|details| details.get("retryAfterSeconds"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(1 << retry);
+        if seconds > 120 {
+            break result;
+        }
+        retry += 1;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
+        while tokio::time::Instant::now() < deadline {
+            if token.is_cancelled() {
+                return Err(stopped(token));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    };
     if result
         .as_ref()
         .err()
@@ -496,7 +588,7 @@ async fn download_archive_inner(
 ) -> Result<(), BackendError> {
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(20))
-        .timeout(Duration::from_secs(30 * 60))
+        .read_timeout(Duration::from_secs(90))
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
             if attempt.previous().len() >= 5 || attempt.url().scheme() != "https" {
                 attempt.stop()
@@ -576,6 +668,17 @@ async fn download_archive_inner(
         }
     }
     let mut response = send_cancellable(request, token, "Capability download failed.").await?;
+    if response.status().is_server_error()
+        || response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+    {
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok());
+        return Err(network_error(format!("Capability server returned HTTP {}", response.status()))
+            .with_details(serde_json::json!({ "httpStatus": response.status().as_u16(), "retryAfterSeconds": retry_after })));
+    }
     let mut response_url = response.url().as_str().to_owned();
     let mut response_etag = response_header(&response, reqwest::header::ETAG);
     let mut response_last_modified = response_header(&response, reqwest::header::LAST_MODIFIED);
@@ -635,6 +738,7 @@ async fn download_archive_inner(
     metadata.owner_task_id = owner_task_id.into();
     let mut downloaded = metadata.downloaded_bytes;
     let mut last_checkpoint = downloaded;
+    let mut last_progress = Instant::now();
     metadata.updated_at_unix_seconds = unix_seconds();
     write_partial_metadata_background(blocking_work, &paths.metadata, &metadata, token).await?;
     let mut stream = response.bytes_stream();
@@ -652,7 +756,24 @@ async fn download_archive_inner(
             }
         };
         let Some(chunk) = next else { break };
-        let chunk = chunk.map_err(|_| install_error("Capability download failed."))?;
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                metadata.downloaded_bytes = downloaded;
+                metadata.prefix_sha256 = format!("{:x}", hasher.clone().finalize());
+                metadata.updated_at_unix_seconds = unix_seconds();
+                file.sync_data().await.map_err(|error| {
+                    install_error(&format!(
+                        "Capability download could not be checkpointed: {error}"
+                    ))
+                })?;
+                write_partial_metadata_background(blocking_work, &paths.metadata, &metadata, token)
+                    .await?;
+                return Err(network_error(format!(
+                    "Capability download interrupted: {error}"
+                )));
+            }
+        };
         downloaded = downloaded
             .checked_add(chunk.len() as u64)
             .ok_or_else(|| install_error("Capability download is too large."))?;
@@ -663,11 +784,16 @@ async fn download_archive_inner(
         file.write_all(&chunk)
             .await
             .map_err(|_| install_error("Capability download could not be saved."))?;
-        progress(
-            CapabilityInstallPhase::Downloading,
-            downloaded,
-            entry.compressed_bytes,
-        );
+        if last_progress.elapsed() >= Duration::from_millis(100)
+            || downloaded == entry.compressed_bytes
+        {
+            progress(
+                CapabilityInstallPhase::Downloading,
+                downloaded,
+                entry.compressed_bytes,
+            );
+            last_progress = Instant::now();
+        }
         if downloaded.saturating_sub(last_checkpoint) >= PARTIAL_CHECKPOINT_BYTES {
             metadata.downloaded_bytes = downloaded;
             metadata.prefix_sha256 = format!("{:x}", hasher.clone().finalize());
@@ -737,6 +863,10 @@ async fn write_partial_metadata_background(
         .await
 }
 
+fn network_error(message: String) -> BackendError {
+    BackendError::new("APP_CAPABILITY_NETWORK_UNAVAILABLE", message, true, true)
+}
+
 async fn send_cancellable(
     request: reqwest::RequestBuilder,
     token: &CancellationToken,
@@ -747,7 +877,7 @@ async fn send_cancellable(
     loop {
         tokio::select! {
             response = &mut send => {
-                return response.map_err(|_| install_error(failure_message));
+                return response.map_err(|error| network_error(format!("{failure_message} {error}")));
             }
             _ = tokio::time::sleep(Duration::from_millis(100)) => {
                 if token.is_cancelled() {
@@ -1455,6 +1585,8 @@ fn extract_and_verify_with_keys_cancellable(
     }
     let pack = verify_installed_root_with_keys(staging_root, entry, keys)?;
     restore_executable_permissions(&pack)?;
+    // A filesystem without hard links keeps the verified independent files.
+    let _ = super::capability_payload::share_installed_payloads(install_root, &pack);
     Ok(())
 }
 
@@ -1658,7 +1790,8 @@ fn decode_hex(value: &str) -> Option<Vec<u8>> {
 }
 
 fn valid_catalog_entry(entry: &CapabilityCatalogEntry) -> bool {
-    !entry.capability_id.is_empty()
+    super::capability_payload::valid_chunks(&entry.archive_chunks, entry.compressed_bytes)
+        && !entry.capability_id.is_empty()
         && entry
             .capability_id
             .chars()
@@ -1809,7 +1942,7 @@ fn cancelled() -> BackendError {
     )
 }
 
-fn stopped(token: &CancellationToken) -> BackendError {
+pub(super) fn stopped(token: &CancellationToken) -> BackendError {
     if token.is_pause_requested() {
         BackendError::new(
             "APP_CAPABILITY_INSTALL_PAUSED",
@@ -1899,6 +2032,7 @@ mod tests {
                 compressed_bytes: std::fs::metadata(&archive).unwrap().len(),
                 installed_bytes: (manifest_bytes.len() + runtime.len()) as u64,
                 model_bytes: None,
+                archive_chunks: Vec::new(),
                 license: "MIT".into(),
             };
             Self {
@@ -1974,10 +2108,16 @@ mod tests {
             compressed_bytes: 1,
             installed_bytes: 1,
             model_bytes: None,
+            archive_chunks: Vec::new(),
             license: "Apache-2.0".into(),
         };
         assert!(!valid_catalog_entry(&entry));
-        assert!(catalog_entry("asr-sensevoice-small", &entry.target_triple).is_none());
+        assert!(select_catalog_entry(
+            vec![entry.clone()],
+            &entry.capability_id,
+            &entry.target_triple
+        )
+        .is_none());
     }
 
     #[test]
@@ -2000,6 +2140,7 @@ mod tests {
             compressed_bytes: 1,
             installed_bytes: 1,
             model_bytes: None,
+            archive_chunks: Vec::new(),
             license: "Apache-2.0".into(),
         };
         let selected = select_catalog_entry(

@@ -513,7 +513,7 @@ export function restrictedEnvironment(packRoot, temporaryRoot, platform = proces
 }
 
 export function classifyExecutionError(error, stage) {
-  if (error?.killed || error?.code === "ETIMEDOUT" || error?.signal === "SIGKILL") return "IMPORT_ASR_TIMEOUT";
+  if (error?.killed || error?.code === "ETIMEDOUT") return "IMPORT_ASR_TIMEOUT";
   return stage === "decode" ? "IMPORT_ASR_DECODE_FAILED" : "IMPORT_ASR_ENGINE_FAILED";
 }
 

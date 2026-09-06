@@ -24,6 +24,18 @@ function item(status: ImportItemStatus, overrides: Partial<ImportItem> = {}): Im
 }
 
 describe("presentImportItem", () => {
+  it("keeps readable mixed PDFs committable while offering optional OCR", () => {
+    for (const action of ["enable_ocr", "install_ocr_capability"] as const) {
+      const view = presentImportItem(item("preview_ready", { issue: {
+        code: "IMPORT_WEB_OCR_UNAVAILABLE", message: "scanned pages", stage: "extract", retryable: false,
+        userActionRequired: true, recoveryActions: [action], availableActions: [],
+      } }));
+      expect(view.committable).toBe(true);
+      expect(view.userState).toBe("ready");
+      expect(view.userIssue?.title).toBe("importV2.issue.optionalOcr.title");
+    }
+  });
+
   it.each([
     ["queued", "discovering", "importV2.userState.discovering", "start", false],
     ["inspecting", "processing", "importV2.userState.processing", null, false],

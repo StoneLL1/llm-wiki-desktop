@@ -78,6 +78,19 @@ fn invalid_csv() -> BackendError {
     )
 }
 
+/// Prefer explicit article landmarks; callers still retain the full response as evidence.
+pub fn html_article_to_markdown(value: &str) -> (String, Vec<String>) {
+    let lower = value.to_ascii_lowercase();
+    for name in ["article", "main"] {
+        if let Some(start) = lower.find(&format!("<{name}")) {
+            if let Some(end) = lower[start..].find(&format!("</{name}>")) {
+                return html_to_markdown(&value[start..start + end + name.len() + 3]);
+            }
+        }
+    }
+    html_to_markdown(value)
+}
+
 pub fn html_to_markdown(value: &str) -> (String, Vec<String>) {
     let lower = value.to_ascii_lowercase();
     let mut warnings = Vec::new();
@@ -158,6 +171,9 @@ fn render_tag(tag: &str, output: &mut String) {
         .trim_end_matches('/')
         .to_ascii_lowercase();
     match (closing, name.as_str()) {
+        (false, "pre") => output.push_str("\n\n````\n"),
+        (true, "pre") => output.push_str("\n````\n\n"),
+        (false, "code") | (true, "code") => output.push('`'),
         (false, "h1") => output.push_str("\n# "),
         (false, "h2") => output.push_str("\n## "),
         (false, "h3") => output.push_str("\n### "),

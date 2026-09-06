@@ -90,7 +90,7 @@ export function ImportCapabilityDialog(props: ImportCapabilityDialogProps) {
   const installed = capability?.installation.state === "healthy" || (!management && requirement?.available === true);
   const mutationIntent = management ? props.intent !== "details" : true;
   const installable = capability?.installAllowed ?? requirement?.installable ?? false;
-  const canConfirm = mutationIntent && installable && acknowledged && !busy && !paused;
+  const canConfirm = mutationIntent && (installable || (!management && installed)) && (!management || acknowledged) && !busy && !paused;
 
   useEffect(() => {
     setAcknowledged(false);
@@ -109,7 +109,7 @@ export function ImportCapabilityDialog(props: ImportCapabilityDialogProps) {
   const version = capability?.targetVersion ?? requirement?.requirement.minimumVersion ?? null;
   const target = capability?.targetTriple ?? requirement?.requirement.targetTriple ?? "—";
   const license = capability?.licenseExpression ?? requirement?.license ?? requirement?.requirement.acceptedLicenseExpressions.join(", ") ?? "—";
-  const packageBytes = capability?.compressedBytes ?? requirement?.compressedBytes;
+  const packageBytes = management ? capability?.compressedBytes : installed ? 0 : requirement?.downloadBytes ?? capability?.compressedBytes ?? requirement?.compressedBytes;
   const installedBytes = capability?.installedBytes ?? requirement?.installedBytes;
   const modelBytes = capability?.modelBytes ?? requirement?.modelBytes;
   const purpose = capability ? t(capability.purposeKey) : capabilityPurpose(requirement!.route, t);
@@ -167,7 +167,7 @@ export function ImportCapabilityDialog(props: ImportCapabilityDialogProps) {
   const progressTotal = task?.progress?.total ?? capability?.operation.progressTotal;
   const progressState = capability?.operation.state ?? (paused ? "paused" : failed ? "failed" : busy ? "downloading" : null);
   const downloading = progressState === "downloading";
-  const installResult = task?.result?.reference?.type === "app_capability_install"
+  const installResult = installed && task?.result?.reference?.type === "app_capability_install"
     ? task.result.reference
     : null;
   const reviewContinuationCount = installResult
@@ -207,15 +207,20 @@ export function ImportCapabilityDialog(props: ImportCapabilityDialogProps) {
         <div className="import-capability-dialog__body">
           <dl className="import-capability-dialog__facts">
             <div><dt>{t("importV2.capability.purpose")}</dt><dd>{purpose}</dd></div>
+          </dl>
+          <dl className="import-capability-dialog__facts">
+            <div><dt>{t(management ? "importV2.capability.compressed" : "importV2.capability.newDownload")}</dt><dd>{bytes(packageBytes)}</dd></div>
+            <div><dt>{t("importV2.capabilityManagement.continuations")}</dt><dd>{management ? t("importV2.capabilityManagement.continuationManagement", { count: waitingCount }) : t("importV2.capabilityManagement.continuationImport", { count: waitingCount })}</dd></div>
+          </dl>
+          <details className="import-v2-technical-details"><summary>{t("importV2.preview.technicalDetails")}</summary>
+          <dl className="import-capability-dialog__facts">
             <div><dt>{t("importV2.capability.version")}</dt><dd>{version ?? "—"}</dd></div>
             <div><dt>{t("importV2.capability.platform")}</dt><dd className="font-mono">{target}</dd></div>
             <div><dt>{t("importV2.capabilityManagement.publisherKey")}</dt><dd className="font-mono">{capability?.publisherKeyId ?? "—"}</dd></div>
             <div><dt>{t("importV2.capabilityManagement.sourceDomain")}</dt><dd className="font-mono">{capability?.sourceDomain ?? "—"}</dd></div>
-            <div><dt>{t("importV2.capability.compressed")}</dt><dd>{bytes(packageBytes)}</dd></div>
             <div><dt>{t("importV2.capability.model")}</dt><dd>{bytes(modelBytes)}</dd></div>
             <div><dt>{t("importV2.capability.installed")}</dt><dd>{bytes(installedBytes)}</dd></div>
             <div><dt>{t("importV2.capability.license")}</dt><dd>{license}</dd></div>
-            <div><dt>{t("importV2.capabilityManagement.continuations")}</dt><dd>{management ? t("importV2.capabilityManagement.continuationManagement", { count: waitingCount }) : t("importV2.capabilityManagement.continuationImport", { count: waitingCount })}</dd></div>
           </dl>
 
           <section className="import-capability-dialog__permissions" aria-labelledby="import-capability-permissions">
@@ -228,7 +233,9 @@ export function ImportCapabilityDialog(props: ImportCapabilityDialogProps) {
           </section>
 
           <p className="import-capability-dialog__safety">{t("importV2.capabilityManagement.activationSafety")}</p>
-          {!installable && (mutationIntent || capability?.distribution.state !== "published") ? <p className="import-capability-dialog__warning" role="alert">{t(capability?.distribution.state === "source_catalog_empty" ? "importV2.capability.state.catalog_unavailable" : capability?.distribution.state === "unsupported" ? "backendError.summary.appCapabilityUnsupported" : "importV2.capability.unavailable")}</p> : null}
+          <dl><dt>{t("importV2.capability.identifier")}</dt><dd>{capabilityId}</dd><dt>{t("importV2.capabilityManagement.routes")}</dt><dd>{capability?.routes.join(", ") ?? requirement?.route ?? "—"}</dd>{stableErrorCode ? <><dt>{t("importV2.capabilityManagement.errorCode")}</dt><dd>{stableErrorCode}</dd></> : null}</dl>
+          </details>
+          {!installable && !installed && (mutationIntent || capability?.distribution.state !== "published") ? <p className="import-capability-dialog__warning" role="alert">{t(capability?.distribution.state === "source_catalog_empty" ? "importV2.capability.state.catalog_unavailable" : capability?.distribution.state === "unsupported" ? "backendError.summary.appCapabilityUnsupported" : "importV2.capability.unavailable")}</p> : null}
           {installed && !failed && !busy && !paused ? <p className="import-capability-dialog__success" role="status"><Check size={14} aria-hidden="true" />{t("importV2.capability.installedState")}</p> : null}
           {installResult && installResult.resumedContinuations > 0 ? <p className="import-capability-dialog__success" role="status"><Check size={14} aria-hidden="true" />{t("importV2.capabilityManagement.continuationResumed", { count: installResult.resumedContinuations })}</p> : null}
           {reviewContinuationCount > 0 ? <p className="import-capability-dialog__warning" role="alert">{t("importV2.capabilityManagement.continuationReview", { count: reviewContinuationCount })}</p> : null}
@@ -238,14 +245,14 @@ export function ImportCapabilityDialog(props: ImportCapabilityDialogProps) {
             {downloading && progressTotal ? <progress max={progressTotal} value={progressCurrent ?? 0} /> : null}
           </div> : null}
 
-          {mutationIntent && !paused ? <label className="import-capability-dialog__ack"><input type="checkbox" checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} disabled={busy || !installable} /><span>{t("importV2.capabilityManagement.acknowledgement", { version: version ?? "—", license })}</span></label> : null}
+          {management && mutationIntent && !paused ? <label className="import-capability-dialog__ack"><input type="checkbox" checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} disabled={busy || !installable} /><span>{t("importV2.capabilityManagement.acknowledgement", { version: version ?? "—", license })}</span></label> : null}
           {installError ?? actionError ?? taskError ? <ActionableErrorNotice className="mt-3" error={(installError ?? actionError ?? taskError)!} onAction={async (kind) => { if (kind === "retry") await retryVisibleError(); }} /> : null}
-          <details className="import-v2-technical-details mt-3"><summary>{t("importV2.preview.technicalDetails")}</summary><dl><dt>{t("importV2.capability.identifier")}</dt><dd>{capabilityId}</dd><dt>{t("importV2.capabilityManagement.routes")}</dt><dd>{capability?.routes.join(", ") ?? requirement?.route ?? "—"}</dd>{stableErrorCode ? <><dt>{t("importV2.capabilityManagement.errorCode")}</dt><dd>{stableErrorCode}</dd></> : null}</dl></details>
+
         </div>
         <footer>
-          {busy ? <button type="button" className="btn btn--sm" onClick={() => void cancelActive()}>{t("importV2.capabilityManagement.action.cancel")}</button> : <button type="button" className="btn btn--sm" onClick={props.onCancel}>{t("importV2.capability.close")}</button>}
+          {busy && management ? <button type="button" className="btn btn--sm" onClick={() => void cancelActive()}>{t("importV2.capabilityManagement.action.cancel")}</button> : <button type="button" className="btn btn--sm" onClick={props.onCancel}>{t("importV2.capability.close")}</button>}
           {paused ? <button type="button" className="btn btn--sm btn--primary" onClick={() => void continuePaused()} disabled={starting}>{starting ? <LoaderCircle size={13} className="animate-spin" aria-hidden="true" /> : null}{t("importV2.capabilityManagement.action.continue")}</button> : null}
-          {mutationIntent && !paused ? <button type="button" className="btn btn--sm btn--primary" onClick={() => void install()} disabled={!canConfirm}><Download size={13} aria-hidden="true" />{starting ? <LoaderCircle size={13} className="animate-spin" aria-hidden="true" /> : null}{t(management && props.intent === "update" ? "importV2.capabilityManagement.action.update" : management && props.intent === "retry" ? "importV2.capabilityManagement.action.retry" : "importV2.capabilityManagement.action.install")}</button> : null}
+          {mutationIntent && !paused ? <button type="button" className="btn btn--sm btn--primary" onClick={() => void install()} disabled={!canConfirm}><Download size={13} aria-hidden="true" />{starting ? <LoaderCircle size={13} className="animate-spin" aria-hidden="true" /> : null}{t(management && props.intent === "update" ? "importV2.capabilityManagement.action.update" : management && props.intent === "retry" ? "importV2.capabilityManagement.action.retry" : management ? "importV2.capabilityManagement.action.install" : "importV2.capability.prepareAndContinue")}</button> : null}
         </footer>
       </section>
     </div>

@@ -1,3 +1,7 @@
+pub use super::routing::routes_for_format;
+use super::routing::{
+    detect_input_format, explicit_routes, is_bilibili_import_input, reorder_routes,
+};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -271,7 +275,13 @@ impl ImportV2Service {
             ImportItemStatus::WaitingAuthorization
                 | ImportItemStatus::WaitingCapability
                 | ImportItemStatus::Failed
-        ) {
+        ) && !(kind == ImportMediaAuthorizationKind::Ocr
+            && item.status == ImportItemStatus::PreviewReady
+            && item
+                .issue
+                .as_ref()
+                .is_some_and(|issue| issue.code == "IMPORT_WEB_OCR_UNAVAILABLE"))
+        {
             return Err(BackendError::new(
                 IMPORT_V2_STATE_INVALID,
                 "Media recognition can be authorized only while this import item is waiting.",
@@ -3623,6 +3633,23 @@ impl ImportV2Service {
             }
         }
         if engines.is_empty() {
+            if !planned_routes.is_empty()
+                && planned_routes
+                    .iter()
+                    .all(|(route, _)| route.starts_with("ocr."))
+            {
+                return self.finish_waiting_local_ocr(
+                    context,
+                    files,
+                    tasks,
+                    session_id,
+                    item_id,
+                    task_id,
+                    snapshot.expected_item_revision,
+                    ocr_unavailable(),
+                    ImportStage::Route,
+                );
+            }
             let x_capability_missing = planned_routes
                 .iter()
                 .any(|(route, _)| *route == "web.x.post");
@@ -3922,7 +3949,9 @@ impl ImportV2Service {
                 }
             };
             if matches!(descriptor.route.as_str(), "ocr.cjk-accurate" | "ocr.basic") {
-                if candidate.text_coverage.unwrap_or_default() <= 0.0
+                if candidate
+                    .text_coverage
+                    .is_some_and(|coverage| coverage <= 0.0)
                     || candidate
                         .warnings
                         .iter()
@@ -3969,6 +3998,62 @@ impl ImportV2Service {
                 worker_revision.set(snapshot.expected_item_revision);
                 last_error = Some(error);
                 continue;
+            }
+            if matches!(descriptor.route.as_str(), "ocr.cjk-accurate" | "ocr.basic") {
+                let compose = (|| -> Result<(), BackendError> {
+                    let staging = context.root.join(&staging_root);
+                    let report = files
+                        .read_bytes(
+                            context,
+                            &format!("{staging_root}/{}", candidate.markdown_path),
+                        )
+                        .map_err(|_| ocr_unavailable())?;
+                    let metadata = candidate
+                        .metadata_path
+                        .as_ref()
+                        .map(|path| {
+                            files
+                                .read_bytes(context, &format!("{staging_root}/{path}"))
+                                .map_err(|_| ocr_unavailable())
+                        })
+                        .transpose()?;
+                    let report = std::str::from_utf8(&report).map_err(|_| ocr_unavailable())?;
+                    let article = ocr_article_text(report, metadata.as_deref());
+                    if article.trim().is_empty() {
+                        return Err(ocr_no_text());
+                    }
+                    files
+                        .write_project_bytes_absolute(
+                            context,
+                            &staging.join("article.md"),
+                            article.as_bytes(),
+                        )
+                        .map_err(|_| ocr_unavailable())?;
+                    if !candidate.asset_paths.contains(&candidate.markdown_path) {
+                        candidate.asset_paths.push(candidate.markdown_path.clone());
+                    }
+                    candidate.markdown_path = "article.md".into();
+                    candidate.title = Path::new(&request.input.display_name)
+                        .file_stem()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or(&request.input.display_name)
+                        .to_string();
+                    candidate.text_coverage = None;
+                    Ok(())
+                })();
+                if let Err(error) = compose {
+                    return self.finish_failed(
+                        context,
+                        files,
+                        tasks,
+                        session_id,
+                        item_id,
+                        task_id,
+                        snapshot.expected_item_revision,
+                        error,
+                        ImportStage::Extract,
+                    );
+                }
             }
             if candidate.continuation.is_some() {
                 let continuation = candidate.continuation.clone();
@@ -4302,7 +4387,27 @@ impl ImportV2Service {
                     },
                 )?;
                 item.preview = Some(preview);
-                item.issue = None;
+                item.issue = if result.warnings.iter().any(|warning| {
+                    warning.starts_with("PDF_PAGE_") && warning.ends_with("_NEEDS_OCR")
+                }) {
+                    let available = self
+                        .engines
+                        .registered_routes()?
+                        .iter()
+                        .any(|route| route == "ocr.cjk-accurate" || route == "ocr.basic");
+                    let mut issue = ImportIssue::for_web_code(
+                        "IMPORT_WEB_OCR_UNAVAILABLE",
+                        ImportStage::Extract,
+                    );
+                    issue.recovery_actions = vec![if available {
+                        ImportRecoveryAction::EnableOcr
+                    } else {
+                        ImportRecoveryAction::InstallOcrCapability
+                    }];
+                    Some(issue)
+                } else {
+                    None
+                };
                 if restricted_content {
                     item.restricted_content = true;
                     item.restricted_identity_summary
@@ -4515,7 +4620,7 @@ impl ImportV2Service {
             return Err(asr_unavailable());
         }
         let descriptor = describe_engine(engine.as_ref())?;
-        let shard_key = asr_shard_key(&canonical_media, &descriptor)?;
+        let shard_key = asr_shard_key(&canonical_media, &descriptor, request)?;
         let shard_root = staging.join("asr-shards");
         let started_at = chrono::Utc::now().to_rfc3339();
         let mut asr_request = request.clone();
@@ -4565,7 +4670,7 @@ impl ImportV2Service {
                 } else {
                     "\n\n## Local ASR Transcript\n\n"
                 });
-                base.push_str(&cached.transcript);
+                append_transcript_body(&mut base, &cached.transcript);
                 files
                     .write_project_bytes_absolute(context, &base_path, base.as_bytes())
                     .map_err(|_| asr_unavailable())?;
@@ -4720,7 +4825,7 @@ impl ImportV2Service {
             } else {
                 "\n\n## Local ASR Transcript\n\n"
             });
-            base.push_str(&transcript);
+            append_transcript_body(&mut base, &transcript);
             files
                 .write_project_bytes_absolute(context, &base_path, base.as_bytes())
                 .map_err(|_| asr_unavailable())?;
@@ -5019,7 +5124,14 @@ impl ImportV2Service {
                         )?
                         .item_revision;
                     worker_revision.set(*expected_item_revision);
+                    if token.is_cancelled() {
+                        return Err(cancelled_error());
+                    }
                     first_ocr_error.get_or_insert_with(|| error.clone());
+                    base = base.replace(
+                        &format!("<!-- OCR_PAGE_{source_image_number:03} -->"),
+                        &format!("> 第 {source_image_number} 页暂未识别 / Page {source_image_number} could not be recognized."),
+                    );
                     web_result.warnings.push(format!(
                         "Local OCR failed for source image {source_image_number}: {}",
                         error.code
@@ -5037,9 +5149,11 @@ impl ImportV2Service {
                 )
                 .map_err(|_| ocr_unavailable())?;
             web_result.asset_paths.push(durable_markdown);
+            let mut article_text = ocr_article_text(&ocr_markdown, None);
             if let Some(metadata_path) = &ocr_result.metadata_path {
                 let metadata =
                     std::fs::read(workspace.join(metadata_path)).map_err(|_| ocr_unavailable())?;
+                article_text = ocr_article_text(&ocr_markdown, Some(&metadata));
                 let durable_metadata = format!("ocr/image-{source_image_number:03}.metadata.json");
                 files
                     .write_project_bytes_absolute(
@@ -5054,18 +5168,13 @@ impl ImportV2Service {
             if base.contains(&pdf_placeholder) {
                 base = base.replace(
                     &pdf_placeholder,
-                    &format!(
-                        "> 本页文字由本地 OCR {} {} 提取。\n\n{}",
-                        descriptor.engine_id, descriptor.engine_version, ocr_markdown
-                    ),
+                    &format!("> 本页文字由本地 OCR 提取。\n\n{article_text}"),
                 );
             } else {
                 base.push_str(&format!(
-                    "\n\n## 图片文字 / OCR — 第 {source_image_number} 张\n\n\
-                     > 来源：本地 OCR · {} {}\n\n",
-                    descriptor.engine_id, descriptor.engine_version
+                    "\n\n## 图片文字 / OCR — 第 {source_image_number} 张\n\n"
                 ));
-                base.push_str(&ocr_markdown);
+                base.push_str(&article_text);
             }
             web_result.warnings.push(format!(
                 "local_ocr:{}:{}",
@@ -5082,13 +5191,15 @@ impl ImportV2Service {
                 label: "ocr.recognizing".into(),
             },
         )?;
-        if successful_ocr != temporary_input_paths.len() || base.contains("<!-- OCR_PAGE_") {
+        // Preserve readable native pages and successful OCR shards. An image-only
+        // source with no recognized text still cannot become an article.
+        if successful_ocr == 0 && web_result.text_coverage == Some(0.0) {
             return Err(first_ocr_error.unwrap_or_else(ocr_unavailable));
         }
         files
             .write_project_bytes_absolute(context, &base_path, base.as_bytes())
             .map_err(|_| ocr_unavailable())?;
-        web_result.text_coverage = Some(1.0);
+        web_result.text_coverage = None;
         Ok(web_result)
     }
 
@@ -6006,255 +6117,6 @@ fn is_agent_eligible_failure(original_code: &str, issue: &ImportIssue) -> bool {
         )
 }
 
-fn reorder_routes(
-    mut routes: Vec<(&'static str, QualityFloor)>,
-    recovery_action: Option<&ImportRecoveryAction>,
-) -> Vec<(&'static str, QualityFloor)> {
-    match recovery_action {
-        Some(ImportRecoveryAction::SwitchRoute) if routes.len() > 1 => routes.rotate_left(1),
-        Some(ImportRecoveryAction::SwitchParser) if routes.len() > 1 => routes.rotate_left(1),
-        Some(ImportRecoveryAction::EnableOcr) => {
-            routes.sort_by_key(|(route, _)| {
-                if route.starts_with("ocr.") {
-                    0
-                } else if *route == "pdf.layout" {
-                    1
-                } else {
-                    2
-                }
-            });
-        }
-        Some(ImportRecoveryAction::RetryRoute) | _ => {}
-    }
-    routes
-}
-
-fn detect_input_format(
-    context: &ProjectContext,
-    input: &ImportInput,
-) -> Result<Option<FileFormat>, BackendError> {
-    if input.kind == ImportInputKind::Url {
-        return Ok(None);
-    }
-    let locator = Path::new(&input.locator);
-    let path = if locator.is_absolute() {
-        locator.to_path_buf()
-    } else {
-        context.root.join(locator)
-    };
-    let prefix = std::fs::File::open(&path)
-        .and_then(|file| {
-            use std::io::Read;
-            let mut bytes = Vec::new();
-            file.take(8192).read_to_end(&mut bytes)?;
-            Ok(bytes)
-        })
-        .map_err(|error| {
-            BackendError::new(
-                "IMPORT_FILE_IO",
-                format!("The selected source could not be inspected: {error}"),
-                true,
-                true,
-            )
-        })?;
-    crate::services::import_v2::file_discovery::identify_file(&path, &prefix)
-        .map(|(format, _)| Some(format))
-}
-
-/// Canonical Batch 3 route contract. Discovery and contract tests share this
-/// function so adding a supported local format cannot silently diverge from
-/// the production orchestrator.
-pub fn routes_for_format(format: FileFormat) -> Vec<&'static str> {
-    match format {
-        FileFormat::Markdown | FileFormat::Text | FileFormat::Html => vec!["file.native"],
-        FileFormat::Csv => vec!["file.csv-package"],
-        FileFormat::Docx => vec![
-            "office.modern.docx",
-            "pack.markitdown",
-            "pack.office-oxide",
-            "agent.office",
-        ],
-        FileFormat::Xlsx => vec![
-            "office.modern.xlsx",
-            "pack.markitdown",
-            "pack.office-oxide",
-            "agent.office",
-        ],
-        FileFormat::Pptx => vec![
-            "office.modern.pptx",
-            "pack.markitdown",
-            "pack.office-oxide",
-            "agent.office",
-        ],
-        FileFormat::Doc | FileFormat::Xls | FileFormat::Ppt => {
-            vec![
-                "pack.office-legacy",
-                "pack.markitdown",
-                "pack.office-oxide",
-                "agent.office",
-            ]
-        }
-        FileFormat::Pdf => vec![
-            "pdf.text",
-            "pdf.layout",
-            "ocr.cjk-accurate",
-            "ocr.basic",
-            "agent.pdf",
-        ],
-        FileFormat::Srt | FileFormat::Vtt | FileFormat::Ass | FileFormat::Lrc => {
-            vec!["media.subtitle"]
-        }
-        FileFormat::Mp3
-        | FileFormat::Wav
-        | FileFormat::M4a
-        | FileFormat::Aac
-        | FileFormat::Flac
-        | FileFormat::Ogg
-        | FileFormat::Opus
-        | FileFormat::Wma
-        | FileFormat::Mp4
-        | FileFormat::Mov
-        | FileFormat::Mkv
-        | FileFormat::Webm
-        | FileFormat::Avi
-        | FileFormat::M4v
-        | FileFormat::Wmv
-        | FileFormat::AnimatedGif => {
-            vec!["media.companion", "media.subtitle", "media.keyframes", "media.asr"]
-        }
-        FileFormat::Png
-        | FileFormat::Jpeg
-        | FileFormat::Webp
-        | FileFormat::Bmp
-        | FileFormat::Tiff
-        | FileFormat::Heic
-        | FileFormat::Heif => vec!["ocr.cjk-accurate", "ocr.basic"],
-    }
-}
-
-fn explicit_routes(input: &ImportInput) -> Vec<&'static str> {
-    if input.kind == crate::models::import_v2::ImportInputKind::Url {
-        let host = url::Url::parse(
-            input
-                .normalized_locator
-                .as_deref()
-                .unwrap_or(&input.locator),
-        )
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
-        .unwrap_or_default();
-        if host == "xiaohongshu.com"
-            || host.ends_with(".xiaohongshu.com")
-            || host == "xhslink.com"
-            || host.ends_with(".xhslink.com")
-            || host == "xhslink.cn"
-            || host.ends_with(".xhslink.cn")
-        {
-            return vec![
-                "web.generic.browser",
-                "web.xiaohongshu.note",
-                "web.generic.readability",
-            ];
-        }
-        if host == "douyin.com"
-            || host.ends_with(".douyin.com")
-            || host == "iesdouyin.com"
-            || host.ends_with(".iesdouyin.com")
-        {
-            return vec![
-                "web.generic.browser",
-                "web.douyin.video",
-                "web.generic.readability",
-            ];
-        }
-        if host == "x.com"
-            || host.ends_with(".x.com")
-            || host == "twitter.com"
-            || host.ends_with(".twitter.com")
-        {
-            return vec!["web.x.post"];
-        }
-        if host == "bilibili.com" || host.ends_with(".bilibili.com") || host == "b23.tv" {
-            return vec![
-                "web.bilibili.video",
-                "web.bilibili.metadata",
-                "web.generic.browser",
-            ];
-        }
-        let platform = if host == "mp.weixin.qq.com" {
-            Some("web.wechat.article")
-        } else if host == "zhihu.com" || host.ends_with(".zhihu.com") {
-            Some("web.zhihu.content")
-        } else {
-            None
-        };
-        let mut routes = platform.into_iter().collect::<Vec<_>>();
-        routes.extend(["web.generic.readability", "web.generic.browser"]);
-        return routes;
-    }
-    let extension = Path::new(&input.locator)
-        .extension()
-        .and_then(|v| v.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    match extension.as_str() {
-        "md" | "markdown" | "txt" | "html" | "htm" => vec!["file.native"],
-        "csv" => vec!["file.csv-package"],
-        "docx" => vec![
-            "office.modern.docx",
-            "pack.markitdown",
-            "pack.office-oxide",
-            "agent.office",
-        ],
-        "xlsx" => vec![
-            "office.modern.xlsx",
-            "pack.markitdown",
-            "pack.office-oxide",
-            "agent.office",
-        ],
-        "pptx" => vec![
-            "office.modern.pptx",
-            "pack.markitdown",
-            "pack.office-oxide",
-            "agent.office",
-        ],
-        "doc" | "xls" | "ppt" => vec!["pack.office-legacy", "pack.office-oxide", "agent.office"],
-        "pdf" => vec![
-            "pdf.text",
-            "pdf.layout",
-            "ocr.cjk-accurate",
-            "ocr.basic",
-            "agent.pdf",
-        ],
-        "srt" | "vtt" | "lrc" | "ass" | "ssa" => vec!["media.subtitle"],
-        "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg" | "opus" | "wma" | "mp4" | "mov" | "mkv"
-        | "webm" | "avi" | "m4v" | "wmv" | "gif" => {
-            vec!["media.companion", "media.asr"]
-        }
-        "png" | "jpg" | "jpeg" | "webp" | "bmp" | "tif" | "tiff" | "heic" | "heif" => {
-            vec!["ocr.cjk-accurate", "ocr.basic"]
-        }
-        _ => Vec::new(),
-    }
-}
-
-fn is_bilibili_import_input(input: &ImportInput) -> bool {
-    if input.kind != crate::models::import_v2::ImportInputKind::Url {
-        return false;
-    }
-    url::Url::parse(
-        input
-            .normalized_locator
-            .as_deref()
-            .unwrap_or(&input.locator),
-    )
-    .ok()
-    .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
-    .is_some_and(|host| {
-        host == "bilibili.com" || host.ends_with(".bilibili.com") || host == "b23.tv"
-    })
-}
-
 fn asr_unavailable() -> BackendError {
     BackendError::new(
         "IMPORT_WEB_SUBTITLE_UNAVAILABLE",
@@ -6310,7 +6172,7 @@ fn apply_companion_transcript_fallback(
     if !result.asset_paths.iter().any(|path| path == relative) {
         result.asset_paths.push(relative.into());
     }
-    result.text_coverage = Some(1.0);
+    result.text_coverage = None;
     result.continuation = None;
     result
         .warnings
@@ -6325,6 +6187,25 @@ fn is_allowed_local_asr_output_workspace(staging: &Path, workspace: &Path) -> bo
     let runtime_temp = staging.join("runtime-temp");
     (workspace.parent() == Some(staging) && name.starts_with(".sensevoice-output-"))
         || (workspace.parent() == Some(runtime_temp.as_path()) && name.starts_with("asr-output-"))
+}
+
+fn ocr_article_text(markdown: &str, metadata: Option<&[u8]>) -> String {
+    if let Some(value) =
+        metadata.and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
+    {
+        if let Some(blocks) = value.get("blocks").and_then(|value| value.as_array()) {
+            let texts: Vec<_> = blocks
+                .iter()
+                .filter_map(|block| block.get("text").and_then(|value| value.as_str()))
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .collect();
+            if !texts.is_empty() {
+                return texts.join("\n\n");
+            }
+        }
+    }
+    crate::utils::markdown_utils::split_frontmatter(markdown).body
 }
 
 fn ocr_unavailable() -> BackendError {
@@ -6448,18 +6329,35 @@ struct CachedAsrShard {
     continuation: Option<EngineContinuation>,
 }
 
+fn append_transcript_body(article: &mut String, transcript: &str) {
+    let body = crate::utils::markdown_utils::split_frontmatter(transcript).body;
+    let body = body.trim_start();
+    article.push_str(
+        body.strip_prefix("# Transcript\n")
+            .unwrap_or(body)
+            .trim_start(),
+    );
+}
+
 fn asr_shard_key(
     input: &Path,
     descriptor: &crate::services::import_v2::engine::EngineDescriptor,
+    request: &EngineRequest,
 ) -> Result<String, BackendError> {
-    let bytes = std::fs::read(input).map_err(|_| asr_unavailable())?;
     let mut hasher = Sha256::new();
-    hasher.update(b"asr-shard-v1\0");
+    hasher.update(b"asr-shard-v2\0");
     hasher.update(descriptor.engine_id.as_bytes());
     hasher.update(b"\0");
     hasher.update(descriptor.engine_version.as_bytes());
     hasher.update(b"\0");
-    hasher.update(&bytes);
+    hasher.update(
+        serde_json::to_vec(&(&request.asr_profile, &request.recognition_language))
+            .map_err(|_| asr_unavailable())?,
+    );
+    hasher.update(b"\0");
+    let mut file = std::fs::File::open(input).map_err(|_| asr_unavailable())?;
+    let (input_hash, _) = super::artifact::hash_reader(&mut file).map_err(|_| asr_unavailable())?;
+    hasher.update(input_hash.as_bytes());
     Ok(format!("{:x}", hasher.finalize()))
 }
 
@@ -7650,25 +7548,25 @@ mod tests {
             (
                 "https://www.xiaohongshu.com/explore/abc",
                 vec![
-                    "web.generic.browser",
                     "web.xiaohongshu.note",
                     "web.generic.readability",
+                    "web.generic.browser",
                 ],
             ),
             (
                 "http://xhslink.cn/o/abc",
                 vec![
-                    "web.generic.browser",
                     "web.xiaohongshu.note",
                     "web.generic.readability",
+                    "web.generic.browser",
                 ],
             ),
             (
                 "https://www.douyin.com/video/123",
                 vec![
-                    "web.generic.browser",
                     "web.douyin.video",
                     "web.generic.readability",
+                    "web.generic.browser",
                 ],
             ),
             (
@@ -9549,7 +9447,7 @@ mod tests {
         let ocr = reorder_routes(routes, Some(&ImportRecoveryAction::EnableOcr));
         assert_eq!(
             ocr.iter().map(|(route, _)| *route).collect::<Vec<_>>(),
-            vec!["ocr.cjk-accurate", "pdf.layout", "pdf.text", "agent.pdf"]
+            vec!["pdf.text", "ocr.cjk-accurate", "pdf.layout", "agent.pdf"]
         );
     }
 
@@ -10632,7 +10530,6 @@ mod tests {
             engine_version: "1.0.0".into(),
             route: "media.asr".into(),
         };
-        let shard_key = asr_shard_key(&media_path, &descriptor).unwrap();
         let request = EngineRequest {
             protocol_version: "2".into(),
             request_id: uuid::Uuid::new_v4().to_string(),
@@ -10653,6 +10550,19 @@ mod tests {
             local_ocr_authorized: false,
             media_save_mode: crate::models::import_v2::MediaSaveMode::ExtractOnly,
         };
+        let shard_key = asr_shard_key(&media_path, &descriptor, &request).unwrap();
+        let mut changed_options = request.clone();
+        changed_options.recognition_language = Some("ja".into());
+        assert_ne!(
+            shard_key,
+            asr_shard_key(&media_path, &descriptor, &changed_options).unwrap()
+        );
+        changed_options = request.clone();
+        changed_options.asr_profile = Some(ImportAsrProfile::Accurate);
+        assert_ne!(
+            shard_key,
+            asr_shard_key(&media_path, &descriptor, &changed_options).unwrap()
+        );
         let web_result = || EngineResult {
             source_snapshot_path: "source.bin".into(),
             markdown_path: "candidate.md".into(),
@@ -10986,21 +10896,22 @@ mod tests {
     }
 
     #[test]
-    fn partial_multi_image_ocr_failure_never_promotes_a_partial_candidate() {
-        let fixture = OrchestratorFixture::new("ocr-partial-failure");
-        let error = execute_two_image_ocr(&fixture, true, false).unwrap_err();
-        assert_eq!(error.code, "IMPORT_OCR_NO_TEXT");
-        assert!(!fixture.root.join("raw").exists());
-        assert!(!fixture.root.join("wiki").exists());
-    }
-
-    #[test]
-    fn accurate_ocr_rejects_nonempty_text_below_the_confidence_floor() {
-        let fixture = OrchestratorFixture::new("ocr-low-confidence");
-        let error = execute_two_image_ocr(&fixture, false, true).unwrap_err();
-        assert_eq!(error.code, "IMPORT_OCR_LOW_CONFIDENCE");
-        assert!(!fixture.root.join("raw").exists());
-        assert!(!fixture.root.join("wiki").exists());
+    fn partial_multi_image_ocr_keeps_successful_pages_and_reports_each_failure() {
+        for (empty, low_confidence, code) in [
+            (true, false, "IMPORT_OCR_NO_TEXT"),
+            (false, true, "IMPORT_OCR_LOW_CONFIDENCE"),
+        ] {
+            let fixture = OrchestratorFixture::new("ocr-partial-failure");
+            let (result, staging) = execute_two_image_ocr(&fixture, empty, low_confidence).unwrap();
+            let body = std::fs::read_to_string(staging.join("candidate.md")).unwrap();
+            assert!(body.contains("first recognized page"));
+            assert!(!body.contains("second recognized page"));
+            assert!(result.warnings.iter().any(|w| w.contains(code)));
+            assert_eq!(result.text_coverage, None);
+            assert!(staging.join("ocr/image-001.md").exists());
+            assert!(!fixture.root.join("raw").exists());
+            assert!(!fixture.root.join("wiki").exists());
+        }
     }
 
     #[test]
@@ -11021,6 +10932,47 @@ mod tests {
         assert_eq!(ocr_source_image_number(Path::new("page-002.png"), 0), 2);
         assert_eq!(ocr_source_image_number(Path::new("image-007.png"), 0), 7);
         assert_eq!(ocr_source_image_number(Path::new("unlabeled.png"), 4), 5);
+    }
+
+    #[test]
+    fn standalone_image_without_a_runner_requests_ocr_preparation() {
+        let fixture = OrchestratorFixture::new("ocr-first-use");
+        let (session, item, task) = fixture.seed_one_item_named("image-no-text.png");
+        let waiting = fixture
+            .service
+            .run_item(
+                &fixture.context,
+                &fixture.files,
+                &fixture.tasks,
+                &session.session_id,
+                &item.item_id,
+                &task.id,
+            )
+            .unwrap();
+        assert_eq!(waiting.status, ImportItemStatus::WaitingCapability);
+        let issue = waiting.issue.unwrap();
+        assert!(issue
+            .recovery_actions
+            .contains(&ImportRecoveryAction::InstallOcrCapability));
+        assert!(!issue
+            .recovery_actions
+            .contains(&ImportRecoveryAction::InstallCapability));
+        assert!(!fixture.root.join("raw").exists());
+    }
+
+    #[test]
+    fn ocr_article_uses_recognized_text_without_internal_report_details() {
+        let report = "---\nengine: test-ocr\n---\n# Local OCR evidence\nMean confidence: 0.98\nCoordinates: (0, 0, 10, 10)";
+        let metadata =
+            br#"{"blocks":[{"text":" First paragraph "},{"text":""},{"text":"Second paragraph"}]}"#;
+        assert_eq!(
+            ocr_article_text(report, Some(metadata)),
+            "First paragraph\n\nSecond paragraph"
+        );
+        assert_eq!(
+            ocr_article_text("---\nengine: basic\n---\nLegacy recognized text", None).trim(),
+            "Legacy recognized text"
+        );
     }
 
     #[test]

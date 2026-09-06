@@ -500,7 +500,15 @@ impl ImportEngine for NativeStructuredFileEngine {
                 });
                 pdf_inspection = Some(inspection);
                 pdf_page_plan = Some(page_plan);
-                if requires_more_capability {
+                if requires_more_capability
+                    && !pdf_inspection.as_ref().is_some_and(|inspection| {
+                        inspection.text_characters_per_page.iter().enumerate().any(
+                            |(index, count)| {
+                                *count > 0 && !inspection.image_only_pages.contains(&(index as u32))
+                            },
+                        )
+                    })
+                {
                     return Err(BackendError::new(
                         "IMPORT_WEB_OCR_UNAVAILABLE",
                         "Some PDF pages need local OCR before a complete Source can be created.",
@@ -560,7 +568,7 @@ impl ImportEngine for NativeStructuredFileEngine {
             let package = stage_workbook_package(&staging, &request.input.display_name, &sheets)?;
             markdown = package.0;
             asset_paths = package.1;
-            sheet_count_exact = Some(sheets.len() as f64);
+            sheet_count_exact = Some(1.0);
             formula_value_pairs = sheets
                 .iter()
                 .flat_map(|sheet| sheet.rows.iter())
@@ -588,12 +596,7 @@ impl ImportEngine for NativeStructuredFileEngine {
             .render()
             .map_err(|_| invalid("The presentation output plan could not be rendered."))?;
             markdown = output.candidates.join("\n\n");
-            slide_count_exact = Some(
-                markdown
-                    .lines()
-                    .filter(|line| line.starts_with("## Slide "))
-                    .count() as f64,
-            );
+            slide_count_exact = Some(1.0);
         }
         let descriptor = self.descriptor();
         let mut warnings = match self.extension() {
@@ -601,6 +604,10 @@ impl ImportEngine for NativeStructuredFileEngine {
             "docx" => vec!["OFFICE_STRUCTURED_CONTENT_NOT_EXTRACTED".to_string()],
             _ => Vec::new(),
         };
+        if let Some(plans) = pdf_page_plan.as_ref() {
+            warnings.extend(plans.iter().filter(|page| page.route == crate::services::import_v2::pdf_router::PdfPageRoute::WaitingCapability)
+                .map(|page| format!("PDF_PAGE_{}_NEEDS_OCR", page.page_index + 1)));
+        }
         if presentation_image_preservation_incomplete {
             warnings.push("PRESENTATION_IMAGE_PRESERVATION_INCOMPLETE".to_string());
         }
@@ -659,7 +666,16 @@ impl ImportEngine for NativeStructuredFileEngine {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into_owned(),
-            text_coverage: Some(1.0),
+            text_coverage: pdf_inspection.as_ref().and_then(|inspection| {
+                inspection
+                    .text_characters_per_page
+                    .iter()
+                    .enumerate()
+                    .all(|(index, count)| {
+                        *count == 0 || inspection.image_only_pages.contains(&(index as u32))
+                    })
+                    .then_some(0.0)
+            }),
             // The fallback reader extracts cell text but does not verify table
             // structure, formulas, or displayed values.
             table_cell_accuracy: None,

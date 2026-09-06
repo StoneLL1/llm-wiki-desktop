@@ -17,6 +17,9 @@
       "pdf.text",
       "media.companion",
       "web.generic.static",
+      "web.xiaohongshu.note",
+      "web.douyin.video",
+      "web.bilibili.video",
       "web.generic.readability",
       "web.generic.browser",
       "web.wechat.article",
@@ -42,7 +45,7 @@
     ],
     "platformContentTypes": [
       "generic_web", "wechat_article", "zhihu_content", "bilibili_video",
-      "x_post", "collection", "remote_media"
+      "xiaohongshu_note", "douyin_video", "x_post", "collection", "remote_media"
     ],
     "recoveryActions": [
       "install_capability", "retry", "switch_parser", "enable_ocr", "invoke_agent",
@@ -61,7 +64,8 @@
       "purposeKey": "importV2.capabilityPurpose.local",
       "routes": [
         "file.native", "file.csv-package", "office.modern.docx", "office.modern.xlsx",
-        "office.modern.pptx", "pdf.text", "media.companion", "web.generic.static"
+        "office.modern.pptx", "pdf.text", "media.companion", "web.generic.static",
+        "web.xiaohongshu.note", "web.douyin.video", "web.bilibili.video"
       ],
       "formats": {
         "extensions": [
@@ -69,7 +73,7 @@
           "mp3", "wav", "m4a", "aac", "flac", "ogg", "opus", "wma", "mp4", "mov", "mkv",
           "webm", "avi", "m4v", "wmv", "srt", "vtt", "ass", "ssa", "lrc"
         ],
-        "platformContentTypes": ["collection", "remote_media"]
+        "platformContentTypes": ["collection", "remote_media", "xiaohongshu_note", "douyin_video", "bilibili_video"]
       },
       "protocolVersion": "2",
       "distributionTier": "built_in",

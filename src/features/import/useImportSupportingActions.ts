@@ -290,6 +290,7 @@ export function useImportSupportingActions({
     capabilityId: string,
     requirementRevision: string,
     asrOptions?: import("./importWorkflow").AsrAuthorizationOptions,
+    additionalItemIds?: string[],
   ) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey
@@ -304,6 +305,7 @@ export function useImportSupportingActions({
         capabilityId,
         requirementRevision,
         acknowledgeInstall: true,
+        ...(additionalItemIds?.length ? { additionalItemIds } : {}),
         asrProfile: asrOptions?.profile,
         recognitionLanguage: asrOptions?.language,
       });

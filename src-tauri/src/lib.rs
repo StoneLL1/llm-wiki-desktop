@@ -589,16 +589,18 @@ pub fn run() {
                     .map_err(startup_backend_error)?;
                 #[cfg(debug_assertions)]
                 {
-                    let development_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                        .join("../.dev-capabilities");
+                    // Packaged debug builds must start without touching the
+                    // build machine's checkout (including protected folders).
+                    let development_root = std::env::var_os("LLM_WIKI_DEV_CAPABILITIES")
+                        .map(std::path::PathBuf::from);
+                    let development = development_root.as_ref().map(|root| {
+                        (root.join("installed"), root.join("development-public-key.hex"))
+                    });
                     state
                         .import_capability_runtime
                         .load_startup(
                             &install_root,
-                            Some((
-                                &development_root.join("installed"),
-                                &development_root.join("development-public-key.hex"),
-                            )),
+                            development.as_ref().map(|(root, key)| (root.as_path(), key.as_path())),
                             &state.import_v2_service,
                         )
                         .map_err(startup_backend_error)?;

@@ -12,7 +12,7 @@ use crate::services::import_v2::engine::{
     ImportEngine,
 };
 use crate::services::import_v2::markdown_normalizer::{
-    decode_text, html_to_markdown, normalize_markdown,
+    decode_text, html_article_to_markdown, normalize_markdown,
 };
 use crate::services::import_v2::media_router::{link_or_copy, TemporaryMediaWorkspace};
 use crate::services::import_v2::platform_network_policy::{
@@ -345,11 +345,12 @@ impl ImportEngine for GenericWebEngine {
         } else {
             decode_text(&artifact.bytes)?
         };
-        if bilibili_api.is_none() && platform == Some(Platform::Xiaohongshu) {
-            if let Some(failure) = xiaohongshu::classify_page(&body) {
-                return Err(xiaohongshu_error(failure));
-            }
-        } else if bilibili_api.is_none() && is_platform_auth_challenge(request, &body) {
+        // The Xiaohongshu extractor first checks the requested note's data;
+        // login widgets or quoted verification words beside a note are not a wall.
+        if bilibili_api.is_none()
+            && platform != Some(Platform::Xiaohongshu)
+            && is_platform_auth_challenge(request, &body)
+        {
             return Err(BackendError::new(
                 "IMPORT_WEB_LOGIN_REQUIRED",
                 "The platform returned a login or verification page. Complete login and retry.",
@@ -395,7 +396,7 @@ impl ImportEngine for GenericWebEngine {
             .map(|markdown| (markdown, Vec::new()))
             .unwrap_or_else(|| {
                 if artifact.content_type.contains("html") {
-                    html_to_markdown(&body)
+                    html_article_to_markdown(&body)
                 } else {
                     (normalize_markdown(&body), Vec::new())
                 }
@@ -580,7 +581,15 @@ impl ImportEngine for GenericWebEngine {
         let mut transcript_source = None::<String>;
         let mut transcript_language = None::<String>;
         if let Some(document) = platform_document.as_ref() {
-            for (subtitle_index, subtitle) in document.subtitles.iter().enumerate() {
+            for (subtitle_index, subtitle) in document
+                .subtitles
+                .iter()
+                .enumerate()
+                .filter(|(_, subtitle)| subtitle.kind.is_reliable_source())
+            {
+                if transcription_ready {
+                    break;
+                }
                 if !platform
                     .is_some_and(|platform| is_trusted_platform_asset_url(platform, &subtitle.url))
                 {
@@ -647,7 +656,7 @@ impl ImportEngine for GenericWebEngine {
                                 unavailable("The normalized subtitle segments could not be staged.")
                             })?;
                             asset_paths.push(segments_relative);
-                            if !transcription_ready && subtitle.kind.is_reliable_source() {
+                            if !transcription_ready {
                                 transcript_source = Some(
                                     match subtitle.kind {
                                         PlatformSubtitleKind::AuthorOriginal => {
@@ -687,10 +696,6 @@ impl ImportEngine for GenericWebEngine {
                                 ));
                                 markdown.push_str(&rendered);
                                 transcription_ready = true;
-                            } else if !subtitle.kind.is_reliable_source() {
-                                warnings.push(
-                                    "Machine-translated subtitle was retained as evidence but not used as the source transcript.".into(),
-                                );
                             }
                         }
                     }
@@ -833,7 +838,7 @@ impl ImportEngine for GenericWebEngine {
                     None
                 };
                 let media = match media {
-                    Some((media, download))
+                    Some((media, _download))
                         if platform.is_some_and(|platform| {
                             !is_trusted_platform_asset_url(platform, &media.final_public_url)
                         }) =>
@@ -984,11 +989,6 @@ impl ImportEngine for GenericWebEngine {
             .map(|document| document.title.clone())
             .or_else(|| extract_html_title(&body))
             .unwrap_or_else(|| request.input.display_name.clone());
-        let text_coverage = if let Some(document) = platform_document.as_ref() {
-            (!document.description.trim().is_empty() || transcription_ready) as u8 as f64
-        } else {
-            (!markdown.trim().is_empty()) as u8 as f64
-        };
         let metadata_bytes = serde_json::to_vec_pretty(&metadata)
             .map_err(|_| unavailable("The web engine metadata could not be serialized."))?;
         let written = write_bound_bytes(
@@ -1019,7 +1019,7 @@ impl ImportEngine for GenericWebEngine {
             asset_paths,
             metadata_path: Some("metadata.json".into()),
             title,
-            text_coverage: Some(text_coverage),
+            text_coverage: None,
             table_cell_accuracy: None,
             sheet_count_exact: None,
             slide_count_exact: None,
@@ -1694,18 +1694,37 @@ fn is_platform_auth_challenge(request: &EngineRequest, body: &str) -> bool {
         return false;
     }
     let lower = body.to_ascii_lowercase();
-    [
-        "captcha",
-        "challenge",
-        "security verification",
-        "verify you are human",
-        "请先登录",
-        "请完成验证",
-        "访问过于频繁",
-        "安全验证",
+    // Platform payloads and article roots may legitimately discuss login or
+    // challenges. Require a page-level wall signature, never a prose keyword.
+    if [
+        "__initial_state__",
+        "render_data",
+        "<article",
+        "itemprop=\"articlebody\"",
     ]
     .iter()
     .any(|marker| lower.contains(marker))
+    {
+        return false;
+    }
+    [
+        "id=\"challenge-form\"",
+        "id=\"captcha\"",
+        "class=\"captcha",
+        "class=\"signflow",
+        "id=\"login-wall\"",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+        || (lower.len() < 1024
+            && [
+                "verify you are human",
+                "请完成验证",
+                "请先登录",
+                "访问过于频繁",
+            ]
+            .iter()
+            .any(|marker| lower.contains(marker)))
 }
 
 fn extract_html_media_url(body: &str) -> Option<String> {

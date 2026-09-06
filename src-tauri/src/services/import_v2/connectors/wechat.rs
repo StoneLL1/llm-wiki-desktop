@@ -11,6 +11,9 @@ pub fn is_wechat_target(url: &str) -> bool {
 }
 
 pub fn is_challenge_html(html: &str) -> bool {
+    if has_article_body(html) {
+        return false;
+    }
     let lower = html.to_ascii_lowercase();
     lower.contains("环境异常")
         || lower.contains("访问过于频繁")
@@ -20,12 +23,19 @@ pub fn is_challenge_html(html: &str) -> bool {
         || lower.contains("verify_wxpay")
 }
 
+fn has_article_body(html: &str) -> bool {
+    element_body_by_id(html, "activity-name")
+        .is_some_and(|title| !strip_markup(title).trim().is_empty())
+        && element_body_by_id(html, "js_content")
+            .is_some_and(|body| !strip_markup(body).trim().is_empty())
+}
+
 pub fn extract(html: &str, url: &str) -> Result<ConnectorDocument, ConnectorFailure> {
     if is_challenge_html(html) {
         return Err(ConnectorFailure::Challenge);
     }
     let lower = html.to_ascii_lowercase();
-    if lower.contains("文章已被删除") {
+    if !has_article_body(html) && lower.contains("文章已被删除") {
         return Err(ConnectorFailure::Removed);
     }
 
@@ -34,7 +44,7 @@ pub fn extract(html: &str, url: &str) -> Result<ConnectorDocument, ConnectorFail
         .filter(|value| !value.is_empty())
         .ok_or(ConnectorFailure::StructureChanged)?;
     let body = element_body_by_id(html, "js_content")
-        .filter(|value| value.trim().len() >= 8)
+        .filter(|value| !strip_markup(value).trim().is_empty())
         .ok_or(ConnectorFailure::EmptyBody)?;
     let target = UrlPolicy
         .normalize_for_session(url)
@@ -148,4 +158,25 @@ fn is_void_tag(tag: &str) -> bool {
 fn strip_markup(value: &str) -> String {
     let (markdown, _) = crate::services::import_v2::markdown_normalizer::html_to_markdown(value);
     markdown.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn readable_article_can_explain_verification_and_removed_page_messages() {
+        let html = r#"<h1 id="activity-name">认证问题说明</h1>
+            <div id="js_content"><p>环境异常、请完成验证、文章已被删除均为页面提示示例。</p></div>"#;
+        assert!(!is_challenge_html(html));
+        let article = extract(html, "https://mp.weixin.qq.com/s/example").unwrap();
+        assert!(article.body_html.contains("请完成验证"));
+        assert!(matches!(
+            extract(
+                "<p>环境异常，请完成验证</p>",
+                "https://mp.weixin.qq.com/s/example"
+            ),
+            Err(ConnectorFailure::Challenge)
+        ));
+    }
 }

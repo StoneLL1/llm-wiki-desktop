@@ -9,7 +9,8 @@ import {
 import { importV2Api } from "../../services/importV2Api";
 import { importProjectKey, useImportStore, type ImportQueueFilter } from "../../stores/importStore";
 import { useProjectStore } from "../../stores/projectStore";
-import { useTaskStore } from "../../stores/taskStore";
+import { selectTasksForProject, useTaskStore } from "../../stores/taskStore";
+import { isTerminalStatus } from "../../types/task";
 import { useToastStore } from "../../stores/toastStore";
 import type { AppView } from "../../stores/navigationStore";
 import type { ImportFrontendReadiness } from "../../types/importV2Presentation";
@@ -120,6 +121,11 @@ export function useImportSessionScope(
   latestAuthorityRevisionKey.current = expectedAuthorityRevisionKey;
 
   const [readiness, setReadiness] = useState<ImportFrontendReadiness | null>(null);
+  const preparationRevision = useTaskStore((state) => selectTasksForProject(state, null)
+    .filter((task) => task.taskType === "capability_install" && isTerminalStatus(task.status))
+    .map((task) => `${task.id}:${task.updatedAt}`)
+    .join("|"));
+  const readinessPreparationRef = useRef(preparationRevision);
   const [readinessWarning, setReadinessWarning] = useState<NormalizedBackendError | null>(null);
   const [readinessRetrying, setReadinessRetrying] = useState(false);
   const [recoveryWarning, setRecoveryWarning] = useState<NormalizedBackendError | null>(null);
@@ -181,6 +187,13 @@ export function useImportSessionScope(
       }
     }
   }, [isScopeCurrent, projectId, projectKey, rootPath]);
+
+  useEffect(() => {
+    if (activeView !== "import" || bootstrapState !== "ready"
+      || readinessPreparationRef.current === preparationRevision) return;
+    readinessPreparationRef.current = preparationRevision;
+    void retryReadiness();
+  }, [activeView, bootstrapState, preparationRevision, retryReadiness]);
 
   const startRecoveryForScope = useCallback(async (
     requestKey: string,

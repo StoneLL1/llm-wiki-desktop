@@ -409,12 +409,11 @@ impl FileTransaction {
                 let intent = &journal.entries[index];
                 let target = safe_journal_target(root, &intent.relative_path)?;
                 let parent_binding = bind_recovery_parent(root, &target)?;
-                let current = match parent_binding.read_regular(&target) {
-                    Ok(bytes) => Some(bytes),
+                let current_hash = match bound_hash(&parent_binding, &target) {
+                    Ok(hash) => Some(hash),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                     Err(error) => return Err(io_error(error, &target)),
                 };
-                let current_hash = current.as_deref().map(digest_bytes);
                 if journal.state == JournalState::Committed {
                     let desired_is_present = current_hash.as_deref() == Some(&intent.desired_hash)
                         && journal_identity_matches(
@@ -425,7 +424,7 @@ impl FileTransaction {
                             intent,
                             false,
                         )?;
-                    if (intent.desired_absent && current.is_some())
+                    if (intent.desired_absent && current_hash.is_some())
                         || (!intent.desired_absent && !desired_is_present)
                     {
                         return Err(conflict_error());
@@ -437,7 +436,7 @@ impl FileTransaction {
                     if current_hash == previous_hash {
                         continue;
                     }
-                    if current.is_some() {
+                    if current_hash.is_some() {
                         return Err(conflict_error());
                     }
                     let previous = intent
@@ -525,7 +524,7 @@ impl FileTransaction {
         &mut self,
         path: &Path,
         previous: Option<Vec<u8>>,
-        bytes: &[u8],
+        desired_hash: &str,
         candidate_identity: FileIdentity,
     ) -> Result<(), BackendError> {
         let Some(root) = self.project_root.as_deref() else {
@@ -545,7 +544,7 @@ impl FileTransaction {
         self.journal_entries.push(JournalEntry {
             relative_path: relative.clone(),
             previous,
-            desired_hash: digest_bytes(bytes),
+            desired_hash: desired_hash.to_owned(),
             desired_absent: false,
             // The same-volume install primitives below preserve the candidate's
             // native identity. Persist it before the namespace mutation so a
@@ -671,8 +670,27 @@ impl FileTransaction {
     }
 
     pub fn write_new(&mut self, path: &Path, bytes: &[u8]) -> Result<(), BackendError> {
+        self.write_new_stream(
+            path,
+            &mut std::io::Cursor::new(bytes),
+            &digest_bytes(bytes),
+            bytes.len() as u64,
+        )
+    }
+
+    pub(super) fn write_new_stream(
+        &mut self,
+        path: &Path,
+        reader: &mut impl std::io::Read,
+        expected_hash: &str,
+        expected_size: u64,
+    ) -> Result<(), BackendError> {
         let parent_binding = self.ensure_and_bind_mutation_parent(path)?;
-        let temporary = write_synced_temp(&parent_binding, path, bytes)?;
+        let mut checked =
+            super::artifact::VerifiedReader::new(reader, expected_hash, expected_size);
+        let temporary = parent_binding
+            .copy_synced_temp(path, &mut checked)
+            .map_err(|error| io_error(error, path))?;
         self.track_artifact(&parent_binding, &temporary)?;
         let candidate_identity = bound_file_identity(&parent_binding, &temporary)?;
         let candidate_pin = self.pin_candidate_identity(&parent_binding, &temporary)?;
@@ -681,7 +699,7 @@ impl FileTransaction {
         if let Some(pin) = candidate_pin.as_deref() {
             self.stage_recovery_artifact(pin)?;
         }
-        self.record_intent(path, None, bytes, candidate_identity)?;
+        self.record_intent(path, None, expected_hash, candidate_identity)?;
         #[cfg(test)]
         if let Some(entry) = self.journal_entries.last() {
             commit_fault_boundary("intent", Some(entry.relative_path.as_str()));
@@ -719,7 +737,7 @@ impl FileTransaction {
             path: path.to_path_buf(),
             previous: None,
         });
-        self.capture_installed_expected(&parent_binding, path, bytes, candidate_identity)?;
+        self.capture_installed_expected(&parent_binding, path, expected_hash, candidate_identity)?;
         parent_binding
             .sync()
             .map_err(|error| io_error(error, parent_binding.parent()))?;
@@ -946,7 +964,7 @@ impl FileTransaction {
         self.record_intent(
             path,
             Some(previous_before.clone()),
-            bytes,
+            &digest_bytes(bytes),
             candidate_identity,
         )?;
         #[cfg(test)]
@@ -984,7 +1002,12 @@ impl FileTransaction {
             path: path.to_path_buf(),
             previous: Some(previous_before.clone()),
         });
-        self.capture_installed_expected(&parent_binding, path, bytes, candidate_identity)?;
+        self.capture_installed_expected(
+            &parent_binding,
+            path,
+            &digest_bytes(bytes),
+            candidate_identity,
+        )?;
         #[cfg(test)]
         if let Some(entry) = self.journal_entries.last() {
             commit_fault_boundary("installed", Some(entry.relative_path.as_str()));
@@ -1374,7 +1397,7 @@ impl FileTransaction {
         &mut self,
         binding: &Arc<RecoveryParentBinding>,
         path: &Path,
-        bytes: &[u8],
+        expected_hash: &str,
         expected_identity: FileIdentity,
     ) -> Result<(), BackendError> {
         self.unverified_installs.insert(path.to_path_buf());
@@ -1402,7 +1425,7 @@ impl FileTransaction {
             path.to_path_buf(),
             InstalledOwnership {
                 identity,
-                hash: digest_bytes(bytes),
+                hash: expected_hash.to_owned(),
                 binding: Arc::clone(binding),
                 _anchor: anchor,
             },
@@ -1437,10 +1460,7 @@ impl FileTransaction {
         for (path, ownership) in &self.installed_ownership {
             let target_still_owned = bound_file_identity(&ownership.binding, path).ok()
                 == Some(ownership.identity)
-                && read_regular_nofollow(&ownership.binding, path)
-                    .ok()
-                    .map(|bytes| digest_bytes(&bytes))
-                    .as_deref()
+                && bound_hash(&ownership.binding, path).ok().as_deref()
                     == Some(ownership.hash.as_str());
             if !target_still_owned || !self.live_candidate_pin_matches(ownership.identity) {
                 return Err(conflict_error());
@@ -1472,11 +1492,7 @@ impl FileTransaction {
         for (path, ownership) in &self.installed_ownership {
             let valid = bound_file_identity(&ownership.binding, path).ok().as_ref()
                 == Some(&ownership.identity)
-                && read_regular_nofollow(&ownership.binding, path)
-                    .ok()
-                    .map(|bytes| digest_bytes(&bytes))
-                    .as_ref()
-                    == Some(&ownership.hash)
+                && bound_hash(&ownership.binding, path).ok().as_ref() == Some(&ownership.hash)
                 && self.live_candidate_pin_matches(ownership.identity);
             ownership_valid.insert(
                 path.clone(),
@@ -2085,8 +2101,7 @@ fn resume_recovery_entry(
     let guard_exists = bound_file_identity(binding, &guard).is_ok();
 
     if !guard_exists {
-        let canonical = read_regular_nofollow(binding, path).ok();
-        let canonical_hash = canonical.as_deref().map(digest_bytes);
+        let canonical_hash = bound_hash(binding, path).ok();
         let canonical_is_installed = bound_file_identity(binding, path).ok()
             == Some(record.expected_identity)
             && canonical_hash.as_deref() == Some(&record.expected_hash);
@@ -2114,9 +2129,7 @@ fn resume_recovery_entry(
     }
 
     let verified = bound_file_identity(binding, &guard).ok() == Some(record.expected_identity)
-        && read_regular_nofollow(binding, &guard)
-            .ok()
-            .is_some_and(|bytes| digest_bytes(&bytes) == record.expected_hash);
+        && bound_hash(binding, &guard).ok().as_deref() == Some(record.expected_hash.as_str());
     if !verified {
         let restore = bound_restore_guard_if_absent(binding, &guard, path);
         let guard_relative = guard
@@ -2140,10 +2153,7 @@ fn resume_recovery_entry(
     }
 
     if record.action == RecoveryAction::RestorePrevious {
-        let canonical_hash = read_regular_nofollow(binding, path)
-            .ok()
-            .as_deref()
-            .map(digest_bytes);
+        let canonical_hash = bound_hash(binding, path).ok();
         if canonical_hash != previous_hash {
             run_before_recovery_final_mutation_hook(path);
             let temporary = write_synced_temp(binding, path, previous.as_deref().unwrap())?;
@@ -2258,6 +2268,11 @@ fn staging_safe_io_error() -> BackendError {
 fn rollback_failure(message: &str, failures: Vec<String>) -> BackendError {
     BackendError::new(IMPORT_V2_COMMIT_FAILED, message, false, true)
         .with_details(serde_json::json!({ "rollbackFailures": failures }))
+}
+
+fn bound_hash(binding: &RecoveryParentBinding, path: &Path) -> std::io::Result<String> {
+    let mut file = binding.open_regular(path)?;
+    super::artifact::hash_reader(&mut file).map(|(hash, _)| hash)
 }
 
 fn digest_bytes(bytes: &[u8]) -> String {

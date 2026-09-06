@@ -404,8 +404,7 @@ describe("BackendError presentation", () => {
       .mockResolvedValueOnce(undefined);
     render(<ImportCapabilityDialog open requirement={requirement} onInstall={onInstall} onCancel={vi.fn()} />);
 
-    fireEvent.click(screen.getByRole("checkbox"));
-    fireEvent.click(screen.getByRole("button", { name: "Install" }));
+    fireEvent.click(screen.getByRole("button", { name: "Prepare and continue" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("A required import capability is unavailable");
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(onInstall).toHaveBeenCalledTimes(2));
