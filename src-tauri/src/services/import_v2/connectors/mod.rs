@@ -35,6 +35,7 @@ pub enum ConnectorFailure {
     Captcha,
     LoginRequired,
     Removed,
+    LinkUnavailable,
     EmptyBody,
     StructureChanged,
 }

@@ -15,11 +15,19 @@ fn public_urls_prepare_preview_save_and_reopen() {
             r#"["https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Authentication"]"#.into()
         }))
         .unwrap();
+    let expected_count = std::env::var("IMPORT_LIVE_EXPECT_COMMITTED")
+        .ok()
+        .map(|value| value.parse::<usize>().unwrap())
+        .unwrap_or(urls.len());
     let root = std::env::temp_dir().join(format!("import-live-urls-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(root.join(".app")).unwrap();
     let context = ProjectContext::new("live-urls", root.clone());
     let files = FileStore;
     let service = ImportV2Service::with_secret_service(SecretService::memory());
+    if let Ok(directory) = std::env::var("IMPORT_ACCEPTANCE_INSTALLED_ROOT") {
+        llm_wiki_desktop_lib::services::import_v2::capability_runtime::ImportCapabilityRuntime::default()
+            .load_installed(std::path::Path::new(&directory), &service);
+    }
     #[cfg(debug_assertions)]
     if let Ok(directory) = std::env::var("IMPORT_ACCEPTANCE_DEV_ROOT") {
         let directory = std::path::Path::new(&directory);
@@ -36,18 +44,26 @@ fn public_urls_prepare_preview_save_and_reopen() {
             &files,
             &session.session_id,
             urls.into_iter()
-                .map(|url| ImportInput {
-                    kind: ImportInputKind::Url,
-                    display_name: url.clone(),
-                    locator: url,
-                    normalized_locator: None,
-                    source_identity: None,
-                    media_save_mode: Default::default(),
+                .map(|url| {
+                    // Use the same secure target handoff as add_import_url_v2;
+                    // persisting a raw URL here would discard its signed query.
+                    let target = llm_wiki_desktop_lib::services::import_v2::url_policy::UrlPolicy
+                        .normalize_for_session(&url)
+                        .unwrap();
+                    ImportInput {
+                        kind: ImportInputKind::Url,
+                        display_name: target.public.public_url.clone(),
+                        locator: service.store_web_target(&target).unwrap(),
+                        normalized_locator: Some(target.public.public_url),
+                        source_identity: None,
+                        media_save_mode: Default::default(),
+                    }
                 })
                 .collect(),
         )
         .unwrap();
     let mut decisions = Vec::new();
+    let mut expected_titles = Vec::new();
     for item in &session.items {
         let task = tasks
             .create_project_task(
@@ -102,6 +118,55 @@ fn public_urls_prepare_preview_save_and_reopen() {
             prepared.issue,
             prepared.attempts
         );
+        if std::env::var("IMPORT_ACCEPTANCE_OCR").as_deref() == Ok("1")
+            && prepared.issue.as_ref().is_some_and(|issue| {
+                issue
+                    .recovery_actions
+                    .contains(&ImportRecoveryAction::EnableOcr)
+                    || issue
+                        .recovery_actions
+                        .contains(&ImportRecoveryAction::InstallOcrCapability)
+            })
+        {
+            service
+                .authorize_media_for_session(
+                    &context,
+                    &files,
+                    &session.session_id,
+                    &item.item_id,
+                    ImportMediaAuthorizationKind::Ocr,
+                    None,
+                    None,
+                )
+                .unwrap();
+            let recognition = tasks
+                .create_project_task(
+                    TaskType::Import,
+                    context.project_id.clone(),
+                    root.clone(),
+                    "Live note image recognition".into(),
+                    true,
+                )
+                .unwrap();
+            prepared = service
+                .run_item_with_recovery(
+                    &context,
+                    &files,
+                    &tasks,
+                    &session.session_id,
+                    &item.item_id,
+                    &recognition.id,
+                    Some(&ImportRecoveryAction::EnableOcr),
+                )
+                .unwrap();
+            eprintln!(
+                "LIVE_OCR {} elapsed_ms={} status={:?} issue={:?}",
+                item.input.display_name,
+                start.elapsed().as_millis(),
+                prepared.status,
+                prepared.issue
+            );
+        }
         if std::env::var("IMPORT_ACCEPTANCE_ASR").as_deref() == Ok("1")
             && prepared.status == ImportItemStatus::WaitingAuthorization
             && prepared.issue.as_ref().is_some_and(|issue| {
@@ -151,6 +216,7 @@ fn public_urls_prepare_preview_save_and_reopen() {
             );
         }
         if prepared.status == ImportItemStatus::PreviewReady {
+            expected_titles.push(prepared.preview.as_ref().unwrap().title.clone());
             decisions.push(CommitItemDecision {
                 item_id: item.item_id.clone(),
                 resolution: prepared
@@ -161,6 +227,13 @@ fn public_urls_prepare_preview_save_and_reopen() {
             });
         }
     }
+    eprintln!("LIVE_REPORT_ROOT {}", root.display());
+    assert_eq!(
+        decisions.len(),
+        expected_count,
+        "Every expected URL must produce a readable preview; inspect the retained session at {}",
+        root.display()
+    );
     if !decisions.is_empty() {
         let count = decisions.len();
         let result = service
@@ -193,12 +266,40 @@ fn public_urls_prepare_preview_save_and_reopen() {
                 .count(),
             count
         );
+        let mut reopened_articles = Vec::new();
         for item in result.items {
             if let Some(path) = item.wiki_path {
                 let path = root.join(path);
                 let article = fs::read_to_string(&path).unwrap();
                 assert!(article.contains("type: source"));
+                assert!(
+                    !article.contains("xsec_token="),
+                    "Signed access parameters must not enter the Source article"
+                );
+                assert!(
+                    !article.contains("<!-- OCR_IMAGE_"),
+                    "Every image must have its recognition result or missing-text note"
+                );
                 eprintln!("LIVE_SOURCE {} bytes={}", path.display(), article.len());
+                reopened_articles.push(article);
+            }
+        }
+        for title in expected_titles {
+            assert!(
+                reopened_articles
+                    .iter()
+                    .any(|article| article.contains(&title)),
+                "The extracted title must survive commit and reopen"
+            );
+        }
+        if let Ok(expected) = std::env::var("IMPORT_LIVE_EXPECT_TEXT") {
+            for text in serde_json::from_str::<Vec<String>>(&expected).unwrap() {
+                assert!(
+                    reopened_articles
+                        .iter()
+                        .any(|article| article.contains(&text)),
+                    "Expected readable text was missing after reopen: {text}"
+                );
             }
         }
     }

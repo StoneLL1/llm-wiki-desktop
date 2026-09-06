@@ -82,6 +82,13 @@ another recovery call. Closing the dialog does not cancel shared preparation.
 
 Readable mixed PDFs remain selectable while exposing optional OCR for their
 scanned pages. Partial OCR preserves completed pages and explains missing ones.
+Xiaohongshu entry accepts a complete share message containing one URL. Full
+author captions and ordered images may be saved immediately with optional OCR;
+short or tag-only carousels require image text. OCR results and failures stay
+directly below their corresponding images. Unavailable share links prompt a new
+complete link instead of parser repair. See the
+[real Xiaohongshu acceptance](../../../docs/testing/xiaohongshu-import-acceptance.md)
+for the caption heuristic, live samples and remaining boundaries.
 Preparation progress is application-scoped; queue and inspector updates remain
 project/session-scoped. After a commit, the inspector releases the completed
 selection rather than retaining stale preparation actions.

@@ -181,3 +181,23 @@ fn captcha_login_and_removed_pages_have_distinct_failures() {
         assert_eq!(xiaohongshu::classify_page(fixture), Some(expected));
     }
 }
+
+#[test]
+fn redirected_access_pages_are_not_reported_as_parser_changes() {
+    for (url, html, expected) in [
+        ("https://www.xiaohongshu.com/404?error_code=300031", "<title>小红书 - 你访问的页面不见了</title>", ConnectorFailure::LinkUnavailable),
+        ("https://www.xiaohongshu.com/website-login/error", "<html><title>小红书</title><body><script>location.href='/website-login'</script></body></html>", ConnectorFailure::LoginRequired),
+        ("https://www.xiaohongshu.com/explore/missing", "<main>当前笔记暂时无法浏览</main>", ConnectorFailure::LinkUnavailable),
+    ] {
+        assert_eq!(xiaohongshu::extract_page(html, url).unwrap_err(), expected);
+    }
+    let document = xiaohongshu::extract_page(
+        &format!(
+            "{}<aside>登录后浏览更多，你访问的页面不见了</aside>",
+            include_str!("../../tests/fixtures/import-v2/web/xiaohongshu/image-note.html")
+        ),
+        "https://www.xiaohongshu.com/explore/67f00abc1234",
+    )
+    .unwrap();
+    assert_eq!(document.title, "周末读书记录");
+}

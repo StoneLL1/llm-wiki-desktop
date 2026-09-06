@@ -86,6 +86,18 @@ export function isValidPublicHttpImportUrl(value: string): boolean {
   }
 }
 
+/** Accept one platform share link without dropping its signed query parameters. */
+export function extractImportUrl(value: string): string | null {
+  const trimmed = value.trim();
+  if (!/\s/u.test(trimmed) && isValidPublicHttpImportUrl(trimmed)) return trimmed;
+  const links = trimmed.match(/https?:\/\/[^\s<>"“”「」]+/giu) ?? [];
+  if (links.length !== 1) return null;
+  const link = links[0].replace(/[。，、；！：）】》]+$/u, "");
+  return isValidPublicHttpImportUrl(link) && importPlatformForLocator(link) === "xiaohongshu"
+    ? link
+    : null;
+}
+
 export function routeForImportItem(item: ImportItem): string {
   const attemptedRoute = item.attempts.at(-1)?.route;
   if (attemptedRoute) return attemptedRoute;

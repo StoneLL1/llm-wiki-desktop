@@ -24,6 +24,19 @@ function item(status: ImportItemStatus, overrides: Partial<ImportItem> = {}): Im
 }
 
 describe("presentImportItem", () => {
+  it("explains an unavailable share link without suggesting an Agent or parser repair", () => {
+    const view = presentImportItem(item("failed", {
+      input: { kind: "url", locator: "https://www.xiaohongshu.com/explore/note", displayName: "note", normalizedLocator: null },
+      issue: {
+      code: "IMPORT_WEB_LINK_UNAVAILABLE", message: "Unavailable share link", stage: "extract",
+      retryable: false, userActionRequired: true, recoveryActions: ["skip", "view_log"], availableActions: [],
+    } }));
+    expect(view.userIssue?.title).toBe("importV2.issue.linkUnavailable.title");
+    expect(view.userIssue?.dataSafety).toBe("importV2.issue.linkUnavailable.dataSafety");
+    expect(view.committable).toBe(false);
+    expect(view.actions).not.toContain("retry");
+    expect(view.actions).not.toContain("preserve_remote_media");
+  });
   it("keeps readable mixed PDFs committable while offering optional OCR", () => {
     for (const action of ["enable_ocr", "install_ocr_capability"] as const) {
       const view = presentImportItem(item("preview_ready", { issue: {
@@ -34,6 +47,16 @@ describe("presentImportItem", () => {
       expect(view.userState).toBe("ready");
       expect(view.userIssue?.title).toBe("importV2.issue.optionalOcr.title");
     }
+  });
+
+  it("lets captioned image notes save immediately and offers image-specific optional OCR", () => {
+    const view = presentImportItem(item("preview_ready", {
+      input: { kind: "url", locator: "https://www.xiaohongshu.com/explore/note", displayName: "note", normalizedLocator: null },
+      issue: { code: "IMPORT_WEB_OCR_UNAVAILABLE", message: "Optional image text", stage: "extract",
+        retryable: false, userActionRequired: true, recoveryActions: ["enable_ocr"], availableActions: [] },
+    }));
+    expect(view.committable).toBe(true);
+    expect(view.userIssue?.title).toBe("importV2.issue.optionalImageOcr.title");
   });
 
   it.each([

@@ -340,12 +340,14 @@ fn connector_error(failure: connectors::ConnectorFailure) -> BackendError {
             false,
             true,
         ),
-        connectors::ConnectorFailure::Removed => BackendError::new(
-            "IMPORT_WEB_STRUCTURE_CHANGED",
-            "The WeChat article is unavailable or has been removed.",
-            false,
-            true,
-        ),
+        connectors::ConnectorFailure::Removed | connectors::ConnectorFailure::LinkUnavailable => {
+            BackendError::new(
+                "IMPORT_WEB_STRUCTURE_CHANGED",
+                "The WeChat article is unavailable or has been removed.",
+                false,
+                true,
+            )
+        }
         connectors::ConnectorFailure::EmptyBody => BackendError::new(
             "IMPORT_WEB_STRUCTURE_CHANGED",
             "The WeChat article did not contain readable body content.",

@@ -5,8 +5,8 @@ import { ChevronDown, Circle, ClipboardPaste, FileText, FolderOpen, Image, Link,
 import { pickDirectory, selectImportFiles } from "./nativeFilePicker";
 import { subscribeToDragDrop } from "./dragDrop";
 import {
+  extractImportUrl,
   isUnsupportedImportUrl,
-  isValidPublicHttpImportUrl,
 } from "./importLocator";
 
 export interface ImportSourceMethodsProps {
@@ -71,7 +71,8 @@ export function ImportSourceMethods({
   const expanded = controlledExpanded ?? internalExpanded;
   const matrixExpanded = controlledMatrixExpanded ?? internalMatrixExpanded;
   const unsupportedLocalUrl = useMemo(() => isUnsupportedImportUrl(url), [url]);
-  const invalidUrl = useMemo(() => Boolean(url.trim()) && !unsupportedLocalUrl && !isValidPublicHttpImportUrl(url.trim()), [unsupportedLocalUrl, url]);
+  const extractedUrl = useMemo(() => extractImportUrl(url), [url]);
+  const invalidUrl = Boolean(url.trim()) && !unsupportedLocalUrl && !extractedUrl;
   const hasUrlFeedback = unsupportedLocalUrl || invalidUrl || inputError === "url";
   const pathBusy = sessionSyncing || addingPaths || addingText || pickingPaths;
   const textBusy = sessionSyncing || addingPaths || addingUrl || addingText || submittingText;
@@ -80,10 +81,7 @@ export function ImportSourceMethods({
     if (heading) return heading.replace(/^#\s+/, "").trim();
     return textSourceName.replace(/\.(md|markdown|txt)$/i, "") || t("importV2.clipboard.fallbackTitle");
   }, [t, text, textSourceName]);
-  const pastedUrl = useMemo(() => {
-    const value = text.trim();
-    return value && !/\s/u.test(value) && isValidPublicHttpImportUrl(value) ? value : null;
-  }, [text]);
+  const pastedUrl = useMemo(() => extractImportUrl(text), [text]);
 
   const importPathsFrom = useCallback(async (selectPaths: () => Promise<string[]>) => {
     if (pathBusy) return;
@@ -141,7 +139,7 @@ export function ImportSourceMethods({
     });
 
   const submitUrl = () => {
-    const value = url.trim();
+    const value = extractedUrl;
     if (!value || unsupportedLocalUrl || invalidUrl || submittingUrl || addingUrl || sessionSyncing) return;
     setInputError(null);
     setSubmittingUrl(true);
@@ -290,7 +288,8 @@ export function ImportSourceMethods({
                 <span className="input-group__lead"><Link size={14} aria-hidden="true" /></span>
                 <input
                   id="import-v2-url"
-                  type="url"
+                  type="text"
+                  inputMode="url"
                   className="input input--mono"
                   aria-label={t("importV2.url.label")}
                   aria-describedby={hasUrlFeedback ? "import-v2-url-feedback" : undefined}

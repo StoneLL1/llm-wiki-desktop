@@ -89,6 +89,18 @@ describe("ImportSourceMethods", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
+  it("queues a pasted Xiaohongshu share message as its complete URL", async () => {
+    const onAddUrl = vi.fn().mockResolvedValue(undefined);
+    render(<ImportSourceMethods onAddPaths={vi.fn()} onAddUrl={onAddUrl} />);
+    fireEvent.change(screen.getByRole("textbox", { name: "URL" }), {
+      target: { value: "周末读书 https://www.xiaohongshu.com/explore/note?xsec_token=access%2Bvalue%3D&xsec_source=pc_share 复制后打开小红书" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add URL" }));
+    await waitFor(() => expect(onAddUrl).toHaveBeenCalledWith(
+      "https://www.xiaohongshu.com/explore/note?xsec_token=access%2Bvalue%3D&xsec_source=pc_share",
+    ));
+  });
+
   it("does not leave media-choice controls in the keyboard sequence", () => {
     render(<ImportSourceMethods onAddPaths={vi.fn()} onAddUrl={vi.fn()} />);
 

@@ -53,6 +53,40 @@ fn grant(port: u16) -> PrivateTargetGrant {
 }
 
 #[tokio::test]
+async fn http_import_preserves_signed_query_only_in_the_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let join = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut bytes = [0u8; 4096];
+        let count = stream.read(&mut bytes).unwrap();
+        let request = String::from_utf8_lossy(&bytes[..count]).to_lowercase();
+        assert!(request.contains("xsec_token=signed%2bvalue%3d"));
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 7\r\nConnection: close\r\n\r\narticle").unwrap();
+    });
+    let target = UrlPolicy
+        .normalize_for_session(&format!(
+            "http://127.0.0.1:{port}/note?xsec_token=signed%2Bvalue%3D"
+        ))
+        .unwrap();
+    let artifact = WebFetchService
+        .fetch(
+            target,
+            &UrlPolicy,
+            &WebFetchPolicy::default(),
+            Some(&grant(port)),
+            "item",
+            |_| {},
+            || false,
+        )
+        .await
+        .unwrap();
+    join.join().unwrap();
+    assert_eq!(artifact.bytes, b"article");
+    assert!(!artifact.final_public_url.contains("signed"));
+}
+
+#[tokio::test]
 async fn controlled_server_streams_bounded_public_artifact_with_private_grant() {
     let body = "<html><article>complete fixture body</article></html>";
     let response=format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body);

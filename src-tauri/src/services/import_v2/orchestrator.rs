@@ -4388,7 +4388,8 @@ impl ImportV2Service {
                 )?;
                 item.preview = Some(preview);
                 item.issue = if result.warnings.iter().any(|warning| {
-                    warning.starts_with("PDF_PAGE_") && warning.ends_with("_NEEDS_OCR")
+                    (warning.starts_with("PDF_PAGE_") && warning.ends_with("_NEEDS_OCR"))
+                        || warning == "IMPORT_IMAGE_OCR_OPTIONAL"
                 }) {
                     let available = self
                         .engines
@@ -5132,6 +5133,15 @@ impl ImportV2Service {
                         &format!("<!-- OCR_PAGE_{source_image_number:03} -->"),
                         &format!("> 第 {source_image_number} 页暂未识别 / Page {source_image_number} could not be recognized."),
                     );
+                    let image_message = if error.code == "IMPORT_OCR_NO_TEXT" {
+                        "> 本图未识别到文字 / No text detected in this image."
+                    } else {
+                        "> 本图文字暂未识别 / Text recognition is unavailable for this image."
+                    };
+                    base = base.replace(
+                        &format!("<!-- OCR_IMAGE_{source_image_number:03} -->"),
+                        image_message,
+                    );
                     web_result.warnings.push(format!(
                         "Local OCR failed for source image {source_image_number}: {}",
                         error.code
@@ -5169,6 +5179,11 @@ impl ImportV2Service {
                 base = base.replace(
                     &pdf_placeholder,
                     &format!("> 本页文字由本地 OCR 提取。\n\n{article_text}"),
+                );
+            } else if base.contains(&format!("<!-- OCR_IMAGE_{source_image_number:03} -->")) {
+                base = base.replace(
+                    &format!("<!-- OCR_IMAGE_{source_image_number:03} -->"),
+                    &format!("### 图片文字 / Image text\n\n{article_text}"),
                 );
             } else {
                 base.push_str(&format!(
@@ -6607,6 +6622,7 @@ fn is_non_fallback_error(error: &BackendError) -> bool {
         || error.code.contains("LOGIN")
         || error.code.contains("CAPTCHA")
         || error.code == "IMPORT_WEB_CONTENT_REMOVED"
+        || error.code == "IMPORT_WEB_LINK_UNAVAILABLE"
         || error.code == "IMPORT_LOCAL_SUBTITLE_AMBIGUOUS"
 }
 fn is_web_user_wait(error: &BackendError) -> bool {
@@ -10757,6 +10773,7 @@ mod tests {
         fixture: &OrchestratorFixture,
         empty_second: bool,
         low_confidence_second: bool,
+        inline_images: bool,
     ) -> Result<(EngineResult, PathBuf), BackendError> {
         fixture
             .service
@@ -10792,7 +10809,9 @@ mod tests {
         std::fs::write(workspace.join("image-001.png"), b"first").unwrap();
         std::fs::write(workspace.join("image-002.png"), b"second").unwrap();
         std::fs::write(staging.join("source.bin"), b"source").unwrap();
-        std::fs::write(staging.join("candidate.md"), "# Base\n").unwrap();
+        std::fs::write(staging.join("candidate.md"), if inline_images {
+            "# Base\n\n![First image](assets/001.jpg)\n\n<!-- OCR_IMAGE_001 -->\n\n![Second image](assets/002.jpg)\n\n<!-- OCR_IMAGE_002 -->\n"
+        } else { "# Base\n" }).unwrap();
         let request = EngineRequest {
             protocol_version: "2".into(),
             request_id: uuid::Uuid::new_v4().to_string(),
@@ -10856,7 +10875,7 @@ mod tests {
     #[test]
     fn multi_image_ocr_keeps_shared_workspace_until_every_input_completes() {
         let fixture = OrchestratorFixture::new("ocr-shared-workspace");
-        let (result, staging) = execute_two_image_ocr(&fixture, false, false).unwrap();
+        let (result, staging) = execute_two_image_ocr(&fixture, false, false, false).unwrap();
         let markdown = std::fs::read_to_string(staging.join("candidate.md")).unwrap();
         let first_boundary = markdown
             .find("## 图片文字 / OCR — 第 1 张")
@@ -10902,7 +10921,8 @@ mod tests {
             (false, true, "IMPORT_OCR_LOW_CONFIDENCE"),
         ] {
             let fixture = OrchestratorFixture::new("ocr-partial-failure");
-            let (result, staging) = execute_two_image_ocr(&fixture, empty, low_confidence).unwrap();
+            let (result, staging) =
+                execute_two_image_ocr(&fixture, empty, low_confidence, false).unwrap();
             let body = std::fs::read_to_string(staging.join("candidate.md")).unwrap();
             assert!(body.contains("first recognized page"));
             assert!(!body.contains("second recognized page"));
@@ -10911,6 +10931,28 @@ mod tests {
             assert!(staging.join("ocr/image-001.md").exists());
             assert!(!fixture.root.join("raw").exists());
             assert!(!fixture.root.join("wiki").exists());
+        }
+    }
+
+    #[test]
+    fn image_post_keeps_each_ocr_result_or_failure_below_its_own_image() {
+        for empty_second in [false, true] {
+            let fixture = OrchestratorFixture::new("ocr-image-placement");
+            let (_, staging) = execute_two_image_ocr(&fixture, empty_second, false, true).unwrap();
+            let body = std::fs::read_to_string(staging.join("candidate.md")).unwrap();
+            assert!(
+                body.find("![First image]").unwrap() < body.find("first recognized page").unwrap()
+            );
+            assert!(
+                body.find("first recognized page").unwrap() < body.find("![Second image]").unwrap()
+            );
+            let second = if empty_second {
+                "No text detected in this image."
+            } else {
+                "second recognized page"
+            };
+            assert!(body.find("![Second image]").unwrap() < body.find(second).unwrap());
+            assert!(!body.contains("<!-- OCR_IMAGE_"));
         }
     }
 

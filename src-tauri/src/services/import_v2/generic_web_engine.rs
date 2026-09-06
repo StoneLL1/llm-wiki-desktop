@@ -445,6 +445,17 @@ impl ImportEngine for GenericWebEngine {
         let mut continuation = None;
         let image_ocr_enabled =
             should_run_platform_image_ocr(platform_document.as_ref(), request.local_ocr_authorized);
+        if platform_document.as_ref().is_some_and(|document| {
+            document.platform == "xiaohongshu"
+                && document.content_type == "image_post"
+                && !request.local_ocr_authorized
+                && has_readable_platform_caption(document)
+        }) {
+            warnings.push("IMPORT_IMAGE_OCR_OPTIONAL".into());
+            for number in 1..=platform_document.as_ref().unwrap().images.len() {
+                markdown = markdown.replace(&format!("<!-- OCR_IMAGE_{number:03} -->"), "");
+            }
+        }
         let mut temporary_ocr_inputs = Vec::new();
         let image_urls = platform_document
             .as_ref()
@@ -1019,7 +1030,10 @@ impl ImportEngine for GenericWebEngine {
             asset_paths,
             metadata_path: Some("metadata.json".into()),
             title,
-            text_coverage: None,
+            text_coverage: platform_document.as_ref().and_then(|document| {
+                (document.content_type == "image_post" && !has_readable_platform_caption(document))
+                    .then_some(0.0)
+            }),
             table_cell_accuracy: None,
             sheet_count_exact: None,
             slide_count_exact: None,
@@ -1165,6 +1179,9 @@ fn render_platform_markdown(
         markdown.push_str("\n## 图片\n\n");
         for (index, image) in document.images.iter().enumerate() {
             markdown.push_str(&format!("{}. ![第 {} 张]({image})\n", index + 1, index + 1));
+            if document.platform == "xiaohongshu" {
+                markdown.push_str(&format!("\n<!-- OCR_IMAGE_{:03} -->\n\n", index + 1));
+            }
         }
     }
     if document.content_type == "video" {
@@ -1232,6 +1249,12 @@ fn xiaohongshu_error(failure: ConnectorFailure) -> BackendError {
         ConnectorFailure::Removed => (
             "IMPORT_WEB_CONTENT_REMOVED",
             "The Xiaohongshu note is unavailable or has been removed.",
+            false,
+            true,
+        ),
+        ConnectorFailure::LinkUnavailable => (
+            "IMPORT_WEB_LINK_UNAVAILABLE",
+            "This note link is unavailable. Copy the complete current share link from Xiaohongshu and add it again.",
             false,
             true,
         ),
@@ -1547,8 +1570,27 @@ fn platform_image_requires_ocr(
     authorized: bool,
 ) -> bool {
     document.is_some_and(|document| {
-        document.platform == "xiaohongshu" && document.content_type == "image_post" && !authorized
+        document.platform == "xiaohongshu"
+            && document.content_type == "image_post"
+            && !authorized
+            && !has_readable_platform_caption(document)
     })
+}
+
+fn has_readable_platform_caption(
+    document: &crate::services::import_v2::platform_provider::PlatformDocument,
+) -> bool {
+    // Keep substantive author captions immediately usable. Short captions and
+    // tag-only carousels still need image text; OCR remains optional otherwise.
+    document
+        .description
+        .split_whitespace()
+        .filter(|word| !word.starts_with('#'))
+        .flat_map(str::chars)
+        .filter(|character| character.is_alphanumeric())
+        .take(80)
+        .count()
+        == 80
 }
 
 fn platform_image_output_is_meaningful(
@@ -2749,6 +2791,12 @@ mod tests {
         assert!(!platform_image_requires_ocr(Some(&document), true));
         assert!(!should_run_platform_image_ocr(Some(&document), false));
         assert!(should_run_platform_image_ocr(Some(&document), true));
+        let mut captioned = document.clone();
+        captioned.description = "这是一段可以单独阅读的完整作者配文".repeat(6);
+        assert!(!platform_image_requires_ocr(Some(&captioned), false));
+        assert!(should_run_platform_image_ocr(Some(&captioned), true));
+        captioned.description = "#职场成长 #生活记录 #分享".repeat(20);
+        assert!(platform_image_requires_ocr(Some(&captioned), false));
         let mut video = document.clone();
         video.content_type = "video".into();
         video.subtitles.push(

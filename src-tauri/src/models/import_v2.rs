@@ -738,7 +738,7 @@ impl ImportIssue {
             "IMPORT_V2_PRIVATE_TARGET_BLOCKED" => (false, true, vec![AuthorizePrivateTarget]),
             "IMPORT_V2_RESPONSE_TOO_LARGE" => (false, true, vec![SwitchRoute]),
             "IMPORT_V2_CONNECTOR_RATE_LIMITED" => (true, false, vec![RetryRoute, SwitchRoute]),
-            "IMPORT_WEB_CONTENT_REMOVED" => (false, true, vec![]),
+            "IMPORT_WEB_CONTENT_REMOVED" | "IMPORT_WEB_LINK_UNAVAILABLE" => (false, true, vec![]),
             "IMPORT_WEB_MEDIA_HOST_UNSUPPORTED" => {
                 (true, true, vec![SwitchRoute, InstallMediaCapability])
             }

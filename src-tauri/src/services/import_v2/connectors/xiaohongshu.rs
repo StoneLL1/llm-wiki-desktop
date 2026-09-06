@@ -52,7 +52,21 @@ pub fn extract_page(html: &str, request_url: &str) -> Result<PlatformDocument, C
             },
         );
     }
-    classify_page(html).map_or(Err(ConnectorFailure::StructureChanged), Err)
+    if let Some(failure) = classify_page(html) {
+        return Err(failure);
+    }
+    // Xiaohongshu returns HTTP 200 for these redirected error/login pages.
+    // They are access outcomes, not evidence that the note schema changed.
+    if let Ok(url) = url::Url::parse(request_url) {
+        match url.path().trim_end_matches('/') {
+            "/website-login/error" | "/website-login" => {
+                return Err(ConnectorFailure::LoginRequired)
+            }
+            "/404" => return Err(ConnectorFailure::LinkUnavailable),
+            _ => {}
+        }
+    }
+    Err(ConnectorFailure::StructureChanged)
 }
 
 pub fn classify_page(html: &str) -> Option<ConnectorFailure> {
@@ -93,6 +107,9 @@ pub fn classify_page(html: &str) -> Option<ConnectorFailure> {
         ],
     ) {
         return Some(ConnectorFailure::Removed);
+    }
+    if contains_any(&lower, &["当前笔记暂时无法浏览", "你访问的页面不见了"]) {
+        return Some(ConnectorFailure::LinkUnavailable);
     }
     None
 }

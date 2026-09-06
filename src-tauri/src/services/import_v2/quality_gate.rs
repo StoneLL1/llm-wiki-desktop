@@ -130,6 +130,7 @@ impl QualityGate {
                 !warning.starts_with("local_asr:")
                     && !warning.starts_with("local_ocr:")
                     && warning.as_str() != "WECHAT_SPECIALIZED_EXTRACTOR"
+                    && warning.as_str() != "IMPORT_IMAGE_OCR_OPTIONAL"
             })
             .cloned()
             .collect::<Vec<_>>();
