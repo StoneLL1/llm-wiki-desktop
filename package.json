@@ -80,7 +80,7 @@
     "dompurify": "^3.4.12",
     "esbuild": "^0.28.1",
     "eslint": "^9.0.0",
-    "globals": "^15.0.0",
+    "globals": "^17.12.0",
     "jsdom": "^25.0.0",
     "tailwindcss": "^4.0.0",
     "turndown": "^7.2.0",
