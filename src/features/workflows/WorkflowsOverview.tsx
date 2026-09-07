@@ -1,4 +1,5 @@
-import { Activity, Clock3, FileOutput, RefreshCw } from "lucide-react";
+import { Activity, ChevronRight, FileOutput, RefreshCw } from "lucide-react";
+import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -35,7 +36,11 @@ export function WorkflowsOverviewView({
   onPrerequisite,
   onOpenRun,
   onContinueQueue,
+  selectedKind = null,
+  children,
 }: {
+  selectedKind?: WorkflowKind | null;
+  children?: ReactNode;
   overview: WorkflowsOverview | null;
   overviewStatus: WorkflowOverviewStatus;
   error: WorkflowOperationError | string | null;
@@ -75,16 +80,43 @@ export function WorkflowsOverviewView({
   const AttentionIcon = leadingRow ? workflowIcons[leadingRow.kind] : Activity;
   return (
     <div className="workflows-overview">
-      <div className="workflows-intro">
-        <h2 data-workflow-surface-title tabIndex={-1}>{t("workflows.overview.title")}</h2>
-        <p>{t("workflows.overview.description")}</p>
-      </div>
       {waitingForOverview ? <div role={overviewStatus === "error" ? "alert" : "status"} className={overviewStatus === "error" ? "workflow-error-banner" : "workflow-overview-section__empty"}>
         <span>{t(overviewStatus === "error" ? "workflows.loadError.description" : "workflows.loading.description")}</span>
         {errorSummary ? <span>{errorSummary}</span> : null}
         {technicalDetails ? <details><summary>{t("workflows.error.technicalDetails")}</summary><pre>{technicalDetails}</pre></details> : null}
         {overviewStatus === "error" ? <button className="btn btn--secondary btn--sm" onClick={onRetry} type="button">{t("workflows.action.retry")}</button> : null}
       </div> : null}
+      <section className="workflow-overview-section" aria-label={t("workflows.overview.available")}>
+        <h2 className="workflow-overview-section__title" id="workflow-overview-available">
+          <span data-workflow-surface-title={children ? undefined : true} tabIndex={-1}>{t("workflows.design.choose")}</span>
+        </h2>
+        <div className="workflow-list" role="list">
+          {WORKFLOW_KINDS.map((kind) => {
+            const row = overview.rows.find((candidate) => candidate.kind === kind);
+            if (!row) return null;
+            return (
+              <div key={kind} role="listitem">
+                <WorkflowRow
+                  row={row}
+                  highlighted={kind === recommendedKind}
+                  selected={kind === (selectedKind ?? leadingRow?.kind ?? recommendedKind)}
+                  hasOtherActiveRun={hasActiveRun && !row.activeTaskId}
+                  pending={row.activeTaskId
+                    ? workflowOperationPending(operations, `task:${row.activeTaskId}:open`)
+                    : row.state === "up_to_date" && row.lastCompletedTaskId
+                      ? workflowOperationPending(operations, `task:${row.lastCompletedTaskId}:open`)
+                      : workflowOperationPending(operations, `prepare:${kind}`)
+                        || workflowOperationPending(operations, "prerequisite:project:")}
+                  onPrepare={() => onPrepare(kind)}
+                  onPrerequisite={onPrerequisite}
+                  onOpenRun={onOpenRun}
+                />
+              </div>
+            );
+          })}
+        </div>
+      </section>
+      {children ?? (<>
       {leadingRow && leadingRow.activeTaskId && leadingStatus ? (
         <section className="workflow-overview-section" aria-labelledby="workflow-overview-attention">
           <h2 className="workflow-overview-section__title" id="workflow-overview-attention">
@@ -116,35 +148,7 @@ export function WorkflowsOverviewView({
           </div>
         </section>
       ) : null}
-      <section className="workflow-overview-section" aria-labelledby="workflow-overview-available">
-        <h2 className="workflow-overview-section__title" id="workflow-overview-available">
-          {t("workflows.overview.available")}
-        </h2>
-        <div className="workflow-list" role="list">
-          {WORKFLOW_KINDS.map((kind) => {
-            const row = overview.rows.find((candidate) => candidate.kind === kind);
-            if (!row) return null;
-            return (
-              <div key={kind} role="listitem">
-                <WorkflowRow
-                  row={row}
-                  highlighted={kind === recommendedKind}
-                  hasOtherActiveRun={hasActiveRun && !row.activeTaskId}
-                  pending={row.activeTaskId
-                    ? workflowOperationPending(operations, `task:${row.activeTaskId}:open`)
-                    : row.state === "up_to_date" && row.lastCompletedTaskId
-                      ? workflowOperationPending(operations, `task:${row.lastCompletedTaskId}:open`)
-                      : workflowOperationPending(operations, `prepare:${kind}`)
-                        || workflowOperationPending(operations, "prerequisite:project:")}
-                  onPrepare={() => onPrepare(kind)}
-                  onPrerequisite={onPrerequisite}
-                  onOpenRun={onOpenRun}
-                />
-              </div>
-            );
-          })}
-        </div>
-      </section>
+      </>)}
       <section className="workflow-overview-section" aria-labelledby="workflow-overview-recent">
         <h2 className="workflow-overview-section__title" id="workflow-overview-recent">
           {t("workflows.overview.recent")}
@@ -176,11 +180,12 @@ function RecentRunRow({ run, language, pending, onOpen }: {
   onOpen: () => void;
 }) {
   const { t } = useTranslation();
+  const RunIcon = workflowIcons[run.kind];
   const dateTimeLabel = workflowDateTimeLabel(run.updatedAt, language);
   return (
     <div className="workflow-recent-row" role="listitem">
       <div className="workflow-recent-row__icon">
-        <Clock3 size={15} aria-hidden="true" />
+        <RunIcon size={15} aria-hidden="true" />
       </div>
       <div className="min-w-0">
         <div className="workflow-recent-row__heading">
@@ -197,7 +202,7 @@ function RecentRunRow({ run, language, pending, onOpen }: {
         type="button"
         onClick={onOpen}
       >
-        {t("workflows.action.view")}
+        <ChevronRight size={15} aria-hidden="true" />
       </button>
     </div>
   );

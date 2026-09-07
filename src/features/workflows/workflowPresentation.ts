@@ -89,7 +89,7 @@ export interface WorkflowResultRowPresentation {
 
 export interface WorkflowResultPresentation {
   titleKey: string;
-  summaryKey: string;
+  summaryKey: string | null;
   primaryActionKey: string;
   rows: WorkflowResultRowPresentation[];
   paths: string[];
@@ -110,7 +110,7 @@ export function presentWorkflowResult(run: WorkflowRun): WorkflowResultPresentat
     case "update_wiki":
       return {
         titleKey: "workflows.result.update_wiki.title",
-        summaryKey: "workflows.result.update_wiki.summary",
+        summaryKey: null,
         primaryActionKey: "workflows.action.viewUpdates",
         paths: result.affectedPaths,
         rows: [
@@ -135,7 +135,7 @@ export function presentWorkflowResult(run: WorkflowRun): WorkflowResultPresentat
         titleKey: "workflows.result.health_check.title",
         summaryKey: result.coverage?.deepStatus === "failed" || result.coverage?.deepStatus === "pending"
           ? "workflows.result.health_check.localRetained"
-          : "workflows.result.health_check.summary",
+          : null,
         primaryActionKey: "workflows.action.openLintResults",
         paths: [],
         rows: [
@@ -166,7 +166,7 @@ export function presentWorkflowResult(run: WorkflowRun): WorkflowResultPresentat
     case "generate_content":
       return {
         titleKey: "workflows.result.generate_content.title",
-        summaryKey: "workflows.result.generate_content.summary",
+        summaryKey: null,
         primaryActionKey: "workflows.action.viewGeneratedResult",
         paths: result.outputPaths,
         rows: [
@@ -188,7 +188,7 @@ export function presentWorkflowResult(run: WorkflowRun): WorkflowResultPresentat
         ]);
       return {
         titleKey: "workflows.result.agent_lint_repair.title",
-        summaryKey: "workflows.result.agent_lint_repair.summary",
+        summaryKey: null,
         primaryActionKey: "workflows.action.openLintResults",
         paths: result.affectedPaths,
         rows: [

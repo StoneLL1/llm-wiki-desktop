@@ -64,7 +64,6 @@ describe("responsive UI CSS contracts", () => {
     expect(css).toContain("--workflow-row-height: 88px");
     expect(workflowHistory).toContain("const HISTORY_ROW_HEIGHT = 88;");
     expect(css).toMatch(/\.workflows-view\s*\{[^}]*container-name:\s*workflows;[^}]*container-type:\s*inline-size/s);
-    expect(css).toMatch(/\.workflow-row\s*\{[^}]*min-height:\s*var\(--workflow-row-height\)/s);
     expect(css).toMatch(/\.workflow-history__row\s*\{[^}]*height:\s*var\(--workflow-row-height\)/s);
     expect(css).toMatch(/\.workflow-status\.is-running svg\s*\{[^}]*color:\s*var\(--accent-hover\)/s);
     expect(css).not.toMatch(/\.workflow-status\.is-running\s*\{[^}]*color:\s*var\(--accent-hover\)/s);
@@ -73,7 +72,7 @@ describe("responsive UI CSS contracts", () => {
     expect(css).toMatch(/\.right-panel-overlay__surface\.is-workflows\s*\{[^}]*animation:\s*workflow-overlay-enter 180ms/s);
     expect(css).toMatch(/\.workflow-typed-result\s*\{[^}]*animation:\s*workflow-state-reveal 160ms/s);
     expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.workflow-skeleton__line[\s\S]*\.workflow-pipeline details\[open\] \.workflow-pipeline__body[\s\S]*\.right-panel-overlay__surface\.is-workflows[\s\S]*\.workflow-typed-result\s*\{[^}]*animation:\s*none/s);
-    expect(css).toMatch(/@container workflows \(max-width: 760px\)[\s\S]*\.workflow-row\s*\{[^}]*min-height:\s*154px;[^}]*grid-template-columns:\s*30px minmax\(0, 1fr\)[^}]*\}[\s\S]*\.workflow-history__run\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) auto/s);
+    expect(css).toMatch(/@container workflows \(max-width: 760px\)[\s\S]*\.workflow-history__run\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) auto/s);
   });
 
   it("defines keyboard-visible resizable pane handles", () => {

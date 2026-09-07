@@ -1,4 +1,4 @@
-import { Activity, CircleAlert, FileOutput, RefreshCw } from "lucide-react";
+import { ChevronRight, CircleAlert, FileOutput, RefreshCw, ShieldCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import type { WorkflowKind, WorkflowOverviewRow } from "../../types/workflow";
@@ -11,13 +11,14 @@ import { WorkflowStatus } from "./WorkflowStatus";
 
 const icons = {
   update_wiki: RefreshCw,
-  health_check: Activity,
+  health_check: ShieldCheck,
   generate_content: FileOutput,
-} satisfies Record<WorkflowKind, typeof Activity>;
+} satisfies Record<WorkflowKind, typeof RefreshCw>;
 
 export function WorkflowRow({
   row,
   highlighted,
+  selected = false,
   hasOtherActiveRun,
   pending,
   onPrepare,
@@ -26,6 +27,7 @@ export function WorkflowRow({
 }: {
   row: WorkflowOverviewRow;
   highlighted: boolean;
+  selected?: boolean;
   hasOtherActiveRun: boolean;
   pending: boolean;
   onPrepare: () => void;
@@ -52,47 +54,44 @@ export function WorkflowRow({
   const actionLabel = t(actionKey);
   const kindLabel = t(workflowKindKey(row.kind));
   return (
-    <div className="workflow-row">
-      <div className="workflow-row__icon"><Icon aria-hidden="true" size={16} /></div>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <h3 className="m-0 text-[13px] font-semibold">{kindLabel}</h3>
-          {highlighted ? <span className="workflow-badge is-accent">{t("workflows.recommended")}</span> : null}
-        </div>
-        <p className="m-0 mt-1 text-[12px] leading-5 text-[var(--text-muted)]">
+    <button
+      aria-label={`${actionLabel}: ${kindLabel}`}
+      aria-pressed={selected}
+      className={`workflow-row${selected ? " is-selected" : ""}`}
+      data-workflow-return-key={`row:${row.kind}:${activeTaskId ?? row.lastCompletedTaskId ?? "prepare"}`}
+      disabled={pending || (state === "up_to_date" && !row.lastCompletedTaskId)}
+      onClick={() => activeTaskId
+        ? onOpenRun(activeTaskId)
+        : state === "up_to_date" && row.lastCompletedTaskId
+          ? onOpenRun(row.lastCompletedTaskId)
+          : opensProjectWorkbench && prerequisite
+            ? onPrerequisite(prerequisite.action)
+            : onPrepare()}
+      type="button"
+    >
+      <span className="workflow-row__head">
+        <span className="workflow-row__icon"><Icon aria-hidden="true" size={17} /></span>
+        <span className="workflow-row__name" role="heading" aria-level={3}>{kindLabel}</span>
+        <WorkflowStatus status={state} />
+      </span>
+      <span className="workflow-row__description">
           {t(workflowKindDescriptionKey(row.kind))}
-        </p>
+      </span>
         {prerequisite && highlighted ? (
-          <p className={`workflow-row__prerequisite${prerequisite.blocking ? " is-blocking" : ""}`}>
+          <span className={`workflow-row__prerequisite${prerequisite.blocking ? " is-blocking" : ""}`}>
             <CircleAlert size={12} aria-hidden="true" />
             <span>{t(prerequisite.messageKey)}</span>
-          </p>
+          </span>
         ) : null}
-        {!activeTaskId && row.lastCompletedAt ? <time className="workflow-row__last" dateTime={row.lastCompletedAt}>{t("workflows.overview.lastCompleted", { time: workflowDateTimeLabel(row.lastCompletedAt, i18n.resolvedLanguage ?? i18n.language) })}</time> : null}
-      </div>
-      <div className="workflow-row__state">
-        <WorkflowStatus status={state} />
-      </div>
-      {activeTaskId ? (
-        <button aria-label={`${actionLabel}: ${kindLabel}`} className="btn btn--secondary btn--sm" data-workflow-return-key={`row:${row.kind}:${activeTaskId}`} disabled={pending} onClick={() => onOpenRun(activeTaskId)} type="button">
-          {actionLabel}
-        </button>
-      ) : (
-        <button
-          aria-label={`${actionLabel}: ${kindLabel}`}
-          className={`btn ${highlighted ? "btn--primary" : "btn--secondary"} btn--sm`}
-          data-workflow-return-key={`row:${row.kind}:${row.lastCompletedTaskId ?? "prepare"}`}
-          disabled={pending || (state === "up_to_date" && !row.lastCompletedTaskId)}
-          onClick={() => state === "up_to_date" && row.lastCompletedTaskId
-            ? onOpenRun(row.lastCompletedTaskId)
-            : opensProjectWorkbench && prerequisite
-              ? onPrerequisite(prerequisite.action)
-              : onPrepare()}
-          type="button"
-        >
-          {actionLabel}
-        </button>
-      )}
-    </div>
+      <span className="workflow-row__foot">
+        <span>
+          {!activeTaskId && row.lastCompletedAt
+            ? <time dateTime={row.lastCompletedAt}>{workflowDateTimeLabel(row.lastCompletedAt, i18n.resolvedLanguage ?? i18n.language)}</time>
+            : actionLabel}
+          {highlighted ? <span className="workflow-badge is-accent">{t("workflows.recommended")}</span> : null}
+        </span>
+        <ChevronRight aria-hidden="true" size={14} />
+      </span>
+    </button>
   );
 }

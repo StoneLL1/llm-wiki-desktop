@@ -2,6 +2,10 @@
 
 Project-scoped presentation for the three fixed product workflows: Update Wiki, Health Check, and Generate Content.
 
+## Presentation
+
+The three reference-style function cards remain above the selected preparation/task panel and bounded recent history. Card clicks use the existing guarded preparation or task-opening actions; rendering the selectors never preloads all forms or starts a workflow. Forms use grouped options, a scope/output summary and one start action. Four semantic phases render horizontally, while detailed stages/logs remain on demand. Responsive layouts use the actual content width; full history retains its fixed virtual row geometry.
+
 ## Ownership
 
 - `useWorkflowsController.ts` owns typed IPC calls, stale-request guards, preparation, and query reconciliation.

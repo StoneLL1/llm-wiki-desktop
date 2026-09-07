@@ -55,13 +55,16 @@ export function WorkflowPipeline({
     const groups = groupsByKind[kind];
     return <div className="workflow-pipeline-shell workflow-grouped-pipeline">
       <ol className="workflow-pipeline">
-        {groups.map((group) => {
+        {groups.map((group, index) => {
           const members = stages.filter((stage) => group.ids.includes(stage.id));
           const active = members.find((stage) => ["running", "waiting", "failed"].includes(stage.status));
           const status = active?.status ?? (members.length > 0 && members.every((stage) => stage.status === "skipped")
             ? "skipped"
             : members.length > 0 && members.every((stage) => ["completed", "skipped"].includes(stage.status)) ? "completed" : "pending");
           return <li key={group.labelKey} className={workflowStageStatusClass(status)}>
+            <span className="workflow-phase-node" aria-hidden="true">
+              {status === "completed" ? <Check size={13} /> : status === "failed" ? <X size={13} /> : index + 1}
+            </span>
             <div className="workflow-pipeline__heading" aria-current={active ? "step" : undefined}>
               <span>{t(group.labelKey)}</span><span>{t(`workflows.stageStatus.${status}`)}</span>
             </div>

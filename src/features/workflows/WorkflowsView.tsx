@@ -104,8 +104,14 @@ export function WorkflowsView({ controller, onOpenTask }: { controller: Workflow
     || surfaceError?.key.includes(":hydrate:")
     || surfaceError?.key.endsWith(":open")
     || historyTaskRetryError;
+  const panel = surface === "preparation" && preparation
+    ? <WorkflowPreparationView lastHealth={overview?.contextSummary?.lastHealth} onOpenLastHealth={(taskId) => void controller.openRun(taskId)} preparation={preparation} onBack={controller.backToOverview} onPrerequisite={controller.handlePrerequisite} onStart={(restricted, remote, draft) => void controller.startPrepared(restricted, remote, draft)} />
+    : surface === "detail" && selectedRun
+      ? <WorkflowTaskDetail run={selectedRun} queuedRuns={queuedRuns} controller={controller} onOpenLogs={onOpenTask} />
+      : null;
   const overviewView = (
     <WorkflowsOverviewView
+      selectedKind={surface === "preparation" ? preparation?.kind : surface === "detail" ? selectedRun?.kind : null}
       overview={overview}
       overviewStatus={overviewStatus}
       error={overviewError?.error ?? null}
@@ -120,17 +126,13 @@ export function WorkflowsView({ controller, onOpenTask }: { controller: Workflow
       onPrerequisite={controller.handlePrerequisite}
       onOpenRun={(taskId) => void controller.openRun(taskId)}
       onContinueQueue={() => void controller.continueQueue()}
-    />
+    >
+      {panel}
+    </WorkflowsOverviewView>
   );
-  const content = !overview
-    ? overviewView
-    : surface === "history"
-      ? <WorkflowHistoryView runs={historyRuns} onBack={controller.backToOverview} onFilter={(kind, status) => void controller.filterHistory(kind, status)} onOpen={(taskId) => void controller.openRun(taskId)} onRetry={(taskId) => void controller.retry(taskId)} onLoadMore={() => void controller.loadHistoryMore()} />
-      : surface === "preparation" && preparation
-        ? <WorkflowPreparationView lastHealth={overview.contextSummary?.lastHealth} onOpenLastHealth={(taskId) => void controller.openRun(taskId)} preparation={preparation} onBack={controller.backToOverview} onPrerequisite={controller.handlePrerequisite} onStart={(restricted, remote, draft) => void controller.startPrepared(restricted, remote, draft)} />
-        : surface === "detail" && selectedRun
-          ? <WorkflowTaskDetail run={selectedRun} queuedRuns={queuedRuns} controller={controller} onOpenLogs={onOpenTask} />
-          : overviewView;
+  const content = overview && surface === "history"
+    ? <WorkflowHistoryView runs={historyRuns} onBack={controller.backToOverview} onFilter={(kind, status) => void controller.filterHistory(kind, status)} onOpen={(taskId) => void controller.openRun(taskId)} onRetry={(taskId) => void controller.retry(taskId)} onLoadMore={() => void controller.loadHistoryMore()} />
+    : overviewView;
 
   return (
     <div className="workflows-view app-pane-scrollbar" aria-busy={surfacePending}>

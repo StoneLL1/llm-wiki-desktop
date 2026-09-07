@@ -83,31 +83,30 @@ The Workflows surface has four views inside the existing desktop shell:
 
 ### Overview
 
-The overview is state-adaptive:
+The 2026-09-07 visual refresh follows the user's `UI-Frontend-design/workflow.html` reference as a style direction, adapted to actual capabilities and window width:
 
-- When a task is running, failed, interrupted, queued, or waiting for confirmation, task state leads.
-- When no task needs attention, the three available workflows lead.
-- Completed history remains secondary.
+- Three equal function cards stay at the top in the fixed Update / Health / Generate order. Cards show real status and open preparation or the corresponding task; selection alone never starts execution.
+- The selected preparation or task occupies an inline bordered panel below the cards. Without an open panel, the actionable attention summary appears here instead.
+- The latest five runs remain below the panel, with independent access to full history.
+- A narrow content pane stacks cards/options; the shared shell still owns pane collapse. Do not restore the previous 154px stacked operation-row layout at ordinary desktop content widths.
 
 ```text
-┌ Workflows · Update / Check / Generate ───────────── Run history ┐
-├───────────────────────────────────────────────┬─────────────────┤
-│ Needs attention / Active task                 │ Context panel   │
-│ ────────────────────────────────────────────  │                 │
-│ Available workflows                           │ Selected        │
-│  [↻] Update Wiki        status        action  │ workflow or     │
-│  [✓] Health Check       status        action  │ task scope,     │
-│  [▣] Generate Content   status        action  │ route, Git,     │
-│                                               │ files, actions  │
-│ Recent runs · latest five                     │                 │
-└───────────────────────────────────────────────┴─────────────────┘
+┌ Workflows · Update / Check / Generate ───── Run history ┐
+│ [ Update Wiki ] [ Health Check ] [ Generate Content ]   │
+│ ┌ Selected configuration / current task ─────────────┐ │
+│ │ Short form or horizontal phases · result / review │ │
+│ └───────────────────────────────────────────────────┘ │
+│ Recent runs · latest five                             │
+└───────────────────────────────────────────────────────┘
 ```
 
-Use compact list rows rather than large feature cards. Preserve the established 13px UI density, pane hierarchy, token system, and quiet near-monochrome treatment.
+Use the reference's quiet white/gray surfaces, subtle borders, selected teal accent, grouped choices and execution summary bar. Retain real authority, conflict review and route semantics. Prototype automation, fake counts/timings, automatic repairs and multi-type launches do not become capabilities through this visual update. `UI-Frontend-design/` stays read-only.
+
+Keep visible copy limited to choices, scope, actionable blockers, and the primary action. Do not show an empty prerequisite success section or repeat form facts in the context panel. Default export filenames and execution metadata belong in collapsed details; the path input appears only for a specific destination. Use 13–14 px for primary content and at least 12 px for secondary Workflow text.
 
 ### Run preparation
 
-Selecting a workflow opens a full main-area preparation view rather than a modal:
+Selecting a workflow opens its preparation panel in the same main area beneath the function cards:
 
 ```text
 Workflows → Update Wiki → Run preparation
@@ -121,7 +120,7 @@ Update Wiki uses four visible phases (prepare, generate, review, save), with exa
 
 ### Task detail
 
-Task detail uses the full main area for the observable pipeline. The right panel shows scope, execution route, Git state, affected files, output location, and current actions.
+Task detail uses the inline main-area panel for four horizontal semantic phases, results, and observable task state. Technical stages and logs stay collapsed until requested. The right panel shows scope, execution route, Git state, affected files, output location, and current actions.
 
 ### Run history
 
@@ -131,7 +130,7 @@ Task detail uses the full main area for the observable pipeline. The right panel
 - Retention limits and the exact first-release filter set remain implementation decisions.
 - Retrying creates a new record linked to the original attempt.
 
-## 5. Workflow List Behavior
+## 5. Workflow Selection Behavior
 
 Keep the workflow order fixed:
 
@@ -139,9 +138,9 @@ Keep the workflow order fixed:
 2. Health Check
 3. Generate Content
 
-Only one workflow receives a “recommended next step” treatment at a time. Rows do not reorder as project state changes.
+Only one workflow receives a “recommended next step” treatment at a time. Cards do not reorder as project state changes.
 
-Each row shows:
+Each card shows:
 
 - Workflow icon and name
 - One-line outcome description

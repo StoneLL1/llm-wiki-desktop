@@ -163,16 +163,16 @@ export function WorkflowTaskDetail({
 
   return (
     <div className="workflow-detail">
-      <button className="workflow-back" onClick={controller.backToOverview} type="button">
-        <ArrowLeft aria-hidden="true" size={14} />
-        {t("workflows.action.back")}
-      </button>
       <div className="workflow-detail__heading">
         <div>
           <h2 data-workflow-surface-title tabIndex={-1}>{t(workflowKindKey(run.kind))}</h2>
           <p><span className="font-mono">{run.taskId.slice(0, 8)}</span></p>
         </div>
         <WorkflowStatus className="workflow-detail__status" status={run.displayStatus} />
+        <button className="workflow-back" onClick={controller.backToOverview} type="button">
+          <ArrowLeft aria-hidden="true" size={14} />
+          {t("workflows.action.back")}
+        </button>
       </div>
 
       {run.pendingAction?.actionType === "review_scope" ? (
@@ -295,7 +295,9 @@ export function WorkflowTaskDetail({
       {resultPresentation ? (
         <section aria-label={t(resultPresentation.titleKey)} className={`workflow-typed-result is-${run.result?.kind}`} role="region">
           <h3 className="workflow-section-title">{t(resultPresentation.titleKey)}</h3>
-          <p className="workflow-result-summary">{t(resultPresentation.summaryKey)}</p>
+          {resultPresentation.summaryKey ? (
+            <p className="workflow-result-summary">{t(resultPresentation.summaryKey)}</p>
+          ) : null}
           <dl className="workflow-result">
             {resultPresentation.rows.map((row) => (
               <div key={row.labelKey}>
