@@ -48,7 +48,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync",
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 pdf-extract = "0.10"
-lopdf = { version = "0.38", default-features = false }
+lopdf = { version = "0.44", default-features = false }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 quick-xml = "0.36"
 zip = { version = "2", default-features = false, features = ["deflate"] }
