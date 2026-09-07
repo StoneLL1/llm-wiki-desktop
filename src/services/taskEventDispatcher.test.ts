@@ -168,6 +168,43 @@ describe("TaskEventDispatcher", () => {
     expect(observed).toEqual([terminal]);
   });
 
+  it("bounds 10,000 workflow progress events to one latest summary per 100ms batch", () => {
+    let scheduled: (() => void) | null = null;
+    let schedules = 0;
+    const dispatcher = new TaskEventDispatcher({ scheduler: {
+      setTimeout: (callback, delay) => {
+        expect(delay).toBe(100);
+        expect(scheduled).toBeNull();
+        scheduled = callback;
+        schedules += 1;
+        return schedules;
+      },
+      clearTimeout: () => { scheduled = null; },
+      requestAnimationFrame: () => null,
+      cancelAnimationFrame: () => {},
+    } });
+    let commits = 0;
+    let latest: WorkflowRunSummary | null = null;
+    dispatcher.registerOwner((event) => { commits += 1; latest = event.payload as WorkflowRunSummary; });
+    for (let batch = 0; batch < 100; batch += 1) {
+      for (let item = 1; item <= 100; item += 1) {
+        dispatcher.dispatch(workflowEvent({ revision: String(batch * 100 + item) }));
+      }
+      expect(commits).toBe(batch);
+      const flush = scheduled as (() => void) | null;
+      expect(flush).not.toBeNull();
+      scheduled = null;
+      flush?.();
+      expect(latest).toMatchObject({ revision: String((batch + 1) * 100) });
+    }
+    expect({ schedules, commits }).toEqual({ schedules: 100, commits: 100 });
+    dispatcher.dispatch(workflowEvent({ revision: "10001", displayStatus: "completed" }));
+    expect(commits).toBe(101);
+    expect(scheduled).toBeNull();
+    dispatcher.clearPending();
+    expect(commits).toBe(101);
+  });
+
   it("drops project A presentation buffers when project B becomes active", () => {
     const dispatcher = new TaskEventDispatcher();
     const observed: BackendEvent[] = [];

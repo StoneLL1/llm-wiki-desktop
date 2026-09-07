@@ -4,6 +4,8 @@ const getWorkflowRunMock = vi.hoisted(() => vi.fn());
 
 vi.mock("./workflowApi", () => ({ getWorkflowRun: getWorkflowRunMock }));
 
+import { useExportStore } from "../stores/exportStore";
+import type { ExportRecord } from "../types/export";
 import { useWikiStore } from "../features/wiki/wikiStore";
 import { useProjectStore, defaultProject } from "../stores/projectStore";
 import { useNavigationStore } from "../stores/navigationStore";
@@ -84,6 +86,35 @@ beforeEach(() => {
 });
 
 describe("workflow navigation", () => {
+  it("previews the exact Workflow ExportRecord even when a newer unrelated artifact exists", async () => {
+    const record: ExportRecord = { id: "record-a", exportType: "project_report", title: "项目报告", sourcePath: undefined,
+      outputPath: "exports/中文报告.html", createdAt: "2026-09-07T00:00:00Z", route: "byok", status: "succeeded", bookmarked: false, taskId: "run-a" };
+    const loadPreview = vi.fn(async (_request, id) => { useExportStore.setState({ previewId: id, previewHtml: "<h1>报告</h1>" }); });
+    useExportStore.setState({ error: null, records: [{ ...record, id: "newest", taskId: "other-task", outputPath: "exports/other.html" }, record],
+      loadExports: vi.fn().mockResolvedValue(undefined), loadPreview });
+    const run: WorkflowRun = { ...completedUpdate(), kind: "generate_content",
+      scope: { kind: "generate_content", artifactType: "project_report", pagePaths: [], outputPath: record.outputPath },
+      result: { kind: "generate_content", artifactType: "project_report", recordId: record.id, outputPaths: [record.outputPath], artifactCount: 1, validationPassed: true } };
+    await openWorkflowResult(project, run);
+    expect(loadPreview).toHaveBeenCalledExactlyOnceWith({ projectId: project.projectId, projectRootPath: project.rootPath, outputPath: record.outputPath }, record.id, expect.any(Function));
+    expect(useExportStore.getState().previewId).toBe(record.id);
+    expect(useNavigationStore.getState().activeView).toBe("exports");
+  });
+
+  it.each(["missing", "foreign-task", "preview-failed"])("keeps the Workflow result visible when its export is %s", async (failure) => {
+    const record: ExportRecord = { id: "record-a", exportType: "project_report", title: "项目报告", sourcePath: undefined,
+      outputPath: "exports/中文报告.html", createdAt: "2026-09-07T00:00:00Z", route: "byok", status: "succeeded", bookmarked: false, taskId: failure === "foreign-task" ? "other-task" : "run-a" };
+    const loadPreview = vi.fn(async () => { useExportStore.setState({ error: "PREVIEW_FAILED", previewId: null, previewHtml: null }); });
+    useExportStore.setState({ error: null, records: failure === "missing" ? [] : [record], previewId: "older", previewHtml: "<h1>Old artifact</h1>",
+      loadExports: vi.fn().mockResolvedValue(undefined), loadPreview });
+    const run: WorkflowRun = { ...completedUpdate(), kind: "generate_content",
+      scope: { kind: "generate_content", artifactType: "project_report", pagePaths: [], outputPath: record.outputPath },
+      result: { kind: "generate_content", artifactType: "project_report", recordId: record.id, outputPaths: [record.outputPath], artifactCount: 1, validationPassed: true } };
+    await expect(openWorkflowResult(project, run)).rejects.toThrow(failure === "preview-failed" ? "PREVIEW_FAILED" : "WORKFLOW_EXPORT_RESULT_UNAVAILABLE");
+    expect(useNavigationStore.getState().activeView).toBe("workflows");
+    if (failure !== "preview-failed") expect(loadPreview).not.toHaveBeenCalled();
+  });
+
   it("does not inject a notification run after the user switches projects", async () => {
     let resolveRun!: (run: WorkflowRun) => void;
     getWorkflowRunMock.mockReturnValue(new Promise<WorkflowRun>((resolve) => { resolveRun = resolve; }));

@@ -855,6 +855,23 @@ describe("useWorkflowsController", () => {
     expect(useWorkflowStore.getState().selectedTaskId).toBe("new-attempt");
   });
 
+  it("reprepares a changed export scope before cancelling and keeps its exact target for renewed review", async () => {
+    const waiting: WorkflowRun = { ...run, kind: "generate_content", revision: "2", displayStatus: "waiting_for_confirmation",
+      scope: { kind: "generate_content", artifactType: "knowledge_card", pagePaths: ["wiki/中文.md"], outputPath: "exports/知识卡.html" },
+      route: { kind: "byok", provider: "ollama", model: "test", routeRevision: "1" },
+      pendingAction: { id: "export-review", actionType: "review_scope", riskLevel: "high", affectedPaths: ["wiki/中文.md"], candidate: null, expiresAt: null, checkpointHash: null } };
+    const fresh: WorkflowPreparation = { ...preparation, kind: waiting.kind, route: waiting.route, scope: waiting.scope };
+    mocks.prepare.mockResolvedValue(fresh);
+    mocks.cancel.mockResolvedValue({ ...waiting, revision: "3", displayStatus: "cancelled", pendingAction: null });
+    const { result } = renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
+    await act(() => result.current.adjustAndPrepare(waiting));
+    expect(mocks.prepare).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ kind: "generate_content", scope: waiting.scope }));
+    expect(mocks.prepare.mock.invocationCallOrder[0]).toBeLessThan(mocks.cancel.mock.invocationCallOrder[0]);
+    expect(mocks.start).not.toHaveBeenCalled();
+    expect(useWorkflowStore.getState()).toMatchObject({ preparation: fresh, retryOfTaskId: waiting.taskId, surface: "preparation" });
+  });
+
   it("reprepares complete Health scope before cancellation and waits for renewed sharing approval", async () => {
     const waiting: WorkflowRun = { ...run, revision: "2", displayStatus: "waiting_for_confirmation",
       scope: { kind: "health_check", mode: "complete" }, route: { kind: "byok", provider: "open_ai", model: "test", routeRevision: "1" },

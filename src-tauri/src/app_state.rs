@@ -2608,6 +2608,166 @@ mod project_registry_tests {
     }
 
     #[test]
+    fn export_commit_revocation_waits_for_started_publication_and_rejects_unstarted_one() {
+        use crate::models::agent::AgentKind;
+        use crate::models::export::{ExportRoute, ExportType};
+        use crate::models::workflow::WorkflowArtifactType;
+        use crate::services::ExportService;
+        for started in [true, false] {
+            let (state, config) = state_with_temp_config("export-commit-revoke-config");
+            let state = Arc::new(state);
+            let project = strict_native_project("export-commit-revoke");
+            let context = state
+                .project_registry
+                .register_trusted_native("project-a", &project)
+                .unwrap();
+            let outcome = state
+                .workflow_service
+                .coordinator
+                .enqueue(
+                    &state.task_service,
+                    EnqueueWorkflow {
+                        project_id: "project-a".into(),
+                        project_root: project.clone(),
+                        task_state_root: Some(project.join(".app/tasks")),
+                        title: "Export".into(),
+                        kind: WorkflowKind::GenerateContent,
+                        scope: WorkflowScope::GenerateContent {
+                            artifact_type: WorkflowArtifactType::BeautifulRead,
+                            page_paths: vec!["wiki/index.md".into()],
+                            output_path: Some("exports/html/中文结果.html".into()),
+                        },
+                        route: Some(WorkflowRoute::Agent {
+                            agent: AgentKind::Claude,
+                            model: None,
+                            route_revision: "test-route".into(),
+                        }),
+                        baseline_fingerprint: "test-baseline".into(),
+                        execution_options: WorkflowExecutionOptions {
+                            preparation_revision: "test-preparation".into(),
+                            ..WorkflowExecutionOptions::default()
+                        },
+                        stages: vec![WorkflowStage {
+                            id: "write_export".into(),
+                            ordinal: 1,
+                            status: WorkflowStageStatus::Pending,
+                            label_key: "write_export".into(),
+                            started_at: None,
+                            completed_at: None,
+                            current_item: None,
+                            progress: None,
+                            decision: None,
+                        }],
+                        retry: None,
+                    },
+                )
+                .unwrap();
+            let WorkflowStartOutcome::Created { run } = outcome else {
+                panic!("new export")
+            };
+            state
+                .task_service
+                .start_workflow_stage(&run.task_id, "write_export")
+                .unwrap();
+            let permit = state
+                .publish_workflow_external_launch(&context, &run)
+                .unwrap();
+            if started {
+                let publication = permit.begin().unwrap();
+                state
+                    .task_service
+                    .set_task_cancellable(&run.task_id, false)
+                    .unwrap();
+                let worker_state = state.clone();
+                let worker_project = project.clone();
+                let (tx, rx) = mpsc::channel();
+                let worker = std::thread::spawn(move || {
+                    tx.send(worker_state.revoke_project_trust("project-a", &worker_project))
+                        .unwrap();
+                });
+                assert!(
+                    rx.recv_timeout(Duration::from_millis(100)).is_err(),
+                    "revocation must wait for the accepted publication"
+                );
+                assert_eq!(
+                    state.resolve_workflow_access(&context).unwrap().trust,
+                    WorkflowProjectTrust::Untrusted
+                );
+                assert!(
+                    state
+                        .publish_workflow_external_launch(&context, &run)
+                        .is_err(),
+                    "no new publication can enter the revoked epoch"
+                );
+                let artifact = state
+                    .export_service
+                    .validate_html_artifact(
+                        "<!doctype html><html><head></head><body>中文结果</body></html>",
+                    )
+                    .unwrap();
+                let record = ExportService::new_validated_record(
+                    ExportType::BeautifulRead,
+                    "中文结果".into(),
+                    Some("wiki/index.md".into()),
+                    "exports/html/中文结果.html".into(),
+                    ExportRoute::Agent,
+                    Some(run.task_id.clone()),
+                    artifact.preview.clone(),
+                );
+                let record_id = record.id.clone();
+                state
+                    .export_service
+                    .save_new_artifact(&context, &artifact, record)
+                    .unwrap();
+                state
+                    .task_service
+                    .complete_workflow_stage(&run.task_id, "write_export")
+                    .unwrap();
+                state
+                    .task_service
+                    .complete_workflow(
+                        &run.task_id,
+                        WorkflowResult::GenerateContent {
+                            artifact_type: WorkflowArtifactType::BeautifulRead,
+                            record_id: Some(record_id),
+                            output_paths: vec!["exports/html/中文结果.html".into()],
+                            artifact_count: Some(1),
+                            validation_passed: true,
+                        },
+                    )
+                    .unwrap();
+                assert!(!state.task_service.is_cancelled(&run.task_id));
+                drop(publication);
+                rx.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+                worker.join().unwrap();
+                assert!(project.join("exports/html/中文结果.html").is_file());
+                assert_eq!(
+                    state.export_service.list_records(&context).unwrap().len(),
+                    1
+                );
+            } else {
+                state.revoke_project_trust("project-a", &project).unwrap();
+                assert!(
+                    permit.begin().is_err(),
+                    "issued but unstarted publication is revoked"
+                );
+                assert!(state.task_service.is_cancelled(&run.task_id));
+                assert!(state
+                    .task_service
+                    .set_task_cancellable(&run.task_id, false)
+                    .is_err());
+                assert!(!project.join("exports/html/中文结果.html").exists());
+                assert!(state
+                    .export_service
+                    .list_records(&context)
+                    .unwrap()
+                    .is_empty());
+            }
+            cleanup_paths(&[&project, &config]);
+        }
+    }
+
+    #[test]
     fn revoked_authority_cannot_reopen_a_lingering_local_quick_report_epoch() {
         let (state, config) = state_with_temp_config("report-rebind-failure-config");
         let project = strict_native_project("report-rebind-failure");

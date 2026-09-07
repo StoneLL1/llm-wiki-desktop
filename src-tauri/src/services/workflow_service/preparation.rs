@@ -1911,7 +1911,10 @@ fn default_output_path(
         WorkflowArtifactType::ProjectReport => "project-report",
     };
     let root = ExportService::default().workflow_export_root_relative(context)?;
-    Ok(format!("{root}/{base}-{suffix}.html"))
+    Ok(format!(
+        "{root}/{base}-{suffix}-{}.html",
+        uuid::Uuid::new_v4()
+    ))
 }
 
 fn normalize_project_relative(value: &str) -> Result<String, BackendError> {
@@ -2718,7 +2721,13 @@ mod batch_zero_cost_tests {
                 route_selection: None,
             };
             let shared = build_snapshot_from_evaluation(&environment, &input, &evaluation).unwrap();
-            let independent = build_snapshot(&environment, &input).unwrap();
+            // New exports intentionally allocate a fresh artifact name on each preparation.
+            // Compare the evaluation paths using the same resolved destination.
+            let independent_input = PrepareWorkflowInput {
+                scope: Some(shared.scope.clone()),
+                ..input
+            };
+            let independent = build_snapshot(&environment, &independent_input).unwrap();
             assert_eq!(shared.project_access, independent.project_access);
             assert_eq!(shared.scope, independent.scope);
             assert_eq!(

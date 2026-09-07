@@ -28,7 +28,7 @@ import { WorkflowTaskDetail } from "./WorkflowTaskDetail";
 import type { WorkflowsController } from "./useWorkflowsController";
 import { WorkflowsOverviewView } from "./WorkflowsOverview";
 import { WorkflowsView } from "./WorkflowsView";
-import { attentionRun, groupWorkflowAttempts, WORKFLOW_STATUSES } from "./workflowPresentation";
+import { groupWorkflowAttempts, WORKFLOW_STATUSES } from "./workflowPresentation";
 import { WorkflowsRightPanel } from "./WorkflowsRightPanel";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
@@ -467,13 +467,72 @@ describe("Workflows overview", () => {
     expect(start).toHaveBeenLastCalledWith(false, false, { scope: { kind: "health_check", mode: "complete" }, routeSelection: null });
 
     view.rerender(<WorkflowPreparationView preparation={{ ...base, kind: "generate_content", scope: { kind: "generate_content", artifactType: "project_report", pagePaths: [], outputPath: "exports/project-report.html" }, availableWikiPages: ["wiki/中文.md"], quickRerunEligible: true }} {...props} />);
-    fireEvent.change(screen.getByLabelText("workflows.preparation.artifactType"), { target: { value: "knowledge_card" } });
+    fireEvent.click(screen.getByRole("radio", { name: "workflows.artifact.knowledgeCard" }));
     fireEvent.click(screen.getByLabelText("wiki/中文.md"));
     fireEvent.change(screen.getByLabelText("workflows.preparation.outputPath"), { target: { value: "exports/知识卡.html" } });
     expect(screen.getByRole("button", { name: "workflows.action.runAgain" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: /workflows.action.(start|runAgain)$/ }));
     expect(start).toHaveBeenLastCalledWith(false, false, { scope: expect.objectContaining({ artifactType: "knowledge_card", outputPath: "exports/知识卡.html" }), routeSelection: null });
     expect(screen.getByRole("button", { name: "workflows.action.runAgain" })).toBeInTheDocument();
+  });
+
+  it("selects legal HTML scopes and preserves a prepared new target until the user changes the output", () => {
+    const start = vi.fn();
+    const preparation: WorkflowPreparation = {
+      schemaVersion: 2, preparationId: "export-options", preparationRevision: "export-options-1",
+      projectAccess: overview.projectAccess!, kind: "generate_content",
+      scope: { kind: "generate_content", artifactType: "knowledge_card", pagePaths: ["wiki/甲.md", "wiki/乙.md"], outputPath: "exports/新制品-unique.html" },
+      availableWikiPages: ["wiki/甲.md", "wiki/乙.md"],
+      baseline: { fingerprint: "b", capturedAt: "2026-09-07T00:00:00Z", itemCount: 2 },
+      route: null, prerequisites: [], output: { labelKey: "workflows.output.artifact", location: "exports/新制品-unique.html", mayChangeWiki: false },
+      gitPolicy: "not_required", requiresScopeConfirmation: false, quickRerunEligible: false,
+    };
+    render(<WorkflowPreparationView preparation={preparation} onBack={vi.fn()} onStart={start} onPrerequisite={vi.fn()} />);
+    const types = screen.getByRole("radiogroup", { name: "workflows.preparation.artifactType" });
+    expect(within(types).getAllByRole("radio")).toHaveLength(4);
+    expect(screen.getByRole("radio", { name: "workflows.preparation.createArtifact" })).toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.start" }));
+    expect(start).toHaveBeenLastCalledWith(false, false, expect.objectContaining({ scope: preparation.scope }));
+    fireEvent.click(screen.getByRole("radio", { name: "workflows.artifact.beautifulRead" }));
+    expect(screen.getByRole("radio", { name: "wiki/甲.md" })).toBeChecked();
+    fireEvent.change(screen.getByLabelText("workflows.preparation.searchOptions"), { target: { value: "乙" } });
+    fireEvent.click(screen.getByRole("button", { name: "workflows.preparation.selectResults" }));
+    expect(screen.getByRole("radio", { name: "wiki/乙.md" })).toBeChecked();
+    fireEvent.change(screen.getByLabelText("workflows.preparation.searchOptions"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.start" }));
+    expect(start).toHaveBeenLastCalledWith(false, false, expect.objectContaining({ scope: expect.objectContaining({ pagePaths: ["wiki/乙.md"], outputPath: null }) }));
+    fireEvent.click(screen.getByRole("radio", { name: "workflows.artifact.conceptMap" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "wiki/甲.md" }));
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.start" }));
+    expect(start).toHaveBeenLastCalledWith(false, false, expect.objectContaining({ scope: expect.objectContaining({ pagePaths: ["wiki/乙.md", "wiki/甲.md"] }) }));
+    fireEvent.click(screen.getByRole("radio", { name: "workflows.artifact.projectReport" }));
+    expect(screen.queryByRole("checkbox", { name: "wiki/甲.md" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("radio", { name: "workflows.preparation.explicitTarget" }));
+    expect(screen.getByRole("button", { name: "workflows.action.start" })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("workflows.preparation.outputPath"), { target: { value: "exports/已有报告.html" } });
+    expect(screen.getByText("workflows.preparation.explicitTargetHint")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.start" }));
+    expect(start).toHaveBeenLastCalledWith(false, false, expect.objectContaining({ scope: expect.objectContaining({ pagePaths: [], outputPath: "exports/已有报告.html" }) }));
+    fireEvent.click(screen.getByRole("radio", { name: "workflows.preparation.createArtifact" }));
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.start" }));
+    expect(start).toHaveBeenLastCalledWith(false, false, expect.objectContaining({ scope: expect.objectContaining({ outputPath: null }) }));
+  });
+
+  it.each(["persistent", "memory_only"] as const)("describes a Health report with %s persistence even without an output path", (persistence) => {
+    const preparation: WorkflowPreparation = {
+      schemaVersion: 2, preparationId: "health-output", preparationRevision: "health-output-1",
+      projectAccess: { ...overview.projectAccess!, persistence }, kind: "health_check",
+      scope: { kind: "health_check", mode: "local_quick" },
+      baseline: { fingerprint: "b", capturedAt: "2026-09-07T00:00:00Z", itemCount: 2 },
+      route: { kind: "local", routeRevision: "local" }, prerequisites: [],
+      output: { labelKey: "workflows.output.healthReport", location: null, mayChangeWiki: false },
+      gitPolicy: "not_required", requiresScopeConfirmation: false, quickRerunEligible: false,
+    };
+    const { container } = render(<WorkflowPreparationView preparation={preparation} onBack={vi.fn()} onStart={vi.fn()} onPrerequisite={vi.fn()} />);
+    const output = container.querySelector("[data-decision-step='3']")!;
+    expect(output).toHaveTextContent("workflows.output.healthReport");
+    expect(output).toHaveTextContent(persistence === "persistent" ? "workflows.preparation.healthReportPersistent" : "workflows.output.session");
+    if (persistence === "persistent") expect(output).not.toHaveTextContent("workflows.output.session");
   });
 
   it("orders non-Health preparation decisions and keeps technical details collapsed", () => {
@@ -601,7 +660,7 @@ describe("Workflows overview", () => {
     expect(screen.getByText("workflows.preparation.generate.knowledge_card")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "workflows.action.openSettings" }));
     expect(prerequisite).toHaveBeenCalledWith("configure_execution_route");
-    fireEvent.change(screen.getByLabelText("workflows.preparation.artifactType"), { target: { value: "project_report" } });
+    fireEvent.click(screen.getByRole("radio", { name: "workflows.artifact.projectReport" }));
     expect(screen.getByText("workflows.preparation.generate.project_report")).toBeInTheDocument();
     expect(screen.getByText("workflows.preparation.fixedScopePending")).toBeInTheDocument();
     expect(screen.queryByLabelText("wiki/a.md")).not.toBeInTheDocument();
@@ -768,14 +827,6 @@ describe("Workflows overview", () => {
     expect(screen.queryByRole("progressbar", { name: "running" })).not.toBeInTheDocument();
     expect(screen.getAllByRole("listitem")).toHaveLength(6);
     expect(WORKFLOW_STATUSES).toEqual(["queued", "running", "waiting_for_confirmation", "completed", "failed", "cancelled", "interrupted"]);
-  });
-
-  it("prioritizes queue-owning work before terminal recovery", () => {
-    const base = { taskId: "running", displayStatus: "running" } as WorkflowRun;
-    expect(attentionRun([{ ...base }, { ...base, taskId: "failed", displayStatus: "failed" }, { ...base, taskId: "waiting", displayStatus: "waiting_for_confirmation" }])?.taskId).toBe("waiting");
-    expect(attentionRun([{ ...base }, { ...base, taskId: "failed", displayStatus: "failed" }])?.taskId).toBe("running");
-    expect(attentionRun([base])?.taskId).toBe("running");
-    expect(attentionRun([{ ...base, taskId: "queued", displayStatus: "queued" }])?.taskId).toBe("queued");
   });
 
   it("keeps an explicitly selected completed run ahead of another attention run", () => {
@@ -1297,6 +1348,8 @@ describe("Workflows overview", () => {
     };
     render(<WorkflowTaskDetail run={waiting} controller={controller} queuedRuns={[]} onOpenLogs={vi.fn()} />);
     expect(screen.getByText("abc123")).toBeInTheDocument();
+    expect(screen.queryByText("workflows.attention.noCheckpoint")).not.toBeInTheDocument();
+    expect(screen.getByText("workflows.attention.userEdits").closest("p")).toHaveTextContent("workflows.result.no");
     expect(screen.getByText("wiki/甲.md")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "workflows.action.applyChanges" }));
     expect(controller.confirm).toHaveBeenCalledWith("waiting-a", "action-a");
@@ -1486,6 +1539,10 @@ describe("Workflows overview", () => {
     expect(within(failureRegion).getByText("stage.apply")).toBeInTheDocument();
     expect(within(failureRegion).queryByText("apply")).not.toBeInTheDocument();
     expect(screen.getByText("workflows.prerequisiteAction.prepare_again")).toBeInTheDocument();
+    const technical = view.container.querySelector<HTMLDetailsElement>(".workflow-pipeline-shell > .workflow-execution-details")!;
+    expect(technical).not.toHaveAttribute("open");
+    technical.open = true;
+    fireEvent(technical, new Event("toggle"));
     expect(view.container.querySelector('details[data-stage-status="failed"]')).toHaveAttribute("open");
     const logs = screen.getByText("workflows.logs.title").closest("details")!;
     expect(logs).not.toHaveAttribute("open");
@@ -1531,12 +1588,40 @@ describe("Workflows overview", () => {
   });
 
   it("shows Health page counts without stage-derived overall progress", () => {
-    render(<WorkflowPipeline kind="health_check" currentStageId="local_check" stages={[
-      { id: "local_check", ordinal: 2, status: "running", labelKey: "stage.local", startedAt: null, completedAt: null, currentItem: "wiki/主题.md", progress: { current: 16, total: 65 }, decision: null },
+    render(<WorkflowPipeline kind="health_check" currentStageId="check_markdown" stages={[
+      { id: "check_markdown", ordinal: 2, status: "running", labelKey: "stage.local", startedAt: null, completedAt: null, currentItem: "wiki/主题.md", progress: { current: 16, total: 65 }, decision: null },
     ]} />);
     expect(screen.queryByRole("progressbar", { name: "workflows.pipeline.overallProgress" })).not.toBeInTheDocument();
-    expect(screen.getByRole("progressbar", { name: "stage.local" })).toHaveAttribute("value", "16");
-    expect(screen.getByRole("progressbar", { name: "stage.local" })).toHaveAttribute("max", "65");
+    expect(screen.getByRole("progressbar", { name: "workflows.healthPhase.local" })).toHaveAttribute("value", "16");
+    expect(screen.getByRole("progressbar", { name: "workflows.healthPhase.local" })).toHaveAttribute("max", "65");
+  });
+
+  it("shows optional Health deep checks as skipped and keeps technical stages disclosed", () => {
+    const { container } = render(<WorkflowPipeline kind="health_check" displayStatus="completed" stages={[
+      { id: "deep_check", ordinal: 4, status: "skipped", labelKey: "stage.deep", startedAt: null, completedAt: null, currentItem: null, progress: null, decision: null },
+      { id: "complete", ordinal: 8, status: "completed", labelKey: "stage.complete", startedAt: null, completedAt: null, currentItem: null, progress: null, decision: null },
+    ]} />);
+    expect(screen.getAllByRole("listitem")).toHaveLength(4);
+    expect(screen.getByText("workflows.healthPhase.deep").closest("li")).toHaveTextContent("workflows.stageStatus.skipped");
+    expect(container.querySelector(".workflow-execution-details")).not.toHaveAttribute("open");
+    const details = container.querySelector<HTMLDetailsElement>(".workflow-execution-details")!;
+    details.open = true;
+    fireEvent(details, new Event("toggle"));
+    expect(screen.getByText("stage.deep")).toBeVisible();
+  });
+
+  it("shows four export phases with an indeterminate active save and exact waiting state", () => {
+    const stages = [
+      { id: "write_export", ordinal: 7, status: "running" as const, labelKey: "stage.write", startedAt: null, completedAt: null, currentItem: "exports/中文.html", progress: null, decision: null },
+    ];
+    const { rerender } = render(<WorkflowPipeline kind="generate_content" currentStageId="write_export" stages={stages} />);
+    expect(screen.getAllByRole("listitem")).toHaveLength(4);
+    expect(screen.getByRole("progressbar", { name: "workflows.exportPhase.save" })).not.toHaveAttribute("value");
+    expect(screen.queryByRole("progressbar", { name: "workflows.pipeline.overallProgress" })).not.toBeInTheDocument();
+    expect(screen.getByText("exports/中文.html", { selector: ".workflow-pipeline-shell > ol code" })).toBeVisible();
+    rerender(<WorkflowPipeline kind="generate_content" currentStageId="write_export" displayStatus="waiting_for_confirmation" stages={[{ ...stages[0]!, status: "waiting" }]} />);
+    expect(screen.getByText("workflows.exportPhase.save").closest("li")).toHaveTextContent("workflows.stageStatus.waiting");
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
   });
 
   it("disables the recommended preparation action while its own request is pending", () => {

@@ -60,7 +60,8 @@ pub use runners::generate_content::{
     cancel_generate_content_confirmation, confirm_generate_content_overwrite,
     discard_generate_content_candidate, generate_content_candidate_is_valid_for_workflow,
     restore_generate_content_confirmation, run_generate_content, run_generate_content_authorized,
-    run_generate_content_with_generator, GenerateContentConfirmationFailure,
+    run_generate_content_with_authority, run_generate_content_with_generator,
+    run_generate_content_with_generator_and_authority, GenerateContentConfirmationFailure,
     GenerateContentExecutionServices, GenerateContentRunner,
 };
 pub use runners::health_check::{
@@ -756,7 +757,7 @@ fn scope_review_retry_link(
     let scope_stage = match kind {
         WorkflowKind::UpdateWiki => "analyze_sources",
         WorkflowKind::HealthCheck => "deep_check",
-        WorkflowKind::GenerateContent => "",
+        WorkflowKind::GenerateContent => "confirm_scope",
     };
     let reviewed_scope = original.current_stage_id.as_deref() == Some(scope_stage)
         && original.stages.iter().any(|stage| {

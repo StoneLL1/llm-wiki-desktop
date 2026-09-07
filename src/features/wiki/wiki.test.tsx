@@ -938,6 +938,39 @@ describe("MarkdownReader", () => {
     await waitFor(() => expect(onOpenPage).toHaveBeenCalledWith("wiki/concepts/attention.md"));
   });
 
+  it("opens explicit wiki paths with or without root and suffix, distinguishing same-name pages", async () => {
+    const onOpenPage = vi.fn();
+    const conceptsPath = "wiki/concepts/compile-and-verify-pipeline.md";
+    const topicsPath = "wiki/topics/compile-and-verify-pipeline.md";
+    const cjkPath = "wiki/概念/编译流程.md";
+    const links = [
+      ["concepts/compile-and-verify-pipeline", "relative path", conceptsPath],
+      ["concepts/compile-and-verify-pipeline.md", "relative file", conceptsPath],
+      ["wiki/concepts/compile-and-verify-pipeline", "project path", conceptsPath],
+      ["wiki/concepts/compile-and-verify-pipeline.md", "project file", conceptsPath],
+      ["topics/compile-and-verify-pipeline", "other same-name page", topicsPath],
+      ["概念/编译流程.md", "中文路径", cjkPath],
+    ];
+    render(
+      <MarkdownReader
+        bodyMarkdown={links.map(([target, label]) => `[[${target}|${label}]]`).join("\n\n")}
+        frontmatterYaml={null}
+        pages={[
+          pageMeta({ path: conceptsPath, title: "Pipeline" }),
+          pageMeta({ path: topicsPath, title: "Pipeline", aliases: ["concepts/compile-and-verify-pipeline"] }),
+          pageMeta({ path: cjkPath, title: "编译流程" }),
+        ]}
+        onOpenPage={onOpenPage}
+      />,
+    );
+    for (const [index, [, label, expectedPath]] of links.entries()) {
+      const link = await screen.findByRole("link", { name: label });
+      expect(link).not.toHaveClass("wikilink--missing");
+      fireEvent.click(link);
+      expect(onOpenPage).toHaveBeenNthCalledWith(index + 1, expectedPath);
+    }
+  });
+
   it("flags a wikilink with no matching page as missing", async () => {
     render(
       <MarkdownReader

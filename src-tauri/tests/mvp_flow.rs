@@ -619,7 +619,11 @@ fn ai_assisted_loop_fake_agent_detected_and_byok_runs() {
     assert!(prompt.contains("html-beautiful-read"));
     // Persist a record the way export_commands would after a fake model run.
     let out_rel = export
-        .build_output_relative_path(ExportType::BeautifulRead, Some("wiki/concepts/cats.md"))
+        .build_output_relative_path_for(
+            &context,
+            ExportType::BeautifulRead,
+            Some("wiki/concepts/cats.md"),
+        )
         .unwrap();
     let record = ExportService::new_record(
         ExportType::BeautifulRead,
@@ -630,7 +634,12 @@ fn ai_assisted_loop_fake_agent_detected_and_byok_runs() {
         None,
     );
     export
-        .write_html(&context, &out_rel, "<!doctype html><html></html>")
+        .write_html_checked(
+            &context,
+            &out_rel,
+            "<!doctype html><html></html>",
+            llm_wiki_desktop_lib::services::WriteMode::CreateNew,
+        )
         .unwrap();
     export.append_record(&context, record).unwrap();
     let listed = export.list_records(&context).unwrap();

@@ -1472,8 +1472,10 @@ impl TaskService {
                 .workflow
                 .as_mut()
                 .expect("validated workflow target must retain workflow state while locked");
-            let effective_task_state_root =
-                workflow_persistence_root_for_workflow(workflow, task_state_root.as_ref());
+            // The caller has checked current project persistence authority.
+            // Health Local/BYOK follow that same authority after recovery;
+            // execution route must not silently downgrade durable queued work.
+            let effective_task_state_root = task_state_root.clone();
             let transition = persistence_transition(previous, effective_task_state_root.as_ref());
             match effective_task_state_root.as_ref() {
                 Some(root) => {
@@ -2848,7 +2850,11 @@ impl TaskService {
             workflow.queue_position = None;
             workflow.continuation_required = false;
             workflow.error = None;
-            workflow.result = result;
+            workflow.result = result.or_else(|| {
+                matches!(workflow.result, Some(WorkflowResult::HealthCheck { .. }))
+                    .then(|| workflow.result.clone())
+                    .flatten()
+            });
             for stage in &mut workflow.stages {
                 stage.decision = None;
             }
@@ -2863,14 +2869,6 @@ impl TaskService {
         error: WorkflowErrorSummary,
     ) -> Result<WorkflowRun, String> {
         self.reject_workflow_execution(id, status, error, false, None)
-    }
-
-    pub(crate) fn interrupt_workflow_confirmation(
-        &self,
-        id: &str,
-        error: WorkflowErrorSummary,
-    ) -> Result<WorkflowRun, String> {
-        self.interrupt_workflow_confirmation_with_result(id, error, None)
     }
 
     pub(crate) fn interrupt_workflow_confirmation_with_result(
@@ -2943,37 +2941,6 @@ impl TaskService {
             task.cancellable = false;
             Ok(())
         })
-    }
-
-    /// Trust revocation cancels only active workflow execution for the
-    /// asserted project root. Queued runs remain queued and must pass a fresh
-    /// authority check before dispatch.
-    pub(crate) fn request_cancel_active_workflows_for_root(
-        &self,
-        project_root: &Path,
-    ) -> Result<(), String> {
-        let expected = project_root
-            .canonicalize()
-            .unwrap_or_else(|_| project_root.to_path_buf());
-        let ids = self
-            .list_workflow_runs()
-            .into_iter()
-            .filter(|run| {
-                matches!(
-                    run.display_status,
-                    crate::models::workflow::WorkflowDisplayStatus::Running
-                        | crate::models::workflow::WorkflowDisplayStatus::WaitingForConfirmation
-                ) && self
-                    .project_root_for_task(&run.task_id)
-                    .map(|root| root.canonicalize().unwrap_or(root) == expected)
-                    .unwrap_or(false)
-            })
-            .map(|run| run.task_id)
-            .collect::<Vec<_>>();
-        for id in ids {
-            self.request_workflow_cancel(&id)?;
-        }
-        Ok(())
     }
 
     /// Close every cancellable non-workflow worker owned by one project before
@@ -3419,6 +3386,17 @@ impl TaskService {
         let entry = tasks
             .get(id)
             .ok_or_else(|| format!("Task not found: {}", id))?;
+        if entry.task.task_type == TaskType::Export {
+            // Recheck cancellation under the same write lock as export commit
+            // admission. The legacy read-then-transition path can race a seal.
+            drop(tasks);
+            let task = self.request_cancel(id)?;
+            return if task.status == TaskStatus::Cancelling {
+                self.finalize_cancellation(id)
+            } else {
+                Ok(task)
+            };
+        }
         if !entry.task.cancellable {
             return Err(format!("Task is not cancellable: {}", id));
         }
@@ -3813,6 +3791,36 @@ impl TaskService {
             task.clone(),
         );
         Ok(task)
+    }
+
+    /// Close a Wiki quick export's cancellation window before its checked
+    /// content/record publication. The task lock makes cancellation and commit
+    /// admission mutually exclusive; no Workflow state is required.
+    pub(crate) fn close_export_cancellation(&self, id: &str) -> Result<(), String> {
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let mut lane = persistence_lane.lock().expect("lock poisoned");
+        let mut tasks = self.tasks.write().expect("lock poisoned");
+        let entry = tasks
+            .get_mut(id)
+            .ok_or_else(|| format!("Task not found: {id}"))?;
+        if entry.task.task_type != TaskType::Export
+            || entry.workflow.is_some()
+            || entry.task.status != TaskStatus::Running
+            || entry.cancellation.is_cancelled()
+        {
+            return Err(format!("Export task is no longer running: {id}"));
+        }
+        let previous = entry.task.clone();
+        entry.task.cancellable = false;
+        entry.task.updated_at = Utc::now().to_rfc3339();
+        drop(tasks);
+        if let Err(error) = self.persist_current_task_with_lane(id, Some(&mut lane)) {
+            if let Some(entry) = self.tasks.write().expect("lock poisoned").get_mut(id) {
+                entry.task = previous;
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Persist the final result while the task is still running, and close
@@ -4709,27 +4717,6 @@ fn persistence_transition(
     }
 }
 
-fn workflow_persistence_root_for_workflow(
-    workflow: &WorkflowExecutionState,
-    project_task_state_root: Option<&PathBuf>,
-) -> Option<PathBuf> {
-    if matches!(
-        (&workflow.kind, &workflow.scope, &workflow.route),
-        (
-            WorkflowKind::HealthCheck,
-            crate::models::workflow::WorkflowScope::HealthCheck {
-                mode: crate::models::workflow::HealthCheckMode::Complete
-            },
-            Some(crate::models::workflow::WorkflowRoute::Agent { .. })
-        )
-    ) || workflow.kind != WorkflowKind::HealthCheck
-    {
-        project_task_state_root.cloned()
-    } else {
-        None
-    }
-}
-
 fn persistence_transition_log(
     transition: WorkflowPersistenceTransition,
 ) -> Option<(LogLevel, &'static str)> {
@@ -5552,8 +5539,8 @@ mod tests {
                 .enqueue(&service, workflow_request(other_root.path(), None))
                 .unwrap(),
         );
-        service
-            .request_cancel_active_workflows_for_root(root.path())
+        coordinator
+            .freeze_owner_for_trust_revocation(&service, root.path())
             .unwrap();
 
         assert!(service.is_cancelled(&active.task_id));
@@ -5650,31 +5637,60 @@ mod tests {
     }
 
     #[test]
-    fn health_local_or_byok_rebind_never_upgrades_to_persistent() {
-        let root = tempfile::tempdir().unwrap();
-        let service = TaskService::default();
-        let coordinator = WorkflowCoordinator::default();
-        let mut request = workflow_request(root.path(), None);
-        request.scope = crate::models::workflow::WorkflowScope::HealthCheck {
-            mode: HealthCheckMode::LocalQuick,
-        };
-        request.route = Some(WorkflowRoute::Local {
-            route_revision: "local".into(),
-        });
-        let run = created_workflow(coordinator.enqueue(&service, request).unwrap());
-        let tasks_root = root.path().join(".app/tasks");
+    fn health_rebind_follows_current_project_persistence_for_local_and_byok() {
+        for (mode, route) in [
+            (
+                HealthCheckMode::LocalQuick,
+                WorkflowRoute::Local {
+                    route_revision: "local".into(),
+                },
+            ),
+            (
+                HealthCheckMode::Complete,
+                WorkflowRoute::Byok {
+                    provider: crate::models::llm::LlmProviderKind::Ollama,
+                    model: "test-model".into(),
+                    route_revision: "byok".into(),
+                },
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let service = TaskService::default();
+            let coordinator = WorkflowCoordinator::default();
+            let mut request = workflow_request(root.path(), None);
+            request.scope = crate::models::workflow::WorkflowScope::HealthCheck { mode };
+            request.route = Some(route);
+            let run = created_workflow(coordinator.enqueue(&service, request).unwrap());
+            let tasks_root = root.path().join(".app/tasks");
 
-        let transition = service
-            .rebind_workflow_persistence(&run.task_id, root.path(), Some(tasks_root.clone()))
-            .unwrap();
+            let transition = service
+                .rebind_workflow_persistence(&run.task_id, root.path(), Some(tasks_root.clone()))
+                .unwrap();
 
-        assert_eq!(transition, WorkflowPersistenceTransition::Unchanged);
-        assert_eq!(service.workflow_persistence_dir(&run.task_id), None);
-        assert_eq!(
-            service.get_workflow_run(&run.task_id).unwrap().persistence,
-            WorkflowPersistenceMode::MemoryOnly
-        );
-        assert!(!tasks_root.join(format!("{}.json", run.task_id)).exists());
+            assert_eq!(
+                transition,
+                WorkflowPersistenceTransition::UpgradedToPersistent
+            );
+            assert_eq!(
+                service.workflow_persistence_dir(&run.task_id),
+                Some(tasks_root.canonicalize().unwrap())
+            );
+            assert_eq!(
+                service.get_workflow_run(&run.task_id).unwrap().persistence,
+                WorkflowPersistenceMode::Persistent
+            );
+            let path = tasks_root.join(format!("{}.json", run.task_id));
+            assert!(path.exists());
+            let before_revoke = std::fs::read(&path).unwrap();
+            service
+                .rebind_workflow_persistence(&run.task_id, root.path(), None)
+                .unwrap();
+            assert_eq!(service.workflow_persistence_dir(&run.task_id), None);
+            service
+                .append_log(&run.task_id, LogLevel::Info, "memory after revoke".into())
+                .unwrap();
+            assert_eq!(std::fs::read(path).unwrap(), before_revoke);
+        }
     }
 
     #[test]
@@ -5786,6 +5802,57 @@ mod tests {
                 TaskStatus::Succeeded => assert!(final_task.result.is_some()),
                 TaskStatus::Cancelled => assert!(final_task.result.is_none()),
                 status => panic!("unexpected race terminal state: {status:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn quick_export_commit_and_cancel_never_publish_a_cancelled_artifact() {
+        for _ in 0..16 {
+            let root = tempfile::tempdir().unwrap();
+            let artifact = root.path().join("中文成果.html");
+            let service = Arc::new(TaskService::default());
+            let task = service.create_task(TaskType::Export, None, "Export".into(), true);
+            service
+                .transition_status(&task.id, TaskStatus::Running)
+                .unwrap();
+            let barrier = Arc::new(std::sync::Barrier::new(3));
+            let commit_service = service.clone();
+            let commit_id = task.id.clone();
+            let commit_barrier = barrier.clone();
+            let output = artifact.clone();
+            let commit = std::thread::spawn(move || {
+                commit_barrier.wait();
+                if commit_service
+                    .close_export_cancellation(&commit_id)
+                    .is_err()
+                {
+                    return false;
+                }
+                std::fs::write(output, b"<!doctype html><title>Export</title>").unwrap();
+                commit_service
+                    .transition_status(&commit_id, TaskStatus::Succeeded)
+                    .unwrap();
+                true
+            });
+            let cancel_service = service.clone();
+            let cancel_id = task.id.clone();
+            let cancel_barrier = barrier.clone();
+            let cancel = std::thread::spawn(move || {
+                cancel_barrier.wait();
+                cancel_service.cancel_task(&cancel_id)
+            });
+            barrier.wait();
+            let committed = commit.join().unwrap();
+            let _ = cancel.join().unwrap();
+            assert_eq!(artifact.exists(), committed);
+            let current = service.get_task(&task.id).unwrap();
+            if committed {
+                assert_eq!(current.status, TaskStatus::Succeeded);
+                assert!(!service.is_cancelled(&task.id));
+            } else {
+                assert_eq!(current.status, TaskStatus::Cancelled);
+                assert!(current.result.is_none());
             }
         }
     }

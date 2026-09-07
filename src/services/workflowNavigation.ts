@@ -152,7 +152,7 @@ export async function openWorkflowResult(
 
     const { openWorkflowResultDetails } = await import("./workflowResultNavigation");
     navigation.assertCurrent();
-    await openWorkflowResultDetails(project, result, navigation);
+    await openWorkflowResultDetails(project, result, navigation, run.taskId);
   } finally {
     navigation.dispose();
   }

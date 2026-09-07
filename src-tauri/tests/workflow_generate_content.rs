@@ -386,6 +386,25 @@ async fn new_artifact_completes_exactly_nine_stages_without_git_and_is_exports_r
     };
     assert_eq!(retry.retry.as_ref().unwrap().attempt_of, task_id);
     assert_eq!(retry.retry.as_ref().unwrap().attempt_number, 2);
+    let WorkflowScope::GenerateContent {
+        output_path: Some(new_path),
+        ..
+    } = &retry.scope
+    else {
+        panic!("retry scope")
+    };
+    assert_ne!(new_path, output);
+    run_generate_content_with_generator(
+        &fixture.context,
+        retry,
+        &fixture.services(),
+        |_, _| async { Ok(HTML.into()) },
+    )
+    .await;
+    assert_eq!(
+        fixture.export.list_records(&fixture.context).unwrap().len(),
+        2
+    );
 }
 
 #[tokio::test]
@@ -776,4 +795,201 @@ async fn cancellation_after_generation_leaves_no_artifact_or_record() {
         .list_records(&fixture.context)
         .unwrap()
         .is_empty());
+}
+
+#[tokio::test]
+async fn all_four_artifact_scopes_produce_distinct_task_bound_previews() {
+    let fixture = Fixture::new("four-types");
+    for (index, artifact_type) in [
+        WorkflowArtifactType::BeautifulRead,
+        WorkflowArtifactType::KnowledgeCard,
+        WorkflowArtifactType::ConceptMap,
+        WorkflowArtifactType::ProjectReport,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let paths = match artifact_type {
+            WorkflowArtifactType::ProjectReport => vec![],
+            WorkflowArtifactType::BeautifulRead => vec!["wiki/concepts/主题.md".into()],
+            _ => vec!["wiki/concepts/主题.md".into(), "wiki/overview.md".into()],
+        };
+        let output = format!("exports/html/成果 {index}.html");
+        let run = fixture.enqueue(artifact_type.clone(), paths, &output, None, None);
+        let id = run.task_id.clone();
+        run_generate_content_with_generator(&fixture.context, run, &fixture.services(), move |prompt, _| async move {
+            assert!(prompt.contains("主题"));
+            Ok(HTML.replace("Generated", &format!("成果 {index}<svg viewBox=\"0 0 20 20\"><circle cx=\"10\" cy=\"10\" r=\"8\"/></svg>")))
+        }).await;
+        let finished = fixture.tasks.get_workflow_run(&id).unwrap();
+        assert_eq!(
+            finished.display_status,
+            WorkflowDisplayStatus::Completed,
+            "{:?}",
+            finished.error
+        );
+        let records = fixture.export.list_records(&fixture.context).unwrap();
+        let record = records
+            .iter()
+            .find(|record| record.task_id.as_deref() == Some(&id))
+            .unwrap();
+        assert_eq!(record.output_path, output);
+        let path = fixture
+            .export
+            .resolve_existing_html_export(&fixture.context, &record.output_path)
+            .unwrap();
+        assert!(fs::read_to_string(path)
+            .unwrap()
+            .contains(&format!("成果 {index}")));
+        let llm_wiki_desktop_lib::models::workflow::WorkflowResult::GenerateContent {
+            record_id,
+            ..
+        } = finished.result.unwrap()
+        else {
+            panic!("export result")
+        };
+        assert_eq!(record_id.as_deref(), Some(record.id.as_str()));
+    }
+    assert_eq!(
+        fixture.export.list_records(&fixture.context).unwrap().len(),
+        4
+    );
+}
+
+#[tokio::test]
+async fn queued_export_changed_input_waits_before_generation_and_survives_restart() {
+    let fixture = Fixture::new("queued-review");
+    let output = "exports/html/queued.html";
+    let run = fixture.enqueue(
+        WorkflowArtifactType::BeautifulRead,
+        vec!["wiki/concepts/主题.md".into()],
+        output,
+        None,
+        None,
+    );
+    let id = run.task_id.clone();
+    fs::write(
+        fixture.context.root.join("wiki/concepts/主题.md"),
+        "# 用户修改\n",
+    )
+    .unwrap();
+    run_generate_content_with_generator(&fixture.context, run, &fixture.services(), |_, _| async {
+        panic!("must review before AI")
+    })
+    .await;
+    let waiting = fixture.tasks.get_workflow_run(&id).unwrap();
+    assert_eq!(
+        waiting.display_status,
+        WorkflowDisplayStatus::WaitingForConfirmation
+    );
+    assert_eq!(
+        waiting.pending_action.unwrap().action_type,
+        llm_wiki_desktop_lib::models::confirmation::PendingActionType::ReviewScope
+    );
+    let restarted = TaskService::default();
+    restarted
+        .set_project_context(
+            fixture.context.project_id.clone(),
+            fixture.context.root.clone(),
+            fixture.context.app_dir.join("tasks"),
+        )
+        .unwrap();
+    assert_eq!(
+        restarted.get_workflow_run(&id).unwrap().display_status,
+        WorkflowDisplayStatus::WaitingForConfirmation
+    );
+    assert!(!fixture.context.root.join(output).exists());
+}
+
+#[tokio::test]
+async fn commit_authority_is_rechecked_after_generation_before_file_or_record() {
+    let fixture = Fixture::new("commit-revoked");
+    let output = "exports/html/revoked.html";
+    let run = fixture.enqueue(
+        WorkflowArtifactType::BeautifulRead,
+        vec!["wiki/concepts/主题.md".into()],
+        output,
+        None,
+        None,
+    );
+    let id = run.task_id.clone();
+    llm_wiki_desktop_lib::services::run_generate_content_with_generator_and_authority(
+        &fixture.context,
+        run,
+        &fixture.services(),
+        |_, _| async { Ok(HTML.into()) },
+        || {
+            Err(BackendError::new(
+                "WORKFLOW_EXTERNAL_LAUNCH_REVOKED",
+                "revoked before commit",
+                true,
+                true,
+            ))
+        },
+    )
+    .await;
+    assert_eq!(
+        fixture.tasks.get_workflow_run(&id).unwrap().display_status,
+        WorkflowDisplayStatus::Failed
+    );
+    assert!(!fixture.context.root.join(output).exists());
+    assert!(fixture
+        .export
+        .list_records(&fixture.context)
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn unreadable_record_history_does_not_leave_an_artifact_and_retry_can_recover() {
+    let fixture = Fixture::new("record-failure");
+    let output = "exports/html/retry.html";
+    let run = fixture.enqueue(
+        WorkflowArtifactType::BeautifulRead,
+        vec!["wiki/concepts/主题.md".into()],
+        output,
+        None,
+        None,
+    );
+    let id = run.task_id.clone();
+    fs::write(
+        fixture.context.app_dir.join("exports.json"),
+        "invalid existing history",
+    )
+    .unwrap();
+    run_generate_content_with_generator(&fixture.context, run, &fixture.services(), |_, _| async {
+        Ok(HTML.into())
+    })
+    .await;
+    assert_eq!(
+        fixture.tasks.get_workflow_run(&id).unwrap().display_status,
+        WorkflowDisplayStatus::Failed
+    );
+    assert!(!fixture.context.root.join(output).exists());
+    assert_eq!(
+        fs::read_to_string(fixture.context.app_dir.join("exports.json")).unwrap(),
+        "invalid existing history"
+    );
+    fs::write(fixture.context.app_dir.join("exports.json"), "[]").unwrap();
+    let WorkflowStartOutcome::Created { run } = fixture
+        .coordinator
+        .retry(
+            &fixture.tasks,
+            &id,
+            fixture.context.project_id.clone(),
+            fixture.context.root.clone(),
+            Some(fixture.context.app_dir.join("tasks")),
+        )
+        .unwrap()
+    else {
+        panic!("new retry")
+    };
+    run_generate_content_with_generator(&fixture.context, run, &fixture.services(), |_, _| async {
+        Ok(HTML.into())
+    })
+    .await;
+    assert_eq!(
+        fixture.export.list_records(&fixture.context).unwrap().len(),
+        1
+    );
 }

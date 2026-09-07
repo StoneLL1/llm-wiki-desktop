@@ -1332,7 +1332,7 @@ async fn changed_complete_scope_waits_for_review_without_external_invocation() {
         llm_wiki_desktop_lib::models::workflow::WorkflowDisplayStatus::WaitingForConfirmation
     );
     assert_eq!(
-        waiting.pending_action.unwrap().action_type,
+        waiting.pending_action.as_ref().unwrap().action_type,
         llm_wiki_desktop_lib::models::confirmation::PendingActionType::ReviewScope
     );
     assert!(waiting.result.is_some());
@@ -1341,6 +1341,172 @@ async fn changed_complete_scope_waits_for_review_without_external_invocation() {
         .lint
         .read_lint_history_report(&fixture.context, &task_id)
         .is_ok());
+    let restarted = TaskService::default();
+    restarted.recover_tasks(&fixture.context.root).unwrap();
+    let restored = restarted.get_workflow_run(&task_id).unwrap();
+    assert_eq!(restored.display_status, waiting.display_status);
+    assert_eq!(restored.pending_action, waiting.pending_action);
+    assert_eq!(restored.result, waiting.result);
+    assert!(restored.error.is_none());
+    fixture
+        .workflows
+        .coordinator
+        .freeze_owner_for_trust_revocation(&restarted, &fixture.context.root)
+        .unwrap();
+    let cancelled = restarted.get_workflow_run(&task_id).unwrap();
+    assert_eq!(
+        cancelled.display_status,
+        llm_wiki_desktop_lib::models::workflow::WorkflowDisplayStatus::Cancelled
+    );
+    assert_eq!(cancelled.result, waiting.result);
+    assert!(cancelled.pending_action.is_none());
+}
+
+#[tokio::test]
+async fn recovered_queued_local_and_byok_health_keep_authorized_persistence_through_completion() {
+    for mode in [HealthCheckMode::LocalQuick, HealthCheckMode::Complete] {
+        let fixture = Fixture::native("restart-queued-persistence");
+        let byok = fixture.configure_ollama();
+        let local = WorkflowRoute::Local {
+            route_revision: "local-v1".into(),
+        };
+        let (blocker_mode, blocker_route, route) = if mode == HealthCheckMode::LocalQuick {
+            (HealthCheckMode::Complete, byok, local)
+        } else {
+            (HealthCheckMode::LocalQuick, local, byok)
+        };
+        fixture.enqueue(blocker_mode, blocker_route, true);
+        let queued = fixture.enqueue(mode.clone(), route, true);
+        assert_eq!(
+            queued.display_status,
+            llm_wiki_desktop_lib::models::workflow::WorkflowDisplayStatus::Queued
+        );
+        let restarted = TaskService::default();
+        restarted
+            .set_project_context(
+                fixture.context.project_id.clone(),
+                fixture.context.root.clone(),
+                fixture.context.app_dir.join("tasks"),
+            )
+            .unwrap();
+        let restored = restarted.get_workflow_run(&queued.task_id).unwrap();
+        assert!(restored.continuation_required);
+        let (_, claimed) = fixture
+            .workflows
+            .coordinator
+            .apply_persistence_and_continue_queued(
+                &restarted,
+                &restored.canonical_identity_key,
+                &restored.identity_revision,
+                &[(
+                    queued.task_id.clone(),
+                    Some(fixture.context.app_dir.join("tasks")),
+                )],
+                true,
+            )
+            .unwrap();
+        let claimed = claimed.expect("explicit continuation claims the recovered queue");
+        assert_eq!(claimed.task_id, queued.task_id);
+        assert_eq!(claimed.persistence, WorkflowPersistenceMode::Persistent);
+        let services = HealthCheckExecutionServices {
+            task_service: &restarted,
+            ..fixture.services()
+        };
+        run_health_check_with_deep(&fixture.context, claimed, &services, |_, _| async {
+            Ok("[]".into())
+        })
+        .await;
+        let completed = restarted.get_workflow_run(&queued.task_id).unwrap();
+        assert_eq!(
+            completed.display_status,
+            llm_wiki_desktop_lib::models::workflow::WorkflowDisplayStatus::Completed
+        );
+        assert!(matches!(
+            completed.result,
+            Some(WorkflowResult::HealthCheck {
+                persistent: true,
+                ..
+            })
+        ));
+        let report = LintService::default()
+            .read_current_health_report(&fixture.context, &queued.task_id)
+            .unwrap();
+        assert!(report.persistent);
+        assert_eq!(report.mode, mode);
+        let reopened = TaskService::default();
+        reopened.recover_tasks(&fixture.context.root).unwrap();
+        assert_eq!(
+            reopened
+                .get_workflow_run(&queued.task_id)
+                .unwrap()
+                .display_status,
+            llm_wiki_desktop_lib::models::workflow::WorkflowDisplayStatus::Completed
+        );
+    }
+}
+
+#[tokio::test]
+async fn restart_during_deep_check_restores_saved_local_report_without_resuming_ai() {
+    use llm_wiki_desktop_lib::models::lint::HealthDeepStatus;
+    use llm_wiki_desktop_lib::models::workflow::WorkflowDisplayStatus;
+    let fixture = Fixture::native("restart-partial");
+    let route = fixture.configure_ollama();
+    let run = fixture.enqueue(HealthCheckMode::Complete, route, true);
+    let task_id = run.task_id.clone();
+    let root = &fixture.context.root;
+    let task = task_id.clone();
+    run_health_check_with_deep(
+        &fixture.context,
+        run,
+        &fixture.services(),
+        |_, _| async move {
+            let task_path = root.join(format!(".app/tasks/{task}.json"));
+            let running_snapshot = fs::read(&task_path).unwrap();
+            let restarted = TaskService::default();
+            restarted.recover_tasks(root).unwrap();
+            let restored = restarted.get_workflow_run(&task).unwrap();
+            assert_eq!(restored.display_status, WorkflowDisplayStatus::Interrupted);
+            assert_eq!(
+                restored.error.as_ref().unwrap().code,
+                "WORKFLOW_INTERRUPTED"
+            );
+            let Some(WorkflowResult::HealthCheck {
+                report_id,
+                persistent,
+                coverage: Some(coverage),
+                ..
+            }) = restored.result
+            else {
+                panic!("interrupted Health must expose the saved local report")
+            };
+            assert_eq!(report_id.as_deref(), Some(task.as_str()));
+            assert!(persistent);
+            assert_eq!(coverage.deep_status, Some(HealthDeepStatus::Pending));
+            assert!(coverage.scanned_pages > 0);
+            assert!(coverage.deep_covered_pages.is_none());
+            assert!(!restored.continuation_required);
+            // Recovery validates the stored report envelope/digest and never uses
+            // a mismatched file merely because its name matches the task id.
+            let report_path = root.join(format!(".app/lint-reports/{task}.json"));
+            let bytes = fs::read(&report_path).unwrap();
+            let mut persisted: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            persisted["healthCheckReport"]["taskId"] = serde_json::json!("another-task");
+            fs::write(&report_path, serde_json::to_vec(&persisted).unwrap()).unwrap();
+            // Restore the running snapshot to simulate the same crash boundary.
+            fs::write(&task_path, running_snapshot).unwrap();
+            let rejected = TaskService::default();
+            rejected.recover_tasks(root).unwrap();
+            assert!(rejected.get_workflow_run(&task).unwrap().result.is_none());
+            fs::write(report_path, bytes).unwrap();
+            Err(BackendError::new(
+                "TEST_INTERRUPTED",
+                "Simulated interruption",
+                true,
+                true,
+            ))
+        },
+    )
+    .await;
 }
 
 #[tokio::test]

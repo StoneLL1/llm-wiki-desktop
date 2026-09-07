@@ -17,6 +17,12 @@ import type {
 import { workflowKindDescriptionKey, workflowKindKey } from "./workflowPresentation";
 
 const MAX_VISIBLE_SCOPE_OPTIONS = 200;
+const ARTIFACT_OPTIONS = [
+  { type: "beautiful_read", label: "beautifulRead" },
+  { type: "knowledge_card", label: "knowledgeCard" },
+  { type: "concept_map", label: "conceptMap" },
+  { type: "project_report", label: "projectReport" },
+] as const;
 
 const ARTIFACT_SKILL_IDS: Record<WorkflowArtifactType, string> = {
   beautiful_read: "html-beautiful-read",
@@ -39,6 +45,9 @@ function scopeValidationKey(scope: WorkflowScope, updateAutoDetect: boolean): st
     return scope.sourceVersions.length === 0 && !updateAutoDetect
       ? "workflows.preparation.invalid.updateWikiEmpty"
       : null;
+  }
+  if (scope.outputPath !== null && !scope.outputPath.trim()) {
+    return "workflows.preparation.invalid.outputPathEmpty";
   }
   if (scope.artifactType === "beautiful_read" && scope.pagePaths.length !== 1) {
     return "workflows.preparation.invalid.beautifulReadScope";
@@ -80,6 +89,7 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
   const prerequisitePending = workflowOperationPending(operations, "prerequisite:project:");
   const [restricted, setRestricted] = useState(false);
   const [remote, setRemote] = useState(false);
+  const [explicitOutput, setExplicitOutput] = useState(preparation.gitPolicy === "required_before_overwrite");
   const [scope, setScope] = useState<WorkflowScope>(preparation.scope);
   const [routeChoice, setRouteChoice] = useState("auto");
   const [preparedRouteChoice, setPreparedRouteChoice] = useState("auto");
@@ -94,6 +104,7 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
     const saved = useWorkflowStore.getState().drafts[preparation.kind];
     const currentDraft = saved?.preparationId === preparation.preparationId ? saved : null;
     setScope(currentDraft?.scope ?? preparation.scope);
+    setExplicitOutput(preparation.gitPolicy === "required_before_overwrite");
     const nextRouteChoice = pendingRouteChoiceRef.current
       ?? (currentDraft?.routeSelection ? workflowRouteSelectionKey(currentDraft.routeSelection) : "auto");
     pendingRouteChoiceRef.current = null;
@@ -174,7 +185,7 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
       const selected = [...new Set([...scope.pagePaths, ...filteredPageOptions])];
       setScope({
         ...scope,
-        pagePaths: scope.artifactType === "beautiful_read" ? selected.slice(0, 1) : selected,
+        pagePaths: scope.artifactType === "beautiful_read" ? filteredPageOptions.slice(0, 1) : selected,
       });
     }
   };
@@ -247,9 +258,37 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
 
       <fieldset className="workflow-preparation-controls" disabled={startPending || preparePending}>
       <ol className="workflow-decision-sequence">
-        <li className="workflow-preparation-step" data-decision-step="1">
+        <li className={scope.kind === "generate_content" ? "workflow-preparation-step is-expanded" : "workflow-preparation-step"} data-decision-step="1">
           <div className="workflow-preparation-step__label">{t("workflows.preparation.whatWillHappen")}</div>
           <p>{t(workflowKindDescriptionKey(preparation.kind))}</p>
+          {scope.kind === "generate_content" ? (
+            <div className="workflow-artifact-options" role="radiogroup" aria-label={t("workflows.preparation.artifactType")}>
+              {ARTIFACT_OPTIONS.map(({ type: artifactType, label }) => (
+                <label className={scope.artifactType === artifactType ? "is-selected" : undefined} key={artifactType}>
+                  <input
+                    aria-label={t(`workflows.artifact.${label}`)}
+                    checked={scope.artifactType === artifactType}
+                    name="workflow-artifact-type"
+                    onChange={() => {
+                      setScope({
+                        ...scope,
+                        artifactType,
+                        outputPath: explicitOutput ? scope.outputPath : null,
+                        pagePaths: artifactType === "project_report"
+                          ? []
+                          : artifactType === "beautiful_read"
+                            ? scope.pagePaths.slice(0, 1)
+                            : scope.pagePaths,
+                      });
+                      setScopePage(0);
+                    }}
+                    type="radio"
+                  />
+                  <span><strong>{t(`workflows.artifact.${label}`)}</strong><small>{t(`workflows.preparation.generate.${artifactType}`)}</small></span>
+                </label>
+              ))}
+            </div>
+          ) : null}
         </li>
         <li className="workflow-preparation-step is-expanded" data-decision-step="2">
           <div className="workflow-preparation-step__label">{t("workflows.preparation.inputScope")}</div>
@@ -307,11 +346,8 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
                 })}
               </div>
             </>
-          ) : scope.kind === "generate_content" && scope.artifactType === "project_report" ? (
-            <p className="workflow-scope-state">{t("workflows.preparation.generate.project_report")}</p>
-          ) : scope.kind === "generate_content" ? (
+          ) : scope.kind === "generate_content" && scope.artifactType !== "project_report" ? (
             <>
-              <p className="workflow-scope-state">{t(`workflows.preparation.generate.${scope.artifactType}`)}</p>
               <ScopeOptionToolbar
                 filteredCount={filteredCount}
                 onClear={clearSelection}
@@ -340,9 +376,10 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
                               : [...scope.pagePaths, path]
                             : scope.pagePaths.filter((item) => item !== path),
                         })}
-                        type="checkbox"
+                        name={scope.artifactType === "beautiful_read" ? "workflow-reading-page" : undefined}
+                        type={scope.artifactType === "beautiful_read" ? "radio" : "checkbox"}
                       />
-                      <code>{path}</code>
+                      <code title={path}>{path}</code>
                     </label>
                   );
                 })}
@@ -351,20 +388,38 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
           ) : null}
           {validationKey ? <p className="workflow-scope-state is-invalid" role="alert">{t(validationKey)}</p> : null}
         </li>
-        <li className="workflow-preparation-step" data-decision-step="3">
+        <li className={scope.kind === "generate_content" ? "workflow-preparation-step is-expanded" : "workflow-preparation-step"} data-decision-step="3">
           <div className="workflow-preparation-step__label">{t("workflows.preparation.output")}</div>
           <div className="workflow-preparation-step__value font-mono">
-            {outputLocation ?? t("workflows.output.session")}
+            {scope.kind === "health_check"
+              ? <>{t("workflows.output.healthReport")} · {t(preparation.projectAccess.persistence === "persistent"
+                ? "workflows.preparation.healthReportPersistent"
+                : "workflows.output.session")}</>
+              : outputLocation ?? t("workflows.output.session")}
           </div>
           {scope.kind === "generate_content" ? (
-            <label className="workflow-field">
-              {t("workflows.preparation.outputPath")}
-              <input
-                onChange={(event) => setScope({ ...scope, outputPath: event.target.value || null })}
-                type="text"
-                value={scope.outputPath ?? ""}
-              />
-            </label>
+            <div>
+              <div className="workflow-option-row" role="radiogroup" aria-label={t("workflows.preparation.saveMode")}>
+                <label>
+                  <input checked={!explicitOutput} name="workflow-save-mode" onChange={() => { setExplicitOutput(false); setScope({ ...scope, outputPath: null }); }} type="radio" />
+                  {t("workflows.preparation.createArtifact")}
+                </label>
+                <label>
+                  <input checked={explicitOutput} name="workflow-save-mode" onChange={() => { setExplicitOutput(true); setScope({ ...scope, outputPath: scope.outputPath ?? "" }); }} type="radio" />
+                  {t("workflows.preparation.explicitTarget")}
+                </label>
+              </div>
+              <p className="workflow-scope-state">{t(!explicitOutput ? "workflows.preparation.createArtifactHint" : "workflows.preparation.explicitTargetHint")}</p>
+              <label className="workflow-field">
+                {t("workflows.preparation.outputPath")}
+                <input
+                  onChange={(event) => { setExplicitOutput(!!event.target.value); setScope({ ...scope, outputPath: event.target.value || null }); }}
+                  placeholder={t("workflows.preparation.outputPathPlaceholder")}
+                  type="text"
+                  value={scope.outputPath ?? ""}
+                />
+              </label>
+            </div>
           ) : null}
         </li>
         <li className="workflow-preparation-step" data-decision-step="4">
@@ -433,30 +488,7 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
               </label>
             </div>
           ) : (
-            <label className="workflow-field">
-              {t("workflows.preparation.artifactType")}
-              <select
-                onChange={(event) => {
-                  const artifactType = event.target.value as WorkflowArtifactType;
-                  setScope({
-                    ...scope,
-                    artifactType,
-                    pagePaths: artifactType === "project_report"
-                      ? []
-                      : artifactType === "beautiful_read"
-                        ? scope.pagePaths.slice(0, 1)
-                        : scope.pagePaths,
-                  });
-                  setScopePage(0);
-                }}
-                value={scope.artifactType}
-              >
-                <option value="beautiful_read">{t("workflows.artifact.beautifulRead")}</option>
-                <option value="knowledge_card">{t("workflows.artifact.knowledgeCard")}</option>
-                <option value="concept_map">{t("workflows.artifact.conceptMap")}</option>
-                <option value="project_report">{t("workflows.artifact.projectReport")}</option>
-              </select>
-            </label>
+            <p>{t("workflows.preparation.exportValidation")}</p>
           )}
         </li>
       </ol>

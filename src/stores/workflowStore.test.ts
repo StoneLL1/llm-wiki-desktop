@@ -76,6 +76,25 @@ describe("workflowStore", () => {
     expect(useWorkflowStore.getState().selectedTaskId).toBe("old-history");
   });
 
+  it("bounds 10,000 terminal summaries and detail visits while retaining active tasks", () => {
+    useWorkflowStore.getState().activateProject("project-a\0D:/a");
+    const history = Array.from({ length: 10_000 }, (_, index) => ({
+      ...run(`history-${index}`, "2026-09-07T00:00:00Z"), revision: "1", sessionId: "session-a",
+      canonicalIdentityKey: index % 2 ? "foreign-owner" : "identity-a",
+    }));
+    const active = Array.from({ length: 3 }, (_, index) => ({
+      ...run(`active-${index}`, "2026-09-07T00:00:00Z"), revision: "1", sessionId: "session-a",
+      displayStatus: "running" as const,
+    }));
+    recordWorkflowFacts([...history, ...active]);
+    expect(Object.keys(useTaskStore.getState().workflowById)).toHaveLength(259);
+    for (const item of active) expect(useTaskStore.getState().workflowById[item.taskId]).toBeDefined();
+    for (const item of history.slice(-200)) useWorkflowStore.getState().upsertRun(item);
+    expect(useWorkflowStore.getState().runs).toHaveLength(16);
+    expect(Object.keys(useWorkflowStore.getState().detailRevisionById)).toHaveLength(16);
+    expect(Object.keys(useTaskStore.getState().workflowById)).toHaveLength(259);
+  });
+
   it("clears old details when a backend restart publishes lower recovered revisions", () => {
     useWorkflowStore.getState().activateProject("project-a\0D:/a");
     useWorkflowStore.getState().setOverviewSnapshot({ ...overview("identity-a", "revision-a"), sessionId: "session-a" });

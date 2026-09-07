@@ -10,6 +10,7 @@ export async function openWorkflowResultDetails(
   project: WorkflowProjectRef,
   result: NonNullable<WorkflowRun["result"]>,
   navigation: WorkflowNavigation,
+  taskId: string,
 ): Promise<void> {
   if (result.kind === "update_wiki") {
     const commitGuard = navigation.matches;
@@ -51,20 +52,26 @@ export async function openWorkflowResultDetails(
   const commitGuard = navigation.matches;
   await useExportStore.getState().loadExports(project.projectId, project.rootPath, commitGuard);
   navigation.assertCurrent();
-  const record = useExportStore
-    .getState()
-    .records.find((candidate) => candidate.id === result.recordId);
-  if (record) {
-    await useExportStore.getState().loadPreview(
-      {
-        projectId: project.projectId,
-        projectRootPath: project.rootPath,
-        outputPath: record.outputPath,
-      },
-      record.id,
-      commitGuard,
-    );
-    navigation.assertCurrent();
+  const exports = useExportStore.getState();
+  if (exports.error) throw new Error(exports.error);
+  const record = exports.records.find((candidate) => candidate.id === result.recordId);
+  if (!record || (record.taskId && record.taskId !== taskId)) {
+    throw new Error("WORKFLOW_EXPORT_RESULT_UNAVAILABLE");
+  }
+  await exports.loadPreview(
+    {
+      projectId: project.projectId,
+      projectRootPath: project.rootPath,
+      outputPath: record.outputPath,
+    },
+    record.id,
+    commitGuard,
+  );
+  navigation.assertCurrent();
+  const preview = useExportStore.getState();
+  if (preview.error) throw new Error(preview.error);
+  if (preview.previewId !== record.id) {
+    throw new Error("WORKFLOW_EXPORT_PREVIEW_SUPERSEDED");
   }
   useNavigationStore.getState().setActiveView("exports");
 }

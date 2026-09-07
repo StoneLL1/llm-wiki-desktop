@@ -45,6 +45,38 @@ fn export_record_path(context: &ProjectContext) -> Result<&str, BackendError> {
     })
 }
 
+fn pending_records_root(context: &ProjectContext) -> Result<String, BackendError> {
+    let parent = Path::new(export_record_path(context)?)
+        .parent()
+        .ok_or_else(|| {
+            BackendError::new(
+                "EXPORT_RECORD_PATH_INVALID",
+                "Export history must have a state directory.",
+                false,
+                false,
+            )
+        })?;
+    Ok(format!(
+        "{}/export-pending",
+        parent.to_string_lossy().replace('\\', "/")
+    ))
+}
+
+fn pending_record_path(context: &ProjectContext, id: &str) -> Result<String, BackendError> {
+    if !id
+        .strip_prefix("export-")
+        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+    {
+        return Err(BackendError::new(
+            "EXPORT_RECORD_INVALID",
+            "Invalid export receipt id.",
+            false,
+            false,
+        ));
+    }
+    Ok(format!("{}/{}.json", pending_records_root(context)?, id))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedExportArtifact {
     pub html: String,
@@ -256,7 +288,10 @@ impl ExportService {
             "You are generating a single, self-contained HTML document for a local Markdown wiki, \
              following the `{skill}` skill. Emit ONLY a complete standalone HTML document: a single \
              `<!doctype html>` page with all CSS inlined in a `<style>` block. {resource_clause} \
-             Do NOT modify any project files. You may wrap the whole document in a fenced ```html \
+             Do NOT modify any project files. Hyperlinks must use only same-document fragment \
+             targets such as href=\"#section\". Render source paths, wiki links and external URLs \
+             as plain text, never as relative, file:, http: or https: links. Do not emit scripts, \
+             event handlers, forms, external stylesheets or CSS imports. You may wrap the whole document in a fenced ```html \
              block; everything else will be discarded.\n",
         ));
         prompt.push_str(&crate::utils::i18n::language_instruction(language));
@@ -651,6 +686,77 @@ impl ExportService {
         }
     }
 
+    /// Shared create-new publication for Workflow and Wiki quick export. Read
+    /// history before touching content, then roll back only our exact bytes if
+    /// saving the record fails. Never remove a concurrent user replacement.
+    pub fn save_new_artifact(
+        &self,
+        context: &ProjectContext,
+        artifact: &ValidatedExportArtifact,
+        record: ExportRecord,
+    ) -> Result<(), BackendError> {
+        if record.preview.as_ref() != Some(&artifact.preview)
+            || self.file_store.content_hash(artifact.html.as_bytes())
+                != artifact.preview.content_hash
+        {
+            return Err(BackendError::new(
+                "EXPORT_RECORD_INVALID",
+                "Export record does not match the validated artifact.",
+                false,
+                false,
+            ));
+        }
+        let _guard = export_record_guard()?;
+        let mut records = self.list_records(context)?;
+        let output_path = self.validate_workflow_output_path(context, &record.output_path)?;
+        let receipt_path = pending_record_path(context, &record.id)?;
+        let receipt = serde_json::to_string_pretty(&record).map_err(|error| {
+            BackendError::new("EXPORT_RECORD_INVALID", error.to_string(), false, false)
+        })?;
+        let receipt_hash = self.file_store.content_hash(receipt.as_bytes());
+        let parent = Path::new(&receipt_path).parent().unwrap().to_string_lossy();
+        self.file_store.ensure_dir(context, &parent)?;
+        self.file_store
+            .write_markdown_create_new_atomic(context, &receipt_path, &receipt)?;
+        if let Err(error) = self.write_html_checked(
+            context,
+            &output_path,
+            &artifact.html,
+            crate::services::WriteMode::CreateNew,
+        ) {
+            let _ = self
+                .file_store
+                .remove_if_hash_matches(context, &receipt_path, &receipt_hash);
+            return Err(error);
+        }
+        records.insert(0, record);
+        if let Err(error) =
+            self.file_store
+                .write_json_atomic(context, export_record_path(context)?, &records)
+        {
+            let removed = self.file_store.remove_if_hash_matches(
+                context,
+                &output_path,
+                &artifact.preview.content_hash,
+            );
+            if removed == Ok(true) {
+                let _ =
+                    self.file_store
+                        .remove_if_hash_matches(context, &receipt_path, &receipt_hash);
+            }
+            return Err(error.with_details(serde_json::json!({
+                "outputPath": output_path,
+                "projectMutationState": if removed == Ok(true) { "rolled_back" } else { "unknown" },
+            })));
+        }
+        // Cleanup failure cannot invalidate a durable file+record. Reads dedup
+        // by record id, so a leftover receipt cannot create another artifact.
+        let _ = self
+            .file_store
+            .remove_if_hash_matches(context, &receipt_path, &receipt_hash);
+        Ok(())
+    }
+
     fn append_page_summaries(
         &self,
         context: &ProjectContext,
@@ -707,45 +813,10 @@ impl ExportService {
                     .to_string()
             })
         };
-        let stamp = compact_timestamp();
+        let stamp = format!("{}-{}", compact_timestamp(), uuid::Uuid::new_v4());
         let export_root = self.workflow_export_root_relative(context)?;
         let path = format!("{export_root}/{slug}-{stamp}.html");
         if !path.starts_with(&format!("{export_root}/")) || path.contains("..") {
-            return Err(BackendError::new(
-                "EXPORT_PATH_INVALID",
-                "Resolved export path escaped exports/html/.",
-                true,
-                true,
-            ));
-        }
-        Ok(path)
-    }
-
-    /// Legacy, path-only helper retained for callers that only need a native
-    /// fixture name. Production export commands must call
-    /// `build_output_relative_path_for`, which derives the root from
-    /// `ProjectLayout`; any later compatible write through this legacy string
-    /// still fails the layout-root validation instead of creating exports/.
-    pub fn build_output_relative_path(
-        &self,
-        export_type: ExportType,
-        source_path: Option<&str>,
-    ) -> Result<String, BackendError> {
-        let slug = if export_type == ExportType::ProjectReport {
-            export_type
-                .skill_folder()
-                .trim_start_matches("html-")
-                .to_string()
-        } else {
-            source_path.map(slug_from_source).unwrap_or_else(|| {
-                export_type
-                    .skill_folder()
-                    .trim_start_matches("html-")
-                    .to_string()
-            })
-        };
-        let path = format!("exports/html/{slug}-{}.html", compact_timestamp());
-        if path.contains("..") {
             return Err(BackendError::new(
                 "EXPORT_PATH_INVALID",
                 "Resolved export path escaped exports/html/.",
@@ -815,29 +886,6 @@ impl ExportService {
         trim_trailing_prose(&body)
     }
 
-    /// Write the HTML to the project-resolved output path. The path must already
-    /// be a safe relative path under `exports/html/`; we additionally resolve it
-    /// through `ProjectContext` (path-safety gate) before writing atomically.
-    pub fn write_html(
-        &self,
-        context: &ProjectContext,
-        output_relative: &str,
-        html: &str,
-    ) -> Result<(), BackendError> {
-        self.write_html_checked(
-            context,
-            output_relative,
-            html,
-            crate::services::WriteMode::CreateNew,
-        )
-        .map_err(|mut error| {
-            if error.code == "WORKFLOW_OUTPUT_PATH_INVALID" {
-                error.code = "EXPORT_PATH_INVALID".to_owned();
-            }
-            error
-        })
-    }
-
     /// Append a record to `.app/exports.json` (created if missing).
     pub fn append_record(
         &self,
@@ -846,6 +894,7 @@ impl ExportService {
     ) -> Result<(), BackendError> {
         let _guard = export_record_guard()?;
         let mut records = self.list_records(context)?;
+        records.retain(|existing| existing.id != record.id);
         records.insert(0, record);
         self.file_store
             .write_json_atomic(context, export_record_path(context)?, &records)
@@ -882,11 +931,68 @@ impl ExportService {
         &self,
         context: &ProjectContext,
     ) -> Result<Vec<ExportRecord>, BackendError> {
-        let export_record_path = export_record_path(context)?;
-        if !self.file_store.exists(context, export_record_path) {
-            return Ok(Vec::new());
+        let path = export_record_path(context)?;
+        let mut records: Vec<ExportRecord> = if self.file_store.exists(context, path) {
+            self.file_store.read_json(context, path)?
+        } else {
+            Vec::new()
+        };
+        // Read-only recovery of a crash between HTML publication and the
+        // history write. A receipt without the exact validated artifact is
+        // never presented as success, and unknown bytes are left untouched.
+        let pending = pending_records_root(context)?;
+        let absolute = context.resolve_project_path(&pending)?;
+        if absolute.exists() {
+            for entry in std::fs::read_dir(&absolute).map_err(|error| {
+                BackendError::new("EXPORT_RECORD_READ_FAILED", error.to_string(), true, false)
+            })? {
+                let entry = entry.map_err(|error| {
+                    BackendError::new("EXPORT_RECORD_READ_FAILED", error.to_string(), true, false)
+                })?;
+                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                let Some(id) = name.strip_suffix(".json") else {
+                    continue;
+                };
+                let Ok(relative) = pending_record_path(context, id) else {
+                    continue;
+                };
+                let Ok(record) = self
+                    .file_store
+                    .read_json::<ExportRecord>(context, &relative)
+                else {
+                    continue;
+                };
+                if record.id != id
+                    || records.iter().any(|existing| existing.id == record.id)
+                    || record.status != ExportStatus::Succeeded
+                {
+                    continue;
+                }
+                let Some(preview) = &record.preview else {
+                    continue;
+                };
+                if !preview.validation_passed {
+                    continue;
+                }
+                let Ok(path) = self.resolve_existing_html_export(context, &record.output_path)
+                else {
+                    continue;
+                };
+                let Ok(bytes) = std::fs::read(path) else {
+                    continue;
+                };
+                if bytes.len() as u64 != preview.byte_size
+                    || self.file_store.content_hash(&bytes) != preview.content_hash
+                {
+                    continue;
+                }
+                records.push(record);
+            }
         }
-        self.file_store.read_json(context, export_record_path)
+        records.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        Ok(records)
     }
 
     pub fn list_records_with_bookmarks(
@@ -1766,9 +1872,14 @@ mod tests {
         let (context, root) = tmp_context("escape");
         let service = ExportService::default();
         let err = service
-            .write_html(&context, "exports/html/../../wiki/x.html", "<p/>")
+            .write_html_checked(
+                &context,
+                "exports/html/../../wiki/x.html",
+                "<p/>",
+                crate::services::WriteMode::CreateNew,
+            )
             .expect_err("escape must be rejected");
-        assert_eq!(err.code, "EXPORT_PATH_INVALID");
+        assert_eq!(err.code, "WORKFLOW_OUTPUT_PATH_INVALID");
         assert!(!context.wiki_dir.join("x.html").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1778,10 +1889,11 @@ mod tests {
         let (context, root) = tmp_context("write");
         let service = ExportService::default();
         service
-            .write_html(
+            .write_html_checked(
                 &context,
                 "exports/html/agent-1.html",
                 "<!doctype html><p>hi</p>",
+                crate::services::WriteMode::CreateNew,
             )
             .unwrap();
         let on_disk = std::fs::read_to_string(
@@ -2216,6 +2328,104 @@ mod tests {
         assert_eq!(record.export_type, ExportType::ProjectReport);
         assert!(record.id.starts_with("export-"));
         assert_eq!(record.task_id.as_deref(), Some("task-1"));
+    }
+
+    #[test]
+    fn pending_create_receipt_recovers_only_the_exact_published_artifact_without_writes() {
+        let (context, root) = tmp_context("create-receipt");
+        let service = ExportService::default();
+        let artifact = service
+            .validate_html_artifact(
+                "<!doctype html><html><head></head><body>中文结果</body></html>",
+            )
+            .unwrap();
+        let record = ExportService::new_validated_record(
+            ExportType::BeautifulRead,
+            "中文".into(),
+            Some("wiki/主题.md".into()),
+            "exports/html/中文 阅读.html".into(),
+            ExportRoute::Agent,
+            Some("task-export".into()),
+            artifact.preview.clone(),
+        );
+        let receipt_path = pending_record_path(&context, &record.id).unwrap();
+        write_file(
+            &context,
+            &receipt_path,
+            &serde_json::to_string_pretty(&record).unwrap(),
+        );
+        assert!(
+            service.list_records(&context).unwrap().is_empty(),
+            "write intent alone is not a result"
+        );
+        service
+            .write_html_checked(
+                &context,
+                &record.output_path,
+                &artifact.html,
+                crate::services::WriteMode::CreateNew,
+            )
+            .unwrap();
+        assert_eq!(
+            service.list_records(&context).unwrap(),
+            vec![record.clone()]
+        );
+        assert!(
+            !context
+                .root
+                .join(export_record_path(&context).unwrap())
+                .exists(),
+            "recovery reads do not mutate metadata"
+        );
+        service.append_record(&context, record.clone()).unwrap();
+        assert_eq!(
+            service.list_records(&context).unwrap().len(),
+            1,
+            "receipt and record deduplicate"
+        );
+        // A crash before the history write followed by an external edit must
+        // not manufacture a successful export or remove the edited bytes.
+        std::fs::remove_file(context.root.join(export_record_path(&context).unwrap())).unwrap();
+        write_file(&context, &record.output_path, "user replacement");
+        assert!(service.list_records(&context).unwrap().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(context.root.join(&record.output_path)).unwrap(),
+            "user replacement"
+        );
+        assert!(context.root.join(receipt_path).exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shared_new_artifact_save_never_overwrites_and_clears_its_receipt() {
+        let (context, root) = tmp_context("shared-create");
+        let service = ExportService::default();
+        let artifact = service
+            .validate_html_artifact("<!doctype html><html><head></head><body>new</body></html>")
+            .unwrap();
+        let record = ExportService::new_validated_record(
+            ExportType::KnowledgeCard,
+            "card".into(),
+            None,
+            "exports/html/new.html".into(),
+            ExportRoute::Agent,
+            Some("task-card".into()),
+            artifact.preview.clone(),
+        );
+        service
+            .save_new_artifact(&context, &artifact, record.clone())
+            .unwrap();
+        assert!(!context
+            .root
+            .join(pending_record_path(&context, &record.id).unwrap())
+            .exists());
+        let mut second = record.clone();
+        second.id = format!("export-{}", uuid::Uuid::new_v4());
+        assert!(service
+            .save_new_artifact(&context, &artifact, second)
+            .is_err());
+        assert_eq!(service.list_records(&context).unwrap(), vec![record]);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

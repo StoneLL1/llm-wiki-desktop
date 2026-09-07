@@ -483,6 +483,41 @@ where
     }
 }
 
+pub(crate) fn recover_health_check_result(
+    task_id: &str,
+    workflow: &crate::models::workflow::WorkflowExecutionState,
+    project_root: &std::path::Path,
+) -> Option<WorkflowResult> {
+    if workflow.kind != WorkflowKind::HealthCheck
+        || workflow.execution_options.operation
+            != crate::models::workflow::WorkflowOperation::BuiltIn
+        || workflow.persistence != crate::models::workflow::WorkflowPersistenceMode::Persistent
+    {
+        return None;
+    }
+    let identity = super::super::project_identity(project_root).ok()?;
+    if identity.canonical_identity_key != workflow.canonical_identity_key
+        || identity.identity_revision != workflow.identity_revision
+    {
+        return None;
+    }
+    let context = ProjectContext::new("workflow-recovery", project_root.to_path_buf())
+        .with_resolved_layout()
+        .ok()?;
+    let report = LintService::default()
+        .read_current_health_report(&context, task_id)
+        .ok()?;
+    if workflow.scope
+        != (WorkflowScope::HealthCheck {
+            mode: report.mode.clone(),
+        })
+        || workflow.route.as_ref() != Some(&report.route)
+    {
+        return None;
+    }
+    health_result(&report).ok()
+}
+
 fn health_result(report: &HealthCheckReport) -> Result<WorkflowResult, BackendError> {
     Ok(WorkflowResult::HealthCheck {
         report_id: Some(report.report_id.clone()),

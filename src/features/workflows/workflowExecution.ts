@@ -60,7 +60,7 @@ export async function reviewWorkflowScope(
   routeSelection: WorkflowRouteSelection | null,
   isCurrent: () => boolean,
 ): Promise<void> {
-  if (!isCurrent() || (run.scope.kind !== "update_wiki" && run.scope.kind !== "health_check")) return;
+  if (!isCurrent()) return;
   let scope = run.scope;
   if (scope.kind === "update_wiki") {
     const available = await prepareWorkflow({ ...request, kind: run.kind, scope: null, routeSelection });

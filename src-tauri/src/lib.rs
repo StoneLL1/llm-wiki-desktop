@@ -549,10 +549,11 @@ pub fn run() {
                                 coordinator: &state.workflow_service.coordinator,
                             };
                             let authority_run = run.clone();
-                            if let Some(next) = services::run_generate_content_authorized(
+                            if let Some(next) = services::run_generate_content_with_authority(
                                 &context,
                                 run,
                                 &generate,
+                                || state.publish_workflow_external_launch(&context, &authority_run),
                                 || state.publish_workflow_external_launch(&context, &authority_run),
                             )
                             .await

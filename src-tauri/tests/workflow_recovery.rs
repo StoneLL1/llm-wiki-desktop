@@ -398,6 +398,82 @@ fn recovery_rejects_invalid_agent_repair_pairings_and_future_operation_authority
 }
 
 #[test]
+fn interrupted_export_recovers_only_the_matching_validated_artifact() {
+    use llm_wiki_desktop_lib::models::export::{ExportRoute, ExportType};
+    use llm_wiki_desktop_lib::models::workflow::{WorkflowArtifactType, WorkflowResult};
+    use llm_wiki_desktop_lib::services::{ExportService, WriteMode};
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("中文知识库");
+    std::fs::create_dir_all(root.join("wiki")).unwrap();
+    std::fs::write(root.join("purpose.md"), "# Purpose\n").unwrap();
+    std::fs::write(root.join("schema.md"), "# Schema\n").unwrap();
+    std::fs::write(root.join("wiki/主题.md"), "# 主题\n").unwrap();
+    let context = ProjectContext::new("export-recovery", root.clone());
+    let coordinator = WorkflowCoordinator::default();
+    let tasks = TaskService::default();
+    let mut input = request(&root, "export-baseline");
+    input.kind = WorkflowKind::GenerateContent;
+    input.scope = WorkflowScope::GenerateContent {
+        artifact_type: WorkflowArtifactType::BeautifulRead,
+        page_paths: vec!["wiki/主题.md".into()],
+        output_path: Some("exports/html/中文成果.html".into()),
+    };
+    input.route = Some(WorkflowRoute::Agent {
+        agent: AgentKind::Claude,
+        model: None,
+        route_revision: "claude-test".into(),
+    });
+    let run = created(coordinator.enqueue(&tasks, input).unwrap());
+    let task_path = root.join(format!(".app/tasks/{}.json", run.task_id));
+    let running = std::fs::read(&task_path).unwrap();
+    let exports = ExportService::default();
+    let artifact = exports.validate_html_artifact("<!doctype html><html><head><title>主题</title></head><body><h1>主题</h1></body></html>").unwrap();
+    exports
+        .write_html_checked(
+            &context,
+            "exports/html/中文成果.html",
+            &artifact.html,
+            WriteMode::CreateNew,
+        )
+        .unwrap();
+    let record = ExportService::new_validated_record(
+        ExportType::BeautifulRead,
+        "主题".into(),
+        Some("wiki/主题.md".into()),
+        "exports/html/中文成果.html".into(),
+        ExportRoute::Agent,
+        Some(run.task_id.clone()),
+        artifact.preview,
+    );
+    let record_id = record.id.clone();
+    exports.append_record(&context, record).unwrap();
+    let restarted = TaskService::default();
+    restarted.recover_tasks(&root).unwrap();
+    let recovered = restarted.get_workflow_run(&run.task_id).unwrap();
+    assert_eq!(recovered.display_status, WorkflowDisplayStatus::Interrupted);
+    assert_eq!(recovered.error.unwrap().code, "WORKFLOW_INTERRUPTED");
+    assert!(
+        matches!(recovered.result, Some(WorkflowResult::GenerateContent {
+        record_id: Some(id), validation_passed: true, ..
+    }) if id == record_id)
+    );
+    // An external edit is never accepted as the task's checked output.
+    std::fs::write(root.join("exports/html/中文成果.html"), "user replacement").unwrap();
+    std::fs::write(task_path, running).unwrap();
+    let changed = TaskService::default();
+    changed.recover_tasks(&root).unwrap();
+    assert!(changed
+        .get_workflow_run(&run.task_id)
+        .unwrap()
+        .result
+        .is_none());
+    assert_eq!(
+        std::fs::read_to_string(root.join("exports/html/中文成果.html")).unwrap(),
+        "user replacement"
+    );
+}
+
+#[test]
 fn restart_interrupts_running_and_holds_queued_until_explicit_continuation() {
     let parent = tempfile::tempdir().unwrap();
     let root = parent.path().join("CJK-知识库");

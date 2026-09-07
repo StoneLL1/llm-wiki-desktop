@@ -131,6 +131,24 @@ pub fn recover_workflow(
     workflow: &mut WorkflowExecutionState,
     project_root: &Path,
 ) {
+    // Domain results can become durable before the task terminal snapshot.
+    // Preserve usable output without promoting interrupted execution to success
+    // or reauthorizing an external route.
+    if workflow.result.is_none()
+        && matches!(task.status, TaskStatus::Running | TaskStatus::Cancelling)
+    {
+        workflow.result = match workflow.kind {
+            WorkflowKind::HealthCheck => super::runners::health_check::recover_health_check_result(
+                &task.id,
+                workflow,
+                project_root,
+            ),
+            WorkflowKind::GenerateContent => {
+                recover_export_result(&task.id, workflow, project_root)
+            }
+            WorkflowKind::UpdateWiki => None,
+        };
+    }
     if let Some(result) =
         super::runners::update_wiki::committed_update_wiki_result(&task.id, project_root)
     {
@@ -172,6 +190,88 @@ pub fn recover_workflow(
         | TaskStatus::Cancelled
         | TaskStatus::Interrupted => {}
     }
+}
+
+fn recover_export_result(
+    task_id: &str,
+    workflow: &WorkflowExecutionState,
+    project_root: &Path,
+) -> Option<crate::models::workflow::WorkflowResult> {
+    use crate::models::export::{ExportRoute, ExportStatus, ExportType};
+    use crate::models::workflow::{
+        WorkflowArtifactType, WorkflowOperation, WorkflowPersistenceMode, WorkflowResult,
+        WorkflowRoute, WorkflowScope,
+    };
+    use crate::services::{ExportService, FileStore};
+    if workflow.execution_options.operation != WorkflowOperation::BuiltIn
+        || workflow.persistence != WorkflowPersistenceMode::Persistent
+    {
+        return None;
+    }
+    let WorkflowScope::GenerateContent {
+        artifact_type,
+        page_paths,
+        output_path: Some(output_path),
+    } = &workflow.scope
+    else {
+        return None;
+    };
+    let identity = project_identity(project_root).ok()?;
+    if identity.canonical_identity_key != workflow.canonical_identity_key
+        || identity.identity_revision != workflow.identity_revision
+    {
+        return None;
+    }
+    let context =
+        crate::models::paths::ProjectContext::new("workflow-recovery", project_root.to_path_buf())
+            .with_resolved_layout()
+            .ok()?;
+    let exports = ExportService::default();
+    exports
+        .validate_workflow_output_path(&context, output_path)
+        .ok()?;
+    let expected_type = match artifact_type {
+        WorkflowArtifactType::BeautifulRead => ExportType::BeautifulRead,
+        WorkflowArtifactType::KnowledgeCard => ExportType::KnowledgeCard,
+        WorkflowArtifactType::ConceptMap => ExportType::ConceptMap,
+        WorkflowArtifactType::ProjectReport => ExportType::ProjectReport,
+    };
+    let expected_route = match workflow.route.as_ref()? {
+        WorkflowRoute::Agent { .. } => ExportRoute::Agent,
+        WorkflowRoute::Byok { .. } => ExportRoute::Byok,
+        WorkflowRoute::Local { .. } => return None,
+    };
+    let source = (expected_type != ExportType::ProjectReport && page_paths.len() == 1)
+        .then(|| page_paths[0].as_str());
+    let records = exports.list_records(&context).ok()?;
+    let record = records.iter().find(|record| {
+        record.task_id.as_deref() == Some(task_id)
+            && record.export_type == expected_type
+            && record.output_path == *output_path
+            && record.route == expected_route
+            && record.source_path.as_deref() == source
+            && record.status == ExportStatus::Succeeded
+            && !record.id.is_empty()
+            && record
+                .preview
+                .as_ref()
+                .is_some_and(|preview| preview.validation_passed)
+    })?;
+    exports
+        .resolve_existing_html_export(&context, output_path)
+        .ok()?;
+    let bytes = FileStore.read_bytes(&context, output_path).ok()?;
+    let preview = record.preview.as_ref()?;
+    if bytes.len() as u64 != preview.byte_size || hex_sha256(&bytes) != preview.content_hash {
+        return None;
+    }
+    Some(WorkflowResult::GenerateContent {
+        artifact_type: artifact_type.clone(),
+        record_id: Some(record.id.clone()),
+        output_paths: vec![output_path.clone()],
+        artifact_count: Some(1),
+        validation_passed: true,
+    })
 }
 
 fn interrupt(task: &mut BackendTask, workflow: &mut WorkflowExecutionState) {
@@ -227,14 +327,26 @@ fn pending_action_is_valid(
         }
     }
     if pending.action_type == crate::models::confirmation::PendingActionType::ReviewScope
-        && (workflow.kind != WorkflowKind::UpdateWiki
-            || !matches!(
-                workflow.execution_options.operation,
-                crate::models::workflow::WorkflowOperation::BuiltIn
-            )
-            || pending.candidate.is_some()
+        && (!matches!(
+            workflow.execution_options.operation,
+            crate::models::workflow::WorkflowOperation::BuiltIn
+        ) || pending.candidate.is_some()
             || pending.checkpoint_hash.is_some()
-            || workflow.current_stage_id.as_deref() != Some("analyze_sources"))
+            || !matches!(
+                (&workflow.scope, workflow.current_stage_id.as_deref()),
+                (
+                    crate::models::workflow::WorkflowScope::UpdateWiki { .. },
+                    Some("analyze_sources")
+                ) | (
+                    crate::models::workflow::WorkflowScope::HealthCheck {
+                        mode: crate::models::workflow::HealthCheckMode::Complete
+                    },
+                    Some("deep_check")
+                ) | (
+                    crate::models::workflow::WorkflowScope::GenerateContent { .. },
+                    Some("confirm_scope")
+                )
+            ))
     {
         return false;
     }

@@ -233,6 +233,10 @@ Wiki has one deliberate quick-export exception: the current article's `生成 HT
 
 When the user starts Generate Content from Workflows, ask for the applicable scope in the full preparation view. Exports new and regenerate actions also enter this full path, with the existing record's type, source, and output path carried into preparation where applicable.
 
+The implemented typed preparation carries artifact type, applicable Wiki page paths, output path, and execution route. The current concept-map input uses the first selected page as its center and the selected related pages. There are no separate free-text topic, theme, report subtype, or optional-exclusion controls in this schema; the optional report exclusions in the target scope table remain unimplemented and are not claimed as accepted. A normal run creates a new artifact; only an explicit existing output path requests overwrite, with its checkpoint and candidate confirmation. If queued inputs change, Generate Content enters `review_scope` and re-prepares the selected artifact/page intent before a retry-linked task starts.
+
+Workflow and Wiki quick export reuse ExportService validation, create-new checked publication, and ExportRecord/receipt handling. Opening a Workflow result selects its exact record and task association, then opens that record's preview; it does not substitute the latest export. After restart an exact durable result may remain available on an interrupted task without relaunching AI or changing the interrupted task to success.
+
 Expose user-facing template names. Keep Skill IDs in technical details:
 
 | User-facing template | Technical Skill |
@@ -505,7 +509,7 @@ Keep all current task-relevant launch points, with the Wiki single-page exceptio
 
 - Dashboard → Update Wiki
 - Wiki article quick actions → Wiki-local `GenerateHtmlDialog` → direct single-page Export task
-- Workflows Generate Content → full preparation with single-page, multi-page, topic, or project scope
+- Workflows Generate Content → full preparation with applicable single-page, selected multi-page, or project Wiki scope
 - Lint → Run Health Check again
 - Exports new / generate again → full Generate Content preparation
 - Workflows → all three built-in workflows
@@ -560,4 +564,4 @@ The three workflow rows explain their outcomes and the current project state. Pr
 
 This document defines product behavior and interface structure only. It does not itself authorize implementation changes to the current React or Rust code.
 
-The affected living product, flow, frontend, architecture, backend, and roadmap documents were reconciled with this authority on 2026-07-30. Implementation must now follow the [batched execution plan](../plans/2026-07-30-workflows-panel-implementation.md) and scoped migration roadmap in `SPEC/roadmap/agent.md`, update typed task DTOs and IPC contracts before relying on new state, and treat the current `AgentView` route and folder as a legacy implementation baseline rather than target information architecture.
+The current implementation uses the Workflows route and the typed task/IPC contracts described in the [module guide](../../../src/features/workflows/README.md) and [backend structure](../../../SPEC/BACKEND_STRUCTURE.md). The former AgentView route and migration controller are retired. Historical implementation plans record migration decisions; the living module and architecture documents describe current ownership and verification commands.

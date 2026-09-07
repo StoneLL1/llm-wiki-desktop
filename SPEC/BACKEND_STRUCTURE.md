@@ -2,7 +2,7 @@
 
 > Import V2、来源版本、媒体处理、登录态、OCR / ASR 和独立编译的目标后端边界，以 [`../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md) 为准。本文中的 legacy `ImportService` 模块说明仅描述现状，不得覆盖新规范。
 > Batch 9 收口后，旧 `list_imported_sources` / `request_delete_source` / `request_replace_source` 不再注册为生产命令；Source 生命周期只经 typed `source_commands` 与 Import V2 服务。旧 compile index adapter 与 legacy asset fallback 仅为只读兼容边界，并有“不改写 legacy 文件”的独立测试。
-> Workflows 的项目隔离队列、状态、结构化阶段、确认、重试与恢复合同，以 [`../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md`](../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md) 为准。本文区分当前任务 DTO 与待迁移目标，不能把现有 Agent 页面行为当成目标后端合同。
+> Workflows 的项目隔离队列、状态、结构化阶段、确认、重试与恢复合同，以 [`../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md`](../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md) 为准。本文描述当前 typed 任务 DTO 与编排边界，不以已退役的 Agent 页面行为定义后端合同。
 > 无项目工作台、新建知识库、typed 打开评估、受限 / 信任 / 只读、兼容启用、修复和深度扫描的目标合同，以 [`../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md`](../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md) 为准。该 typed assessment/access/trust/repair 管线已落地；普通资料目录只允许新建知识库后导入，不会原地初始化或隐式初始化 Git。
 
 ## 1. 文档目的
@@ -63,7 +63,8 @@ src-tauri/
     │   ├── search_commands.rs
     │   ├── settings_commands.rs
     │   ├── task_commands.rs
-    │   └── wiki_commands.rs
+    │   ├── wiki_commands.rs
+    │   └── workflow_commands.rs
     ├── models/
     │   ├── agent.rs
     │   ├── bookmark.rs
@@ -82,7 +83,8 @@ src-tauri/
     │   ├── search.rs
     │   ├── settings.rs
     │   ├── task.rs
-    │   └── wiki.rs
+    │   ├── wiki.rs
+    │   └── workflow.rs
     ├── services/
     │   ├── agent_service.rs
     │   ├── bookmark_service.rs
@@ -538,12 +540,12 @@ pub struct BackendTask {
 - 已完成分片可复用；主动取消清理临时数据，之后重试从头开始。
 - `ProjectDeepScan` 始终只读、可取消，并持续发布已发现 Markdown 数、能力判断和 warning 的 partial snapshot；取消或失败后，已经可读的内容仍保持可浏览，不自动关闭项目。
 
-### 10.1 Workflows 目标任务合同
+### 10.1 Workflows 任务合同
 
-上面的 `BackendTask` 是当前公开 DTO。Workflows 实现前必须以 typed DTO 扩展而不是自由 JSON 补齐以下语义：
+上面的 `BackendTask` 是通用公开 DTO；Workflows 通过 `WorkflowExecutionState`、`WorkflowRun` 和 `WorkflowRunSummary` 表达以下语义：
 
 - 工作流任务的运行时 `project_id` 必填，并带后端派生的 `canonical_identity_key`、`identity_revision`、稳定 `workflow_kind`、输入范围、项目基线和输入指纹。
-- 用户可见状态统一为 `queued`、`running`、`waiting_for_confirmation`、`succeeded`、`failed`、`cancelled`、`interrupted`；`cancelling` 可以保留为内部过渡状态。
+- Workflow 展示状态统一为 `queued`、`running`、`waiting_for_confirmation`、`completed`、`failed`、`cancelled`、`interrupted`；通用 Task 的成功状态仍为 `succeeded`；`cancelling` 可以保留为内部过渡状态。
 - 任务进度包含工作流阶段 id、阶段顺序、当前处理项、已完成数、总数和结构化活动记录。原始 stdout/stderr 继续写日志，但不能承担主状态合同。
 - 每个项目维护独立串行工作流队列。不同项目可以并行执行，任何列表、确认、取消和历史 command 都必须验证项目归属；前端切换项目后才可操作该项目任务。
 - Workflows overview 行必须携带渲染该行动作所需的有界目标事实：活动任务是否要求显式续队，以及最近完成任务的稳定 task id。前端不得通过偶然命中最近五条运行历史来推断“继续队列”或“查看已完成任务”。
@@ -564,7 +566,9 @@ pub struct BackendTask {
 
 当前实现状态（2026-08-13）：H3–H5 复用本节的 ProjectContext、Workflow queue、TaskService、confirmation、Git checkpoint、candidate manifest 与 typed result 边界完成 Agent Health/repair bridge；H6 未改变 backend runtime。由于最终 full gate 与完整验证矩阵未全绿，Gate H / Batch 7 继续 fail closed。
 
-### 10.3 Workflow 读模型与 Update 实现（2026-09-07）
+### 10.3 Workflow 读模型与三条内置旅程实现（2026-09-07）
+
+`commands/workflow_commands.rs` 保留现有公开命令；委托聚焦的 `workflow_review.rs` / `workflow_history.rs` 处理复核与历史用例。`services/workflow_service/` 按 coordinator、preparation、overview、persistence 与各 runner 分工，ExportService 仍拥有导出保存与记录。
 
 - TaskService 是任务事实唯一来源。`WorkflowRun`、`WorkflowRunSummary` 和 `workflow://updated` 使用十进制字符串 `revision`；持久任务默认兼容旧记录，进程 `sessionId` 隔离旧会话事件。恢复在已持久版本上推进；旧进程尚未落盘的进度不能覆盖新会话的恢复状态。
 - `get_workflows_overview` 只读 ProjectRegistry 已观测的内存访问摘要和 TaskService owner 索引，返回固定三行、最近五项、最多三个关注任务 `activeRuns`、队列摘要及 `sessionId`。未观测的文件/Git 状态为 `unknown`，`pendingSourceCount` 为 `null`，不据此宣称没有内容变化或允许写入。
@@ -572,7 +576,11 @@ pub struct BackendTask {
 - 前端 `taskStore.workflowById` 保存规范摘要；`workflowStore` 保存查询、草稿、选中状态及最多 16 条详情。约 100ms 合并普通进度，终态和确认立即发布；单资源请求在途合并，只有新版本到达才补读，不重复运行 preparation。
 - “开始”对当前草稿自动预检。新范围、自动路线变化或新的敏感内容确认需要展示最新准备结果后再次开始。Update 排队后基线变化使用无候选的 `review_scope`；复核当前选中来源后取消旧等待并用可选 `retryOfTaskId` 关联新任务，不复用旧批准。
 - Update 继续复用 CompileService、候选和 checked apply。受限 Agent 获得已选 Source 与候选 Wiki 的准确文件清单，不依赖目录枚举或猜测路径；实际生成仅探测所选 Agent。唯一来源短名规范化为已批准路径，同名歧义必须使用完整路径。生成结束清理原始临时工作区，持久复核候选保留至确认、丢弃或恢复处理。冲突批准绑定复核时的当前哈希与保留用户编辑的 scoped checkpoint；批准后变化仍拒绝覆盖。Git 仅豁免后端精确枚举的 task JSON/log 与 workflow preferences，不豁免未知 `.app`、Wiki 或 Source 内容，也不把运行日志写进内容检查点。
-- schema 仍为 v2（增量字段有旧记录默认值）；Health/Export 共享调用方继续使用现有命令。其专属业务重构仍属于后续阶段。
+- Health Local 使用队首时的当前内容，不依赖 Agent、Provider 凭据或 Git；LintService 的 run-local scan 复用页面读取、规则、hash 与有界 AI 摘录，并在页面边界检查取消。可信且 app state 可写时持久报告；受限/只读结果留在当前进程。Complete 先保存本地部分，AI 失败、取消或范围复核保留可用报告，打开时在 worker 核验输入时效，修复仍单独验证完整授权。
+- Generate Content 保留四种 HTML 成果，默认新建；显式覆盖使用 checkpoint、持久候选确认和目标 hash checked write。排队后输入变化进入无候选 `review_scope`，保留成果类型与所选页面意图进行重新准备。HTML 与资源验证、`ExportRecord`、新建保存和 pending receipt 由 ExportService 统一拥有；Wiki 快速导出复用该保存路径但保持直接 Export task，不进入 Workflow history。
+- 发布临界区在 TaskService 变更锁内校验已接纳取消并关闭 `cancellable`，摘要和界面使用同一事实。结果预览绑定确切 `recordId` 与可用的 `taskId`，完成对应预览读取后才导航；缺失或被替代的制品不回退到其他结果。
+- 跨重开恢复可将已经持久化且与当前任务匹配的 Health 报告或 Export 制品附回 `interrupted`，不据此推定整条执行成功；已提交 Update receipt 沿用既有提交恢复合同。有效等待确认继续保留，无效/过期候选转为中断；续队与确认仍实时验证身份、撤信任、输入和写入权限。
+- schema 仍为 v2（增量字段有旧记录默认值），命令名称不变。旧数字/缺省 revision 兼容读取；会话 ID 不持久化。实际 release 桌面、AI 路线与性能时间验收需各自证据，不能由 schema/fixture 检查替代。
 
 ## 11. ProjectService
 
@@ -1030,10 +1038,11 @@ Agent 深度 Lint：
 - 调用 `skills/html-*`。
 - 读取 HTML 模板。
 - 生成单篇美化阅读页。
-- 生成知识卡片。
+- 生成知识卡片和概念图。
 - 生成项目级 HTML 报告。
 - 输出到 `ProjectContext.layout` 解析的导出根；原生项目默认是 `exports/html/`。
-- 提供预览路径。
+- 校验 HTML、链接与资源，构造带预览 hash 的 `ExportRecord`；Workflow 与 Wiki 快速导出共享 create-new checked write、记录保存及 pending receipt 恢复。
+- 提供确切制品的预览路径；记录失败时仅回滚本次仍匹配 hash 的新建内容。
 
 硬边界：
 

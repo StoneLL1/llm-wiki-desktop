@@ -219,16 +219,6 @@ export function workflowDurationMs(startedAt: string | null, completedAt: string
   return completed - start;
 }
 
-export function attentionRun(runs: WorkflowRun[]): WorkflowRun | null {
-  return (
-    runs.find((run) => run.displayStatus === "waiting_for_confirmation") ??
-    runs.find((run) => run.displayStatus === "running") ??
-    runs.find((run) => run.displayStatus === "queued") ??
-    runs.find((run) => run.displayStatus === "failed" || run.displayStatus === "interrupted") ??
-    null
-  );
-}
-
 export function attentionWorkflowRow(rows: WorkflowOverviewRow[]): WorkflowOverviewRow | null {
   return (
     rows.find((row) => row.activeTaskId && row.state === "waiting_for_confirmation") ??

@@ -57,9 +57,9 @@ React shell/layout
   -> local files / Git / Agent / LLM / OS credential store
 ```
 
-当前前端工作台调用链是 `AppShell -> WorkspaceController -> WorkspaceRouter`。`AppShell` 持有桌面 shell、右侧上下文面板，以及全局 `ProjectConfirmationController`、`TaskLogDrawer`、`Toaster`；`WorkspaceController` 组合 `useAiCapabilities`、`useTaskLauncher`、`useImportWorkflow`、`useProviderWorkflow`、`useAgentWorkflow` 五条领域 workflow；`WorkspaceRouter` 只分发活动视图。这里的 `useAgentWorkflow` 与 Agent view 是 2026-07-30 的实现基线，后续目标是由项目级 Workflows 编排替代主界面职责，而不是删除底层 Agent 能力。
+当前前端工作台调用链是 `AppShell -> WorkspaceController -> WorkspaceRouter`。`AppShell` 持有桌面 shell、右侧上下文面板，以及全局 `ProjectConfirmationController`、`TaskLogDrawer`、`Toaster`；`WorkspaceController` 组合能力查询、任务启动、Import、Provider 和 `useWorkflowsController` 等聚焦流程；`WorkspaceRouter` 只分发活动视图。项目级 Workflows 已接替旧 Agent 页面和通用运行入口；底层 Agent 执行与配置能力继续保留。
 
-Dashboard 保持首屏同步加载，Wiki、Chat、Graph、Lint、Exports、Import、Agent 等 feature view 使用 `React.lazy` 按需加载，并统一经过 `Suspense` 和 `ViewErrorBoundary`。这是当前实现事实，不是目标导航命名，也不是对 React Router 的推荐；Agent 主视图迁移后应以 Workflows 对用户呈现。
+Dashboard 保持首屏同步加载，Wiki、Chat、Graph、Lint、Exports、Import、Workflows 等 feature view 使用 `React.lazy` 按需加载，并统一经过 `Suspense` 和 `ViewErrorBoundary`。Workflow 准备/启动、历史、结果打开和通知详情也按需载入；隐藏表单不准备，折叠日志与未选择详情不读取正文。
 
 截至 Batch 6，`App.tsx` 始终挂载 `AppShell`，无项目态由 `NoProjectWorkspace` 承接；后端以 typed assessment 将 format、health、filesystem access、trust 与 Git 能力分开建模。打开评估保持零写入，普通资料目录不原地初始化，Git 只在明确的新建/确认写入流程中创建。
 
@@ -106,7 +106,7 @@ Zustand 用于管理前端应用状态。当前已拆分的主要 store 包括�
 
 - `projectStore`：当前项目、最近项目、no-project / assessing / open 状态、typed assessment、独立的 trust / filesystemAccess / health、能力 readiness 与深度扫描快照。`restricted` 只是后端 capabilities 的 UI 摘要；信任判定和持久化不得由 Zustand 决定。
 - `navigationStore`：当前视图、选中文章、右侧面板状态。
-- `taskStore`：统一接收后台任务、进度和日志事件；所有列表、抽屉、选择、确认与历史通过当前项目 selector 暴露，不能形成跨项目任务界面。
+- `taskStore`：统一接收后台任务、进度和日志事件，`workflowById` 持有规范摘要；`workflowStore` 只保存项目查询、草稿、选择和最多 16 条详情。所有列表、抽屉、选择、确认与历史通过当前项目 selector 暴露，不能形成跨项目任务界面。
 - `importStore`：导入预览、来源目录和确认状态。
 - `settingsStore`：语言、主题等 UI 设置，以及后端返回的最近创建父目录等非敏感全局偏好；目标启动规则固定，不由前端选项分支。
 - `chatStore`：当前会话、消息流、引用来源。
@@ -135,6 +135,7 @@ IPC 层负责把前端意图转成后端服务调用。
 - Graph commands：获取 / 构建图谱，以及保存前端计算的布局。
 - Lint commands：本地 / 深度检查、报告与历史、single / batch fix 和 ignore 管理。
 - Export commands：启动 / 重新生成、列表、书签、预览，以及在浏览器或文件夹中打开导出。
+- Workflow commands：`get_workflows_overview`、`prepare_workflow`、`start_workflow`；独立 `list_workflow_runs` / `get_workflow_run` / `get_workflow_file_diff`；`cancel_workflow_run`、`undo_cancel_queued_workflow`、`reorder_queued_workflow`、`retry_workflow`、`confirm_workflow_action`、`discard_workflow_result`。三条内置旅程复用这些现有命令，不为导出另建 controller 或启动协议。
 - Settings commands：读取 / 保存项目设置、Provider 密钥状态、Chat 便捷写入授权，以及 project-independent 的全局更新偏好与安装 receipt。
 - Update commands：读取全局状态、检查固定 endpoint、下载 / 取消、安装、重启与忽略 offer；输入 DTO 只携带 opaque offer id、用户 consent 和 presentation facts，不能携带 endpoint、artifact URL、signature 或 channel。
 - Task commands：创建、列表、详情、取消、日志、清理完成项和活动项目绑定。
@@ -428,10 +429,11 @@ Agent 深度 Lint：
 - 调用 `skills/html-*`。
 - 读取 HTML 模板。
 - 生成单篇美化阅读页。
-- 生成知识卡片。
+- 生成知识卡片和概念图。
 - 生成项目级 HTML 报告。
 - 输出到 `ProjectContext.layout` 解析的导出根；原生项目默认是 `exports/html/`。
-- 为 UI 提供 iframe 预览路径。
+- 复用 HTML/资源验证、checked write 与 `ExportRecord`。默认发布新制品；显式覆盖须 checkpoint 与候选确认。Workflow 和 Wiki 单篇快速导出共享新建保存及 pending receipt，避免内容已落盘而 history 未保存时丢失可验证记录。
+- 为 UI 提供确切记录的 iframe 预览路径。Workflow 按 `recordId` 及可用的 `taskId` 关联结果，预览成功后才进入 Exports；Wiki 单篇快速导出仍留在文章内，不进入 Workflow history。
 
 边界：
 
@@ -467,7 +469,7 @@ Agent 深度 Lint：
 
 应用重启后，耗时下载、OCR 和 ASR 恢复为暂停状态，由用户明确继续；已完成分片可复用。用户主动取消时清理临时数据，后续重试从头开始。
 
-Workflows 迁移必须在 `TaskService` 或其后端编排模块中落实以下契约，不能由 React 本地状态模拟：
+Workflows 由 `TaskService` 与后端编排模块实现以下契约，React 呈现任务事实：
 
 - 每个工作流任务都带当前进程使用的 runtime `project_id`、后端 opaque `canonical_identity_key + identity_revision`、稳定 `workflow_kind`、输入范围、基线和输入指纹；持久归属与跨重开去重不得依赖 runtime `project_id`。
 - 同一项目的工作流串行执行；不同项目可以独立运行，但前端只能在对应项目内展示和操作。
@@ -476,6 +478,9 @@ Workflows 迁移必须在 `TaskService` 或其后端编排模块中落实以下�
 - 重试创建带 `attempt_of` 关联的新任务，不覆盖原任务。
 - 用户可见状态覆盖已排队、运行中、等待确认、已完成、失败、已取消、已中断；异常退出不得把运行中任务恢复成仍在运行。
 - 项目 app state 可写时，任务、等待确认与排队状态持久化到 `ProjectLayout.taskStateRoot`（原生映射为 `.app/tasks/`）；排队任务重开后等待用户明确继续，运行中任务映射为已中断并报告可复用阶段。restricted/read-only 允许的只读任务使用 typed 但 non-persistent 的内存/临时状态；其中 trusted read-only Complete Check 也不得尝试创建项目 `.app/`。
+- schema v2 的 `revision` 为十进制字符串，兼容旧数字/缺省值；进程 `sessionId` 隔离重启前事件。TaskService owner 索引提供有界 overview 与分页 history，概览不准备、不扫描 Markdown、不探测 Agent/Git 或读取凭据；普通进度以 100ms 合并，语义边界立即发布。
+- 已持久化的 Health 报告与确切 Export 制品可附回中断任务，但不自动重启 AI 或宣称整条旅程成功。有效待确认继续保留，无效候选转中断；续队、范围复核和确认重新核验当前身份/信任与输入。Generate Content 与 Update/Complete Health 共用 `review_scope` 重新准备入口。
+- 新制品发布临界区通过 TaskService 的同一变更锁关闭取消，已接纳取消不得再发布；summary 的 `cancellable` 同步反映这一事实。
 - 系统通知只用于等待确认、完成和失败。
 
 ## 21. SettingsService

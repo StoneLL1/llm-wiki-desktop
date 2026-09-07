@@ -641,13 +641,34 @@ impl WorkflowCoordinator {
                 transition.continued_local_quick_runs.push(run);
                 continue;
             }
+            // A runner closes cancellation only after entering its short
+            // checked publication window. AppState has already closed new
+            // launch epochs and waits for their publication guards before
+            // revocation returns. Do not cancel or discard that accepted
+            // commit's resources while it drains.
+            if run.display_status == crate::models::workflow::WorkflowDisplayStatus::Running
+                && !run.cancellable
+            {
+                continue;
+            }
             let was_waiting = run.display_status
                 == crate::models::workflow::WorkflowDisplayStatus::WaitingForConfirmation;
-            transition.stopped_runs.push(run.clone());
             if let Err(error) = tasks.request_workflow_cancel(&run.task_id) {
+                // Commit admission can win after the owner snapshot above.
+                // Preserve real cancellation errors; only an observed closed
+                // running window (or a finished task) has nothing to cancel.
+                if tasks.get_workflow_run(&run.task_id).is_some_and(|current| {
+                    is_terminal(&current)
+                        || (current.display_status
+                            == crate::models::workflow::WorkflowDisplayStatus::Running
+                            && !current.cancellable)
+                }) {
+                    continue;
+                }
                 transition.errors.push(error);
                 continue;
             }
+            transition.stopped_runs.push(run.clone());
             if was_waiting {
                 if let Err(error) = tasks.finalize_workflow_cancellation(&run.task_id) {
                     transition.errors.push(error);
@@ -951,22 +972,45 @@ impl WorkflowCoordinator {
             || original.persistence_transition
                 == Some(WorkflowPersistenceTransition::DowngradedToMemoryOnly);
         let is_persistent = task_state_root.is_some();
+        let mut scope = original.scope.clone();
         if completed_generate {
             let context =
                 crate::models::paths::ProjectContext::new(project_id.clone(), project_root.clone())
                     .with_resolved_layout()
                     .map_err(|error| error.message)?;
             if let WorkflowScope::GenerateContent {
-                output_path: Some(output_path),
-                ..
-            } = &original.scope
+                artifact_type,
+                page_paths,
+                output_path,
+            } = &mut scope
             {
-                execution_options.existing_target_hash = crate::services::FileStore
-                    .file_hash_if_exists(&context, output_path)
-                    .map_err(|error| error.message)?;
+                let export_type = match artifact_type {
+                    crate::models::workflow::WorkflowArtifactType::BeautifulRead => {
+                        crate::models::export::ExportType::BeautifulRead
+                    }
+                    crate::models::workflow::WorkflowArtifactType::KnowledgeCard => {
+                        crate::models::export::ExportType::KnowledgeCard
+                    }
+                    crate::models::workflow::WorkflowArtifactType::ConceptMap => {
+                        crate::models::export::ExportType::ConceptMap
+                    }
+                    crate::models::workflow::WorkflowArtifactType::ProjectReport => {
+                        crate::models::export::ExportType::ProjectReport
+                    }
+                };
+                *output_path = Some(
+                    crate::services::ExportService::default()
+                        .build_output_relative_path_for(
+                            &context,
+                            export_type,
+                            page_paths.first().map(String::as_str),
+                        )
+                        .map_err(|error| error.message)?,
+                );
+                execution_options.existing_target_hash = None;
             }
             baseline_fingerprint =
-                super::preparation::workflow_baseline_for_scope(&context, &original.scope)
+                super::preparation::workflow_baseline_for_scope(&context, &scope)
                     .map_err(|error| error.message)?
                     .fingerprint;
         }
@@ -978,7 +1022,7 @@ impl WorkflowCoordinator {
                 task_state_root,
                 title: format!("Retry {:?}", original.kind),
                 kind: original.kind,
-                scope: original.scope,
+                scope,
                 route: original.route,
                 baseline_fingerprint,
                 execution_options,

@@ -90,6 +90,16 @@ function buildResolver(pages: WikiPageMeta[]): Map<string, string> {
       if (alias) index.set(alias.toLowerCase(), page.path);
     }
   }
+  // Match the backend Lint path keys: canonical project paths and paths
+  // relative to wiki/, both with and without .md. Register paths last so an
+  // unrelated title/alias cannot redirect an explicit path to another page.
+  for (const page of pages) {
+    const path = page.path.replace(/\\/g, "/").toLowerCase();
+    for (const key of [path, path.replace(/\.md$/, "")]) {
+      index.set(key, page.path);
+      if (key.startsWith("wiki/")) index.set(key.slice(5), page.path);
+    }
+  }
   return index;
 }
 
