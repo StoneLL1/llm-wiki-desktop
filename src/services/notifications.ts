@@ -8,13 +8,14 @@ import {
 } from "@tauri-apps/plugin-notification";
 import i18next from "i18next";
 
-import { hydrateAndSelectWorkflowRun, openWorkflowResult } from "./workflowNavigation";
-import { useNavigationStore } from "../stores/navigationStore";
 import { useProjectStore } from "../stores/projectStore";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useTaskStore } from "../stores/taskStore";
+import { compareWorkflowRevision } from "./workflowTaskSnapshot";
 import type { BackendEvent, BackendTask } from "../types/task";
-import type { WorkflowDisplayStatus, WorkflowRun } from "../types/workflow";
+import type { WorkflowDisplayStatus, WorkflowRun, WorkflowRunSummary } from "../types/workflow";
+
+const loadWorkflowNotifications = () => import("./workflowNotifications");
 
 type NotificationPermissionState = "unknown" | "granted" | "denied";
 
@@ -25,8 +26,6 @@ let permissionState: { epoch: number; value: NotificationPermissionState } = {
 };
 let permissionCheckInFlight: { epoch: number; promise: Promise<boolean> } | null = null;
 let permissionRequestInFlight: { epoch: number; promise: Promise<boolean> } | null = null;
-const notifiedWorkflowStatus = new Map<string, WorkflowDisplayStatus>();
-const notifyingWorkflowStatus = new Set<string>();
 const ALLOWED_WORKFLOW_STATUSES = new Set<WorkflowDisplayStatus>([
   "waiting_for_confirmation",
   "completed",
@@ -104,58 +103,6 @@ function taskFromPayload(payload: unknown, taskId: string): BackendTask | null {
     : null;
 }
 
-function safeWorkflowSummary(run: WorkflowRun): string | null {
-  if (!run.result) return i18next.t(`workflows.status.${run.displayStatus}`);
-  if (run.result.kind === "update_wiki") {
-    if (![run.result.created, run.result.updated, run.result.deleted, run.result.conflicted].every(Number.isFinite)) return null;
-    return i18next.t("notification.workflow.updateSummary", {
-      changed: run.result.created + run.result.updated,
-      deleted: run.result.deleted,
-      conflicted: run.result.conflicted,
-    });
-  }
-  if (run.result.kind === "health_check") {
-    if (![run.result.errorCount, run.result.warningCount].every(Number.isFinite)) return null;
-    return i18next.t("notification.workflow.healthSummary", {
-      errors: run.result.errorCount,
-      warnings: run.result.warningCount,
-    });
-  }
-  if (run.result.kind !== "generate_content" || !Array.isArray(run.result.outputPaths)) return null;
-  return i18next.t("notification.workflow.generateSummary", {
-    count: run.result.outputPaths.length,
-  });
-}
-
-function workflowNotificationOptions(event: BackendEvent, run: WorkflowRun): Options | null {
-  if (
-    !run
-    || typeof run !== "object"
-    || typeof run.taskId !== "string"
-    || !run.taskId
-    || typeof run.projectId !== "string"
-    || !["update_wiki", "health_check", "generate_content"].includes(run.kind)
-    || !ALLOWED_WORKFLOW_STATUSES.has(run.displayStatus)
-    || !("result" in run)
-    || (run.result !== null && typeof run.result !== "object")
-    || (run.result != null && run.result.kind !== run.kind)
-  ) return null;
-  const body = safeWorkflowSummary(run);
-  if (!body) return null;
-  const projectName =
-    useProjectStore.getState().currentProject.projectId === run.projectId
-      ? useProjectStore.getState().currentProject.name
-      : useProjectStore.getState().recentProjects.find((project) => project.projectId === run.projectId)?.name
-        ?? i18next.t("notification.workflow.unknownProject");
-  return {
-    title: i18next.t("notification.workflow.title", {
-      project: projectName,
-      workflow: i18next.t(`workflows.kind.${run.kind}`),
-    }),
-    body,
-    extra: workflowExtra(event, run),
-  };
-}
 
 function taskNotificationOptions(event: BackendEvent, task: BackendTask | null): Options | null {
   if (!event.taskId) return null;
@@ -187,15 +134,6 @@ function taskNotificationOptions(event: BackendEvent, task: BackendTask | null):
   return null;
 }
 
-function workflowExtra(event: BackendEvent, run: WorkflowRun): Record<string, string> {
-  return {
-    taskId: run.taskId,
-    projectId: event.projectId ?? run.projectId,
-    eventType: event.eventType,
-    workflowKind: run.kind,
-    workflowStatus: run.displayStatus,
-  };
-}
 
 export async function handleNotificationAction(
   notification: Pick<Options, "extra">,
@@ -214,35 +152,17 @@ export async function handleNotificationAction(
     return;
   }
 
-  const projects = useProjectStore.getState();
-  let project = projects.currentProject.projectId === projectId
-    ? { rootPath: projects.currentProject.rootPath }
-    : projects.recentProjects.find((candidate) => candidate.projectId === projectId);
-  if (!project?.rootPath) return;
-  if (projects.currentProject.projectId !== projectId) {
-    const assessment = await projects.assessProject(project.rootPath);
-    const canOpen =
-      assessment.health !== "unreadable" &&
-      !["ambiguous_markdown", "ordinary_materials", "unknown"].includes(assessment.format);
-    if (!canOpen) return;
-    await projects.openAssessedProject(assessment.assessmentId);
-    project = { rootPath: project.rootPath };
+  const origin = useProjectStore.getState();
+  try {
+    const { openWorkflowNotification } = await loadWorkflowNotifications();
+    const latest = useProjectStore.getState();
+    if (latest.currentProject.projectId !== origin.currentProject.projectId
+      || latest.currentProject.rootPath !== origin.currentProject.rootPath
+      || latest.authority !== origin.authority) return;
+    await openWorkflowNotification(projectId, taskId, workflowStatus);
+  } catch {
+    // A notification click can be retried if its optional Workflow chunk is unavailable.
   }
-
-  const behavior = useSettingsStore.getState().settings.notificationClickBehavior;
-  if (behavior === "activate_window_only") return;
-  if (behavior === "error_log") {
-    useTaskStore.getState().openDrawer(taskId);
-    return;
-  }
-  const workflowProject = { projectId, rootPath: project.rootPath };
-  const run = await hydrateAndSelectWorkflowRun(workflowProject, taskId);
-  if (behavior === "result_page" && workflowStatus === "completed") {
-    await openWorkflowResult(workflowProject, run);
-    return;
-  }
-
-  useNavigationStore.getState().setActiveView("workflows");
 }
 
 export async function registerNotificationActionListener(): Promise<() => void> {
@@ -250,33 +170,50 @@ export async function registerNotificationActionListener(): Promise<() => void> 
   return () => listener.unregister();
 }
 
+function currentWorkflowNotification(
+  event: BackendEvent,
+  run: WorkflowRun | WorkflowRunSummary,
+  projectRootPath: string,
+): boolean {
+  const tasks = useTaskStore.getState();
+  const accepted = tasks.workflowById[run.taskId];
+  const { currentProject, authority } = useProjectStore.getState();
+  return event.taskId === run.taskId && event.projectId === run.projectId
+    && currentProject.projectId === run.projectId && currentProject.rootPath === projectRootPath
+    && authority?.projectId === run.projectId
+    && authority.canonicalIdentityKey === run.canonicalIdentityKey
+    && authority.identityRevision === run.identityRevision
+    && !!accepted && accepted.projectId === run.projectId
+    && accepted.canonicalIdentityKey === run.canonicalIdentityKey
+    && accepted.identityRevision === run.identityRevision
+    && accepted.sessionId === run.sessionId
+    && (tasks.workflowSessionId === null ? !run.sessionId : run.sessionId === tasks.workflowSessionId)
+    && (!run.sessionId || !tasks.retiredWorkflowSessions.includes(run.sessionId))
+    && compareWorkflowRevision(accepted, run) === 0
+    && accepted.displayStatus === run.displayStatus;
+}
+
+function workflowNotificationEnabled(status: WorkflowDisplayStatus): boolean {
+  const settings = useSettingsStore.getState().settings.systemNotifications;
+  return status === "completed" ? settings.onTaskCompleted
+    : status === "failed" ? settings.onTaskFailed : settings.onConfirmationNeeded;
+}
+
 export async function notifyTaskEvent(event: BackendEvent): Promise<void> {
   const settings = useSettingsStore.getState().settings.systemNotifications;
 
   if (event.eventType === "workflow_updated") {
-    const run = event.payload as WorkflowRun;
+    const run = event.payload as WorkflowRun | WorkflowRunSummary;
     if (!run?.taskId || !ALLOWED_WORKFLOW_STATUSES.has(run.displayStatus)) return;
-    if (notifiedWorkflowStatus.get(run.taskId) === run.displayStatus) return;
-    const enabled = run.displayStatus === "completed"
-      ? settings.onTaskCompleted
-      : run.displayStatus === "failed"
-        ? settings.onTaskFailed
-        : settings.onConfirmationNeeded;
-    if (!enabled) return;
-    const notificationKey = `${run.taskId}\0${run.displayStatus}`;
-    if (notifyingWorkflowStatus.has(notificationKey)) return;
-    const options = workflowNotificationOptions(event, run);
-    if (!options) return;
-    notifyingWorkflowStatus.add(notificationKey);
-    if (!(await checkPermission().catch(() => false))) {
-      notifyingWorkflowStatus.delete(notificationKey);
-      return;
-    }
-    notifiedWorkflowStatus.set(run.taskId, run.displayStatus);
+    const projectRootPath = useProjectStore.getState().currentProject.rootPath;
+    if (!currentWorkflowNotification(event, run, projectRootPath)) return;
+    if (!workflowNotificationEnabled(run.displayStatus)) return;
     try {
-      await sendNotification(options);
-    } finally {
-      notifyingWorkflowStatus.delete(notificationKey);
+      const { notifyWorkflowEvent } = await loadWorkflowNotifications();
+      await notifyWorkflowEvent(event, run, checkPermission, () => currentWorkflowNotification(event, run, projectRootPath)
+        && workflowNotificationEnabled(run.displayStatus));
+    } catch {
+      // A repeated event may retry if the Workflow notification chunk could not load.
     }
     return;
   }

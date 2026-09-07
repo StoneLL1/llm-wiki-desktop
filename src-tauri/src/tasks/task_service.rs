@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -17,10 +17,12 @@ use crate::models::task::{
     TaskType,
 };
 use crate::models::workflow::{
-    validate_workflow_execution_contract, WorkflowDisplayStatus, WorkflowErrorSummary,
-    WorkflowExecutionState, WorkflowKind, WorkflowOperation, WorkflowPendingAction,
+    validate_workflow_execution_contract, WorkflowArtifactContextSummary, WorkflowContextSummary,
+    WorkflowDisplayStatus, WorkflowErrorSummary, WorkflowExecutionState,
+    WorkflowHealthContextSummary, WorkflowKind, WorkflowOperation, WorkflowPendingAction,
     WorkflowPersistenceMode, WorkflowPersistenceTransition, WorkflowProjectMutationState,
-    WorkflowResult, WorkflowRun, WorkflowRunSummary, WorkflowStageStatus, WORKFLOW_SCHEMA_VERSION,
+    WorkflowQueueContextItem, WorkflowResult, WorkflowRun, WorkflowRunOutcomeSummary,
+    WorkflowRunSummary, WorkflowStageStatus, WORKFLOW_SCHEMA_VERSION,
 };
 use crate::services::FileStore;
 use crate::tasks::cancellation::CancellationRegistry;
@@ -63,6 +65,244 @@ struct WorkflowHistoryIndexEntry {
 }
 
 type WorkflowHistoryIndex = (u64, Arc<Vec<WorkflowHistoryIndexEntry>>);
+
+type WorkflowOwnerKey = (String, String);
+type WorkflowOrder = (String, String);
+
+/// Derived indexes owned by TaskService, updated when task facts are published.
+/// Overview reads touch fixed-size set heads, independent of history length.
+#[derive(Default)]
+struct WorkflowOwnerIndex {
+    summaries: HashMap<String, WorkflowRunSummary>,
+    recent: BTreeSet<WorkflowOrder>,
+    by_status: HashMap<(WorkflowKind, WorkflowDisplayStatus), BTreeSet<WorkflowOrder>>,
+    by_kind: HashMap<WorkflowKind, BTreeSet<WorkflowOrder>>,
+    completed: HashMap<WorkflowKind, BTreeSet<WorkflowOrder>>,
+    queued: BTreeSet<(u32, String, String)>,
+    health: BTreeSet<WorkflowOrder>,
+    artifacts: BTreeSet<WorkflowOrder>,
+}
+
+#[derive(Default)]
+struct WorkflowSummaryIndex {
+    owners: HashMap<WorkflowOwnerKey, WorkflowOwnerIndex>,
+    task_owners: HashMap<String, WorkflowOwnerKey>,
+}
+
+pub(crate) struct WorkflowOwnerSnapshot {
+    pub recent_runs: Vec<WorkflowRunSummary>,
+    pub attention: Vec<WorkflowRunSummary>,
+    pub completed: Vec<WorkflowRunSummary>,
+    pub context: WorkflowContextSummary,
+}
+
+impl WorkflowOwnerIndex {
+    fn update_sets(&mut self, run: &WorkflowRunSummary, insert: bool) {
+        fn update<T: Ord>(set: &mut BTreeSet<T>, value: T, insert: bool) {
+            if insert {
+                set.insert(value);
+            } else {
+                set.remove(&value);
+            }
+        }
+        let id = run.task_id.clone();
+        let recent = (run.updated_at.clone(), id.clone());
+        update(&mut self.recent, recent.clone(), insert);
+        update(
+            self.by_status
+                .entry((run.kind.clone(), run.display_status.clone()))
+                .or_default(),
+            recent,
+            insert,
+        );
+        update(
+            self.by_kind.entry(run.kind.clone()).or_default(),
+            (run.started_at.clone(), id.clone()),
+            insert,
+        );
+        if run.display_status == WorkflowDisplayStatus::Queued {
+            update(
+                &mut self.queued,
+                (
+                    run.queue_position.unwrap_or(u32::MAX),
+                    run.started_at.clone(),
+                    id.clone(),
+                ),
+                insert,
+            );
+        }
+        if run.display_status == WorkflowDisplayStatus::Completed {
+            if let Some(completed_at) = &run.completed_at {
+                let order = (completed_at.clone(), id);
+                update(
+                    self.completed.entry(run.kind.clone()).or_default(),
+                    order.clone(),
+                    insert,
+                );
+                if run.kind == WorkflowKind::HealthCheck
+                    && run.operation == WorkflowOperation::BuiltIn
+                    && matches!(
+                        run.outcome,
+                        Some(WorkflowRunOutcomeSummary::HealthCheck { .. })
+                    )
+                {
+                    update(&mut self.health, order.clone(), insert);
+                }
+                if run.kind == WorkflowKind::GenerateContent
+                    && matches!(
+                        run.outcome,
+                        Some(WorkflowRunOutcomeSummary::GenerateContent { .. })
+                    )
+                {
+                    update(&mut self.artifacts, order, insert);
+                }
+            }
+        }
+    }
+
+    fn remove(&mut self, id: &str) {
+        if let Some(previous) = self.summaries.remove(id) {
+            self.update_sets(&previous, false);
+        }
+    }
+
+    fn insert(&mut self, run: WorkflowRunSummary) {
+        self.remove(&run.task_id);
+        self.update_sets(&run, true);
+        self.summaries.insert(run.task_id.clone(), run);
+    }
+
+    fn head(&self, order: Option<&BTreeSet<WorkflowOrder>>) -> Option<&WorkflowRunSummary> {
+        self.summaries.get(&order?.last()?.1)
+    }
+
+    fn snapshot(&self) -> WorkflowOwnerSnapshot {
+        let mut attention = Vec::new();
+        let mut completed = Vec::new();
+        for kind in [
+            WorkflowKind::UpdateWiki,
+            WorkflowKind::HealthCheck,
+            WorkflowKind::GenerateContent,
+        ] {
+            if let Some(run) = self.head(self.completed.get(&kind)) {
+                completed.push(run.clone());
+            }
+            let latest = self.head(self.by_kind.get(&kind));
+            for status in [
+                WorkflowDisplayStatus::WaitingForConfirmation,
+                WorkflowDisplayStatus::Running,
+                WorkflowDisplayStatus::Queued,
+                WorkflowDisplayStatus::Failed,
+                WorkflowDisplayStatus::Interrupted,
+            ] {
+                if let Some(run) = self.head(self.by_status.get(&(kind.clone(), status.clone()))) {
+                    // A later same-kind intent supersedes an old failure. A failed
+                    // retry is the new attention target; older failures remain history.
+                    let superseded = latest.is_some_and(|latest| {
+                        (latest.started_at.as_str(), latest.task_id.as_str())
+                            > (run.started_at.as_str(), run.task_id.as_str())
+                    });
+                    if matches!(
+                        status,
+                        WorkflowDisplayStatus::Failed | WorkflowDisplayStatus::Interrupted
+                    ) && superseded
+                    {
+                        continue;
+                    }
+                    attention.push(run.clone());
+                    break;
+                }
+            }
+        }
+        let last_health = self
+            .head(Some(&self.health))
+            .and_then(|run| match &run.outcome {
+                Some(WorkflowRunOutcomeSummary::HealthCheck {
+                    error_count,
+                    warning_count,
+                    info_count,
+                }) => Some(WorkflowHealthContextSummary {
+                    task_id: run.task_id.clone(),
+                    completed_at: run.completed_at.clone()?,
+                    error_count: *error_count,
+                    warning_count: *warning_count,
+                    info_count: *info_count,
+                }),
+                _ => None,
+            });
+        let recent_artifact = self
+            .head(Some(&self.artifacts))
+            .and_then(|run| match &run.outcome {
+                Some(WorkflowRunOutcomeSummary::GenerateContent { artifact_type, .. }) => {
+                    Some(WorkflowArtifactContextSummary {
+                        task_id: run.task_id.clone(),
+                        completed_at: run.completed_at.clone()?,
+                        artifact_type: artifact_type.clone(),
+                    })
+                }
+                _ => None,
+            });
+        WorkflowOwnerSnapshot {
+            recent_runs: self
+                .recent
+                .iter()
+                .rev()
+                .take(5)
+                .filter_map(|(_, id)| self.summaries.get(id).cloned())
+                .collect(),
+            attention,
+            completed,
+            context: WorkflowContextSummary {
+                pending_source_count: None,
+                last_health,
+                recent_artifact,
+                queue_count: self.queued.len(),
+                queued_runs: self
+                    .queued
+                    .iter()
+                    .take(5)
+                    .filter_map(|(_, _, id)| {
+                        let run = self.summaries.get(id)?;
+                        Some(WorkflowQueueContextItem {
+                            task_id: run.task_id.clone(),
+                            kind: run.kind.clone(),
+                            operation: run.operation.clone(),
+                            queue_position: run.queue_position,
+                            started_at: run.started_at.clone(),
+                        })
+                    })
+                    .collect(),
+            },
+        }
+    }
+}
+
+impl WorkflowSummaryIndex {
+    fn remove(&mut self, id: &str) {
+        if let Some(key) = self.task_owners.remove(id) {
+            if let Some(owner) = self.owners.get_mut(&key) {
+                owner.remove(id);
+            }
+            if self
+                .owners
+                .get(&key)
+                .is_some_and(|owner| owner.summaries.is_empty())
+            {
+                self.owners.remove(&key);
+            }
+        }
+    }
+
+    fn insert(&mut self, run: WorkflowRunSummary) {
+        self.remove(&run.task_id);
+        let key = (
+            run.canonical_identity_key.clone(),
+            run.identity_revision.clone(),
+        );
+        self.task_owners.insert(run.task_id.clone(), key.clone());
+        self.owners.entry(key).or_default().insert(run);
+    }
+}
 
 struct WorkflowPersistenceClock {
     started_at: Instant,
@@ -343,6 +583,8 @@ pub struct TaskService {
     task_persistence_dirs: Arc<RwLock<HashMap<String, PathBuf>>>,
     workflow_persistence_lanes: Arc<RwLock<HashMap<String, Arc<Mutex<WorkflowPersistenceLane>>>>>,
     workflow_persistence_clock: Arc<WorkflowPersistenceClock>,
+    workflow_session_id: Arc<String>,
+    workflow_summary_index: Arc<RwLock<WorkflowSummaryIndex>>,
     workflow_history_revision: Arc<AtomicU64>,
     workflow_history_indices: Arc<RwLock<HashMap<WorkflowHistoryIndexKey, WorkflowHistoryIndex>>>,
     import_history_task_creation_lock: Arc<Mutex<()>>,
@@ -373,6 +615,8 @@ impl Default for TaskService {
             task_persistence_dirs: Arc::new(RwLock::new(HashMap::new())),
             workflow_persistence_lanes: Arc::new(RwLock::new(HashMap::new())),
             workflow_persistence_clock: Arc::new(WorkflowPersistenceClock::default()),
+            workflow_session_id: Arc::new(Uuid::new_v4().to_string()),
+            workflow_summary_index: Arc::new(RwLock::new(WorkflowSummaryIndex::default())),
             workflow_history_revision: Arc::new(AtomicU64::new(0)),
             workflow_history_indices: Arc::new(RwLock::new(HashMap::new())),
             import_history_task_creation_lock: Arc::new(Mutex::new(())),
@@ -408,6 +652,8 @@ impl TaskService {
             task_persistence_dirs: Arc::new(RwLock::new(HashMap::new())),
             workflow_persistence_lanes: Arc::new(RwLock::new(HashMap::new())),
             workflow_persistence_clock: Arc::new(WorkflowPersistenceClock::default()),
+            workflow_session_id: Arc::new(Uuid::new_v4().to_string()),
+            workflow_summary_index: Arc::new(RwLock::new(WorkflowSummaryIndex::default())),
             workflow_history_revision: Arc::new(AtomicU64::new(0)),
             workflow_history_indices: Arc::new(RwLock::new(HashMap::new())),
             import_history_task_creation_lock: Arc::new(Mutex::new(())),
@@ -478,6 +724,29 @@ impl TaskService {
     ) {
         #[cfg(test)]
         TASK_EVENT_EMISSIONS.with(|count| count.set(count.get() + 1));
+        if event_type == crate::models::task::BackendEventType::WorkflowUpdated {
+            if let Some(summary) = task_id
+                .as_deref()
+                .and_then(|id| self.index_workflow_summary(id))
+            {
+                self.event_bus.read().expect("lock poisoned").emit(
+                    event_type,
+                    Some(summary.project_id.clone()),
+                    task_id,
+                    summary,
+                );
+            }
+            return;
+        }
+        if matches!(
+            event_type,
+            crate::models::task::BackendEventType::TaskLog
+                | crate::models::task::BackendEventType::TaskActivity
+        ) {
+            if let Some(id) = task_id.as_deref() {
+                self.index_workflow_summary(id);
+            }
+        }
         self.event_bus
             .read()
             .expect("lock poisoned")
@@ -952,6 +1221,11 @@ impl TaskService {
             error: None,
         };
 
+        let workflow = workflow.map(|mut state| {
+            state.revision = 1;
+            state.session_id = self.workflow_session_id.as_ref().clone();
+            state
+        });
         let entry = TaskEntry {
             task: task.clone(),
             cancellation: token,
@@ -1083,6 +1357,9 @@ impl TaskService {
     }
 
     pub fn get_workflow_run(&self, id: &str) -> Option<WorkflowRun> {
+        // Detail must not expose a barrier mutation that may still roll back.
+        let lane = self.workflow_persistence_lane_if_present(id)?;
+        let _guard = lane.lock().expect("lock poisoned");
         let tasks = self.tasks.read().expect("lock poisoned");
         let entry = tasks.get(id)?;
         entry.workflow.as_ref()?.to_run(&entry.task)
@@ -1216,6 +1493,7 @@ impl TaskService {
                 continue;
             };
             workflow.persistence_transition = Some(transition);
+            workflow.advance_revision()?;
             let line = LogLine {
                 timestamp: Utc::now().to_rfc3339(),
                 level,
@@ -1430,6 +1708,7 @@ impl TaskService {
             WorkflowPersistenceMode::MemoryOnly
         };
         workflow.persistence_transition = Some(transition);
+        workflow.advance_revision()?;
         let line = LogLine {
             timestamp: Utc::now().to_rfc3339(),
             level,
@@ -1573,6 +1852,11 @@ impl TaskService {
             kind,
             status,
         };
+        let summary_index = self.workflow_summary_index.read().expect("lock poisoned");
+        let owner = summary_index.owners.get(&(
+            canonical_identity_key.to_string(),
+            identity_revision.to_string(),
+        ));
         let revision = self.workflow_history_revision.load(Ordering::Acquire);
         let cached = self
             .workflow_history_indices
@@ -1582,29 +1866,19 @@ impl TaskService {
             .filter(|(cached_revision, _)| *cached_revision == revision)
             .map(|(_, entries)| Arc::clone(entries));
         let entries = cached.unwrap_or_else(|| {
-            let tasks = self.tasks.read().expect("lock poisoned");
-            let mut entries = tasks
-                .values()
-                .filter_map(|entry| {
-                    let workflow = entry.workflow.as_ref()?;
-                    if workflow.canonical_identity_key != key.canonical_identity_key
-                        || workflow.identity_revision != key.identity_revision
-                        || key.kind.as_ref().is_some_and(|kind| &workflow.kind != kind)
-                    {
-                        return None;
-                    }
-                    let run = workflow.to_run(&entry.task)?;
-                    if key
-                        .status
-                        .as_ref()
-                        .is_some_and(|status| &run.display_status != status)
-                    {
-                        return None;
-                    }
-                    Some(WorkflowHistoryIndexEntry {
-                        started_at: run.started_at,
-                        task_id: run.task_id,
-                    })
+            let mut entries = owner
+                .into_iter()
+                .flat_map(|owner| owner.summaries.values())
+                .filter(|run| {
+                    key.kind.as_ref().is_none_or(|kind| &run.kind == kind)
+                        && key
+                            .status
+                            .as_ref()
+                            .is_none_or(|status| &run.display_status == status)
+                })
+                .map(|run| WorkflowHistoryIndexEntry {
+                    started_at: run.started_at.clone(),
+                    task_id: run.task_id.clone(),
                 })
                 .collect::<Vec<_>>();
             entries.sort_by(|left, right| {
@@ -1626,16 +1900,62 @@ impl TaskService {
             })
         });
         let end = start.saturating_add(limit).min(entries.len());
-        let tasks = self.tasks.read().expect("lock poisoned");
         let runs = entries[start..end]
             .iter()
-            .filter_map(|entry| {
-                let task = tasks.get(&entry.task_id)?;
-                let run = task.workflow.as_ref()?.to_run(&task.task)?;
-                Some(WorkflowRunSummary::from(&run))
-            })
+            .filter_map(|entry| owner?.summaries.get(&entry.task_id).cloned())
             .collect();
         (runs, end < entries.len())
+    }
+
+    fn index_workflow_summary(&self, id: &str) -> Option<WorkflowRunSummary> {
+        // Keep the task read lock until index publication so concurrent mutations
+        // cannot publish an older snapshot over a newer one.
+        let tasks = self.tasks.read().expect("lock poisoned");
+        let entry = tasks.get(id)?;
+        let summary = entry.workflow.as_ref()?.to_summary(&entry.task)?;
+        let mut index = self.workflow_summary_index.write().expect("lock poisoned");
+        let owner_key = (
+            summary.canonical_identity_key.clone(),
+            summary.identity_revision.clone(),
+        );
+        let previous = index
+            .owners
+            .get(&owner_key)
+            .and_then(|owner| owner.summaries.get(id));
+        let history_changed = previous.is_none_or(|previous| {
+            previous.display_status != summary.display_status
+                || previous.kind != summary.kind
+                || previous.outcome != summary.outcome
+        });
+        index.insert(summary.clone());
+        if history_changed {
+            self.bump_workflow_history_revision();
+        }
+        Some(summary)
+    }
+
+    pub(crate) fn workflow_session_id(&self) -> &str {
+        self.workflow_session_id.as_str()
+    }
+
+    pub(crate) fn workflow_owner_snapshot(
+        &self,
+        identity_key: &str,
+        identity_revision: &str,
+    ) -> WorkflowOwnerSnapshot {
+        let index = self.workflow_summary_index.read().expect("lock poisoned");
+        index
+            .owners
+            .get(&(identity_key.to_string(), identity_revision.to_string()))
+            .map(WorkflowOwnerIndex::snapshot)
+            .unwrap_or_else(|| WorkflowOwnerIndex::default().snapshot())
+    }
+
+    fn remove_workflow_summaries(&self, ids: &[String]) {
+        let mut index = self.workflow_summary_index.write().expect("lock poisoned");
+        for id in ids {
+            index.remove(id);
+        }
     }
 
     fn bump_workflow_history_revision(&self) {
@@ -1722,6 +2042,7 @@ impl TaskService {
             .ok_or_else(|| format!("Task is not a workflow: {id}"))?;
 
         mutate(&mut entry.task, workflow)?;
+        workflow.advance_revision()?;
         entry.task.updated_at = Utc::now().to_rfc3339();
         if matches!(
             entry.task.status,
@@ -2744,6 +3065,15 @@ impl TaskService {
         id: &str,
         new_status: TaskStatus,
     ) -> Result<BackendTask, String> {
+        if self
+            .get_task(id)
+            .is_some_and(|task| task.task_type == TaskType::Workflow)
+        {
+            self.transition_workflow_status(id, new_status)?;
+            return self
+                .get_task(id)
+                .ok_or_else(|| format!("Task not found: {id}"));
+        }
         let persistence_lane = self.workflow_persistence_lane(id);
         let mut lane = persistence_lane.lock().expect("lock poisoned");
         let mut tasks = self.tasks.write().expect("lock poisoned");
@@ -2800,6 +3130,34 @@ impl TaskService {
         total: Option<u64>,
         label: Option<String>,
     ) -> Result<BackendTask, String> {
+        if self
+            .get_task(id)
+            .is_some_and(|task| task.task_type == TaskType::Workflow)
+        {
+            self.mutate_workflow_with_durability(
+                id,
+                WorkflowMutationDurability::ObservationalProgress,
+                |task, _| {
+                    if !matches!(
+                        task.status,
+                        TaskStatus::Succeeded
+                            | TaskStatus::Failed
+                            | TaskStatus::Cancelled
+                            | TaskStatus::Interrupted
+                    ) {
+                        task.progress = Some(TaskProgress {
+                            current,
+                            total,
+                            label,
+                        });
+                    }
+                    Ok(())
+                },
+            )?;
+            return self
+                .get_task(id)
+                .ok_or_else(|| format!("Task not found: {id}"));
+        }
         let persistence_lane = self.workflow_persistence_lane(id);
         let mut lane = persistence_lane.lock().expect("lock poisoned");
         let project_root = self
@@ -2953,6 +3311,9 @@ impl TaskService {
 
         entry.log_lines.push(line.clone());
         entry.task.updated_at = Utc::now().to_rfc3339();
+        if let Some(workflow) = entry.workflow.as_mut() {
+            workflow.advance_revision()?;
+        }
         let pid = entry.task.project_id.clone();
         let tid = entry.task.id.clone();
 
@@ -3000,6 +3361,11 @@ impl TaskService {
             };
             entry.activities.push(activity.clone());
             entry.task.updated_at = Utc::now().to_rfc3339();
+            if let Some(workflow) = entry.workflow.as_mut() {
+                if workflow.advance_revision().is_err() {
+                    return;
+                }
+            }
             (entry.task.project_id.clone(), entry.task.id.clone())
         };
         self.emit(
@@ -3674,6 +4040,7 @@ impl TaskService {
             .expect("lock poisoned")
             .retain(|id, _| !removed_ids.contains(id));
         if removed_workflow {
+            self.remove_workflow_summaries(&removed_ids);
             self.bump_workflow_history_revision();
         }
         removed_count
@@ -3735,6 +4102,7 @@ impl TaskService {
             .expect("lock poisoned")
             .retain(|id, _| !matching_ids.contains(id));
         if removed_workflow {
+            self.remove_workflow_summaries(&matching_ids);
             self.bump_workflow_history_revision();
         }
         matching_ids.len()
@@ -3782,6 +4150,8 @@ impl TaskService {
         for id in ids {
             self.cancellation.remove(id);
         }
+        self.remove_workflow_summaries(ids);
+        self.bump_workflow_history_revision();
         Ok(())
     }
 
@@ -4168,7 +4538,12 @@ impl TaskService {
                                         let entry = tasks
                                             .get_mut(&task.id)
                                             .expect("existing task must remain present");
-                                        entry.task.project_id = Some(project_id.to_string());
+                                        if entry.task.project_id.as_deref() != Some(project_id) {
+                                            entry.task.project_id = Some(project_id.to_string());
+                                            if let Some(workflow) = entry.workflow.as_mut() {
+                                                workflow.advance_revision()?;
+                                            }
+                                        }
                                         entry.task.clone()
                                     } else {
                                         existing
@@ -4193,6 +4568,8 @@ impl TaskService {
                                 }
                                 let token = self.cancellation.register(&task.id);
                                 if let Some(state) = workflow.as_mut() {
+                                    state.advance_revision()?;
+                                    state.session_id = self.workflow_session_id.as_ref().clone();
                                     crate::services::recover_workflow(
                                         &mut task,
                                         state,
@@ -4278,6 +4655,9 @@ impl TaskService {
             }
         }
 
+        if !recovered.is_empty() {
+            self.bump_workflow_history_revision();
+        }
         Ok(recovered)
     }
 }
@@ -4520,6 +4900,137 @@ mod tests {
             WorkflowStartOutcome::Created { run } => run,
             WorkflowStartOutcome::Existing { .. } => panic!("expected new workflow"),
         }
+    }
+
+    fn indexed_summary(id: &str, kind: &str, status: &str, time: &str) -> WorkflowRunSummary {
+        serde_json::from_value(serde_json::json!({
+            "taskId": id, "projectId": "project", "canonicalIdentityKey": "owner", "identityRevision": "identity-1",
+            "kind": kind, "operation": { "kind": "built_in" }, "displayStatus": status,
+            "retry": null, "startedAt": time, "updatedAt": time,
+            "completedAt": if status == "completed" { Some(time) } else { None },
+        })).unwrap()
+    }
+
+    #[test]
+    fn owner_snapshot_bounds_recent_and_queue_and_retains_kind_context() {
+        let mut owner = WorkflowOwnerIndex::default();
+        let mut health = indexed_summary("health", "health_check", "completed", "0000");
+        health.outcome = Some(WorkflowRunOutcomeSummary::HealthCheck {
+            error_count: 2,
+            warning_count: 3,
+            info_count: 4,
+        });
+        owner.insert(health);
+        for index in 0..5_000 {
+            let mut run = indexed_summary(
+                &format!("queue-{index}"),
+                "update_wiki",
+                "queued",
+                &format!("{index:05}"),
+            );
+            run.queue_position = Some(index + 1);
+            owner.insert(run);
+        }
+        let snapshot = owner.snapshot();
+        assert_eq!(snapshot.recent_runs.len(), 5);
+        assert_eq!(snapshot.context.queue_count, 5_000);
+        assert_eq!(snapshot.context.queued_runs.len(), 5);
+        assert_eq!(snapshot.context.queued_runs[0].task_id, "queue-0");
+        assert_eq!(snapshot.context.last_health.unwrap().task_id, "health");
+        assert!(snapshot.context.pending_source_count.is_none());
+        owner.remove("queue-0");
+        assert_eq!(owner.snapshot().context.queued_runs[0].task_id, "queue-1");
+    }
+
+    #[test]
+    fn attention_prefers_live_work_and_resolves_a_superseded_failure() {
+        let mut owner = WorkflowOwnerIndex::default();
+        owner.insert(indexed_summary("failure", "update_wiki", "failed", "1"));
+        assert_eq!(owner.snapshot().attention[0].task_id, "failure");
+        owner.insert(indexed_summary("retry", "update_wiki", "queued", "2"));
+        assert_eq!(owner.snapshot().attention[0].task_id, "retry");
+        owner.insert(indexed_summary("running", "update_wiki", "running", "0"));
+        assert_eq!(owner.snapshot().attention[0].task_id, "running");
+        owner.remove("running");
+        owner.insert(indexed_summary("retry", "update_wiki", "completed", "2"));
+        assert!(owner.snapshot().attention.is_empty());
+        assert_eq!(owner.snapshot().completed[0].task_id, "retry");
+        assert!(owner.summaries.contains_key("failure"));
+    }
+
+    #[test]
+    fn workflow_revision_survives_restart_as_decimal_and_changes_session() {
+        let root = tempfile::tempdir().unwrap();
+        let tasks = TaskService::default();
+        let run = created_workflow(
+            WorkflowCoordinator::default()
+                .enqueue(
+                    &tasks,
+                    workflow_request(root.path(), Some(root.path().join(".app/tasks"))),
+                )
+                .unwrap(),
+        );
+        let next = tasks
+            .mutate_workflow(&run.task_id, |_, state| {
+                state.revision = 9_007_199_254_740_992;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(next.revision, "9007199254740993");
+        let path = root
+            .path()
+            .join(".app/tasks")
+            .join(format!("{}.json", run.task_id));
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json["workflow"]["revision"], "9007199254740993");
+        assert!(json["workflow"].get("sessionId").is_none());
+        let restarted = TaskService::default();
+        restarted.recover_tasks(root.path()).unwrap();
+        let recovered = restarted.get_workflow_run(&run.task_id).unwrap();
+        assert_eq!(recovered.revision, "9007199254740994");
+        assert_ne!(next.session_id, recovered.session_id);
+        let snapshot =
+            restarted.workflow_owner_snapshot(&run.canonical_identity_key, &run.identity_revision);
+        assert_eq!(snapshot.recent_runs[0].revision, recovered.revision);
+        assert_eq!(snapshot.recent_runs[0].session_id, recovered.session_id);
+        let (history, _) = restarted.page_workflow_runs(
+            &run.canonical_identity_key,
+            &run.identity_revision,
+            None,
+            None,
+            None,
+            5,
+        );
+        assert_eq!(history[0], snapshot.recent_runs[0]);
+        assert_eq!(history[0], WorkflowRunSummary::from(&recovered));
+    }
+
+    #[test]
+    fn legacy_workflow_without_revision_recovers_with_a_versioned_summary() {
+        let root = tempfile::tempdir().unwrap();
+        let tasks = TaskService::default();
+        let run = created_workflow(
+            WorkflowCoordinator::default()
+                .enqueue(
+                    &tasks,
+                    workflow_request(root.path(), Some(root.path().join(".app/tasks"))),
+                )
+                .unwrap(),
+        );
+        let path = root
+            .path()
+            .join(".app/tasks")
+            .join(format!("{}.json", run.task_id));
+        let mut json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        json["workflow"].as_object_mut().unwrap().remove("revision");
+        std::fs::write(&path, serde_json::to_string(&json).unwrap()).unwrap();
+        let restarted = TaskService::default();
+        restarted.recover_tasks(root.path()).unwrap();
+        let recovered = restarted.get_workflow_run(&run.task_id).unwrap();
+        assert_eq!(recovered.revision, "1");
+        assert!(!recovered.session_id.is_empty());
     }
 
     #[test]

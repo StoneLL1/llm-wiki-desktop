@@ -490,7 +490,15 @@
         "mutation"
       ],
       "projectScoped": true,
-      "writeAuthority": "ProjectWritePermit"
+      "writeAuthority": "ProjectWritePermit",
+      "authorityPaths": [
+        {
+          "source": "src-tauri/src/services/workflow_review.rs",
+          "function": "confirm_workflow_action_for_state",
+          "commandDelegate": "confirm_workflow_action_for_state",
+          "authority": "ProjectWritePermit"
+        }
+      ]
     },
     {
       "name": "continue_queued_workflows",

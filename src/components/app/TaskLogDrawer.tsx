@@ -433,6 +433,7 @@ function TaskLogDrawerBody({
       setActiveView("workflows");
       closeDrawer();
     } catch (error) {
+      if (error instanceof Error && ["WORKFLOW_NAVIGATION_SUPERSEDED", "WORKFLOW_PROJECT_CHANGED"].includes(error.message)) return;
       pushToast("error", translateBackendError(error, t));
     }
   };

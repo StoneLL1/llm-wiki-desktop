@@ -133,6 +133,7 @@ pub enum PendingActionType {
     OverwriteFile,
     BatchRewrite,
     MergeConflict,
+    ReviewScope,
     AgentAutoFix,
     InstallAgent,
     RunSkill,
@@ -2209,6 +2210,8 @@ mod tests {
         };
         let run = WorkflowRun {
             schema_version: 1,
+            revision: "0".into(),
+            session_id: String::new(),
             task_id: "task-malicious".into(),
             project_id: context.project_id.clone(),
             canonical_identity_key: "identity".into(),

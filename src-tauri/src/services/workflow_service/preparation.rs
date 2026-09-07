@@ -240,13 +240,6 @@ struct RequestEvaluationSnapshot {
     markdown_files: RefCell<HashMap<String, CachedMarkdownFile>>,
 }
 
-pub(super) struct WorkflowOverviewEvaluationSnapshot {
-    pub(super) prerequisites: Vec<(WorkflowKind, Option<WorkflowPrerequisite>, String)>,
-    pub(super) has_sources: bool,
-    pub(super) changed_source_count: usize,
-    pub(super) has_readable_markdown: bool,
-}
-
 #[derive(Default)]
 struct PreparationRecords {
     prepared: HashMap<String, PreparedRecord>,
@@ -265,9 +258,18 @@ pub(crate) enum PreparationStartLookup {
 }
 
 impl RequestEvaluationSnapshot {
+    #[cfg(test)]
     fn capture(
         environment: &WorkflowPreparationEnvironment<'_>,
         collect_resource_paths: bool,
+    ) -> Result<Self, BackendError> {
+        Self::capture_for_input(environment, collect_resource_paths, None)
+    }
+
+    fn capture_for_input(
+        environment: &WorkflowPreparationEnvironment<'_>,
+        collect_resource_paths: bool,
+        input: Option<&PrepareWorkflowInput>,
     ) -> Result<Self, BackendError> {
         let identity = project_identity(&environment.context.root).map_err(|message| {
             BackendError::new("WORKFLOW_IDENTITY_FAILED", message, true, false)
@@ -299,7 +301,25 @@ impl RequestEvaluationSnapshot {
         let route_started = std::time::Instant::now();
         #[cfg(test)]
         let agent_before = AGENT_NANOS.get();
-        let route_catalog = RouteCatalog::load(environment, &project_access)?;
+        let local_only = matches!(
+            input.and_then(|input| input.scope.as_ref()),
+            Some(WorkflowScope::HealthCheck {
+                mode: HealthCheckMode::LocalQuick
+            })
+        );
+        let route_catalog = if local_only {
+            RouteCatalog {
+                default_agent: None,
+                agents: HashMap::new(),
+                providers: Vec::new(),
+            }
+        } else {
+            RouteCatalog::load(
+                environment,
+                &project_access,
+                input.and_then(|input| input.route_selection.as_ref()),
+            )?
+        };
         #[cfg(test)]
         {
             let route_total = u64::try_from(route_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
@@ -371,94 +391,6 @@ impl RequestEvaluationSnapshot {
     }
 }
 
-pub(super) fn overview_evaluation_snapshot(
-    preferences: &WorkflowPreferences,
-    environment: &WorkflowPreparationEnvironment<'_>,
-) -> Result<WorkflowOverviewEvaluationSnapshot, BackendError> {
-    let evaluation = RequestEvaluationSnapshot::capture(environment, true)?;
-    let remembered = preferences.load(
-        environment.context,
-        &evaluation.project_access.canonical_identity_key,
-        &evaluation.project_access.identity_revision,
-        &evaluation.project_access.persistence,
-    )?;
-    let remembered_health =
-        if evaluation.project_access.persistence == WorkflowPersistenceMode::MemoryOnly {
-            remembered
-                .iter()
-                .find(|entry| entry.kind == WorkflowKind::HealthCheck)
-                .cloned()
-        } else {
-            preferences
-                .load(
-                    environment.context,
-                    &evaluation.project_access.canonical_identity_key,
-                    &evaluation.project_access.identity_revision,
-                    &WorkflowPersistenceMode::MemoryOnly,
-                )?
-                .into_iter()
-                .find(|entry| entry.kind == WorkflowKind::HealthCheck)
-        };
-    let prerequisites = [
-        WorkflowKind::UpdateWiki,
-        WorkflowKind::HealthCheck,
-        WorkflowKind::GenerateContent,
-    ]
-    .into_iter()
-    .map(|kind| {
-        let mut snapshot = build_snapshot_from_evaluation(
-            environment,
-            &PrepareWorkflowInput {
-                kind: kind.clone(),
-                scope: None,
-                route_selection: None,
-            },
-            &evaluation,
-        )?;
-        let previous = if kind == WorkflowKind::HealthCheck {
-            remembered_health.as_ref()
-        } else {
-            remembered.iter().find(|entry| entry.kind == kind)
-        };
-        if let Some(previous) = previous {
-            let remembered = build_snapshot_from_evaluation(
-                environment,
-                &PrepareWorkflowInput {
-                    kind: kind.clone(),
-                    scope: Some(previous.scope.clone()),
-                    route_selection: route_selection(&previous.route),
-                },
-                &evaluation,
-            );
-            match remembered {
-                Ok(remembered) => snapshot = remembered,
-                Err(error) if stale_remembered_scope(&error) => {}
-                Err(error) => return Err(error),
-            }
-        }
-        let prerequisite = snapshot
-            .prerequisites
-            .into_iter()
-            .min_by_key(|item| prerequisite_priority(&item.action));
-        Ok((kind, prerequisite, snapshot.baseline.fingerprint))
-    })
-    .collect::<Result<Vec<_>, BackendError>>()?;
-    let has_readable_markdown = !evaluation.source_versions.is_empty()
-        || !evaluation
-            .readable_markdown(environment.context)?
-            .is_empty();
-    Ok(WorkflowOverviewEvaluationSnapshot {
-        prerequisites,
-        has_sources: !evaluation.source_versions.is_empty(),
-        changed_source_count: evaluation
-            .resolved_sources
-            .iter()
-            .filter(|source| !source.already_consumed)
-            .count(),
-        has_readable_markdown,
-    })
-}
-
 impl WorkflowPreparationService {
     pub fn prepare(
         &self,
@@ -466,9 +398,10 @@ impl WorkflowPreparationService {
         environment: &WorkflowPreparationEnvironment<'_>,
         input: PrepareWorkflowInput,
     ) -> Result<WorkflowPreparation, BackendError> {
-        let evaluation = RequestEvaluationSnapshot::capture(
+        let evaluation = RequestEvaluationSnapshot::capture_for_input(
             environment,
             input.kind == WorkflowKind::GenerateContent,
+            Some(&input),
         )?;
         let mut snapshot = build_snapshot_from_evaluation(environment, &input, &evaluation)?;
         let previous = preferences
@@ -652,7 +585,7 @@ impl WorkflowPreparationService {
             &PrepareWorkflowInput {
                 kind: record.preparation.kind.clone(),
                 scope: Some(record.preparation.scope.clone()),
-                route_selection: record.route_selection.clone(),
+                route_selection: route_selection(&record.preparation.route),
             },
         )?;
         if refreshed.project_access != record.preparation.project_access
@@ -810,9 +743,10 @@ fn build_snapshot(
     environment: &WorkflowPreparationEnvironment<'_>,
     input: &PrepareWorkflowInput,
 ) -> Result<PreparationSnapshot, BackendError> {
-    let evaluation = RequestEvaluationSnapshot::capture(
+    let evaluation = RequestEvaluationSnapshot::capture_for_input(
         environment,
         input.kind == WorkflowKind::GenerateContent,
+        Some(input),
     )?;
     build_snapshot_from_evaluation(environment, input, &evaluation)
 }
@@ -1044,6 +978,7 @@ impl RouteCatalog {
     fn load(
         environment: &WorkflowPreparationEnvironment<'_>,
         project_access: &WorkflowProjectAccessSummary,
+        selected: Option<&WorkflowRouteSelection>,
     ) -> Result<Self, BackendError> {
         #[cfg(test)]
         ROUTE_CATALOG_LOADS.with(|count| count.set(count.get() + 1));
@@ -1061,6 +996,11 @@ impl RouteCatalog {
         let detected_agents = std::thread::scope(|scope| {
             let handles = AgentKind::ALL
                 .into_iter()
+                .filter(|kind| match selected {
+                    Some(WorkflowRouteSelection::Agent { agent }) => kind == agent,
+                    Some(WorkflowRouteSelection::Byok { .. }) => false,
+                    None => true,
+                })
                 .map(|kind| {
                     let settings_revision = &settings_revision;
                     let canonical_identity_key = &project_access.canonical_identity_key;
@@ -1156,6 +1096,12 @@ impl RouteCatalog {
             .collect();
         let mut providers = Vec::new();
         for config in settings.llm_providers {
+            if selected.is_some_and(|selection| match selection {
+                WorkflowRouteSelection::Byok { provider } => *provider != config.provider,
+                WorkflowRouteSelection::Agent { .. } => true,
+            }) {
+                continue;
+            }
             let binding =
                 crate::services::LlmService::credential_binding(environment.context, &config)?;
             let configured_secret = if project_access.trust == WorkflowProjectTrust::Trusted {
@@ -1502,7 +1448,7 @@ fn prerequisites(
     if matches!(
         scope,
         WorkflowScope::UpdateWiki { .. } | WorkflowScope::GenerateContent { .. }
-    ) && access.filesystem_access == WorkflowFilesystemAccess::ReadOnly
+    ) && access.filesystem_access != WorkflowFilesystemAccess::Writable
     {
         items.push(prerequisite(
             "WORKFLOW_PROJECT_READ_ONLY",
@@ -1541,6 +1487,11 @@ fn prerequisites(
                 "WORKFLOW_GIT_DIRTY",
                 prerequisite_message_key(&WorkflowPrerequisiteAction::ResolveDirtyGit).into(),
                 WorkflowPrerequisiteAction::ResolveDirtyGit,
+            )),
+            WorkflowGitState::Unknown => items.push(prerequisite(
+                "WORKFLOW_GIT_NOT_OBSERVED",
+                "workflows.error.prepareAgain".into(),
+                WorkflowPrerequisiteAction::PrepareAgain,
             )),
             WorkflowGitState::Clean => {}
         }
@@ -2026,21 +1977,6 @@ fn prerequisite_message_key(action: &WorkflowPrerequisiteAction) -> &'static str
     }
 }
 
-fn prerequisite_priority(action: &WorkflowPrerequisiteAction) -> u8 {
-    match action {
-        WorkflowPrerequisiteAction::OpenOrCreateProject => 0,
-        WorkflowPrerequisiteAction::ImportSources | WorkflowPrerequisiteAction::UpdateWiki => 1,
-        WorkflowPrerequisiteAction::TrustProject => 2,
-        WorkflowPrerequisiteAction::MakeWritable => 3,
-        WorkflowPrerequisiteAction::ConfigureGit | WorkflowPrerequisiteAction::ResolveDirtyGit => 4,
-        WorkflowPrerequisiteAction::ConfigureExecutionRoute
-        | WorkflowPrerequisiteAction::ChooseExecutionRoute => 5,
-        WorkflowPrerequisiteAction::PrepareAgain
-        | WorkflowPrerequisiteAction::AcknowledgeRemoteProvider
-        | WorkflowPrerequisiteAction::AcknowledgeRestrictedContent => 6,
-    }
-}
-
 pub fn workflow_stages(kind: &WorkflowKind) -> Vec<WorkflowStage> {
     let definitions: &[(&str, &str)] = match kind {
         WorkflowKind::UpdateWiki => &[
@@ -2332,7 +2268,42 @@ mod batch_zero_cost_tests {
     }
 
     #[test]
-    fn overview_reuses_route_probe_markdown_and_hash_work_for_scale_fixture() {
+    fn unknown_overview_access_does_not_authorize_wiki_preparation() {
+        let root = tempfile::tempdir().unwrap();
+        let context = ProjectContext::new("unknown-access", root.path().to_path_buf());
+        let access = WorkflowProjectAccessSummary {
+            project_id: context.project_id.clone(),
+            canonical_identity_key: "identity".into(),
+            identity_revision: "revision".into(),
+            trust: WorkflowProjectTrust::Trusted,
+            filesystem_access: WorkflowFilesystemAccess::Unknown,
+            persistence: WorkflowPersistenceMode::MemoryOnly,
+            git_state: WorkflowGitState::Unknown,
+        };
+        let items = prerequisites(
+            &context,
+            &WorkflowScope::UpdateWiki {
+                mode: UpdateWikiMode::ChangedSources,
+                source_versions: Vec::new(),
+            },
+            &access,
+            &None,
+            &[],
+            &[],
+            &WorkflowGitPolicy::RequiredBeforeWrite,
+            None,
+            false,
+        );
+        assert!(items
+            .iter()
+            .any(|item| item.blocking && item.code == "WORKFLOW_PROJECT_READ_ONLY"));
+        assert!(items
+            .iter()
+            .any(|item| item.blocking && item.code == "WORKFLOW_GIT_NOT_OBSERVED"));
+    }
+
+    #[test]
+    fn fifty_overview_queries_do_no_source_markdown_route_or_hash_work() {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join(".app")).unwrap();
         std::fs::create_dir_all(root.path().join("wiki/scale")).unwrap();
@@ -2379,38 +2350,33 @@ mod batch_zero_cost_tests {
             .unwrap();
 
         assert_eq!(result.rows.len(), 3);
-        assert_eq!(AgentKind::ALL.len(), 4, "Batch 0 freezes four Agent kinds");
+        let zero_cost = PreparationCostSnapshot {
+            source_inventories: 0,
+            markdown_root_inventories: 0,
+            route_catalog_loads: 0,
+            agent_probes: 0,
+            baseline_hashes: 0,
+        };
+        assert_eq!(preparation_costs(), zero_cost);
+        for _ in 0..50 {
+            agents.invalidate_workflow_route_cache();
+            let overview = service
+                .project_overview(
+                    &context,
+                    environment.access.clone(),
+                    &settings,
+                    &secrets,
+                    &agents,
+                    &tasks,
+                )
+                .unwrap();
+            assert_eq!(overview.rows.len(), 3);
+            assert!(overview.rows.iter().all(|row| !row.recommended));
+        }
         assert_eq!(
             preparation_costs(),
-            PreparationCostSnapshot {
-                source_inventories: 1,
-                markdown_root_inventories: 1,
-                route_catalog_loads: 1,
-                agent_probes: 4,
-                baseline_hashes: 1_000,
-            }
-        );
-
-        service
-            .project_overview(
-                &context,
-                environment.access.clone(),
-                &settings,
-                &secrets,
-                &agents,
-                &tasks,
-            )
-            .unwrap();
-        assert_eq!(
-            preparation_costs(),
-            PreparationCostSnapshot {
-                source_inventories: 2,
-                markdown_root_inventories: 2,
-                route_catalog_loads: 2,
-                agent_probes: 4,
-                baseline_hashes: 2_000,
-            },
-            "the TTL route cache may reuse Agent probes, but content and authority facts must remain request-fresh"
+            zero_cost,
+            "hot overview queries must not run preparation, even when Agent cache is cold"
         );
     }
 
@@ -2635,7 +2601,7 @@ mod batch_zero_cost_tests {
     }
 
     #[test]
-    fn overview_starts_all_cold_agent_probes_in_parallel() {
+    fn overview_does_not_wait_for_unreleased_cold_agent_probes() {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join(".app")).unwrap();
         std::fs::create_dir_all(root.path().join("wiki")).unwrap();
@@ -2657,8 +2623,9 @@ mod batch_zero_cost_tests {
             releases: Mutex::new(release_receivers),
             resolved_commands: Mutex::new(HashSet::new()),
         }));
+        let (completed_tx, completed_rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
-            WorkflowService::default().project_overview(
+            let result = WorkflowService::default().project_overview(
                 &context,
                 WorkflowAccessSnapshot {
                     trust: WorkflowProjectTrust::Untrusted,
@@ -2672,161 +2639,98 @@ mod batch_zero_cost_tests {
                 &secrets,
                 &agents,
                 &TaskService::default(),
-            )
+            );
+            let _ = completed_tx.send(result);
         });
 
-        let all_entered_before_release = (0..AgentKind::ALL.len()).all(|_| {
-            entered_rx
-                .recv_timeout(std::time::Duration::from_secs(2))
-                .is_ok()
-        });
+        let completed_before_release = completed_rx.recv_timeout(std::time::Duration::from_secs(2));
+        let probe_started = entered_rx.try_recv().is_ok();
+        // Always release on regression so a failed assertion cannot strand a thread.
         for release in release_senders {
-            release.send(()).unwrap();
+            let _ = release.send(());
         }
-        worker.join().unwrap().unwrap();
+        worker.join().unwrap();
         assert!(
-            all_entered_before_release,
-            "all cold Agent probes must start before any one probe completes"
+            completed_before_release.unwrap().is_ok(),
+            "overview must complete while every Agent probe is unavailable"
         );
+        assert!(!probe_started, "overview must never enter Agent detection");
     }
 
     #[test]
-    #[ignore = "local release performance reference for the Batch 5B stop/go gate"]
-    fn overview_release_reference_reports_request_phases() {
+    #[ignore = "local release performance reference for the bounded overview read model"]
+    fn overview_release_reference_reports_zero_preparation_work() {
         assert!(
             !cfg!(debug_assertions),
-            "Batch 5B reference must run with cargo test --release"
+            "Run this reference with cargo test --release"
         );
         let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join(".app")).unwrap();
         std::fs::create_dir_all(root.path().join("wiki/scale")).unwrap();
         for index in 0..1_000 {
             std::fs::write(
                 root.path().join(format!("wiki/scale/page-{index:04}.md")),
-                format!("# Page {index}\n\n![asset](../assets/shared.png)\n"),
+                format!("# Page {index}\n"),
             )
             .unwrap();
         }
-        let context = ProjectContext::new("release-reference", root.path().to_path_buf());
-        let config = tempfile::tempdir().unwrap();
-        let settings = SettingsService::with_config_dir(config.path().to_path_buf());
-        let secrets = SecretService::memory();
-        let agents = AgentService::default();
+        let identity = project_identity(root.path()).unwrap();
+        let access = WorkflowProjectAccessSummary {
+            project_id: "overview-reference".into(),
+            canonical_identity_key: identity.canonical_identity_key,
+            identity_revision: identity.identity_revision,
+            trust: WorkflowProjectTrust::Untrusted,
+            filesystem_access: WorkflowFilesystemAccess::Unknown,
+            persistence: WorkflowPersistenceMode::MemoryOnly,
+            git_state: WorkflowGitState::Unknown,
+        };
         let service = WorkflowService::default();
         let tasks = TaskService::default();
-        let access = WorkflowAccessSnapshot {
-            trust: WorkflowProjectTrust::Untrusted,
-            trust_kind: None,
-            filesystem_access: WorkflowFilesystemAccess::ReadOnly,
-            persistence: WorkflowPersistenceMode::MemoryOnly,
-            git_state: WorkflowGitState::Unavailable,
-            authority_revision: "release-reference-authority".into(),
-        };
-        let invoke = || {
-            service
-                .project_overview(
-                    &context,
-                    access.clone(),
-                    &settings,
-                    &secrets,
-                    &agents,
-                    &tasks,
-                )
-                .unwrap()
-        };
-        for _ in 0..5 {
-            agents.invalidate_workflow_route_cache();
-            reset_preparation_costs();
-            invoke();
-            reset_preparation_costs();
-            invoke();
-        }
-        let mut warm_total_ms = Vec::with_capacity(50);
-        let mut warm_route_ms = Vec::with_capacity(50);
-        let mut warm_agent_ms = Vec::with_capacity(50);
-        let mut warm_inventory_ms = Vec::with_capacity(50);
-        let mut warm_markdown_ms = Vec::with_capacity(50);
-        let mut cold_agent_ms = Vec::with_capacity(50);
-        let mut cold_slowest_probe_ms = Vec::with_capacity(50);
+        let mut total_ms = Vec::with_capacity(50);
+        reset_preparation_costs();
         for _ in 0..50 {
-            agents.invalidate_workflow_route_cache();
-            reset_preparation_costs();
-            invoke();
-            let cold = preparation_timings();
-            let cold_agent = cold.agent_nanos as f64 / 1_000_000.0;
-            let cold_slowest = cold.slowest_agent_probe_nanos as f64 / 1_000_000.0;
-            assert_eq!(preparation_costs().agent_probes, AgentKind::ALL.len());
-            assert!(
-                cold_agent <= cold_slowest + 500.0,
-                "cold Agent phase must stay within the slowest probe plus 500ms: phase={cold_agent:.3}ms slowest={cold_slowest:.3}ms"
-            );
-            cold_agent_ms.push(cold_agent);
-            cold_slowest_probe_ms.push(cold_slowest);
-
-            reset_preparation_costs();
             let started = std::time::Instant::now();
-            invoke();
-            warm_total_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
-            let warm = preparation_timings();
-            warm_route_ms.push(warm.route_nanos as f64 / 1_000_000.0);
-            warm_agent_ms.push(warm.agent_nanos as f64 / 1_000_000.0);
-            warm_inventory_ms.push(warm.inventory_nanos as f64 / 1_000_000.0);
-            warm_markdown_ms.push(warm.markdown_nanos as f64 / 1_000_000.0);
-            assert_eq!(
-                preparation_costs().agent_probes,
-                0,
-                "TTL-warm overview must spawn no Agent probe subprocesses"
-            );
+            let overview = service
+                .overview
+                .for_project(access.clone(), &tasks)
+                .unwrap();
+            total_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+            assert_eq!(overview.rows.len(), 3);
         }
-        let warm_total = sample_stats(&warm_total_ms);
-        let warm_route = sample_stats(&warm_route_ms);
-        let warm_agent = sample_stats(&warm_agent_ms);
-        let warm_inventory = sample_stats(&warm_inventory_ms);
-        let warm_markdown = sample_stats(&warm_markdown_ms);
-        let cold_agent = sample_stats(&cold_agent_ms);
-        let cold_slowest = sample_stats(&cold_slowest_probe_ms);
-        let agent_kinds = AgentKind::ALL
-            .iter()
-            .map(|kind| format!("{kind:?}").to_ascii_lowercase())
-            .collect::<Vec<_>>()
-            .join(",");
+        let total = sample_stats(&total_ms);
+        let timings = preparation_timings();
+        assert_eq!(
+            preparation_costs(),
+            PreparationCostSnapshot {
+                source_inventories: 0,
+                markdown_root_inventories: 0,
+                route_catalog_loads: 0,
+                agent_probes: 0,
+                baseline_hashes: 0,
+            }
+        );
+        assert_eq!(
+            timings.inventory_nanos
+                + timings.route_nanos
+                + timings.agent_nanos
+                + timings.slowest_agent_probe_nanos
+                + timings.markdown_nanos,
+            0
+        );
         eprintln!(
-            "BATCH5B_OVERVIEW_REFERENCE profile=release cache_mode=explicit_cold_then_ttl_warm ttl_secs=30 agent_kinds={} os={} arch={} parallelism={} samples=50 warm_total_mean_ms={:.3} warm_total_p95_ms={:.3} warm_total_cv={:.4} warm_route_non_agent_mean_ms={:.3} warm_route_non_agent_p95_ms={:.3} warm_agent_mean_ms={:.3} warm_agent_p95_ms={:.3} warm_inventory_mean_ms={:.3} warm_inventory_p95_ms={:.3} warm_markdown_mean_ms={:.3} warm_markdown_p95_ms={:.3} cold_agent_mean_ms={:.3} cold_agent_p95_ms={:.3} cold_slowest_probe_mean_ms={:.3} cold_slowest_probe_p95_ms={:.3}",
-            agent_kinds,
-            std::env::consts::OS,
-            std::env::consts::ARCH,
-            std::thread::available_parallelism().map_or(0, |value| value.get()),
-            warm_total.mean,
-            warm_total.p95,
-            warm_total.cv,
-            warm_route.mean,
-            warm_route.p95,
-            warm_agent.mean,
-            warm_agent.p95,
-            warm_inventory.mean,
-            warm_inventory.p95,
-            warm_markdown.mean,
-            warm_markdown.p95,
-            cold_agent.mean,
-            cold_agent.p95,
-            cold_slowest.mean,
-            cold_slowest.p95,
+            "WORKFLOW_OVERVIEW_REFERENCE profile=release samples=50 markdown_fixture=1000 os={} arch={} total_mean_ms={:.6} total_p50_ms={:.6} total_p95_ms={:.6} total_max_ms={:.6} total_cv={:.4} source_inventories=0 markdown_inventories=0 route_loads=0 agent_probes=0 hashes=0",
+            std::env::consts::OS, std::env::consts::ARCH, total.mean, total.p50, total.p95, total.max, total.cv,
         );
-        assert!(warm_total.cv < 0.15, "warm overview CV must stay below 15%");
         assert!(
-            warm_total.p95 <= 1_000.0,
-            "TTL-warm 1,000-Markdown overview p95 must stay within 1 second"
+            total.p95 <= 1_000.0,
+            "bounded overview must return within one second"
         );
-        assert_eq!(preparation_costs().source_inventories, 1);
-        assert_eq!(preparation_costs().markdown_root_inventories, 1);
-        assert_eq!(preparation_costs().route_catalog_loads, 1);
-        assert_eq!(preparation_costs().agent_probes, 0);
-        assert_eq!(preparation_costs().baseline_hashes, 1_000);
     }
 
     struct SampleStats {
         mean: f64,
+        p50: f64,
         p95: f64,
+        max: f64,
         cv: f64,
     }
 
@@ -2844,7 +2748,9 @@ mod batch_zero_cost_tests {
             .min(ordered.len() - 1);
         SampleStats {
             mean,
+            p50: ordered[(ordered.len() - 1) / 2],
             p95: ordered[p95_index],
+            max: ordered[ordered.len() - 1],
             cv: variance.sqrt() / mean,
         }
     }

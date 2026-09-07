@@ -7,6 +7,7 @@ import {
   type WorkflowOperationError,
   type WorkflowOperationState,
 } from "../../stores/workflowStore";
+import { useTaskStore } from "../../stores/taskStore";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
 import type { WorkflowsController } from "./useWorkflowsController";
@@ -22,7 +23,8 @@ export function WorkflowsView({ controller, onOpenTask }: { controller: Workflow
   const requestWorkflowLaunch = useNavigationStore((state) => state.requestWorkflowLaunch);
   const overview = useWorkflowStore((state) => state.overview);
   const overviewStatus = useWorkflowStore((state) => state.overviewStatus);
-  const runs = useWorkflowStore((state) => state.runs);
+  const selectedRun = useWorkflowStore((state) => state.runs.find((run) => run.taskId === state.selectedTaskId) ?? null);
+  const summaryById = useTaskStore((state) => state.workflowById);
   const historyRuns = useWorkflowStore((state) => state.historyRuns);
   const historyKind = useWorkflowStore((state) => state.historyKind);
   const historyStatus = useWorkflowStore((state) => state.historyStatus);
@@ -31,8 +33,10 @@ export function WorkflowsView({ controller, onOpenTask }: { controller: Workflow
   const selectedTaskId = useWorkflowStore((state) => state.selectedTaskId);
   const surface = useWorkflowStore((state) => state.surface);
   const operations = useWorkflowStore((state) => state.operations);
-  const selectedRun = runs.find((run) => run.taskId === selectedTaskId) ?? null;
-  const queuedRuns = runs.filter((run) => run.displayStatus === "queued").sort((a, b) => (a.queuePosition ?? 999) - (b.queuePosition ?? 999));
+  const queuedRuns = Object.values(summaryById).filter((run) => run.projectId === project.projectId
+    && run.canonicalIdentityKey === overview?.projectAccess?.canonicalIdentityKey
+    && run.identityRevision === overview?.projectAccess?.identityRevision
+    && run.displayStatus === "queued").sort((a, b) => (a.queuePosition ?? 999) - (b.queuePosition ?? 999));
   const overviewError = latestOperationError(operations, ["overview:init", "overview:reconcile"]);
   const surfaceError = latestOperationError(
     operations,
@@ -65,7 +69,7 @@ export function WorkflowsView({ controller, onOpenTask }: { controller: Workflow
     }
     if (surfaceError.key.startsWith("history:")) {
       if (historyPageRequiresRefresh) {
-        void controller.refresh();
+        void controller.filterHistory(historyKind, historyStatus);
       } else if (surfaceError.key === "history:page" && historyCursor) {
         void controller.loadHistoryMore();
       } else {
@@ -123,7 +127,7 @@ export function WorkflowsView({ controller, onOpenTask }: { controller: Workflow
     : surface === "history"
       ? <WorkflowHistoryView runs={historyRuns} onBack={controller.backToOverview} onFilter={(kind, status) => void controller.filterHistory(kind, status)} onOpen={(taskId) => void controller.openRun(taskId)} onRetry={(taskId) => void controller.retry(taskId)} onLoadMore={() => void controller.loadHistoryMore()} />
       : surface === "preparation" && preparation
-        ? <WorkflowPreparationView preparation={preparation} onBack={controller.backToOverview} onPrerequisite={controller.handlePrerequisite} onReprepare={(scope, route) => void controller.prepare(preparation.kind, scope, route)} onStart={(restricted, remote) => void controller.startPrepared(restricted, remote)} />
+        ? <WorkflowPreparationView preparation={preparation} onBack={controller.backToOverview} onPrerequisite={controller.handlePrerequisite} onStart={(restricted, remote, draft) => void controller.startPrepared(restricted, remote, draft)} />
         : surface === "detail" && selectedRun
           ? <WorkflowTaskDetail run={selectedRun} queuedRuns={queuedRuns} controller={controller} onOpenLogs={onOpenTask} />
           : overviewView;

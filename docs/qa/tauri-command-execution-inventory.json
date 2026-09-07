@@ -54,12 +54,12 @@
   "currentSnapshot": {
     "status": "project_facts_batch4_green",
     "total": 213,
-    "sync": 133,
-    "async": 80,
+    "sync": 121,
+    "async": 92,
     "importTotal": 60,
     "importSync": 0,
-    "blockingSync": 127,
-    "measuredAt": "2026-08-30",
+    "blockingSync": 115,
+    "measuredAt": "2026-09-07",
     "sourceCommit": "CONTAINING_COMMIT"
   },
   "legacyBlockingSyncCeiling": 130,
@@ -1006,84 +1006,84 @@
       "command": "get_workflows_overview",
       "module": "workflow_commands",
       "classification": "BlockingRead",
-      "currentExecution": "sync",
-      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+      "currentExecution": "async",
+      "rationale": "Reads only the in-memory project display binding and bounded task summaries through the metadata worker; no preparation, files, Git, credentials, or Agent probes."
     },
     {
       "command": "prepare_workflow",
       "module": "workflow_commands",
-      "classification": "LongTaskStart",
-      "currentExecution": "sync",
-      "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
+      "classification": "BlockingRead",
+      "currentExecution": "async",
+      "rationale": "Validates the selected workflow scope and route in the bounded heavy-I/O worker; does not run blocking checks on the command executor."
     },
     {
       "command": "start_workflow",
       "module": "workflow_commands",
       "classification": "LongTaskStart",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
     },
     {
       "command": "list_workflow_runs",
       "module": "workflow_commands",
       "classification": "BlockingRead",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
     },
     {
       "command": "get_workflow_run",
       "module": "workflow_commands",
       "classification": "BlockingRead",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
     },
     {
       "command": "get_workflow_file_diff",
       "module": "workflow_commands",
       "classification": "BlockingRead",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
     },
     {
       "command": "cancel_workflow_run",
       "module": "workflow_commands",
       "classification": "BlockingMutation",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
     },
     {
       "command": "undo_cancel_queued_workflow",
       "module": "workflow_commands",
       "classification": "BlockingMutation",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
     },
     {
       "command": "reorder_queued_workflow",
       "module": "workflow_commands",
       "classification": "BlockingMutation",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
     },
     {
       "command": "retry_workflow",
       "module": "workflow_commands",
       "classification": "LongTaskStart",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
     },
     {
       "command": "confirm_workflow_action",
       "module": "workflow_commands",
       "classification": "BlockingMutation",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
     },
     {
       "command": "discard_workflow_result",
       "module": "workflow_commands",
       "classification": "BlockingMutation",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
     },
     {
@@ -1555,5 +1555,11 @@
       "currentExecution": "sync",
       "rationale": "Touches an external process, Agent, capability, OCR/ASR/media runner, shell integration, or application restart boundary."
     }
-  ]
+  ],
+  "workflowAsyncTarget": {
+    "status": "async_boundaries",
+    "reviewedAt": "2026-09-07",
+    "commandCount": 12,
+    "targetBlockingSyncCeiling": 115
+  }
 }

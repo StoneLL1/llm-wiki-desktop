@@ -218,7 +218,8 @@ export function evaluateFinalFourRedlines(root) {
     ["src/components/app/TaskLogDrawer.tsx", ["ActionableErrorNotice"]],
     ["src/hooks/useTaskLauncher.ts", ["translateBackendError"]],
     ["src/hooks/useTaskEvents.ts", ["translateBackendError"]],
-    ["src/features/workflows/useWorkflowsController.ts", ["normalizeBackendError", "backendErrorCode"]],
+    ["src/features/workflows/useWorkflowsController.ts", ["normalizeBackendError"]],
+    ["src/features/workflows/workflowHistory.ts", ["normalizeBackendError", "backendErrorCode"]],
     ["src/features/workflows/WorkflowsRightPanel.tsx", ["normalizeBackendError"]],
     ["src/features/workflows/WorkflowTaskDetail.tsx", ["backendErrorCode"]],
   ];

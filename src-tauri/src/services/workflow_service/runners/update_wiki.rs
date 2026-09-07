@@ -125,12 +125,23 @@ where
     let current_baseline =
         super::super::preparation::workflow_baseline_for_scope(context, &run.scope)?;
     if current_baseline.fingerprint != run.baseline_fingerprint {
-        return Err(BackendError::new(
-            "WORKFLOW_INPUT_BASELINE_CHANGED",
-            "Update Wiki inputs changed after preparation. Prepare and run again.",
-            true,
-            true,
-        ));
+        // No candidate or external invocation exists yet. Keep the original
+        // approved scope on the task and ask the user to prepare it again;
+        // changed input is a scope decision, not a failed model invocation.
+        sink.wait(
+            ANALYZE_SOURCES,
+            WorkflowPendingAction {
+                id: uuid::Uuid::new_v4().to_string(),
+                action_type: PendingActionType::ReviewScope,
+                risk_level: RiskLevel::Low,
+                affected_paths: vec![context.to_project_relative(&context.wiki_dir)?],
+                candidate: None,
+                expires_at: None,
+                checkpoint_hash: None,
+            },
+        )
+        .map_err(task_error)?;
+        return Ok(UpdateWikiOutcome::Waiting);
     }
     let source_versions = resolve_selected_versions(context, &selected_refs)?;
     let resolved = CompileService::resolve_source_versions(context, &source_versions)?;
@@ -180,22 +191,26 @@ where
         return Ok(UpdateWikiOutcome::Finished(next));
     }
 
-    let input_baseline = snapshot_compile_inputs(context, &selected_sources)?;
     let wiki_baseline = CompileService::snapshot_wiki(context)?;
+    let input_baseline = snapshot_compile_inputs(context, &selected_sources, &wiki_baseline)?;
     sink.start(CREATE_CHECKPOINT).map_err(task_error)?;
     let checkpoint = with_update_wiki_git_cancellation(services, task_id, || {
-        services.git_service.clean_head_checkpoint(
+        services.git_service.clean_head_checkpoint_allowing_paths(
             context,
             CheckpointPurpose::HighRiskOperation,
             "Before Update Wiki workflow",
+            &super::super::WorkflowService::runtime_metadata_paths(
+                context,
+                services.compile.task_service,
+            ),
         )
     })?;
     sink.complete(CREATE_CHECKPOINT).map_err(task_error)?;
 
     let workspace =
         CompileService::create_workspace_for_sources(context, task_id, &selected_sources)?;
-    let protected_sources = CompileService::snapshot_workspace_sources(&workspace)?;
     let result = async {
+        let protected_sources = CompileService::snapshot_workspace_sources(&workspace)?;
         sink.start(PLAN_UPDATES).map_err(task_error)?;
         let concrete_route = workflow_compile_route(run)?;
         let mut observer = UpdateWikiObserver {
@@ -312,6 +327,18 @@ where
         apply_persisted_update_wiki_candidate(context, run, descriptor, services)
     }
     .await;
+    // Review/recovery persists its own manifest and hashes in the task-owned
+    // candidate directory. The original generation copy is no longer needed,
+    // including when a process is cancelled or its output fails validation.
+    if let Err(error) = std::fs::remove_dir_all(&workspace) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            let _ = services.compile.task_service.append_log(
+                task_id,
+                LogLevel::Warn,
+                format!("Could not remove the temporary Update Wiki generation workspace: {error}"),
+            );
+        }
+    }
     let preserve_recovery = result.as_ref().is_err_and(|error| {
         matches!(
             error.code.as_str(),
@@ -440,8 +467,9 @@ fn workflow_compile_route(run: &WorkflowRun) -> Result<ResolvedCompileRoute, Bac
 fn snapshot_compile_inputs(
     context: &ProjectContext,
     sources: &[crate::services::ResolvedCompileSource],
+    wiki_baseline: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>, BackendError> {
-    let mut snapshot = CompileService::snapshot_wiki(context)?;
+    let mut snapshot = wiki_baseline.clone();
     for path in ["purpose.md", "schema.md"] {
         if context.resolve_project_path(path)?.is_file() {
             snapshot.insert(path.into(), FileStore.file_hash(context, path)?);
@@ -774,6 +802,21 @@ pub fn confirm_update_wiki_review(
             ),
             next: None,
         })?;
+    if run
+        .pending_action
+        .as_ref()
+        .is_some_and(|pending| pending.action_type == PendingActionType::ReviewScope)
+    {
+        return Err(UpdateWikiConfirmationFailure {
+            error: BackendError::new(
+                "WORKFLOW_REPREPARATION_REQUIRED",
+                "Review the changed inputs and prepare Update Wiki again before running.",
+                true,
+                true,
+            ),
+            next: None,
+        });
+    }
     let descriptor = load_update_wiki_candidate_for_workflow(task_id, &context.root, &workflow);
     if run.kind != WorkflowKind::UpdateWiki
         || run.display_status
@@ -873,6 +916,14 @@ pub fn restore_update_wiki_confirmation(
             true,
         )
     })?;
+    if pending.action_type == PendingActionType::ReviewScope
+        && run.kind == WorkflowKind::UpdateWiki
+        && run.current_stage_id.as_deref() == Some(ANALYZE_SOURCES)
+        && pending.candidate.is_none()
+        && pending.checkpoint_hash.is_none()
+    {
+        return Ok(());
+    }
     let workflow = tasks
         .workflow_execution_state(&run.task_id)
         .ok_or_else(|| {
@@ -946,7 +997,6 @@ fn apply_persisted_update_wiki_candidate(
         context,
         descriptor.checkpoint_hash.as_deref(),
     )?;
-    ensure_clean_git(services, task_id, context)?;
     if current_manifest_hashes(context, &descriptor.candidate.manifest, services.file_store)?
         != descriptor.current_hashes
     {
@@ -992,6 +1042,10 @@ fn apply_persisted_update_wiki_candidate(
         .confirmation_registry
         .update_install_barrier()
         .enter_project_mutation()?;
+    // A reviewed conflict authorizes applying against the exact current values
+    // shown in the review. Preserve those user edits in Git before replacing
+    // them; unrelated dirty paths and changes made after review remain errors.
+    let checkpoint_hash = checkpoint_reviewed_inputs(context, run, &descriptor, services)?;
     sink.complete(REVIEW_RISK).map_err(task_error)?;
     sink.start(APPLY_CHANGES).map_err(task_error)?;
 
@@ -1014,12 +1068,7 @@ fn apply_persisted_update_wiki_candidate(
         .set_task_cancellable(task_id, false)
         .map_err(task_error)?;
     let preapply_check = (|| {
-        ensure_checkpoint_head(
-            services,
-            task_id,
-            context,
-            descriptor.checkpoint_hash.as_deref(),
-        )?;
+        ensure_checkpoint_head(services, task_id, context, checkpoint_hash.as_deref())?;
         ensure_clean_git(services, task_id, context)?;
         if current_manifest_hashes(context, &descriptor.candidate.manifest, services.file_store)?
             != descriptor.current_hashes
@@ -1041,13 +1090,11 @@ fn apply_persisted_update_wiki_candidate(
             .map_err(task_error)?;
         return Err(error);
     }
-    let expected_hashes =
-        baseline_manifest_hashes(&descriptor.candidate.manifest, &descriptor.baseline_hashes);
     let affected_paths = match CompileService::apply_confirmed_workflow_manifest(
         context,
         &descriptor.candidate.manifest,
         Some(&descriptor.candidate.plan),
-        &expected_hashes,
+        &descriptor.current_hashes,
     ) {
         Ok(paths) => paths,
         Err(error) => {
@@ -1124,7 +1171,7 @@ fn apply_persisted_update_wiki_candidate(
         deleted: summary.deleted.len() as u64,
         conflicted: summary.conflicted.len() as u64,
         affected_paths: affected_paths.clone(),
-        checkpoint_hash: descriptor.checkpoint_hash.clone(),
+        checkpoint_hash: checkpoint_hash.clone(),
         final_commit: None,
     };
     if let Err(error) = persist_reconciliation_result(task_id, &pending_result) {
@@ -1144,7 +1191,7 @@ fn apply_persisted_update_wiki_candidate(
         task_id,
         descriptor.candidate.route.legacy_kind(),
         &affected_paths,
-        descriptor.checkpoint_hash.clone(),
+        checkpoint_hash.clone(),
         &descriptor.source_versions,
         &mut backup,
         &metadata_paths,
@@ -1171,7 +1218,7 @@ fn apply_persisted_update_wiki_candidate(
         deleted: summary.deleted.len() as u64,
         conflicted: summary.conflicted.len() as u64,
         affected_paths,
-        checkpoint_hash: descriptor.checkpoint_hash,
+        checkpoint_hash,
         final_commit,
     };
     let _ = persist_reconciliation_result(task_id, &committed_result);
@@ -1217,22 +1264,76 @@ fn current_manifest_hashes(
     Ok(hashes)
 }
 
-fn baseline_manifest_hashes(
-    manifest: &CompileManifest,
-    baseline: &HashMap<String, String>,
-) -> HashMap<String, String> {
-    manifest
+fn checkpoint_reviewed_inputs(
+    context: &ProjectContext,
+    run: &WorkflowRun,
+    descriptor: &PersistedUpdateWikiCandidate,
+    services: &UpdateWikiExecutionServices<'_>,
+) -> Result<Option<String>, BackendError> {
+    let reviewed_paths = descriptor
+        .candidate
+        .manifest
         .files
         .iter()
         .map(|file| file.path.as_str())
-        .chain(manifest.deletions.iter().map(String::as_str))
-        .filter_map(|path| {
-            baseline
-                .get(path)
-                .cloned()
-                .map(|hash| (path.to_string(), hash))
+        .chain(
+            descriptor
+                .candidate
+                .manifest
+                .deletions
+                .iter()
+                .map(String::as_str),
+        )
+        .filter(|path| {
+            descriptor.current_hashes.get(*path) != descriptor.baseline_hashes.get(*path)
         })
-        .collect()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if reviewed_paths.is_empty()
+        || run.display_status
+            != crate::models::workflow::WorkflowDisplayStatus::WaitingForConfirmation
+    {
+        ensure_clean_git(services, &run.task_id, context)?;
+        return Ok(descriptor.checkpoint_hash.clone());
+    }
+    with_update_wiki_git_cancellation(services, &run.task_id, || {
+        let mut allowed_paths = super::super::WorkflowService::runtime_metadata_paths(
+            context,
+            services.compile.task_service,
+        );
+        allowed_paths.extend(reviewed_paths.iter().cloned());
+        let base = services.git_service.clean_head_checkpoint_allowing_paths(
+            context,
+            CheckpointPurpose::HighRiskOperation,
+            "Before applying reviewed Update Wiki changes",
+            &allowed_paths,
+        )?;
+        if base.commit_hash != descriptor.checkpoint_hash {
+            return Err(BackendError::new(
+                "COMPILE_CHECKPOINT_CHANGED",
+                "The project Git HEAD changed before the reviewed edits were checkpointed.",
+                true,
+                true,
+            ));
+        }
+        if current_manifest_hashes(context, &descriptor.candidate.manifest, services.file_store)?
+            != descriptor.current_hashes
+        {
+            return Err(BackendError::new(
+                "WORKFLOW_OUTPUT_BASELINE_CHANGED",
+                "Wiki outputs changed before the reviewed edits were checkpointed.",
+                true,
+                true,
+            ));
+        }
+        services.git_service.create_scoped_checkpoint(
+            context,
+            CheckpointPurpose::HighRiskOperation,
+            &format!("Preserve reviewed edits before Update Wiki {}", run.task_id),
+            &reviewed_paths,
+        )
+    })
+    .map(|checkpoint| checkpoint.commit_hash)
 }
 
 fn refresh_indexes(
@@ -1413,18 +1514,18 @@ fn ensure_clean_git(
     task_id: &str,
     context: &ProjectContext,
 ) -> Result<(), BackendError> {
-    let status = with_update_wiki_git_cancellation(services, task_id, || {
-        services.git_service.repository_status(context)
-    })?;
-    if !status.is_repository || status.has_changes {
-        return Err(BackendError::new(
-            "WORKFLOW_GIT_STATE_CHANGED",
-            "Update Wiki requires the prepared Git repository to remain clean.",
-            true,
-            true,
-        ));
-    }
-    Ok(())
+    with_update_wiki_git_cancellation(services, task_id, || {
+        services.git_service.clean_head_checkpoint_allowing_paths(
+            context,
+            CheckpointPurpose::HighRiskOperation,
+            "Verify Update Wiki content checkpoint",
+            &super::super::WorkflowService::runtime_metadata_paths(
+                context,
+                services.compile.task_service,
+            ),
+        )
+    })
+    .map(|_| ())
 }
 
 fn rollback_after_apply(
@@ -2293,6 +2394,10 @@ fn candidate_file_diff_len(path: &str, content: Option<&str>) -> usize {
     }
     bytes
 }
+
+#[cfg(test)]
+#[path = "update_wiki_real_acceptance.rs"]
+mod real_route_acceptance;
 
 #[cfg(test)]
 mod batch6_diff_summary_tests {

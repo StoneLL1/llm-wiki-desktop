@@ -14,6 +14,7 @@ interface ConfirmationDialogProps {
 }
 
 const confirmLabelKeys: Record<PendingAction["actionType"], string> = {
+  review_scope: "workflows.scopeReview.review",
   repair_project: "confirmation.confirm.repair_project",
   delete_file: "confirmation.confirm.delete_file",
   overwrite_file: "confirmation.confirm.overwrite_file",

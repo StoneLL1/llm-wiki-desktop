@@ -199,6 +199,8 @@ impl WorkflowCoordinator {
             })
             .count() as u32;
         let state = WorkflowExecutionState {
+            revision: 0,
+            session_id: String::new(),
             schema_version: WORKFLOW_SCHEMA_VERSION,
             canonical_identity_key: identity.canonical_identity_key,
             identity_revision: identity.identity_revision,

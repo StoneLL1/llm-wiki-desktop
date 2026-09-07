@@ -405,20 +405,17 @@ fn overview_is_fixed_order_and_no_project_is_actionable() {
         )
         .unwrap();
     assert_eq!(project_overview.rows.len(), 3);
-    assert_eq!(
-        project_overview
-            .rows
-            .iter()
-            .filter(|row| row.recommended)
-            .count(),
-        1
-    );
+    assert!(project_overview.rows.iter().all(|row| !row.recommended));
     assert_eq!(
         project_overview.rows[0]
             .prerequisite
             .as_ref()
             .map(|item| &item.action),
-        Some(&llm_wiki_desktop_lib::models::workflow::WorkflowPrerequisiteAction::ImportSources)
+        Some(&WorkflowPrerequisiteAction::TrustProject)
+    );
+    assert!(
+        project_overview.rows[1].prerequisite.is_none(),
+        "overview does not inventory content before opening Health preparation"
     );
 }
 
@@ -521,7 +518,7 @@ fn generate_content_artifact_types_keep_their_page_scope_contracts() {
 }
 
 #[test]
-fn empty_project_surfaces_import_and_update_prerequisites_without_inventing_content() {
+fn empty_project_overview_leaves_unknown_content_to_preparation() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(root.path().join(".app")).unwrap();
     let context = ProjectContext::new("empty-project", root.path().to_path_buf());
@@ -543,26 +540,21 @@ fn empty_project_surfaces_import_and_update_prerequisites_without_inventing_cont
         .unwrap();
 
     assert_eq!(overview.rows.len(), 3);
+    assert!(overview.rows.iter().all(|row| !row.recommended));
     assert_eq!(
         overview.rows[0]
             .prerequisite
             .as_ref()
             .map(|item| &item.action),
-        Some(&WorkflowPrerequisiteAction::ImportSources)
+        Some(&WorkflowPrerequisiteAction::TrustProject)
     );
-    assert_eq!(
-        overview.rows[1]
-            .prerequisite
-            .as_ref()
-            .map(|item| &item.action),
-        Some(&WorkflowPrerequisiteAction::ImportSources)
-    );
+    assert!(overview.rows[1].prerequisite.is_none());
     assert_eq!(
         overview.rows[2]
             .prerequisite
             .as_ref()
             .map(|item| &item.action),
-        Some(&WorkflowPrerequisiteAction::UpdateWiki)
+        Some(&WorkflowPrerequisiteAction::TrustProject)
     );
     assert!(!root.path().join("wiki").exists());
 }

@@ -502,7 +502,7 @@ fn persistence_reason(
     if access.trust == WorkflowProjectTrust::Untrusted {
         return Some(TaskProjectPersistenceReason::ProjectUntrusted);
     }
-    if access.filesystem_access == WorkflowFilesystemAccess::ReadOnly {
+    if access.filesystem_access != WorkflowFilesystemAccess::Writable {
         return Some(TaskProjectPersistenceReason::ProjectReadOnly);
     }
     Some(TaskProjectPersistenceReason::TaskStateRootUnavailable)

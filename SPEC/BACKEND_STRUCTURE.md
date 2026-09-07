@@ -564,6 +564,16 @@ pub struct BackendTask {
 
 当前实现状态（2026-08-13）：H3–H5 复用本节的 ProjectContext、Workflow queue、TaskService、confirmation、Git checkpoint、candidate manifest 与 typed result 边界完成 Agent Health/repair bridge；H6 未改变 backend runtime。由于最终 full gate 与完整验证矩阵未全绿，Gate H / Batch 7 继续 fail closed。
 
+### 10.3 Workflow 读模型与 Update 实现（2026-09-07）
+
+- TaskService 是任务事实唯一来源。`WorkflowRun`、`WorkflowRunSummary` 和 `workflow://updated` 使用十进制字符串 `revision`；持久任务默认兼容旧记录，进程 `sessionId` 隔离旧会话事件。恢复在已持久版本上推进；旧进程尚未落盘的进度不能覆盖新会话的恢复状态。
+- `get_workflows_overview` 只读 ProjectRegistry 已观测的内存访问摘要和 TaskService owner 索引，返回固定三行、最近五项、最多三个关注任务 `activeRuns`、队列摘要及 `sessionId`。未观测的文件/Git 状态为 `unknown`，`pendingSourceCount` 为 `null`，不据此宣称没有内容变化或允许写入。
+- 磁盘、Git、Agent 探测 IPC 在现有 blocking worker 上运行。overview 不执行 preparation、Source/Markdown 扫描、正文哈希、Agent 探测或凭据读取。历史独立分页；单任务详情和 Diff 按需加载。`workflow://updated` 只携带摘要，不携带完整 scope、候选 Diff 或结果正文。
+- 前端 `taskStore.workflowById` 保存规范摘要；`workflowStore` 保存查询、草稿、选中状态及最多 16 条详情。约 100ms 合并普通进度，终态和确认立即发布；单资源请求在途合并，只有新版本到达才补读，不重复运行 preparation。
+- “开始”对当前草稿自动预检。新范围、自动路线变化或新的敏感内容确认需要展示最新准备结果后再次开始。Update 排队后基线变化使用无候选的 `review_scope`；复核当前选中来源后取消旧等待并用可选 `retryOfTaskId` 关联新任务，不复用旧批准。
+- Update 继续复用 CompileService、候选和 checked apply。受限 Agent 获得已选 Source 与候选 Wiki 的准确文件清单，不依赖目录枚举或猜测路径；实际生成仅探测所选 Agent。唯一来源短名规范化为已批准路径，同名歧义必须使用完整路径。生成结束清理原始临时工作区，持久复核候选保留至确认、丢弃或恢复处理。冲突批准绑定复核时的当前哈希与保留用户编辑的 scoped checkpoint；批准后变化仍拒绝覆盖。Git 仅豁免后端精确枚举的 task JSON/log 与 workflow preferences，不豁免未知 `.app`、Wiki 或 Source 内容，也不把运行日志写进内容检查点。
+- schema 仍为 v2（增量字段有旧记录默认值）；Health/Export 共享调用方继续使用现有命令。其专属业务重构仍属于后续阶段。
+
 ## 11. ProjectService
 
 职责：

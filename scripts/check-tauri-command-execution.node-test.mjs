@@ -188,7 +188,7 @@ test("Batch 4 offloads the evidenced project-open residual commands", async () =
     residualCommands: ["open_project", "set_active_project", "list_exports"],
     targetBlockingSyncCeiling: 127,
   });
-  assert.equal(result.counts.blockingSync, 127);
+  assert.ok(result.counts.blockingSync <= result.inventory.projectFactsBatch4Target.targetBlockingSyncCeiling);
 });
 
 test("every registered Import command enters through an async boundary", async () => {
@@ -228,4 +228,26 @@ test("blocking Import commands enter the shared bounded runtime while network co
       `${command} must use blocking preflight and finalize phases around native network await`,
     );
   }
+});
+
+test("Workflow commands offload blocking work without sharing the preparation lane for overview or cancellation", async () => {
+  const result = await inspectCommandExecution(repositoryRoot);
+  const commands = result.inventory.commands.filter((entry) => entry.module === "workflow_commands");
+  const source = await readFile(
+    path.join(repositoryRoot, "src-tauri", "src", "commands", "workflow_commands.rs"),
+    "utf8",
+  );
+  assert.equal(commands.length, 12);
+  for (const entry of commands) {
+    assert.equal(entry.currentExecution, "async", entry.command);
+    const start = source.indexOf(`pub async fn ${entry.command}(`);
+    const end = source.indexOf("\n}", start);
+    assert.ok(start >= 0 && end > start, entry.command);
+    assert.match(source.slice(start, end), /run_blocking\(app, BlockingWorkClass::/);
+  }
+  const overview = source.slice(source.indexOf("pub async fn get_workflows_overview("), source.indexOf("pub async fn prepare_workflow("));
+  assert.match(overview, /workflow_overview_access/);
+  assert.doesNotMatch(overview, /resolve_project_context|resolve_workflow_access|settings_service|secret_service|agent_service|prepare\(/);
+  assert.match(source, /pub async fn cancel_workflow_run[\s\S]*?BlockingWorkClass::MetadataIo/);
+  assert.ok(result.counts.blockingSync <= result.inventory.workflowAsyncTarget.targetBlockingSyncCeiling);
 });

@@ -1,3 +1,5 @@
+import { compareWorkflowRevision } from "./workflowTaskSnapshot";
+import type { WorkflowRunSummary } from "../types/workflow";
 import type { BackendEvent, StreamDelta } from "../types/task";
 import { StreamDeltaBatcher, type StreamDeltaScheduler } from "./streamDeltaBatcher";
 import { TaskSnapshotBatcher } from "./taskSnapshotBatcher";
@@ -21,9 +23,18 @@ export class TaskEventDispatcher {
   private readonly listeners = new Set<TaskEventListener>();
   private readonly streamBatcher: StreamDeltaBatcher;
   private readonly taskSnapshotBatcher: TaskSnapshotBatcher;
+  private readonly workflowPending = new Map<string, BackendEvent<WorkflowRunSummary>>();
+  private workflowTimer: number | null = null;
+  private readonly workflowScheduler: StreamDeltaScheduler;
   private ownerListener: TaskEventListener | null = null;
 
   constructor(options: TaskEventDispatcherOptions = {}) {
+    this.workflowScheduler = options.scheduler ?? {
+      setTimeout: (callback, delay) => window.setTimeout(callback, delay),
+      clearTimeout: (id) => window.clearTimeout(id),
+      requestAnimationFrame: (callback) => window.requestAnimationFrame(callback),
+      cancelAnimationFrame: (id) => window.cancelAnimationFrame(id),
+    };
     this.streamBatcher = new StreamDeltaBatcher(
       (event) => this.emit(event),
       options,
@@ -51,6 +62,26 @@ export class TaskEventDispatcher {
   }
 
   dispatch(event: BackendEvent): void {
+    if (event.eventType === "workflow_updated" && event.taskId) {
+      const summaryEvent = event as BackendEvent<WorkflowRunSummary>;
+      // Revisions are local to one backend session and one canonical project owner.
+      // Keep other owners' facts available for the canonical store to accept or reject.
+      const key = JSON.stringify([
+        event.taskId, event.projectId, summaryEvent.payload.projectId,
+        summaryEvent.payload.sessionId ?? null,
+        summaryEvent.payload.canonicalIdentityKey, summaryEvent.payload.identityRevision,
+      ]);
+      const pending = this.workflowPending.get(key);
+      if (pending && compareWorkflowRevision(summaryEvent.payload, pending.payload) < 0) return;
+      if (summaryEvent.payload.displayStatus === "running") {
+        this.workflowPending.set(key, summaryEvent);
+        if (this.workflowTimer === null) this.workflowTimer = this.workflowScheduler.setTimeout(() => this.flushWorkflows(), 100);
+        return;
+      }
+      this.workflowPending.delete(key);
+      this.emit(event);
+      return;
+    }
     if (event.eventType === "task_stream_output") {
       this.streamBatcher.enqueue(event as BackendEvent<StreamDelta>);
       return;
@@ -63,13 +94,23 @@ export class TaskEventDispatcher {
   }
 
   retainProject(projectId: string | null): void {
+    this.flushWorkflows();
     this.streamBatcher.retainProject(projectId);
     this.taskSnapshotBatcher.retainProject(projectId);
   }
 
   clearPending(shouldFlush?: (event: BackendEvent) => boolean): void {
+    this.flushWorkflows();
     this.streamBatcher.dispose(shouldFlush ? (event) => shouldFlush(event) : undefined);
     this.taskSnapshotBatcher.dispose(shouldFlush ? (event) => shouldFlush(event) : undefined);
+  }
+
+  private flushWorkflows(): void {
+    if (this.workflowTimer !== null) this.workflowScheduler.clearTimeout(this.workflowTimer);
+    this.workflowTimer = null;
+    const events = [...this.workflowPending.values()];
+    this.workflowPending.clear();
+    for (const event of events) this.emit(event);
   }
 
   private emit(event: BackendEvent): void {

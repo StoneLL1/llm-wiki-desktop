@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 
 import { i18next } from "../../i18n";
 import {
-  backendErrorCode,
   normalizeBackendError,
 } from "../../lib/backendError";
 
@@ -14,11 +13,9 @@ import {
   discardWorkflowResult,
   getWorkflowRun,
   getWorkflowsOverview,
-  listWorkflowRuns,
   prepareWorkflow,
   reorderQueuedWorkflow,
   retryWorkflow,
-  startWorkflow,
   undoCancelQueuedWorkflow,
 } from "../../services/workflowApi";
 import {
@@ -30,9 +27,11 @@ import {
   type WorkflowOperationError,
   type WorkflowRequestGuard,
 } from "../../stores/workflowStore";
-import { useNavigationStore } from "../../stores/navigationStore";
+import { recordWorkflowFacts, useTaskStore } from "../../stores/taskStore";
+import { compareWorkflowRevision, workflowRunSummary } from "../../services/workflowTaskSnapshot";
 import { useProjectStore } from "../../stores/projectStore";
 import {
+  cancelWorkflowNavigation,
   hydrateAndSelectWorkflowRun,
   openWorkflowResult,
 } from "../../services/workflowNavigation";
@@ -40,7 +39,6 @@ import type { ProjectSummary } from "../../types/project";
 import type {
   WorkflowDisplayStatus,
   WorkflowKind,
-  WorkflowProjectAccessSummary,
   WorkflowPrerequisiteAction,
   WorkflowRouteSelection,
   WorkflowPreparation,
@@ -50,21 +48,9 @@ import type {
   WorkflowScope,
   WorkflowStartOutcome,
 } from "../../types/workflow";
-import { historyPageErrorRequiresRefresh } from "./workflowHistoryRecovery";
 
-interface PendingWorkflowEvent {
-  eventProjectId: string | null;
-  run: WorkflowRun;
-}
-
-const MAX_PENDING_WORKFLOW_EVENTS = 256;
-const WORKFLOW_PROGRESS_FLUSH_MS = 100;
-const TERMINAL_WORKFLOW_STATUSES = new Set<WorkflowRun["displayStatus"]>([
-  "completed",
-  "failed",
-  "cancelled",
-  "interrupted",
-]);
+const loadWorkflowExecution = () => import("./workflowExecution");
+const loadWorkflowHistoryModule = () => import("./workflowHistory");
 
 const hasTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -114,58 +100,11 @@ function workflowRequestGuardMatchesAuthority(
       && authority.identityRevision === guard.identityRevision);
 }
 
-type SettledResult<T> =
-  | { ok: true; value: T }
-  | { ok: false; error: unknown };
-
-function settle<T>(promise: Promise<T>): Promise<SettledResult<T>> {
-  return promise.then(
-    (value) => ({ ok: true, value }),
-    (error: unknown) => ({ ok: false, error }),
-  );
-}
-
-function workflowEventMatchesAccess(
-  event: PendingWorkflowEvent,
-  projectId: string,
-  access: WorkflowProjectAccessSummary,
-): boolean {
-  return event.eventProjectId === projectId
-    && workflowRunMatchesAccess(event.run, projectId, access);
-}
-
-function workflowRunMatchesAccess(
-  run: Pick<WorkflowRun, "projectId" | "canonicalIdentityKey" | "identityRevision">,
-  projectId: string,
-  access: WorkflowProjectAccessSummary,
-): boolean {
-  return run.projectId === projectId
-    && run.canonicalIdentityKey === access.canonicalIdentityKey
-    && run.identityRevision === access.identityRevision;
-}
-
-function keepLatestPendingEvent(
-  pending: Map<string, PendingWorkflowEvent>,
-  event: PendingWorkflowEvent,
-): void {
-  const previous = pending.get(event.run.taskId);
-  if (
-    previous
-    && Date.parse(previous.run.updatedAt) > Date.parse(event.run.updatedAt)
-  ) {
-    return;
-  }
-  if (!previous && pending.size >= MAX_PENDING_WORKFLOW_EVENTS) {
-    const oldestTaskId = pending.keys().next().value as string | undefined;
-    if (oldestTaskId) pending.delete(oldestTaskId);
-  }
-  pending.set(event.run.taskId, event);
-}
 
 export interface WorkflowsController {
   refresh: () => Promise<void>;
   prepare: (kind: WorkflowKind, scope?: WorkflowScope | null, routeSelection?: WorkflowRouteSelection | null) => Promise<void>;
-  startPrepared: (acknowledgeRestrictedContent: boolean, acknowledgeRemoteProvider: boolean) => Promise<void>;
+  startPrepared: (acknowledgeRestrictedContent: boolean, acknowledgeRemoteProvider: boolean, draft?: WorkflowPreparationDraft) => Promise<void>;
   cancel: (taskId: string) => Promise<void>;
   undoCancel: (taskId: string) => Promise<void>;
   reorder: (taskId: string, beforeTaskId: string | null) => Promise<void>;
@@ -235,19 +174,10 @@ export function useWorkflowsController(
   const onProjectPrerequisite = options?.onProjectPrerequisite;
   const activeKeyRef = useRef(projectKey);
   const enabledRef = useRef(enabled);
-  const refreshRequestRef = useRef(0);
-  const refreshIntentRef = useRef(0);
   const historyRequestRef = useRef(0);
-  const overviewWaveRef = useRef<Map<string, Promise<void>>>(new Map());
-  const overviewWaveEpochRef = useRef<Map<string, number>>(new Map());
-  const trailingOverviewRef = useRef<Map<string, { includeHistory: boolean; intent: number }>>(new Map());
-  const pendingEventsRef = useRef<Map<string, PendingWorkflowEvent>>(new Map());
-  const progressEventsRef = useRef<Map<string, PendingWorkflowEvent>>(new Map());
-  const progressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const overviewRequestRef = useRef<{ projectKey: string; epoch: number; dirty: boolean; promise: Promise<void> } | null>(null);
   const prepareRequestRef = useRef(0);
-  const waitingHydrationRef = useRef<Map<string, Promise<void>>>(new Map());
-  const setActiveView = useNavigationStore((state) => state.setActiveView);
-  const openSettings = useNavigationStore((state) => state.openSettings);
+  const waitingHydrationRef = useRef<Map<string, { promise: Promise<void>; dirty: boolean; expected: WorkflowRunSummary }>>(new Map());
   enabledRef.current = enabled;
 
   const request = useCallback(
@@ -261,403 +191,151 @@ export function useWorkflowsController(
     useWorkflowStore.getState().selectRun(outcome.run.taskId);
   }, []);
 
-  const hydrateSelectedWaitingRun = useCallback((candidate: WorkflowRun) => {
+  const hydrateSelectedRun = useCallback((summary: WorkflowRunSummary) => {
     const state = useWorkflowStore.getState();
-    const actionId = candidate.pendingAction?.id;
-    if (
-      candidate.displayStatus !== "waiting_for_confirmation"
-      || candidate.decisionReview
-      || !actionId
-      || state.selectedTaskId !== candidate.taskId
-    ) {
-      return;
-    }
+    if (!enabledRef.current || state.selectedTaskId !== summary.taskId
+      || summary.displayStatus === "running" || summary.displayStatus === "queued") return;
     const guard = captureWorkflowRequestGuard(state);
-    if (!workflowRunMatchesGuard(candidate, project.projectId, guard)) return;
-    const inFlightKey = [
-      guard.projectKey,
-      guard.identityRevision ?? "no-identity",
-      candidate.taskId,
-      actionId,
-    ].join("\0");
-    if (waitingHydrationRef.current.has(inFlightKey)) return;
-
-    const operationKey = `task:${candidate.taskId}:hydrate:${actionId}`;
-    const operationRequest = state.beginOperation(operationKey);
-    const hydration = getWorkflowRun({
-      ...request(),
-      taskId: candidate.taskId,
-    }).then((hydrated) => {
-      const latest = useWorkflowStore.getState();
-      const current = latest.runs.find((run) => run.taskId === candidate.taskId);
-      if (
-        !workflowRequestGuardMatchesAuthority(guard, project)
-        || latest.selectedTaskId !== candidate.taskId
-        || current?.displayStatus !== "waiting_for_confirmation"
-        || current.pendingAction?.id !== actionId
-        || hydrated.pendingAction?.id !== actionId
-        || !hydrated.decisionReview
-        || !workflowRunMatchesGuard(hydrated, project.projectId, guard)
-      ) {
-        return;
-      }
-      latest.hydrateDecisionReview(candidate.taskId, actionId, hydrated.decisionReview);
-    }).catch((error: unknown) => {
-      const latest = useWorkflowStore.getState();
-      const current = latest.runs.find((run) => run.taskId === candidate.taskId);
-      if (
-        workflowRequestGuardMatchesAuthority(guard, project)
-        && latest.selectedTaskId === candidate.taskId
-        && current?.displayStatus === "waiting_for_confirmation"
-        && current.pendingAction?.id === actionId
-      ) {
-        latest.failOperation(
-          operationKey,
-          operationRequest,
-          operationError("workflows.operationError.detail", error),
-        );
-      }
-    }).finally(() => {
-      waitingHydrationRef.current.delete(inFlightKey);
-      useWorkflowStore.getState().finishOperation(operationKey, operationRequest);
-    });
-    waitingHydrationRef.current.set(inFlightKey, hydration);
-  }, [project.projectId, request]);
-
-  const runOverviewRefresh = useCallback(async (
-    includeHistory: boolean,
-    requestedMode: "init" | "reconcile",
-    refreshIntent: number,
-  ): Promise<boolean> => {
-    if (!enabledRef.current || !hasTauri()) return false;
-    const historyRequest = includeHistory ? ++historyRequestRef.current : historyRequestRef.current;
-    const state = useWorkflowStore.getState();
-    const historyKind = state.historyKind;
-    const historyStatus = state.historyStatus;
-    const refreshRequest = ++refreshRequestRef.current;
-    const requestGuard = captureWorkflowRequestGuard(state);
-    const projectRequest = request();
-    const projectScope = {
-      projectId: projectRequest.projectId,
-      rootPath: projectRequest.projectRootPath,
-    };
-    const authorityIdentityGuard = workflowAuthorityIdentity(projectScope);
-    const operationKey = requestedMode === "reconcile" || state.overview
-      ? "overview:reconcile"
-      : "overview:init";
-    const operationRequest = state.beginOperation(operationKey);
-    if (!state.overview) state.setOverviewStatus("loading");
-    try {
-      const overviewResultPromise = settle(getWorkflowsOverview(projectRequest));
-      const historyResultPromise = includeHistory && projectRequest.projectId && projectRequest.projectRootPath
-        ? settle(listWorkflowRuns({
-            ...projectRequest,
-            workflowKind: historyKind,
-            displayStatus: historyStatus,
-            cursor: null,
-            limit: 50,
-          }))
-        : Promise.resolve({
-            ok: true as const,
-            value: { runs: [] as WorkflowRunSummary[], nextCursor: null },
-          });
-      const [overviewResult, historyResult] = await Promise.all([
-        overviewResultPromise,
-        historyResultPromise,
-      ]);
-      const latest = useWorkflowStore.getState();
-      if (
-        !enabledRef.current
-        || !workflowRequestScopeMatches(requestGuard)
-        || workflowAuthorityIdentity(projectScope) !== authorityIdentityGuard
-        || refreshRequestRef.current !== refreshRequest
-        || refreshIntentRef.current !== refreshIntent
-      ) return false;
-      if (!overviewResult.ok) {
-        latest.setOverviewStatus("error");
-        latest.failOperation(
-          operationKey,
-          operationRequest,
-          operationError("workflows.operationError.overview", overviewResult.error),
-        );
-        return false;
-      }
-      const overview = overviewResult.value;
-      const overviewAccess = overview.projectAccess;
-      const currentAuthority = useProjectStore.getState().authority;
-      const authorityMatchesOverview = !overviewAccess
-        ? !currentAuthority || currentAuthority.projectId !== project.projectId
-        : !currentAuthority
-          || currentAuthority.projectId !== projectRequest.projectId
-          || (currentAuthority.canonicalIdentityKey === overviewAccess.canonicalIdentityKey
-            && currentAuthority.identityRevision === overviewAccess.identityRevision);
-      if (!authorityMatchesOverview) {
-        latest.failOperation(operationKey, operationRequest, {
-          summary: i18next.t("workflows.error.historyIdentityMismatch"),
-          technicalDetails: "WORKFLOW_AUTHORITY_IDENTITY_MISMATCH",
-        });
-        if (!latest.overview) latest.setOverviewStatus("error");
-        return false;
-      }
-      const historyRequestIsCurrent = includeHistory
-        && historyRequestRef.current === historyRequest
-        && latest.historyKind === historyKind
-        && latest.historyStatus === historyStatus;
-      if (includeHistory && !historyRequestIsCurrent) {
-        latest.setOverviewSnapshot(overview);
-        return true;
-      }
-      if (!historyResult.ok) {
-        if (!latest.overview) latest.setOverviewStatus("error");
-        latest.failOperation(
-          operationKey,
-          operationRequest,
-          operationError("workflows.operationError.history", historyResult.error),
-        );
-        return false;
-      }
-      const historyMatchesOverview = overviewAccess
-        ? historyResult.value.runs.every((run) =>
-            workflowRunMatchesAccess(run, projectRequest.projectId, overviewAccess),
-          )
-        : historyResult.value.runs.length === 0;
-      if (!historyMatchesOverview) {
-        latest.failOperation(operationKey, operationRequest, {
-          summary: i18next.t("workflows.error.historyIdentityMismatch"),
-          technicalDetails: "WORKFLOW_HISTORY_IDENTITY_MISMATCH",
-        });
-        if (!latest.overview) latest.setOverviewStatus("error");
-        return false;
-      }
-      if (includeHistory) {
-        latest.setProjectSnapshot(overview, historyResult.value.runs, historyResult.value.nextCursor);
-      } else {
-        latest.setOverviewSnapshot(overview);
-      }
-      if (overviewAccess) {
-        const pendingEvents = [...pendingEventsRef.current.values()];
-        pendingEventsRef.current.clear();
-        const accepted = pendingEvents.filter((pendingEvent) =>
-          workflowEventMatchesAccess(pendingEvent, projectRequest.projectId, overviewAccess),
-        );
-        latest.upsertRuns(accepted.map((pendingEvent) => pendingEvent.run));
-        for (const pendingEvent of accepted) {
-          hydrateSelectedWaitingRun(pendingEvent.run);
-        }
-      }
-      return true;
-    } catch (error) {
-      const latest = useWorkflowStore.getState();
-      if (
-        workflowRequestScopeMatches(requestGuard)
-        && workflowAuthorityIdentity(projectScope) === authorityIdentityGuard
-        && refreshRequestRef.current === refreshRequest
-        && refreshIntentRef.current === refreshIntent
-      ) {
-        if (!latest.overview) latest.setOverviewStatus("error");
-        latest.failOperation(
-          operationKey,
-          operationRequest,
-          operationError("workflows.operationError.overview", error),
-        );
-      }
-      return false;
-    } finally {
-      useWorkflowStore.getState().finishOperation(operationKey, operationRequest);
-    }
-  }, [hydrateSelectedWaitingRun, projectKey, request]);
-
-  const runOverviewWave = useCallback(async (
-    includeHistory: boolean,
-    supersedeActive = true,
-  ) => {
-    if (!enabledRef.current || !hasTauri()) return;
-    const existing = overviewWaveRef.current.get(projectKey);
-    const currentRequestEpoch = useWorkflowStore.getState().requestEpoch;
-    if (
-      existing
-      && !useWorkflowStore.getState().overview
-      && overviewWaveEpochRef.current.get(projectKey) === currentRequestEpoch
-      && !supersedeActive
-    ) {
-      const currentIntent = refreshIntentRef.current;
-      const pending = trailingOverviewRef.current.get(projectKey);
-      trailingOverviewRef.current.set(projectKey, {
-        includeHistory: (pending?.includeHistory ?? false) || includeHistory,
-        intent: Math.max(pending?.intent ?? currentIntent, currentIntent),
-      });
-      await existing;
-      return;
-    }
-    const intent = ++refreshIntentRef.current;
+    if (!workflowRunMatchesGuard(summary, project.projectId, guard)) return;
+    const key = `${guard.projectKey}\0${summary.taskId}`;
+    const existing = waitingHydrationRef.current.get(key);
     if (existing) {
-      const pending = trailingOverviewRef.current.get(projectKey);
-      trailingOverviewRef.current.set(projectKey, {
-        includeHistory: (pending?.includeHistory ?? false) || includeHistory,
-        intent,
-      });
-      await existing;
+      if (summary.sessionId !== existing.expected.sessionId || compareWorkflowRevision(summary, existing.expected) > 0) existing.dirty = true;
       return;
     }
-    const wave = (async () => {
-      await runOverviewRefresh(
-        includeHistory,
-        includeHistory ? "init" : "reconcile",
-        intent,
-      );
-      const trailing = trailingOverviewRef.current.get(projectKey);
-      if (
-        trailing
-        && enabledRef.current
-        && activeKeyRef.current === projectKey
-      ) {
-        trailingOverviewRef.current.delete(projectKey);
-        await runOverviewRefresh(trailing.includeHistory, "reconcile", trailing.intent);
-      }
-    })();
-    overviewWaveRef.current.set(projectKey, wave);
-    overviewWaveEpochRef.current.set(projectKey, currentRequestEpoch);
-    let followup: { includeHistory: boolean; intent: number } | undefined;
-    try {
-      await wave;
-    } finally {
-      if (overviewWaveRef.current.get(projectKey) === wave) {
-        overviewWaveRef.current.delete(projectKey);
-        overviewWaveEpochRef.current.delete(projectKey);
-        followup = trailingOverviewRef.current.get(projectKey);
-        if (followup) trailingOverviewRef.current.delete(projectKey);
-      }
-    }
-    // A boundary arriving during the trailing pass owns a new bounded wave;
-    // the completed wave above never grows beyond first + one trailing invoke.
-    if (followup && enabledRef.current && activeKeyRef.current === projectKey) {
-      await runOverviewWave(followup.includeHistory);
-    }
-  }, [projectKey, runOverviewRefresh]);
+    if (summary.revision !== undefined && state.detailRevisionById[summary.taskId] === summary.revision) return;
+    const slot = { promise: Promise.resolve(), dirty: false, expected: summary };
+    waitingHydrationRef.current.set(key, slot);
+    const operationKey = `task:${summary.taskId}:hydrate:boundary`;
+    const operation = state.beginOperation(operationKey);
+    slot.promise = (async () => {
+      do {
+        slot.dirty = false;
+        const expected = useTaskStore.getState().workflowById[summary.taskId] ?? summary;
+        slot.expected = expected;
+        try {
+          const run = await getWorkflowRun({ ...request(), taskId: summary.taskId });
+          recordWorkflowFacts([run]);
+          const latest = useWorkflowStore.getState();
+          if (!workflowRequestGuardMatchesAuthority(guard, project) || latest.selectedTaskId !== summary.taskId) return;
+          if (workflowRunMatchesGuard(run, project.projectId, guard)) latest.upsertRun(run);
+          const current = useTaskStore.getState().workflowById[summary.taskId];
+          if (current && compareWorkflowRevision(current, run) > 0) {
+            if (current.sessionId !== expected.sessionId || compareWorkflowRevision(current, expected) > 0) slot.dirty = true;
+            else {
+              latest.failOperation(operationKey, operation, operationError("workflows.operationError.detail", new Error("WORKFLOW_DETAIL_STALE")));
+              return;
+            }
+          }
+        } catch (error) {
+          const latest = useWorkflowStore.getState();
+          const current = useTaskStore.getState().workflowById[summary.taskId] ?? summary;
+          if (!workflowRequestGuardMatchesAuthority(guard, project) || latest.selectedTaskId !== summary.taskId) return;
+          if (current.sessionId === expected.sessionId && compareWorkflowRevision(current, expected) === 0) {
+            latest.failOperation(operationKey, operation, operationError("workflows.operationError.detail", error));
+            return;
+          }
+          slot.dirty = true;
+        }
+      } while (slot.dirty && enabledRef.current && workflowRequestGuardMatchesAuthority(guard, project)
+        && useWorkflowStore.getState().selectedTaskId === summary.taskId);
+    })().finally(() => {
+      if (waitingHydrationRef.current.get(key) === slot) waitingHydrationRef.current.delete(key);
+      useWorkflowStore.getState().finishOperation(operationKey, operation);
+    });
+  }, [project, request]);
 
-  const reconcileOverview = useCallback(
-    () => runOverviewWave(false, false),
-    [runOverviewWave],
-  );
+  const refresh = useCallback(async (): Promise<void> => {
+    if (!enabledRef.current || !hasTauri()) return;
+    const initial = useWorkflowStore.getState();
+    const existing = overviewRequestRef.current;
+    if (existing?.projectKey === projectKey && existing.epoch === initial.requestEpoch) {
+      existing.dirty = true;
+      return existing.promise;
+    }
+    const slot = { projectKey, epoch: initial.requestEpoch, dirty: false, promise: Promise.resolve() };
+    overviewRequestRef.current = slot;
+    slot.promise = (async () => {
+      do {
+        slot.dirty = false;
+        const state = useWorkflowStore.getState();
+        const guard = captureWorkflowRequestGuard(state);
+        const identity = workflowAuthorityIdentity(project);
+        const key = state.overview ? "overview:reconcile" : "overview:init";
+        const operation = state.beginOperation(key);
+        if (!state.overview) state.setOverviewStatus("loading");
+        try {
+          const overview = await getWorkflowsOverview(request());
+          if (!workflowRequestScopeMatches(guard)
+            || workflowAuthorityIdentity(project) !== identity) return;
+          const access = overview.projectAccess;
+          if (access && identity && identity !== `${access.canonicalIdentityKey}\0${access.identityRevision}`) {
+            throw new Error("WORKFLOW_AUTHORITY_IDENTITY_MISMATCH");
+          }
+          const latest = useWorkflowStore.getState();
+          latest.setOverviewSnapshot(overview);
+          latest.applySummaries(Object.values(useTaskStore.getState().workflowById));
+          const selected = useTaskStore.getState().workflowById[latest.selectedTaskId ?? ""];
+          if (selected) hydrateSelectedRun(selected);
+        } catch (error) {
+          if (workflowRequestScopeMatches(guard) && workflowAuthorityIdentity(project) === identity) {
+            const latest = useWorkflowStore.getState();
+            latest.setOverviewStatus("error");
+            latest.failOperation(key, operation, operationError("workflows.operationError.overview", error));
+          }
+        } finally {
+          useWorkflowStore.getState().finishOperation(key, operation);
+        }
+      } while (slot.dirty && enabledRef.current && activeKeyRef.current === projectKey
+        && useWorkflowStore.getState().requestEpoch === slot.epoch);
+    })().finally(() => {
+      if (overviewRequestRef.current === slot) overviewRequestRef.current = null;
+    });
+    return slot.promise;
+  }, [hydrateSelectedRun, project, projectKey, request]);
 
-  const refresh = useCallback(async () => {
-    const state = useWorkflowStore.getState();
-    await runOverviewWave(!state.overview || state.surface === "history");
-  }, [runOverviewWave]);
+  const reconcileOverview = refresh;
 
   useEffect(() => {
     activeKeyRef.current = projectKey;
-    pendingEventsRef.current.clear();
-    progressEventsRef.current.clear();
-    trailingOverviewRef.current.clear();
-    if (progressTimerRef.current) {
-      clearTimeout(progressTimerRef.current);
-      progressTimerRef.current = null;
-    }
     waitingHydrationRef.current.clear();
     useWorkflowStore.getState().activateProject(projectKey);
-    return () => {
-      if (progressTimerRef.current) {
-        clearTimeout(progressTimerRef.current);
-        progressTimerRef.current = null;
-      }
-      progressEventsRef.current.clear();
-    };
+
   }, [authorityIdentity, projectKey]);
 
   useEffect(() => {
     if (enabled) void refresh();
   }, [authorityIdentity, enabled, refresh]);
 
-  useEffect(
-    () => {
-      if (!enabled) return undefined;
-      const flushProgressEvents = () => {
-        progressTimerRef.current = null;
-        if (!enabledRef.current || activeKeyRef.current !== projectKey) {
-          progressEventsRef.current.clear();
-          return;
-        }
-        const state = useWorkflowStore.getState();
-        const access = state.overview?.projectAccess;
-        if (!access) return;
-        const accepted = [...progressEventsRef.current.values()]
-          .filter((pendingEvent) => workflowEventMatchesAccess(
-            pendingEvent,
-            project.projectId,
-            access,
-          ));
-        progressEventsRef.current.clear();
-        state.upsertRuns(accepted.map((pendingEvent) => pendingEvent.run));
-      };
-      const scheduleProgressFlush = () => {
-        if (progressTimerRef.current) return;
-        progressTimerRef.current = setTimeout(
-          flushProgressEvents,
-          WORKFLOW_PROGRESS_FLUSH_MS,
-        );
-      };
-      const unsubscribe = registerTaskEventListener((event) => {
-        if (event.eventType !== "workflow_updated" || activeKeyRef.current !== projectKey) return;
-        const run = event.payload as WorkflowRun;
-        const state = useWorkflowStore.getState();
-        const access = state.overview?.projectAccess;
-        if (event.projectId !== project.projectId || run.projectId !== project.projectId) {
-          return;
-        }
-        if (!access) {
-          keepLatestPendingEvent(pendingEventsRef.current, {
-            eventProjectId: event.projectId,
-            run,
-          });
-          void reconcileOverview();
-          return;
-        }
-        if (
-          run.canonicalIdentityKey !== access.canonicalIdentityKey ||
-          run.identityRevision !== access.identityRevision
-        ) {
-          return;
-        }
-        const ordinaryProgress = run.displayStatus === "running" && !run.pendingAction;
-        if (ordinaryProgress) {
-          keepLatestPendingEvent(progressEventsRef.current, {
-            eventProjectId: event.projectId,
-            run,
-          });
-          scheduleProgressFlush();
-          return;
-        }
-        progressEventsRef.current.delete(run.taskId);
-        state.upsertRun(run);
-        hydrateSelectedWaitingRun(run);
-        void runOverviewWave(
-          state.surface === "history" && TERMINAL_WORKFLOW_STATUSES.has(run.displayStatus),
-        );
-      });
-      return () => {
-        unsubscribe();
-        if (progressTimerRef.current) {
-          clearTimeout(progressTimerRef.current);
-          progressTimerRef.current = null;
-        }
-        progressEventsRef.current.clear();
-      };
-    },
-    [enabled, hydrateSelectedWaitingRun, project.projectId, projectKey, reconcileOverview, runOverviewWave],
-  );
+  useEffect(() => registerTaskEventListener((event) => {
+    if (event.eventType !== "workflow_updated") return;
+    const run = workflowRunSummary(event.payload as WorkflowRun | WorkflowRunSummary);
+    if (run.projectId !== event.projectId) return;
+    // The app dispatcher coalesces progress; facts survive hidden pages and project switches.
+    recordWorkflowFacts([run], false);
+    const accepted = useTaskStore.getState().workflowById[run.taskId];
+    if (!accepted || compareWorkflowRevision(run, accepted) < 0) return;
+    if (activeKeyRef.current !== projectKey || run.projectId !== project.projectId) return;
+    const row = useWorkflowStore.getState().overview?.rows.find((row) => row.kind === run.kind);
+    const boundary = run.displayStatus !== "running" || (row?.activeTaskId !== run.taskId || row.state !== "running");
+    useWorkflowStore.getState().applySummaries([accepted]);
+    hydrateSelectedRun(accepted);
+    if (boundary && enabledRef.current) void reconcileOverview();
+  }), [hydrateSelectedRun, project.projectId, projectKey, reconcileOverview]);
 
   const perform = useCallback(
     async (
       operationKey: string,
       summaryKey: string,
-      operation: () => Promise<WorkflowRun | WorkflowStartOutcome | { runs: WorkflowRun[] }>,
+      operation: () => Promise<WorkflowRun | WorkflowStartOutcome | { runs: WorkflowRun[] } | null>,
     ) => {
       const state = useWorkflowStore.getState();
       const guard = captureWorkflowRequestGuard(state);
       const operationRequest = state.beginOperation(operationKey);
       try {
         const result = await operation();
+        if (!result) return;
+        recordWorkflowFacts("run" in result ? [result.run] : "runs" in result ? result.runs : [result]);
         const latest = useWorkflowStore.getState();
         if (!workflowRequestGuardMatchesAuthority(guard, project)) return;
         if ("kind" in result && (result.kind === "created" || result.kind === "existing")) {
@@ -689,6 +367,7 @@ export function useWorkflowsController(
 
   const prepareKind = useCallback(
     async (kind: WorkflowKind, scope: WorkflowScope | null = null, routeSelection: WorkflowRouteSelection | null = null) => {
+      cancelWorkflowNavigation();
       if (
         project.projectId
         && project.rootPath
@@ -697,6 +376,9 @@ export function useWorkflowsController(
         await refresh();
       }
       const state = useWorkflowStore.getState();
+      const savedDraft = state.drafts[kind];
+      const selectedScope = scope ?? savedDraft?.scope ?? null;
+      const selectedRoute = routeSelection ?? savedDraft?.routeSelection ?? null;
       const prepareRequest = ++prepareRequestRef.current;
       const guard = captureWorkflowRequestGuard(state);
       const operationKey = `prepare:${kind}`;
@@ -705,8 +387,8 @@ export function useWorkflowsController(
         const preparation = await prepareWorkflow({
           ...request(),
           kind,
-          scope,
-          routeSelection,
+          scope: selectedScope,
+          routeSelection: selectedRoute,
         });
         const latest = useWorkflowStore.getState();
         if (
@@ -742,56 +424,12 @@ export function useWorkflowsController(
     const operationKey = "history:page";
     const operationRequest = state.beginOperation(operationKey);
     try {
-      const page = await listWorkflowRuns({
-        ...request(),
-        workflowKind: state.historyKind,
-        displayStatus: state.historyStatus,
-        cursor,
-        limit: 50,
-      });
-      const latest = useWorkflowStore.getState();
-      const latestAccess = latest.overview?.projectAccess;
-      if (
-        !workflowRequestGuardMatchesAuthority(guard, project)
-        || latest.historyCursor !== cursor
-        || latest.historyKind !== state.historyKind
-        || latest.historyStatus !== state.historyStatus
-        || historyRequestRef.current !== historyRequest
-        || !latestAccess
-        || latestAccess.canonicalIdentityKey !== expectedAccess.canonicalIdentityKey
-        || latestAccess.identityRevision !== expectedAccess.identityRevision
-      ) return;
-      if (
-        !page.runs.every((run) =>
-          workflowRunMatchesAccess(run, project.projectId, latestAccess),
-        )
-      ) {
-        latest.setHistoryCursor(null);
-        latest.failOperation(operationKey, operationRequest, {
-          summary: i18next.t("workflows.error.historyIdentityMismatch"),
-          technicalDetails: "WORKFLOW_HISTORY_IDENTITY_MISMATCH",
-        });
-        return;
-      }
-      latest.appendHistoryPage(page.runs, page.nextCursor);
+      const { loadWorkflowHistory } = await loadWorkflowHistoryModule();
+      await loadWorkflowHistory({ ...request(), workflowKind: state.historyKind, displayStatus: state.historyStatus, cursor, limit: 50 },
+        guard, expectedAccess, operationRequest, () => enabledRef.current && historyRequestRef.current === historyRequest);
     } catch (error) {
-      const latest = useWorkflowStore.getState();
-      if (
-        workflowRequestGuardMatchesAuthority(guard, project)
-        && historyRequestRef.current === historyRequest
-        && latest.historyCursor === cursor
-        && latest.historyKind === state.historyKind
-        && latest.historyStatus === state.historyStatus
-      ) {
-        const errorCode = backendErrorCode(error);
-        const staleCursor = errorCode === "WORKFLOW_CURSOR_SCOPE_MISMATCH"
-          || errorCode === "WORKFLOW_CURSOR_INVALID";
-        if (historyPageErrorRequiresRefresh(errorCode)) latest.setHistoryCursor(null);
-        latest.failOperation(
-          operationKey,
-          operationRequest,
-          operationError(staleCursor ? "workflows.error.historyCursorStale" : "workflows.operationError.history", error),
-        );
+      if (workflowRequestGuardMatchesAuthority(guard, project) && historyRequestRef.current === historyRequest) {
+        useWorkflowStore.getState().failOperation(operationKey, operationRequest, operationError("workflows.operationError.history", error));
       }
     } finally {
       useWorkflowStore.getState().finishOperation(operationKey, operationRequest);
@@ -813,57 +451,43 @@ export function useWorkflowsController(
     const operationKey = "history:filter";
     const operationRequest = useWorkflowStore.getState().beginOperation(operationKey);
     try {
-      const page = await listWorkflowRuns({
-        ...request(),
-        workflowKind: kind,
-        displayStatus: status,
-        cursor: null,
-        limit: 50,
-      });
-      const latest = useWorkflowStore.getState();
-      const latestAccess = latest.overview?.projectAccess;
-      if (
-        !workflowRequestGuardMatchesAuthority(guard, project)
-        || historyRequestRef.current !== historyRequest
-        || latest.historyKind !== kind
-        || latest.historyStatus !== status
-        || !latestAccess
-        || latestAccess.canonicalIdentityKey !== expectedAccess.canonicalIdentityKey
-        || latestAccess.identityRevision !== expectedAccess.identityRevision
-      ) return;
-      if (!page.runs.every((run) => workflowRunMatchesAccess(run, project.projectId, latestAccess))) {
-        latest.failOperation(operationKey, operationRequest, {
-          summary: i18next.t("workflows.error.historyIdentityMismatch"),
-          technicalDetails: "WORKFLOW_HISTORY_IDENTITY_MISMATCH",
-        });
-        return;
-      }
-      latest.replaceHistoryPage(page.runs, page.nextCursor);
+      const { loadWorkflowHistory } = await loadWorkflowHistoryModule();
+      await loadWorkflowHistory({ ...request(), workflowKind: kind, displayStatus: status, cursor: null, limit: 50 },
+        guard, expectedAccess, operationRequest, () => enabledRef.current && historyRequestRef.current === historyRequest);
     } catch (error) {
-      if (
-        workflowRequestGuardMatchesAuthority(guard, project)
-        && historyRequestRef.current === historyRequest
-        && useWorkflowStore.getState().historyKind === kind
-        && useWorkflowStore.getState().historyStatus === status
-      ) {
-        useWorkflowStore.getState().failOperation(
-          operationKey,
-          operationRequest,
-          operationError("workflows.operationError.history", error),
-        );
+      if (workflowRequestGuardMatchesAuthority(guard, project) && historyRequestRef.current === historyRequest) {
+        useWorkflowStore.getState().failOperation(operationKey, operationRequest, operationError("workflows.operationError.history", error));
       }
     } finally {
       useWorkflowStore.getState().finishOperation(operationKey, operationRequest);
     }
   }, [project, request]);
 
+  const selectedTaskId = useWorkflowStore((state) => state.selectedTaskId);
+  const selectedSummary = useTaskStore((state) => state.workflowById[selectedTaskId ?? ""]);
+  useEffect(() => {
+    if (!enabled || !selectedSummary) return;
+    const revision = useWorkflowStore.getState().detailRevisionById[selectedSummary.taskId];
+    if (revision !== selectedSummary.revision) hydrateSelectedRun(selectedSummary);
+  }, [enabled, selectedSummary, hydrateSelectedRun]);
+
+  const surface = useWorkflowStore((state) => state.surface);
+  const overviewIdentity = useWorkflowStore((state) => state.identityGuard.identityRevision);
+  useEffect(() => {
+    if (enabled && surface === "history" && overviewIdentity) {
+      const state = useWorkflowStore.getState();
+      void filterHistory(state.historyKind, state.historyStatus);
+    }
+  }, [enabled, surface, overviewIdentity, filterHistory]);
+
   return useMemo(
     () => ({
       refresh,
       prepare: prepareKind,
-      startPrepared: async (acknowledgeRestrictedContent, acknowledgeRemoteProvider) => {
+      startPrepared: async (acknowledgeRestrictedContent, acknowledgeRemoteProvider, draft) => {
         const state = useWorkflowStore.getState();
         const preparation = state.preparation;
+        const retryOfTaskId = state.retryOfTaskId;
         if (!preparation) return;
         const operationKey = `start:${preparation.preparationId}`;
         if (workflowOperationPending(state.operations, operationKey)) return;
@@ -875,14 +499,13 @@ export function useWorkflowsController(
         await perform(
           operationKey,
           "workflows.operationError.start",
-          () =>
-          startWorkflow({
-            ...request(),
-            preparationId: preparation.preparationId,
-            preparationRevision: preparation.preparationRevision,
-            acknowledgeRestrictedContent,
-            acknowledgeRemoteProvider,
-          }),
+          async () => {
+            const { startPreparedWorkflow } = await loadWorkflowExecution();
+            return startPreparedWorkflow(request(), preparation, {
+              acknowledgeRestrictedContent, acknowledgeRemoteProvider, draft, retryOfTaskId,
+            }, () => enabledRef.current && workflowRequestGuardMatchesAuthority(guard, project)
+              && useWorkflowStore.getState().preparation === preparation);
+          }
         );
       },
       cancel: (taskId) => perform(
@@ -909,20 +532,48 @@ export function useWorkflowsController(
       adjustAndPrepare: async (run, openSettingsAfter = false) => {
         const routeSelection = routeSelectionOf(run.route);
         if (openSettingsAfter) {
-          openSettings("ai", {
-            projectId: project.projectId,
-            projectRootPath: project.rootPath,
-            kind: run.kind,
-            scope: run.scope,
-            routeSelection,
-            source: "adjust",
-            expectedSurface: "detail",
-            expectedCanonicalIdentityKey: run.canonicalIdentityKey,
-            expectedIdentityRevision: run.identityRevision,
-            expectedPreparationId: null,
-            expectedPreparationRevision: null,
-            expectedTaskId: run.taskId,
-          });
+          const state = useWorkflowStore.getState();
+          const guard = captureWorkflowRequestGuard(state);
+          const operationKey = `task:${run.taskId}:settings`;
+          if (workflowOperationPending(state.operations, operationKey)) return;
+          const operation = state.beginOperation(operationKey);
+          try {
+            const { openWorkflowAdjustmentSettings } = await loadWorkflowExecution();
+            const latest = useWorkflowStore.getState();
+            if (enabledRef.current && workflowRequestGuardMatchesAuthority(guard, project)
+              && latest.selectedTaskId === state.selectedTaskId && latest.surface === state.surface) {
+              openWorkflowAdjustmentSettings(project, run);
+            }
+          } catch (error) {
+            if (workflowRequestGuardMatchesAuthority(guard, project)) {
+              useWorkflowStore.getState().failOperation(operationKey, operation, operationError("workflows.operationError.prepare", error));
+            }
+          } finally {
+            useWorkflowStore.getState().finishOperation(operationKey, operation);
+          }
+          return;
+        }
+        if (run.pendingAction?.actionType === "review_scope" && run.scope.kind === "update_wiki") {
+          const state = useWorkflowStore.getState();
+          const { selectedTaskId, surface } = state;
+          const guard = captureWorkflowRequestGuard(state);
+          const operationKey = `task:${run.taskId}:review-scope`;
+          if (workflowOperationPending(state.operations, operationKey)) return;
+          const operation = useWorkflowStore.getState().beginOperation(operationKey);
+          try {
+            const { reviewWorkflowScope } = await loadWorkflowExecution();
+            await reviewWorkflowScope(request(), run, routeSelection, () => enabledRef.current
+              && workflowRequestGuardMatchesAuthority(guard, project)
+              && useWorkflowStore.getState().selectedTaskId === selectedTaskId
+              && useWorkflowStore.getState().surface === surface);
+          } catch (error) {
+            if (workflowRequestGuardMatchesAuthority(guard, project)) {
+              useWorkflowStore.getState().failOperation(operationKey, operation,
+                operationError("workflows.operationError.prepare", error));
+            }
+          } finally {
+            useWorkflowStore.getState().finishOperation(operationKey, operation);
+          }
           return;
         }
         await prepareKind(run.kind, run.scope, routeSelection);
@@ -938,6 +589,7 @@ export function useWorkflowsController(
             taskId,
           );
         } catch (error) {
+          if (error instanceof Error && error.message === "WORKFLOW_NAVIGATION_SUPERSEDED") return;
           if (workflowRequestGuardMatchesAuthority(guard, project)) {
             useWorkflowStore.getState().failOperation(
               operationKey,
@@ -960,6 +612,7 @@ export function useWorkflowsController(
           run,
           );
         } catch (error) {
+          if (error instanceof Error && error.message === "WORKFLOW_NAVIGATION_SUPERSEDED") return;
           if (workflowRequestGuardMatchesAuthority(guard, project)) {
             useWorkflowStore.getState().failOperation(
               operationKey,
@@ -989,114 +642,37 @@ export function useWorkflowsController(
       ),
       filterHistory,
       loadHistoryMore,
-      handlePrerequisite: (action, draft) => {
-        if (action === "import_sources") {
-          const preparation = useWorkflowStore.getState().preparation;
-          if (preparation) {
-            useNavigationStore.setState({
-              workflowLaunchIntent: {
-                projectId: project.projectId,
-                projectRootPath: project.rootPath,
-                kind: preparation.kind,
-                origin: "workflows",
-                scopePreset: draft?.scope ?? preparation.scope,
-                routeSelection: draft ? draft.routeSelection : routeSelectionOf(preparation.route),
-                expectedCanonicalIdentityKey: preparation.projectAccess.canonicalIdentityKey,
-                expectedIdentityRevision: preparation.projectAccess.identityRevision,
-              },
-            });
-          }
-          setActiveView("import");
-          return;
-        }
-        if (action === "update_wiki") {
-          void prepareKind("update_wiki");
-          return;
-        }
-        if (action === "choose_execution_route") return;
-        if (action === "configure_execution_route") {
-          const preparation = useWorkflowStore.getState().preparation;
-          if (!preparation) {
-            void refresh();
-            return;
-          }
-          openSettings("ai", {
-            projectId: project.projectId,
-            projectRootPath: project.rootPath,
-            kind: preparation.kind,
-            scope: draft?.scope ?? preparation.scope,
-            routeSelection: draft ? draft.routeSelection : routeSelectionOf(preparation.route),
-            source: "prerequisite",
-            expectedSurface: "preparation",
-            expectedCanonicalIdentityKey:
-              preparation.projectAccess.canonicalIdentityKey,
-            expectedIdentityRevision: preparation.projectAccess.identityRevision,
-            expectedPreparationId: preparation.preparationId,
-            expectedPreparationRevision: preparation.preparationRevision,
-            expectedTaskId: null,
-          });
-          return;
-        }
-        if (action === "prepare_again") {
-          const preparation = useWorkflowStore.getState().preparation;
-          if (preparation) {
-            void prepareKind(
-              preparation.kind,
-              preparation.scope,
-              routeSelectionOf(preparation.route),
-            );
-          } else {
-            void refresh();
-          }
-          return;
-        }
-        if (PROJECT_PREREQUISITE_ACTIONS.has(action)) {
-          const state = useWorkflowStore.getState();
-          const preparation = state.preparation;
-          const projectAction = action as WorkflowProjectPrerequisiteAction;
-          const operationKey = `prerequisite:project:${projectAction}`;
-          if (workflowOperationPending(state.operations, operationKey)) return;
-          const guard = captureWorkflowRequestGuard(state);
-          const operationRequest = state.beginOperation(operationKey);
-          if (onProjectPrerequisite) {
-            void Promise.resolve(
-              onProjectPrerequisite(projectAction, {
-                project,
-                preparation,
-                prepareAgain: async () => {
-                  if (preparation) {
-                    await prepareKind(
-                      preparation.kind,
-                      preparation.scope,
-                      routeSelectionOf(preparation.route),
-                    );
-                  } else {
-                    await refresh();
-                  }
-                },
-              }),
-            ).catch((error) => {
-              if (workflowRequestGuardMatchesAuthority(guard, project)) {
-                useWorkflowStore.getState().failOperation(
-                  operationKey,
-                  operationRequest,
-                  operationError("workflows.operationError.prerequisite", error),
-                );
-              }
-            }).finally(() => {
-              useWorkflowStore.getState().finishOperation(operationKey, operationRequest);
-            });
-          } else {
-            state.failOperation(operationKey, operationRequest, {
+      handlePrerequisite: async (action, draft) => {
+        const state = useWorkflowStore.getState();
+        const guard = captureWorkflowRequestGuard(state);
+        const projectAction = PROJECT_PREREQUISITE_ACTIONS.has(action);
+        const operationKey = projectAction ? `prerequisite:project:${action}` : `prerequisite:${action}`;
+        if (workflowOperationPending(state.operations, operationKey)) return;
+        const operation = state.beginOperation(operationKey);
+        try {
+          if (projectAction && !onProjectPrerequisite) {
+            state.failOperation(operationKey, operation, {
               summary: i18next.t("workflows.prerequisite.projectActionUnavailable"),
               technicalDetails: "WORKFLOW_PROJECT_ACTION_UNAVAILABLE",
             });
+            return;
           }
-          return;
+          const { handleWorkflowPrerequisite } = await loadWorkflowExecution();
+          const latest = useWorkflowStore.getState();
+          if (!enabledRef.current || !workflowRequestGuardMatchesAuthority(guard, project)
+            || latest.preparation !== state.preparation || latest.selectedTaskId !== state.selectedTaskId
+            || latest.surface !== state.surface) return;
+          await handleWorkflowPrerequisite(action, draft, project, prepareKind, refresh, onProjectPrerequisite);
+        } catch (error) {
+          if (workflowRequestGuardMatchesAuthority(guard, project)) {
+            useWorkflowStore.getState().failOperation(operationKey, operation, operationError("workflows.operationError.prerequisite", error));
+          }
+        } finally {
+          useWorkflowStore.getState().finishOperation(operationKey, operation);
         }
-        void refresh();
       },
       backToOverview: () => {
+        cancelWorkflowNavigation();
         const state = useWorkflowStore.getState();
         state.setSurface("overview");
       },
@@ -1104,14 +680,12 @@ export function useWorkflowsController(
     [
       filterHistory,
       loadHistoryMore,
-      openSettings,
       onProjectPrerequisite,
       perform,
       prepareKind,
       project,
       refresh,
       request,
-      setActiveView,
     ],
   );
 }

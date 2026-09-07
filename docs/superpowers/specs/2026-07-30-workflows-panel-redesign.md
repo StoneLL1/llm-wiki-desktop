@@ -115,6 +115,10 @@ Workflows → Update Wiki → Run preparation
 
 It contains only product-defined structured settings. Starting the workflow replaces this view with its task detail.
 
+Starting automatically prepares the current draft and revalidates it before admission; there is no separate “Update preparation” action or redundant first-run scope checkbox. Changed scope, automatic route changes, and newly required sensitive-content acknowledgements are presented for review before starting. Overview and history load independently, so waiting for history or execution-route detection cannot block the three workflow entries. Unobserved content changes stay unknown rather than being displayed as “up to date”.
+
+Update Wiki uses four visible phases (prepare, generate, review, save), with exact execution stages and logs available on demand. Completed results and their open action appear before stage details. A queued baseline change enters a recoverable scope review without an applicable candidate; reviewing the current selected Source versions creates a linked new attempt after the previous wait is cancelled.
+
 ### Task detail
 
 Task detail uses the full main area for the observable pipeline. The right panel shows scope, execution route, Git state, affected files, output location, and current actions.

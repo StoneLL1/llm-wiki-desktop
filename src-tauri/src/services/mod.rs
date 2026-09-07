@@ -24,7 +24,20 @@ mod secret_service;
 mod settings_service;
 mod update_service;
 mod wiki_index;
+#[cfg(any(feature = "gui", test))]
+mod workflow_history;
+#[cfg(any(feature = "gui", test))]
+mod workflow_review;
 mod workflow_service;
+
+#[cfg(feature = "gui")]
+pub(crate) use workflow_history::list_workflow_runs_for_state;
+#[cfg(feature = "gui")]
+pub(crate) use workflow_review::{
+    agent_lint_repair_services, confirm_workflow_action_for_state, dispatch_next,
+    ensure_workflow_identity, get_workflow_file_diff_for_state, get_workflow_run_for_state,
+    interrupt_unconfirmable_workflow, require_workflow_project, workflow_run,
+};
 
 pub use agent_service::{
     AgentInvocation, AgentProbeTarget, AgentService, ProcessRunner, SystemProcessRunner,
@@ -105,7 +118,7 @@ pub use workflow_service::{
     WorkflowPreparationEnvironment, WorkflowPreparationService, WorkflowRunner, WorkflowService,
     WorkflowStageSink, WorkflowTrustTransition,
 };
-#[cfg(feature = "gui")]
+#[cfg(any(feature = "gui", test))]
 pub(crate) use workflow_service::{
     agent_lint_repair_decision_review, agent_lint_repair_file_diff_page,
     update_wiki_decision_review_for_workflow, update_wiki_decision_review_summary_for_workflow,

@@ -362,7 +362,13 @@ const parseRustWorkflowRun = (value: unknown): WorkflowRun => {
 describe("workflow API", () => {
   beforeEach(() => {
     invoke.mockReset();
-    invoke.mockResolvedValue({});
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "list_workflow_runs") return { runs: [], nextCursor: null };
+      if (command === "get_workflows_overview") return { schemaVersion: 1, projectAccess: null, rows: [] };
+      if (["continue_queued_workflows", "reorder_queued_workflow"].includes(command)) return { runs: [], nextCursor: null };
+      if (["start_workflow", "retry_workflow"].includes(command)) return { run: rustRunFixture };
+      return rustRunFixture;
+    });
   });
 
   it("uses one explicit request envelope for every frozen command", async () => {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { BackendEvent, BackendEventType, BackendTask, StreamDelta } from "../types/task";
+import type { WorkflowRunSummary } from "../types/workflow";
 import { TaskEventDispatcher } from "./taskEventDispatcher";
 
 function streamEvent(projectId: string, taskId: string, delta: string): BackendEvent<StreamDelta> {
@@ -54,6 +55,18 @@ function taskSnapshotEvent(progress = 1): BackendEvent<BackendTask> {
   };
 }
 
+function workflowEvent(overrides: Partial<WorkflowRunSummary> = {}): BackendEvent<WorkflowRunSummary> {
+  const run: WorkflowRunSummary = {
+    schemaVersion: 1, revision: "100", sessionId: "session-old", taskId: "workflow-a",
+    projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a",
+    kind: "update_wiki", operation: { kind: "built_in" }, displayStatus: "running",
+    retry: null, outcome: null, startedAt: "2026-09-07T00:00:00Z",
+    updatedAt: "2026-09-07T00:01:00Z", completedAt: null,
+    ...overrides,
+  };
+  return { eventId: `${run.sessionId}-${run.revision}`, eventType: "workflow_updated", taskId: run.taskId, projectId: run.projectId, timestamp: run.updatedAt, payload: run };
+}
+
 describe("TaskEventDispatcher", () => {
   it("always runs the event owner before feature listeners", () => {
     const dispatcher = new TaskEventDispatcher();
@@ -100,6 +113,60 @@ describe("TaskEventDispatcher", () => {
       expect((observed[0]?.payload as StreamDelta).delta).toBe("tail");
     },
   );
+
+  it.each(["completed", "failed", "cancelled", "waiting_for_confirmation"] as const)(
+    "immediately delivers a new-session %s below an old pending progress revision",
+    (displayStatus) => {
+      const dispatcher = new TaskEventDispatcher();
+      const observed: BackendEvent[] = [];
+      dispatcher.registerOwner((event) => observed.push(event));
+      const oldProgress = workflowEvent();
+      const restored = workflowEvent({ sessionId: "session-new", revision: "5", displayStatus });
+      dispatcher.dispatch(oldProgress);
+      expect(observed).toEqual([]);
+
+      dispatcher.dispatch(restored);
+      expect(observed).toEqual([restored]);
+      dispatcher.clearPending();
+      // The event owner, not the dispatcher, decides whether the old session is retired.
+      expect(observed).toEqual([restored, oldProgress]);
+    },
+  );
+
+  it.each([
+    { projectId: "project-b" },
+    { canonicalIdentityKey: "identity-b" },
+    { identityRevision: "revision-b" },
+  ])("does not compare or overwrite pending revisions from a different owner %o", (owner) => {
+    const dispatcher = new TaskEventDispatcher();
+    const observed: BackendEvent[] = [];
+    dispatcher.registerOwner((event) => observed.push(event));
+    const original = workflowEvent();
+    const otherProgress = workflowEvent({ ...owner, revision: "3" });
+    const otherTerminal = workflowEvent({ ...owner, revision: "5", displayStatus: "completed" });
+    dispatcher.dispatch(original);
+    dispatcher.dispatch(otherProgress);
+    dispatcher.dispatch(otherTerminal);
+
+    expect(observed).toEqual([otherTerminal]);
+    dispatcher.clearPending();
+    expect(observed).toEqual([otherTerminal, original]);
+  });
+
+  it("keeps revision ordering within the same session and owner without delaying its terminal", () => {
+    const dispatcher = new TaskEventDispatcher();
+    const observed: BackendEvent[] = [];
+    dispatcher.registerOwner((event) => observed.push(event));
+    dispatcher.dispatch(workflowEvent());
+    dispatcher.dispatch(workflowEvent({ revision: "5", displayStatus: "completed" }));
+    expect(observed).toEqual([]);
+
+    const terminal = workflowEvent({ revision: "101", displayStatus: "completed" });
+    dispatcher.dispatch(terminal);
+    expect(observed).toEqual([terminal]);
+    dispatcher.clearPending();
+    expect(observed).toEqual([terminal]);
+  });
 
   it("drops project A presentation buffers when project B becomes active", () => {
     const dispatcher = new TaskEventDispatcher();

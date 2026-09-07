@@ -133,6 +133,8 @@ fn waiting_action() -> WorkflowPendingAction {
 
 fn sample_run() -> WorkflowRun {
     WorkflowRun {
+        revision: "0".into(),
+        session_id: String::new(),
         schema_version: WORKFLOW_SCHEMA_VERSION,
         task_id: "task-1".into(),
         project_id: "project-中文".into(),
@@ -182,6 +184,20 @@ fn sample_run() -> WorkflowRun {
         cancellable: true,
         undo_cancel_until: None,
     }
+}
+
+#[test]
+fn summary_preserves_revision_and_progress_without_candidate_details() {
+    let mut run = sample_run();
+    run.revision = "9007199254740993".into();
+    run.session_id = "process-session".into();
+    let summary = llm_wiki_desktop_lib::models::workflow::WorkflowRunSummary::from(&run);
+    assert_eq!(summary.revision, run.revision);
+    assert_eq!(summary.session_id, run.session_id);
+    let stage = summary.current_stage.unwrap();
+    assert_eq!(stage.current_item, run.stages[0].current_item);
+    assert_eq!(stage.progress, run.stages[0].progress);
+    assert!(stage.decision.is_none());
 }
 
 #[test]

@@ -27,3 +27,4 @@ pub mod task;
 pub mod update;
 pub mod wiki;
 pub mod workflow;
+pub mod workflow_requests;

@@ -164,13 +164,13 @@ export interface WorkflowBaselineSummary {
 }
 
 export type WorkflowProjectTrust = "trusted" | "untrusted";
-export type WorkflowFilesystemAccess = "writable" | "read_only";
+export type WorkflowFilesystemAccess = "unknown" | "writable" | "read_only";
 export type WorkflowPersistenceMode = "persistent" | "memory_only";
 export type WorkflowPersistenceTransition =
   | "unchanged"
   | "downgraded_to_memory_only"
   | "upgraded_to_persistent";
-export type WorkflowGitState = "clean" | "dirty" | "unavailable";
+export type WorkflowGitState = "unknown" | "clean" | "dirty" | "unavailable";
 
 export interface WorkflowProjectAccessSummary {
   projectId: string;
@@ -321,6 +321,8 @@ export interface WorkflowDecisionReview {
 }
 
 export interface WorkflowRun {
+  revision?: string;
+  sessionId?: string;
   schemaVersion: number;
   taskId: string;
   projectId: string;
@@ -395,7 +397,7 @@ export interface WorkflowQueueContextItem {
 }
 
 export interface WorkflowContextSummary {
-  pendingSourceCount: number;
+  pendingSourceCount: number | null;
   lastHealth: WorkflowHealthContextSummary | null;
   recentArtifact: WorkflowArtifactContextSummary | null;
   queueCount: number;
@@ -403,6 +405,8 @@ export interface WorkflowContextSummary {
 }
 
 export interface WorkflowsOverview {
+  sessionId?: string;
+  activeRuns?: WorkflowRunSummary[];
   schemaVersion: number;
   projectAccess: WorkflowProjectAccessSummary | null;
   rows: WorkflowOverviewRow[];
@@ -442,6 +446,13 @@ export type WorkflowRunOutcomeSummary =
     };
 
 export interface WorkflowRunSummary {
+  revision?: string;
+  sessionId?: string;
+  queuePosition?: number | null;
+  continuationRequired?: boolean;
+  currentStageId?: string | null;
+  currentStage?: WorkflowStage | null;
+  cancellable?: boolean;
   schemaVersion: number;
   taskId: string;
   projectId: string;
@@ -479,6 +490,7 @@ export interface PrepareWorkflowRequest extends WorkflowProjectRequest {
 }
 
 export interface StartWorkflowRequest extends WorkflowProjectRequest {
+  retryOfTaskId?: string | null;
   preparationId: string;
   preparationRevision: string;
   acknowledgeRestrictedContent?: boolean;

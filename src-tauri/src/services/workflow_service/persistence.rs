@@ -226,6 +226,18 @@ fn pending_action_is_valid(
             return false;
         }
     }
+    if pending.action_type == crate::models::confirmation::PendingActionType::ReviewScope
+        && (workflow.kind != WorkflowKind::UpdateWiki
+            || !matches!(
+                workflow.execution_options.operation,
+                crate::models::workflow::WorkflowOperation::BuiltIn
+            )
+            || pending.candidate.is_some()
+            || pending.checkpoint_hash.is_some()
+            || workflow.current_stage_id.as_deref() != Some("analyze_sources"))
+    {
+        return false;
+    }
     if let Some(candidate) = pending.candidate.as_ref() {
         match candidate {
             WorkflowCandidateReference::TaskOwned { candidate_id } => {

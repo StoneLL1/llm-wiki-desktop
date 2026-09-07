@@ -7,7 +7,7 @@ import { useWorkflowStore, workflowOperationPending } from "../../stores/workflo
 import { useProjectStore } from "../../stores/projectStore";
 import { captureProjectScope, isProjectScopeCurrent } from "../../stores/projectScope";
 import { getWorkflowFileDiff, rollbackAgentLintRepair } from "../../services/workflowApi";
-import type { WorkflowRun } from "../../types/workflow";
+import type { WorkflowRun, WorkflowRunSummary } from "../../types/workflow";
 import type { WorkflowsController } from "./useWorkflowsController";
 import { WorkflowPipeline } from "./WorkflowPipeline";
 import {
@@ -28,7 +28,7 @@ export function WorkflowTaskDetail({
 }: {
   run: WorkflowRun;
   controller: WorkflowsController;
-  queuedRuns: WorkflowRun[];
+  queuedRuns: Array<Pick<WorkflowRunSummary, "taskId">>;
   onOpenLogs: (taskId: string) => void;
 }) {
   const { t, i18n } = useTranslation();
@@ -175,7 +175,17 @@ export function WorkflowTaskDetail({
         <WorkflowStatus className="workflow-detail__status" status={run.displayStatus} />
       </div>
 
-      {run.pendingAction ? (
+      {run.pendingAction?.actionType === "review_scope" ? (
+        <section className="workflow-attention" aria-label={t("workflows.scopeReview.title")}>
+          <h3>{t("workflows.scopeReview.title")}</h3>
+          <p>{t("workflows.scopeReview.description")}</p>
+          <ul>{run.pendingAction.affectedPaths.map((path) => <li key={path}><code>{path}</code></li>)}</ul>
+          <div className="workflow-actions">
+            <button className="btn btn--primary" disabled={taskMutationPending} onClick={() => void controller.adjustAndPrepare(run)} type="button">{t("workflows.scopeReview.review")}</button>
+            <button className="btn btn--secondary" disabled={taskMutationPending} onClick={() => void controller.cancel(run.taskId)} type="button">{t("workflows.action.cancel")}</button>
+          </div>
+        </section>
+      ) : run.pendingAction ? (
         <section aria-labelledby={`workflow-review-${run.taskId}`} className="workflow-attention workflow-decision-review">
           <div className="workflow-attention__title">
             <AlertTriangle aria-hidden="true" size={15} />
@@ -249,10 +259,6 @@ export function WorkflowTaskDetail({
         </section>
       ) : null}
 
-      <section aria-labelledby={`workflow-pipeline-${run.taskId}`}>
-        <h3 className="workflow-section-title" id={`workflow-pipeline-${run.taskId}`}>{t("workflows.pipeline.title")}</h3>
-        <WorkflowPipeline currentStageId={run.currentStageId} displayStatus={run.displayStatus} stages={run.stages} />
-      </section>
       {run.displayStatus === "failed" && run.error ? (
         <section aria-label={t("workflows.failure.title")} className="workflow-error workflow-failure" role="region">
           <div className="workflow-attention__title">
@@ -331,6 +337,11 @@ export function WorkflowTaskDetail({
           {rollbackErrorKey ? <p className="workflow-conflict-notice" role="alert">{t(rollbackErrorKey)}</p> : null}
         </section>
       ) : null}
+
+      <section aria-labelledby={`workflow-pipeline-${run.taskId}`}>
+        <h3 className="workflow-section-title" id={`workflow-pipeline-${run.taskId}`}>{t("workflows.pipeline.title")}</h3>
+        <WorkflowPipeline kind={run.kind} currentStageId={run.currentStageId} displayStatus={run.displayStatus} stages={run.stages} />
+      </section>
 
       {confirmingCancel ? (
         <section className="workflow-attention" role="alert">

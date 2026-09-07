@@ -1,3 +1,4 @@
+import { workflowScopeEqual } from "../../services/workflowDraft";
 import { ArrowLeft, Check, ShieldAlert } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -29,27 +30,6 @@ function sourceVersionKey(source: { sourceId: string; versionId: string }): stri
 
 export function workflowRouteSelectionKey(route: WorkflowRouteSelection): string {
   return route.kind === "agent" ? `agent:${route.agent}` : `byok:${route.provider}`;
-}
-
-function stringSetEqual(left: readonly string[], right: readonly string[]): boolean {
-  if (left.length !== right.length) return false;
-  const expected = new Set(left);
-  return right.every((value) => expected.has(value));
-}
-
-function workflowScopeEqual(left: WorkflowScope, right: WorkflowScope): boolean {
-  if (left.kind !== right.kind) return false;
-  if (left.kind === "health_check" && right.kind === "health_check") return left.mode === right.mode;
-  if (left.kind === "update_wiki" && right.kind === "update_wiki") {
-    return left.mode === right.mode
-      && stringSetEqual(left.sourceVersions.map(sourceVersionKey), right.sourceVersions.map(sourceVersionKey));
-  }
-  if (left.kind === "generate_content" && right.kind === "generate_content") {
-    return left.artifactType === right.artifactType
-      && left.outputPath === right.outputPath
-      && stringSetEqual(left.pagePaths, right.pagePaths);
-  }
-  return false;
 }
 
 function scopeValidationKey(scope: WorkflowScope, updateAutoDetect: boolean): string | null {
@@ -84,12 +64,11 @@ function routeDisplay(
   return `${t("workflows.route.byok")} · ${route.provider}`;
 }
 
-export function WorkflowPreparationView({ preparation, onBack, onStart, onPrerequisite, onReprepare }: {
+export function WorkflowPreparationView({ preparation, onBack, onStart, onPrerequisite }: {
   preparation: WorkflowPreparation;
   onBack: () => void;
-  onStart: (restricted: boolean, remote: boolean) => void;
+  onStart: (restricted: boolean, remote: boolean, draft: WorkflowPreparationDraft) => void;
   onPrerequisite: (action: WorkflowPrerequisiteAction, draft?: WorkflowPreparationDraft) => void;
-  onReprepare: (scope: WorkflowScope, route: WorkflowRouteSelection | null) => void;
 }) {
   const { t } = useTranslation();
   const operations = useWorkflowStore((state) => state.operations);
@@ -98,7 +77,6 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
   const prerequisitePending = workflowOperationPending(operations, "prerequisite:project:");
   const [restricted, setRestricted] = useState(false);
   const [remote, setRemote] = useState(false);
-  const [scopeConfirmed, setScopeConfirmed] = useState(false);
   const [scope, setScope] = useState<WorkflowScope>(preparation.scope);
   const [routeChoice, setRouteChoice] = useState("auto");
   const [preparedRouteChoice, setPreparedRouteChoice] = useState("auto");
@@ -110,15 +88,17 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
   const pendingRouteChoiceRef = useRef<string | null>(null);
 
   useEffect(() => {
-    setScope(preparation.scope);
-    const nextRouteChoice = pendingRouteChoiceRef.current ?? "auto";
+    const saved = useWorkflowStore.getState().drafts[preparation.kind];
+    const currentDraft = saved?.preparationId === preparation.preparationId ? saved : null;
+    setScope(currentDraft?.scope ?? preparation.scope);
+    const nextRouteChoice = pendingRouteChoiceRef.current
+      ?? (currentDraft?.routeSelection ? workflowRouteSelectionKey(currentDraft.routeSelection) : "auto");
     pendingRouteChoiceRef.current = null;
     setRouteChoice(nextRouteChoice);
     setPreparedRouteChoice(nextRouteChoice);
     setUpdateAutoDetect(false);
     setRestricted(false);
     setRemote(false);
-    setScopeConfirmed(false);
     setScopeQuery("");
     setScopePage(0);
   }, [preparation.preparationRevision, preparation.scope]);
@@ -128,13 +108,13 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
     if (routeChoice === "auto") return null;
     return visibleRoutes.find((route) => workflowRouteSelectionKey(route) === routeChoice) ?? null;
   }, [routeChoice, visibleRoutes]);
+  useEffect(() => {
+    useWorkflowStore.getState().setDraft(preparation.kind, { preparationId: preparation.preparationId, scope, routeSelection });
+  }, [preparation.kind, preparation.preparationId, scope, routeSelection]);
   const scopeChanged = !workflowScopeEqual(scope, preparation.scope) || routeChoice !== preparedRouteChoice;
   const outputScopeChanged = scope.kind === "generate_content"
     && preparation.scope.kind === "generate_content"
     && !workflowScopeEqual(scope, preparation.scope);
-  useEffect(() => {
-    if (scopeChanged) setScopeConfirmed(false);
-  }, [scopeChanged]);
   const sourceOptions = preparation.availableSourceVersions
     ?? (preparation.scope.kind === "update_wiki" ? preparation.scope.sourceVersions : []);
   const pageOptions = preparation.availableWikiPages
@@ -215,10 +195,9 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
   const needsRemote = preparation.prerequisites.some((item) =>
     item.action === "acknowledge_remote_provider",
   );
-  const canStart = !blocking
+  const canStart = (!blocking || scopeChanged)
     && !preparedNoChanges
     && !validationKey
-    && (!preparation.requiresScopeConfirmation || scopeConfirmed)
     && (!needsRestricted || restricted)
     && (!needsRemote || remote);
   const outputLocation = scope.kind === "generate_content"
@@ -263,6 +242,7 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
         <p>{t("workflows.preparation.description")}</p>
       </div>
 
+      <fieldset className="workflow-preparation-controls" disabled={startPending || preparePending}>
       <ol className="workflow-decision-sequence">
         <li className="workflow-preparation-step" data-decision-step="1">
           <div className="workflow-preparation-step__label">{t("workflows.preparation.whatWillHappen")}</div>
@@ -503,12 +483,6 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
         ))}
       </section>
 
-      {preparation.requiresScopeConfirmation ? (
-        <label className="workflow-confirm">
-          <input checked={scopeConfirmed} onChange={(event) => setScopeConfirmed(event.target.checked)} type="checkbox" />
-          {t("workflows.confirm.scope")}
-        </label>
-      ) : null}
       {needsRestricted ? (
         <label className="workflow-confirm">
           <input checked={restricted} onChange={(event) => setRestricted(event.target.checked)} type="checkbox" />
@@ -575,26 +549,12 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
         ) : null}
       </details>
 
-      <div className="workflow-preparation-update">
-        <button
-          className="btn btn--secondary btn--sm"
-          disabled={!scopeChanged || Boolean(validationKey) || preparePending || startPending}
-          onClick={() => {
-            pendingRouteChoiceRef.current = routeChoice;
-            onReprepare(scope, routeSelection);
-          }}
-          type="button"
-        >
-          {preparePending ? t("workflows.action.updatingPreparation") : t("workflows.action.updatePreparation")}
-        </button>
-      </div>
-
       <div className="workflow-actions" data-decision-step="8">
         <button
           aria-busy={startPending}
           className="btn btn--primary"
-          disabled={!canStart || scopeChanged || startPending || preparePending}
-          onClick={() => onStart(restricted, remote)}
+          disabled={!canStart || startPending || preparePending}
+          onClick={() => { pendingRouteChoiceRef.current = routeChoice; onStart(restricted, remote, draft()); }}
           type="button"
         >
           {startPending
@@ -604,6 +564,7 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
               : t("workflows.action.start")}
         </button>
       </div>
+      </fieldset>
     </div>
   );
 }

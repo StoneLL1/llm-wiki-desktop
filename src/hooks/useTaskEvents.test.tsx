@@ -2,6 +2,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { BackendEvent, BackendTask } from "../types/task";
+import type { WorkflowRunSummary } from "../types/workflow";
 import { defaultProject, useProjectStore } from "../stores/projectStore";
 import { useTaskStore } from "../stores/taskStore";
 import { useChatStore } from "../stores/chatStore";
@@ -137,6 +138,9 @@ beforeEach(() => {
   useTaskStore.setState({
     activeProjectId: "project-a",
     activeProjectRootPath: "",
+    workflowById: {},
+    workflowSessionId: null,
+    retiredWorkflowSessions: [],
     taskById: {},
     taskIdsByProject: {},
     runningCountByProject: {},
@@ -163,6 +167,28 @@ describe("task event listener bridge", () => {
     expect(isTaskEventForProject(event, "project-b")).toBe(false);
     expect(isTaskEventForProject({ ...event, projectId: null }, "project-a")).toBe(false);
   });
+  it("accepts the canonical Workflow snapshot before notification effects", async () => {
+    const run: WorkflowRunSummary = {
+      schemaVersion: 1, revision: "2", sessionId: "session-a", taskId: "workflow-order",
+      projectId: "project-a", canonicalIdentityKey: "identity-a", identityRevision: "revision-a",
+      kind: "health_check", operation: { kind: "built_in" }, displayStatus: "completed",
+      retry: null, outcome: { kind: "health_check", errorCount: 0, warningCount: 0, infoCount: 0 },
+      startedAt: event.timestamp, updatedAt: event.timestamp, completedAt: event.timestamp,
+    };
+    notifyTaskEventMock.mockImplementation((notified: BackendEvent) => {
+      expect(useTaskStore.getState().workflowById[notified.taskId!]).toEqual(run);
+    });
+    const mounted = renderHook(() => useTaskEvents());
+    await waitFor(() => expect(listenMock.mock.calls.find(([channel]) => channel === "workflow://updated")).toBeDefined());
+    const callback = listenMock.mock.calls.find(([channel]) => channel === "workflow://updated")![1];
+    const workflowEvent = { ...event, eventType: "workflow_updated", taskId: run.taskId, payload: run };
+    act(() => callback({ payload: workflowEvent }));
+
+    expect(notifyTaskEventMock).toHaveBeenCalledOnce();
+    expect(notifyTaskEventMock).toHaveBeenCalledWith(workflowEvent);
+    mounted.unmount();
+  });
+
   it("returns an unsubscribe handle for workflow-owned listeners", () => {
     const listener = vi.fn();
     const unsubscribe = registerTaskEventListener(listener);

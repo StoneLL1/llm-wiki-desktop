@@ -289,13 +289,8 @@ impl CompileService {
         };
         let (plan, manifest) = match &route {
             ResolvedCompileRoute::Agent { agent, .. } => {
-                let installed = services
-                    .agent_service
-                    .detect_agents(Some(*agent))
-                    .iter()
-                    .any(|info| {
-                        info.kind == *agent && info.state == AgentDetectionState::Installed
-                    });
+                let installed = services.agent_service.detect_agent(*agent, true).state
+                    == AgentDetectionState::Installed;
                 if !installed {
                     return Err(BackendError::new(
                         "AGENT_UNAVAILABLE",
@@ -312,11 +307,13 @@ impl CompileService {
                         format!("Running {}", agent.command()),
                     )
                     .map_err(task_operation_error)?;
-                let invocation = AgentService::invocation(
-                    *agent,
-                    workspace,
-                    &Self::compile_prompt_with_policy(workspace, &language, policy),
-                )?;
+                let mut prompt = Self::compile_prompt_with_policy(workspace, &language, policy);
+                let existing_pages = match reviewable_workspace_paths.as_ref() {
+                    Some(paths) => paths.clone(),
+                    None => Self::workspace_candidate_paths(workspace)?,
+                };
+                Self::append_agent_workspace_inventory(&mut prompt, sources, &existing_pages);
+                let invocation = AgentService::invocation(*agent, workspace, &prompt)?;
                 services.agent_service.run_task_streaming_for_agent(
                     *agent,
                     &invocation,
@@ -1051,6 +1048,30 @@ impl CompileService {
             language,
             CompileGenerationPolicy::LegacyNoDeletes,
         )
+    }
+
+    fn append_agent_workspace_inventory(
+        prompt: &mut String,
+        sources: &[ResolvedCompileSource],
+        existing_pages: &HashSet<String>,
+    ) {
+        let mut source_paths = sources
+            .iter()
+            .map(|source| source.workspace_path.as_str())
+            .collect::<Vec<_>>();
+        source_paths.sort_unstable();
+        source_paths.dedup();
+        let mut wiki_paths = existing_pages
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        wiki_paths.sort_unstable();
+        prompt.push_str("\nAuthoritative input file inventory (project-relative paths inside this isolated workspace):\n");
+        prompt.push_str(
+            &serde_json::json!({"sourceFiles": source_paths, "existingWikiFiles": wiki_paths})
+                .to_string(),
+        );
+        prompt.push_str("\nRead these exact files; Read cannot list directories and no shell or discovery tool is available. Do not guess source filenames or search for omitted sources. The listed sourceFiles are the complete approved source scope. Cite their filenames and use their listed paths in CompilePlan sourceIds. Existing Wiki files not listed here are outside this candidate workspace.\n");
     }
 
     fn compile_prompt_with_policy(
@@ -2255,18 +2276,26 @@ fn canonical_source_ref(raw: &str, known_sources: &HashSet<String>) -> Option<St
     if normalized.is_empty() {
         return None;
     }
-    if known_sources.contains(&normalized) {
+    if normalized.contains('/') && known_sources.contains(&normalized) {
         return Some(normalized);
     }
-    let source_prefixed = format!("wiki/sources/{normalized}");
-    if known_sources.contains(&source_prefixed) {
-        return Some(source_prefixed);
+    // The allowed set contains full paths and display filename aliases.
+    // Resolve aliases before membership so plan paths and frontmatter names
+    // identify the same approved source; ambiguous filenames fail closed.
+    let mut paths = known_sources.iter().filter(|path| {
+        path.contains('/')
+            && (*path == &format!("wiki/sources/{normalized}")
+                || *path == &format!("raw/extracted/{normalized}")
+                || (!normalized.contains('/')
+                    && Path::new(path.as_str())
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        == Some(normalized.as_str())))
+    });
+    if let Some(path) = paths.next() {
+        return paths.next().is_none().then(|| path.clone());
     }
-    let legacy_prefixed = format!("raw/extracted/{normalized}");
-    if known_sources.contains(&legacy_prefixed) {
-        return Some(legacy_prefixed);
-    }
-    None
+    known_sources.get(&normalized).cloned()
 }
 
 fn canonical_source_set(raw: &[String], known_sources: &HashSet<String>) -> HashSet<String> {
@@ -3078,11 +3107,47 @@ mod tests {
     }
 
     #[test]
+    fn source_filename_aliases_match_approved_plan_paths_but_reject_ambiguity() {
+        for full_path in [
+            "wiki/sources/参考 来源.md",
+            "raw/extracted/参考 来源.md",
+            "wiki/sources/folder/参考 来源.md",
+        ] {
+            let known = HashSet::from([full_path.to_string(), "参考 来源.md".to_string()]);
+            assert_eq!(
+                canonical_source_ref("参考 来源.md", &known).as_deref(),
+                Some(full_path)
+            );
+            assert_eq!(
+                canonical_source_ref(&full_path.replace('/', "\\"), &known).as_deref(),
+                Some(full_path)
+            );
+            assert_eq!(
+                canonical_source_set(&[full_path.into()], &known),
+                canonical_source_set(&["参考 来源.md".into()], &known)
+            );
+            assert!(canonical_source_ref("未批准.md", &known).is_none());
+        }
+        let ambiguous = HashSet::from([
+            "wiki/sources/a/同名.md".into(),
+            "wiki/sources/b/同名.md".into(),
+            "同名.md".into(),
+        ]);
+        assert!(canonical_source_ref("同名.md", &ambiguous).is_none());
+        assert_eq!(
+            canonical_source_ref("wiki/sources/a/同名.md", &ambiguous).as_deref(),
+            Some("wiki/sources/a/同名.md")
+        );
+    }
+
+    #[test]
     fn accepted_plan_requires_manifest_coverage_type_and_source_match() {
         let context = temp_project_context("compile-plan-manifest-match");
         let known_sources = HashSet::from([
             "wiki/sources/source-a.md".to_string(),
             "wiki/sources/source-b.md".to_string(),
+            "source-a.md".to_string(),
+            "source-b.md".to_string(),
         ]);
         let plan = CompilePlan {
             summary: "create concept".into(),
@@ -3140,6 +3205,17 @@ mod tests {
         )
         .expect_err("manifest sources must match plan sourceIds");
         assert_eq!(error.code, "COMPILE_MANIFEST_SEMANTIC_INVALID");
+        let matching_alias = valid_manifest_with(CompileFile::new(
+            "wiki/concepts/agent-memory.md",
+            "---\ntype: concept\nsources: [source-a.md]\n---\n# Agent Memory\n\n> Sources: [[sources/source-a]]",
+        ));
+        CompileService::validate_manifest_semantics(
+            &context,
+            &matching_alias,
+            Some(&plan),
+            &known_sources,
+        )
+        .unwrap();
         fs::remove_dir_all(context.root).ok();
     }
 
@@ -3176,6 +3252,52 @@ mod tests {
         );
         assert!(!root.join("wiki/concepts/bad.md").exists());
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn agent_inventory_identifies_readable_selected_cjk_paths_without_exposing_unselected_sources()
+    {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("raw/extracted")).unwrap();
+        fs::create_dir_all(root.path().join(".app")).unwrap();
+        let source_path = "raw/extracted/选中 来源 September.md";
+        let other_path = "raw/extracted/未选中.md";
+        for (path, content) in [
+            (source_path, "# Selected\n"),
+            (other_path, "# Unselected\n"),
+        ] {
+            fs::write(root.path().join(path), content).unwrap();
+        }
+        fs::write(root.path().join(".app/source-index.json"), serde_json::json!({"sources": {"raw/sources/selected.txt": [source_path], "raw/sources/other.txt": [other_path]}}).to_string()).unwrap();
+        let context = ProjectContext::new("inventory", root.path().to_path_buf());
+        let versions = CompileService::list_source_versions(&context).unwrap();
+        let sources = CompileService::resolve_source_versions(&context, &versions)
+            .unwrap()
+            .into_iter()
+            .filter(|source| source.project_path == source_path)
+            .collect::<Vec<_>>();
+        assert_eq!(sources.len(), 1);
+        let mut prompt = String::new();
+        CompileService::append_agent_workspace_inventory(
+            &mut prompt,
+            &sources,
+            &HashSet::from(["wiki/concepts/已有 内容.md".into()]),
+        );
+        let inventory: serde_json::Value =
+            serde_json::from_str(prompt.lines().find(|line| line.starts_with('{')).unwrap())
+                .unwrap();
+        let selected = inventory["sourceFiles"][0].as_str().unwrap();
+        assert_eq!(selected, sources[0].workspace_path);
+        assert_eq!(
+            fs::read_to_string(&sources[0].absolute_path).unwrap(),
+            "# Selected\n"
+        );
+        assert_eq!(
+            inventory["existingWikiFiles"][0],
+            "wiki/concepts/已有 内容.md"
+        );
+        assert!(!prompt.contains("未选中"));
+        assert!(!prompt.contains(root.path().to_str().unwrap()));
     }
 
     #[test]

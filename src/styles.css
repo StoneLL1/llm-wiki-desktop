@@ -4934,3 +4934,9 @@ select:focus-visible {
 }
 
 
+
+.workflow-preparation-controls { min-width: 0; margin: 0; padding: 0; border: 0; }
+
+.workflow-update-pipeline .workflow-pipeline__body { display: grid; gap: var(--sp-2); margin-left: 0; }
+.workflow-update-pipeline .workflow-pipeline__body code { overflow-wrap: anywhere; }
+.workflow-update-pipeline .workflow-pipeline__body progress { width: 100%; height: 4px; accent-color: var(--accent); }

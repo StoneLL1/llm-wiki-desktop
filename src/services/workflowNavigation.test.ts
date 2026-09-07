@@ -8,8 +8,9 @@ import { useWikiStore } from "../features/wiki/wikiStore";
 import { useProjectStore, defaultProject } from "../stores/projectStore";
 import { useNavigationStore } from "../stores/navigationStore";
 import { useWorkflowStore } from "../stores/workflowStore";
+import { useTaskStore } from "../stores/taskStore";
 import type { WorkflowRun } from "../types/workflow";
-import { hydrateAndSelectWorkflowRun, openWorkflowResult } from "./workflowNavigation";
+import { cancelWorkflowNavigation, hydrateAndSelectWorkflowRun, openWorkflowResult } from "./workflowNavigation";
 
 const project = { projectId: "project-a", rootPath: "D:/知识库" };
 
@@ -53,6 +54,8 @@ function completedUpdate(): WorkflowRun {
 
 beforeEach(() => {
   getWorkflowRunMock.mockReset();
+  useTaskStore.setState({ workflowById: {}, workflowSessionId: null, retiredWorkflowSessions: [] });
+  useNavigationStore.setState({ activeView: "workflows" });
   useWikiStore.getState().reset();
   useWorkflowStore.getState().reset();
   useProjectStore.setState({
@@ -122,6 +125,70 @@ describe("workflow navigation", () => {
     await expect(opening).rejects.toThrow("WORKFLOW_PROJECT_CHANGED");
     expect(useWorkflowStore.getState().runs).toEqual([]);
     expect(useWorkflowStore.getState().selectedTaskId).toBeNull();
+  });
+
+  it("keeps the newer same-project selection when the older detail arrives last", async () => {
+    let releaseA!: (run: WorkflowRun) => void;
+    getWorkflowRunMock.mockImplementation(({ taskId }) => taskId === "run-a"
+      ? new Promise<WorkflowRun>((resolve) => { releaseA = resolve; })
+      : Promise.resolve({ ...completedUpdate(), taskId }));
+    const openingA = hydrateAndSelectWorkflowRun(project, "run-a");
+    await hydrateAndSelectWorkflowRun(project, "run-b");
+    releaseA(completedUpdate());
+
+    await expect(openingA).rejects.toThrow("WORKFLOW_NAVIGATION_SUPERSEDED");
+    expect(useWorkflowStore.getState().selectedTaskId).toBe("run-b");
+  });
+
+  it("abandons selection as soon as preparation begins, before its response changes the surface", async () => {
+    let release!: (run: WorkflowRun) => void;
+    getWorkflowRunMock.mockReturnValue(new Promise<WorkflowRun>((resolve) => { release = resolve; }));
+    const opening = hydrateAndSelectWorkflowRun(project, "run-a");
+    cancelWorkflowNavigation();
+    release(completedUpdate());
+
+    await expect(opening).rejects.toThrow("WORKFLOW_NAVIGATION_SUPERSEDED");
+    expect(useWorkflowStore.getState()).toMatchObject({ surface: "overview", selectedTaskId: null });
+  });
+
+  it("abandons late selection when preparation is opened during hydration", async () => {
+    let release!: (run: WorkflowRun) => void;
+    getWorkflowRunMock.mockReturnValue(new Promise<WorkflowRun>((resolve) => { release = resolve; }));
+    const opening = hydrateAndSelectWorkflowRun(project, "run-a");
+    const preparation = { id: "new-preparation" } as never;
+    useWorkflowStore.getState().setPreparation(preparation);
+    release(completedUpdate());
+
+    await expect(opening).rejects.toThrow("WORKFLOW_NAVIGATION_SUPERSEDED");
+    expect(useWorkflowStore.getState()).toMatchObject({ surface: "preparation", preparation, selectedTaskId: null });
+  });
+
+  it("remembers a surface change even when the user returns before the detail arrives", async () => {
+    let release!: (run: WorkflowRun) => void;
+    getWorkflowRunMock.mockReturnValue(new Promise<WorkflowRun>((resolve) => { release = resolve; }));
+    const opening = hydrateAndSelectWorkflowRun(project, "run-a");
+    useWorkflowStore.getState().setSurface("history");
+    useWorkflowStore.getState().setSurface("overview");
+    release(completedUpdate());
+
+    await expect(opening).rejects.toThrow("WORKFLOW_NAVIGATION_SUPERSEDED");
+    expect(useWorkflowStore.getState().selectedTaskId).toBeNull();
+  });
+
+  it("does not commit a late result or reopen Wiki after the user leaves Workflows", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    useWikiStore.setState({ scan: vi.fn(async (_id, _root, commitGuard) => {
+      await gate;
+      if (commitGuard?.()) useWikiStore.setState({ tree: { pages: [] } as never });
+    }) });
+    const opening = openWorkflowResult(project, completedUpdate());
+    useNavigationStore.getState().setActiveView("chat");
+    release();
+
+    await expect(opening).rejects.toThrow("WORKFLOW_NAVIGATION_SUPERSEDED");
+    expect(useWikiStore.getState().tree).toBeNull();
+    expect(useNavigationStore.getState().activeView).toBe("chat");
   });
 
   it("opens an existing affected Wiki page instead of a deleted first path", async () => {

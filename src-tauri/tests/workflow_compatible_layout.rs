@@ -2,7 +2,7 @@ use llm_wiki_desktop_lib::models::layout::{ProjectMarkdownRoot, ProjectMarkdownR
 use llm_wiki_desktop_lib::models::paths::ProjectContext;
 use llm_wiki_desktop_lib::models::workflow::{
     HealthCheckMode, WorkflowFilesystemAccess, WorkflowGitState, WorkflowKind,
-    WorkflowPersistenceMode, WorkflowPrerequisiteAction, WorkflowProjectTrust, WorkflowScope,
+    WorkflowPersistenceMode, WorkflowProjectTrust, WorkflowScope,
 };
 use llm_wiki_desktop_lib::services::{
     AgentService, PrepareWorkflowInput, SecretService, SettingsService, WorkflowAccessSnapshot,
@@ -50,7 +50,7 @@ fn compatible_enablement_uses_app_owned_state_roots_without_content_write_roots(
 }
 
 #[test]
-fn compatible_restricted_overview_keeps_readable_markdown_without_creating_state() {
+fn compatible_restricted_overview_keeps_entries_without_reading_content_or_creating_state() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(root.path().join(".obsidian")).unwrap();
     std::fs::create_dir_all(root.path().join("笔记/嵌套")).unwrap();
@@ -79,20 +79,23 @@ fn compatible_restricted_overview_keeps_readable_markdown_without_creating_state
         .find(|row| row.kind == WorkflowKind::GenerateContent)
         .unwrap();
     assert_eq!(
-        generate_content.prerequisite.as_ref().map(|item| item.code.as_str()),
+        generate_content
+            .prerequisite
+            .as_ref()
+            .map(|item| item.code.as_str()),
         Some("WORKFLOW_PROJECT_UNTRUSTED"),
-        "The overview must report blocking prerequisites instead of requiring an unmapped export root."
+        "Only known access facts may block overview; unmapped export roots belong to preparation."
     );
     let health = overview
         .rows
         .iter()
         .find(|row| row.kind == WorkflowKind::HealthCheck)
         .unwrap();
-    assert_ne!(
-        health.prerequisite.as_ref().map(|item| &item.action),
-        Some(&WorkflowPrerequisiteAction::ImportSources),
-        "Workflows overview must consume compatible readable Markdown rather than fixed native roots"
+    assert!(
+        health.prerequisite.is_none(),
+        "overview must not inventory compatible Markdown or guess its content availability"
     );
+    assert!(overview.rows.iter().all(|row| !row.recommended));
     assert!(context
         .list_markdown_files_for_roles(&[
             llm_wiki_desktop_lib::models::layout::ProjectMarkdownRootRole::Source,

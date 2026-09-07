@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import type { WorkflowRun, WorkflowsOverview } from "../types/workflow";
 import { useWorkflowStore } from "./workflowStore";
+import { recordWorkflowFacts, useTaskStore } from "./taskStore";
+import { workflowRunSummary } from "../services/workflowTaskSnapshot";
 
 function run(taskId: string, updatedAt: string): WorkflowRun {
   return {
@@ -32,7 +34,57 @@ function run(taskId: string, updatedAt: string): WorkflowRun {
 }
 
 describe("workflowStore", () => {
-  beforeEach(() => useWorkflowStore.getState().reset());
+  beforeEach(() => {
+    useWorkflowStore.getState().reset();
+    useTaskStore.setState({ workflowById: {}, workflowSessionId: null, retiredWorkflowSessions: [] });
+  });
+
+  it("compares decimal revisions without losing precision and rejects retired sessions", () => {
+    const old = { ...run("versioned", "2026-08-01T00:00:00Z"), revision: "9007199254740992", sessionId: "session-a" };
+    const newer = { ...old, revision: "9007199254740993", displayStatus: "failed" as const };
+    recordWorkflowFacts([old]);
+    recordWorkflowFacts([newer], false);
+    recordWorkflowFacts([old], false);
+    expect(useTaskStore.getState().workflowById.versioned?.revision).toBe(newer.revision);
+    recordWorkflowFacts([{ ...old, taskId: "lost-memory-task", displayStatus: "queued" }]);
+    const restored = { ...old, revision: "5", sessionId: "session-b", displayStatus: "interrupted" as const };
+    recordWorkflowFacts([restored]);
+    recordWorkflowFacts([newer], false);
+    recordWorkflowFacts([newer], true, "session-a");
+    expect(useTaskStore.getState().workflowById.versioned).toMatchObject({ sessionId: "session-b", revision: "5" });
+    expect(useTaskStore.getState().workflowById["lost-memory-task"]).toBeUndefined();
+  });
+
+  it("keeps a late first detail and history page behind the canonical task summary", () => {
+    useWorkflowStore.getState().activateProject("project-a\0D:/a");
+    const old = { ...run("late", "2026-08-01T00:00:00Z"), revision: "1", sessionId: "session-a", displayStatus: "running" as const };
+    recordWorkflowFacts([{ ...old, revision: "2", displayStatus: "cancelled" }]);
+    useWorkflowStore.getState().upsertRun(old);
+    useWorkflowStore.getState().replaceHistoryPage([workflowRunSummary(old)], null);
+    expect(useWorkflowStore.getState().runs[0]).toMatchObject({ revision: "2", displayStatus: "cancelled", pendingAction: null, result: null });
+    expect(useWorkflowStore.getState().detailRevisionById.late).toBe("1");
+    expect(useWorkflowStore.getState().historyRuns[0]).toMatchObject({ revision: "2", displayStatus: "cancelled" });
+  });
+
+  it("opens older history after filling the bounded detail cache", () => {
+    useWorkflowStore.getState().activateProject("project-a\0D:/a");
+    for (let index = 0; index < 20; index++) useWorkflowStore.getState().upsertRun(run(`recent-${index}`, "2026-08-02T00:00:00Z"));
+    useWorkflowStore.getState().upsertRun(run("old-history", "2020-01-01T00:00:00Z"));
+    useWorkflowStore.getState().selectRun("old-history");
+    expect(useWorkflowStore.getState().runs).toHaveLength(16);
+    expect(Object.keys(useWorkflowStore.getState().detailRevisionById)).toHaveLength(16);
+    expect(useWorkflowStore.getState().selectedTaskId).toBe("old-history");
+  });
+
+  it("clears old details when a backend restart publishes lower recovered revisions", () => {
+    useWorkflowStore.getState().activateProject("project-a\0D:/a");
+    useWorkflowStore.getState().setOverviewSnapshot({ ...overview("identity-a", "revision-a"), sessionId: "session-a" });
+    useWorkflowStore.getState().upsertRun({ ...run("restored", "2026-08-01T00:00:00Z"), revision: "50", sessionId: "session-a" });
+    useWorkflowStore.getState().selectRun("restored");
+    useWorkflowStore.getState().setOverviewSnapshot({ ...overview("identity-a", "revision-a"), sessionId: "session-b" });
+    expect(useWorkflowStore.getState().runs).toEqual([]);
+    expect(useWorkflowStore.getState().selectedTaskId).toBeNull();
+  });
 
   it("resets project-scoped state and advances the request epoch", () => {
     const firstEpoch = useWorkflowStore.getState().activateProject("project-a\0D:/a");
@@ -128,29 +180,19 @@ describe("workflowStore", () => {
   it("atomically clears project-scoped presentation when the canonical identity rotates", () => {
     useWorkflowStore.getState().activateProject("project-a\0D:/a");
     const firstOverview = overview("identity-a", "revision-a");
-    useWorkflowStore.getState().setProjectSnapshot(
-      firstOverview,
-      [run("old-run", "2026-08-01T03:00:00Z")],
-      "old-cursor",
-    );
+    useWorkflowStore.getState().setOverviewSnapshot(firstOverview);
+    useWorkflowStore.getState().upsertRun(run("old-run", "2026-08-01T03:00:00Z"));
+    useWorkflowStore.getState().replaceHistoryPage([], "old-cursor");
     useWorkflowStore.setState({
       preparation: {} as never,
       selectedTaskId: "old-run",
       surface: "detail",
     });
 
-    useWorkflowStore.getState().setProjectSnapshot(
-      overview("identity-b", "revision-b"),
-      [{
-        ...run("new-run", "2026-08-01T04:00:00Z"),
-        canonicalIdentityKey: "identity-b",
-        identityRevision: "revision-b",
-      }],
-      null,
-    );
+    useWorkflowStore.getState().setOverviewSnapshot(overview("identity-b", "revision-b"));
 
     expect(useWorkflowStore.getState()).toMatchObject({
-      runs: [expect.objectContaining({ taskId: "new-run" })],
+      runs: [],
       preparation: null,
       selectedTaskId: null,
       surface: "overview",

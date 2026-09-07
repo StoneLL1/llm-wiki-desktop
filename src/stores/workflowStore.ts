@@ -1,3 +1,5 @@
+import { compareWorkflowRevision, mergeWorkflowOverview } from "../services/workflowTaskSnapshot";
+import { recordWorkflowFacts, useTaskStore } from "./taskStore";
 import { create } from "zustand";
 import { registerProjectScopeResetHandler } from "./projectScopeResetRegistry";
 
@@ -6,6 +8,7 @@ import type {
   WorkflowDisplayStatus,
   WorkflowKind,
   WorkflowPreparation,
+  WorkflowPreparationDraft,
   WorkflowRun,
   WorkflowRunSummary,
   WorkflowsOverview,
@@ -41,8 +44,12 @@ export interface WorkflowState {
   overview: WorkflowsOverview | null;
   overviewStatus: WorkflowOverviewStatus;
   runs: WorkflowRun[];
+  detailRevisionById: Record<string, string | undefined>;
   historyRuns: WorkflowRunSummary[];
+  retryOfTaskId: string | null;
   preparation: WorkflowPreparation | null;
+  drafts: Partial<Record<WorkflowKind, WorkflowPreparationDraft & { preparationId: string }>>;
+  setDraft: (kind: WorkflowKind, draft: WorkflowPreparationDraft & { preparationId: string }) => void;
   selectedTaskId: string | null;
   surface: WorkflowsSurface;
   historyKind: WorkflowKind | null;
@@ -53,12 +60,8 @@ export interface WorkflowState {
   requestEpoch: number;
   activateProject: (projectKey: string) => number;
   reset: () => void;
-  setProjectSnapshot: (
-    overview: WorkflowsOverview,
-    runs: WorkflowRunSummary[],
-    historyCursor: string | null,
-  ) => void;
   setOverviewSnapshot: (overview: WorkflowsOverview) => void;
+  applySummaries: (summaries: readonly WorkflowRunSummary[]) => void;
   setOverviewStatus: (status: WorkflowOverviewStatus) => void;
   replaceRuns: (runs: WorkflowRun[]) => void;
   replaceHistoryPage: (runs: WorkflowRunSummary[], cursor: string | null) => void;
@@ -86,8 +89,11 @@ const initialState = {
   overview: null,
   overviewStatus: "idle" as WorkflowOverviewStatus,
   runs: [] as WorkflowRun[],
+  detailRevisionById: {} as Record<string, string | undefined>,
   historyRuns: [] as WorkflowRunSummary[],
+  retryOfTaskId: null,
   preparation: null,
+  drafts: {} as WorkflowState["drafts"],
   selectedTaskId: null,
   surface: "overview" as WorkflowsSurface,
   historyKind: null as WorkflowKind | null,
@@ -108,31 +114,12 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     return requestEpoch;
   },
   reset: () => set((state) => ({ ...initialState, requestEpoch: state.requestEpoch + 1 })),
-  setProjectSnapshot: (overview, runs, historyCursor) =>
+  setOverviewSnapshot: (snapshot) =>
     set((state) => {
-      const identityChanged = workflowIdentityChanged(state.overview, overview);
-      const identityGuard = identityGuardOf(overview);
-      const legacyFullRuns = runs.filter((run): run is WorkflowRun => "scope" in run);
-      return {
-        overview,
-        identityGuard,
-        overviewStatus: "ready" as WorkflowOverviewStatus,
-        runs: sortRuns(mergeRunSnapshots(identityChanged ? [] : state.runs, legacyFullRuns)),
-        historyRuns: sortHistoryRuns(runs),
-        historyCursor,
-        ...(identityChanged
-          ? {
-              preparation: null,
-              selectedTaskId: null,
-              surface: "overview" as WorkflowsSurface,
-              operations: {},
-            }
-          : {}),
-      };
-    }),
-  setOverviewSnapshot: (overview) =>
-    set((state) => {
-      const identityChanged = workflowIdentityChanged(state.overview, overview);
+      recordWorkflowFacts([...(snapshot.recentRuns ?? []), ...(snapshot.activeRuns ?? [])], true, snapshot.sessionId);
+      const overview = mergeWorkflowOverview(snapshot, Object.values(useTaskStore.getState().workflowById));
+      const identityChanged = workflowIdentityChanged(state.overview, overview)
+        || Boolean(state.overview?.sessionId && overview.sessionId && state.overview.sessionId !== overview.sessionId);
       const identityGuard = identityGuardOf(overview);
       return {
         overview,
@@ -141,9 +128,12 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         ...(identityChanged
           ? {
               runs: [],
+              detailRevisionById: {},
               historyRuns: [],
               historyCursor: null,
+              retryOfTaskId: null,
               preparation: null,
+              drafts: {},
               selectedTaskId: null,
               surface: "overview" as WorkflowsSurface,
               operations: {},
@@ -151,30 +141,62 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
           : {}),
       };
     }),
+  applySummaries: (summaries) => set((state) => {
+    const accepted = summaries.filter((run) => run.projectId === state.projectKey.split("\0")[0]
+      && run.canonicalIdentityKey === state.identityGuard.canonicalIdentityKey
+      && run.identityRevision === state.identityGuard.identityRevision);
+    if (accepted.length === 0) return state;
+    let changed = false;
+    const runs = state.runs.map((run) => {
+      const summary = accepted.find((value) => value.taskId === run.taskId);
+      if (!summary || compareWorkflowRevision(summary, run) <= 0) return run;
+      changed = true;
+      return projectSummaryOntoDetail(run, summary);
+    });
+    const boundary = accepted.some((run) => run.displayStatus !== "running"
+      || state.overview?.rows.some((row) => row.kind === run.kind && (row.activeTaskId !== run.taskId || row.state !== "running")));
+    const historyRuns = state.historyRuns.map((run) => {
+      const summary = accepted.find((value) => value.taskId === run.taskId);
+      return summary && compareWorkflowRevision(summary, run) > 0 ? summary : run;
+    });
+    return { ...(changed ? { runs } : {}),
+      ...(boundary && state.overview ? { overview: mergeWorkflowOverview(state.overview, Object.values(useTaskStore.getState().workflowById)), historyRuns } : {}),
+    };
+  }),
   setOverviewStatus: (overviewStatus) => set({ overviewStatus }),
   replaceRuns: (runs) =>
-    set((state) => ({ runs: sortRuns(mergeRunSnapshots(state.runs, runs)) })),
+    set((state) => {
+      let cached = state.runs;
+      for (const run of runs) if (cached.some((detail) => detail.taskId === run.taskId)) cached = upsertSortedRun(cached, run);
+      return { runs: cached };
+    }),
   replaceHistoryPage: (runs, historyCursor) =>
     set(() => ({
-      historyRuns: sortHistoryRuns(runs),
+      historyRuns: sortHistoryRuns(runs.map(currentSummary)),
       historyCursor,
     })),
   appendHistoryPage: (runs, historyCursor) =>
     set((state) => ({
-      historyRuns: sortHistoryRuns(mergeHistorySnapshots(state.historyRuns, runs)),
+      historyRuns: sortHistoryRuns(mergeHistorySnapshots(state.historyRuns, runs.map(currentSummary))),
       historyCursor,
     })),
   upsertRun: (run) =>
     set((state) => {
       const runs = upsertSortedRun(state.runs, run);
-      return runs === state.runs ? state : { runs };
+      if (runs === state.runs) return state;
+      return { runs, detailRevisionById: Object.fromEntries(runs.map((detail) => [detail.taskId, detail.taskId === run.taskId ? run.revision : state.detailRevisionById[detail.taskId]])) };
     }),
   upsertRuns: (incoming) =>
     set((state) => {
       if (incoming.length === 0) return state;
       let runs = state.runs;
-      for (const run of incoming) runs = upsertSortedRun(runs, run);
-      return runs === state.runs ? state : { runs };
+      const detailRevisionById = { ...state.detailRevisionById };
+      for (const run of incoming) {
+        const next = upsertSortedRun(runs, run);
+        if (next !== runs) detailRevisionById[run.taskId] = run.revision;
+        runs = next;
+      }
+      return runs === state.runs ? state : { runs, detailRevisionById: Object.fromEntries(runs.map((detail) => [detail.taskId, detailRevisionById[detail.taskId]])) };
     }),
   hydrateDecisionReview: (taskId, actionId, decisionReview) =>
     set((state) => {
@@ -190,8 +212,9 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         ),
       };
     }),
+  setDraft: (kind, draft) => set((state) => ({ drafts: { ...state.drafts, [kind]: draft } })),
   setPreparation: (preparation) => set(preparation
-    ? { preparation, selectedTaskId: null, surface: "preparation" }
+    ? { preparation, retryOfTaskId: null, selectedTaskId: null, surface: "preparation" }
     : { preparation: null }),
   selectRun: (selectedTaskId) =>
     set((state) => {
@@ -281,12 +304,26 @@ function workflowIdentityChanged(
     || previous.projectAccess?.identityRevision !== next.projectAccess?.identityRevision;
 }
 
-function sortRuns(runs: WorkflowRun[]): WorkflowRun[] {
-  return [...runs].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
-}
-
 function sortHistoryRuns(runs: WorkflowRunSummary[]): WorkflowRunSummary[] {
   return [...runs].sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt));
+}
+
+function currentSummary(run: WorkflowRunSummary): WorkflowRunSummary {
+  const current = useTaskStore.getState().workflowById[run.taskId];
+  if (!current || current.canonicalIdentityKey !== run.canonicalIdentityKey
+    || current.identityRevision !== run.identityRevision) return run;
+  return current.sessionId !== run.sessionId || compareWorkflowRevision(current, run) >= 0 ? current : run;
+}
+
+function projectSummaryOntoDetail(run: WorkflowRun, summary: WorkflowRunSummary): WorkflowRun {
+  return { ...run, revision: summary.revision, sessionId: summary.sessionId,
+    displayStatus: summary.displayStatus, updatedAt: summary.updatedAt, completedAt: summary.completedAt,
+    currentStageId: summary.currentStageId ?? run.currentStageId,
+    stages: summary.currentStage ? run.stages.map((stage) => stage.id === summary.currentStage?.id ? summary.currentStage : stage) : run.stages,
+    queuePosition: summary.queuePosition ?? null, continuationRequired: summary.continuationRequired ?? run.continuationRequired,
+    cancellable: summary.cancellable ?? run.cancellable,
+    pendingAction: null, decisionReview: null, result: null, error: null,
+  };
 }
 
 function mergeHistorySnapshots(
@@ -298,40 +335,22 @@ function mergeHistorySnapshots(
   return [...merged.values()];
 }
 
-function mergeRunSnapshots(current: WorkflowRun[], incoming: WorkflowRun[]): WorkflowRun[] {
-  const merged = new Map(current.map((run) => [run.taskId, run]));
-  for (const run of incoming) {
-    const previous = merged.get(run.taskId);
-    if (!previous || shouldAcceptWorkflowRun(previous, run)) {
-      merged.set(run.taskId, preserveHydratedDecisionReview(previous, run));
-    }
-  }
-  return [...merged.values()];
-}
-
 function upsertSortedRun(current: WorkflowRun[], incoming: WorkflowRun): WorkflowRun[] {
   const previousIndex = current.findIndex((candidate) => candidate.taskId === incoming.taskId);
   const previous = previousIndex >= 0 ? current[previousIndex] : undefined;
   if (previous && !shouldAcceptWorkflowRun(previous, incoming)) return current;
-  const accepted = preserveHydratedDecisionReview(previous, incoming);
-  if (previous && previous.updatedAt === accepted.updatedAt) {
-    const next = [...current];
-    next[previousIndex] = accepted;
-    return next;
-  }
-  const next = previousIndex >= 0
-    ? [...current.slice(0, previousIndex), ...current.slice(previousIndex + 1)]
-    : [...current];
-  const acceptedTime = Date.parse(accepted.updatedAt);
-  let low = 0;
-  let high = next.length;
-  while (low < high) {
-    const middle = Math.floor((low + high) / 2);
-    if (Date.parse(next[middle].updatedAt) < acceptedTime) high = middle;
-    else low = middle + 1;
-  }
-  next.splice(low, 0, accepted);
-  return next;
+  const fact = useTaskStore.getState().workflowById[incoming.taskId];
+  const retired = useTaskStore.getState().retiredWorkflowSessions;
+  if (incoming.sessionId && retired.includes(incoming.sessionId)) return current;
+  const accepted = fact && compareWorkflowRevision(fact, incoming) > 0
+    ? projectSummaryOntoDetail(incoming, fact)
+    : preserveHydratedDecisionReview(previous, incoming);
+  // Detail cache eviction follows access, not task time. An old history item
+  // must survive the very request that opens it, alongside the selected task.
+  const selected = useWorkflowStore.getState().selectedTaskId;
+  const retained = current.filter((run) => run.taskId !== accepted.taskId);
+  const pinned = selected ? retained.find((run) => run.taskId === selected) : undefined;
+  return [accepted, ...(pinned ? [pinned] : []), ...retained.filter((run) => run !== pinned)].slice(0, 16);
 }
 
 const TERMINAL_WORKFLOW_STATUSES = new Set<WorkflowRun["displayStatus"]>([
@@ -342,11 +361,17 @@ const TERMINAL_WORKFLOW_STATUSES = new Set<WorkflowRun["displayStatus"]>([
 ]);
 
 function shouldAcceptWorkflowRun(previous: WorkflowRun, incoming: WorkflowRun): boolean {
+  const taskState = useTaskStore.getState();
+  if (incoming.sessionId && taskState.retiredWorkflowSessions.includes(incoming.sessionId)) return false;
+  if (incoming.sessionId && previous.sessionId && incoming.sessionId !== previous.sessionId) {
+    return incoming.sessionId === taskState.workflowSessionId;
+  }
   if (
-    TERMINAL_WORKFLOW_STATUSES.has(previous.displayStatus)
+    incoming.revision === undefined
+    && TERMINAL_WORKFLOW_STATUSES.has(previous.displayStatus)
     && !TERMINAL_WORKFLOW_STATUSES.has(incoming.displayStatus)
   ) return false;
-  return Date.parse(incoming.updatedAt) >= Date.parse(previous.updatedAt);
+  return compareWorkflowRevision(incoming, previous) >= 0;
 }
 
 function preserveHydratedDecisionReview(
@@ -386,7 +411,7 @@ export function workflowRequestGuardMatches(
 }
 
 export function workflowRunMatchesGuard(
-  run: WorkflowRun,
+  run: Pick<WorkflowRun, "projectId" | "canonicalIdentityKey" | "identityRevision">,
   projectId: string,
   guard: WorkflowRequestGuard,
 ): boolean {

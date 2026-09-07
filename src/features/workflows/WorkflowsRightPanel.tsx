@@ -193,6 +193,7 @@ export function WorkflowsRightPanel() {
         taskId,
       );
     } catch (error) {
+      if (error instanceof Error && error.message === "WORKFLOW_NAVIGATION_SUPERSEDED") return;
       const currentProject = useProjectStore.getState().currentProject;
       const currentAuthority = useProjectStore.getState().authority;
       const currentAuthorityIdentity = currentAuthority?.projectId === project.projectId
@@ -313,7 +314,7 @@ export function WorkflowsRightPanel() {
               <h3>{project.name}</h3>
               <CopyablePath path={project.rootPath} />
               <dl className="workflow-context-facts">
-                <div><dt>{t("workflows.context.pendingSources")}</dt><dd>{contextSummary ? number.format(contextSummary.pendingSourceCount) : t("workflows.context.summaryUnavailable")}</dd></div>
+                <div><dt>{t("workflows.context.pendingSources")}</dt><dd>{contextSummary?.pendingSourceCount != null ? number.format(contextSummary.pendingSourceCount) : t("workflows.context.summaryUnavailable")}</dd></div>
                 <div><dt>{t("workflows.context.lastHealth")}</dt><dd>{contextSummary?.lastHealth ? t("workflows.context.healthSummary", { errors: number.format(contextSummary.lastHealth.errorCount), warnings: number.format(contextSummary.lastHealth.warningCount), info: number.format(contextSummary.lastHealth.infoCount) }) : contextSummary ? EMPTY_VALUE : t("workflows.context.summaryUnavailable")}</dd></div>
                 <div><dt>{t("workflows.context.recentArtifact")}</dt><dd>{contextSummary?.recentArtifact ? t(workflowArtifactTypeKey(contextSummary.recentArtifact.artifactType)) : contextSummary ? EMPTY_VALUE : t("workflows.context.summaryUnavailable")}</dd></div>
                 <div><dt>{t("workflows.context.queued")}</dt><dd>{contextSummary ? number.format(contextSummary.queueCount) : t("workflows.context.summaryUnavailable")}</dd></div>
