@@ -27,7 +27,12 @@ export async function startPreparedWorkflow(
   if (!isCurrent()) return null;
   const { acknowledgeRestrictedContent, acknowledgeRemoteProvider, draft, retryOfTaskId } = options;
   const latestDraft = draft ?? { scope: preparation.scope, routeSelection: routeSelectionOf(preparation.route) };
-  const fresh = await prepareWorkflow({ ...request, kind: preparation.kind, ...latestDraft });
+  const preparedRouteSelection = useWorkflowStore.getState().preparedRouteSelections[preparation.kind] ?? null;
+  const unchanged = !draft || (workflowScopeEqual(latestDraft.scope, preparation.scope)
+    && JSON.stringify(latestDraft.routeSelection) === JSON.stringify(preparedRouteSelection));
+  // Admission validates the prepared baseline and current authority in Rust.
+  // Re-discover only when the user changed structured choices.
+  const fresh = unchanged ? preparation : await prepareWorkflow({ ...request, kind: preparation.kind, ...latestDraft });
   if (!isCurrent()
     || fresh.projectAccess.canonicalIdentityKey !== preparation.projectAccess.canonicalIdentityKey
     || fresh.projectAccess.identityRevision !== preparation.projectAccess.identityRevision) return null;
@@ -42,7 +47,7 @@ export async function startPreparedWorkflow(
     || fresh.prerequisites.some((item) => item.action === "acknowledge_restricted_content" && (!acknowledgeRestrictedContent || !sameApproval))
     || (fresh.kind === "update_wiki" && fresh.scope.kind === "update_wiki" && fresh.scope.sourceVersions.length === 0);
   if (requiresReview) {
-    useWorkflowStore.getState().setPreparation(fresh);
+    useWorkflowStore.getState().setPreparation(fresh, latestDraft.routeSelection);
     useWorkflowStore.setState({ retryOfTaskId });
     return null;
   }
@@ -77,7 +82,7 @@ export async function reviewWorkflowScope(
   const cancelled = await cancelWorkflowRun({ ...request, taskId: run.taskId });
   recordWorkflowFacts([cancelled]);
   if (!isCurrent()) return;
-  useWorkflowStore.getState().setPreparation(fresh);
+  useWorkflowStore.getState().setPreparation(fresh, routeSelection);
   useWorkflowStore.setState({ retryOfTaskId: run.taskId });
 }
 

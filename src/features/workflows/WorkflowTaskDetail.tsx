@@ -10,6 +10,7 @@ import { getWorkflowFileDiff, rollbackAgentLintRepair } from "../../services/wor
 import type { WorkflowRun, WorkflowRunSummary } from "../../types/workflow";
 import type { WorkflowsController } from "./useWorkflowsController";
 import { WorkflowPipeline } from "./WorkflowPipeline";
+import { WorkflowUpdateHistory } from "./WorkflowUpdateHistory";
 import {
   presentWorkflowResult,
   workflowActionTypeKey,
@@ -338,6 +339,10 @@ export function WorkflowTaskDetail({
           </div>
           {rollbackErrorKey ? <p className="workflow-conflict-notice" role="alert">{t(rollbackErrorKey)}</p> : null}
         </section>
+      ) : null}
+      {run.kind === "update_wiki" && (retryable
+        || (run.displayStatus === "completed" && run.result?.kind === "update_wiki" && run.result.finalCommit)) ? (
+        <WorkflowUpdateHistory key={run.taskId} run={run} onChanged={controller.refresh} />
       ) : null}
 
       <section aria-labelledby={`workflow-pipeline-${run.taskId}`}>

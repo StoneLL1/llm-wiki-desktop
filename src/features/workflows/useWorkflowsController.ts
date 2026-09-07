@@ -30,6 +30,7 @@ import {
 import { recordWorkflowFacts, useTaskStore } from "../../stores/taskStore";
 import { compareWorkflowRevision, workflowRunSummary } from "../../services/workflowTaskSnapshot";
 import { useProjectStore } from "../../stores/projectStore";
+import { useNavigationStore } from "../../stores/navigationStore";
 import {
   cancelWorkflowNavigation,
   hydrateAndSelectWorkflowRun,
@@ -177,6 +178,7 @@ export function useWorkflowsController(
   const historyRequestRef = useRef(0);
   const overviewRequestRef = useRef<{ projectKey: string; epoch: number; dirty: boolean; promise: Promise<void> } | null>(null);
   const prepareRequestRef = useRef(0);
+  const historyReconcileRef = useRef<{ dirty: boolean; promise: Promise<void> } | null>(null);
   const waitingHydrationRef = useRef<Map<string, { promise: Promise<void>; dirty: boolean; expected: WorkflowRunSummary }>>(new Map());
   enabledRef.current = enabled;
 
@@ -299,6 +301,7 @@ export function useWorkflowsController(
   useEffect(() => {
     activeKeyRef.current = projectKey;
     waitingHydrationRef.current.clear();
+    historyReconcileRef.current = null;
     useWorkflowStore.getState().activateProject(projectKey);
 
   }, [authorityIdentity, projectKey]);
@@ -307,21 +310,29 @@ export function useWorkflowsController(
     if (enabled) void refresh();
   }, [authorityIdentity, enabled, refresh]);
 
-  useEffect(() => registerTaskEventListener((event) => {
-    if (event.eventType !== "workflow_updated") return;
-    const run = workflowRunSummary(event.payload as WorkflowRun | WorkflowRunSummary);
-    if (run.projectId !== event.projectId) return;
-    // The app dispatcher coalesces progress; facts survive hidden pages and project switches.
-    recordWorkflowFacts([run], false);
-    const accepted = useTaskStore.getState().workflowById[run.taskId];
-    if (!accepted || compareWorkflowRevision(run, accepted) < 0) return;
-    if (activeKeyRef.current !== projectKey || run.projectId !== project.projectId) return;
-    const row = useWorkflowStore.getState().overview?.rows.find((row) => row.kind === run.kind);
-    const boundary = run.displayStatus !== "running" || (row?.activeTaskId !== run.taskId || row.state !== "running");
-    useWorkflowStore.getState().applySummaries([accepted]);
-    hydrateSelectedRun(accepted);
-    if (boundary && enabledRef.current) void reconcileOverview();
-  }), [hydrateSelectedRun, project.projectId, projectKey, reconcileOverview]);
+  useEffect(() => {
+    const stopWorkflow = useWorkflowStore.subscribe((state, previous) => {
+      if (state.surface !== previous.surface || state.preparingKind !== previous.preparingKind) {
+        prepareRequestRef.current += 1;
+        for (const [key, operation] of Object.entries(state.operations)) {
+          if (key.startsWith("prepare:") && operation.pending) state.finishOperation(key, operation.requestId);
+        }
+      }
+    });
+    const stopNavigation = useNavigationStore.subscribe((state, previous) => {
+      if (state.activeView !== previous.activeView) {
+        prepareRequestRef.current += 1;
+        if (useWorkflowStore.getState().preparingKind) useWorkflowStore.getState().setSurface("overview");
+      }
+    });
+    return () => { stopWorkflow(); stopNavigation(); prepareRequestRef.current += 1; };
+  }, []);
+  useEffect(() => {
+    if (!enabled) {
+      prepareRequestRef.current += 1;
+      if (useWorkflowStore.getState().preparingKind) useWorkflowStore.getState().setSurface("overview");
+    }
+  }, [enabled]);
 
   const perform = useCallback(
     async (
@@ -368,22 +379,30 @@ export function useWorkflowsController(
   const prepareKind = useCallback(
     async (kind: WorkflowKind, scope: WorkflowScope | null = null, routeSelection: WorkflowRouteSelection | null = null) => {
       cancelWorkflowNavigation();
-      if (
-        project.projectId
-        && project.rootPath
-        && !useWorkflowStore.getState().identityGuard.canonicalIdentityKey
-      ) {
-        await refresh();
-      }
-      const state = useWorkflowStore.getState();
-      const savedDraft = state.drafts[kind];
-      const selectedScope = scope ?? savedDraft?.scope ?? null;
-      const selectedRoute = routeSelection ?? savedDraft?.routeSelection ?? null;
+      useWorkflowStore.getState().beginPreparation(kind);
       const prepareRequest = ++prepareRequestRef.current;
-      const guard = captureWorkflowRequestGuard(state);
       const operationKey = `prepare:${kind}`;
-      const operationRequest = state.beginOperation(operationKey);
+      const operationRequest = useWorkflowStore.getState().beginOperation(operationKey);
+      let guard: WorkflowRequestGuard | null = null;
+      const isCurrent = () => enabledRef.current && prepareRequestRef.current === prepareRequest
+        && useWorkflowStore.getState().surface === "preparation"
+        && useWorkflowStore.getState().preparingKind === kind
+        && useProjectStore.getState().currentProject.projectId === project.projectId
+        && useProjectStore.getState().currentProject.rootPath === project.rootPath;
       try {
+        if (
+          project.projectId
+          && project.rootPath
+          && !useWorkflowStore.getState().identityGuard.canonicalIdentityKey
+        ) {
+          await refresh();
+        }
+        if (!isCurrent()) return;
+        const state = useWorkflowStore.getState();
+        const savedDraft = state.drafts[kind];
+        const selectedScope = scope ?? savedDraft?.scope ?? null;
+        const selectedRoute = routeSelection ?? savedDraft?.routeSelection ?? null;
+        guard = captureWorkflowRequestGuard(state);
         const preparation = await prepareWorkflow({
           ...request(),
           kind,
@@ -392,14 +411,14 @@ export function useWorkflowsController(
         });
         const latest = useWorkflowStore.getState();
         if (
-          !workflowRequestGuardMatchesAuthority(guard, project)
-          || prepareRequestRef.current !== prepareRequest
+          !isCurrent()
+          || !workflowRequestGuardMatchesAuthority(guard, project)
           || preparation.projectAccess.canonicalIdentityKey !== guard.canonicalIdentityKey
           || preparation.projectAccess.identityRevision !== guard.identityRevision
         ) return;
-        latest.setPreparation(preparation);
+        latest.setPreparation(preparation, selectedRoute);
       } catch (error) {
-        if (workflowRequestGuardMatchesAuthority(guard, project) && prepareRequestRef.current === prepareRequest) {
+        if (isCurrent() && (!guard || workflowRequestGuardMatchesAuthority(guard, project))) {
           useWorkflowStore.getState().failOperation(
             operationKey,
             operationRequest,
@@ -439,12 +458,13 @@ export function useWorkflowsController(
   const filterHistory = useCallback(async (
     kind: WorkflowKind | null,
     status: WorkflowDisplayStatus | null,
+    preserveRows = false,
   ) => {
     if (!enabledRef.current || !hasTauri()) return;
     const state = useWorkflowStore.getState();
     const expectedAccess = state.overview?.projectAccess;
     if (!expectedAccess) return;
-    state.setHistoryFilters(kind, status);
+    if (!preserveRows) state.setHistoryFilters(kind, status);
     state.clearOperationError("history:page");
     const historyRequest = ++historyRequestRef.current;
     const guard = captureWorkflowRequestGuard(useWorkflowStore.getState());
@@ -462,6 +482,46 @@ export function useWorkflowsController(
       useWorkflowStore.getState().finishOperation(operationKey, operationRequest);
     }
   }, [project, request]);
+
+  const reconcileHistory = useCallback((): Promise<void> => {
+    if (!enabledRef.current || useWorkflowStore.getState().surface !== "history") return Promise.resolve();
+    const existing = historyReconcileRef.current;
+    if (existing) { existing.dirty = true; return existing.promise; }
+    const slot = { dirty: false, promise: Promise.resolve() };
+    const epoch = useWorkflowStore.getState().requestEpoch;
+    historyReconcileRef.current = slot;
+    slot.promise = (async () => {
+      do {
+        slot.dirty = false;
+        const state = useWorkflowStore.getState();
+        await filterHistory(state.historyKind, state.historyStatus, true);
+      } while (slot.dirty && enabledRef.current && activeKeyRef.current === projectKey
+        && useWorkflowStore.getState().requestEpoch === epoch
+        && useWorkflowStore.getState().surface === "history");
+    })().finally(() => {
+      if (historyReconcileRef.current === slot) historyReconcileRef.current = null;
+    });
+    return slot.promise;
+  }, [filterHistory, projectKey]);
+
+  useEffect(() => registerTaskEventListener((event) => {
+    if (event.eventType !== "workflow_updated") return;
+    const run = workflowRunSummary(event.payload as WorkflowRun | WorkflowRunSummary);
+    if (run.projectId !== event.projectId) return;
+    // The app dispatcher coalesces progress; facts survive hidden pages and project switches.
+    recordWorkflowFacts([run], false);
+    const accepted = useTaskStore.getState().workflowById[run.taskId];
+    if (!accepted || compareWorkflowRevision(run, accepted) < 0) return;
+    if (activeKeyRef.current !== projectKey || run.projectId !== project.projectId) return;
+    const row = useWorkflowStore.getState().overview?.rows.find((row) => row.kind === run.kind);
+    const boundary = run.displayStatus !== "running" || (row?.activeTaskId !== run.taskId || row.state !== "running");
+    useWorkflowStore.getState().applySummaries([accepted]);
+    hydrateSelectedRun(accepted);
+    if (boundary && enabledRef.current) {
+      void reconcileOverview();
+      void reconcileHistory();
+    }
+  }), [hydrateSelectedRun, project.projectId, projectKey, reconcileOverview, reconcileHistory]);
 
   const selectedTaskId = useWorkflowStore((state) => state.selectedTaskId);
   const selectedSummary = useTaskStore((state) => state.workflowById[selectedTaskId ?? ""]);

@@ -34,6 +34,34 @@ pub struct CompileBackup {
     entries: Vec<CompileBackupEntry>,
 }
 
+impl CompileBackup {
+    pub(crate) fn claim_prepared_history_values(
+        &mut self,
+        before: &std::collections::BTreeMap<String, Option<Vec<u8>>>,
+        installed: &std::collections::BTreeMap<String, Option<Vec<u8>>>,
+    ) -> Result<(), BackendError> {
+        if before.keys().ne(installed.keys())
+            || before
+                .keys()
+                .any(|path| !self.entries.iter().any(|entry| &entry.relative == path))
+        {
+            return Err(BackendError::new(
+                "COMPILE_BACKUP_FAILED",
+                "Prepared metadata does not match the workflow backup.",
+                false,
+                true,
+            ));
+        }
+        for entry in &mut self.entries {
+            if let Some(baseline) = before.get(&entry.relative) {
+                entry.baseline = baseline.clone();
+                entry.installed = installed.get(&entry.relative).cloned();
+            }
+        }
+        Ok(())
+    }
+}
+
 struct CompileBackupEntry {
     relative: String,
     baseline: Option<Vec<u8>>,
@@ -1988,6 +2016,70 @@ impl CompileService {
             rollback_owned_path(context, entry, &absolute)?;
         }
         Ok(())
+    }
+
+    /// An operation's before/after refs are its durable undo journal. Already
+    /// restored paths are accepted on retry after a partial undo or restart.
+    pub(crate) fn prepare_history_restore(
+        context: &ProjectContext,
+        before: &std::collections::BTreeMap<String, Option<Vec<u8>>>,
+        after: &std::collections::BTreeMap<String, Option<Vec<u8>>>,
+    ) -> Result<CompileBackup, BackendError> {
+        let conflict = |path: &str| {
+            BackendError::new(
+                "WORKFLOW_UNDO_CONFLICT",
+                "A file has changed since this update. Its current edits were preserved.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "path": path }))
+        };
+        if before.keys().ne(after.keys()) {
+            return Err(conflict("history path set"));
+        }
+        let mut entries = Vec::new();
+        for (relative, baseline) in before {
+            let absolute = resolve_compile_mutation_path(context, relative)?;
+            let current = read_bound_optional(context, &absolute, "WORKFLOW_UNDO_FAILED")?;
+            if &current != baseline && after.get(relative) != Some(&current) {
+                return Err(conflict(relative));
+            }
+            entries.push(CompileBackupEntry {
+                relative: relative.clone(),
+                baseline: baseline.clone(),
+                installed: after.get(relative).cloned(),
+            });
+        }
+        Ok(CompileBackup { entries })
+    }
+
+    pub(crate) fn restore_prepared_history_outputs(
+        context: &ProjectContext,
+        backup: &CompileBackup,
+    ) -> Result<(), BackendError> {
+        for entry in &backup.entries {
+            let absolute = resolve_compile_mutation_path(context, &entry.relative)?;
+            rollback_owned_path(context, entry, &absolute).map_err(|_| {
+                BackendError::new(
+                    "WORKFLOW_UNDO_CONFLICT",
+                    "A file changed during recovery. Its current edits were preserved.",
+                    true,
+                    true,
+                )
+                .with_details(serde_json::json!({ "path": entry.relative }))
+            })?;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn restore_history_outputs(
+        context: &ProjectContext,
+        before: &std::collections::BTreeMap<String, Option<Vec<u8>>>,
+        after: &std::collections::BTreeMap<String, Option<Vec<u8>>>,
+    ) -> Result<(), BackendError> {
+        let backup = Self::prepare_history_restore(context, before, after)?;
+        Self::restore_prepared_history_outputs(context, &backup)
     }
 
     pub fn restore_workflow_outputs_if_unchanged(

@@ -11,6 +11,7 @@ import type {
   WorkflowPreparationDraft,
   WorkflowRun,
   WorkflowRunSummary,
+  WorkflowRouteSelection,
   WorkflowsOverview,
 } from "../types/workflow";
 
@@ -48,6 +49,10 @@ export interface WorkflowState {
   historyRuns: WorkflowRunSummary[];
   retryOfTaskId: string | null;
   preparation: WorkflowPreparation | null;
+  preparingKind: WorkflowKind | null;
+  preparations: Partial<Record<WorkflowKind, WorkflowPreparation>>;
+  preparedRouteSelections: Partial<Record<WorkflowKind, WorkflowRouteSelection | null>>;
+  beginPreparation: (kind: WorkflowKind) => void;
   drafts: Partial<Record<WorkflowKind, WorkflowPreparationDraft & { preparationId: string }>>;
   setDraft: (kind: WorkflowKind, draft: WorkflowPreparationDraft & { preparationId: string }) => void;
   selectedTaskId: string | null;
@@ -69,7 +74,7 @@ export interface WorkflowState {
   upsertRun: (run: WorkflowRun) => void;
   upsertRuns: (runs: readonly WorkflowRun[]) => void;
   hydrateDecisionReview: (taskId: string, actionId: string, review: WorkflowDecisionReview) => void;
-  setPreparation: (preparation: WorkflowPreparation | null) => void;
+  setPreparation: (preparation: WorkflowPreparation | null, routeSelection?: WorkflowRouteSelection | null) => void;
   selectRun: (taskId: string | null) => void;
   setSurface: (surface: WorkflowsSurface) => void;
   setHistoryFilters: (kind: WorkflowKind | null, status: WorkflowDisplayStatus | null) => void;
@@ -93,6 +98,9 @@ const initialState = {
   historyRuns: [] as WorkflowRunSummary[],
   retryOfTaskId: null,
   preparation: null,
+  preparingKind: null,
+  preparations: {} as WorkflowState["preparations"],
+  preparedRouteSelections: {} as WorkflowState["preparedRouteSelections"],
   drafts: {} as WorkflowState["drafts"],
   selectedTaskId: null,
   surface: "overview" as WorkflowsSurface,
@@ -133,6 +141,9 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
               historyCursor: null,
               retryOfTaskId: null,
               preparation: null,
+              preparingKind: null,
+              preparations: {},
+              preparedRouteSelections: {},
               drafts: {},
               selectedTaskId: null,
               surface: "overview" as WorkflowsSurface,
@@ -213,16 +224,30 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       };
     }),
   setDraft: (kind, draft) => set((state) => ({ drafts: { ...state.drafts, [kind]: draft } })),
-  setPreparation: (preparation) => set(preparation
-    ? { preparation, retryOfTaskId: null, selectedTaskId: null, surface: "preparation" }
-    : { preparation: null }),
+  beginPreparation: (kind) => set((state) => ({
+    preparation: state.preparations[kind] ?? null,
+    preparingKind: kind,
+    selectedTaskId: null,
+    surface: "preparation",
+  })),
+  setPreparation: (preparation, routeSelection = null) => set((state) => preparation
+    ? {
+        preparation,
+        preparingKind: null,
+        preparations: { ...state.preparations, [preparation.kind]: preparation },
+        preparedRouteSelections: { ...state.preparedRouteSelections, [preparation.kind]: routeSelection },
+        retryOfTaskId: null,
+        selectedTaskId: null,
+        surface: "preparation",
+      }
+    : { preparation: null, preparingKind: null }),
   selectRun: (selectedTaskId) =>
     set((state) => {
       if (selectedTaskId && !state.runs.some((run) => run.taskId === selectedTaskId)) {
         return state;
       }
       return selectedTaskId
-        ? { selectedTaskId, preparation: null, surface: "detail" }
+        ? { selectedTaskId, preparation: null, preparingKind: null, surface: "detail" }
         : { selectedTaskId: null, surface: "overview" };
     }),
   setSurface: (surface) => set((state) => {
@@ -240,6 +265,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       surface,
       selectedTaskId: null,
       preparation: null,
+      preparingKind: null,
     };
   }),
   setHistoryFilters: (historyKind, historyStatus) =>
@@ -258,7 +284,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   },
   finishOperation: (key, requestId) => set((state) => {
     const operation = state.operations[key];
-    if (!operation || operation.requestId !== requestId) return state;
+    if (!operation || operation.requestId !== requestId || !operation.pending) return state;
     return {
       operations: {
         ...state.operations,
@@ -318,8 +344,8 @@ function currentSummary(run: WorkflowRunSummary): WorkflowRunSummary {
 function projectSummaryOntoDetail(run: WorkflowRun, summary: WorkflowRunSummary): WorkflowRun {
   return { ...run, revision: summary.revision, sessionId: summary.sessionId,
     displayStatus: summary.displayStatus, updatedAt: summary.updatedAt, completedAt: summary.completedAt,
-    currentStageId: summary.currentStageId ?? run.currentStageId,
-    stages: summary.currentStage ? run.stages.map((stage) => stage.id === summary.currentStage?.id ? summary.currentStage : stage) : run.stages,
+    currentStageId: summary.currentStageId === undefined ? run.currentStageId : summary.currentStageId,
+    stages: summary.stages ?? (summary.currentStage ? run.stages.map((stage) => stage.id === summary.currentStage?.id ? summary.currentStage : stage) : run.stages),
     queuePosition: summary.queuePosition ?? null, continuationRequired: summary.continuationRequired ?? run.continuationRequired,
     cancellable: summary.cancellable ?? run.cancellable,
     pendingAction: null, decisionReview: null, result: null, error: null,

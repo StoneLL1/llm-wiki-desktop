@@ -52,7 +52,11 @@ pub async fn prepare_workflow(
         let state = app.state::<AppState>();
         let context =
             state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-        let access = if request.kind == crate::models::workflow::WorkflowKind::HealthCheck {
+        let access = if matches!(
+            request.kind,
+            crate::models::workflow::WorkflowKind::HealthCheck
+                | crate::models::workflow::WorkflowKind::UpdateWiki
+        ) {
             state.resolve_workflow_read_access(&context)?
         } else {
             state.resolve_workflow_access(&context)?
@@ -81,54 +85,76 @@ pub async fn start_workflow(
     request: StartWorkflowRequest,
 ) -> Result<WorkflowStartOutcome, BackendError> {
     run_blocking(app, BlockingWorkClass::HeavyIo, move |app| {
-        let state = app.state::<AppState>();
-        let context =
-            state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-        let kind = state.workflow_service.preparation.kind_for_start(
-            &state.task_service,
-            &context,
-            &request.preparation_id,
-            &request.preparation_revision,
-        )?;
-        let enqueue = |permit: &crate::app_state::ProjectTaskMutationPermit<'_>| {
-            state.workflow_service.enqueue_with_acknowledgements(
-                permit,
-                &state.settings_service,
-                &state.secret_service,
-                &state.agent_service,
-                &state.task_service,
-                &request.preparation_id,
-                &request.preparation_revision,
-                request.acknowledge_restricted_content,
-                request.acknowledge_remote_provider,
-                request.retry_of_task_id.as_deref(),
-            )
-        };
-        let outcome = if kind == crate::models::workflow::WorkflowKind::HealthCheck {
-            state.with_current_project_read_task_access(
-                &request.project_id,
-                &request.project_root_path,
-                enqueue,
-            )?
-        } else {
-            state.with_current_project_task_access(
-                &request.project_id,
-                &request.project_root_path,
-                enqueue,
-            )?
-        };
-        if let WorkflowStartOutcome::Created { run } = &outcome {
-            if run.display_status == WorkflowDisplayStatus::Running {
-                state.workflow_service.dispatch_claimed_run_with_settings(
-                    &state.task_service,
-                    &state.settings_service,
-                    run,
-                )?;
-            }
-        }
-        Ok(outcome)
+        start_workflow_for_state(&app.state::<AppState>(), request)
     })
     .await
+}
+
+pub(crate) fn start_workflow_for_state(
+    state: &AppState,
+    request: StartWorkflowRequest,
+) -> Result<WorkflowStartOutcome, BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let kind = state.workflow_service.preparation.kind_for_start(
+        &state.task_service,
+        &context,
+        &request.preparation_id,
+        &request.preparation_revision,
+    )?;
+    let read_access = matches!(
+        kind,
+        crate::models::workflow::WorkflowKind::HealthCheck
+            | crate::models::workflow::WorkflowKind::UpdateWiki
+    );
+    let access = if read_access {
+        state.resolve_workflow_read_access(&context)?
+    } else {
+        state.resolve_workflow_access(&context)?
+    };
+    // Hashing, route probes and acknowledgements run before taking the
+    // project authority lock. The permit below only admits this result if
+    // the exact authority and writable/persistence facts are still current.
+    let admission = state.workflow_service.prepare_start_admission(
+        &context,
+        access,
+        &state.settings_service,
+        &state.secret_service,
+        &state.agent_service,
+        &state.task_service,
+        &request.preparation_id,
+        &request.preparation_revision,
+        request.acknowledge_restricted_content,
+        request.acknowledge_remote_provider,
+        request.retry_of_task_id.as_deref(),
+    )?;
+    let enqueue = |permit: &crate::app_state::ProjectTaskMutationPermit<'_>| {
+        state
+            .workflow_service
+            .enqueue_prevalidated(permit, &state.task_service, &admission)
+    };
+    let outcome = if read_access {
+        state.with_current_project_read_task_access(
+            &request.project_id,
+            &request.project_root_path,
+            enqueue,
+        )?
+    } else {
+        state.with_current_project_task_access(
+            &request.project_id,
+            &request.project_root_path,
+            enqueue,
+        )?
+    };
+    if let WorkflowStartOutcome::Created { run } = &outcome {
+        if run.display_status == WorkflowDisplayStatus::Running {
+            state.workflow_service.dispatch_claimed_run_with_settings(
+                &state.task_service,
+                &state.settings_service,
+                run,
+            )?;
+        }
+    }
+    Ok(outcome)
 }
 
 #[tauri::command]
@@ -160,6 +186,49 @@ pub async fn get_workflow_file_diff(
 ) -> Result<WorkflowFileDiffPage, BackendError> {
     run_blocking(app, BlockingWorkClass::HeavyIo, move |app| {
         get_workflow_file_diff_for_state(&app.state::<AppState>(), request)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn get_workflow_history_state(
+    app: AppHandle,
+    request: WorkflowRunRequest,
+) -> Result<crate::services::UpdateWikiHistoryState, BackendError> {
+    run_blocking(app, BlockingWorkClass::HeavyIo, move |app| {
+        let state = app.state::<AppState>();
+        let context = require_workflow_project(&state, &request)?;
+        let run = workflow_run(&state, &request.task_id)?;
+        ensure_workflow_identity(&context, &run)?;
+        crate::services::get_update_wiki_history_state(&context, &run)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn undo_workflow_update(
+    app: AppHandle,
+    request: WorkflowRunRequest,
+) -> Result<crate::services::UpdateWikiHistoryState, BackendError> {
+    run_blocking(app, BlockingWorkClass::HeavyIo, move |app| {
+        let state = app.state::<AppState>();
+        require_workflow_project(&state, &request)?;
+        state.with_current_project_write_access(
+            &request.project_id,
+            &request.project_root_path,
+            |_permit, context| {
+                let run = workflow_run(&state, &request.task_id)?;
+                ensure_workflow_identity(context, &run)?;
+                crate::services::undo_update_wiki_history(
+                    context,
+                    &run,
+                    &state.file_store,
+                    &state.bookmark_service,
+                    &state.search_service,
+                    &state.task_service,
+                )
+            },
+        )
     })
     .await
 }

@@ -989,6 +989,9 @@ pub struct WorkflowRunSummary {
     pub current_stage_id: Option<String>,
     #[serde(default)]
     pub current_stage: Option<WorkflowStage>,
+    /// Complete bounded stage facts survive coalesced summary events.
+    #[serde(default)]
+    pub stages: Vec<WorkflowStage>,
     #[serde(default)]
     pub cancellable: bool,
     pub retry: Option<WorkflowRetryLink>,
@@ -1034,6 +1037,7 @@ impl From<&WorkflowRun> for WorkflowRunSummary {
                 .iter()
                 .find(|stage| Some(&stage.id) == run.current_stage_id.as_ref())
                 .map(stage_summary),
+            stages: run.stages.iter().map(stage_summary).collect(),
             cancellable: run.cancellable,
             retry: run.retry.clone(),
             outcome: run.result.as_ref().map(WorkflowRunOutcomeSummary::from),
@@ -1121,6 +1125,7 @@ impl WorkflowExecutionState {
                 .iter()
                 .find(|stage| Some(&stage.id) == self.current_stage_id.as_ref())
                 .map(stage_summary),
+            stages: self.stages.iter().map(stage_summary).collect(),
             cancellable: task.cancellable,
             retry: self.retry.clone(),
             outcome: self.result.as_ref().map(WorkflowRunOutcomeSummary::from),

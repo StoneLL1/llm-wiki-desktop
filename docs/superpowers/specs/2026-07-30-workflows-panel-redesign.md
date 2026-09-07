@@ -286,8 +286,9 @@ Workflow entries remain visible in an empty or partially configured context, but
 | No knowledge base is open | 新建知识库 / 打开已有知识库 |
 | External knowledge base is restricted | 本地健康检查可继续；外部 AI 或写入工作流提供“信任知识库” |
 | Project is read-only | 只读检查可继续；写入工作流说明“需要可写知识库” |
-| Checkpoint-required write has no Git capability | 启用本地 Git或保持只读能力 |
-| Dirty Git blocks a high-risk write | 先自行处理，或明确确认把当前全部变更作为检查点 |
+| Update Wiki has no project-local Git | 应用在任务开始后自动准备本地历史；Git 不可用时在写入前失败 |
+| Other checkpoint-required writes have no Git capability | 启用本地 Git或保持只读能力 |
+| Dirty Git blocks another high-risk write (excluding Update Wiki) | 先自行处理，或明确确认把当前全部变更作为检查点 |
 | Update Wiki has no Sources | 先添加来源 → Import |
 | Health Check has no readable Source or Wiki Markdown | 导入资料 / 等待扫描 |
 | Generate Content has no pages | 先更新 Wiki |
@@ -295,7 +296,7 @@ Workflow entries remain visible in an empty or partially configured context, but
 
 Completing a prerequisite returns the user to the intended preparation context when possible, but does not automatically launch work.
 
-External AI, Agent and Skill execution requires a trusted project. Any mutation additionally requires writable permission, and checkpoint-required mutation requires usable Git. These conditions are revalidated by the backend when the user starts or confirms work; frontend disabled state is not authorization.
+External AI, Agent and Skill execution requires a trusted project. Any mutation additionally requires writable permission, and checkpoint-required mutation requires recoverable Git history. Update Wiki establishes its application-owned history automatically during execution; other workflows retain their existing checkpoint policy. These conditions are revalidated by the backend when the user starts or confirms work; frontend disabled state is not authorization.
 
 ## 9. Queue and Project Isolation
 
@@ -411,7 +412,10 @@ Use the term **Git 检查点** directly.
 
 Rules:
 
-- Update Wiki creates a Git checkpoint before applying changes.
+- Update Wiki automatically stores exact before/planned snapshots under private `refs/llm-wiki/operations/<task-id>/` using a temporary index. Only successful publication promotes the planned snapshot to `after`; the ordinary branch, HEAD, staging area and unrelated files remain unchanged. Dirty files are valid input. Users do not manually submit a checkpoint as a prerequisite.
+- A project without local Git may initialize object storage when the user starts Update Wiki, without an all-files initial commit. A project nested inside an external Git repository is rejected before initialization to preserve that repository’s behavior. Preparation and navigation never initialize Git.
+- Completed updates expose undo in their task detail. Failed/interrupted publication can restore from the durable before/planned snapshots. Restore compares current bytes with the operation’s before/installed bytes, preserving later external edits. Durable `undo-started`/`undo` refs distinguish incomplete and completed recovery; new Update Wiki publication waits for incomplete recovery to finish.
+- Preparation opens immediately and restores the selected workflow’s local draft. Discovery runs in the background; cancelling preparation dismisses UI intent and ignores late results. Selected Source versions and guidance bind start admission; the Wiki baseline is captured when the queued update runs, rather than hashing the whole Wiki during navigation.
 - Health Check itself creates no checkpoint. After a selected repair batch is approved, queued dispatch must create the required clean-HEAD project-local checkpoint before the first Agent repair invocation; checkpoint failure means zero Agent invocations and zero candidate or real-project mutation.
 - Generate Content requires a checkpoint before overwriting an existing artifact; creating a new artifact does not require one.
 - Users cannot disable a checkpoint required by a high-risk action.
@@ -467,7 +471,7 @@ Completion prioritizes product outcomes over terminal output.
 
 - Pages created, updated, and skipped
 - Affected file paths
-- Git checkpoint and completion commit
+- Application-owned before/after history and undo or interrupted recovery (Update Wiki); other workflows retain their checkpoint/result identifiers
 - Duration and execution route
 - **查看更新内容**
 - **再次运行**

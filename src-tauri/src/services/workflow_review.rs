@@ -475,38 +475,12 @@ fn hydrate_workflow_confirmation(
                     "The persisted workflow candidate is no longer valid.",
                 )
             })?;
-        if include_update_wiki_diffs {
-            crate::services::update_wiki_decision_review_for_workflow(
-                &run.task_id,
-                &context.root,
-                &workflow,
-            )
-        } else {
-            let summary = crate::services::update_wiki_decision_review_summary_for_workflow(
-                &run.task_id,
-                &context.root,
-                &workflow,
-            )
-            .ok_or_else(|| {
-                workflow_error(
-                    "WORKFLOW_CANDIDATE_STALE",
-                    "The persisted workflow candidate is no longer valid.",
-                )
-            })?;
-            if crate::services::update_wiki_review_can_inline(
-                &summary,
-                LARGE_DIFF_BYTES,
-                LARGE_REVIEW_BYTES,
-            ) {
-                crate::services::update_wiki_decision_review_for_workflow(
-                    &run.task_id,
-                    &context.root,
-                    &workflow,
-                )
-            } else {
-                Some(summary)
-            }
-        }
+        crate::services::update_wiki_decision_review_for_workflow(
+            &run.task_id,
+            &context.root,
+            &workflow,
+            (!include_update_wiki_diffs).then_some((LARGE_DIFF_BYTES, LARGE_REVIEW_BYTES)),
+        )
         .ok_or_else(|| {
             workflow_error(
                 "WORKFLOW_CANDIDATE_STALE",
@@ -529,6 +503,19 @@ fn validate_workflow_confirmation(
     run: &WorkflowRun,
     pending: &crate::models::workflow::WorkflowPendingAction,
 ) -> Result<StoredPendingAction, BackendError> {
+    if run.kind == WorkflowKind::UpdateWiki {
+        if let Ok(stored) = state.confirmation_registry.peek(&pending.id) {
+            if crate::models::confirmation::workflow_execution_matches(
+                &run.kind,
+                stored.execution.as_ref(),
+                context,
+                run,
+                pending,
+            ) {
+                return Ok(stored);
+            }
+        }
+    }
     match &run.kind {
         WorkflowKind::UpdateWiki => restore_update_wiki_confirmation(
             context,

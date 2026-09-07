@@ -5,7 +5,11 @@ const i18nMocks = vi.hoisted(() => ({
   t: (key: string) => key,
   language: "en-US",
 }));
-const workflowApiMocks = vi.hoisted(() => ({ getWorkflowFileDiff: vi.fn(), rollbackAgentLintRepair: vi.fn() }));
+const workflowApiMocks = vi.hoisted(() => ({
+  getWorkflowFileDiff: vi.fn(), rollbackAgentLintRepair: vi.fn(),
+  getWorkflowHistoryState: vi.fn().mockResolvedValue({ available: false, undone: false, recovery: false, undoInProgress: false, checkpointHash: null, finalCommit: null }),
+  undoWorkflowUpdate: vi.fn(),
+}));
 
 vi.mock("react-i18next", () => ({
   initReactI18next: { type: "3rdParty", init: vi.fn() },
@@ -17,11 +21,14 @@ vi.mock("react-i18next", () => ({
 vi.mock("../../services/workflowApi", () => ({
   getWorkflowFileDiff: workflowApiMocks.getWorkflowFileDiff,
   rollbackAgentLintRepair: workflowApiMocks.rollbackAgentLintRepair,
+  getWorkflowHistoryState: workflowApiMocks.getWorkflowHistoryState,
+  undoWorkflowUpdate: workflowApiMocks.undoWorkflowUpdate,
 }));
 
 import type { WorkflowFileDiffPage, WorkflowPreparation, WorkflowRun, WorkflowRunSummary, WorkflowsOverview } from "../../types/workflow";
 import { WIKI_LINT_SKILL_SHA256 } from "../../types/lint";
 import { WorkflowHistoryView } from "./WorkflowHistoryView";
+import { makePreparationWithOptions } from "./workflowBaselineFixtures";
 import { WorkflowPipeline } from "./WorkflowPipeline";
 import { WorkflowPreparationView } from "./WorkflowPreparationView";
 import { WorkflowTaskDetail } from "./WorkflowTaskDetail";
@@ -141,6 +148,19 @@ describe("Workflows overview", () => {
       scopePreset: null,
     });
     expect(controller.prepare).not.toHaveBeenCalled();
+  });
+
+  it("shows the selected preparation and a cancel action before discovery completes", () => {
+    const controller = { backToOverview: vi.fn(), refresh: vi.fn() } as unknown as WorkflowsController;
+    useWorkflowStore.setState({ overview, overviewStatus: "ready" });
+    useWorkflowStore.getState().beginPreparation("update_wiki");
+    useWorkflowStore.getState().beginOperation("prepare:update_wiki");
+    render(<WorkflowsView controller={controller} onOpenTask={vi.fn()} />);
+    expect(screen.getByRole("heading", { name: "workflows.kind.update_wiki", level: 2 })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "workflows.action.run: workflows.kind.update_wiki" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("status")).toHaveTextContent("workflows.action.preparing");
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.cancel" }));
+    expect(controller.backToOverview).toHaveBeenCalledOnce();
   });
 
   it("renders exactly the three fixed workflows and a single recommendation", () => {
@@ -960,7 +980,7 @@ describe("Workflows overview", () => {
     const view = render(<WorkflowsRightPanel />);
     expect(screen.queryByText("workflows.context.prerequisites")).not.toBeInTheDocument();
     expect(screen.queryByText("workflows.prerequisite.resolveDirtyGit")).not.toBeInTheDocument();
-    expect(screen.getByText("workflows.git.required_before_write")).toBeInTheDocument();
+    expect(screen.getByText("workflows.git.automaticUpdateHistory")).toBeInTheDocument();
     expect(screen.getByText("workflows.output.wiki")).toBeInTheDocument();
     expect(screen.queryByText("workflows.context.queue")).not.toBeInTheDocument();
 
@@ -1254,6 +1274,19 @@ describe("Workflows overview", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("refresh unavailable");
     fireEvent.click(screen.getByRole("button", { name: "workflows.action.refresh" }));
     expect(controller.refresh).toHaveBeenCalledOnce();
+  });
+
+  it("offers a direct preparation retry when backend admission rejects a stale token", () => {
+    const prep = makePreparationWithOptions(1);
+    const controller = { prepare: vi.fn(), refresh: vi.fn() } as unknown as WorkflowsController;
+    useWorkflowStore.setState({ overview, overviewStatus: "ready" });
+    useWorkflowStore.getState().setPreparation(prep);
+    const key = `start:${prep.preparationId}`;
+    useWorkflowStore.setState({ operations: { [key]: { requestId: 1, pending: false, error: { summary: "Preparation expired", technicalDetails: "WORKFLOW_PREPARATION_STALE" } } } });
+    render(<WorkflowsView controller={controller} onOpenTask={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.prepareAgain" }));
+    expect(controller.prepare).toHaveBeenCalledExactlyOnceWith(prep.kind);
+    expect(useWorkflowStore.getState().operations[key]?.error).toBeNull();
   });
 
   it("keeps background reconcile state from blocking or overwriting preparation", () => {
@@ -1575,6 +1608,20 @@ describe("Workflows overview", () => {
     view.rerender(<WorkflowTaskDetail run={workflowRun({ taskId: "cancelled-pipeline", kind: "update_wiki", displayStatus: "cancelled" })} controller={controller} queuedRuns={[]} onOpenLogs={vi.fn()} />);
     expect(screen.getByRole("status")).toHaveTextContent("workflows.cancelled.description");
     expect(screen.queryByRole("region", { name: "workflows.failure.title" })).not.toBeInTheDocument();
+  });
+
+  it.each(["failed", "interrupted"] as const)("shows recovery for a %s Update with no result", async (displayStatus) => {
+    const controller = { refresh: vi.fn() } as unknown as WorkflowsController;
+    useProjectStore.setState({
+      currentProject: { ...useProjectStore.getState().currentProject, projectId: "project-a", rootPath: "D:/知识库" },
+      authority: null,
+    });
+    workflowApiMocks.getWorkflowHistoryState.mockResolvedValueOnce({
+      available: true, undone: false, recovery: true, undoInProgress: false, checkpointHash: "before", finalCommit: null,
+    });
+    render(<WorkflowTaskDetail run={workflowRun({ taskId: `recover-${displayStatus}`, kind: "update_wiki", displayStatus })} controller={controller} queuedRuns={[]} onOpenLogs={vi.fn()} />);
+    expect(await screen.findByRole("button", { name: "workflows.updateHistory.restore" })).toBeInTheDocument();
+    expect(workflowApiMocks.getWorkflowHistoryState).toHaveBeenLastCalledWith({ projectId: "project-a", projectRootPath: "D:/知识库", taskId: `recover-${displayStatus}` });
   });
 
   it("exposes truthful overall and stage progress with expanded current work and real duration", () => {

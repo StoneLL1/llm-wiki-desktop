@@ -225,7 +225,7 @@ export function WorkflowsRightPanel() {
               <h3>{t(workflowKindKey(preparation.kind))}</h3>
               <dl className="workflow-context-facts">
                 <div><dt>{t("workflows.context.route")}</dt><dd>{t(workflowRouteKey(preparation.route))}</dd></div>
-                <div><dt>{t("workflows.context.git")}</dt><dd>{t(`workflows.git.${preparation.gitPolicy}`)}</dd></div>
+                <div><dt>{t("workflows.context.git")}</dt><dd>{t(preparation.kind === "update_wiki" ? "workflows.git.automaticUpdateHistory" : `workflows.git.${preparation.gitPolicy}`)}</dd></div>
                 <div><dt>{t("workflows.context.output")}</dt><dd>{t(preparation.output.labelKey)}</dd></div>
               </dl>
             </section>

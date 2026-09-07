@@ -17,7 +17,7 @@ Before implementation, read the relevant docs:
 - For a new native knowledge base, use the project folder as the source of truth: `raw/`, `wiki/`, `.app/`, `exports/`, `skills/`. Compatible vaults keep their existing Markdown layout; app-owned guidance lives only under `.app/compat/`.
 - Keep `raw/sources/` immutable by default. Replacing or deleting original sources requires explicit confirmation.
 - API keys and tokens must use OS credential storage. Never write secrets to project files, logs, or exported artifacts.
-- Checkpoint-required file operations need Git checkpoints first: delete, overwrite, batch rewrite, workflow/Agent auto-fix, conflict merge, source replacement.
+- Checkpoint-required file operations need Git checkpoints first: delete, overwrite, batch rewrite, workflow/Agent auto-fix, conflict merge, source replacement. Update Wiki manages private operation refs and a temporary index automatically, including recovery of interrupted writes; it does not require a clean worktree or change the user’s HEAD/index.
 - Search is local keyword/filter search only. Natural-language answers must enter Chat or an explicit product workflow; Agent / BYOK is the execution route, not the navigation model.
 - Agent CLI is an enhancement, not the only path. After a readable Source exists, BYOK API must support core AI organization, Update Wiki, and Chat flows; it is not an Import parser or recovery route.
 - Do not silently install or run Agent install commands.

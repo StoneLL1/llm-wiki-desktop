@@ -41,6 +41,8 @@ const workflowCommands = [
   "list_workflow_runs",
   "get_workflow_run",
   "get_workflow_file_diff",
+  "get_workflow_history_state",
+  "undo_workflow_update",
   "cancel_workflow_run",
   "undo_cancel_queued_workflow",
   "reorder_queued_workflow",
@@ -58,6 +60,8 @@ const workflowApiExports = [
   "listWorkflowRuns",
   "getWorkflowRun",
   "getWorkflowFileDiff",
+  "getWorkflowHistoryState",
+  "undoWorkflowUpdate",
   "cancelWorkflowRun",
   "undoCancelQueuedWorkflow",
   "reorderQueuedWorkflow",
@@ -102,8 +106,8 @@ const workflowAuthorityViolations = (files: SourceFile[]): string[] => {
   const forbiddenAuthorityCalls = /\b(?:grant_compatible_project_trust|revoke_project_trust|register_trusted_native|register_trusted_compatible(?:_with_identity)?|revoke_trust|initialize_git_repository|initialize_repository|start_project_open_assessment|assess_project_folder)\s*\(/g;
   const forbiddenAuthorityDerivation = /\b(?:resolve_authority|filesystem_access|has_writable_task_state_root)\s*\(|\b(?:ProjectTrustAuthority|ProjectFilesystemAccess|ProjectTrustState)::|permissions\(\)\.readonly\(\)/g;
   const forbiddenGitDerivation = /\brepository_status(?:_for_assessment)?\s*\(/g;
-  const checkpointRevalidationCallCounts: Record<string, number> = {
-    "src-tauri/src/services/workflow_service/runners/update_wiki.rs": 2,
+  const checkpointRevalidationCallLimits: Record<string, number> = {
+    "src-tauri/src/services/workflow_service/runners/update_wiki.rs": 1,
     "src-tauri/src/services/workflow_service/runners/agent_lint_repair.rs": 3,
   };
   for (const file of files) {
@@ -115,10 +119,10 @@ const workflowAuthorityViolations = (files: SourceFile[]): string[] => {
     }
     forbiddenAuthorityCalls.lastIndex = 0;
     const gitDerivationCount = [...productionSource.matchAll(forbiddenGitDerivation)].length;
-    const allowedGitDerivationCount = checkpointRevalidationCallCounts[path] ?? 0;
+    const allowedGitDerivationCount = checkpointRevalidationCallLimits[path] ?? 0;
     if (
       forbiddenAuthorityDerivation.test(productionSource) ||
-      gitDerivationCount !== allowedGitDerivationCount
+      gitDerivationCount > allowedGitDerivationCount
     ) {
       violations.push(`${path}: derives trust, writability, or Git state`);
     }

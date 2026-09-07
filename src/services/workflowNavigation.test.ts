@@ -86,6 +86,15 @@ beforeEach(() => {
 });
 
 describe("workflow navigation", () => {
+  it("abandons pending preparation before opening a task", async () => {
+    useWorkflowStore.getState().beginPreparation("update_wiki");
+    getWorkflowRunMock.mockResolvedValueOnce(completedUpdate());
+    await hydrateAndSelectWorkflowRun(project, "run-a");
+    expect(useWorkflowStore.getState().preparingKind).toBeNull();
+    expect(useWorkflowStore.getState().surface).toBe("detail");
+    expect(useWorkflowStore.getState().selectedTaskId).toBe("run-a");
+  });
+
   it("previews the exact Workflow ExportRecord even when a newer unrelated artifact exists", async () => {
     const record: ExportRecord = { id: "record-a", exportType: "project_report", title: "项目报告", sourcePath: undefined,
       outputPath: "exports/中文报告.html", createdAt: "2026-09-07T00:00:00Z", route: "byok", status: "succeeded", bookmarked: false, taskId: "run-a" };

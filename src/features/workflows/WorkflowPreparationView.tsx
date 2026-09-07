@@ -531,7 +531,7 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
         </li>
         <li className="workflow-preparation-step" data-decision-step="5">
           <div className="workflow-preparation-step__label">{t("workflows.preparation.git")}</div>
-          <div className="workflow-preparation-step__value">{t(`workflows.git.${preparation.gitPolicy}`)}</div>
+          <div className="workflow-preparation-step__value">{t(preparation.kind === "update_wiki" ? "workflows.git.automaticUpdateHistory" : `workflows.git.${preparation.gitPolicy}`)}</div>
         </li>
         <li className="workflow-preparation-step" data-decision-step="6">
           <div className="workflow-preparation-step__label">{t("workflows.preparation.route")}</div>

@@ -109,14 +109,14 @@ export function makeMarkdownPaths(count = WORKFLOW_BASELINE_SIZES.markdownFiles)
   );
 }
 
-export function makeScopeOptions(count = WORKFLOW_BASELINE_SIZES.scopeOptions) {
+export function makeScopeOptions(count: number = WORKFLOW_BASELINE_SIZES.scopeOptions) {
   return Array.from({ length: count }, (_, index) => ({
     sourceId: `source-${String(index).padStart(5, "0")}`,
     versionId: `version-${String(index).padStart(5, "0")}`,
   }));
 }
 
-export function makePreparationWithOptions(count = WORKFLOW_BASELINE_SIZES.scopeOptions): WorkflowPreparation {
+export function makePreparationWithOptions(count: number = WORKFLOW_BASELINE_SIZES.scopeOptions): WorkflowPreparation {
   const options = makeScopeOptions(count);
   return {
     schemaVersion: 2,

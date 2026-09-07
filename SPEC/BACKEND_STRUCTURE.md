@@ -568,10 +568,16 @@ pub struct BackendTask {
 
 ### 10.3 Workflow 读模型与三条内置旅程实现（2026-09-07）
 
+2026-09-07 响应与历史修复：权限变更 permit 负责单次持锁及锁内验证，内部调用不能重新获取同一 transition mutex；Git/确认/相关文件 IPC 通过异步 blocking worker 执行。启动先在权限锁外准备，再在短许可内复核 access/identity 并入队。队列锁按项目隔离。Update Wiki 准备不探测 Git、不全量读取 Wiki；执行阶段固定 Wiki 基线，在写入前保存私有 `before` / `planned` refs，成功后只发布 `after` 引用，用户 HEAD/index 不变。恢复以精确 bytes 做比较写入，`undo-started` / `undo` refs 持久记录恢复进度；未完成恢复阻止新的 Update Wiki 发布。
+
+任务磁盘包装升级到 schema 3：小状态快照与追加式 `.events.jsonl` 分离，旧 inline 日志兼容迁移，恢复忽略末尾短写，生命周期完成仍有持久化屏障。`WorkflowRunSummary.stages` 携带完整有界阶段事实（不含 decision 正文），避免事件乱序或丢失导致阶段显示回退。新增 typed IPC `get_workflow_history_state` / `undo_workflow_update` 提供项目隔离的恢复能力。
+
+
 `commands/workflow_commands.rs` 保留现有公开命令；委托聚焦的 `workflow_review.rs` / `workflow_history.rs` 处理复核与历史用例。`services/workflow_service/` 按 coordinator、preparation、overview、persistence 与各 runner 分工，ExportService 仍拥有导出保存与记录。
 
 - TaskService 是任务事实唯一来源。`WorkflowRun`、`WorkflowRunSummary` 和 `workflow://updated` 使用十进制字符串 `revision`；持久任务默认兼容旧记录，进程 `sessionId` 隔离旧会话事件。恢复在已持久版本上推进；旧进程尚未落盘的进度不能覆盖新会话的恢复状态。
 - `get_workflows_overview` 只读 ProjectRegistry 已观测的内存访问摘要和 TaskService owner 索引，返回固定三行、最近五项、最多三个关注任务 `activeRuns`、队列摘要及 `sessionId`。未观测的文件/Git 状态为 `unknown`，`pendingSourceCount` 为 `null`，不据此宣称没有内容变化或允许写入。
+- WorkspaceController 首次进入 Workflows 时才挂载 lazy WorkflowsControllerRuntime；加载后保留实例处理隐藏页面的任务事实和项目切换。准备表单先显示本地状态，再异步补齐范围与路线事实。
 - 磁盘、Git、Agent 探测 IPC 在现有 blocking worker 上运行。overview 不执行 preparation、Source/Markdown 扫描、正文哈希、Agent 探测或凭据读取。历史独立分页；单任务详情和 Diff 按需加载。`workflow://updated` 只携带摘要，不携带完整 scope、候选 Diff 或结果正文。
 - 前端 `taskStore.workflowById` 保存规范摘要；`workflowStore` 保存查询、草稿、选中状态及最多 16 条详情。约 100ms 合并普通进度，终态和确认立即发布；单资源请求在途合并，只有新版本到达才补读，不重复运行 preparation。
 - “开始”对当前草稿自动预检。新范围、自动路线变化或新的敏感内容确认需要展示最新准备结果后再次开始。Update 排队后基线变化使用无候选的 `review_scope`；复核当前选中来源后取消旧等待并用可选 `retryOfTaskId` 关联新任务，不复用旧批准。

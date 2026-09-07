@@ -453,6 +453,8 @@ export interface WorkflowRunSummary {
   continuationRequired?: boolean;
   currentStageId?: string | null;
   currentStage?: WorkflowStage | null;
+  /** Complete small stage snapshot; absent only on older backend summaries. */
+  stages?: WorkflowStage[];
   cancellable?: boolean;
   schemaVersion: number;
   taskId: string;

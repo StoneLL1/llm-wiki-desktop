@@ -874,7 +874,7 @@ fn legacy_v1_wrapper_migrates_and_current_wrapper_is_accepted() {
         .join(format!("{}.json", run.task_id));
     let mut value: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(value["schemaVersion"], 2);
+    assert_eq!(value["schemaVersion"], 3);
     assert_eq!(value["workflow"]["schemaVersion"], 2);
     assert_eq!(
         value["workflow"]["executionOptions"]["operation"]["kind"],
@@ -889,7 +889,7 @@ fn legacy_v1_wrapper_migrates_and_current_wrapper_is_accepted() {
     assert!(restarted.get_workflow_run(&run.task_id).is_some());
     let migrated: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(migrated["schemaVersion"], 2);
+    assert_eq!(migrated["schemaVersion"], 3);
     assert_eq!(migrated["workflow"]["schemaVersion"], 2);
     assert_eq!(
         migrated["workflow"]["executionOptions"]["operation"]["kind"],

@@ -1,4 +1,4 @@
-import { ChevronRight, CircleAlert, FileOutput, RefreshCw, ShieldCheck } from "lucide-react";
+import { LoaderCircle, ChevronRight, CircleAlert, FileOutput, RefreshCw, ShieldCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import type { WorkflowKind, WorkflowOverviewRow } from "../../types/workflow";
@@ -57,6 +57,7 @@ export function WorkflowRow({
     <button
       aria-label={`${actionLabel}: ${kindLabel}`}
       aria-pressed={selected}
+      aria-busy={pending}
       className={`workflow-row${selected ? " is-selected" : ""}`}
       data-workflow-return-key={`row:${row.kind}:${activeTaskId ?? row.lastCompletedTaskId ?? "prepare"}`}
       disabled={pending || (state === "up_to_date" && !row.lastCompletedTaskId)}
@@ -85,7 +86,7 @@ export function WorkflowRow({
         ) : null}
       <span className="workflow-row__foot">
         <span>
-          {!activeTaskId && row.lastCompletedAt
+          {pending ? <><LoaderCircle aria-hidden="true" size={13} />{t("workflows.action.preparing")}</> : !activeTaskId && row.lastCompletedAt
             ? <time dateTime={row.lastCompletedAt}>{workflowDateTimeLabel(row.lastCompletedAt, i18n.resolvedLanguage ?? i18n.language)}</time>
             : actionLabel}
           {highlighted ? <span className="workflow-badge is-accent">{t("workflows.recommended")}</span> : null}

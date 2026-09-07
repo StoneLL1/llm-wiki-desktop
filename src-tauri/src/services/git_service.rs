@@ -1,6 +1,8 @@
 #[derive(Default)]
 pub struct GitService;
 
+mod history;
+
 #[cfg(test)]
 use std::cell::Cell;
 use std::cell::RefCell;
@@ -242,7 +244,7 @@ impl GitService {
     }
 
     pub fn changed_paths(&self, context: &ProjectContext) -> Result<Vec<String>, BackendError> {
-        if !self.repository_status(context)?.is_repository {
+        if !owns_project_repository(context)? {
             return Err(BackendError::new(
                 "GIT_REPOSITORY_MISSING",
                 "Git repository is required before enumerating changes.",
@@ -261,7 +263,7 @@ impl GitService {
         context: &ProjectContext,
         relative_path: &str,
     ) -> Result<bool, BackendError> {
-        if !self.repository_status(context)?.is_repository {
+        if !owns_project_repository(context)? {
             return Ok(false);
         }
         Ok(run_git(
@@ -303,10 +305,7 @@ impl GitService {
             return false;
         }
         let context = ProjectContext::new("workflow-recovery", project_root.to_path_buf());
-        if !GitService
-            .repository_status(&context)
-            .is_ok_and(|status| status.is_repository)
-        {
+        if !owns_project_repository(&context).unwrap_or(false) {
             return false;
         }
         let commit = format!("{checkpoint_hash}^{{commit}}");
@@ -738,7 +737,7 @@ impl GitService {
         &self,
         context: &ProjectContext,
     ) -> Result<Vec<GitChangedFile>, BackendError> {
-        if !self.repository_status(context)?.is_repository {
+        if !owns_project_repository(context)? {
             return Err(BackendError::new(
                 "GIT_REPOSITORY_MISSING",
                 "Git repository is required before enumerating changes.",
@@ -761,7 +760,7 @@ impl GitService {
         context: &ProjectContext,
         preserved_ignored_paths: &[String],
     ) -> Result<Vec<GitChangedFile>, BackendError> {
-        if !self.repository_status(context)?.is_repository {
+        if !owns_project_repository(context)? {
             return Err(BackendError::new(
                 "GIT_REPOSITORY_MISSING",
                 "Git repository is required before enumerating changes.",
@@ -1282,6 +1281,18 @@ fn git_command_error(stderr: &[u8], args: &[&str]) -> BackendError {
     .with_details(serde_json::json!({ "args": args }))
 }
 
+/// Validate repository ownership without scanning the worktree or resolving HEAD.
+fn owns_project_repository(context: &ProjectContext) -> Result<bool, BackendError> {
+    let root = validate_existing_project_root(&context.root).map_err(git_path_unsafe)?;
+    if !validate_git_marker(&root)? {
+        return Ok(false);
+    }
+    let top = run_git(context, &["rev-parse", "--show-toplevel"])?;
+    Ok(Path::new(top.trim())
+        .canonicalize()
+        .is_ok_and(|path| path == root))
+}
+
 fn run_git(context: &ProjectContext, args: &[&str]) -> Result<String, BackendError> {
     run_git_bytes(context, args).map(|stdout| String::from_utf8_lossy(&stdout).to_string())
 }
@@ -1290,7 +1301,25 @@ fn run_git_bytes(context: &ProjectContext, args: &[&str]) -> Result<Vec<u8>, Bac
     let output = run_git_process(
         context,
         args,
-        DEFAULT_GIT_TIMEOUT,
+        if matches!(
+            args.first().copied(),
+            Some(
+                "--version"
+                    | "rev-parse"
+                    | "status"
+                    | "diff"
+                    | "ls-files"
+                    | "ls-tree"
+                    | "cat-file"
+                    | "show"
+                    | "log"
+                    | "for-each-ref"
+            )
+        ) {
+            Duration::from_secs(10)
+        } else {
+            DEFAULT_GIT_TIMEOUT
+        },
         MAX_GIT_OUTPUT_BYTES,
         || false,
     )

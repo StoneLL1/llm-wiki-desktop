@@ -305,7 +305,14 @@ impl RequestEvaluationSnapshot {
         } else {
             CompileService::resolve_source_versions(environment.context, &source_versions)?
         };
-        let readable_markdown = list_markdown_inventory(environment.context)?;
+        // Update approves selected Source intent; Wiki bytes are captured once by
+        // the runner, not while opening or refreshing a form.
+        let readable_markdown = if input.is_some_and(|input| input.kind == WorkflowKind::UpdateWiki)
+        {
+            Vec::new()
+        } else {
+            list_markdown_inventory(environment.context)?
+        };
         let wiki_pages = wiki_pages_from_inventory(environment.context, &readable_markdown);
         #[cfg(test)]
         add_elapsed(&INVENTORY_NANOS, inventory_started);
@@ -816,7 +823,11 @@ fn build_snapshot_from_evaluation(
             version_id: source.version_id.clone(),
         })
         .collect();
-    let available_wiki_pages = evaluation.wiki_pages.clone();
+    let available_wiki_pages = if input.kind == WorkflowKind::UpdateWiki {
+        Vec::new()
+    } else {
+        evaluation.wiki_pages.clone()
+    };
     let agent_policy = match input.kind {
         WorkflowKind::HealthCheck => AgentRoutePolicy::LintOnly,
         WorkflowKind::UpdateWiki | WorkflowKind::GenerateContent => AgentRoutePolicy::Any,
@@ -1525,6 +1536,7 @@ fn prerequisites(
         WorkflowGitPolicy::RequiredBeforeWrite | WorkflowGitPolicy::RequiredBeforeOverwrite
     ) {
         match access.git_state {
+            _ if matches!(scope, WorkflowScope::UpdateWiki { .. }) => {}
             WorkflowGitState::Unavailable => items.push(prerequisite(
                 "WORKFLOW_GIT_UNAVAILABLE",
                 prerequisite_message_key(&WorkflowPrerequisiteAction::ConfigureGit).into(),
@@ -1686,6 +1698,7 @@ fn baseline_files(
     evaluation: Option<&RequestEvaluationSnapshot>,
 ) -> Result<(Vec<String>, bool), BackendError> {
     let (mut files, has_readable_markdown) = match scope {
+        WorkflowScope::UpdateWiki { .. } => (Vec::new(), false),
         WorkflowScope::GenerateContent { page_paths, .. } if !page_paths.is_empty() => {
             (page_paths.clone(), true)
         }
@@ -2351,9 +2364,11 @@ mod batch_zero_cost_tests {
         assert!(items
             .iter()
             .any(|item| item.blocking && item.code == "WORKFLOW_PROJECT_READ_ONLY"));
-        assert!(items
+        // Update establishes private history at execution; unknown write
+        // authority remains blocking, but an unobserved Git state does not.
+        assert!(!items
             .iter()
-            .any(|item| item.blocking && item.code == "WORKFLOW_GIT_NOT_OBSERVED"));
+            .any(|item| item.code == "WORKFLOW_GIT_NOT_OBSERVED"));
     }
 
     #[test]

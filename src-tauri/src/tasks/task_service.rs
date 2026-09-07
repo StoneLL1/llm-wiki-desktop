@@ -36,7 +36,7 @@ use crate::utils::path_safety::{
 };
 use crate::utils::safe_project_dir::remove_project_file;
 
-const PERSISTED_TASK_SCHEMA_VERSION: u32 = 2;
+const PERSISTED_TASK_SCHEMA_VERSION: u32 = 3;
 const TASK_PROGRESS_PERSISTENCE_WINDOW: Duration = Duration::from_millis(500);
 
 #[derive(Default)]
@@ -434,6 +434,8 @@ struct PersistedTaskEntry {
     #[serde(default)]
     log_lines: Vec<LogLine>,
     #[serde(default)]
+    journal: bool,
+    #[serde(default)]
     activities: Vec<TaskActivity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     workflow: Option<WorkflowExecutionState>,
@@ -488,7 +490,7 @@ fn parse_persisted_task(json: &str, persisted_id: &str) -> Result<RecoveredTaskS
     // could be silently ignored by BackendTask's permissive deserializer.
     let mut entry = serde_json::from_value::<PersistedTaskEntry>(value)
         .map_err(|error| format!("Invalid persisted task wrapper: {error}"))?;
-    if !matches!(entry.schema_version, 1 | PERSISTED_TASK_SCHEMA_VERSION) {
+    if !matches!(entry.schema_version, 1 | 2 | PERSISTED_TASK_SCHEMA_VERSION) {
         return Err(format!(
             "Unsupported persisted task schema version: {}",
             entry.schema_version
@@ -1229,6 +1231,7 @@ impl TaskService {
         let entry = TaskEntry {
             task: task.clone(),
             cancellation: token,
+            journal: Default::default(),
             log_lines: Vec::new(),
             activities: Vec::new(),
             persisted_path: None,
@@ -1574,6 +1577,10 @@ impl TaskService {
                         Some(PersistedTaskEntry {
                             schema_version: PERSISTED_TASK_SCHEMA_VERSION,
                             task,
+                            journal: serde_json::from_str::<serde_json::Value>(&json)
+                                .ok()
+                                .and_then(|value| value.get("journal").and_then(|v| v.as_bool()))
+                                .unwrap_or(false),
                             log_lines,
                             activities,
                             workflow,
@@ -1667,7 +1674,9 @@ impl TaskService {
         let mut tasks = self.tasks.write().expect("lock poisoned");
         let mut persistence = self.task_persistence_dirs.write().expect("lock poisoned");
         for (id, entry, previous_dir) in previous_states {
-            tasks.insert(id.clone(), entry.clone());
+            let mut restored = entry.clone();
+            restored.journal = Default::default();
+            tasks.insert(id.clone(), restored);
             match previous_dir {
                 Some(dir) => {
                     persistence.insert(id.clone(), dir.clone());
@@ -1827,6 +1836,60 @@ impl TaskService {
             .expect("lock poisoned")
             .get(id)
             .cloned()
+    }
+
+    pub(crate) fn workflow_owner_key(&self, id: &str) -> Option<String> {
+        self.workflow_summary_index
+            .read()
+            .expect("lock poisoned")
+            .task_owners
+            .get(id)
+            .map(|(key, _)| key.clone())
+    }
+
+    /// Select ids in the owner index before loading full execution state.
+    /// Queue operations only inspect live work, independent of completed history.
+    pub(crate) fn workflow_runs_for_owner(
+        &self,
+        key: &str,
+        revision: &str,
+        active_only: bool,
+    ) -> Vec<WorkflowRun> {
+        let ids = {
+            let index = self.workflow_summary_index.read().expect("lock poisoned");
+            let Some(owner) = index.owners.get(&(key.to_string(), revision.to_string())) else {
+                return Vec::new();
+            };
+            if active_only {
+                owner
+                    .by_status
+                    .iter()
+                    .filter(|((_, status), _)| {
+                        matches!(
+                            status,
+                            WorkflowDisplayStatus::Running
+                                | WorkflowDisplayStatus::WaitingForConfirmation
+                                | WorkflowDisplayStatus::Queued
+                        )
+                    })
+                    .flat_map(|(_, order)| order.iter().map(|(_, id)| id.clone()))
+                    .collect::<Vec<_>>()
+            } else {
+                owner
+                    .recent
+                    .iter()
+                    .rev()
+                    .map(|(_, id)| id.clone())
+                    .collect()
+            }
+        };
+        let tasks = self.tasks.read().expect("lock poisoned");
+        ids.iter()
+            .filter_map(|id| {
+                let entry = tasks.get(id)?;
+                entry.workflow.as_ref()?.to_run(&entry.task)
+            })
+            .collect()
     }
 
     pub fn list_workflow_runs(&self) -> Vec<WorkflowRun> {
@@ -2059,8 +2122,9 @@ impl TaskService {
         let persisted = PersistedTaskEntry {
             schema_version: PERSISTED_TASK_SCHEMA_VERSION,
             task: entry.task.clone(),
-            log_lines: entry.log_lines.clone(),
-            activities: entry.activities.clone(),
+            journal: true,
+            log_lines: Vec::new(),
+            activities: Vec::new(),
             workflow: entry.workflow.clone(),
         };
         lane.next_revision = lane.next_revision.saturating_add(1);
@@ -2254,8 +2318,9 @@ impl TaskService {
             .map(|entry| PersistedTaskEntry {
                 schema_version: PERSISTED_TASK_SCHEMA_VERSION,
                 task: entry.task.clone(),
-                log_lines: entry.log_lines.clone(),
-                activities: entry.activities.clone(),
+                journal: true,
+                log_lines: Vec::new(),
+                activities: Vec::new(),
                 workflow: entry.workflow.clone(),
             });
         let result = match (project_root, persistence_dir, persisted) {
@@ -3196,8 +3261,9 @@ impl TaskService {
                 .map(|entry| PersistedTaskEntry {
                     schema_version: PERSISTED_TASK_SCHEMA_VERSION,
                     task: entry.task.clone(),
-                    log_lines: entry.log_lines.clone(),
-                    activities: entry.activities.clone(),
+                    journal: true,
+                    log_lines: Vec::new(),
+                    activities: Vec::new(),
                     workflow: entry.workflow.clone(),
                 })
                 .ok_or_else(|| format!("Task disappeared during persistence: {id}"))?;
@@ -3272,10 +3338,8 @@ impl TaskService {
     }
 
     pub fn append_log(&self, id: &str, level: LogLevel, message: String) -> Result<(), String> {
-        let persistence_lane = self.workflow_persistence_lane_if_present(id);
-        let mut lane = persistence_lane
-            .as_ref()
-            .map(|lane| lane.lock().expect("lock poisoned"));
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let _lane = persistence_lane.lock().expect("lock poisoned");
         let mut tasks = self.tasks.write().expect("lock poisoned");
         let entry = tasks
             .get_mut(id)
@@ -3297,13 +3361,8 @@ impl TaskService {
 
         drop(tasks);
         use crate::models::task::BackendEventType::TaskLog;
-        if lane.is_some() {
-            self.persist_current_task_with_lane(id, lane.as_deref_mut())?;
-            self.emit(TaskLog, pid, Some(tid), line);
-        } else {
-            self.emit(TaskLog, pid, Some(tid), line);
-            self.persist_current_task(id)?;
-        }
+        self.persist_task_journal(id)?;
+        self.emit(TaskLog, pid, Some(tid), line);
 
         Ok(())
     }
@@ -3328,10 +3387,8 @@ impl TaskService {
     /// snapshot. Activity payloads are intentionally bounded and never carry
     /// raw model reasoning, tool arguments, file contents, or command output.
     pub fn emit_activity(&self, id: &str, activity: TaskActivity) {
-        let persistence_lane = self.workflow_persistence_lane_if_present(id);
-        let mut lane = persistence_lane
-            .as_ref()
-            .map(|lane| lane.lock().expect("lock poisoned"));
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let _lane = persistence_lane.lock().expect("lock poisoned");
         let (pid, tid) = {
             let mut tasks = self.tasks.write().expect("lock poisoned");
             let Some(entry) = tasks.get_mut(id) else {
@@ -3352,11 +3409,7 @@ impl TaskService {
             Some(tid),
             activity,
         );
-        if lane.is_some() {
-            let _ = self.persist_current_task_with_lane(id, lane.as_deref_mut());
-        } else {
-            let _ = self.persist_current_task(id);
-        }
+        let _ = self.persist_task_journal(id);
     }
 
     /// Emit an ephemeral streaming delta for a generative task (chat answer
@@ -4222,10 +4275,18 @@ impl TaskService {
                 "Failed to remove persisted task {}: {error}",
                 path.display()
             )
-        })
+        })?;
+        let journal_path = persistence_dir.join(format!("{id}.events.jsonl"));
+        match remove_project_file(&project_root, &journal_path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("Failed to remove task journal: {error}")),
+        }
     }
 
     pub fn persist_task(&self, id: &str, project_root: &Path) -> Result<(), String> {
+        let persistence_lane = self.workflow_persistence_lane(id);
+        let _lane = persistence_lane.lock().expect("lock poisoned");
         let tasks_dir = project_root.join(".app").join("tasks");
         let tasks_dir = validate_persistence_dir(project_root, &tasks_dir)?;
         self.persist_task_to_dir(id, project_root, &tasks_dir)?;
@@ -4297,7 +4358,12 @@ impl TaskService {
         let result = if injected_failure {
             Err(format!("Injected task persistence failure: {id}"))
         } else {
-            write_persisted_task(project_root, tasks_dir, id, persisted)
+            (if persisted.journal {
+                self.persist_task_journal_to(id, project_root, tasks_dir)
+            } else {
+                Ok(())
+            })
+            .and_then(|_| write_persisted_task(project_root, tasks_dir, id, persisted))
         };
         #[cfg(test)]
         {
@@ -4415,19 +4481,91 @@ impl TaskService {
         let persisted = PersistedTaskEntry {
             schema_version: PERSISTED_TASK_SCHEMA_VERSION,
             task: entry.task.clone(),
-            log_lines: entry.log_lines.clone(),
-            activities: entry.activities.clone(),
+            journal: true,
+            log_lines: Vec::new(),
+            activities: Vec::new(),
             workflow: entry.workflow.clone(),
         };
+        drop(tasks);
+        self.persist_task_journal_to(id, project_root, tasks_dir)?;
         let path = write_persisted_task(project_root, tasks_dir, id, &persisted)?;
 
-        drop(tasks);
         let mut tasks = self.tasks.write().expect("lock poisoned");
         if let Some(entry) = tasks.get_mut(id) {
             entry.persisted_path = Some(path);
         }
 
         Ok(())
+    }
+
+    fn persist_task_journal_to(
+        &self,
+        id: &str,
+        project_root: &Path,
+        tasks_dir: &Path,
+    ) -> Result<(), String> {
+        validate_task_persistence_id(id)?;
+        let journal = self
+            .tasks
+            .read()
+            .expect("lock poisoned")
+            .get(id)
+            .ok_or_else(|| format!("Task not found: {id}"))?
+            .journal
+            .clone();
+        let mut cursor = journal.lock().expect("lock poisoned");
+        let tasks_dir = ensure_project_directory(project_root, tasks_dir)
+            .map_err(|error| format!("Task persistence path is unsafe: {error}"))?;
+        let path = tasks_dir.join(format!("{id}.events.jsonl"));
+        let (logs, activities) = {
+            let tasks = self.tasks.read().expect("lock poisoned");
+            let entry = tasks
+                .get(id)
+                .ok_or_else(|| format!("Task not found: {id}"))?;
+            if cursor.logs > entry.log_lines.len() || cursor.activities > entry.activities.len() {
+                // A rejected lifecycle transition can restore the prior in-memory
+                // entry. Rebuild its observational journal on the next accepted write.
+                *cursor = Default::default();
+            }
+            let (logs, activities) = if cursor.path.as_ref() == Some(&path) {
+                (cursor.logs, cursor.activities)
+            } else {
+                (0, 0)
+            };
+            (
+                entry.log_lines[logs..].to_vec(),
+                entry.activities[activities..].to_vec(),
+            )
+        };
+        cursor.append(project_root, &path, &logs, &activities)
+    }
+
+    fn persist_task_journal(&self, id: &str) -> Result<(), String> {
+        let root = self.project_root_for_task(id);
+        let dir = self
+            .task_persistence_dirs
+            .read()
+            .expect("lock poisoned")
+            .get(id)
+            .cloned();
+        match (root, dir) {
+            (Some(root), Some(dir)) => {
+                let has_snapshot = self
+                    .tasks
+                    .read()
+                    .expect("lock poisoned")
+                    .get(id)
+                    .is_some_and(|entry| entry.persisted_path.is_some());
+                if has_snapshot {
+                    self.persist_task_journal_to(id, &root, &dir)
+                } else {
+                    // A recoverable initial snapshot failure must not leave an
+                    // orphan journal after the storage becomes writable again.
+                    self.persist_current_task_with_lane(id, None)
+                }
+            }
+            _ => Ok(()),
+        }
     }
 
     fn persist_current_task(&self, id: &str) -> Result<(), String> {
@@ -4473,8 +4611,9 @@ impl TaskService {
         let persisted = PersistedTaskEntry {
             schema_version: PERSISTED_TASK_SCHEMA_VERSION,
             task: entry.task.clone(),
-            log_lines: entry.log_lines.clone(),
-            activities: entry.activities.clone(),
+            journal: true,
+            log_lines: Vec::new(),
+            activities: Vec::new(),
             workflow: entry.workflow.clone(),
         };
         let dir = validate_persistence_dir(&project_root, dir)?;
@@ -4541,7 +4680,7 @@ impl TaskService {
                     Ok(json) => {
                         let parsed = parse_persisted_task(&json, persisted_id);
                         match parsed {
-                            Ok((mut task, log_lines, activities, mut workflow)) => {
+                            Ok((mut task, mut log_lines, mut activities, mut workflow)) => {
                                 if let Some(project_id) = current_project_id {
                                     task.project_id = Some(project_id.to_string());
                                 }
@@ -4584,6 +4723,20 @@ impl TaskService {
                                     );
                                     recovered.push(rebound);
                                     continue;
+                                }
+                                let mut journal_cursor = Default::default();
+                                if serde_json::from_str::<serde_json::Value>(&json)
+                                    .ok()
+                                    .and_then(|value| {
+                                        value.get("journal").and_then(|v| v.as_bool())
+                                    })
+                                    == Some(true)
+                                {
+                                    (log_lines, activities, journal_cursor) =
+                                        super::task_journal::recover(
+                                            project_root,
+                                            &tasks_dir.join(format!("{persisted_id}.events.jsonl")),
+                                        )?;
                                 }
                                 let token = self.cancellation.register(&task.id);
                                 if let Some(state) = workflow.as_mut() {
@@ -4629,6 +4782,7 @@ impl TaskService {
                                 let task_entry = TaskEntry {
                                     task: task.clone(),
                                     cancellation: token,
+                                    journal: Arc::new(Mutex::new(journal_cursor)),
                                     log_lines,
                                     activities,
                                     persisted_path: Some(path),
@@ -4812,7 +4966,13 @@ fn remove_persisted_task_snapshot(
             "Failed to remove rolled-back task {}: {error}",
             path.display()
         )
-    })
+    })?;
+    let journal_path = persistence_dir.join(format!("{id}.events.jsonl"));
+    match remove_project_file(project_root, &journal_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Failed to remove rolled-back journal: {error}")),
+    }
 }
 
 fn require_current_stage(workflow: &WorkflowExecutionState, stage_id: &str) -> Result<(), String> {
@@ -4907,6 +5067,135 @@ mod tests {
             "retry": null, "startedAt": time, "updatedAt": time,
             "completedAt": if status == "completed" { Some(time) } else { None },
         })).unwrap()
+    }
+
+    #[test]
+    fn latest_summary_retains_completed_stages_when_intermediate_events_are_dropped() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, _) = make_service();
+        let coordinator = WorkflowCoordinator::default();
+        let mut request = workflow_request(root.path(), None);
+        let mut second = request.stages[0].clone();
+        second.id = "publish".into();
+        second.ordinal = 2;
+        request.stages.push(second);
+        let run = created_workflow(coordinator.enqueue(&service, request).unwrap());
+        service.start_workflow_stage(&run.task_id, "read").unwrap();
+        service
+            .complete_workflow_stage(&run.task_id, "read")
+            .unwrap();
+        service
+            .start_workflow_stage(&run.task_id, "publish")
+            .unwrap();
+        let summary = service.index_workflow_summary(&run.task_id).unwrap();
+        assert_eq!(summary.current_stage_id.as_deref(), Some("publish"));
+        assert_eq!(summary.stages[0].status, WorkflowStageStatus::Completed);
+        assert!(summary.stages[0].completed_at.is_some());
+        assert_eq!(summary.stages[1].status, WorkflowStageStatus::Running);
+    }
+
+    #[test]
+    fn journals_append_without_rewriting_snapshot_and_recover_after_torn_tail() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, _) = make_service();
+        let task = service
+            .create_project_task(
+                TaskType::AgentRun,
+                "project".into(),
+                root.path().to_path_buf(),
+                "journal".into(),
+                true,
+            )
+            .unwrap();
+        let snapshot = root.path().join(format!(".app/tasks/{}.json", task.id));
+        let journal = root
+            .path()
+            .join(format!(".app/tasks/{}.events.jsonl", task.id));
+        let before = std::fs::read(&snapshot).unwrap();
+        reset_task_costs();
+        for index in 0..100 {
+            service
+                .append_log(&task.id, LogLevel::Info, format!("日志 {index}"))
+                .unwrap();
+        }
+        service.emit_activity(
+            &task.id,
+            TaskActivity::ToolCall {
+                call_id: "call".into(),
+                name: "Read".into(),
+                detail: Some("wiki/中文.md".into()),
+            },
+        );
+        assert_eq!(
+            task_costs().0,
+            0,
+            "append must not serialize the task snapshot"
+        );
+        assert_eq!(std::fs::read(&snapshot).unwrap(), before);
+        // A crash after writing only part of the next JSON record must retain every prior record.
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&journal)
+            .unwrap()
+            .write_all(b"{\"kind\":\"log\",\"value\":")
+            .unwrap();
+        let (restarted, _) = make_service();
+        restarted.recover_tasks(root.path()).unwrap();
+        assert_eq!(restarted.get_logs(&task.id).unwrap().len(), 100);
+        assert_eq!(restarted.get_activities(&task.id).unwrap().len(), 1);
+        restarted
+            .append_log(&task.id, LogLevel::Info, "after restart".into())
+            .unwrap();
+        let (again, _) = make_service();
+        again.recover_tasks(root.path()).unwrap();
+        assert_eq!(
+            again.get_logs(&task.id).unwrap().last().unwrap().message,
+            "after restart"
+        );
+    }
+
+    #[test]
+    fn legacy_inline_history_migrates_once_without_loss_or_duplicates() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(".app/tasks");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (service, _) = make_service();
+        let task = service.create_task(
+            TaskType::AgentRun,
+            Some("project".into()),
+            "legacy".into(),
+            true,
+        );
+        let path = dir.join(format!("{}.json", task.id));
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 2, "task": task, "logLines": [{
+                    "timestamp": "2026-09-07T00:00:00Z", "level": "info", "message": "old log"
+                }], "activities": [], "workflow": null,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let (restarted, _) = make_service();
+        restarted.recover_tasks(root.path()).unwrap();
+        restarted
+            .append_log(&task.id, LogLevel::Info, "new log".into())
+            .unwrap();
+        let snapshot: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(snapshot["schemaVersion"], 3);
+        assert_eq!(snapshot["logLines"], serde_json::json!([]));
+        let (again, _) = make_service();
+        again.recover_tasks(root.path()).unwrap();
+        let logs = again.get_logs(&task.id).unwrap();
+        assert_eq!(
+            logs.iter()
+                .map(|line| line.message.as_str())
+                .collect::<Vec<_>>(),
+            ["old log", "new log"]
+        );
     }
 
     #[test]
@@ -6057,7 +6346,7 @@ mod tests {
     }
 
     #[test]
-    fn generic_workflow_barrier_cancels_the_pending_trailing_generation() {
+    fn observational_log_keeps_the_pending_progress_flush_without_rewriting_snapshot() {
         let root = tempfile::tempdir().unwrap();
         let service = TaskService::default();
         let run = created_workflow(
@@ -6093,18 +6382,18 @@ mod tests {
             .append_log(
                 &run.task_id,
                 LogLevel::Info,
-                "barrier flushes latest progress".into(),
+                "independent observational log".into(),
             )
             .unwrap();
         assert_eq!(
             service.persistence_write_count(&run.task_id),
-            writes_before_barrier + 1
+            writes_before_barrier
         );
         service.flush_pending_workflow_progress(&run.task_id, pending_generation);
         assert_eq!(
             service.persistence_write_count(&run.task_id),
             writes_before_barrier + 1,
-            "a cancelled trailing generation performed a duplicate write"
+            "pending progress should still receive exactly one trailing snapshot"
         );
         let lane = persistence_lane.lock().unwrap();
         assert!(lane.pending_observational_revision.is_none());

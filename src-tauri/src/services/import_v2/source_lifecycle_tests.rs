@@ -1353,7 +1353,7 @@ fn package_restore_requires_every_child_baseline_and_low_level_writes_keep_sourc
 
     let file_commands = include_str!("../../commands/file_commands.rs");
     let write_body = file_commands
-        .split("pub fn write_markdown_file")
+        .split("pub async fn write_markdown_file")
         .nth(1)
         .and_then(|body| body.split("#[tauri::command]").next())
         .unwrap();

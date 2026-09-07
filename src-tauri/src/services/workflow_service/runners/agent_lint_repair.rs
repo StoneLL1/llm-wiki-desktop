@@ -1284,6 +1284,7 @@ fn task_state_noise_paths(task_id: &str) -> Vec<String> {
     vec![
         format!(".app/tasks/{task_id}.json"),
         format!(".app/tasks/{task_id}.log"),
+        format!(".app/tasks/{task_id}.events.jsonl"),
     ]
 }
 

@@ -50,6 +50,7 @@ pub struct ProjectWritePermit<'permit> {
 /// cannot require a normal [`ProjectWritePermit`]; they do still retain the
 /// authority transition lock and prove that the registered root is writable.
 pub(crate) struct ProjectAuthorityMutationPermit<'permit> {
+    issuer: &'permit AppState,
     context: ProjectContext,
     _update_mutation_lease: UpdateMutationLease,
     _transition_guard: &'permit MutexGuard<'permit, ()>,
@@ -97,6 +98,28 @@ impl ProjectWritePermit<'_> {
 impl ProjectAuthorityMutationPermit<'_> {
     pub(crate) fn context(&self) -> &ProjectContext {
         &self.context
+    }
+
+    /// Revalidate under the authority lock already owned by this permit.
+    /// Calling an independently locking AppState entry point here would deadlock.
+    pub(crate) fn workflow_access(
+        &self,
+    ) -> Result<crate::services::WorkflowAccessSnapshot, BackendError> {
+        self.issuer.resolve_workflow_access_locked(&self.context)
+    }
+
+    pub(crate) fn grant_compatible_project_trust(&self) -> Result<ProjectContext, BackendError> {
+        self.issuer
+            .grant_compatible_project_trust_locked(&self.context.project_id, &self.context.root)
+    }
+
+    pub(crate) fn refresh_native_authority_after_repair(
+        &self,
+    ) -> Result<ProjectContext, BackendError> {
+        self.issuer.refresh_native_authority_after_repair_locked(
+            &self.context.project_id,
+            &self.context.root,
+        )
     }
 }
 
@@ -782,7 +805,7 @@ impl AppState {
         context: &ProjectContext,
         run: &crate::models::workflow::WorkflowRun,
     ) -> Result<crate::services::WorkflowExternalLaunchPermit, BackendError> {
-        let inspect_git = run.kind != crate::models::workflow::WorkflowKind::HealthCheck
+        let inspect_git = run.kind == crate::models::workflow::WorkflowKind::GenerateContent
             || matches!(
                 run.operation,
                 crate::models::workflow::WorkflowOperation::AgentLintRepair { .. }
@@ -1009,6 +1032,7 @@ impl AppState {
             ));
         }
         let permit = ProjectAuthorityMutationPermit {
+            issuer: self,
             context: context.clone(),
             _update_mutation_lease: update_mutation_lease,
             _transition_guard: &transition,
@@ -1487,15 +1511,11 @@ impl AppState {
     /// proven and binds workflow persistence only to a safe writable task
     /// directory.  If the bind fails, runtime trust is revoked rather than
     /// leaving a half-refreshed authority behind.
-    pub(crate) fn refresh_native_authority_after_repair(
+    fn refresh_native_authority_after_repair_locked(
         &self,
         project_id: &str,
         root: &Path,
     ) -> Result<ProjectContext, BackendError> {
-        let transition_lane = self.project_trust_transition.lane(root)?;
-        let _transition = transition_lane
-            .lock()
-            .map_err(|_| trust_transition_locked())?;
         if !ProjectRegistry::is_strict_native_layout(root) {
             return Err(BackendError::new(
                 "PROJECT_NATIVE_REPAIR_STALE",
@@ -1544,6 +1564,14 @@ impl AppState {
         let _transition = transition_lane
             .lock()
             .map_err(|_| trust_transition_locked())?;
+        self.grant_compatible_project_trust_locked(project_id, root)
+    }
+
+    fn grant_compatible_project_trust_locked(
+        &self,
+        project_id: &str,
+        root: &Path,
+    ) -> Result<ProjectContext, BackendError> {
         self.project_registry.resolve(project_id, root)?;
         if !ProjectRegistry::is_verified_compatible_layout(root) {
             return Err(invalid_trust_authority(

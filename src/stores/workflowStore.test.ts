@@ -66,6 +66,21 @@ describe("workflowStore", () => {
     expect(useWorkflowStore.getState().historyRuns[0]).toMatchObject({ revision: "2", displayStatus: "cancelled" });
   });
 
+  it("replaces all stage facts across coalesced stage transitions and clears the current stage", () => {
+    const store = useWorkflowStore.getState();
+    store.activateProject("project-a\0D:/a");
+    useWorkflowStore.setState({ identityGuard: { canonicalIdentityKey: "identity-a", identityRevision: "revision-a" } });
+    const stage = { id: "read", ordinal: 1, status: "running" as const, labelKey: "read", startedAt: "2026-08-01T00:00:00Z", completedAt: null, currentItem: null, progress: null, decision: null };
+    const initial: WorkflowRun = { ...run("stages", "2026-08-01T00:00:00Z"), revision: "1", displayStatus: "running", currentStageId: "read", stages: [stage, { ...stage, id: "check", ordinal: 2, status: "pending" }] };
+    store.upsertRun(initial);
+    const advanced: WorkflowRun = { ...initial, revision: "3", currentStageId: "check", stages: [{ ...stage, status: "completed" }, { ...stage, id: "check", ordinal: 2 }] };
+    store.applySummaries([workflowRunSummary(advanced)]);
+    expect(useWorkflowStore.getState().runs[0]?.stages.map((item) => item.status)).toEqual(["completed", "running"]);
+    store.applySummaries([workflowRunSummary({ ...advanced, revision: "4", currentStageId: null, stages: advanced.stages.map((item) => ({ ...item, status: "completed" })) })]);
+    expect(useWorkflowStore.getState().runs[0]?.currentStageId).toBeNull();
+    expect(useWorkflowStore.getState().runs[0]?.stages.every((item) => item.status === "completed")).toBe(true);
+  });
+
   it("opens older history after filling the bounded detail cache", () => {
     useWorkflowStore.getState().activateProject("project-a\0D:/a");
     for (let index = 0; index < 20; index++) useWorkflowStore.getState().upsertRun(run(`recent-${index}`, "2026-08-02T00:00:00Z"));

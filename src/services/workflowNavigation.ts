@@ -87,6 +87,8 @@ export function cancelWorkflowNavigation(): void {
 
 /** Navigation intent is separate from task facts, which may keep arriving in the background. */
 function beginNavigation(project: WorkflowProjectRef) {
+  assertActiveProject(project);
+  if (useWorkflowStore.getState().preparingKind) useWorkflowStore.getState().setSurface("overview");
   const guard = captureNavigationGuard(project);
   const sequence = ++navigationSequence;
   let superseded = false;

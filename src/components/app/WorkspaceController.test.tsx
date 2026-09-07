@@ -200,12 +200,30 @@ describe("WorkspaceController", () => {
       taskLauncher,
     );
     expect(mocks.useProviderWorkflow).toHaveBeenCalledWith(project, capabilities);
+    expect(mocks.useWorkflowsController).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Import through router" }));
     expect(mocks.addPaths).toHaveBeenCalledWith(["C:/source.pdf"]);
     fireEvent.click(screen.getByRole("button", { name: "Save through settings" }));
     expect(mocks.saveProvider).toHaveBeenCalledWith(
       expect.objectContaining({ provider: "ollama" }),
     );
+  });
+
+  it("loads the Workflow runtime on demand and retains project-scoped background synchronization", async () => {
+    render(<WorkspaceController />);
+    expect(mocks.useWorkflowsController).not.toHaveBeenCalled();
+    act(() => useNavigationStore.setState({ activeView: "workflows", workflowLaunchIntent: {
+      projectId: project.projectId, projectRootPath: project.rootPath,
+      kind: "update_wiki", origin: "wiki", scopePreset: null,
+    } }));
+    await waitFor(() => expect(mocks.useWorkflowsController).toHaveBeenLastCalledWith(project, true, expect.any(Object)));
+    await waitFor(() => expect(workflowsController.prepare).toHaveBeenCalledExactlyOnceWith("update_wiki", null, null));
+    expect(useNavigationStore.getState().workflowLaunchIntent).toBeNull();
+    act(() => useNavigationStore.getState().setActiveView("wiki"));
+    expect(mocks.useWorkflowsController).toHaveBeenLastCalledWith(project, false, expect.any(Object));
+    const replacement = { ...project, projectId: "project-b", rootPath: "D:/知识库/project-b" };
+    act(() => useProjectStore.setState({ currentProject: replacement }));
+    expect(mocks.useWorkflowsController).toHaveBeenLastCalledWith(replacement, false, expect.any(Object));
   });
 
   it("switches routed views without replacing the current project", () => {
@@ -239,11 +257,11 @@ describe("WorkspaceController", () => {
 
     render(<WorkspaceController />);
 
-    expect(workflowsController.prepare).toHaveBeenCalledWith(
+    await waitFor(() => expect(workflowsController.prepare).toHaveBeenCalledWith(
       "generate_content",
       expect.objectContaining({ pagePaths: ["wiki/中文.md"] }),
       { kind: "byok", provider: "open_ai" },
-    );
+    ));
     expect(useNavigationStore.getState().workflowLaunchIntent).toBeNull();
   });
 
@@ -266,14 +284,14 @@ describe("WorkspaceController", () => {
 
     render(<WorkspaceController />);
 
-    expect(workflowsController.prepare).toHaveBeenCalledWith(
+    await waitFor(() => expect(workflowsController.prepare).toHaveBeenCalledWith(
       "generate_content",
       expect.objectContaining({
         pagePaths: ["wiki/export-source.md"],
         outputPath: "exports/html/export-source.html",
       }),
       null,
-    );
+    ));
     expect(useNavigationStore.getState().workflowLaunchIntent).toBeNull();
   });
 
@@ -444,8 +462,10 @@ describe("WorkspaceController", () => {
     expect(historyTrigger).not.toHaveFocus();
   });
 
-  it("returns an open-project workflow prerequisite to the project workbench", () => {
+  it("returns an open-project workflow prerequisite to the project workbench", async () => {
+    useNavigationStore.setState({ activeView: "workflows" });
     render(<WorkspaceController />);
+    await waitFor(() => expect(mocks.useWorkflowsController).toHaveBeenCalled());
     const options = mocks.useWorkflowsController.mock.calls.at(-1)?.[2] as {
       onProjectPrerequisite: (action: string, context: {
         project: typeof project;
@@ -472,7 +492,7 @@ describe("WorkspaceController", () => {
     expect(screen.getByTestId("settings-dialog")).toHaveTextContent("true:ai");
   });
 
-  it("hosts project authority prerequisites and only prepares again after satisfaction", () => {
+  it("hosts project authority prerequisites and only prepares again after satisfaction", async () => {
     useNavigationStore.setState({ activeView: "workflows", settingsOpen: false });
     const preparation = {
       preparationId: "prep-authority",
@@ -488,6 +508,7 @@ describe("WorkspaceController", () => {
       surface: "preparation",
     });
     render(<WorkspaceController />);
+    await waitFor(() => expect(mocks.useWorkflowsController).toHaveBeenCalled());
     const options = mocks.useWorkflowsController.mock.calls.at(-1)?.[2] as {
       onProjectPrerequisite: (action: string, context: {
         project: typeof project;

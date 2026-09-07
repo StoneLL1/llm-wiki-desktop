@@ -36,6 +36,7 @@ export function workflowRunSummary(run: WorkflowRun | WorkflowRunSummary): Workf
     queuePosition: run.queuePosition, continuationRequired: run.continuationRequired,
     currentStageId: run.currentStageId,
     currentStage: currentStage ? { ...currentStage, decision: null } : null,
+    stages: run.stages.map((stage) => ({ ...stage, decision: null })),
     cancellable: run.cancellable,
   };
 }

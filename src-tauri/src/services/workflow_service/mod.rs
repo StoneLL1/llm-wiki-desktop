@@ -69,15 +69,15 @@ pub use runners::health_check::{
     HealthCheckExecutionServices, HealthCheckRunner,
 };
 pub use runners::update_wiki::{
-    confirm_update_wiki_review, discard_update_wiki_candidate, persist_update_wiki_review,
-    restore_update_wiki_confirmation, run_update_wiki, run_update_wiki_authorized,
-    update_wiki_candidate_is_valid, update_wiki_decision_review, UpdateWikiConfirmationFailure,
-    UpdateWikiExecutionServices, UpdateWikiRunner,
+    confirm_update_wiki_review, discard_update_wiki_candidate, get_update_wiki_history_state,
+    persist_update_wiki_review, restore_update_wiki_confirmation, run_update_wiki,
+    run_update_wiki_authorized, undo_update_wiki_history, update_wiki_candidate_is_valid,
+    update_wiki_decision_review, UpdateWikiConfirmationFailure, UpdateWikiExecutionServices,
+    UpdateWikiHistoryState, UpdateWikiRunner,
 };
 #[cfg(any(feature = "gui", test))]
 pub(crate) use runners::update_wiki::{
-    update_wiki_decision_review_for_workflow, update_wiki_decision_review_summary_for_workflow,
-    update_wiki_file_diff_page_for_workflow, update_wiki_review_can_inline,
+    update_wiki_decision_review_for_workflow, update_wiki_file_diff_page_for_workflow,
 };
 pub use stage_sink::WorkflowStageSink;
 
@@ -96,6 +96,24 @@ pub trait WorkflowRunner: Send + Sync {
     /// lifetime and report every stage through `WorkflowStageSink`; they must
     /// not create another task or resolve a different execution route.
     fn start(&self, run: WorkflowRun);
+}
+
+/// Backend-only result of expensive preparation. It cannot be supplied by IPC;
+/// admission rechecks its project authority under a short-lived task permit.
+pub(crate) struct WorkflowStartAdmission {
+    context: ProjectContext,
+    access: WorkflowAccessSnapshot,
+    preparation_id: String,
+    preparation_revision: String,
+    state: WorkflowAdmissionState,
+}
+
+enum WorkflowAdmissionState {
+    Existing(WorkflowStartOutcome),
+    Prepared {
+        validated: ValidatedWorkflowStart,
+        retry: Option<crate::models::workflow::WorkflowRetryLink>,
+    },
 }
 
 pub struct WorkflowService {
@@ -135,6 +153,11 @@ impl WorkflowService {
             if let Some(root) = context.layout.task_state_root.as_deref() {
                 paths.push(format!("{}/{}.json", root.trim_end_matches('/'), task.id));
                 paths.push(format!("{}/{}.log", root.trim_end_matches('/'), task.id));
+                paths.push(format!(
+                    "{}/{}.events.jsonl",
+                    root.trim_end_matches('/'),
+                    task.id
+                ));
             }
             if tasks.get_workflow_run(&task.id).is_some_and(|run| {
                 run.kind == WorkflowKind::HealthCheck
@@ -254,6 +277,9 @@ impl WorkflowService {
         )
     }
 
+    // Existing runner fixtures construct their permit directly. Production IPC
+    // always separates expensive preparation from the short admission window.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn enqueue_with_acknowledgements(
         &self,
@@ -284,6 +310,26 @@ impl WorkflowService {
         )
     }
 
+    pub(crate) fn enqueue_prevalidated(
+        &self,
+        permit: &ProjectTaskMutationPermit<'_>,
+        tasks: &TaskService,
+        admission: &WorkflowStartAdmission,
+    ) -> Result<WorkflowStartOutcome, BackendError> {
+        if permit.context().project_id != admission.context.project_id
+            || permit.context().root != admission.context.root
+            || permit.workflow_access() != admission.access
+        {
+            return Err(BackendError::new(
+                "WORKFLOW_PREPARATION_STALE",
+                "Project authority changed while the workflow was being prepared.",
+                true,
+                true,
+            ));
+        }
+        self.admit_prevalidated(tasks, admission)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn start_with_acknowledgements_impl(
         &self,
@@ -300,6 +346,52 @@ impl WorkflowService {
         dispatch_immediately: bool,
         retry_of_task_id: Option<&str>,
     ) -> Result<WorkflowStartOutcome, BackendError> {
+        let admission = self.prepare_start_admission(
+            context,
+            access,
+            settings_service,
+            secret_service,
+            agent_service,
+            tasks,
+            preparation_id,
+            preparation_revision,
+            acknowledge_restricted_content,
+            acknowledge_remote_provider,
+            retry_of_task_id,
+        )?;
+        let outcome = self.admit_prevalidated(tasks, &admission)?;
+        if dispatch_immediately {
+            if let WorkflowStartOutcome::Created { run } = &outcome {
+                if run.display_status == WorkflowDisplayStatus::Running {
+                    self.dispatch_claimed_run_with_settings(tasks, settings_service, run)?;
+                }
+            }
+        }
+        Ok(outcome)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_start_admission(
+        &self,
+        context: &ProjectContext,
+        access: WorkflowAccessSnapshot,
+        settings_service: &SettingsService,
+        secret_service: &SecretService,
+        agent_service: &AgentService,
+        tasks: &TaskService,
+        preparation_id: &str,
+        preparation_revision: &str,
+        acknowledge_restricted_content: bool,
+        acknowledge_remote_provider: bool,
+        retry_of_task_id: Option<&str>,
+    ) -> Result<WorkflowStartAdmission, BackendError> {
+        let admission = |state| WorkflowStartAdmission {
+            context: context.clone(),
+            access: access.clone(),
+            preparation_id: preparation_id.to_string(),
+            preparation_revision: preparation_revision.to_string(),
+            state,
+        };
         let identity = project_identity(&context.root).map_err(|message| {
             BackendError::new("WORKFLOW_IDENTITY_FAILED", message, true, false)
         })?;
@@ -311,7 +403,8 @@ impl WorkflowService {
         )?;
         match preparation_lookup {
             preparation::PreparationStartLookup::Started(task_id) => {
-                return existing_preparation_run(tasks, context, &task_id);
+                return existing_preparation_run(tasks, context, &task_id)
+                    .map(|outcome| admission(WorkflowAdmissionState::Existing(outcome)));
             }
             preparation::PreparationStartLookup::Missing => {
                 if let Some(outcome) = recover_preparation_run(
@@ -321,7 +414,7 @@ impl WorkflowService {
                     preparation_id,
                     preparation_revision,
                 )? {
-                    return Ok(outcome);
+                    return Ok(admission(WorkflowAdmissionState::Existing(outcome)));
                 }
             }
             preparation::PreparationStartLookup::Prepared => {
@@ -331,7 +424,7 @@ impl WorkflowService {
         }
         let environment = WorkflowPreparationEnvironment {
             context,
-            access,
+            access: access.clone(),
             settings_service,
             secret_service,
             agent_service,
@@ -350,7 +443,8 @@ impl WorkflowService {
                     &identity.identity_revision,
                 )? {
                     preparation::PreparationStartLookup::Started(task_id) => {
-                        return existing_preparation_run(tasks, context, &task_id);
+                        return existing_preparation_run(tasks, context, &task_id)
+                            .map(|outcome| admission(WorkflowAdmissionState::Existing(outcome)));
                     }
                     preparation::PreparationStartLookup::Missing => {
                         if let Some(outcome) = recover_preparation_run(
@@ -360,7 +454,7 @@ impl WorkflowService {
                             preparation_id,
                             preparation_revision,
                         )? {
-                            return Ok(outcome);
+                            return Ok(admission(WorkflowAdmissionState::Existing(outcome)));
                         }
                     }
                     preparation::PreparationStartLookup::Prepared => {}
@@ -459,6 +553,26 @@ impl WorkflowService {
                     false,
                 )
             })?;
+        Ok(admission(WorkflowAdmissionState::Prepared {
+            validated,
+            retry,
+        }))
+    }
+
+    fn admit_prevalidated(
+        &self,
+        tasks: &TaskService,
+        admission: &WorkflowStartAdmission,
+    ) -> Result<WorkflowStartOutcome, BackendError> {
+        let context = &admission.context;
+        let (validated, retry) = match &admission.state {
+            WorkflowAdmissionState::Existing(outcome) => {
+                let (WorkflowStartOutcome::Existing { run }
+                | WorkflowStartOutcome::Created { run }) = outcome;
+                return existing_preparation_run(tasks, context, &run.task_id);
+            }
+            WorkflowAdmissionState::Prepared { validated, retry } => (validated, retry),
+        };
         let outcome = self
             .coordinator
             .enqueue_for_owner(
@@ -474,7 +588,7 @@ impl WorkflowService {
                     baseline_fingerprint: validated.preparation.baseline.fingerprint.clone(),
                     execution_options: validated.execution_options.clone(),
                     stages: validated.stages.clone(),
-                    retry,
+                    retry: retry.clone(),
                 },
                 &validated.preparation.project_access.canonical_identity_key,
                 &validated.preparation.project_access.identity_revision,
@@ -484,8 +598,8 @@ impl WorkflowService {
             WorkflowStartOutcome::Created { run } | WorkflowStartOutcome::Existing { run } => run,
         };
         self.preparation.mark_started(
-            preparation_id,
-            preparation_revision,
+            &admission.preparation_id,
+            &admission.preparation_revision,
             &run.task_id,
             &run.canonical_identity_key,
             &run.identity_revision,
@@ -500,12 +614,6 @@ impl WorkflowService {
                 LogLevel::Warn,
                 "Workflow preferences could not be saved; this run is unaffected.".into(),
             );
-        }
-        if dispatch_immediately
-            && matches!(&outcome, WorkflowStartOutcome::Created { .. })
-            && run.display_status == WorkflowDisplayStatus::Running
-        {
-            self.dispatch_claimed_run_with_settings(tasks, settings_service, run)?;
         }
         Ok(outcome)
     }
@@ -1008,6 +1116,98 @@ mod batch_one_start_race_tests {
         }
     }
 
+    #[cfg(feature = "gui")]
+    #[test]
+    fn slow_start_preparation_releases_authority_and_rejects_revocation_before_admission() {
+        let project = tempfile::tempdir().unwrap();
+        for directory in ["raw/sources", "wiki", ".app/tasks", "exports", "skills"] {
+            std::fs::create_dir_all(project.path().join(directory)).unwrap();
+        }
+        std::fs::write(project.path().join("purpose.md"), "# Purpose\n").unwrap();
+        std::fs::write(project.path().join("schema.md"), "# Schema\n").unwrap();
+        std::fs::write(project.path().join("wiki/page.md"), "# Page\n").unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let state = Arc::new(crate::app_state::AppState {
+            project_service: crate::services::ProjectService::with_config_dir(config.path().into()),
+            project_assessment_service: crate::services::ProjectAssessmentService::new(
+                config.path().into(),
+            ),
+            settings_service: SettingsService::with_config_dir(config.path().into()),
+            secret_service: SecretService::memory(),
+            ..crate::app_state::AppState::default()
+        });
+        let context = state
+            .project_registry
+            .register_trusted_native("slow-start", project.path())
+            .unwrap();
+        state
+            .workflow_service
+            .register_runner(Arc::new(NoopHealthRunner))
+            .unwrap();
+        let prepared = state
+            .workflow_service
+            .prepare(
+                &WorkflowPreparationEnvironment {
+                    context: &context,
+                    access: state.resolve_workflow_read_access(&context).unwrap(),
+                    settings_service: &state.settings_service,
+                    secret_service: &state.secret_service,
+                    agent_service: &state.agent_service,
+                },
+                PrepareWorkflowInput {
+                    kind: WorkflowKind::HealthCheck,
+                    scope: Some(WorkflowScope::HealthCheck {
+                        mode: HealthCheckMode::LocalQuick,
+                    }),
+                    route_selection: None,
+                },
+            )
+            .unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        state
+            .workflow_service
+            .set_start_after_prepared_lookup_hook(Box::new(move || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }));
+        let worker_state = Arc::clone(&state);
+        let worker_root = context.root.to_string_lossy().into_owned();
+        let worker = std::thread::spawn(move || {
+            crate::commands::workflow_commands::start_workflow_for_state(
+                &worker_state,
+                crate::models::workflow_requests::StartWorkflowRequest {
+                    project_id: "slow-start".into(),
+                    project_root_path: worker_root,
+                    preparation_id: prepared.preparation_id,
+                    preparation_revision: prepared.preparation_revision,
+                    acknowledge_restricted_content: false,
+                    acknowledge_remote_provider: false,
+                    retry_of_task_id: None,
+                },
+            )
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let (revoked_tx, revoked_rx) = mpsc::channel();
+        let revoke_state = Arc::clone(&state);
+        let revoke_root = context.root.clone();
+        let revoker = std::thread::spawn(move || {
+            let result = revoke_state.revoke_project_trust("slow-start", &revoke_root);
+            revoked_tx.send(result).unwrap();
+        });
+        let revoked = revoked_rx.recv_timeout(std::time::Duration::from_secs(5));
+        release_tx.send(()).unwrap();
+        revoked
+            .expect("slow preparation must not hold the authority lock")
+            .unwrap();
+        revoker.join().unwrap();
+        let error = worker.join().unwrap().unwrap_err();
+        assert_eq!(error.code, "WORKFLOW_PREPARATION_STALE");
+        assert!(state.task_service.list_workflow_runs().is_empty());
+    }
+
     #[test]
     fn prepared_to_started_race_recovers_existing_deterministically() {
         let project = tempfile::tempdir().unwrap();
@@ -1119,3 +1319,6 @@ mod batch_one_start_race_tests {
             .is_err());
     }
 }
+
+#[cfg(test)]
+pub(crate) use runners::update_wiki::update_wiki_review_can_inline;

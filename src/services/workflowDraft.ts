@@ -12,7 +12,9 @@ export function workflowScopeEqual(a: WorkflowScope, b: WorkflowScope): boolean 
     return a.mode === b.mode && sameSet(a.sourceVersions.map(key), b.sourceVersions.map(key));
   }
   if (a.kind === "generate_content" && b.kind === "generate_content") {
-    return a.artifactType === b.artifactType && a.outputPath === b.outputPath && sameSet(a.pagePaths, b.pagePaths);
+    return a.artifactType === b.artifactType && a.outputPath === b.outputPath
+      && (a.artifactType !== "concept_map" || a.pagePaths[0] === b.pagePaths[0])
+      && sameSet(a.pagePaths, b.pagePaths);
   }
   return false;
 }

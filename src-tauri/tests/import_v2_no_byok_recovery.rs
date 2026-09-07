@@ -1,5 +1,19 @@
 #[test]
 fn import_v2_command_and_model_surfaces_do_not_expose_byok_recovery() {
+    // Only Import command registrations define this surface; Workflow
+    // implementation comments may legitimately describe BYOK execution.
+    let registrations = include_str!("../src/lib.rs")
+        .split("tauri::generate_handler![")
+        .nth(1)
+        .expect("registered command inventory")
+        .split("])")
+        .next()
+        .unwrap()
+        .lines()
+        .filter(|line| line.contains("commands::import_v2"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!registrations.is_empty());
     for (label, source) in [
         (
             "main commands",
@@ -9,7 +23,7 @@ fn import_v2_command_and_model_surfaces_do_not_expose_byok_recovery() {
             "Agent commands",
             include_str!("../src/commands/import_v2_agent_commands.rs"),
         ),
-        ("registrations", include_str!("../src/lib.rs")),
+        ("registrations", registrations.as_str()),
         ("core models", include_str!("../src/models/import_v2.rs")),
         (
             "Agent models",

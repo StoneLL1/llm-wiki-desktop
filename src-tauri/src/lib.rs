@@ -185,13 +185,22 @@ pub fn run() {
             state
                 .task_service
                 .set_event_bus(EventBus::new_tauri(handle.clone()));
+            // These runners still mix filesystem/Git calls with async Agent/BYOK
+            // waits. Keep that synchronous work off Tokio's async workers without
+            // holding a HeavyIo admission permit for the entire AI invocation.
+            // The workflow coordinator retains per-project queue/cancellation ownership.
+            fn spawn_mixed_io_workflow(future: impl std::future::Future<Output = ()> + Send + 'static) {
+                tauri::async_runtime::spawn_blocking(move || {
+                    tauri::async_runtime::block_on(future);
+                });
+            }
             let runner_handle = handle.clone();
             state
                 .workflow_service
                 .register_runner(std::sync::Arc::new(services::UpdateWikiRunner::new(
                     move |run| {
                         let app = runner_handle.clone();
-                        tauri::async_runtime::spawn(async move {
+                        spawn_mixed_io_workflow(async move {
                             let state = app.state::<app_state::AppState>();
                             let Some(root) = state.task_service.project_root_for_task(&run.task_id) else {
                                 reject_workflow_dispatch(&state, &run.task_id,
@@ -227,7 +236,7 @@ pub fn run() {
                                 }
                             };
                             let _ = identity;
-                            let access = match state.resolve_workflow_access(&context) {
+                            let access = match state.resolve_workflow_read_access(&context) {
                                 Ok(access) => access,
                                 Err(error) => {
                                     reject_workflow_dispatch(&state, &run.task_id, &error.code, error.message);
@@ -289,7 +298,7 @@ pub fn run() {
                 .register_runner(std::sync::Arc::new(services::HealthCheckRunner::new(
                     move |run| {
                         let app = health_runner_handle.clone();
-                        tauri::async_runtime::spawn(async move {
+                        spawn_mixed_io_workflow(async move {
                             let state = app.state::<app_state::AppState>();
                             let Some(root) = state.task_service.project_root_for_task(&run.task_id)
                             else {
@@ -371,7 +380,7 @@ pub fn run() {
                 .register_runner(std::sync::Arc::new(services::AgentLintRepairRunner::new(
                     move |run| {
                         let app = lint_repair_runner_handle.clone();
-                        tauri::async_runtime::spawn(async move {
+                        spawn_mixed_io_workflow(async move {
                             let state = app.state::<app_state::AppState>();
                             let Some(root) = state.task_service.project_root_for_task(&run.task_id)
                             else {
@@ -476,7 +485,7 @@ pub fn run() {
                 .register_runner(std::sync::Arc::new(services::GenerateContentRunner::new(
                     move |run| {
                         let app = generate_runner_handle.clone();
-                        tauri::async_runtime::spawn(async move {
+                        spawn_mixed_io_workflow(async move {
                             let state = app.state::<app_state::AppState>();
                             let Some(root) = state.task_service.project_root_for_task(&run.task_id)
                             else {
@@ -838,6 +847,8 @@ pub fn run() {
             commands::workflow_commands::start_workflow,
             commands::workflow_commands::list_workflow_runs,
             commands::workflow_commands::get_workflow_run,
+            commands::workflow_commands::get_workflow_history_state,
+            commands::workflow_commands::undo_workflow_update,
             commands::workflow_commands::get_workflow_file_diff,
             commands::workflow_commands::cancel_workflow_run,
             commands::workflow_commands::undo_cancel_queued_workflow,

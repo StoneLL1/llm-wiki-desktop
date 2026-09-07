@@ -59,6 +59,23 @@ export function getWorkflowFileDiff(
   return invoke<WorkflowFileDiffPage>("get_workflow_file_diff", { request });
 }
 
+export interface WorkflowUpdateHistoryState {
+  available: boolean;
+  undone: boolean;
+  recovery: boolean;
+  undoInProgress: boolean;
+  checkpointHash: string | null;
+  finalCommit: string | null;
+}
+
+export function getWorkflowHistoryState(request: WorkflowRunRequest): Promise<WorkflowUpdateHistoryState> {
+  return invoke<WorkflowUpdateHistoryState>("get_workflow_history_state", { request });
+}
+
+export function undoWorkflowUpdate(request: WorkflowRunRequest): Promise<WorkflowUpdateHistoryState> {
+  return invoke<WorkflowUpdateHistoryState>("undo_workflow_update", { request });
+}
+
 export function cancelWorkflowRun(
   request: WorkflowRunRequest,
 ): Promise<WorkflowRun> {

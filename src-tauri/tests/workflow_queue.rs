@@ -1570,7 +1570,7 @@ fn workflow_mutations_persist_one_versioned_snapshot_and_emit_scoped_events() {
         .join(".app/tasks")
         .join(format!("{}.json", run.task_id));
     let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-    assert_eq!(value["schemaVersion"], 2);
+    assert_eq!(value["schemaVersion"], 3);
     assert_eq!(value["workflow"]["currentStageId"], "prepare");
     assert_eq!(value["workflow"]["stages"][0]["progress"]["current"], 1);
     assert_eq!(

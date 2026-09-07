@@ -28,7 +28,7 @@
   "projectFactsBatch0Target": {
     "status": "green",
     "requiredExecution": "async",
-    "reviewedCommandTotal": 213,
+    "reviewedCommandTotal": 215,
     "targetBlockingSyncCeiling": 130
   },
   "projectFactsBatch4Target": {
@@ -53,12 +53,12 @@
   },
   "currentSnapshot": {
     "status": "project_facts_batch4_green",
-    "total": 213,
-    "sync": 120,
-    "async": 93,
+    "total": 215,
+    "sync": 111,
+    "async": 104,
     "importTotal": 60,
     "importSync": 0,
-    "blockingSync": 114,
+    "blockingSync": 105,
     "measuredAt": "2026-09-07",
     "sourceCommit": "CONTAINING_COMMIT"
   },
@@ -453,35 +453,35 @@
       "command": "read_markdown_file",
       "module": "file_commands",
       "classification": "BlockingRead",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
     },
     {
       "command": "write_markdown_file",
       "module": "file_commands",
       "classification": "BlockingMutation",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
     },
     {
       "command": "write_json_file",
       "module": "file_commands",
       "classification": "BlockingMutation",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
     },
     {
       "command": "get_file_hash",
       "module": "file_commands",
       "classification": "BlockingRead",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
     },
     {
       "command": "confirm_pending_action",
       "module": "file_commands",
       "classification": "BlockingMutation",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
     },
     {
@@ -495,28 +495,28 @@
       "command": "initialize_git_repository",
       "module": "git_commands",
       "classification": "BlockingMutation",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
     },
     {
       "command": "request_assessed_git_checkpoint",
       "module": "git_commands",
       "classification": "LongTaskStart",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
     },
     {
       "command": "create_git_checkpoint",
       "module": "git_commands",
       "classification": "BlockingMutation",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
     },
     {
       "command": "git_diff_markdown",
       "module": "git_commands",
       "classification": "BlockingRead",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
     },
     {
@@ -1554,6 +1554,20 @@
       "classification": "ProcessOrMedia",
       "currentExecution": "sync",
       "rationale": "Touches an external process, Agent, capability, OCR/ASR/media runner, shell integration, or application restart boundary."
+    },
+    {
+      "command": "get_workflow_history_state",
+      "module": "workflow_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "async",
+      "rationale": "Read application-owned Git history refs on the bounded blocking worker."
+    },
+    {
+      "command": "undo_workflow_update",
+      "module": "workflow_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "async",
+      "rationale": "Restore exact operation files with content comparison under current write authority on the blocking worker."
     }
   ],
   "workflowAsyncTarget": {

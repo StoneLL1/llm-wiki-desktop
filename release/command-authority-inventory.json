@@ -455,7 +455,7 @@
       "writeAuthority": "ProjectWritePermit",
       "authorityPaths": [
         {
-          "function": "confirm_pending_action",
+          "function": "confirm_pending_action_for_state",
           "authority": "ProjectAuthorityMutationPermit",
           "requiredCalls": [
             "execute_claimed_project_authority_action"
@@ -463,14 +463,16 @@
           "orderedCalls": [
             "with_current_project_authority_mutation",
             "execute_claimed_project_authority_action"
-          ]
+          ],
+          "commandDelegate": "confirm_pending_action_for_state"
         },
         {
-          "function": "confirm_pending_action",
+          "function": "confirm_pending_action_for_state",
           "authority": "ProjectWritePermit",
           "requiredCalls": [
             "execute_wiki_page_delete"
-          ]
+          ],
+          "commandDelegate": "confirm_pending_action_for_state"
         }
       ]
     },
@@ -1951,13 +1953,15 @@
       "writeAuthority": "ProjectTaskMutationPermit",
       "authorityPaths": [
         {
-          "function": "start_workflow",
-          "authority": "ProjectTaskMutationPermit"
+          "function": "start_workflow_for_state",
+          "authority": "ProjectTaskMutationPermit",
+          "commandDelegate": "start_workflow_for_state"
         },
         {
-          "function": "start_workflow",
+          "function": "start_workflow_for_state",
           "authority": "ProjectTaskMutationPermit",
-          "helper": "with_current_project_read_task_access"
+          "helper": "with_current_project_read_task_access",
+          "commandDelegate": "start_workflow_for_state"
         }
       ]
     },
@@ -2107,6 +2111,36 @@
       "classifications": ["mutation", "network"],
       "projectScoped": false,
       "writeAuthority": "AppCapabilityCoordinator"
+    },
+    {
+      "name": "get_workflow_history_state",
+      "source": "src-tauri/src/commands/workflow_commands.rs",
+      "classifications": [
+        "read",
+        "external-process"
+      ],
+      "projectScoped": true
+    },
+    {
+      "name": "undo_workflow_update",
+      "source": "src-tauri/src/commands/workflow_commands.rs",
+      "classifications": [
+        "mutation",
+        "external-process"
+      ],
+      "projectScoped": true,
+      "writeAuthority": "ProjectWritePermit",
+      "authorityPaths": [
+        {
+          "function": "undo_workflow_update",
+          "authority": "ProjectWritePermit",
+          "orderedCalls": [
+            "with_current_project_write_access",
+            "ensure_workflow_identity",
+            "undo_update_wiki_history"
+          ]
+        }
+      ]
     }
   ],
   "serviceAuthorityContracts": [
