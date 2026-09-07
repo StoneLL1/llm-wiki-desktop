@@ -638,6 +638,8 @@ pub struct WorkflowPreparation {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowHealthCoverageSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deep_status: Option<crate::models::lint::HealthDeepStatus>,
     pub mode: HealthCheckMode,
     pub scanned_pages: u64,
     pub deep_covered_pages: Option<u64>,

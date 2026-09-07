@@ -423,9 +423,41 @@ pub struct HealthCheckCoverage {
     pub not_applicable_rules: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthReportFreshness {
+    Current,
+    Stale,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthDeepStatus {
+    NotRequested,
+    Pending,
+    Completed,
+    Failed,
+}
+
+/// Actual read evidence, independent of preparation and repair authorization.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthCheckExecution {
+    pub input_fingerprint: String,
+    pub scanned_at: String,
+    pub input_hashes: BTreeMap<String, Option<String>>,
+    pub freshness: HealthReportFreshness,
+    pub deep_status: HealthDeepStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deep_error_code: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct HealthCheckReport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<HealthCheckExecution>,
     pub report_id: String,
     pub task_id: String,
     pub mode: HealthCheckMode,

@@ -79,7 +79,8 @@ pub(crate) use graph_service::GraphCachePolicy;
 pub use graph_service::GraphService;
 pub use lint_service::{
     health_source_paths, AgentLintRepairCandidate, AgentLintRepairWorkspaceDescriptor,
-    AgentLintRepairWorkspaceLease, DeepLintSnapshot, LintService, LocalLintPhase,
+    AgentLintRepairWorkspaceLease, DeepLintSnapshot, HealthLocalScan, HealthScanPhase,
+    HealthScanProgress, LintService, LocalLintPhase,
 };
 pub use llm_service::LlmService;
 pub use project_service::{assess_project_folder, ProjectAssessmentService, ProjectService};

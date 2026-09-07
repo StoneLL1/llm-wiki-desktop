@@ -855,6 +855,23 @@ describe("useWorkflowsController", () => {
     expect(useWorkflowStore.getState().selectedTaskId).toBe("new-attempt");
   });
 
+  it("reprepares complete Health scope before cancellation and waits for renewed sharing approval", async () => {
+    const waiting: WorkflowRun = { ...run, revision: "2", displayStatus: "waiting_for_confirmation",
+      scope: { kind: "health_check", mode: "complete" }, route: { kind: "byok", provider: "open_ai", model: "test", routeRevision: "1" },
+      pendingAction: { id: "health-review", actionType: "review_scope", riskLevel: "high", affectedPaths: ["wiki/新页.md"], candidate: null, expiresAt: null, checkpointHash: null } };
+    const fresh: WorkflowPreparation = { ...preparation, route: waiting.route, scope: waiting.scope };
+    mocks.prepare.mockResolvedValue(fresh);
+    mocks.cancel.mockResolvedValue({ ...waiting, revision: "3", displayStatus: "cancelled", pendingAction: null });
+    const { result } = renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
+    await act(() => result.current.adjustAndPrepare(waiting));
+    expect(mocks.prepare).toHaveBeenCalledTimes(1);
+    expect(mocks.prepare).toHaveBeenCalledWith(expect.objectContaining({ scope: waiting.scope, routeSelection: { kind: "byok", provider: "open_ai" } }));
+    expect(mocks.prepare.mock.invocationCallOrder[0]).toBeLessThan(mocks.cancel.mock.invocationCallOrder[0]);
+    expect(mocks.start).not.toHaveBeenCalled();
+    expect(useWorkflowStore.getState()).toMatchObject({ preparation: fresh, retryOfTaskId: waiting.taskId, surface: "preparation" });
+  });
+
   it("leaves the old scope-review task intact when preparation fails before cancellation", async () => {
     const waiting: WorkflowRun = { ...run, kind: "update_wiki", revision: "2", displayStatus: "waiting_for_confirmation",
       scope: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [{ sourceId: "source-a", versionId: "old" }] },

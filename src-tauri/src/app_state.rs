@@ -730,6 +730,14 @@ impl AppState {
         self.with_workflow_access(context, Ok)
     }
 
+    /// Read-only Health and task metadata need authority, never Git status.
+    pub(crate) fn resolve_workflow_read_access(
+        &self,
+        context: &ProjectContext,
+    ) -> Result<crate::services::WorkflowAccessSnapshot, BackendError> {
+        self.with_workflow_read_access(context, Ok)
+    }
+
     /// External AI and Agent execution is an explicit privacy boundary. A
     /// registry entry alone is never sufficient: the project must retain a
     /// current trusted authority after layout, identity, and health are
@@ -774,7 +782,12 @@ impl AppState {
         context: &ProjectContext,
         run: &crate::models::workflow::WorkflowRun,
     ) -> Result<crate::services::WorkflowExternalLaunchPermit, BackendError> {
-        self.with_workflow_access(context, |access| {
+        let inspect_git = run.kind != crate::models::workflow::WorkflowKind::HealthCheck
+            || matches!(
+                run.operation,
+                crate::models::workflow::WorkflowOperation::AgentLintRepair { .. }
+            );
+        self.with_workflow_access_mode(context, inspect_git, |access| {
             let current = self
                 .task_service
                 .get_workflow_run(&run.task_id)
@@ -857,7 +870,7 @@ impl AppState {
         context: &ProjectContext,
         run: &crate::models::workflow::WorkflowRun,
     ) -> Result<Option<crate::services::WorkflowExternalLaunchPermit>, BackendError> {
-        self.with_workflow_access(context, |access| {
+        self.with_workflow_read_access(context, |access| {
             let current = self
                 .task_service
                 .get_workflow_run(&run.task_id)
@@ -1009,6 +1022,25 @@ impl AppState {
         asserted_root: &str,
         operation: impl FnOnce(&ProjectTaskMutationPermit<'_>) -> Result<T, BackendError>,
     ) -> Result<T, BackendError> {
+        self.with_current_project_task_access_mode(project_id, asserted_root, true, operation)
+    }
+
+    pub(crate) fn with_current_project_read_task_access<T>(
+        &self,
+        project_id: &str,
+        asserted_root: &str,
+        operation: impl FnOnce(&ProjectTaskMutationPermit<'_>) -> Result<T, BackendError>,
+    ) -> Result<T, BackendError> {
+        self.with_current_project_task_access_mode(project_id, asserted_root, false, operation)
+    }
+
+    fn with_current_project_task_access_mode<T>(
+        &self,
+        project_id: &str,
+        asserted_root: &str,
+        inspect_git: bool,
+        operation: impl FnOnce(&ProjectTaskMutationPermit<'_>) -> Result<T, BackendError>,
+    ) -> Result<T, BackendError> {
         let transition_lane = self
             .project_trust_transition
             .lane(Path::new(asserted_root))?;
@@ -1019,7 +1051,7 @@ impl AppState {
             .project_registry
             .resolve(project_id, Path::new(asserted_root))
             .and_then(ProjectContext::with_resolved_layout)?;
-        let workflow_access = self.resolve_workflow_access_locked(&context)?;
+        let workflow_access = self.resolve_workflow_access_mode_locked(&context, inspect_git)?;
         if workflow_access.persistence == WorkflowPersistenceMode::MemoryOnly {
             self.task_service
                 .rebind_workflows_for_root(&context.root, None)
@@ -1260,17 +1292,42 @@ impl AppState {
         context: &ProjectContext,
         operation: impl FnOnce(crate::services::WorkflowAccessSnapshot) -> Result<T, BackendError>,
     ) -> Result<T, BackendError> {
+        self.with_workflow_access_mode(context, true, operation)
+    }
+
+    pub(crate) fn with_workflow_read_access<T>(
+        &self,
+        context: &ProjectContext,
+        operation: impl FnOnce(crate::services::WorkflowAccessSnapshot) -> Result<T, BackendError>,
+    ) -> Result<T, BackendError> {
+        self.with_workflow_access_mode(context, false, operation)
+    }
+
+    fn with_workflow_access_mode<T>(
+        &self,
+        context: &ProjectContext,
+        inspect_git: bool,
+        operation: impl FnOnce(crate::services::WorkflowAccessSnapshot) -> Result<T, BackendError>,
+    ) -> Result<T, BackendError> {
         let transition_lane = self.project_trust_transition.lane(&context.root)?;
         let _transition = transition_lane
             .lock()
             .map_err(|_| trust_transition_locked())?;
-        let access = self.resolve_workflow_access_locked(context)?;
+        let access = self.resolve_workflow_access_mode_locked(context, inspect_git)?;
         operation(access)
     }
 
     fn resolve_workflow_access_locked(
         &self,
         context: &ProjectContext,
+    ) -> Result<crate::services::WorkflowAccessSnapshot, BackendError> {
+        self.resolve_workflow_access_mode_locked(context, true)
+    }
+
+    fn resolve_workflow_access_mode_locked(
+        &self,
+        context: &ProjectContext,
+        inspect_git: bool,
     ) -> Result<crate::services::WorkflowAccessSnapshot, BackendError> {
         let resolved = self.resolve_external_ai_authority_locked(context)?;
         let authority = resolved.authority;
@@ -1283,18 +1340,30 @@ impl AppState {
             && self
                 .project_service
                 .has_writable_task_state_root(&authority.context);
-        let git = self.git_service.repository_status(&authority.context)?;
-        let content_changes = if git.has_changes {
-            let runtime_paths = crate::services::WorkflowService::runtime_metadata_paths(
-                &authority.context,
-                &self.task_service,
-            );
-            self.git_service
-                .changed_paths(&authority.context)?
-                .iter()
-                .any(|path| !runtime_paths.contains(path))
+        let git_state = if inspect_git {
+            let git = self.git_service.repository_status(&authority.context)?;
+            let content_changes = if git.has_changes {
+                let runtime_paths = crate::services::WorkflowService::runtime_metadata_paths(
+                    &authority.context,
+                    &self.task_service,
+                );
+                self.git_service
+                    .changed_paths(&authority.context)?
+                    .iter()
+                    .any(|path| !runtime_paths.contains(path))
+            } else {
+                false
+            };
+            if !git.is_repository {
+                WorkflowGitState::Unavailable
+            } else if content_changes {
+                WorkflowGitState::Dirty
+            } else {
+                WorkflowGitState::Clean
+            }
         } else {
-            false
+            // This access view makes no claim about repository availability.
+            WorkflowGitState::Unavailable
         };
         let access = crate::services::WorkflowAccessSnapshot {
             trust: if trusted {
@@ -1312,13 +1381,7 @@ impl AppState {
             } else {
                 WorkflowPersistenceMode::MemoryOnly
             },
-            git_state: if !git.is_repository {
-                WorkflowGitState::Unavailable
-            } else if content_changes {
-                WorkflowGitState::Dirty
-            } else {
-                WorkflowGitState::Clean
-            },
+            git_state,
             authority_revision: authority.authority_revision,
         };
         if let Some(registered) = self
@@ -1328,7 +1391,13 @@ impl AppState {
             .map_err(|_| registry_locked())?
             .get_mut(&context.project_id)
         {
-            registered.workflow_access = Some(access.clone());
+            let mut observed = access.clone();
+            if !inspect_git {
+                if let Some(previous) = registered.workflow_access.as_ref() {
+                    observed.git_state = previous.git_state.clone();
+                }
+            }
+            registered.workflow_access = Some(observed);
         }
         Ok(access)
     }
@@ -3099,6 +3168,98 @@ mod project_registry_tests {
     }
 
     #[test]
+    fn health_task_and_report_authority_never_probe_git() {
+        let (mut state, config) = state_with_temp_config("health-no-git-config");
+        state.settings_service = crate::services::SettingsService::with_config_dir(config.clone());
+        fs::write(config.join("settings.json"), "invalid JSON").unwrap();
+        let project = strict_native_project("health-no-git-中文");
+        // Any repository probe would start a subprocess against this broken
+        // marker; Health metadata and report writes have no Git dependency.
+        fs::create_dir(project.join(".git")).unwrap();
+        let context = state
+            .project_registry
+            .register_trusted_native("project-a", &project)
+            .unwrap();
+        GitService::reset_process_attempts_for_test();
+        let access = state.resolve_workflow_read_access(&context).unwrap();
+        assert_eq!(access.persistence, WorkflowPersistenceMode::Persistent);
+        let preparation = state
+            .workflow_service
+            .prepare(
+                &crate::services::WorkflowPreparationEnvironment {
+                    context: &context,
+                    access,
+                    settings_service: &state.settings_service,
+                    secret_service: &state.secret_service,
+                    agent_service: &state.agent_service,
+                },
+                crate::services::PrepareWorkflowInput {
+                    kind: WorkflowKind::HealthCheck,
+                    scope: None,
+                    route_selection: None,
+                },
+            )
+            .unwrap();
+        state
+            .workflow_service
+            .register_runner(std::sync::Arc::new(
+                crate::services::HealthCheckRunner::new(|_| {}),
+            ))
+            .unwrap();
+        let outcome = state
+            .with_current_project_read_task_access(
+                "project-a",
+                project.to_str().unwrap(),
+                |permit| {
+                    state.workflow_service.enqueue_with_acknowledgements(
+                        permit,
+                        &state.settings_service,
+                        &state.secret_service,
+                        &state.agent_service,
+                        &state.task_service,
+                        &preparation.preparation_id,
+                        &preparation.preparation_revision,
+                        false,
+                        false,
+                        None,
+                    )
+                },
+            )
+            .unwrap();
+        let WorkflowStartOutcome::Created { run } = outcome else {
+            panic!("new Health run")
+        };
+        assert_eq!(run.persistence, WorkflowPersistenceMode::Persistent);
+        assert!(state
+            .publish_workflow_persistent_report(&context, &run)
+            .unwrap()
+            .is_some());
+        state
+            .with_current_project_read_task_access(
+                "project-a",
+                project.to_str().unwrap(),
+                |_permit| {
+                    state
+                        .workflow_service
+                        .coordinator
+                        .cancel(&state.task_service, &run.task_id)
+                        .map_err(|message| BackendError::new("TEST_CANCEL", message, false, false))
+                },
+            )
+            .unwrap();
+        assert_eq!(GitService::process_attempts_for_test(), 0);
+        state.project_service.force_read_only_for_test(&project);
+        let read_only = state.resolve_workflow_read_access(&context).unwrap();
+        assert_eq!(read_only.persistence, WorkflowPersistenceMode::MemoryOnly);
+        assert_eq!(
+            read_only.filesystem_access,
+            WorkflowFilesystemAccess::ReadOnly
+        );
+        assert_eq!(GitService::process_attempts_for_test(), 0);
+        cleanup_paths(&[&project, &config]);
+    }
+
+    #[test]
     fn external_ai_access_assesses_health_once_without_starting_git() {
         let (state, config) = state_with_temp_config("external-ai-minimal-config");
         let project = strict_native_project("external-ai-minimal");
@@ -3445,6 +3606,157 @@ mod project_registry_tests {
             WorkflowGitState::Dirty
         );
         fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn workflow_access_ignores_only_known_health_report_metadata() {
+        use crate::models::git::CheckpointPurpose;
+        for compatible in [false, true] {
+            let (state, config) = state_with_temp_config("health-checkpoint-metadata");
+            let project = if compatible {
+                compatible_project("health-checkpoint-兼容")
+            } else {
+                strict_native_project("health-checkpoint-原生")
+            };
+            let context = if compatible {
+                let restricted = state
+                    .project_registry
+                    .register("project-a", &project)
+                    .unwrap();
+                state
+                    .project_service
+                    .enable_compatible_guidance(&restricted, ProjectTemplate::General)
+                    .unwrap();
+                state
+                    .grant_compatible_project_trust("project-a", &project)
+                    .unwrap()
+            } else {
+                state
+                    .project_registry
+                    .register_trusted_native("project-a", &project)
+                    .unwrap()
+            };
+            state
+                .git_service
+                .initialize_repository(&context, "initial")
+                .unwrap();
+            let outcome = state
+                .workflow_service
+                .coordinator
+                .enqueue(
+                    &state.task_service,
+                    EnqueueWorkflow {
+                        project_id: context.project_id.clone(),
+                        project_root: project.clone(),
+                        task_state_root: Some(
+                            project.join(context.layout.task_state_root.as_deref().unwrap()),
+                        ),
+                        title: "Health Check".into(),
+                        kind: WorkflowKind::HealthCheck,
+                        scope: WorkflowScope::HealthCheck {
+                            mode: HealthCheckMode::LocalQuick,
+                        },
+                        route: Some(WorkflowRoute::Local {
+                            route_revision: "local-v1".into(),
+                        }),
+                        baseline_fingerprint: "current-at-start".into(),
+                        execution_options: WorkflowExecutionOptions {
+                            preparation_revision: "health-checkpoint-metadata".into(),
+                            ..Default::default()
+                        },
+                        stages: workflow_stages(&WorkflowKind::HealthCheck),
+                        retry: None,
+                    },
+                )
+                .unwrap();
+            let WorkflowStartOutcome::Created { run } = outcome else {
+                panic!("new Health owner")
+            };
+            let report_root = context.layout.lint_report_root.as_deref().unwrap();
+            let report_path = format!("{report_root}/{}.json", run.task_id);
+            let history_path = format!(
+                "{}/lint-history.json",
+                context.layout.app_state_root.as_deref().unwrap()
+            );
+            fs::create_dir_all(project.join(report_root)).unwrap();
+            fs::write(project.join(&report_path), "{}\n").unwrap();
+            fs::write(project.join(&history_path), "{}\n").unwrap();
+            assert_eq!(
+                state.resolve_workflow_access(&context).unwrap().git_state,
+                WorkflowGitState::Clean
+            );
+            let runtime_paths = crate::services::WorkflowService::runtime_metadata_paths(
+                &context,
+                &state.task_service,
+            );
+            let checkpoint = state
+                .git_service
+                .clean_head_checkpoint_allowing_paths(
+                    &context,
+                    CheckpointPurpose::HighRiskOperation,
+                    "Before Update Wiki workflow",
+                    &runtime_paths,
+                )
+                .unwrap();
+            assert!(!checkpoint.created);
+            for path in [&report_path, &history_path] {
+                assert!(GitService::file_at_checkpoint(
+                    &context,
+                    checkpoint.commit_hash.as_deref().unwrap(),
+                    path
+                )
+                .unwrap()
+                .is_none());
+            }
+            // Merely residing in the report directory is not task ownership.
+            let unknown = project.join(report_root).join("unknown.json");
+            fs::write(&unknown, "{}\n").unwrap();
+            assert_eq!(
+                state.resolve_workflow_access(&context).unwrap().git_state,
+                WorkflowGitState::Dirty
+            );
+            assert_eq!(
+                state
+                    .git_service
+                    .clean_head_checkpoint_allowing_paths(
+                        &context,
+                        CheckpointPurpose::HighRiskOperation,
+                        "Before Update Wiki workflow",
+                        &runtime_paths,
+                    )
+                    .unwrap_err()
+                    .code,
+                "GIT_WORKTREE_DIRTY"
+            );
+            fs::remove_file(unknown).unwrap();
+            fs::write(
+                project.join(if compatible {
+                    "index.md"
+                } else {
+                    "wiki/index.md"
+                }),
+                "# User edit\n",
+            )
+            .unwrap();
+            assert_eq!(
+                state.resolve_workflow_access(&context).unwrap().git_state,
+                WorkflowGitState::Dirty
+            );
+            assert_eq!(
+                state
+                    .git_service
+                    .clean_head_checkpoint_allowing_paths(
+                        &context,
+                        CheckpointPurpose::HighRiskOperation,
+                        "Before Update Wiki workflow",
+                        &runtime_paths,
+                    )
+                    .unwrap_err()
+                    .code,
+                "GIT_WORKTREE_DIRTY"
+            );
+            cleanup_paths(&[&project, &config]);
+        }
     }
 
     #[test]

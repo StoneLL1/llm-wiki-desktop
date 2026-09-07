@@ -54,11 +54,11 @@
   "currentSnapshot": {
     "status": "project_facts_batch4_green",
     "total": 213,
-    "sync": 121,
-    "async": 92,
+    "sync": 120,
+    "async": 93,
     "importTotal": 60,
     "importSync": 0,
-    "blockingSync": 115,
+    "blockingSync": 114,
     "measuredAt": "2026-09-07",
     "sourceCommit": "CONTAINING_COMMIT"
   },
@@ -1461,7 +1461,7 @@
       "command": "read_lint_history_report",
       "module": "lint_commands",
       "classification": "BlockingRead",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
     },
     {

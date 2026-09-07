@@ -1,5 +1,6 @@
 mod deep;
 mod fixes;
+mod health;
 mod ignores;
 mod repair;
 mod reports;
@@ -15,6 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard, RwLock};
 
 pub use deep::DeepLintSnapshot;
+pub use health::{HealthLocalScan, HealthScanPhase, HealthScanProgress};
 pub use repair::{
     AgentLintRepairCandidate, AgentLintRepairWorkspaceDescriptor, AgentLintRepairWorkspaceLease,
 };

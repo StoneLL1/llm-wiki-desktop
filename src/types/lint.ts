@@ -201,7 +201,18 @@ export interface HealthCheckCoverage {
   notApplicableRules: string[];
 }
 
+export type HealthCheckDeepStatus = "not_requested" | "pending" | "completed" | "failed";
+
+export interface HealthCheckExecution {
+  inputFingerprint: string;
+  scannedAt: string;
+  freshness: "current" | "stale" | "unknown";
+  deepStatus: HealthCheckDeepStatus;
+  deepErrorCode?: string | null;
+}
+
 export interface HealthCheckReport {
+  execution?: HealthCheckExecution;
   reportId: string;
   taskId: string;
   mode: HealthCheckMode;
@@ -238,6 +249,7 @@ export function isAgentLintRepairEligible(
     || report.mode !== "complete"
     || !report.persistent
     || report.route.kind !== "agent"
+    || (report.execution !== undefined && (report.execution.freshness !== "current" || report.execution.deepStatus !== "completed"))
     || issue.source !== "agent"
     || !(report.findingOrigins[issue.id] ?? []).includes("agent")
   ) {

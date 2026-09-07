@@ -189,6 +189,29 @@ impl LintService {
         }
     }
 
+    /// Viewing a report evaluates current input evidence without changing the
+    /// persisted attestation or granting repair authority.
+    pub fn read_lint_history_report_for_view(
+        &self,
+        context: &ProjectContext,
+        id: &str,
+    ) -> Result<PersistedLintReport, BackendError> {
+        let mut persisted = self.read_lint_history_report(context, id)?;
+        if let Some(execution) = persisted
+            .health_check_report
+            .as_mut()
+            .and_then(|report| report.execution.as_mut())
+        {
+            execution.freshness =
+                match self.verify_health_inputs(context, &execution.input_hashes, |_| Ok(())) {
+                    Ok(true) => crate::models::lint::HealthReportFreshness::Current,
+                    Ok(false) => crate::models::lint::HealthReportFreshness::Stale,
+                    Err(_) => crate::models::lint::HealthReportFreshness::Unknown,
+                };
+        }
+        Ok(persisted)
+    }
+
     /// Return the current Health report owned by the existing workflow
     /// authority. Memory-only reports are process-local; persistent reports
     /// are read from the atomic report file so repair preparation still works
@@ -266,7 +289,10 @@ impl LintService {
             true => owner.persistence == WorkflowPersistenceMode::Persistent,
             false => owner.persistence == WorkflowPersistenceMode::MemoryOnly,
         };
-        if report.task_id != owner.task_id
+        if report.execution.as_ref().is_some_and(|execution| {
+            execution.freshness != crate::models::lint::HealthReportFreshness::Current
+                || execution.deep_status != crate::models::lint::HealthDeepStatus::Completed
+        }) || report.task_id != owner.task_id
             || owner.project_id != project_id
             || owner.kind != WorkflowKind::HealthCheck
             || owner.operation != WorkflowOperation::BuiltIn
@@ -360,10 +386,14 @@ impl LintService {
             #[cfg(unix)]
             roots.entry(project_key.clone()).or_insert(project_anchor);
             let reports = memory.entry(project_key.clone()).or_default();
-            reports.insert(report.report_id.clone(), persisted);
+            let previous = reports.insert(report.report_id.clone(), persisted);
             trim_memory_reports(reports);
             if let Err(error) = validate() {
-                reports.remove(&report.report_id);
+                if let Some(previous) = previous {
+                    reports.insert(report.report_id.clone(), previous);
+                } else {
+                    reports.remove(&report.report_id);
+                }
                 let remove_namespace = reports.is_empty();
                 if remove_namespace {
                     memory.remove(&project_key);
@@ -393,15 +423,33 @@ impl LintService {
                 true,
             )
         })?;
+        let report_path = format!("{LINT_REPORTS_DIR}/{}.json", report.report_id);
+        let previous = if self.file_store.exists(context, &report_path) {
+            Some(
+                self.file_store
+                    .read_json::<PersistedLintReport>(context, &report_path)?,
+            )
+        } else {
+            None
+        };
+        let previous_history = self.load_history(context)?;
         self.file_store.ensure_dir(context, LINT_REPORTS_DIR)?;
-        self.file_store.write_json_atomic(
-            context,
-            &format!("{LINT_REPORTS_DIR}/{}.json", report.report_id),
-            &persisted,
-        )?;
-        self.record_history_entry_locked(context, entry.clone())?;
-        if let Err(error) = validate() {
-            self.rollback_health_check_report_locked(context, &report.report_id)?;
+        self.file_store
+            .write_json_atomic(context, &report_path, &persisted)?;
+        let committed = self
+            .record_history_entry_locked(context, entry.clone())
+            .and_then(|_| validate());
+        if let Err(error) = committed {
+            // A failed deep-result update must not erase the already durable
+            // local portion. Restore both prior metadata objects under the lock.
+            if let Some(previous) = previous {
+                self.file_store
+                    .write_json_atomic(context, &report_path, &previous)?;
+                self.file_store
+                    .write_json_atomic(context, LINT_HISTORY_PATH, &previous_history)?;
+            } else {
+                self.rollback_health_check_report_locked(context, &report.report_id)?;
+            }
             return Err(error);
         }
         Ok(entry)
@@ -756,6 +804,7 @@ mod tests {
 
     fn health_report(id: &str, persistent: bool, generated_at: String) -> HealthCheckReport {
         HealthCheckReport {
+            execution: None,
             report_id: id.into(),
             task_id: id.into(),
             mode: HealthCheckMode::LocalQuick,
@@ -1239,6 +1288,48 @@ mod tests {
             .entries
             .is_empty());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_health_report_update_preserves_the_completed_local_portion() {
+        for persistent in [false, true] {
+            let (context, root) = tmp_context("health-local-retained");
+            let service = LintService::default();
+            let original =
+                health_report("local-retained", persistent, "2026-09-07T00:00:00Z".into());
+            service
+                .store_health_check_report(&context, &original)
+                .unwrap();
+            let mut updated = original.clone();
+            updated.error_count = 99;
+            let calls = Cell::new(0);
+            service
+                .store_health_check_report_guarded(&context, &updated, || {
+                    calls.set(calls.get() + 1);
+                    if calls.get() == 2 {
+                        Err(BackendError::new(
+                            "WORKFLOW_CANCELLED",
+                            "Cancelled",
+                            true,
+                            false,
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                })
+                .unwrap_err();
+            assert_eq!(
+                service
+                    .read_current_health_report(&context, "local-retained")
+                    .unwrap(),
+                original
+            );
+            assert_eq!(
+                service.list_lint_history(&context).unwrap().entries[0].error_count,
+                0
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[cfg(unix)]

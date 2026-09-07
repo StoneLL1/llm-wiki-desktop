@@ -14,6 +14,7 @@ import { isAgentLintRepairEligible } from "../../types/lint";
 import type { LintIssue, LintIssueType } from "../../types/lint";
 import { AgentLintRepairPanel } from "./AgentLintRepairPanel";
 import { LintBatchConfirmDialog } from "./LintBatchConfirmDialog";
+import { HealthCheckReportSummary } from "./HealthCheckReportSummary";
 import { LintHistoryList } from "./LintHistoryList";
 import { LintIssueDetails } from "./LintIssueDetails";
 import { LintIssueList } from "./LintIssueList";
@@ -465,6 +466,8 @@ export function LintView() {
             </button>
           </div>
         ) : null}
+
+        {healthReport ? <HealthCheckReportSummary report={healthReport} /> : null}
 
         <AgentLintRepairPanel
           report={healthReport}

@@ -1516,6 +1516,29 @@ describe("Workflows overview", () => {
     expect(screen.getByText("wiki/非常长的路径/页面.md")).toHaveAttribute("title", "wiki/非常长的路径/页面.md");
   });
 
+  it("keeps failed deep-check local results openable without recommending export", () => {
+    const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
+    const failed = workflowRun({ taskId: "failed-local-retained", kind: "health_check", displayStatus: "failed", result: {
+      kind: "health_check", reportId: "retained-local", persistent: true, errorCount: 0, warningCount: 1, infoCount: 0,
+      coverage: { mode: "complete", scannedPages: 65, deepStatus: "failed", deepCoveredPages: null, deepTruncated: false },
+    } });
+    render(<WorkflowTaskDetail run={failed} controller={controller} queuedRuns={[]} onOpenLogs={vi.fn()} />);
+    expect(screen.getByText("workflows.result.health_check.localRetained")).toBeInTheDocument();
+    expect(screen.getByText("lint.healthReport.deep.failed")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "workflows.action.prepareNext" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.openLintResults" }));
+    expect(controller.openResult).toHaveBeenCalledWith(failed);
+  });
+
+  it("shows Health page counts without stage-derived overall progress", () => {
+    render(<WorkflowPipeline kind="health_check" currentStageId="local_check" stages={[
+      { id: "local_check", ordinal: 2, status: "running", labelKey: "stage.local", startedAt: null, completedAt: null, currentItem: "wiki/主题.md", progress: { current: 16, total: 65 }, decision: null },
+    ]} />);
+    expect(screen.queryByRole("progressbar", { name: "workflows.pipeline.overallProgress" })).not.toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "stage.local" })).toHaveAttribute("value", "16");
+    expect(screen.getByRole("progressbar", { name: "stage.local" })).toHaveAttribute("max", "65");
+  });
+
   it("disables the recommended preparation action while its own request is pending", () => {
     const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
     const completed = {

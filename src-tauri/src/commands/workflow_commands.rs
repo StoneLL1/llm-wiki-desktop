@@ -52,7 +52,11 @@ pub async fn prepare_workflow(
         let state = app.state::<AppState>();
         let context =
             state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-        let access = state.resolve_workflow_access(&context)?;
+        let access = if request.kind == crate::models::workflow::WorkflowKind::HealthCheck {
+            state.resolve_workflow_read_access(&context)?
+        } else {
+            state.resolve_workflow_access(&context)?
+        };
         state.workflow_service.prepare(
             &WorkflowPreparationEnvironment {
                 context: &context,
@@ -78,24 +82,41 @@ pub async fn start_workflow(
 ) -> Result<WorkflowStartOutcome, BackendError> {
     run_blocking(app, BlockingWorkClass::HeavyIo, move |app| {
         let state = app.state::<AppState>();
-        let outcome = state.with_current_project_task_access(
-            &request.project_id,
-            &request.project_root_path,
-            |permit| {
-                state.workflow_service.enqueue_with_acknowledgements(
-                    permit,
-                    &state.settings_service,
-                    &state.secret_service,
-                    &state.agent_service,
-                    &state.task_service,
-                    &request.preparation_id,
-                    &request.preparation_revision,
-                    request.acknowledge_restricted_content,
-                    request.acknowledge_remote_provider,
-                    request.retry_of_task_id.as_deref(),
-                )
-            },
+        let context =
+            state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+        let kind = state.workflow_service.preparation.kind_for_start(
+            &state.task_service,
+            &context,
+            &request.preparation_id,
+            &request.preparation_revision,
         )?;
+        let enqueue = |permit: &crate::app_state::ProjectTaskMutationPermit<'_>| {
+            state.workflow_service.enqueue_with_acknowledgements(
+                permit,
+                &state.settings_service,
+                &state.secret_service,
+                &state.agent_service,
+                &state.task_service,
+                &request.preparation_id,
+                &request.preparation_revision,
+                request.acknowledge_restricted_content,
+                request.acknowledge_remote_provider,
+                request.retry_of_task_id.as_deref(),
+            )
+        };
+        let outcome = if kind == crate::models::workflow::WorkflowKind::HealthCheck {
+            state.with_current_project_read_task_access(
+                &request.project_id,
+                &request.project_root_path,
+                enqueue,
+            )?
+        } else {
+            state.with_current_project_task_access(
+                &request.project_id,
+                &request.project_root_path,
+                enqueue,
+            )?
+        };
         if let WorkflowStartOutcome::Created { run } = &outcome {
             if run.display_status == WorkflowDisplayStatus::Running {
                 state.workflow_service.dispatch_claimed_run_with_settings(
@@ -151,7 +172,7 @@ pub async fn cancel_workflow_run(
     run_blocking(app, BlockingWorkClass::MetadataIo, move |app| {
         let state = app.state::<AppState>();
         require_workflow_project(&state, &request)?;
-        let (run, next) = state.with_current_project_task_access(
+        let (run, next) = state.with_current_project_read_task_access(
             &request.project_id,
             &request.project_root_path,
             |permit| {
@@ -184,6 +205,19 @@ pub async fn undo_cancel_queued_workflow(
             before.operation,
             crate::models::workflow::WorkflowOperation::AgentLintRepair { .. }
         );
+        if is_builtin_health(&before) {
+            let (run, claimed) = state.with_current_project_read_task_access(
+                &request.project_id,
+                &request.project_root_path,
+                |_permit| {
+                    state.workflow_service.coordinator
+                        .undo_cancel(&state.task_service, &request.task_id)
+                        .map_err(|message| workflow_error("WORKFLOW_UNDO_CANCEL_FAILED", message))
+                },
+            )?;
+            dispatch_next(&state, claimed)?;
+            return Ok(run);
+        }
         let (run, claimed) = state.with_current_project_write_access(
             &request.project_id,
             &request.project_root_path,
@@ -271,6 +305,27 @@ pub async fn reorder_queued_workflow(
                 },
             )?;
         }
+        if is_builtin_health(&workflow_run(&state, &task_request.task_id)?) {
+            let runs = state.with_current_project_read_task_access(
+                &task_request.project_id,
+                &task_request.project_root_path,
+                |_permit| {
+                    state
+                        .workflow_service
+                        .coordinator
+                        .reorder_queued(
+                            &state.task_service,
+                            &task_request.task_id,
+                            request.before_task_id.as_deref(),
+                        )
+                        .map_err(|message| workflow_error("WORKFLOW_REORDER_FAILED", message))
+                },
+            )?;
+            return Ok(WorkflowRunPage {
+                runs,
+                next_cursor: None,
+            });
+        }
         let runs = state.with_current_project_write_access(
             &task_request.project_id,
             &task_request.project_root_path,
@@ -316,6 +371,42 @@ pub(crate) fn retry_workflow_for_state(
         original.operation,
         crate::models::workflow::WorkflowOperation::AgentLintRepair { .. }
     );
+    if is_builtin_health(&original) {
+        let outcome = state.with_current_project_read_task_access(
+            &request.project_id,
+            &request.project_root_path,
+            |permit| {
+                let current = permit.context();
+                let replay = revalidate_workflow_replay_with_access(
+                    state,
+                    current,
+                    &original,
+                    permit.workflow_access(),
+                    super::lint_commands::AgentLintRepairReplayIntent::Retry,
+                )?;
+                replay.eligibility?;
+                state
+                    .workflow_service
+                    .coordinator
+                    .retry(
+                        &state.task_service,
+                        &request.task_id,
+                        current.project_id.clone(),
+                        current.root.clone(),
+                        replay.persistence.task_state_root,
+                    )
+                    .map_err(|message| workflow_error("WORKFLOW_RETRY_FAILED", message))
+            },
+        )?;
+        if let WorkflowStartOutcome::Created { run } = &outcome {
+            state.workflow_service.dispatch_claimed_run_with_settings(
+                &state.task_service,
+                &state.settings_service,
+                run,
+            )?;
+        }
+        return Ok(outcome);
+    }
     let (outcome, released_claim) = state.with_current_project_write_access(
         &request.project_id,
         &request.project_root_path,
@@ -410,6 +501,14 @@ pub(crate) fn retry_workflow_for_state(
         )?;
     }
     Ok(outcome)
+}
+
+fn is_builtin_health(run: &WorkflowRun) -> bool {
+    run.kind == crate::models::workflow::WorkflowKind::HealthCheck
+        && matches!(
+            run.operation,
+            crate::models::workflow::WorkflowOperation::BuiltIn
+        )
 }
 
 pub(crate) struct WorkflowReplayValidation {

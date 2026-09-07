@@ -283,11 +283,23 @@ impl RequestEvaluationSnapshot {
             persistence: environment.access.persistence.clone(),
             git_state: environment.access.git_state.clone(),
         };
-        #[cfg(test)]
-        SOURCE_INVENTORIES.with(|count| count.set(count.get() + 1));
+        let health = input.is_some_and(|input| input.kind == WorkflowKind::HealthCheck);
+        let local_only = health
+            && !matches!(
+                input.and_then(|input| input.scope.as_ref()),
+                Some(WorkflowScope::HealthCheck {
+                    mode: HealthCheckMode::Complete
+                })
+            );
         #[cfg(test)]
         let inventory_started = std::time::Instant::now();
-        let source_versions = CompileService::list_source_versions(environment.context)?;
+        let source_versions = if health {
+            Vec::new()
+        } else {
+            #[cfg(test)]
+            SOURCE_INVENTORIES.with(|count| count.set(count.get() + 1));
+            CompileService::list_source_versions(environment.context)?
+        };
         let resolved_sources = if source_versions.is_empty() {
             Vec::new()
         } else {
@@ -301,12 +313,6 @@ impl RequestEvaluationSnapshot {
         let route_started = std::time::Instant::now();
         #[cfg(test)]
         let agent_before = AGENT_NANOS.get();
-        let local_only = matches!(
-            input.and_then(|input| input.scope.as_ref()),
-            Some(WorkflowScope::HealthCheck {
-                mode: HealthCheckMode::LocalQuick
-            })
-        );
         let route_catalog = if local_only {
             RouteCatalog {
                 default_agent: None,
@@ -414,13 +420,15 @@ impl WorkflowPreparationService {
             .into_iter()
             .find(|entry| entry.kind == input.kind);
         let remembered_input = previous.as_ref().and_then(|entry| {
-            input.scope.is_none().then(|| PrepareWorkflowInput {
-                kind: input.kind.clone(),
-                scope: Some(entry.scope.clone()),
-                route_selection: input
-                    .route_selection
-                    .clone()
-                    .or_else(|| route_selection(&entry.route)),
+            (input.scope.is_none() && input.kind != WorkflowKind::HealthCheck).then(|| {
+                PrepareWorkflowInput {
+                    kind: input.kind.clone(),
+                    scope: Some(entry.scope.clone()),
+                    route_selection: input
+                        .route_selection
+                        .clone()
+                        .or_else(|| route_selection(&entry.route)),
+                }
             })
         });
         let mut applied_remembered_input = None;
@@ -515,6 +523,48 @@ impl WorkflowPreparationService {
             return Ok(PreparationStartLookup::Prepared);
         }
         Ok(PreparationStartLookup::Missing)
+    }
+
+    /// Select the existing authority path without opening route settings or
+    /// inspecting project content. Enqueue still validates identity and token.
+    pub(crate) fn kind_for_start(
+        &self,
+        tasks: &crate::tasks::TaskService,
+        context: &ProjectContext,
+        preparation_id: &str,
+        preparation_revision: &str,
+    ) -> Result<WorkflowKind, BackendError> {
+        let records = self.records.read().map_err(|_| preparation_lock_error())?;
+        if let Some(record) = records.prepared.get(preparation_id) {
+            if record.preparation.preparation_revision == preparation_revision {
+                return Ok(record.preparation.kind.clone());
+            }
+        }
+        if let Some(record) = records.started.get(preparation_id) {
+            if record.preparation_revision == preparation_revision {
+                if let Some(run) = tasks.get_workflow_run(&record.task_id) {
+                    return Ok(run.kind);
+                }
+            }
+        }
+        drop(records);
+        // The preparation cache is bounded and process-local; TaskService's
+        // owner index remains the existing idempotent recovery authority.
+        let identity = project_identity(&context.root).map_err(|message| {
+            BackendError::new("WORKFLOW_IDENTITY_FAILED", message, true, false)
+        })?;
+        if let Some(crate::models::workflow::WorkflowStartOutcome::Existing { run }) =
+            super::recover_preparation_run(
+                tasks,
+                context,
+                &identity,
+                preparation_id,
+                preparation_revision,
+            )?
+        {
+            return Ok(run.kind);
+        }
+        Err(stale_preparation_error())
     }
 
     pub fn mark_started(
@@ -756,14 +806,11 @@ fn build_snapshot_from_evaluation(
     input: &PrepareWorkflowInput,
     evaluation: &RequestEvaluationSnapshot,
 ) -> Result<PreparationSnapshot, BackendError> {
-    // Health is read-only with respect to project content and Git. Only a
-    // Complete Health Agent route produces the report consumed by H3 repair;
-    // keep Local Quick and BYOK Health metadata process-local. Trusted,
-    // writable Complete Agent Health still receives a durable owner.
-    let mut project_access = evaluation.project_access.clone();
+    let project_access = evaluation.project_access.clone();
     let available_source_versions = evaluation
         .source_versions
         .iter()
+        .filter(|_| input.kind != WorkflowKind::HealthCheck)
         .map(|source| WorkflowSourceVersionRef {
             source_id: source.source_id.clone(),
             version_id: source.version_id.clone(),
@@ -774,19 +821,19 @@ fn build_snapshot_from_evaluation(
         WorkflowKind::HealthCheck => AgentRoutePolicy::LintOnly,
         WorkflowKind::UpdateWiki | WorkflowKind::GenerateContent => AgentRoutePolicy::Any,
     };
-    let available_routes = evaluation
-        .route_catalog
-        .available_selections_for(agent_policy);
-    let default_route = resolve_external_route(
-        input.route_selection.as_ref(),
-        &evaluation.route_catalog,
-        if input.kind == WorkflowKind::HealthCheck {
-            AgentRoutePolicy::LintOnly
-        } else {
-            AgentRoutePolicy::Disabled
-        },
-        input.kind == WorkflowKind::HealthCheck,
-    );
+    let available_routes = if input.kind == WorkflowKind::HealthCheck
+        && !matches!(
+            input.scope,
+            Some(WorkflowScope::HealthCheck {
+                mode: HealthCheckMode::Complete
+            })
+        ) {
+        Vec::new()
+    } else {
+        evaluation
+            .route_catalog
+            .available_selections_for(agent_policy)
+    };
     let scope = normalize_scope(
         environment.context,
         &input.kind,
@@ -794,7 +841,6 @@ fn build_snapshot_from_evaluation(
         &evaluation.source_versions,
         &evaluation.resolved_sources,
         &evaluation.wiki_pages,
-        project_access.trust == WorkflowProjectTrust::Trusted && default_route.route.is_some(),
     )?;
     let route_resolution = resolve_route(
         &scope,
@@ -802,26 +848,32 @@ fn build_snapshot_from_evaluation(
         &evaluation.route_catalog,
     );
     let route = route_resolution.route;
-    let durable_health_owner = matches!(
-        (&scope, &route),
-        (
-            WorkflowScope::HealthCheck {
-                mode: HealthCheckMode::Complete
-            },
-            Some(WorkflowRoute::Agent { .. })
-        )
-    );
-    if input.kind == WorkflowKind::HealthCheck && !durable_health_owner {
-        project_access.persistence = WorkflowPersistenceMode::MemoryOnly;
-    }
     let output = output_summary(environment.context, &scope)?;
     let git_policy = git_policy(environment.context, &scope)?;
-    let captured_baseline = capture_baseline(
-        environment.context,
-        &scope,
-        &evaluation.source_versions,
-        Some(evaluation),
-    )?;
+    let captured_baseline = if matches!(
+        scope,
+        WorkflowScope::HealthCheck {
+            mode: HealthCheckMode::LocalQuick
+        }
+    ) {
+        // Local Health approves an intent to inspect the state at execution time;
+        // queued writes and external edits must not invalidate that intent.
+        CapturedBaseline {
+            summary: WorkflowBaselineSummary {
+                fingerprint: hex_sha256(b"health-local-current-at-start-v1"),
+                captured_at: Utc::now().to_rfc3339(),
+                item_count: evaluation.readable_markdown.len() as u64,
+            },
+            has_readable_markdown: !evaluation.readable_markdown.is_empty(),
+        }
+    } else {
+        capture_baseline(
+            environment.context,
+            &scope,
+            &evaluation.source_versions,
+            Some(evaluation),
+        )?
+    };
     let mut prerequisites = prerequisites(
         environment.context,
         &scope,
@@ -1166,7 +1218,6 @@ fn normalize_scope(
     source_versions: &[SourceVersionRef],
     resolved_sources: &[crate::services::ResolvedCompileSource],
     wiki_pages: &[String],
-    complete_health_available: bool,
 ) -> Result<WorkflowScope, BackendError> {
     if requested.is_some_and(|scope| scope_kind(scope) != *kind) {
         return Err(BackendError::new(
@@ -1232,11 +1283,7 @@ fn normalize_scope(
             })
         }
         WorkflowKind::HealthCheck => Ok(requested.cloned().unwrap_or(WorkflowScope::HealthCheck {
-            mode: if complete_health_available {
-                HealthCheckMode::Complete
-            } else {
-                HealthCheckMode::LocalQuick
-            },
+            mode: HealthCheckMode::LocalQuick,
         })),
         WorkflowKind::GenerateContent => {
             let (artifact_type, mut page_paths, output_path) = match requested {
@@ -1625,7 +1672,11 @@ pub fn workflow_baseline_for_scope(
     context: &ProjectContext,
     scope: &WorkflowScope,
 ) -> Result<WorkflowBaselineSummary, BackendError> {
-    let current_sources = CompileService::list_source_versions(context)?;
+    let current_sources = if matches!(scope, WorkflowScope::HealthCheck { .. }) {
+        Vec::new()
+    } else {
+        CompileService::list_source_versions(context)?
+    };
     Ok(capture_baseline(context, scope, &current_sources, None)?.summary)
 }
 
@@ -2300,6 +2351,102 @@ mod batch_zero_cost_tests {
         assert!(items
             .iter()
             .any(|item| item.blocking && item.code == "WORKFLOW_GIT_NOT_OBSERVED"));
+    }
+
+    #[test]
+    fn local_health_preparation_is_an_intent_without_ai_settings_sources_or_hashing() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".app")).unwrap();
+        std::fs::create_dir_all(root.path().join("wiki/中文")).unwrap();
+        let page = root.path().join("wiki/中文/页面.md");
+        std::fs::write(&page, "# Page\n").unwrap();
+        // Broken optional AI configuration and source metadata must not prevent
+        // a deterministic read-only check from being prepared or started.
+        std::fs::write(root.path().join(".app/settings.json"), "invalid JSON").unwrap();
+        std::fs::create_dir_all(root.path().join(".app/source-versions")).unwrap();
+        std::fs::write(
+            root.path().join(".app/source-versions/broken.json"),
+            "invalid JSON",
+        )
+        .unwrap();
+        let context = ProjectContext::new("health-intent", root.path().to_path_buf());
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(config.path().join("settings.json"), "invalid JSON").unwrap();
+        let settings = SettingsService::with_config_dir(config.path().to_path_buf());
+        let secrets = SecretService::memory();
+        let agents = AgentService::with_runner(Arc::new(DeterministicMissingProcessRunner));
+        let environment = WorkflowPreparationEnvironment {
+            context: &context,
+            access: WorkflowAccessSnapshot {
+                trust: WorkflowProjectTrust::Trusted,
+                trust_kind: Some(ProjectTrustKind::Native),
+                filesystem_access: WorkflowFilesystemAccess::Writable,
+                persistence: WorkflowPersistenceMode::Persistent,
+                git_state: WorkflowGitState::Unavailable,
+                authority_revision: "health-authority".into(),
+            },
+            settings_service: &settings,
+            secret_service: &secrets,
+            agent_service: &agents,
+        };
+        let service = WorkflowService::default();
+        for scope in [
+            None,
+            Some(WorkflowScope::HealthCheck {
+                mode: HealthCheckMode::LocalQuick,
+            }),
+        ] {
+            reset_preparation_costs();
+            let prepared = service
+                .prepare(
+                    &environment,
+                    PrepareWorkflowInput {
+                        kind: WorkflowKind::HealthCheck,
+                        scope,
+                        route_selection: None,
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                prepared.project_access.persistence,
+                WorkflowPersistenceMode::Persistent
+            );
+            assert_eq!(
+                prepared.scope,
+                WorkflowScope::HealthCheck {
+                    mode: HealthCheckMode::LocalQuick
+                }
+            );
+            assert!(matches!(prepared.route, Some(WorkflowRoute::Local { .. })));
+            assert!(
+                prepared.baseline.item_count > 0,
+                "read inventory count is real even though intent is not content-bound"
+            );
+            assert!(prepared.prerequisites.is_empty());
+            assert_eq!(
+                preparation_costs(),
+                PreparationCostSnapshot {
+                    source_inventories: 0,
+                    markdown_root_inventories: 1,
+                    route_catalog_loads: 0,
+                    agent_probes: 0,
+                    baseline_hashes: 0,
+                }
+            );
+            std::fs::write(&page, "# External change\n").unwrap();
+            std::fs::write(root.path().join("wiki/new.md"), "# Queued update output\n").unwrap();
+            service
+                .preparation
+                .validate_for_start(
+                    &environment,
+                    &prepared.preparation_id,
+                    &prepared.preparation_revision,
+                )
+                .unwrap();
+            assert_eq!(preparation_costs().source_inventories, 0);
+            assert_eq!(preparation_costs().baseline_hashes, 0);
+            assert_eq!(preparation_costs().route_catalog_loads, 0);
+        }
     }
 
     #[test]

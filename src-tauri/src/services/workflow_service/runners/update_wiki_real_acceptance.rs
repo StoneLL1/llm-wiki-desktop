@@ -168,6 +168,25 @@ async fn real_claude_default_route_generates_and_applies_disposable_wiki() {
     let WorkflowStartOutcome::Created { run } = outcome else {
         panic!("expected new run");
     };
+    state
+        .workflow_service
+        .register_runner(std::sync::Arc::new(
+            crate::services::HealthCheckRunner::new(|_| {
+                panic!("acceptance drives authorized Health directly")
+            }),
+        ))
+        .unwrap();
+    let queued_health = (std::env::var("LLM_WIKI_REAL_HEALTH_FOLLOWUP").as_deref() == Ok("1"))
+        .then(|| {
+            enqueue_acceptance_health(
+                &state,
+                &context,
+                crate::models::workflow::HealthCheckMode::LocalQuick,
+            )
+        });
+    if let Some(health) = &queued_health {
+        assert_eq!(health.display_status, WorkflowDisplayStatus::Queued);
+    }
     let wiki_before = CompileService::snapshot_wiki(&context).unwrap();
     let head_before = state.git_service.repository_status(&context).unwrap().head;
     let cancel_after_tool =
@@ -322,4 +341,123 @@ async fn real_claude_default_route_generates_and_applies_disposable_wiki() {
         assert!(index.pages.iter().any(|page| &page.path == *path));
     }
     println!("real_workflow_route=claude task={} applied={} opened={} indexed={} checkpoint={} final_commit={}", run.task_id, affected_paths.len(), opened.len(), index.pages.len(), checkpoint, commit);
+
+    if let Some(health) = queued_health {
+        execute_acceptance_health(&state, &context, &health.task_id, &evidence_root).await;
+        let deep = enqueue_acceptance_health(
+            &state,
+            &context,
+            crate::models::workflow::HealthCheckMode::Complete,
+        );
+        execute_acceptance_health(&state, &context, &deep.task_id, &evidence_root).await;
+    }
+}
+
+fn enqueue_acceptance_health(
+    state: &AppState,
+    context: &ProjectContext,
+    mode: crate::models::workflow::HealthCheckMode,
+) -> WorkflowRun {
+    let preparation = state
+        .workflow_service
+        .prepare(
+            &WorkflowPreparationEnvironment {
+                context,
+                access: state.resolve_workflow_read_access(context).unwrap(),
+                settings_service: &state.settings_service,
+                secret_service: &state.secret_service,
+                agent_service: &state.agent_service,
+            },
+            PrepareWorkflowInput {
+                kind: WorkflowKind::HealthCheck,
+                scope: Some(WorkflowScope::HealthCheck { mode }),
+                route_selection: None,
+            },
+        )
+        .unwrap();
+    assert!(!preparation.prerequisites.iter().any(|item| item.blocking));
+    let outcome = state
+        .with_current_project_read_task_access(
+            &context.project_id,
+            context.root.to_str().unwrap(),
+            |permit| {
+                state.workflow_service.enqueue_with_acknowledgements(
+                    permit,
+                    &state.settings_service,
+                    &state.secret_service,
+                    &state.agent_service,
+                    &state.task_service,
+                    &preparation.preparation_id,
+                    &preparation.preparation_revision,
+                    false,
+                    false,
+                    None,
+                )
+            },
+        )
+        .unwrap();
+    let WorkflowStartOutcome::Created { run } = outcome else {
+        panic!("new health task");
+    };
+    run
+}
+
+async fn execute_acceptance_health(
+    state: &AppState,
+    context: &ProjectContext,
+    task_id: &str,
+    evidence: &std::path::Path,
+) {
+    let run = state.task_service.get_workflow_run(task_id).unwrap();
+    assert_eq!(run.display_status, WorkflowDisplayStatus::Running);
+    let services = crate::services::HealthCheckExecutionServices {
+        lint_service: &state.lint_service,
+        search_service: &state.search_service,
+        settings_service: &state.settings_service,
+        secret_service: &state.secret_service,
+        agent_service: &state.agent_service,
+        llm_service: &state.llm_service,
+        task_service: &state.task_service,
+        coordinator: &state.workflow_service.coordinator,
+    };
+    crate::services::run_health_check_authorized(
+        context,
+        run.clone(),
+        &services,
+        || state.publish_workflow_external_launch(context, &run),
+        || state.publish_workflow_persistent_report(context, &run),
+    )
+    .await;
+    let finished = state.task_service.get_workflow_run(task_id).unwrap();
+    fs::write(
+        evidence.join(format!("health-{task_id}.json")),
+        serde_json::to_vec_pretty(&finished).unwrap(),
+    )
+    .unwrap();
+    let report = crate::services::LintService::default()
+        .read_lint_history_report_for_view(context, task_id)
+        .unwrap()
+        .health_check_report
+        .unwrap();
+    fs::write(
+        evidence.join(format!("report-{task_id}.json")),
+        serde_json::to_vec_pretty(&report).unwrap(),
+    )
+    .unwrap();
+    println!(
+        "real_health task={} mode={:?} status={:?} scanned={} persistent={} deep={:?} error={:?}",
+        task_id,
+        report.mode,
+        finished.display_status,
+        report.coverage.scanned_pages,
+        report.persistent,
+        report.execution.as_ref().unwrap().deep_status,
+        finished.error.as_ref().map(|error| &error.code)
+    );
+    assert_eq!(finished.display_status, WorkflowDisplayStatus::Completed);
+    assert!(report.persistent);
+    assert_eq!(
+        report.execution.unwrap().freshness,
+        crate::models::lint::HealthReportFreshness::Current
+    );
 }

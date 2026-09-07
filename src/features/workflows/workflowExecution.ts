@@ -60,16 +60,19 @@ export async function reviewWorkflowScope(
   routeSelection: WorkflowRouteSelection | null,
   isCurrent: () => boolean,
 ): Promise<void> {
-  if (!isCurrent() || run.scope.kind !== "update_wiki") return;
-  const available = await prepareWorkflow({ ...request, kind: run.kind, scope: null, routeSelection });
-  if (!isCurrent()) return;
-  const selectedIds = new Set(run.scope.sourceVersions.map((source) => source.sourceId));
-  const versions = (available.availableSourceVersions ?? []).filter((source) => selectedIds.has(source.sourceId));
-  if ([...selectedIds].some((id) => !versions.some((source) => source.sourceId === id))) {
-    throw new Error("WORKFLOW_SELECTED_SOURCE_UNAVAILABLE");
+  if (!isCurrent() || (run.scope.kind !== "update_wiki" && run.scope.kind !== "health_check")) return;
+  let scope = run.scope;
+  if (scope.kind === "update_wiki") {
+    const available = await prepareWorkflow({ ...request, kind: run.kind, scope: null, routeSelection });
+    if (!isCurrent()) return;
+    const selectedIds = new Set(scope.sourceVersions.map((source) => source.sourceId));
+    const versions = (available.availableSourceVersions ?? []).filter((source) => selectedIds.has(source.sourceId));
+    if ([...selectedIds].some((id) => !versions.some((source) => source.sourceId === id))) {
+      throw new Error("WORKFLOW_SELECTED_SOURCE_UNAVAILABLE");
+    }
+    scope = { ...scope, sourceVersions: versions };
   }
-  const fresh = await prepareWorkflow({ ...request, kind: run.kind,
-    scope: { ...run.scope, sourceVersions: versions }, routeSelection });
+  const fresh = await prepareWorkflow({ ...request, kind: run.kind, scope, routeSelection });
   if (!isCurrent()) return;
   const cancelled = await cancelWorkflowRun({ ...request, taskId: run.taskId });
   recordWorkflowFacts([cancelled]);

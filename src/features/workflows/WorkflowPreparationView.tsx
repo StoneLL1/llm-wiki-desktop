@@ -6,6 +6,7 @@ import { useTranslation } from "react-i18next";
 import { useWorkflowStore, workflowOperationPending } from "../../stores/workflowStore";
 import type {
   WorkflowArtifactType,
+  WorkflowHealthContextSummary,
   WorkflowPreparation,
   WorkflowPreparationDraft,
   WorkflowPrerequisiteAction,
@@ -64,13 +65,15 @@ function routeDisplay(
   return `${t("workflows.route.byok")} · ${route.provider}`;
 }
 
-export function WorkflowPreparationView({ preparation, onBack, onStart, onPrerequisite }: {
+export function WorkflowPreparationView({ preparation, onBack, onStart, onPrerequisite, lastHealth, onOpenLastHealth }: {
+  lastHealth?: WorkflowHealthContextSummary | null;
+  onOpenLastHealth?: (taskId: string) => void;
   preparation: WorkflowPreparation;
   onBack: () => void;
   onStart: (restricted: boolean, remote: boolean, draft: WorkflowPreparationDraft) => void;
   onPrerequisite: (action: WorkflowPrerequisiteAction, draft?: WorkflowPreparationDraft) => void;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const operations = useWorkflowStore((state) => state.operations);
   const preparePending = workflowOperationPending(operations, `prepare:${preparation.kind}`);
   const startPending = workflowOperationPending(operations, `start:${preparation.preparationId}`);
@@ -549,6 +552,7 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
         ) : null}
       </details>
 
+      {scope.kind === "health_check" ? <p className="workflow-scope-state">{t("workflows.health.currentAtStart")}</p> : null}
       <div className="workflow-actions" data-decision-step="8">
         <button
           aria-busy={startPending}
@@ -565,6 +569,14 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
         </button>
       </div>
       </fieldset>
+      {scope.kind === "health_check" && lastHealth ? (
+        <section className="workflow-prerequisites mt-4 border-t border-[var(--border)] pt-3" aria-label={t("workflows.context.lastHealth")}>
+          <h3>{t("workflows.context.lastHealth")}</h3>
+          <p><time dateTime={lastHealth.completedAt}>{new Date(lastHealth.completedAt).toLocaleString(i18n?.resolvedLanguage)}</time> · {t("workflows.context.healthSummary", { errors: lastHealth.errorCount, warnings: lastHealth.warningCount, info: lastHealth.infoCount })}</p>
+          <p>{t("workflows.health.openForFreshness")}</p>
+          {onOpenLastHealth ? <button type="button" className="btn btn--secondary btn--sm" onClick={() => onOpenLastHealth(lastHealth.taskId)}>{t("workflows.action.openResult")}</button> : null}
+        </section>
+      ) : null}
     </div>
   );
 }

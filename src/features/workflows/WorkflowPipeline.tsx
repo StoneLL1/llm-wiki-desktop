@@ -61,7 +61,7 @@ export function WorkflowPipeline({
   }
   return (
     <div className={`workflow-pipeline-wrap is-${displayStatus.replaceAll("_", "-")}`}>
-      <div className="workflow-pipeline-overall">
+      {kind !== "health_check" ? <div className="workflow-pipeline-overall">
         <div className="workflow-pipeline-overall__copy">
           <span>{t("workflows.pipeline.overallProgress")}</span>
           <span>{overallValueText}</span>
@@ -72,7 +72,7 @@ export function WorkflowPipeline({
           max={Math.max(stages.length, 1)}
           {...(overallValue === null ? {} : { value: overallValue })}
         />
-      </div>
+      </div> : currentStage ? <p className="workflow-pipeline-overall__copy">{t(currentStage.labelKey)}{currentStage.status === "running" && !currentStage.progress ? <progress aria-label={t(currentStage.labelKey)} /> : null}</p> : null}
       <ol className="workflow-pipeline">
         {stages.map((stage) => {
           const Icon = stage.status === "completed"

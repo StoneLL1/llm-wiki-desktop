@@ -560,9 +560,6 @@ impl Fixture {
         route: WorkflowRoute,
         persistent: bool,
     ) -> llm_wiki_desktop_lib::models::workflow::WorkflowRun {
-        let persistent = persistent
-            && matches!(mode, HealthCheckMode::Complete)
-            && matches!(&route, WorkflowRoute::Agent { .. });
         let scope = WorkflowScope::HealthCheck { mode };
         let baseline = workflow_baseline_for_scope(&self.context, &scope).unwrap();
         let outcome = self
@@ -733,8 +730,7 @@ async fn mixed_compatible_root_counts_as_source_and_wiki_so_index_drift_applies(
 }
 
 #[tokio::test]
-async fn complete_byok_runs_local_first_merges_duplicate_evidence_without_persistent_repair_owner()
-{
+async fn complete_byok_runs_local_first_merges_evidence_and_persists_without_repair_authority() {
     let fixture = Fixture::native("complete");
     let route = fixture.configure_ollama();
     let run = fixture.enqueue(HealthCheckMode::Complete, route, true);
@@ -761,7 +757,7 @@ async fn complete_byok_runs_local_first_merges_duplicate_evidence_without_persis
         .stages
         .iter()
         .all(|stage| stage.status == WorkflowStageStatus::Completed));
-    assert!(!fixture
+    assert!(fixture
         .context
         .app_dir
         .join(format!("lint-reports/{task_id}.json"))
@@ -773,7 +769,7 @@ async fn complete_byok_runs_local_first_merges_duplicate_evidence_without_persis
         .read_lint_history_report(&fixture.context, &task_id)
         .unwrap();
     let report = stored.health_check_report.unwrap();
-    assert!(!report.persistent);
+    assert!(report.persistent);
     assert_eq!(report.coverage.source_pages, 1);
     assert_eq!(report.coverage.deep_covered_pages, Some(4));
     assert!(!report.coverage.deep_truncated);
@@ -810,7 +806,7 @@ async fn complete_byok_runs_local_first_merges_duplicate_evidence_without_persis
 }
 
 #[tokio::test]
-async fn markdown_change_during_deep_check_fails_recoverably_without_report() {
+async fn markdown_change_during_deep_check_preserves_stale_local_report() {
     let fixture = Fixture::native("baseline");
     let route = fixture.configure_ollama();
     let run = fixture.enqueue(HealthCheckMode::Complete, route, true);
@@ -831,11 +827,28 @@ async fn markdown_change_during_deep_check_fails_recoverably_without_report() {
     let error = failed.error.expect("recoverable workflow error");
     assert_eq!(error.code, "WORKFLOW_INPUT_BASELINE_CHANGED");
     assert!(error.recoverable);
-    assert!(!fixture
+    assert!(fixture
         .context
         .app_dir
         .join(format!("lint-reports/{task_id}.json"))
         .exists());
+    let report = fixture
+        .lint
+        .read_lint_history_report_for_view(&fixture.context, &task_id)
+        .unwrap()
+        .health_check_report
+        .unwrap();
+    let execution = report.execution.unwrap();
+    assert_eq!(
+        execution.freshness,
+        llm_wiki_desktop_lib::models::lint::HealthReportFreshness::Stale
+    );
+    assert_eq!(
+        execution.deep_status,
+        llm_wiki_desktop_lib::models::lint::HealthDeepStatus::Failed
+    );
+    assert_eq!(report.coverage.deep_covered_pages, None);
+    assert!(!report.issues.is_empty());
 }
 
 #[tokio::test]
@@ -1164,4 +1177,282 @@ async fn markdown_change_during_final_launch_probe_prevents_agent_spawn() {
         .app_dir
         .join(format!("lint-reports/{task_id}.json"))
         .exists());
+}
+
+#[tokio::test]
+async fn local_current_at_start_persists_reopens_and_detects_external_edits_without_git() {
+    use llm_wiki_desktop_lib::models::lint::HealthReportFreshness;
+    let fixture = Fixture::native("current-at-start-中文");
+    let run = fixture.enqueue(
+        HealthCheckMode::LocalQuick,
+        WorkflowRoute::Local {
+            route_revision: "local-v1".into(),
+        },
+        true,
+    );
+    let task_id = run.task_id.clone();
+    let before = run.baseline_fingerprint.clone();
+    let path = fixture.context.root.join("wiki/concepts/后续页面.md");
+    fs::write(&path, "# 后续页面\n[[不存在的页面]]\n").unwrap();
+    run_health_check_with_deep(&fixture.context, run, &fixture.services(), |_, _| async {
+        panic!("local must not invoke AI")
+    })
+    .await;
+    let finished = fixture.tasks.get_workflow_run(&task_id).unwrap();
+    assert_eq!(
+        finished.display_status,
+        llm_wiki_desktop_lib::models::workflow::WorkflowDisplayStatus::Completed
+    );
+    assert_eq!(
+        finished.baseline_fingerprint, before,
+        "admission evidence remains immutable"
+    );
+    let restarted = LintService::default();
+    let report = restarted
+        .read_lint_history_report_for_view(&fixture.context, &task_id)
+        .unwrap()
+        .health_check_report
+        .unwrap();
+    assert!(report.persistent);
+    assert!(report
+        .issues
+        .iter()
+        .any(|issue| issue.path == "wiki/concepts/后续页面.md"));
+    let evidence = report.execution.unwrap();
+    assert_eq!(evidence.freshness, HealthReportFreshness::Current);
+    fs::write(&path, "# 用户的后续编辑\n").unwrap();
+    let stale = restarted
+        .read_lint_history_report_for_view(&fixture.context, &task_id)
+        .unwrap()
+        .health_check_report
+        .unwrap();
+    assert_eq!(
+        stale.execution.unwrap().freshness,
+        HealthReportFreshness::Stale
+    );
+    assert_eq!(
+        restarted
+            .read_current_health_report(&fixture.context, &task_id)
+            .unwrap()
+            .execution
+            .unwrap(),
+        evidence,
+        "view freshness never rewrites stored evidence"
+    );
+    assert!(!fixture.context.root.join(".git").exists());
+    let restored_tasks = TaskService::default();
+    restored_tasks
+        .set_project_context(
+            fixture.context.project_id.clone(),
+            fixture.context.root.clone(),
+            fixture.context.app_dir.join("tasks"),
+        )
+        .unwrap();
+    assert!(restored_tasks
+        .get_workflow_run(&task_id)
+        .unwrap()
+        .result
+        .is_some());
+}
+
+#[tokio::test]
+async fn complete_failure_exposes_previously_saved_local_result_and_exact_coverage() {
+    use llm_wiki_desktop_lib::models::lint::HealthDeepStatus;
+    let fixture = Fixture::native("deep-failure");
+    let route = fixture.configure_ollama();
+    let run = fixture.enqueue(HealthCheckMode::Complete, route, true);
+    let task_id = run.task_id.clone();
+    let lint = &fixture.lint;
+    let context = &fixture.context;
+    let report_id = task_id.clone();
+    run_health_check_with_deep(context, run, &fixture.services(), move |_, _| async move {
+        let saved = lint
+            .read_lint_history_report(context, &report_id)
+            .unwrap()
+            .health_check_report
+            .unwrap();
+        assert_eq!(
+            saved.execution.unwrap().deep_status,
+            HealthDeepStatus::Pending
+        );
+        assert!(!saved.issues.is_empty());
+        Err(BackendError::new(
+            "PROVIDER_TEST_FAILURE",
+            "Controlled provider failure",
+            true,
+            true,
+        ))
+    })
+    .await;
+    let failed = fixture.tasks.get_workflow_run(&task_id).unwrap();
+    assert_eq!(
+        failed.display_status,
+        llm_wiki_desktop_lib::models::workflow::WorkflowDisplayStatus::Failed
+    );
+    assert_eq!(failed.error.unwrap().code, "PROVIDER_TEST_FAILURE");
+    assert!(matches!(
+        failed.result,
+        Some(WorkflowResult::HealthCheck {
+            report_id: Some(_),
+            persistent: true,
+            ..
+        })
+    ));
+    let reopened = LintService::default()
+        .read_lint_history_report(&fixture.context, &task_id)
+        .unwrap()
+        .health_check_report
+        .unwrap();
+    assert_eq!(
+        reopened.execution.unwrap().deep_status,
+        HealthDeepStatus::Failed
+    );
+    assert_eq!(reopened.coverage.deep_covered_pages, None);
+    assert!(!reopened.issues.is_empty());
+}
+
+#[tokio::test]
+async fn changed_complete_scope_waits_for_review_without_external_invocation() {
+    let fixture = Fixture::native("complete-queued-scope");
+    let route = fixture.configure_ollama();
+    let run = fixture.enqueue(HealthCheckMode::Complete, route, true);
+    let task_id = run.task_id.clone();
+    fs::write(
+        fixture.context.root.join("wiki/concepts/新增.md"),
+        "# 新增\n",
+    )
+    .unwrap();
+    run_health_check_with_deep(&fixture.context, run, &fixture.services(), |_, _| async {
+        panic!("changed external disclosure needs approval")
+    })
+    .await;
+    let waiting = fixture.tasks.get_workflow_run(&task_id).unwrap();
+    assert_eq!(
+        waiting.display_status,
+        llm_wiki_desktop_lib::models::workflow::WorkflowDisplayStatus::WaitingForConfirmation
+    );
+    assert_eq!(
+        waiting.pending_action.unwrap().action_type,
+        llm_wiki_desktop_lib::models::confirmation::PendingActionType::ReviewScope
+    );
+    assert!(waiting.result.is_some());
+    assert!(waiting.error.is_none());
+    assert!(fixture
+        .lint
+        .read_lint_history_report(&fixture.context, &task_id)
+        .is_ok());
+}
+
+#[tokio::test]
+async fn local_scan_cancellation_observes_real_page_progress_before_finishing() {
+    let fixture = Fixture::native("cancel-batch");
+    for index in 0..2000 {
+        fs::write(
+            fixture
+                .context
+                .root
+                .join(format!("wiki/concepts/批次-{index}.md")),
+            format!("# 批次 {index}\n{}", "正文 content. ".repeat(128)),
+        )
+        .unwrap();
+    }
+    let run = fixture.enqueue(
+        HealthCheckMode::LocalQuick,
+        WorkflowRoute::Local {
+            route_revision: "local-v1".into(),
+        },
+        false,
+    );
+    let task_id = run.task_id.clone();
+    let tasks = fixture.tasks.clone();
+    let observed = task_id.clone();
+    let watcher = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let current = tasks.get_workflow_run(&observed).unwrap();
+            let progress = current
+                .stages
+                .iter()
+                .find(|stage| stage.id == "check_markdown")
+                .and_then(|stage| stage.progress.as_ref());
+            if progress.is_some_and(|progress| {
+                progress.current >= 5 && progress.current < progress.total.unwrap_or(0)
+            }) {
+                let started = std::time::Instant::now();
+                tasks.request_cancel(&observed).unwrap();
+                return started;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "must observe actual local page progress"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    });
+    run_health_check_with_deep(&fixture.context, run, &fixture.services(), |_, _| async {
+        panic!("no AI")
+    })
+    .await;
+    let requested_at = watcher.join().unwrap();
+    let elapsed = requested_at.elapsed();
+    println!(
+        "local_health_cancel_after_page latency_ms={}",
+        elapsed.as_millis()
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "cancellation waited for whole scan: {elapsed:?}"
+    );
+    let cancelled = fixture.tasks.get_workflow_run(&task_id).unwrap();
+    assert_eq!(
+        cancelled.display_status,
+        llm_wiki_desktop_lib::models::workflow::WorkflowDisplayStatus::Cancelled
+    );
+    assert!(fixture
+        .lint
+        .list_lint_history(&fixture.context)
+        .unwrap()
+        .entries
+        .is_empty());
+    assert!(!fixture.context.root.join(".git").exists());
+}
+
+#[tokio::test]
+async fn cancellation_during_deep_retains_completed_local_report_on_task() {
+    let fixture = Fixture::native("cancel-deep-retained");
+    let route = fixture.configure_ollama();
+    let run = fixture.enqueue(HealthCheckMode::Complete, route, true);
+    let task_id = run.task_id.clone();
+    let observed = task_id.clone();
+    let tasks = fixture.tasks.clone();
+    run_health_check_with_deep(
+        &fixture.context,
+        run,
+        &fixture.services(),
+        move |_, _| async move {
+            tasks.request_cancel(&observed).unwrap();
+            Err(BackendError::new(
+                "WORKFLOW_CANCELLED",
+                "Cancelled",
+                true,
+                false,
+            ))
+        },
+    )
+    .await;
+    let cancelled = fixture.tasks.get_workflow_run(&task_id).unwrap();
+    assert_eq!(
+        cancelled.display_status,
+        llm_wiki_desktop_lib::models::workflow::WorkflowDisplayStatus::Cancelled
+    );
+    assert!(matches!(
+        cancelled.result,
+        Some(WorkflowResult::HealthCheck {
+            persistent: true,
+            ..
+        })
+    ));
+    assert!(LintService::default()
+        .read_lint_history_report(&fixture.context, &task_id)
+        .is_ok());
 }

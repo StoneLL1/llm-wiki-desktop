@@ -2523,6 +2523,16 @@ impl TaskService {
         stage_id: &str,
         pending: WorkflowPendingAction,
     ) -> Result<WorkflowRun, String> {
+        self.wait_workflow_stage_with_result(id, stage_id, pending, None)
+    }
+
+    pub(crate) fn wait_workflow_stage_with_result(
+        &self,
+        id: &str,
+        stage_id: &str,
+        pending: WorkflowPendingAction,
+        result: Option<WorkflowResult>,
+    ) -> Result<WorkflowRun, String> {
         let cancellation = self.cancellation.get(id);
         self.mutate_workflow(id, |task, workflow| {
             require_running_workflow(task, cancellation.as_ref(), id)?;
@@ -2540,6 +2550,7 @@ impl TaskService {
             stage.decision = Some(pending.clone());
             workflow.current_stage_id = Some(stage_id.to_string());
             workflow.pending_action = Some(pending);
+            workflow.result = result;
             task.status = TaskStatus::WaitingForConfirmation;
             Ok(())
         })

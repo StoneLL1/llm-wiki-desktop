@@ -68,7 +68,11 @@ export function AgentLintRepairPanel({
   const hasAgentFindings = report.issues.some((issue) => issue.source === "agent");
   if (report.route.kind !== "agent" && !hasAgentFindings) return null;
 
-  const unavailable = report.route.kind !== "agent"
+  const unavailable = report.execution && report.execution.freshness !== "current"
+    ? "lint.healthReport.repairNeedsCurrent"
+    : report.execution && report.execution.deepStatus !== "completed"
+      ? "lint.healthReport.repairNeedsDeep"
+      : report.route.kind !== "agent"
     ? "lint.repair.unavailable.agentRoute"
     : !agentRouteConfigured
       ? "lint.repair.unavailable.agentNotConfigured"

@@ -50,7 +50,7 @@ export function WorkflowTaskDetail({
     operations,
     run.result?.kind === "update_wiki"
       ? "health_check"
-      : run.result?.kind === "health_check" && run.result.errorCount === 0
+      : run.result?.kind === "health_check" && run.displayStatus === "completed" && run.result.errorCount === 0
         ? "generate_content"
         : null,
   );
@@ -73,7 +73,7 @@ export function WorkflowTaskDetail({
   const recommendedNext =
     run.result?.kind === "update_wiki"
       ? "health_check"
-      : run.result?.kind === "health_check" && run.result.errorCount === 0
+      : run.result?.kind === "health_check" && run.displayStatus === "completed" && run.result.errorCount === 0
         ? "generate_content"
         : null;
   const resultPresentation = presentWorkflowResult(run);
@@ -178,7 +178,7 @@ export function WorkflowTaskDetail({
       {run.pendingAction?.actionType === "review_scope" ? (
         <section className="workflow-attention" aria-label={t("workflows.scopeReview.title")}>
           <h3>{t("workflows.scopeReview.title")}</h3>
-          <p>{t("workflows.scopeReview.description")}</p>
+          <p>{t(run.kind === "health_check" ? "workflows.health.scopeReview" : "workflows.scopeReview.description")}</p>
           <ul>{run.pendingAction.affectedPaths.map((path) => <li key={path}><code>{path}</code></li>)}</ul>
           <div className="workflow-actions">
             <button className="btn btn--primary" disabled={taskMutationPending} onClick={() => void controller.adjustAndPrepare(run)} type="button">{t("workflows.scopeReview.review")}</button>

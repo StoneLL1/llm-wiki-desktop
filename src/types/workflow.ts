@@ -255,6 +255,7 @@ export type WorkflowResult =
       infoCount: number;
       coverage?: {
         mode: HealthCheckMode;
+        deepStatus?: import("./lint").HealthCheckDeepStatus;
         scannedPages: number;
         deepCoveredPages: number | null;
         deepTruncated: boolean;

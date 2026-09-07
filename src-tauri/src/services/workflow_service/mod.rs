@@ -129,10 +129,25 @@ impl WorkflowService {
         tasks: &TaskService,
     ) -> Vec<String> {
         let mut paths = Vec::new();
-        if let Some(root) = context.layout.task_state_root.as_deref() {
-            for task in tasks.list_tasks_for_root(&context.root, None) {
+        let mut has_health_report_owner = false;
+        for task in tasks.list_tasks_for_root(&context.root, None) {
+            if let Some(root) = context.layout.task_state_root.as_deref() {
                 paths.push(format!("{}/{}.json", root.trim_end_matches('/'), task.id));
                 paths.push(format!("{}/{}.log", root.trim_end_matches('/'), task.id));
+            }
+            if tasks.get_workflow_run(&task.id).is_some_and(|run| {
+                run.kind == WorkflowKind::HealthCheck
+                    && run.operation.kind() == WorkflowOperationKind::BuiltIn
+            }) {
+                has_health_report_owner = true;
+                if let Some(root) = context.layout.lint_report_root.as_deref() {
+                    paths.push(format!("{}/{}.json", root.trim_end_matches('/'), task.id));
+                }
+            }
+        }
+        if has_health_report_owner {
+            if let Some(root) = context.layout.app_state_root.as_deref() {
+                paths.push(format!("{}/lint-history.json", root.trim_end_matches('/')));
             }
         }
         if let Some(root) = context.layout.workflow_state_root.as_deref() {
@@ -405,8 +420,8 @@ impl WorkflowService {
             validated.preparation.route.as_ref(),
         )?;
         let disclosure_revision = preparation::REMOTE_PROVIDER_DISCLOSURE_REVISION;
-        let disclosure_acknowledged =
-            settings_service.is_remote_provider_disclosure_acknowledged(disclosure_revision)?;
+        let disclosure_acknowledged = !remote_route
+            || settings_service.is_remote_provider_disclosure_acknowledged(disclosure_revision)?;
         if remote_route && !disclosure_acknowledged && !acknowledge_remote_provider {
             return Err(BackendError::new(
                 "WORKFLOW_REMOTE_PROVIDER_ACKNOWLEDGEMENT_REQUIRED",
@@ -736,16 +751,20 @@ fn scope_review_retry_link(
     identity: &ProjectWorkflowIdentity,
     kind: &WorkflowKind,
 ) -> Result<crate::models::workflow::WorkflowRetryLink, BackendError> {
-    // Cancellation clears the pending decision but deliberately retains stage
-    // history. Only Update Wiki scope review waits in analyze_sources; regular
-    // candidate approvals wait later, in review_risk.
-    let reviewed_scope = original.current_stage_id.as_deref() == Some("analyze_sources")
+    // Cancellation preserves stage history for these read-only scope reviews.
+    // Generated-candidate confirmation and Agent repair are separate contracts.
+    let scope_stage = match kind {
+        WorkflowKind::UpdateWiki => "analyze_sources",
+        WorkflowKind::HealthCheck => "deep_check",
+        WorkflowKind::GenerateContent => "",
+    };
+    let reviewed_scope = original.current_stage_id.as_deref() == Some(scope_stage)
         && original.stages.iter().any(|stage| {
-            stage.id == "analyze_sources"
+            stage.id == scope_stage
                 && stage.status == crate::models::workflow::WorkflowStageStatus::Waiting
         });
-    if *kind != WorkflowKind::UpdateWiki
-        || original.kind != WorkflowKind::UpdateWiki
+    if scope_stage.is_empty()
+        || original.kind != *kind
         || !matches!(
             original.operation,
             crate::models::workflow::WorkflowOperation::BuiltIn
@@ -757,7 +776,7 @@ fn scope_review_retry_link(
     {
         return Err(BackendError::new(
             "WORKFLOW_SCOPE_REVIEW_RETRY_INVALID",
-            "Only a cancelled scope review from this project can be linked to the new Update Wiki run.",
+            "Only a cancelled scope review from this project can be linked to a new run of the same workflow.",
             true,
             true,
         ));
@@ -810,13 +829,14 @@ fn recover_preparation_run(
         &identity.canonical_identity_key,
         &identity.identity_revision,
         |options| {
-            options
-                .preparation_fingerprint
-                .as_ref()
-                .is_some_and(|fingerprint| {
-                    preparation::preparation_revision_for(preparation_id, fingerprint)
-                        == preparation_revision
-                })
+            options.preparation_revision == preparation_revision
+                && options
+                    .preparation_fingerprint
+                    .as_ref()
+                    .is_some_and(|fingerprint| {
+                        preparation::preparation_revision_for(preparation_id, fingerprint)
+                            == preparation_revision
+                    })
         },
     );
     run.map(|run| current_preparation_run(context, run))
@@ -896,75 +916,95 @@ mod batch_one_start_race_tests {
         use crate::models::confirmation::{PendingActionType, RiskLevel};
         use crate::models::workflow::{UpdateWikiMode, WorkflowPendingAction};
 
-        let root = tempfile::tempdir().unwrap();
-        let identity = project_identity(root.path()).unwrap();
-        let tasks = TaskService::default();
-        let coordinator = WorkflowCoordinator::default();
-        let outcome = coordinator
-            .enqueue(
-                &tasks,
-                EnqueueWorkflow {
-                    project_id: "scope-retry".into(),
-                    project_root: root.path().to_path_buf(),
-                    task_state_root: None,
-                    title: "Update Wiki".into(),
-                    kind: WorkflowKind::UpdateWiki,
-                    scope: WorkflowScope::UpdateWiki {
-                        mode: UpdateWikiMode::ChangedSources,
-                        source_versions: Vec::new(),
+        for kind in [WorkflowKind::UpdateWiki, WorkflowKind::HealthCheck] {
+            let stage = if kind == WorkflowKind::UpdateWiki {
+                "analyze_sources"
+            } else {
+                "deep_check"
+            };
+            let scope = if kind == WorkflowKind::UpdateWiki {
+                WorkflowScope::UpdateWiki {
+                    mode: UpdateWikiMode::ChangedSources,
+                    source_versions: Vec::new(),
+                }
+            } else {
+                WorkflowScope::HealthCheck {
+                    mode: crate::models::workflow::HealthCheckMode::Complete,
+                }
+            };
+            let root = tempfile::tempdir().unwrap();
+            let identity = project_identity(root.path()).unwrap();
+            let tasks = TaskService::default();
+            let coordinator = WorkflowCoordinator::default();
+            let outcome = coordinator
+                .enqueue(
+                    &tasks,
+                    EnqueueWorkflow {
+                        project_id: "scope-retry".into(),
+                        project_root: root.path().to_path_buf(),
+                        task_state_root: None,
+                        title: "Update Wiki".into(),
+                        kind: kind.clone(),
+                        scope,
+                        route: None,
+                        baseline_fingerprint: "approved-inputs".into(),
+                        execution_options: crate::models::workflow::WorkflowExecutionOptions {
+                            preparation_revision: "scope-review-test".into(),
+                            ..Default::default()
+                        },
+                        stages: workflow_stages(&kind),
+                        retry: None,
                     },
-                    route: None,
-                    baseline_fingerprint: "approved-inputs".into(),
-                    execution_options: crate::models::workflow::WorkflowExecutionOptions {
-                        preparation_revision: "scope-review-test".into(),
-                        ..Default::default()
+                )
+                .unwrap();
+            let WorkflowStartOutcome::Created { run } = outcome else {
+                panic!("new task");
+            };
+            assert!(scope_review_retry_link(&run, &identity, &kind).is_err());
+            let sink = WorkflowStageSink::new(&tasks, &coordinator, &run.task_id);
+            if kind == WorkflowKind::HealthCheck {
+                for previous in run.stages.iter().take_while(|item| item.id != stage) {
+                    sink.start(&previous.id).unwrap();
+                    sink.complete(&previous.id).unwrap();
+                }
+            }
+            sink.start(stage).unwrap();
+            let waiting = sink
+                .wait(
+                    stage,
+                    WorkflowPendingAction {
+                        id: "scope-review".into(),
+                        action_type: PendingActionType::ReviewScope,
+                        risk_level: RiskLevel::Low,
+                        affected_paths: vec!["wiki".into()],
+                        candidate: None,
+                        expires_at: None,
+                        checkpoint_hash: None,
                     },
-                    stages: workflow_stages(&WorkflowKind::UpdateWiki),
-                    retry: None,
-                },
+                )
+                .unwrap();
+            assert!(scope_review_retry_link(&waiting, &identity, &kind).is_err());
+            coordinator.cancel(&tasks, &run.task_id).unwrap();
+            coordinator
+                .finish_cancelled_and_claim_next(&tasks, &run.task_id)
+                .unwrap();
+            let cancelled = tasks.get_workflow_run(&run.task_id).unwrap();
+            assert!(cancelled.pending_action.is_none());
+            let retry = scope_review_retry_link(&cancelled, &identity, &kind).unwrap();
+            assert_eq!(retry.attempt_of, run.task_id);
+            assert_eq!(retry.attempt_number, 2);
+            let other = tempfile::tempdir().unwrap();
+            assert!(scope_review_retry_link(
+                &cancelled,
+                &project_identity(other.path()).unwrap(),
+                &kind,
             )
-            .unwrap();
-        let WorkflowStartOutcome::Created { run } = outcome else {
-            panic!("new task");
-        };
-        assert!(scope_review_retry_link(&run, &identity, &WorkflowKind::UpdateWiki).is_err());
-        let sink = WorkflowStageSink::new(&tasks, &coordinator, &run.task_id);
-        sink.start("analyze_sources").unwrap();
-        let waiting = sink
-            .wait(
-                "analyze_sources",
-                WorkflowPendingAction {
-                    id: "scope-review".into(),
-                    action_type: PendingActionType::ReviewScope,
-                    risk_level: RiskLevel::Low,
-                    affected_paths: vec!["wiki".into()],
-                    candidate: None,
-                    expires_at: None,
-                    checkpoint_hash: None,
-                },
-            )
-            .unwrap();
-        assert!(scope_review_retry_link(&waiting, &identity, &WorkflowKind::UpdateWiki).is_err());
-        coordinator.cancel(&tasks, &run.task_id).unwrap();
-        coordinator
-            .finish_cancelled_and_claim_next(&tasks, &run.task_id)
-            .unwrap();
-        let cancelled = tasks.get_workflow_run(&run.task_id).unwrap();
-        assert!(cancelled.pending_action.is_none());
-        let retry =
-            scope_review_retry_link(&cancelled, &identity, &WorkflowKind::UpdateWiki).unwrap();
-        assert_eq!(retry.attempt_of, run.task_id);
-        assert_eq!(retry.attempt_number, 2);
-        let other = tempfile::tempdir().unwrap();
-        assert!(scope_review_retry_link(
-            &cancelled,
-            &project_identity(other.path()).unwrap(),
-            &WorkflowKind::UpdateWiki,
-        )
-        .is_err());
-        assert!(
-            scope_review_retry_link(&cancelled, &identity, &WorkflowKind::HealthCheck).is_err()
-        );
+            .is_err());
+            assert!(
+                scope_review_retry_link(&cancelled, &identity, &WorkflowKind::GenerateContent)
+                    .is_err()
+            );
+        }
     }
 
     #[test]
@@ -1054,5 +1094,27 @@ mod batch_one_start_race_tests {
             WorkflowStartOutcome::Created { .. } => panic!("racing start must recover Existing"),
         }
         assert_eq!(tasks.list_workflow_runs().len(), 1);
+        let reopened_preparations = WorkflowPreparationService::default();
+        assert_eq!(
+            reopened_preparations
+                .kind_for_start(
+                    &tasks,
+                    &context,
+                    &preparation.preparation_id,
+                    &preparation.preparation_revision,
+                )
+                .unwrap(),
+            WorkflowKind::HealthCheck
+        );
+        let other = tempfile::tempdir().unwrap();
+        let other_context = ProjectContext::new("other-owner", other.path().to_path_buf());
+        assert!(reopened_preparations
+            .kind_for_start(
+                &tasks,
+                &other_context,
+                &preparation.preparation_id,
+                &preparation.preparation_revision,
+            )
+            .is_err());
     }
 }

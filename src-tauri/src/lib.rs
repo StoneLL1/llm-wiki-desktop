@@ -327,30 +327,12 @@ pub fn run() {
                                 }
                             };
                             let _ = identity;
-                            let access = match state.resolve_workflow_access(&context) {
-                                Ok(access) => access,
-                                Err(error) => {
-                                    reject_workflow_dispatch(&state, &run.task_id, &error.code, error.message);
-                                    return;
-                                }
-                            };
-                            let complete = matches!(
-                                &run.scope,
-                                models::workflow::WorkflowScope::HealthCheck {
-                                    mode: models::workflow::HealthCheckMode::Complete
-                                }
-                            );
-                            if complete
-                                && access.trust
-                                    != models::workflow::WorkflowProjectTrust::Trusted
-                            {
-                                reject_workflow_dispatch(&state, &run.task_id,
-                                    "WORKFLOW_PROJECT_UNTRUSTED",
-                                    "Complete Health Check requires a current trusted project access snapshot."
-                                        .into(),
-                                );
+                            if let Err(error) = state.resolve_workflow_read_access(&context) {
+                                reject_workflow_dispatch(&state, &run.task_id, &error.code, error.message);
                                 return;
                             }
+                            // Current external-AI authority is checked by the
+                            // launch permit after the local result is available.
                             let health = services::HealthCheckExecutionServices {
                                 lint_service: &state.lint_service,
                                 search_service: &state.search_service,

@@ -349,7 +349,8 @@
           "authority": "ProjectTaskMutationPermit",
           "forbiddenCalls": [
             "with_current_project_write_access"
-          ]
+          ],
+          "helper": "with_current_project_read_task_access"
         }
       ]
     },
@@ -1379,7 +1380,18 @@
         "mutation"
       ],
       "projectScoped": true,
-      "writeAuthority": "ProjectWritePermit"
+      "writeAuthority": "ProjectWritePermit",
+      "authorityPaths": [
+        {
+          "function": "reorder_queued_workflow",
+          "authority": "ProjectWritePermit"
+        },
+        {
+          "function": "reorder_queued_workflow",
+          "authority": "ProjectTaskMutationPermit",
+          "helper": "with_current_project_read_task_access"
+        }
+      ]
     },
     {
       "name": "reprocess_source_asr",
@@ -1499,7 +1511,20 @@
       ],
       "projectScoped": true,
       "writeAuthority": "ProjectWritePermit",
-      "authorityFunction": "retry_workflow_for_state"
+      "authorityFunction": "retry_workflow_for_state",
+      "authorityPaths": [
+        {
+          "function": "retry_workflow_for_state",
+          "authority": "ProjectWritePermit",
+          "commandDelegate": "retry_workflow_for_state"
+        },
+        {
+          "function": "retry_workflow_for_state",
+          "authority": "ProjectTaskMutationPermit",
+          "helper": "with_current_project_read_task_access",
+          "commandDelegate": "retry_workflow_for_state"
+        }
+      ]
     },
     {
       "name": "revoke_all_chat_convenience_authorizations",
@@ -1923,7 +1948,18 @@
         "secret"
       ],
       "projectScoped": true,
-      "writeAuthority": "ProjectTaskMutationPermit"
+      "writeAuthority": "ProjectTaskMutationPermit",
+      "authorityPaths": [
+        {
+          "function": "start_workflow",
+          "authority": "ProjectTaskMutationPermit"
+        },
+        {
+          "function": "start_workflow",
+          "authority": "ProjectTaskMutationPermit",
+          "helper": "with_current_project_read_task_access"
+        }
+      ]
     },
     {
       "name": "store_provider_secret",
@@ -1989,7 +2025,18 @@
         "mutation"
       ],
       "projectScoped": true,
-      "writeAuthority": "ProjectWritePermit"
+      "writeAuthority": "ProjectWritePermit",
+      "authorityPaths": [
+        {
+          "function": "undo_cancel_queued_workflow",
+          "authority": "ProjectWritePermit"
+        },
+        {
+          "function": "undo_cancel_queued_workflow",
+          "authority": "ProjectTaskMutationPermit",
+          "helper": "with_current_project_read_task_access"
+        }
+      ]
     },
     {
       "name": "write_json_file",

@@ -7,8 +7,8 @@ use std::time::Instant;
 use crate::errors::BackendError;
 use crate::models::agent::AgentDetectionState;
 use crate::models::lint::{
-    Fixability, HealthCheckCoverage, HealthCheckReport, LintIssue, LintIssueSource, LintIssueType,
-    LintSeverity,
+    Fixability, HealthCheckCoverage, HealthCheckExecution, HealthCheckReport, HealthDeepStatus,
+    HealthReportFreshness, LintIssue, LintIssueSource, LintSeverity,
 };
 use crate::models::llm::LlmProviderConfig;
 use crate::models::paths::ProjectContext;
@@ -19,8 +19,8 @@ use crate::models::workflow::{
     WorkflowRun, WorkflowScope,
 };
 use crate::services::{
-    health_source_paths, AgentService, DeepLintSnapshot, LintService, LlmService, LocalLintPhase,
-    SearchService, SecretService, SettingsService,
+    AgentService, DeepLintSnapshot, HealthScanPhase, LintService, LlmService, SearchService,
+    SecretService, SettingsService,
 };
 use crate::tasks::task_model::LogLevel;
 use crate::tasks::TaskService;
@@ -172,7 +172,7 @@ where
 {
     match execute_health_check(context, &run, services, deep_check, report_authority).await {
         Ok(next) => next,
-        Err(error) => finish_error(&run, services, error),
+        Err(error) => finish_error(context, &run, services, error),
     }
 }
 
@@ -195,177 +195,86 @@ where
 
     sink.start(READ_MARKDOWN).map_err(task_error)?;
     ensure_not_cancelled(services.task_service, task_id)?;
-    let baseline = workflow_baseline_for_scope(context, &run.scope)?;
-    if baseline.fingerprint != run.baseline_fingerprint {
-        return Err(baseline_changed());
+    if mode == HealthCheckMode::LocalQuick {
+        validate_local_route(run.route.as_ref())?;
     }
-    let tree = services
-        .search_service
-        .scan_wiki(context, &std::collections::HashSet::new())?;
-    let source_paths = health_source_paths(context)?;
-    let source_only_paths = context
-        .list_markdown_files_for_roles(&[crate::models::layout::ProjectMarkdownRootRole::Source])?
-        .into_iter()
-        .filter_map(|path| context.to_project_relative(&path).ok())
-        .collect::<std::collections::HashSet<_>>();
-    let source_pages = source_paths.len();
-    let wiki_pages = tree
-        .pages
-        .iter()
-        .filter(|page| !source_only_paths.contains(&page.path))
-        .count();
-    let readable_pages = tree
-        .pages
-        .iter()
-        .map(|page| page.path.as_str())
-        .chain(source_paths.iter().map(String::as_str))
-        .collect::<std::collections::HashSet<_>>()
-        .len() as u64;
-    let mut not_applicable_rules = Vec::new();
-    if context.layout.wiki_index_path.is_none() || (wiki_pages == 0 && source_pages > 0) {
-        not_applicable_rules.push("index_drift".to_string());
-    }
-    sink.progress(
-        READ_MARKDOWN,
-        tree.pages.first().map(|page| page.path.clone()),
-        readable_pages,
-        Some(readable_pages),
-    )
-    .map_err(task_error)?;
+    // Inventory, content and deterministic rules belong to one execution-time
+    // read pass. An admission fingerprint never freezes a local read request.
     sink.complete(READ_MARKDOWN).map_err(task_error)?;
-
     sink.start(CHECK_MARKDOWN).map_err(task_error)?;
-    ensure_not_cancelled(services.task_service, task_id)?;
-    let local_report = services.lint_service.run_health_local_lint_with_phase(
+    let mut checking_links = false;
+    let scan = services.lint_service.run_health_local_scan(
         context,
         services.search_service,
-        |phase| match phase {
-            LocalLintPhase::MarkdownComplete => {
-                sink.progress(CHECK_MARKDOWN, None, readable_pages, Some(readable_pages))
-                    .map_err(task_error)?;
+        |progress| {
+            ensure_not_cancelled(services.task_service, task_id)?;
+            if progress.phase != HealthScanPhase::Markdown && !checking_links {
                 sink.complete(CHECK_MARKDOWN).map_err(task_error)?;
                 sink.start(CHECK_LINKS).map_err(task_error)?;
-                ensure_not_cancelled(services.task_service, task_id)
+                checking_links = true;
             }
-        },
-    )?;
-    sink.progress(
-        CHECK_LINKS,
-        local_report
-            .issues
-            .iter()
-            .find(|issue| is_link_rule(issue.issue_type))
-            .map(|issue| issue.path.clone()),
-        local_report.scanned_pages as u64,
-        Some(local_report.scanned_pages as u64),
-    )
-    .map_err(task_error)?;
-    sink.complete(CHECK_LINKS).map_err(task_error)?;
-
-    let mut deep_issues = Vec::new();
-    let mut deep_covered_pages = None;
-    let mut deep_truncated = false;
-    match mode {
-        HealthCheckMode::LocalQuick => {
-            validate_local_route(run.route.as_ref())?;
-            sink.skip(DEEP_CHECK).map_err(task_error)?;
-        }
-        HealthCheckMode::Complete => {
-            sink.start(DEEP_CHECK).map_err(task_error)?;
-            ensure_not_cancelled(services.task_service, task_id)?;
-            let route = run.route.clone().ok_or_else(route_unavailable)?;
-            if matches!(route, WorkflowRoute::Local { .. }) {
-                return Err(route_unavailable());
-            }
-            validate_prepared_route(context, services, &route)?;
-            let language = services
-                .settings_service
-                .read_settings(context)
-                .map(|settings| settings.language)
-                .unwrap_or_else(|_| "en".into());
-            let snapshot = services
-                .lint_service
-                .prepare_health_deep_lint_snapshot(
-                    context,
-                    services.search_service,
-                    &language,
-                    &local_report,
-                )
-                .map_err(map_deep_snapshot_error)?;
-            deep_covered_pages = Some(snapshot.deep_covered_pages);
-            deep_truncated = snapshot.deep_truncated;
-            services
-                .lint_service
-                .verify_deep_lint_snapshot(context, services.search_service, &snapshot)
-                .map_err(map_deep_snapshot_error)?;
-            if workflow_baseline_for_scope(context, &run.scope)?.fingerprint
-                != run.baseline_fingerprint
+            // Cancellation is observed for every page. Publish count updates
+            // only at real batch edges; verification must not reset link counts.
+            if progress.phase == HealthScanPhase::Verify
+                || (progress.completed % 16 != 0 && progress.completed != progress.total)
             {
-                return Err(baseline_changed());
+                return Ok(());
             }
-            let raw = deep_check(snapshot.clone(), route).await?;
-            ensure_not_cancelled(services.task_service, task_id)?;
-            deep_issues = services
-                .lint_service
-                .finish_deep_lint_snapshot(context, services.search_service, &snapshot, &raw, false)
-                .map_err(map_deep_snapshot_error)?;
             sink.progress(
-                DEEP_CHECK,
-                deep_issues.first().map(|issue| issue.path.clone()),
-                deep_issues.len() as u64,
-                Some(tree.pages.len() as u64),
+                if checking_links {
+                    CHECK_LINKS
+                } else {
+                    CHECK_MARKDOWN
+                },
+                progress.path.clone(),
+                progress.completed as u64,
+                Some(progress.total as u64),
             )
             .map_err(task_error)?;
-            sink.complete(DEEP_CHECK).map_err(task_error)?;
-        }
+            Ok(())
+        },
+    )?;
+    if !checking_links {
+        sink.complete(CHECK_MARKDOWN).map_err(task_error)?;
+        sink.start(CHECK_LINKS).map_err(task_error)?;
     }
-
-    sink.start(MERGE_FINDINGS).map_err(task_error)?;
-    let (issues, finding_origins) = merge_findings(local_report.issues, deep_issues);
-    sink.progress(
-        MERGE_FINDINGS,
-        issues.first().map(|issue| issue.path.clone()),
-        issues.len() as u64,
-        Some(issues.len() as u64),
-    )
-    .map_err(task_error)?;
-    sink.complete(MERGE_FINDINGS).map_err(task_error)?;
-
-    sink.start(CLASSIFY_FINDINGS).map_err(task_error)?;
+    sink.complete(CHECK_LINKS).map_err(task_error)?;
+    let (issues, finding_origins) = merge_findings(scan.report.issues.clone(), Vec::new());
     let (error_count, warning_count, info_count, findings_by_type) = classify(&issues);
-    sink.progress(
-        CLASSIFY_FINDINGS,
-        None,
-        issues.len() as u64,
-        Some(issues.len() as u64),
-    )
-    .map_err(task_error)?;
-    sink.complete(CLASSIFY_FINDINGS).map_err(task_error)?;
-
-    sink.start(WRITE_REPORT).map_err(task_error)?;
-    ensure_not_cancelled(services.task_service, task_id)?;
-    if workflow_baseline_for_scope(context, &run.scope)?.fingerprint != run.baseline_fingerprint {
-        return Err(baseline_changed());
-    }
-    let persistent = services
-        .task_service
-        .workflow_persistence_dir(task_id)
-        .is_some();
     let mut report = HealthCheckReport {
+        execution: Some(HealthCheckExecution {
+            input_fingerprint: scan.input_fingerprint.clone(),
+            input_hashes: scan.input_hashes.clone(),
+            scanned_at: scan.scanned_at.clone(),
+            freshness: if scan.current {
+                HealthReportFreshness::Current
+            } else {
+                HealthReportFreshness::Stale
+            },
+            deep_status: if mode == HealthCheckMode::LocalQuick {
+                HealthDeepStatus::NotRequested
+            } else {
+                HealthDeepStatus::Pending
+            },
+            deep_error_code: None,
+        }),
         report_id: task_id.to_string(),
         task_id: task_id.to_string(),
         mode: mode.clone(),
         route: run.route.clone().ok_or_else(route_unavailable)?,
-        persistent,
+        persistent: services
+            .task_service
+            .workflow_persistence_dir(task_id)
+            .is_some(),
         issues,
         finding_origins,
         coverage: HealthCheckCoverage {
-            scanned_pages: local_report.scanned_pages,
-            source_pages,
-            wiki_pages,
-            deep_covered_pages,
-            deep_truncated,
-            not_applicable_rules,
+            scanned_pages: scan.report.scanned_pages,
+            source_pages: scan.source_pages,
+            wiki_pages: scan.wiki_pages,
+            deep_covered_pages: None,
+            deep_truncated: false,
+            not_applicable_rules: scan.not_applicable_rules.clone(),
         },
         error_count,
         warning_count,
@@ -374,92 +283,230 @@ where
         duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
         generated_at: crate::utils::time_utils::now_rfc3339(),
     };
-    loop {
-        let expected_persistent = report.persistent;
-        let report_publication = report_authority()?;
-        if report_publication.is_some() != expected_persistent {
-            report.persistent = services
+    let mut deep_issues = Vec::new();
+    if mode == HealthCheckMode::LocalQuick {
+        sink.skip(DEEP_CHECK).map_err(task_error)?;
+    } else {
+        // Save the local portion before any external work. It remains in Lint
+        // history even if the process or external route stops here.
+        store_report(context, run, services, &mut report, &mut report_authority)?;
+        sink.start(DEEP_CHECK).map_err(task_error)?;
+        if workflow_baseline_for_scope(context, &run.scope)?.fingerprint != run.baseline_fingerprint
+        {
+            services
                 .task_service
-                .workflow_persistence_dir(task_id)
-                .is_some();
-            continue;
+                .wait_workflow_stage_with_result(
+                    task_id,
+                    DEEP_CHECK,
+                    crate::models::workflow::WorkflowPendingAction {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        action_type: crate::models::confirmation::PendingActionType::ReviewScope,
+                        risk_level: crate::models::confirmation::RiskLevel::Low,
+                        affected_paths: Vec::new(),
+                        candidate: None,
+                        expires_at: None,
+                        checkpoint_hash: None,
+                    },
+                    Some(health_result(&report)?),
+                )
+                .map_err(task_error)?;
+            return Ok(None);
         }
-        let report_publication = report_publication
+        let deep_result = async {
+            ensure_not_cancelled(services.task_service, task_id)?;
+            let route = run.route.clone().ok_or_else(route_unavailable)?;
+            validate_prepared_route(context, services, &route)?;
+            let language = services
+                .settings_service
+                .read_settings(context)
+                .map(|settings| settings.language)
+                .unwrap_or_else(|_| "en".into());
+            let snapshot = services
+                .lint_service
+                .prepare_health_deep_snapshot_from_scan(&scan, &language);
+            report.coverage.deep_truncated = snapshot.deep_truncated;
+            services
+                .lint_service
+                .verify_deep_lint_snapshot(context, services.search_service, &snapshot)
+                .map_err(map_deep_snapshot_error)?;
+            let raw = deep_check(snapshot.clone(), route).await?;
+            ensure_not_cancelled(services.task_service, task_id)?;
+            let issues = services
+                .lint_service
+                .finish_deep_lint_snapshot(context, services.search_service, &snapshot, &raw, false)
+                .map_err(map_deep_snapshot_error)?;
+            report.coverage.deep_covered_pages = Some(snapshot.deep_covered_pages);
+            Ok::<_, BackendError>(issues)
+        }
+        .await;
+        match deep_result {
+            Ok(issues) => {
+                deep_issues = issues;
+                report.execution.as_mut().unwrap().deep_status = HealthDeepStatus::Completed;
+                sink.complete(DEEP_CHECK).map_err(task_error)?;
+            }
+            Err(error) => {
+                ensure_not_cancelled(services.task_service, task_id)?;
+                let execution = report.execution.as_mut().unwrap();
+                execution.deep_status = HealthDeepStatus::Failed;
+                execution.deep_error_code = Some(error.code.clone());
+                refresh_report_freshness(
+                    context,
+                    services.lint_service,
+                    &mut report,
+                    services.task_service,
+                    task_id,
+                )?;
+                report.duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                store_report(context, run, services, &mut report, &mut report_authority)?;
+                services
+                    .task_service
+                    .append_log(task_id, LogLevel::Error, error.message.clone())
+                    .map_err(task_error)?;
+                services
+                    .task_service
+                    .set_error(task_id, error.clone())
+                    .map_err(task_error)?;
+                let (_, next) = sink
+                    .fail_with_result(
+                        DEEP_CHECK,
+                        health_error_summary(&error),
+                        health_result(&report)?,
+                    )
+                    .map_err(task_error)?;
+                return Ok(next);
+            }
+        }
+    }
+    sink.start(MERGE_FINDINGS).map_err(task_error)?;
+    (report.issues, report.finding_origins) = merge_findings(report.issues, deep_issues);
+    sink.complete(MERGE_FINDINGS).map_err(task_error)?;
+    sink.start(CLASSIFY_FINDINGS).map_err(task_error)?;
+    (
+        report.error_count,
+        report.warning_count,
+        report.info_count,
+        report.findings_by_type,
+    ) = classify(&report.issues);
+    sink.complete(CLASSIFY_FINDINGS).map_err(task_error)?;
+    sink.start(WRITE_REPORT).map_err(task_error)?;
+    refresh_report_freshness(
+        context,
+        services.lint_service,
+        &mut report,
+        services.task_service,
+        task_id,
+    )?;
+    report.duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    store_report(context, run, services, &mut report, &mut report_authority)?;
+    sink.progress(WRITE_REPORT, Some(report.report_id.clone()), 1, Some(1))
+        .map_err(task_error)?;
+    sink.complete(WRITE_REPORT).map_err(task_error)?;
+    sink.start(COMPLETE).map_err(task_error)?;
+    sink.complete(COMPLETE).map_err(task_error)?;
+    let (_, next) = sink.finish(health_result(&report)?).map_err(task_error)?;
+    Ok(next)
+}
+
+fn refresh_report_freshness(
+    context: &ProjectContext,
+    lint: &LintService,
+    report: &mut HealthCheckReport,
+    tasks: &TaskService,
+    task_id: &str,
+) -> Result<(), BackendError> {
+    let execution = report
+        .execution
+        .as_mut()
+        .expect("new report has execution evidence");
+    let verification = lint.verify_health_inputs(context, &execution.input_hashes, |_| {
+        ensure_not_cancelled(tasks, task_id)
+    });
+    execution.freshness = match verification {
+        Ok(true) => HealthReportFreshness::Current,
+        Ok(false) => HealthReportFreshness::Stale,
+        Err(error) if error.code == "WORKFLOW_CANCELLED" => return Err(error),
+        Err(_) => HealthReportFreshness::Unknown,
+    };
+    Ok(())
+}
+
+fn store_report<P>(
+    context: &ProjectContext,
+    run: &WorkflowRun,
+    services: &HealthCheckExecutionServices<'_>,
+    report: &mut HealthCheckReport,
+    report_authority: &mut P,
+) -> Result<(), BackendError>
+where
+    P: FnMut() -> Result<Option<WorkflowExternalLaunchPermit>, BackendError>,
+{
+    let task_id = run.task_id.as_str();
+    loop {
+        ensure_not_cancelled(services.task_service, task_id)?;
+        let publication = report_authority()?;
+        report.persistent = publication.is_some();
+        let publication = publication
             .map(WorkflowExternalLaunchPermit::begin)
             .transpose()?;
+        let persistent = report.persistent;
         let stored =
             services
                 .lint_service
-                .store_health_check_report_guarded(context, &report, || {
+                .store_health_check_report_guarded(context, report, || {
                     ensure_not_cancelled(services.task_service, task_id)?;
                     if services
                         .task_service
                         .workflow_persistence_dir(task_id)
                         .is_some()
-                        != expected_persistent
+                        != persistent
                     {
                         return Err(BackendError::new(
                             "WORKFLOW_PERSISTENCE_CHANGED",
-                            "Workflow persistence changed while preparing the health-check report.",
+                            "Report persistence authority changed.",
                             true,
                             true,
                         ));
-                    }
-                    if workflow_baseline_for_scope(context, &run.scope)?.fingerprint
-                        != run.baseline_fingerprint
-                    {
-                        return Err(baseline_changed());
                     }
                     Ok(())
                 });
         match stored {
             Ok(_) => {
-                if let Some(publication) = report_publication {
+                if let Some(publication) = publication {
                     publication.started();
                 }
-                break;
+                return Ok(());
             }
-            Err(error) if error.code == "WORKFLOW_PERSISTENCE_CHANGED" => {
-                report.persistent = services
-                    .task_service
-                    .workflow_persistence_dir(task_id)
-                    .is_some();
-            }
+            Err(error) if error.code == "WORKFLOW_PERSISTENCE_CHANGED" => continue,
             Err(error) => return Err(error),
         }
     }
-    sink.progress(WRITE_REPORT, Some(report.report_id.clone()), 1, Some(1))
-        .map_err(task_error)?;
-    sink.complete(WRITE_REPORT).map_err(task_error)?;
+}
 
-    sink.start(COMPLETE).map_err(task_error)?;
-    sink.complete(COMPLETE).map_err(task_error)?;
-    let coverage = WorkflowHealthCoverageSummary {
-        mode: report.mode.clone(),
-        scanned_pages: report.coverage.scanned_pages as u64,
-        deep_covered_pages: report.coverage.deep_covered_pages.map(|count| count as u64),
-        deep_truncated: report.coverage.deep_truncated,
-    };
-    let result_findings_by_type = report
-        .findings_by_type
-        .iter()
-        .map(|(kind, count)| (kind.clone(), *count as u64))
-        .collect();
-    let report_digest = LintService::health_check_report_digest(&report)
-        .map_err(|error| task_error(error.message))?;
-    let (_, next) = sink
-        .finish(WorkflowResult::HealthCheck {
-            report_id: Some(report.report_id),
-            persistent: report.persistent,
-            report_digest: Some(report_digest),
-            error_count: error_count as u64,
-            warning_count: warning_count as u64,
-            info_count: info_count as u64,
-            coverage: Some(coverage),
-            findings_by_type: result_findings_by_type,
-        })
-        .map_err(task_error)?;
-    Ok(next)
+fn health_result(report: &HealthCheckReport) -> Result<WorkflowResult, BackendError> {
+    Ok(WorkflowResult::HealthCheck {
+        report_id: Some(report.report_id.clone()),
+        persistent: report.persistent,
+        report_digest: Some(LintService::health_check_report_digest(report)?),
+        error_count: report.error_count as u64,
+        warning_count: report.warning_count as u64,
+        info_count: report.info_count as u64,
+        coverage: Some(WorkflowHealthCoverageSummary {
+            deep_status: report
+                .execution
+                .as_ref()
+                .map(|execution| execution.deep_status),
+            mode: report.mode.clone(),
+            scanned_pages: report.coverage.scanned_pages as u64,
+            deep_covered_pages: report.coverage.deep_covered_pages.map(|count| count as u64),
+            deep_truncated: report.coverage.deep_truncated,
+        }),
+        findings_by_type: report
+            .findings_by_type
+            .iter()
+            .map(|(kind, count)| (kind.clone(), *count as u64))
+            .collect(),
+    })
 }
 
 async fn execute_prepared_deep_route(
@@ -786,13 +833,6 @@ fn classify(issues: &[LintIssue]) -> (usize, usize, usize, BTreeMap<String, usiz
     (errors, warnings, infos, by_type)
 }
 
-fn is_link_rule(issue_type: LintIssueType) -> bool {
-    matches!(
-        issue_type,
-        LintIssueType::DeadLink | LintIssueType::OrphanPage | LintIssueType::IndexDrift
-    )
-}
-
 fn severity_rank(severity: LintSeverity) -> u8 {
     match severity {
         LintSeverity::Error => 0,
@@ -864,6 +904,7 @@ fn route_unavailable() -> BackendError {
 }
 
 fn finish_error(
+    context: &ProjectContext,
     run: &WorkflowRun,
     services: &HealthCheckExecutionServices<'_>,
     error: BackendError,
@@ -878,10 +919,19 @@ fn finish_error(
             .is_some_and(|task| {
                 matches!(task.status, TaskStatus::Cancelling | TaskStatus::Cancelled)
             });
+    let retained = services
+        .lint_service
+        .read_current_health_report(context, &run.task_id)
+        .ok()
+        .and_then(|report| health_result(&report).ok());
     let outcome = if cancelled {
         services
             .coordinator
-            .finish_cancelled_and_claim_next(services.task_service, &run.task_id)
+            .finish_cancelled_and_claim_next_with_result(
+                services.task_service,
+                &run.task_id,
+                retained,
+            )
     } else {
         let _ = services.task_service.set_error(&run.task_id, error.clone());
         let sink =
@@ -911,41 +961,42 @@ fn finish_error(
         }) {
             let _ = sink.start(&current);
         }
-        sink.fail(
-            &current,
-            WorkflowErrorSummary {
-                code: error.code.clone(),
-                message_key: if error.code.contains("BASELINE")
-                    || error.code.contains("SCAN_CHANGED")
-                {
-                    "workflows.error.prepareAgain".into()
-                } else if error.code.contains("ROUTE")
-                    || error.code.contains("PROVIDER")
-                    || error.code.contains("AGENT")
-                {
-                    "workflows.error.configureExecutionRoute".into()
-                } else {
-                    "workflows.error.healthCheckFailed".into()
-                },
-                recoverable: error.recoverable,
-                user_action_required: error.user_action_required,
-                suggested_action: if error.code.contains("BASELINE")
-                    || error.code.contains("SCAN_CHANGED")
-                {
-                    Some(WorkflowPrerequisiteAction::PrepareAgain)
-                } else if error.code.contains("ROUTE")
-                    || error.code.contains("PROVIDER")
-                    || error.code.contains("AGENT")
-                {
-                    Some(WorkflowPrerequisiteAction::ConfigureExecutionRoute)
-                } else {
-                    None
-                },
-                project_mutation_state: WorkflowProjectMutationState::NotModified,
-            },
-        )
+        match retained {
+            Some(result) => sink.fail_with_result(&current, health_error_summary(&error), result),
+            None => sink.fail(&current, health_error_summary(&error)),
+        }
     };
     outcome.ok().and_then(|(_, next)| next)
+}
+
+fn health_error_summary(error: &BackendError) -> WorkflowErrorSummary {
+    WorkflowErrorSummary {
+        code: error.code.clone(),
+        message_key: if error.code.contains("BASELINE") || error.code.contains("SCAN_CHANGED") {
+            "workflows.error.prepareAgain".into()
+        } else if error.code.contains("ROUTE")
+            || error.code.contains("PROVIDER")
+            || error.code.contains("AGENT")
+        {
+            "workflows.error.configureExecutionRoute".into()
+        } else {
+            "workflows.error.healthCheckFailed".into()
+        },
+        recoverable: error.recoverable,
+        user_action_required: error.user_action_required,
+        suggested_action: if error.code.contains("BASELINE") || error.code.contains("SCAN_CHANGED")
+        {
+            Some(WorkflowPrerequisiteAction::PrepareAgain)
+        } else if error.code.contains("ROUTE")
+            || error.code.contains("PROVIDER")
+            || error.code.contains("AGENT")
+        {
+            Some(WorkflowPrerequisiteAction::ConfigureExecutionRoute)
+        } else {
+            None
+        },
+        project_mutation_state: WorkflowProjectMutationState::NotModified,
+    }
 }
 
 fn task_error(message: String) -> BackendError {

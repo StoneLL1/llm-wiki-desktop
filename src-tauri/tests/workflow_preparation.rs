@@ -885,26 +885,37 @@ fn queued_runs_are_not_dispatched_before_the_coordinator_claims_them() {
         WorkflowFilesystemAccess::Writable,
         WorkflowPersistenceMode::Persistent,
     );
-    let first = prepare(
-        &service,
-        &context,
-        snapshot.clone(),
-        &settings,
-        &secrets,
-        &agents,
-    );
-    service
-        .start(
-            &context,
-            snapshot.clone(),
-            &settings,
-            &secrets,
-            &agents,
+    // A distinct active workflow owns the lane. Local Health requests with
+    // the same current-at-start intent correctly deduplicate with each other.
+    let first = service
+        .coordinator
+        .enqueue(
             &tasks,
-            &first.preparation_id,
-            &first.preparation_revision,
+            llm_wiki_desktop_lib::services::EnqueueWorkflow {
+                project_id: context.project_id.clone(),
+                project_root: context.root.clone(),
+                task_state_root: Some(context.root.join(".app/tasks")),
+                title: "Update Wiki".into(),
+                kind: WorkflowKind::UpdateWiki,
+                scope: WorkflowScope::UpdateWiki {
+                    mode: llm_wiki_desktop_lib::models::workflow::UpdateWikiMode::ChangedSources,
+                    source_versions: Vec::new(),
+                },
+                route: None,
+                baseline_fingerprint: "update-inputs".into(),
+                execution_options:
+                    llm_wiki_desktop_lib::models::workflow::WorkflowExecutionOptions {
+                        preparation_revision: "queue-test-update".into(),
+                        ..Default::default()
+                    },
+                stages: llm_wiki_desktop_lib::services::workflow_stages(&WorkflowKind::UpdateWiki),
+                retry: None,
+            },
         )
         .unwrap();
+    let WorkflowStartOutcome::Created { run: active } = first else {
+        panic!("new Update lane owner")
+    };
     std::fs::write(root.path().join("wiki/概览.md"), "# changed baseline\n").unwrap();
     let second = prepare(&service, &context, snapshot, &settings, &secrets, &agents);
     let outcome = service
@@ -923,18 +934,31 @@ fn queued_runs_are_not_dispatched_before_the_coordinator_claims_them() {
             &second.preparation_revision,
         )
         .unwrap();
-    match outcome {
-        WorkflowStartOutcome::Created { run } => assert_eq!(
-            run.display_status,
-            llm_wiki_desktop_lib::models::workflow::WorkflowDisplayStatus::Queued
-        ),
-        WorkflowStartOutcome::Existing { .. } => panic!("changed baseline must queue"),
-    }
+    let queued_id = match outcome {
+        WorkflowStartOutcome::Created { run } => {
+            assert_eq!(
+                run.display_status,
+                llm_wiki_desktop_lib::models::workflow::WorkflowDisplayStatus::Queued
+            );
+            run.task_id
+        }
+        WorkflowStartOutcome::Existing { .. } => panic!("Health must queue behind Update"),
+    };
+    assert_eq!(runner.0.load(Ordering::SeqCst), 0);
+    service.coordinator.cancel(&tasks, &active.task_id).unwrap();
+    let (_, claimed) = service
+        .coordinator
+        .finish_cancelled_and_claim_next(&tasks, &active.task_id)
+        .unwrap();
+    let claimed = claimed.expect("Health is claimed when the lane is released");
+    assert_eq!(claimed.task_id, queued_id);
+    assert_eq!(runner.0.load(Ordering::SeqCst), 0);
+    service.dispatch_claimed_run(&tasks, &claimed).unwrap();
     assert_eq!(runner.0.load(Ordering::SeqCst), 1);
 }
 
 #[test]
-fn changed_baseline_or_access_invalidates_the_token() {
+fn local_content_edits_preserve_the_token_but_access_changes_invalidate_it() {
     let (root, context) = project();
     let config = tempfile::tempdir().unwrap();
     let settings = SettingsService::with_config_dir(config.path().to_path_buf());
@@ -959,7 +983,7 @@ fn changed_baseline_or_access_invalidates_the_token() {
         &agents,
     );
     std::fs::write(root.path().join("wiki/概览.md"), "# 已修改\n").unwrap();
-    let error = service
+    let started_after_edit = service
         .start(
             &context,
             trusted.clone(),
@@ -970,8 +994,11 @@ fn changed_baseline_or_access_invalidates_the_token() {
             &baseline.preparation_id,
             &baseline.preparation_revision,
         )
-        .unwrap_err();
-    assert_eq!(error.code, "WORKFLOW_PREPARATION_STALE");
+        .unwrap();
+    assert!(matches!(
+        started_after_edit,
+        WorkflowStartOutcome::Created { .. }
+    ));
 
     let access_token = prepare(
         &service,
@@ -1415,12 +1442,15 @@ fn preparation_capacity_evicts_old_unstarted_tokens_but_keeps_started_replay() {
     );
     assert_eq!(stale.unwrap_err().code, "WORKFLOW_PREPARATION_STALE");
 
-    for marker in 0..128 {
-        std::fs::write(
-            context.root.join("wiki/cap-pressure.md"),
-            format!("# cap pressure {marker}\n"),
-        )
+    // New Local runs share one intent fingerprint. End each attempt before
+    // creating the next, so capacity pressure comes from distinct task facts
+    // rather than violating active-run deduplication with content edits.
+    service.coordinator.cancel(&tasks, &first_task_id).unwrap();
+    service
+        .coordinator
+        .finish_cancelled_and_claim_next(&tasks, &first_task_id)
         .unwrap();
+    for _ in 0..128 {
         let preparation = prepare(
             &service,
             &context,
@@ -1441,7 +1471,14 @@ fn preparation_capacity_evicts_old_unstarted_tokens_but_keeps_started_replay() {
                 &preparation.preparation_revision,
             )
             .unwrap();
-        assert!(matches!(outcome, WorkflowStartOutcome::Created { .. }));
+        let WorkflowStartOutcome::Created { run } = outcome else {
+            panic!("terminal run permits a new Health attempt")
+        };
+        service.coordinator.cancel(&tasks, &run.task_id).unwrap();
+        service
+            .coordinator
+            .finish_cancelled_and_claim_next(&tasks, &run.task_id)
+            .unwrap();
     }
     let replay = service
         .start(

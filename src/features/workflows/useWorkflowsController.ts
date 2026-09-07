@@ -553,7 +553,7 @@ export function useWorkflowsController(
           }
           return;
         }
-        if (run.pendingAction?.actionType === "review_scope" && run.scope.kind === "update_wiki") {
+        if (run.pendingAction?.actionType === "review_scope" && (run.scope.kind === "update_wiki" || run.scope.kind === "health_check")) {
           const state = useWorkflowStore.getState();
           const { selectedTaskId, surface } = state;
           const guard = captureWorkflowRequestGuard(state);

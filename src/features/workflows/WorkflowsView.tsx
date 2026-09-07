@@ -127,7 +127,7 @@ export function WorkflowsView({ controller, onOpenTask }: { controller: Workflow
     : surface === "history"
       ? <WorkflowHistoryView runs={historyRuns} onBack={controller.backToOverview} onFilter={(kind, status) => void controller.filterHistory(kind, status)} onOpen={(taskId) => void controller.openRun(taskId)} onRetry={(taskId) => void controller.retry(taskId)} onLoadMore={() => void controller.loadHistoryMore()} />
       : surface === "preparation" && preparation
-        ? <WorkflowPreparationView preparation={preparation} onBack={controller.backToOverview} onPrerequisite={controller.handlePrerequisite} onStart={(restricted, remote, draft) => void controller.startPrepared(restricted, remote, draft)} />
+        ? <WorkflowPreparationView lastHealth={overview.contextSummary?.lastHealth} onOpenLastHealth={(taskId) => void controller.openRun(taskId)} preparation={preparation} onBack={controller.backToOverview} onPrerequisite={controller.handlePrerequisite} onStart={(restricted, remote, draft) => void controller.startPrepared(restricted, remote, draft)} />
         : surface === "detail" && selectedRun
           ? <WorkflowTaskDetail run={selectedRun} queuedRuns={queuedRuns} controller={controller} onOpenLogs={onOpenTask} />
           : overviewView;

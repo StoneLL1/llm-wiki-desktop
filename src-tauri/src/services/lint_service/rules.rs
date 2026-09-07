@@ -16,7 +16,7 @@ use super::LintService;
 
 /// Pages linked from index.md aren't "orphans" even though nothing links
 /// back to them, and the structural pages themselves are never orphans.
-const STRUCTURAL_FILES: &[&str] = &["wiki/index.md", "wiki/overview.md", "wiki/log.md"];
+pub(super) const STRUCTURAL_FILES: &[&str] = &["wiki/index.md", "wiki/overview.md", "wiki/log.md"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalLintPhase {
@@ -70,174 +70,10 @@ impl LintService {
                     BackendError::new("LINT_PAGE_READ_FAILED", error.message, true, false)
                         .with_details(serde_json::json!({ "path": page.path }))
                 })?;
-            let split = split_frontmatter(&raw);
-            let frontmatter_present = split.frontmatter.is_some();
-            let frontmatter = split
-                .frontmatter
-                .as_deref()
-                .map(parse_frontmatter)
-                .unwrap_or_default();
-
-            issues.extend(schema_source_issues(
-                context,
-                page,
-                &split.body,
-                &frontmatter,
-            ));
-
-            // Missing frontmatter (structural files are exempt).
-            if !frontmatter_present && !STRUCTURAL_FILES.contains(&page.path.as_str()) {
-                let wiki_relative = page.path.strip_prefix("wiki/").unwrap_or(&page.path);
-                let inferred_type = WikiPageType::infer(None, wiki_relative);
-                let fixability = if inferred_type == WikiPageType::Other {
-                    Fixability::None
-                } else {
-                    Fixability::Safe
-                };
-                issues.push(LintIssue {
-                    id: format!("missing_frontmatter:{}", page.path),
-                    source: LintIssueSource::Local,
-                    severity: LintSeverity::Warning,
-                    issue_type: LintIssueType::MissingFrontmatter,
-                    path: page.path.clone(),
-                    scan_hash: None,
-                    range: None,
-                    message: "Page has no YAML frontmatter.".into(),
-                    evidence: None,
-                    target: None,
-                    fixability,
-                    suggested_action: Some(if fixability == Fixability::Safe {
-                        "Add a minimal frontmatter block inferred from the page folder.".into()
-                    } else {
-                        "Choose a recognized page folder/type, then add frontmatter manually."
-                            .into()
-                    }),
-                });
-            }
-
-            // Empty page.
-            if page.word_count == 0 {
-                issues.push(LintIssue {
-                    id: format!("empty_page:{}", page.path),
-                    source: LintIssueSource::Local,
-                    severity: LintSeverity::Warning,
-                    issue_type: LintIssueType::EmptyPage,
-                    path: page.path.clone(),
-                    scan_hash: None,
-                    range: None,
-                    message: "Page body has no readable words.".into(),
-                    evidence: None,
-                    target: None,
-                    fixability: Fixability::None,
-                    suggested_action: Some("Add content or remove the page.".into()),
-                });
-            }
-
-            // Missing resources referenced by `sources:` and by local
-            // Markdown links/images. Frontmatter alone misses the common
-            // `![scan](../raw/scan.png)` path, while treating remote URLs as
-            // local files creates noisy false positives.
-            let mut resource_refs = page.sources.clone();
-            resource_refs.extend(extract_local_resource_refs(&split.body));
-            resource_refs.sort();
-            resource_refs.dedup();
-            for source in &resource_refs {
-                if is_external(source) {
-                    continue;
-                }
-                if !resource_exists(context, &page.path, source) {
-                    issues.push(LintIssue {
-                        id: format!("missing_resource:{}:{source}", page.path),
-                        source: LintIssueSource::Local,
-                        severity: LintSeverity::Warning,
-                        issue_type: LintIssueType::MissingResource,
-                        path: page.path.clone(),
-                        scan_hash: None,
-                        range: None,
-                        message: format!("Source reference `{source}` does not exist."),
-                        evidence: None,
-                        target: Some(source.clone()),
-                        fixability: Fixability::None,
-                        suggested_action: Some("Add the source file or correct the path.".into()),
-                    });
-                }
-            }
+            issues.extend(markdown_page_issues(context, page, &raw));
         }
 
-        // Duplicate filenames (same stem, different folders).
-        let mut by_stem: HashMap<String, Vec<&WikiPageMeta>> = HashMap::new();
-        for page in &pages {
-            if let Some(stem) = file_stem(&page.path) {
-                by_stem
-                    .entry(stem.to_ascii_lowercase())
-                    .or_default()
-                    .push(page);
-            }
-        }
-        for group in by_stem.values() {
-            if group.len() < 2 {
-                continue;
-            }
-            let colliding: Vec<String> = group.iter().map(|p| p.path.clone()).collect();
-            for page in group {
-                issues.push(LintIssue {
-                    id: format!("duplicate_filename:{}", page.path),
-                    source: LintIssueSource::Local,
-                    severity: LintSeverity::Warning,
-                    issue_type: LintIssueType::DuplicateFilename,
-                    path: page.path.clone(),
-                    scan_hash: None,
-                    range: None,
-                    message: format!(
-                        "Filename stem collides with {} other page(s).",
-                        group.len() - 1
-                    ),
-                    evidence: Some(colliding.join(", ")),
-                    target: None,
-                    fixability: Fixability::None,
-                    suggested_action: Some("Rename one of the pages to disambiguate.".into()),
-                });
-            }
-        }
-
-        // Path-case collisions (paths equal modulo ASCII case).
-        let mut by_casefold: HashMap<String, Vec<&WikiPageMeta>> = HashMap::new();
-        for page in &pages {
-            by_casefold
-                .entry(page.path.to_ascii_lowercase())
-                .or_default()
-                .push(page);
-        }
-        for group in by_casefold.values() {
-            if group.len() < 2 {
-                continue;
-            }
-            for page in group {
-                issues.push(LintIssue {
-                    id: format!("path_case:{}", page.path),
-                    source: LintIssueSource::Local,
-                    severity: LintSeverity::Warning,
-                    issue_type: LintIssueType::PathCase,
-                    path: page.path.clone(),
-                    scan_hash: None,
-                    range: None,
-                    message: "Path differs from another page only by letter case.".into(),
-                    evidence: Some(
-                        group
-                            .iter()
-                            .filter(|p| p.path != page.path)
-                            .map(|p| p.path.clone())
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                    ),
-                    target: None,
-                    fixability: Fixability::None,
-                    suggested_action: Some(
-                        "Rename so paths are unambiguous on case-insensitive filesystems.".into(),
-                    ),
-                });
-            }
-        }
+        issues.extend(collision_issues(&pages));
 
         issues.extend(check_structural_page_basics(context, &pages, &lookup));
         on_phase(LocalLintPhase::MarkdownComplete)?;
@@ -384,78 +220,23 @@ impl LintService {
     where
         F: FnMut(LocalLintPhase) -> Result<(), BackendError>,
     {
-        let source_paths = health_source_paths(context)?;
-        let before = self.capture_prompt_input_hashes(
-            context,
-            &source_paths.iter().cloned().collect::<HashSet<_>>(),
-        )?;
-        let mut source_issues = Vec::new();
-        for path in &source_paths {
-            let raw = self.file_store.read_markdown(context, path)?;
-            let split = split_frontmatter(&raw);
-            if split.frontmatter.is_none() {
-                source_issues.push(local_issue(
-                    LintIssueType::MissingFrontmatter,
-                    LintSeverity::Warning,
-                    path,
-                    "Committed Source Markdown has no YAML frontmatter.",
-                    None,
-                    None,
-                ));
+        let mut markdown_complete = false;
+        let scan = self.run_health_local_scan(context, search_service, |progress| {
+            if !markdown_complete && progress.phase != super::HealthScanPhase::Markdown {
+                markdown_complete = true;
+                on_phase(LocalLintPhase::MarkdownComplete)?;
             }
-            if split.body.trim().is_empty() {
-                source_issues.push(local_issue(
-                    LintIssueType::EmptyPage,
-                    LintSeverity::Warning,
-                    path,
-                    "Committed Source Markdown has no readable body.",
-                    None,
-                    None,
-                ));
-            }
-            for resource in extract_local_resource_refs(&split.body) {
-                if !is_external(&resource) && !resource_exists(context, path, &resource) {
-                    source_issues.push(local_issue(
-                        LintIssueType::MissingResource,
-                        LintSeverity::Warning,
-                        path,
-                        &format!("Source reference `{resource}` does not exist."),
-                        Some(resource),
-                        None,
-                    ));
-                }
-            }
-        }
-
-        let mut report =
-            self.run_local_lint_with_phase(context, search_service, |phase| on_phase(phase))?;
-        let after_paths = health_source_paths(context)?;
-        let after = self.capture_prompt_input_hashes(
-            context,
-            &after_paths.iter().cloned().collect::<HashSet<_>>(),
-        )?;
-        if source_paths != after_paths || before != after {
+            Ok(())
+        })?;
+        if !scan.current {
             return Err(BackendError::new(
                 "LINT_SCAN_CHANGED",
-                "Source Markdown changed while the local Health Check was running.",
+                "Markdown changed during the Health Check scan.",
                 true,
                 true,
             ));
         }
-        for issue in &mut source_issues {
-            issue.scan_hash = self.file_store.file_hash(context, &issue.path).ok();
-            issue.fixability = Fixability::None;
-        }
-        report.issues.extend(source_issues);
-        self.filter_ignored_issues(context, &mut report.issues)?;
-        report.scanned_pages += source_paths.len();
-        report.issues.sort_by(|a, b| {
-            severity_rank(a.severity)
-                .cmp(&severity_rank(b.severity))
-                .then_with(|| a.path.cmp(&b.path))
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        Ok(report)
+        Ok(scan.report)
     }
 
     fn capture_scan_snapshot(
@@ -542,6 +323,201 @@ impl LintService {
     }
 }
 
+pub(super) fn markdown_page_issues(
+    context: &ProjectContext,
+    page: &WikiPageMeta,
+    raw: &str,
+) -> Vec<LintIssue> {
+    markdown_page_issues_with_resources(context, page, raw, |source| {
+        resource_exists(context, &page.path, source)
+    })
+}
+
+pub(super) fn markdown_page_issues_with_resources<F>(
+    context: &ProjectContext,
+    page: &WikiPageMeta,
+    raw: &str,
+    mut exists: F,
+) -> Vec<LintIssue>
+where
+    F: FnMut(&str) -> bool,
+{
+    let mut issues = Vec::new();
+    let split = split_frontmatter(&raw);
+    let frontmatter_present = split.frontmatter.is_some();
+    let frontmatter = split
+        .frontmatter
+        .as_deref()
+        .map(parse_frontmatter)
+        .unwrap_or_default();
+
+    issues.extend(schema_source_issues(
+        context,
+        page,
+        &split.body,
+        &frontmatter,
+    ));
+
+    // Missing frontmatter (structural files are exempt).
+    if !frontmatter_present && !STRUCTURAL_FILES.contains(&page.path.as_str()) {
+        let wiki_relative = page.path.strip_prefix("wiki/").unwrap_or(&page.path);
+        let inferred_type = WikiPageType::infer(None, wiki_relative);
+        let fixability = if inferred_type == WikiPageType::Other {
+            Fixability::None
+        } else {
+            Fixability::Safe
+        };
+        issues.push(LintIssue {
+            id: format!("missing_frontmatter:{}", page.path),
+            source: LintIssueSource::Local,
+            severity: LintSeverity::Warning,
+            issue_type: LintIssueType::MissingFrontmatter,
+            path: page.path.clone(),
+            scan_hash: None,
+            range: None,
+            message: "Page has no YAML frontmatter.".into(),
+            evidence: None,
+            target: None,
+            fixability,
+            suggested_action: Some(if fixability == Fixability::Safe {
+                "Add a minimal frontmatter block inferred from the page folder.".into()
+            } else {
+                "Choose a recognized page folder/type, then add frontmatter manually.".into()
+            }),
+        });
+    }
+
+    // Empty page.
+    if page.word_count == 0 {
+        issues.push(LintIssue {
+            id: format!("empty_page:{}", page.path),
+            source: LintIssueSource::Local,
+            severity: LintSeverity::Warning,
+            issue_type: LintIssueType::EmptyPage,
+            path: page.path.clone(),
+            scan_hash: None,
+            range: None,
+            message: "Page body has no readable words.".into(),
+            evidence: None,
+            target: None,
+            fixability: Fixability::None,
+            suggested_action: Some("Add content or remove the page.".into()),
+        });
+    }
+
+    // Missing resources referenced by `sources:` and by local
+    // Markdown links/images. Frontmatter alone misses the common
+    // `![scan](../raw/scan.png)` path, while treating remote URLs as
+    // local files creates noisy false positives.
+    let mut resource_refs = page.sources.clone();
+    resource_refs.extend(extract_local_resource_refs(&split.body));
+    resource_refs.sort();
+    resource_refs.dedup();
+    for source in &resource_refs {
+        if is_external(source) {
+            continue;
+        }
+        if !exists(source) {
+            issues.push(LintIssue {
+                id: format!("missing_resource:{}:{source}", page.path),
+                source: LintIssueSource::Local,
+                severity: LintSeverity::Warning,
+                issue_type: LintIssueType::MissingResource,
+                path: page.path.clone(),
+                scan_hash: None,
+                range: None,
+                message: format!("Source reference `{source}` does not exist."),
+                evidence: None,
+                target: Some(source.clone()),
+                fixability: Fixability::None,
+                suggested_action: Some("Add the source file or correct the path.".into()),
+            });
+        }
+    }
+
+    issues
+}
+
+pub(super) fn collision_issues(pages: &[WikiPageMeta]) -> Vec<LintIssue> {
+    let mut issues = Vec::new();
+    // Duplicate filenames (same stem, different folders).
+    let mut by_stem: HashMap<String, Vec<&WikiPageMeta>> = HashMap::new();
+    for page in pages {
+        if let Some(stem) = file_stem(&page.path) {
+            by_stem
+                .entry(stem.to_ascii_lowercase())
+                .or_default()
+                .push(page);
+        }
+    }
+    for group in by_stem.values() {
+        if group.len() < 2 {
+            continue;
+        }
+        let colliding: Vec<String> = group.iter().map(|p| p.path.clone()).collect();
+        for page in group {
+            issues.push(LintIssue {
+                id: format!("duplicate_filename:{}", page.path),
+                source: LintIssueSource::Local,
+                severity: LintSeverity::Warning,
+                issue_type: LintIssueType::DuplicateFilename,
+                path: page.path.clone(),
+                scan_hash: None,
+                range: None,
+                message: format!(
+                    "Filename stem collides with {} other page(s).",
+                    group.len() - 1
+                ),
+                evidence: Some(colliding.join(", ")),
+                target: None,
+                fixability: Fixability::None,
+                suggested_action: Some("Rename one of the pages to disambiguate.".into()),
+            });
+        }
+    }
+
+    // Path-case collisions (paths equal modulo ASCII case).
+    let mut by_casefold: HashMap<String, Vec<&WikiPageMeta>> = HashMap::new();
+    for page in pages {
+        by_casefold
+            .entry(page.path.to_ascii_lowercase())
+            .or_default()
+            .push(page);
+    }
+    for group in by_casefold.values() {
+        if group.len() < 2 {
+            continue;
+        }
+        for page in group {
+            issues.push(LintIssue {
+                id: format!("path_case:{}", page.path),
+                source: LintIssueSource::Local,
+                severity: LintSeverity::Warning,
+                issue_type: LintIssueType::PathCase,
+                path: page.path.clone(),
+                scan_hash: None,
+                range: None,
+                message: "Path differs from another page only by letter case.".into(),
+                evidence: Some(
+                    group
+                        .iter()
+                        .filter(|p| p.path != page.path)
+                        .map(|p| p.path.clone())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+                target: None,
+                fixability: Fixability::None,
+                suggested_action: Some(
+                    "Rename so paths are unambiguous on case-insensitive filesystems.".into(),
+                ),
+            });
+        }
+    }
+
+    issues
+}
+
 pub fn health_source_paths(context: &ProjectContext) -> Result<Vec<String>, BackendError> {
     let structural_paths = [
         context.layout.wiki_index_path.as_deref(),
@@ -568,7 +544,7 @@ pub fn health_source_paths(context: &ProjectContext) -> Result<Vec<String>, Back
 /// Case-insensitive lookup from note-name/title/alias -> page path, mirroring
 /// `graph_service::build_target_lookup`. Replicated here to avoid coupling
 /// lint to graph internals.
-fn build_target_lookup(pages: &[WikiPageMeta]) -> HashMap<String, String> {
+pub(super) fn build_target_lookup(pages: &[WikiPageMeta]) -> HashMap<String, String> {
     let mut lookup: HashMap<String, String> = HashMap::new();
     for page in pages {
         for key in resolution_keys(page) {
@@ -605,7 +581,7 @@ fn resolution_keys(page: &WikiPageMeta) -> Vec<String> {
 }
 
 /// Count resolved inbound wikilinks per page (for orphan detection).
-fn build_inbound_counts(
+pub(super) fn build_inbound_counts(
     pages: &[WikiPageMeta],
     lookup: &HashMap<String, String>,
 ) -> HashMap<String, usize> {
@@ -634,12 +610,12 @@ pub(super) fn file_stem(path: &str) -> Option<String> {
         .or_else(|| Some(file_name.to_string()))
 }
 
-fn is_external(value: &str) -> bool {
+pub(super) fn is_external(value: &str) -> bool {
     let trimmed = value.trim();
     trimmed.contains("://") || trimmed.starts_with("mailto:")
 }
 
-fn resource_exists(context: &ProjectContext, page_path: &str, source: &str) -> bool {
+pub(super) fn resource_exists(context: &ProjectContext, page_path: &str, source: &str) -> bool {
     let normalized = source.replace('\\', "/");
     // Absolute paths and URLs are out of project scope; treat as present to
     // avoid false positives on references we cannot verify.
@@ -657,7 +633,7 @@ fn resource_exists(context: &ProjectContext, page_path: &str, source: &str) -> b
         })
 }
 
-fn source_path_candidates(page_path: &str, source: &str) -> Vec<String> {
+pub(super) fn source_path_candidates(page_path: &str, source: &str) -> Vec<String> {
     let normalized = source
         .trim()
         .trim_matches('<')
@@ -679,7 +655,7 @@ fn source_path_candidates(page_path: &str, source: &str) -> Vec<String> {
     candidates
 }
 
-fn is_absolute_resource_ref(value: &str) -> bool {
+pub(super) fn is_absolute_resource_ref(value: &str) -> bool {
     let trimmed = value.trim();
     trimmed.starts_with('/')
         || trimmed.starts_with("//")
@@ -689,7 +665,7 @@ fn is_absolute_resource_ref(value: &str) -> bool {
             && (trimmed.as_bytes()[2] == b'/' || trimmed.as_bytes()[2] == b'\\'))
 }
 
-fn normalize_resource_path(path: &str) -> Option<String> {
+pub(super) fn normalize_resource_path(path: &str) -> Option<String> {
     let normalized_path = path.replace('\\', "/");
     let mut segments: Vec<&str> = Vec::new();
     for segment in normalized_path.split('/') {
@@ -704,7 +680,7 @@ fn normalize_resource_path(path: &str) -> Option<String> {
     (!segments.is_empty()).then(|| segments.join("/"))
 }
 
-fn extract_local_resource_refs(body: &str) -> Vec<String> {
+pub(super) fn extract_local_resource_refs(body: &str) -> Vec<String> {
     let mut refs = Vec::new();
     let mut cursor = 0usize;
     while let Some(relative_start) = body[cursor..].find("](") {
@@ -824,7 +800,7 @@ fn schema_source_issues(
     issues
 }
 
-fn local_issue(
+pub(super) fn local_issue(
     issue_type: LintIssueType,
     severity: LintSeverity,
     path: &str,
@@ -869,7 +845,7 @@ pub(super) fn lint_issue_type_id(issue_type: LintIssueType) -> &'static str {
     }
 }
 
-fn is_derived_page(page: &WikiPageMeta) -> bool {
+pub(super) fn is_derived_page(page: &WikiPageMeta) -> bool {
     !is_structural_path(&page.path)
         && !matches!(
             page.page_type,
@@ -989,7 +965,7 @@ fn check_structural_page_basics(
 }
 
 /// Find the 1-based body line of the first `[[target]]` occurrence.
-fn find_wikilink_line(body: &str, target: &str) -> Option<usize> {
+pub(super) fn find_wikilink_line(body: &str, target: &str) -> Option<usize> {
     let wanted = target.trim().replace('\\', "/").to_ascii_lowercase();
     for (line_number, line) in body.lines().enumerate() {
         let mut cursor = 0usize;
@@ -1015,7 +991,7 @@ fn find_wikilink_line(body: &str, target: &str) -> Option<usize> {
     None
 }
 
-fn severity_rank(severity: LintSeverity) -> u8 {
+pub(super) fn severity_rank(severity: LintSeverity) -> u8 {
     match severity {
         LintSeverity::Error => 0,
         LintSeverity::Warning => 1,

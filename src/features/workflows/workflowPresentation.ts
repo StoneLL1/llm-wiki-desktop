@@ -133,7 +133,9 @@ export function presentWorkflowResult(run: WorkflowRun): WorkflowResultPresentat
         }));
       return {
         titleKey: "workflows.result.health_check.title",
-        summaryKey: "workflows.result.health_check.summary",
+        summaryKey: result.coverage?.deepStatus === "failed" || result.coverage?.deepStatus === "pending"
+          ? "workflows.result.health_check.localRetained"
+          : "workflows.result.health_check.summary",
         primaryActionKey: "workflows.action.openLintResults",
         paths: [],
         rows: [
@@ -145,6 +147,7 @@ export function presentWorkflowResult(run: WorkflowRun): WorkflowResultPresentat
           { labelKey: "workflows.result.coverage", value: result.coverage
             ? { kind: "translation", key: `workflows.result.coverage.${result.coverage.mode}` }
             : { kind: "text", value: null } },
+          { labelKey: "lint.healthReport.deepStatus", value: { kind: "translation", key: `lint.healthReport.deep.${result.coverage?.deepStatus ?? (result.coverage?.mode === "local_quick" ? "not_requested" : "unknown")}` } },
           { labelKey: "workflows.result.scannedPages", value: result.coverage
             ? { kind: "count", value: result.coverage.scannedPages }
             : { kind: "text", value: null } },
@@ -154,7 +157,7 @@ export function presentWorkflowResult(run: WorkflowRun): WorkflowResultPresentat
           { labelKey: "workflows.result.deepTruncated", value: result.coverage
             ? { kind: "boolean", value: result.coverage.deepTruncated }
             : { kind: "text", value: null } },
-          { labelKey: "workflows.result.persistent", value: { kind: "boolean", value: result.persistent } },
+          { labelKey: "workflows.result.persistent", value: { kind: "translation", key: `lint.healthReport.storage.${result.persistent ? "persistent" : "memory"}` } },
           { labelKey: "workflows.result.reportId", value: { kind: "text", value: result.reportId, mono: true } },
           ...commonRows,
         ],

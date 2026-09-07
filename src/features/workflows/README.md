@@ -26,6 +26,14 @@ Project-scoped presentation for the three fixed product workflows: Update Wiki, 
 - A changed queued baseline enters `review_scope` without a candidate. Re-preparing retains selected source IDs and creates a retry-linked task only after reviewing current versions.
 - Candidate confirmation and checked apply preserve Source, checkpoints, user edits, conflict hashes, and current project authority. The result precedes the four visible phases; logs remain collapsed by default.
 
+## Health Check
+
+- Local Quick starts from the readable knowledge base at execution time, independently of Agent discovery, Provider settings/credentials, and Git. Enqueueing after Update Wiki therefore checks the new pages.
+- LintService owns the run-local read snapshot and shared rules. It reports actual page batches and observes cancellation at page boundaries; bounded AI excerpts reuse the same reads.
+- Trusted projects with writable app state persist reports and tasks for every route. Restricted/read-only projects retain process-local reports. Reports do not authorize repairs or require content checkpoints.
+- Complete saves the local portion before invoking the selected AI route. AI failure or cancellation retains a result link and accurate unfinished coverage. Changed disclosure inputs enter the existing scope-review flow before external launch.
+- Opening a report checks its recorded inputs for freshness in a blocking worker. Stored input evidence and task facts remain unchanged; repair still validates the current report owner, selected findings, hashes, route and authorization.
+
 ## Non-goals
 
 - No arbitrary prompts, shell commands, filesystem writes, Git operations, or secret access from React.
