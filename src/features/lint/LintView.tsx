@@ -4,11 +4,10 @@ import { useTranslation } from "react-i18next";
 import { ResizableSplitter } from "../../components/app/ResizableSplitter";
 import { PANE_WIDTH_LIMITS } from "../../hooks/useResizablePane";
 import { useRouteScrollRestoration } from "../../hooks/useRouteScrollRestoration";
-import { useLintStore } from "../../stores/lintStore";
+import { selectAllIssues, useLintStore } from "../../stores/lintStore";
 import { observeProjectResources } from "../../stores/projectScope";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
-import { cancelTaskRequest, selectTaskById, useTaskStore } from "../../stores/taskStore";
 import { captureProjectScope, isProjectScopeCurrent } from "../../stores/projectScope";
 import { isAgentLintRepairEligible } from "../../types/lint";
 import type { LintIssue, LintIssueType } from "../../types/lint";
@@ -20,6 +19,7 @@ import { LintIssueDetails } from "./LintIssueDetails";
 import { LintIssueList } from "./LintIssueList";
 import { LintPassedSection } from "./LintPassedSection";
 import { LintSummaryCards } from "./LintSummaryCards";
+import { LintTaskStatus } from "./LintTaskStatus";
 
 /** Local deterministic rules that earn a "passed" badge when absent. */
 const PASSED_RULES: LintIssueType[] = [
@@ -43,8 +43,6 @@ export function LintView() {
   const deepReport = useLintStore((state) => state.deepReport);
   const healthReport = useLintStore((state) => state.healthReport);
   const loadingLocal = useLintStore((state) => state.loadingLocal);
-  const runningDeep = useLintStore((state) => state.runningDeep);
-  const deepTaskId = useLintStore((state) => state.deepTaskId);
   const selectedIssueId = useLintStore((state) => state.selectedIssueId);
   const fixStatus = useLintStore((state) => state.fixStatus);
   const fixConfirm = useLintStore((state) => state.fixConfirm);
@@ -69,8 +67,6 @@ export function LintView() {
   const invalidateAgentLintRepairIdentity = useLintStore((state) => state.invalidateAgentLintRepairIdentity);
 
   const runLocalLint = useLintStore((state) => state.runLocalLint);
-  const clearDeepTask = useLintStore((state) => state.clearDeepTask);
-  const loadDeepReport = useLintStore((state) => state.loadDeepReport);
   const selectIssue = useLintStore((state) => state.selectIssue);
   const setMode = useLintStore((state) => state.setMode);
   const setSafetyPrefs = useLintStore((state) => state.setSafetyPrefs);
@@ -89,7 +85,6 @@ export function LintView() {
   const cancelAgentLintRepairPreparation = useLintStore((state) => state.cancelAgentLintRepairPreparation);
   const confirmAgentLintRepairStart = useLintStore((state) => state.confirmAgentLintRepairStart);
 
-  const deepTask = useTaskStore((state) => selectTaskById(state, deepTaskId));
 
   const { projectId, rootPath } = currentProject;
   const layoutRef = useRef<HTMLDivElement>(null);
@@ -100,28 +95,13 @@ export function LintView() {
   const layoutStyle = {
     "--lint-details-w-current": `${lintDetailsWidth}px`,
   } as CSSProperties;
-  const healthIssues = healthReport
-    ? healthReport.issues.map((issue) => ({
-        ...issue,
-        origins: healthReport.findingOrigins[issue.id] ?? [issue.source],
-      }))
-    : [];
-  const localIssues = healthReport
-    ? healthIssues.filter((issue) =>
-        healthReport.findingOrigins[issue.id]?.includes("local"),
-      )
-    : localReport?.issues ?? [];
-  const deepIssues = healthReport
-    ? healthIssues
-        .filter((issue) =>
-          healthReport.findingOrigins[issue.id]?.includes("agent"),
-        )
-        .map((issue) => ({ ...issue, source: "agent" as const }))
-    : deepReport?.issues ?? [];
-  const allIssues = useMemo(
-    () => (healthReport ? healthIssues : [...localIssues, ...deepIssues]),
-    [healthReport, healthIssues, localIssues, deepIssues],
-  );
+  const allIssues = useMemo(() => selectAllIssues({ healthReport, localReport, deepReport, ignores })
+    .map((issue) => ({
+      ...issue,
+      origins: issue.origins ?? (!localReport ? healthReport?.findingOrigins[issue.id] : undefined) ?? [issue.source],
+    })), [healthReport, localReport, deepReport, ignores]);
+  const localIssues = useMemo(() => allIssues.filter((issue) => issue.origins.includes("local")), [allIssues]);
+  const deepIssues = useMemo(() => allIssues.filter((issue) => issue.origins.includes("agent")), [allIssues]);
   const modeIssues = useMemo(() => {
     if (mode === "local") return localIssues;
     if (mode === "agent") return deepIssues;
@@ -131,14 +111,18 @@ export function LintView() {
     ? allIssues.find((issue) => issue.id === selectedIssueId) ?? null
     : null;
   const eligibleAgentFindings = useMemo(
-    () => healthReport?.issues.filter((issue) => isAgentLintRepairEligible(issue, healthReport)) ?? [],
-    [healthReport],
+    () => !localReport ? healthReport?.issues.filter((issue) => isAgentLintRepairEligible(issue, healthReport)) ?? [] : [],
+    [healthReport, localReport],
   );
   const eligibleAgentFindingIds = useMemo(
     () => new Set(eligibleAgentFindings.map((issue) => issue.id)),
     [eligibleAgentFindings],
   );
   const repairSelectionSet = useMemo(() => new Set(agentRepairSelection), [agentRepairSelection]);
+
+  const localOperationPending = loadingLocal || batchRunning || fixApplying;
+  const actionsDisabled = localOperationPending || hasPendingBatchConfirmations || Boolean(fixConfirm)
+    || agentRepairPending || Boolean(agentRepairPreparation);
 
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [ignoringId, setIgnoringId] = useState<string | null>(null);
@@ -208,18 +192,6 @@ export function LintView() {
     };
   }, [projectId, rootPath, ensureHistory, openHistoryReport]);
 
-  useEffect(() => {
-    if (deepTask?.status === "succeeded") {
-      void loadDeepReport({ projectId, projectRootPath: rootPath, taskId: deepTask.id });
-      clearDeepTask();
-    } else if (deepTask && (deepTask.status === "failed" || deepTask.status === "cancelled")) {
-      // The task drawer owns the original failure/cancellation details. Do
-      // not issue a second report-read request that would mask them with
-      // LINT_DEEP_REPORT_MISSING.
-      clearDeepTask();
-    }
-  }, [deepTask, projectId, rootPath, loadDeepReport, clearDeepTask]);
-
   const triggerRecompile = () => {
     requestWorkflowLaunch({
       projectId,
@@ -258,11 +230,6 @@ export function LintView() {
     });
   };
 
-  const handleCancelDeep = () => {
-    if (!deepTaskId) return;
-    void cancelTaskRequest(deepTaskId);
-  };
-
   const handleToggleRepairSelection = (issueId: string, selected: boolean) => {
     if (!healthReport || agentRepairPreparation || agentRepairPending) return;
     const next = new Set(agentRepairSelection);
@@ -286,15 +253,17 @@ export function LintView() {
   };
 
   const handleIgnore = (issue: LintIssue) => {
-    if (fixConfirm || batchRunning || fixApplying || hasPendingBatchConfirmations || agentRepairPending || agentRepairPreparation) return;
+    if (actionsDisabled) return;
     setNotice(null);
     setIgnoringId(issue.id);
+    const scope = captureProjectScope();
     void addIgnore({
       projectId,
       projectRootPath: rootPath,
       path: issue.path,
       rule: issue.issueType,
     }).then((ok) => {
+      if (!isProjectScopeCurrent(scope)) return;
       setIgnoringId(null);
       if (ok) {
         setNotice(t("lint.plan.ignored"));
@@ -305,16 +274,18 @@ export function LintView() {
   };
 
   const handleRemoveIgnore = (path: string, rule: LintIssueType) => {
-    if (fixConfirm || batchRunning || fixApplying || hasPendingBatchConfirmations || agentRepairPending || agentRepairPreparation) return;
+    if (actionsDisabled) return;
     const key = `${path}:${rule}`;
     setNotice(null);
     setRemovingIgnoreKey(key);
+    const scope = captureProjectScope();
     void removeIgnore({
       projectId,
       projectRootPath: rootPath,
       path,
       rule,
     }).then((ok) => {
+      if (!isProjectScopeCurrent(scope)) return;
       setRemovingIgnoreKey(null);
       if (ok) {
         setNotice(t("lint.ignores.restored"));
@@ -391,63 +362,30 @@ export function LintView() {
           <button
             type="button"
             onClick={handleRunLocal}
-            disabled={
-              loadingLocal ||
-              batchRunning ||
-              fixApplying ||
-              hasPendingBatchConfirmations ||
-              Boolean(fixConfirm) ||
-              agentRepairPending ||
-              Boolean(agentRepairPreparation)
-            }
+            disabled={actionsDisabled}
             className="h-[28px] rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] hover:bg-[var(--surface-muted)] disabled:opacity-40"
           >
             {loadingLocal ? "…" : t("lint.actions.runLocal")}
           </button>
-          {runningDeep ? (
-            <button
-              type="button"
-              onClick={handleCancelDeep}
-              className="h-[28px] rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] hover:bg-[var(--surface-muted)]"
-            >
-              {t("lint.actions.cancel")}
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={handleStartDeep}
-              disabled={
-                loadingLocal ||
-                batchRunning ||
-                fixApplying ||
-                hasPendingBatchConfirmations ||
-                Boolean(fixConfirm) ||
-                agentRepairPending ||
-                Boolean(agentRepairPreparation)
-              }
-              className="h-[28px] rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] hover:bg-[var(--surface-muted)]"
-            >
-              {t("lint.actions.deepLint")}
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={handleStartDeep}
+            disabled={actionsDisabled}
+            className="h-[28px] rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-[12px] hover:bg-[var(--surface-muted)] disabled:opacity-40"
+          >
+            {t("lint.actions.deepLint")}
+          </button>
           <button
             type="button"
             onClick={() => setConfirmOpen(true)}
-            disabled={
-              autoFixable.length === 0 ||
-              loadingLocal ||
-              batchRunning ||
-              fixApplying ||
-              hasPendingBatchConfirmations ||
-              Boolean(fixConfirm) ||
-              agentRepairPending ||
-              Boolean(agentRepairPreparation)
-            }
+            disabled={autoFixable.length === 0 || actionsDisabled}
             className="ml-auto h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--primary-hover)] disabled:opacity-40"
           >
             {batchRunning ? "…" : t("lint.actions.autoFix", { count: autoFixable.length })}
           </button>
         </div>
+
+        <LintTaskStatus key={`${projectId}\0${rootPath}\0${authorityIdentity}`} />
 
         {notice ? (
           <div className="border-b border-[var(--accent-border)] bg-[var(--accent-soft)] px-4 py-2 text-[12px] text-[var(--accent-hover)]">
@@ -471,11 +409,13 @@ export function LintView() {
 
         <AgentLintRepairPanel
           report={healthReport}
+          locallyRefreshed={Boolean(localReport)}
           agentRouteConfigured={currentProject.agentRoute === "agent"}
           eligibleFindings={eligibleAgentFindings}
           selectedFindingIds={agentRepairSelection}
           preparation={agentRepairPreparation}
           pending={agentRepairPending}
+          disabled={localOperationPending || hasPendingBatchConfirmations || Boolean(fixConfirm)}
           errorCode={agentRepairErrorCode}
           onPrepare={() => {
             if (healthReport) void prepareAgentLintRepair(projectId, rootPath, healthReport.reportId);
@@ -517,15 +457,7 @@ export function LintView() {
                     <button
                       type="button"
                       onClick={() => handleRemoveIgnore(entry.path, entry.rule)}
-                      disabled={
-                        removingIgnoreKey === key ||
-                        Boolean(fixConfirm) ||
-                        batchRunning ||
-                        fixApplying ||
-                        hasPendingBatchConfirmations ||
-                        agentRepairPending ||
-                        Boolean(agentRepairPreparation)
-                      }
+                      disabled={removingIgnoreKey === key || actionsDisabled}
                       className="shrink-0 rounded-[var(--radius-sm)] border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] disabled:opacity-40"
                     >
                       {removingIgnoreKey === key ? t("lint.ignores.restoring") : t("lint.ignores.restore")}
@@ -545,10 +477,7 @@ export function LintView() {
           scrollRef={issueListScrollRef}
           issues={modeIssues}
           selectedIssueId={selectedIssueId}
-          actionsDisabled={
-            loadingLocal || batchRunning || fixApplying || hasPendingBatchConfirmations
-            || agentRepairPending || Boolean(agentRepairPreparation)
-          }
+          actionsDisabled={actionsDisabled}
           onSelect={selectIssue}
           onApplyFix={handleApplyFix}
           repairSelection={repairSelectionSet}
@@ -594,14 +523,8 @@ export function LintView() {
         fixStatus={selectedIssue ? fixStatus[selectedIssue.id] ?? "idle" : "idle"}
         fixConfirm={fixConfirm}
         ignoring={selectedIssue ? ignoringId === selectedIssue.id : false}
-          actionsDisabled={
-            loadingLocal ||
-            batchRunning ||
-            fixApplying ||
-            agentRepairPending ||
-            Boolean(agentRepairPreparation) ||
-            (hasPendingBatchConfirmations && !fixConfirm)
-          }
+        actionsDisabled={localOperationPending || agentRepairPending || Boolean(agentRepairPreparation)
+          || (hasPendingBatchConfirmations && !fixConfirm)}
         safetyPrefs={safetyPrefs}
         onSafetyPrefsChange={setSafetyPrefs}
         onApplyFix={handleApplyFix}

@@ -29,6 +29,8 @@ export interface AgentLintRepairPanelProps {
   selectedFindingIds: string[];
   preparation: AgentLintRepairPreparation | null;
   pending: boolean;
+  disabled?: boolean;
+  locallyRefreshed?: boolean;
   errorCode: string | null;
   onPrepare: () => void;
   onConfirm: () => void;
@@ -47,6 +49,8 @@ export function AgentLintRepairPanel({
   selectedFindingIds,
   preparation,
   pending,
+  disabled = false,
+  locallyRefreshed = false,
   errorCode,
   onPrepare,
   onConfirm,
@@ -68,7 +72,7 @@ export function AgentLintRepairPanel({
   const hasAgentFindings = report.issues.some((issue) => issue.source === "agent");
   if (report.route.kind !== "agent" && !hasAgentFindings) return null;
 
-  const unavailable = report.execution && report.execution.freshness !== "current"
+  const unavailable = locallyRefreshed || report.execution && report.execution.freshness !== "current"
     ? "lint.healthReport.repairNeedsCurrent"
     : report.execution && report.execution.deepStatus !== "completed"
       ? "lint.healthReport.repairNeedsDeep"
@@ -84,6 +88,13 @@ export function AgentLintRepairPanel({
   const pendingAction = preparation?.pendingAction;
   const selectedCount = selectedFindingIds.length;
   const selectionOverLimit = selectedCount > 100;
+
+  if (unavailable) {
+    return <div className="flex items-start gap-2 border-b border-[var(--border)] px-4 py-2 text-[11.5px] text-[var(--text-secondary)]" role="status">
+      <ShieldAlert aria-hidden="true" className="mt-0.5 shrink-0 text-[var(--text-muted)]" size={14} />
+      <span>{t(unavailable)}</span>
+    </div>;
+  }
 
   return (
     <section
@@ -102,12 +113,7 @@ export function AgentLintRepairPanel({
         </div>
       </div>
 
-      {unavailable ? (
-        <div className="mt-2 flex items-start gap-2 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--surface-raised)] px-2.5 py-2 text-[11.5px] leading-5 text-[var(--text-secondary)]" role="status">
-          <ShieldAlert aria-hidden="true" className="mt-0.5 shrink-0 text-[var(--warning)]" size={14} />
-          <span>{t(unavailable)}</span>
-        </div>
-      ) : preparation && pendingAction ? (
+      {preparation && pendingAction ? (
         <div className="mt-2 rounded-[var(--radius-sm)] border border-[var(--accent-border)] bg-[var(--surface-raised)] px-2.5 py-2.5">
           <div className="flex items-center gap-2 text-[12px] font-medium text-[var(--text-primary)]">
             <ShieldAlert aria-hidden="true" className="text-[var(--warning)]" size={14} />
@@ -165,7 +171,7 @@ export function AgentLintRepairPanel({
               ref={prepareButtonRef}
               type="button"
               className="h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--primary-hover)] disabled:opacity-40"
-              disabled={pending || selectedCount === 0 || selectionOverLimit}
+              disabled={disabled || pending || selectedCount === 0 || selectionOverLimit}
               onClick={onPrepare}
             >
               {pending ? t("lint.repair.preparing") : t("lint.repair.prepare", { count: selectedCount })}

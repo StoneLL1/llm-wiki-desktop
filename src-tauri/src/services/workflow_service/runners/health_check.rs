@@ -110,24 +110,14 @@ where
     P: FnMut() -> Result<Option<WorkflowExternalLaunchPermit>, BackendError>,
 {
     let task_id = run.task_id.clone();
-    let launch_run = run.clone();
     run_health_check_with_deep_and_report_authority(
         context,
         run,
         services,
         move |snapshot, route| async move {
             let publication = authorize_external_launch()?.begin()?;
-            execute_prepared_deep_route(
-                context,
-                services,
-                &task_id,
-                &route,
-                &snapshot,
-                &launch_run.scope,
-                &launch_run.baseline_fingerprint,
-                publication,
-            )
-            .await
+            execute_prepared_deep_route(context, services, &task_id, &route, &snapshot, publication)
+                .await
         },
         authorize_report_write,
     )
@@ -203,9 +193,10 @@ where
     sink.complete(READ_MARKDOWN).map_err(task_error)?;
     sink.start(CHECK_MARKDOWN).map_err(task_error)?;
     let mut checking_links = false;
-    let scan = services.lint_service.run_health_local_scan(
+    let scan = services.lint_service.run_health_scan(
         context,
         services.search_service,
+        mode == HealthCheckMode::Complete,
         |progress| {
             ensure_not_cancelled(services.task_service, task_id)?;
             if progress.phase != HealthScanPhase::Markdown && !checking_links {
@@ -312,6 +303,7 @@ where
                 .map_err(task_error)?;
             return Ok(None);
         }
+        let mut freshness_checked = false;
         let deep_result = async {
             ensure_not_cancelled(services.task_service, task_id)?;
             let route = run.route.clone().ok_or_else(route_unavailable)?;
@@ -325,16 +317,24 @@ where
                 .lint_service
                 .prepare_health_deep_snapshot_from_scan(&scan, &language);
             report.coverage.deep_truncated = snapshot.deep_truncated;
-            services
-                .lint_service
-                .verify_deep_lint_snapshot(context, services.search_service, &snapshot)
-                .map_err(map_deep_snapshot_error)?;
+            if !scan.current {
+                return Err(baseline_changed());
+            }
             let raw = deep_check(snapshot.clone(), route).await?;
             ensure_not_cancelled(services.task_service, task_id)?;
+            freshness_checked = true;
+            if !refresh_report_freshness(
+                context,
+                services.lint_service,
+                &mut report,
+                services.task_service,
+                task_id,
+            )? {
+                return Err(baseline_changed());
+            }
             let issues = services
                 .lint_service
-                .finish_deep_lint_snapshot(context, services.search_service, &snapshot, &raw, false)
-                .map_err(map_deep_snapshot_error)?;
+                .parse_deep_lint_snapshot(context, &snapshot, &raw, false)?;
             report.coverage.deep_covered_pages = Some(snapshot.deep_covered_pages);
             Ok::<_, BackendError>(issues)
         }
@@ -350,13 +350,21 @@ where
                 let execution = report.execution.as_mut().unwrap();
                 execution.deep_status = HealthDeepStatus::Failed;
                 execution.deep_error_code = Some(error.code.clone());
-                refresh_report_freshness(
-                    context,
-                    services.lint_service,
-                    &mut report,
-                    services.task_service,
-                    task_id,
-                )?;
+                if !freshness_checked {
+                    if error.code == "WORKFLOW_INPUT_BASELINE_CHANGED" {
+                        execution.freshness = HealthReportFreshness::Stale;
+                    } else if let Err(refresh_error) = refresh_report_freshness(
+                        context,
+                        services.lint_service,
+                        &mut report,
+                        services.task_service,
+                        task_id,
+                    ) {
+                        if refresh_error.code == "WORKFLOW_CANCELLED" {
+                            return Err(refresh_error);
+                        }
+                    }
+                }
                 report.duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
                 store_report(context, run, services, &mut report, &mut report_authority)?;
                 services
@@ -390,13 +398,8 @@ where
     ) = classify(&report.issues);
     sink.complete(CLASSIFY_FINDINGS).map_err(task_error)?;
     sink.start(WRITE_REPORT).map_err(task_error)?;
-    refresh_report_freshness(
-        context,
-        services.lint_service,
-        &mut report,
-        services.task_service,
-        task_id,
-    )?;
+    // Local scanning and the external-result boundary already established
+    // freshness. Sorting and serializing this immutable report need no rescan.
     report.duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
     store_report(context, run, services, &mut report, &mut report_authority)?;
     sink.progress(WRITE_REPORT, Some(report.report_id.clone()), 1, Some(1))
@@ -414,7 +417,7 @@ fn refresh_report_freshness(
     report: &mut HealthCheckReport,
     tasks: &TaskService,
     task_id: &str,
-) -> Result<(), BackendError> {
+) -> Result<bool, BackendError> {
     let execution = report
         .execution
         .as_mut()
@@ -422,13 +425,12 @@ fn refresh_report_freshness(
     let verification = lint.verify_health_inputs(context, &execution.input_hashes, |_| {
         ensure_not_cancelled(tasks, task_id)
     });
-    execution.freshness = match verification {
+    execution.freshness = match &verification {
         Ok(true) => HealthReportFreshness::Current,
         Ok(false) => HealthReportFreshness::Stale,
-        Err(error) if error.code == "WORKFLOW_CANCELLED" => return Err(error),
         Err(_) => HealthReportFreshness::Unknown,
     };
-    Ok(())
+    verification
 }
 
 fn store_report<P>(
@@ -550,8 +552,6 @@ async fn execute_prepared_deep_route(
     task_id: &str,
     route: &WorkflowRoute,
     snapshot: &DeepLintSnapshot,
-    scope: &WorkflowScope,
-    baseline_fingerprint: &str,
     publication: super::super::WorkflowLaunchPublication,
 ) -> Result<String, BackendError> {
     // Revalidate at the actual launch boundary as well as before snapshot
@@ -582,7 +582,7 @@ async fn execute_prepared_deep_route(
                 prepared.target_revision(),
                 route_revision,
             )?;
-            validate_launch_snapshot(context, services, snapshot, scope, baseline_fingerprint)?;
+            validate_launch_snapshot(context, services, snapshot)?;
             let result = services.agent_service.run_prepared_lint_streaming(
                 &prepared,
                 services.task_service,
@@ -603,7 +603,7 @@ async fn execute_prepared_deep_route(
                     "Health Check was cancelled.",
                 ));
             }
-            validate_launch_snapshot(context, services, snapshot, scope, baseline_fingerprint)?;
+            validate_launch_snapshot(context, services, snapshot)?;
             let completion =
                 services
                     .llm_service
@@ -631,16 +631,11 @@ fn validate_launch_snapshot(
     context: &ProjectContext,
     services: &HealthCheckExecutionServices<'_>,
     snapshot: &DeepLintSnapshot,
-    scope: &WorkflowScope,
-    baseline_fingerprint: &str,
 ) -> Result<(), BackendError> {
     services
         .lint_service
         .verify_deep_lint_snapshot(context, services.search_service, snapshot)
         .map_err(map_deep_snapshot_error)?;
-    if workflow_baseline_for_scope(context, scope)?.fingerprint != baseline_fingerprint {
-        return Err(baseline_changed());
-    }
     Ok(())
 }
 

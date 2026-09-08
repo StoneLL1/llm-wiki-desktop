@@ -991,14 +991,20 @@ Provider：
 
 `LintService` 是 `services/lint_service/mod.rs` 中的稳定 facade，当前子模块为：
 
-- `rules.rs`：确定性本地规则与规则 helper。
+- `health.rs`：唯一的运行期扫描，按 layout 读取页面并生成规则输入、内容 hash、资源存在性证据和可选 AI 摘录。
+- `rules.rs`：确定性本地规则与规则 helper；本地入口和修复复查委托同一扫描实现。
 - `ignores.rs`：ignore 读取、写入和匹配。
 - `reports.rs`：Lint 报告、历史和持久化读取。
-- `deep.rs`：深度 Lint 编排与结果解析。
+- `deep.rs`：从扫描结果组装有界提示词、解析 AI 输出；外部执行由 Health workflow runner 编排。
 - `fixes.rs`：single / batch fix、确认和 Git checkpoint 编排。
+- `repair.rs`：Agent repair 候选工作区、路径授权和确定性复检。
 - `test_support.rs`：仅在 `cfg(test)` 下编译的临时项目与 fixture helper。
 
 这些文件通过多个 `impl LintService` block 实现同一个 facade。`LINT_REPORTS_DIR` 只保持计划级 `pub(crate)`，兄弟模块共享 helper 使用 `pub(super)`，其余实现保持私有；commands 和 `AppState` 只依赖 `LintService`。
+
+扫描遵循“读取一次、从同一份内容派生结果”：本地检查不构造 AI 摘录；完整检查复用本地扫描的摘录和 hash。时效校验放在扫描结束、真实外部启动和 AI 返回边界，不在纯合并/分类/序列化后再次整库读取。打开历史报告及写入型修复仍独立核验当前内容。内存报告和其 Unix 目录句柄属于同一个缓存对象、共用一把锁，避免维护两个必须同步淘汰的注册表。
+
+可读 Source 与 Wiki 都可成为链接目标，写入资格另外按 layout 判断。正文行号每页建立一次索引，完整模式交替为 Wiki/Source 分配摘录预算。批量确定性修复共用检查点，全部应用后只运行一次全库复查；复查失败恢复整批应用。断链 finding 按页面与目标去重，确认预览与应用都处理其全部正文出现位置。索引条目使用完整项目相对路径，避免同名页面混淆。
 
 职责：
 

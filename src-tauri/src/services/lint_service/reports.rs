@@ -19,26 +19,6 @@ const LINT_HISTORY_PATH: &str = ".app/lint-history.json";
 const LINT_HISTORY_LIMIT: usize = 50;
 const LINT_MEMORY_PROJECT_LIMIT: usize = 64;
 
-#[cfg(all(test, unix))]
-thread_local! {
-    static AFTER_MEMORY_NAMESPACE_TRIM: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
-        std::cell::RefCell::new(None);
-}
-
-#[cfg(all(test, unix))]
-fn set_after_memory_namespace_trim(hook: impl FnOnce() + 'static) {
-    AFTER_MEMORY_NAMESPACE_TRIM.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
-}
-
-fn run_after_memory_namespace_trim() {
-    #[cfg(all(test, unix))]
-    AFTER_MEMORY_NAMESPACE_TRIM.with(|slot| {
-        if let Some(hook) = slot.borrow_mut().take() {
-            hook();
-        }
-    });
-}
-
 impl LintService {
     pub fn health_check_report_digest(report: &HealthCheckReport) -> Result<String, BackendError> {
         let canonical = crate::services::canonical_json(report).map_err(|error| {
@@ -144,7 +124,7 @@ impl LintService {
         if let Ok(memory) = self.memory_reports.read() {
             if let Some(reports) = memory.get(&project_key) {
                 file.entries
-                    .extend(reports.values().map(|report| report.entry.clone()));
+                    .extend(reports.reports.values().map(|report| report.entry.clone()));
             }
         }
         file.entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
@@ -161,7 +141,10 @@ impl LintService {
         reject_report_id(id)?;
         let project_key = self.memory_project_key(context)?;
         if let Ok(memory) = self.memory_reports.read() {
-            if let Some(report) = memory.get(&project_key).and_then(|reports| reports.get(id)) {
+            if let Some(report) = memory
+                .get(&project_key)
+                .and_then(|namespace| namespace.reports.get(id))
+            {
                 return Ok(report.clone());
             }
         }
@@ -236,7 +219,7 @@ impl LintService {
             })?;
             memory
                 .get(&project_key)
-                .and_then(|reports| reports.get(id))
+                .and_then(|namespace| namespace.reports.get(id))
                 .and_then(|persisted| persisted.health_check_report.as_ref())
                 .filter(|report| {
                     !report.persistent
@@ -370,24 +353,15 @@ impl LintService {
                     false,
                 )
             })?;
-            // All namespace/anchor mutations use one fixed lock order and stay
-            // within the same memory write critical section. This keeps
-            // eviction linearizable: no writer can recreate an evicted report
-            // namespace between its removal and the matching anchor release.
-            #[cfg(unix)]
-            let mut roots = self.memory_project_roots.lock().map_err(|_| {
-                BackendError::new(
-                    "LINT_PROJECT_IDENTITY_UNAVAILABLE",
-                    "In-memory project identity registry is unavailable.",
-                    true,
-                    false,
-                )
-            })?;
-            #[cfg(unix)]
-            roots.entry(project_key.clone()).or_insert(project_anchor);
-            let reports = memory.entry(project_key.clone()).or_default();
+            let reports = &mut memory
+                .entry(project_key.clone())
+                .or_insert_with(|| super::MemoryLintReports {
+                    reports: Default::default(),
+                    #[cfg(unix)]
+                    _anchor: project_anchor,
+                })
+                .reports;
             let previous = reports.insert(report.report_id.clone(), persisted);
-            trim_memory_reports(reports);
             if let Err(error) = validate() {
                 if let Some(previous) = previous {
                     reports.insert(report.report_id.clone(), previous);
@@ -398,20 +372,10 @@ impl LintService {
                 if remove_namespace {
                     memory.remove(&project_key);
                 }
-                #[cfg(unix)]
-                if remove_namespace {
-                    roots.remove(&project_key);
-                }
                 return Err(error);
             }
-            let evicted = trim_memory_project_namespaces(&mut memory, &project_key);
-            #[cfg(not(unix))]
-            let _ = &evicted;
-            run_after_memory_namespace_trim();
-            #[cfg(unix)]
-            for key in &evicted {
-                roots.remove(key);
-            }
+            trim_memory_reports(reports);
+            trim_memory_project_namespaces(&mut memory, &project_key);
             return Ok(entry);
         }
 
@@ -688,7 +652,7 @@ impl LintService {
     fn memory_project_identity(
         &self,
         identity: crate::services::ProjectWorkflowIdentity,
-    ) -> Result<(String, super::MemoryProjectRootAnchor), BackendError> {
+    ) -> Result<(String, std::fs::File), BackendError> {
         use std::os::unix::fs::MetadataExt;
 
         let anchor = std::fs::File::open(&identity.canonical_root).map_err(|error| {
@@ -710,7 +674,7 @@ impl LintService {
         let device = metadata.dev();
         let inode = metadata.ino();
         let key = format!("{}:unix:{device}:{inode}", identity.canonical_identity_key);
-        Ok((key, super::MemoryProjectRootAnchor { _anchor: anchor }))
+        Ok((key, anchor))
     }
 }
 
@@ -732,19 +696,16 @@ fn trim_memory_reports(reports: &mut std::collections::HashMap<String, Persisted
 }
 
 fn trim_memory_project_namespaces(
-    memory: &mut std::collections::HashMap<
-        String,
-        std::collections::HashMap<String, PersistedLintReport>,
-    >,
+    memory: &mut std::collections::HashMap<String, super::MemoryLintReports>,
     protected: &str,
-) -> Vec<String> {
-    let mut evicted = Vec::new();
+) {
     while memory.len() > LINT_MEMORY_PROJECT_LIMIT {
         let Some(oldest) = memory
             .iter()
             .filter(|(key, _)| key.as_str() != protected)
             .min_by_key(|(_, reports)| {
                 reports
+                    .reports
                     .values()
                     .map(|report| report.entry.created_at.as_str())
                     .max()
@@ -755,9 +716,7 @@ fn trim_memory_project_namespaces(
             break;
         };
         memory.remove(&oldest);
-        evicted.push(oldest);
     }
-    evicted
 }
 
 fn reject_report_id(id: &str) -> Result<(), BackendError> {
@@ -1368,7 +1327,7 @@ mod tests {
         assert_ne!(first, second);
         assert_ne!(first, third);
         assert_ne!(second, third);
-        let anchors = service.memory_project_roots.lock().unwrap();
+        let anchors = service.memory_reports.read().unwrap();
         assert!(anchors.contains_key(&first));
         assert!(anchors.contains_key(&second));
         assert!(anchors.contains_key(&third));
@@ -1426,113 +1385,54 @@ mod tests {
             service.memory_reports.read().unwrap().len(),
             super::LINT_MEMORY_PROJECT_LIMIT
         );
-        #[cfg(unix)]
-        assert_eq!(
-            service.memory_project_roots.lock().unwrap().len(),
-            super::LINT_MEMORY_PROJECT_LIMIT
-        );
         drop(service);
         for root in roots {
             std::fs::remove_dir_all(root).unwrap();
         }
     }
 
-    #[cfg(unix)]
     #[test]
-    fn namespace_recreation_cannot_race_eviction_anchor_release() {
-        use std::sync::{mpsc, Arc};
-        use std::time::Duration;
-
-        let service = Arc::new(LintService::default());
-        let (victim_context, victim_root) = tmp_context("health-memory-linear-victim");
-        service
-            .store_health_check_report(
-                &victim_context,
-                &health_report("victim-old", false, "2026-08-24T00:00:00Z".into()),
-            )
-            .unwrap();
-        let mut roots = vec![victim_root];
-        for index in 0..(super::LINT_MEMORY_PROJECT_LIMIT - 1) {
-            let (context, root) = tmp_context(&format!("health-memory-linear-fill-{index}"));
+    fn failed_memory_publication_does_not_evict_previous_history() {
+        let (context, root) = tmp_context("health-memory-rollback-limit");
+        let service = LintService::default();
+        for index in 0..super::LINT_HISTORY_LIMIT {
             service
                 .store_health_check_report(
                     &context,
                     &health_report(
-                        &format!("fill-{index}"),
+                        &format!("report-{index:03}"),
                         false,
-                        format!("2026-08-24T01:{index:02}:00Z"),
+                        format!("2026-09-08T00:{index:02}:00Z"),
                     ),
                 )
                 .unwrap();
-            roots.push(root);
         }
-
-        let (new_context, new_root) = tmp_context("health-memory-linear-new");
-        roots.push(new_root);
-        let (trim_reached_tx, trim_reached_rx) = mpsc::channel();
-        let (release_trim_tx, release_trim_rx) = mpsc::channel();
-        let service_a = Arc::clone(&service);
-        let thread_a = std::thread::spawn(move || {
-            super::set_after_memory_namespace_trim(move || {
-                trim_reached_tx.send(()).unwrap();
-                release_trim_rx
-                    .recv_timeout(Duration::from_secs(2))
-                    .unwrap();
-            });
-            service_a
-                .store_health_check_report(
-                    &new_context,
-                    &health_report("new", false, "2026-08-24T03:00:00Z".into()),
-                )
-                .unwrap();
-        });
-        trim_reached_rx
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap();
-
-        let (victim_done_tx, victim_done_rx) = mpsc::channel();
-        let service_b = Arc::clone(&service);
-        let victim_context_for_thread = victim_context.clone();
-        let thread_b = std::thread::spawn(move || {
-            let result = service_b.store_health_check_report(
-                &victim_context_for_thread,
-                &health_report("victim-new", false, "2026-08-24T04:00:00Z".into()),
-            );
-            victim_done_tx.send(result).unwrap();
-        });
-
-        assert!(
-            victim_done_rx
-                .recv_timeout(Duration::from_millis(100))
-                .is_err(),
-            "namespace recreation escaped the atomic report/anchor eviction section"
-        );
-        release_trim_tx.send(()).unwrap();
-        thread_a.join().unwrap();
-        victim_done_rx
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap()
-            .unwrap();
-        thread_b.join().unwrap();
-
-        let victim_key = service.memory_project_key(&victim_context).unwrap();
+        let before = service.list_lint_history(&context).unwrap();
+        let mut calls = 0;
+        let error = service
+            .store_health_check_report_guarded(
+                &context,
+                &health_report("rejected", false, "2026-09-08T01:00:00Z".into()),
+                || {
+                    calls += 1;
+                    if calls == 2 {
+                        Err(crate::errors::BackendError::new(
+                            "CANCELLED",
+                            "cancelled",
+                            true,
+                            false,
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "CANCELLED");
+        assert_eq!(service.list_lint_history(&context).unwrap(), before);
         assert!(service
-            .memory_reports
-            .read()
-            .unwrap()
-            .contains_key(&victim_key));
-        assert!(
-            service
-                .memory_project_roots
-                .lock()
-                .unwrap()
-                .contains_key(&victim_key),
-            "every live memory-report namespace must retain its root anchor"
-        );
-
-        drop(service);
-        for root in roots {
-            std::fs::remove_dir_all(root).unwrap();
-        }
+            .read_lint_history_report(&context, "rejected")
+            .is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

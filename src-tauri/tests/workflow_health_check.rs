@@ -852,6 +852,37 @@ async fn markdown_change_during_deep_check_preserves_stale_local_report() {
 }
 
 #[tokio::test]
+async fn unreadable_input_after_ai_preserves_unknown_freshness_and_read_error() {
+    let fixture = Fixture::native("unreadable-guidance");
+    fs::write(fixture.context.root.join("purpose.md"), "# Purpose\n").unwrap();
+    let route = fixture.configure_ollama();
+    let run = fixture.enqueue(HealthCheckMode::Complete, route, true);
+    let task_id = run.task_id.clone();
+    let purpose = fixture.context.root.join("purpose.md");
+    run_health_check_with_deep(
+        &fixture.context,
+        run,
+        &fixture.services(),
+        move |_, _| async move {
+            fs::remove_file(&purpose).unwrap();
+            fs::create_dir(&purpose).unwrap();
+            Ok("[]".into())
+        },
+    )
+    .await;
+    let run = fixture.tasks.get_workflow_run(&task_id).unwrap();
+    let report = fixture
+        .lint
+        .read_current_health_report(&fixture.context, &task_id)
+        .unwrap();
+    assert_eq!(run.error.unwrap().code, "FILE_READ_FAILED");
+    assert_eq!(
+        report.execution.unwrap().freshness,
+        llm_wiki_desktop_lib::models::lint::HealthReportFreshness::Unknown
+    );
+}
+
+#[tokio::test]
 async fn stale_complete_route_fails_in_deep_stage_without_downgrading() {
     let fixture = Fixture::native("route-stale");
     let route = fixture.configure_ollama();

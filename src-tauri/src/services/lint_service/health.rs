@@ -10,6 +10,7 @@ use crate::models::lint::{
 use crate::models::paths::ProjectContext;
 use crate::models::wiki::WikiPageMeta;
 use crate::services::SearchService;
+use crate::utils::markdown_utils::extract_wikilinks;
 use crate::utils::time_utils::now_rfc3339;
 
 use super::deep::{
@@ -148,6 +149,21 @@ impl LintService {
         &self,
         context: &ProjectContext,
         search: &SearchService,
+        observer: F,
+    ) -> Result<HealthLocalScan, BackendError>
+    where
+        F: FnMut(HealthScanProgress) -> Result<(), BackendError>,
+    {
+        self.run_health_scan(context, search, true, observer)
+    }
+
+    /// One read/parse pass serves checks, repair verification and AI input.
+    /// Local-only callers do not allocate or format AI excerpts.
+    pub fn run_health_scan<F>(
+        &self,
+        context: &ProjectContext,
+        search: &SearchService,
+        include_deep: bool,
         mut observer: F,
     ) -> Result<HealthLocalScan, BackendError>
     where
@@ -182,6 +198,22 @@ impl LintService {
             .collect::<HashSet<_>>();
         let mut paths = known_paths.iter().cloned().collect::<Vec<_>>();
         paths.sort();
+        if include_deep {
+            // Give both kinds of evidence a place in a bounded AI excerpt.
+            // Lexical order alone lets raw/extracted consume the whole budget.
+            let (sources, wiki): (Vec<_>, Vec<_>) = paths
+                .into_iter()
+                .partition(|path| source_paths.contains(path));
+            let mut sources = sources.into_iter();
+            let mut wiki = wiki.into_iter();
+            paths = std::iter::from_fn(|| {
+                let pair = [wiki.next(), sources.next()];
+                pair.iter().any(Option::is_some).then_some(pair)
+            })
+            .flatten()
+            .flatten()
+            .collect();
+        }
         let mut input_hashes = BTreeMap::new();
         let mut purpose = None;
         let mut schema = None;
@@ -224,6 +256,7 @@ impl LintService {
             }
         }
         let mut pages = Vec::new();
+        let mut lookup = HashMap::new();
         let mut issues = Vec::new();
         let mut link_lines = HashMap::new();
         let mut prompt_blocks = Vec::new();
@@ -238,6 +271,9 @@ impl LintService {
                 Some(path),
             )?;
             let content = search.read_page(context, path, &HashSet::new())?;
+            // Source-only roots are valid link destinations even though their
+            // faithful documents do not participate in derived-Wiki rules.
+            register_page_targets(&mut lookup, &content.meta);
             input_hashes.insert(path.clone(), Some(content.meta.hash.clone()));
             if Some(path.as_str()) == purpose_path(context) {
                 purpose = Some(
@@ -315,18 +351,22 @@ impl LintService {
                         None,
                     ));
                 }
-                for resource in extract_local_resource_refs(&content.body_markdown) {
+                let mut resources = resources_present.keys().cloned().collect::<Vec<_>>();
+                resources.sort();
+                for resource in resources {
                     if !is_external(&resource)
                         && !resources_present.get(&resource).copied().unwrap_or(true)
                     {
-                        issues.push(local_issue(
+                        let mut issue = local_issue(
                             LintIssueType::MissingResource,
                             LintSeverity::Warning,
                             path,
                             &format!("Source reference `{resource}` does not exist."),
-                            Some(resource),
                             None,
-                        ));
+                            Some(resource.clone()),
+                        );
+                        issue.id = format!("missing_resource:{path}:{resource}");
+                        issues.push(issue);
                     }
                 }
             } else {
@@ -336,15 +376,22 @@ impl LintService {
                     &content.raw_markdown,
                     |source| resources_present.get(source).copied().unwrap_or(true),
                 ));
-                for target in &content.meta.wikilinks {
-                    link_lines.insert(
-                        (path.clone(), target.clone()),
-                        find_wikilink_line(&content.body_markdown, target),
-                    );
-                }
+                let lines = wikilink_lines(&content.body_markdown, || {
+                    progress(
+                        &mut observer,
+                        HealthScanPhase::Markdown,
+                        index,
+                        paths.len(),
+                        Some(path),
+                    )
+                })?;
+                link_lines.insert(path.clone(), lines);
                 pages.push(content.meta.clone());
             }
-            if Some(path.as_str()) != context.layout.activity_log_path.as_deref() {
+            if include_deep
+                && !prompt_truncated
+                && Some(path.as_str()) != context.layout.activity_log_path.as_deref()
+            {
                 let block = escape_untrusted_markup(&format!(
                     "\n### {} ({:?})\npath: {}\ntags: {}\n{}\n",
                     content.meta.title,
@@ -369,7 +416,7 @@ impl LintService {
                 Some(path),
             )?;
         }
-        let lookup = build_target_lookup(&pages);
+        pages.sort_by(|left, right| left.path.cmp(&right.path));
         let inbound = build_inbound_counts(&pages, &lookup);
         issues.extend(collision_issues(&pages));
         for (index, page) in pages.iter().enumerate() {
@@ -397,26 +444,28 @@ impl LintService {
                 );
                 issue.id = format!("dead_link:{}:{target}", page.path);
                 issue.range = link_lines
-                    .get(&(page.path.clone(), target.clone()))
+                    .get(&page.path)
+                    .and_then(|lines| lines.get(&target.trim().to_ascii_lowercase()))
                     .copied()
-                    .flatten()
                     .map(|line| LintRange { line, column: None });
                 issue.fixability = Fixability::HighRisk;
                 issue.suggested_action =
                     Some("Remove the link or fix the target to match an existing page.".into());
                 issues.push(issue);
             }
-            if !STRUCTURAL_FILES.contains(&page.path.as_str())
+            if !structural_paths.contains(page.path.as_str())
                 && inbound.get(&page.path).copied().unwrap_or(0) == 0
             {
-                issues.push(local_issue(
+                let mut issue = local_issue(
                     LintIssueType::OrphanPage,
                     LintSeverity::Info,
                     &page.path,
                     "No other page links to this page.",
                     None,
                     None,
-                ));
+                );
+                issue.suggested_action = Some("Link it from a related page or the index.".into());
+                issues.push(issue);
             }
             progress(
                 &mut observer,
@@ -509,7 +558,6 @@ impl LintService {
         if current_paths != inputs.keys().cloned().collect() {
             return Ok(false);
         }
-        let mut current = true;
         for (index, (path, expected)) in inputs.iter().enumerate() {
             progress(
                 &mut observer,
@@ -528,7 +576,7 @@ impl LintService {
                 self.file_store.file_hash_if_exists(context, path)?
             };
             if &actual != expected {
-                current = false;
+                return Ok(false);
             }
             progress(
                 &mut observer,
@@ -538,7 +586,7 @@ impl LintService {
                 Some(path),
             )?;
         }
-        Ok(current)
+        Ok(true)
     }
 
     /// Pure prompt assembly from the local run's exact generation. Full bodies
@@ -558,7 +606,7 @@ impl LintService {
         let mut covered = 0;
         let mut truncated = scan.prompt_truncated;
         for block in &scan.prompt_blocks {
-            if chars + block.chars().count() > DEEP_LINT_PROMPT_BUDGET_CHARS {
+            if chars + block.chars().count() > DEEP_LINT_PROMPT_BUDGET_CHARS - 128 {
                 truncated = true;
                 break;
             }
@@ -570,36 +618,14 @@ impl LintService {
             prompt.push_str("\n[coverage truncated: prompt budget reached; report must not claim full coverage]\n");
         }
         prompt.push_str("</untrusted-wiki-data>\n");
-        // Keep the legacy verifier's input vocabulary; Health uses the richer
-        // persisted evidence above for report freshness after execution.
-        let mut hashes = scan
-            .input_hashes
-            .iter()
-            .filter(|(path, _)| {
-                scan.known_paths.contains(*path)
-                    || matches!(path.as_str(), "purpose.md" | "schema.md" | "wiki/index.md")
-            })
-            .map(|(path, hash)| (path.clone(), hash.clone()))
-            .collect::<HashMap<_, _>>();
-        hashes.entry("wiki/index.md".into()).or_insert(None);
         let skill = WikiLintSkillRef::builtin();
-        hashes.insert(
-            format!("builtin://{}/{}", skill.id, skill.version),
-            Some(skill.sha256.clone()),
-        );
         DeepLintSnapshot {
-            health_input_hashes: Some(scan.input_hashes.clone()),
+            input_hashes: scan.input_hashes.clone(),
             prompt,
             skill,
             known_paths: scan.known_paths.clone(),
             deep_covered_pages: covered,
             deep_truncated: truncated,
-            prompt_input_hashes: hashes,
-            scan_hashes: scan
-                .input_hashes
-                .iter()
-                .filter_map(|(path, hash)| hash.clone().map(|hash| (path.clone(), hash)))
-                .collect(),
             deterministic_issue_ids: scan
                 .report
                 .issues
@@ -608,6 +634,26 @@ impl LintService {
                 .collect(),
         }
     }
+}
+
+/// Index first occurrences once, rather than rescanning a page for every link.
+/// Large pages yield cancellation checks even before their page count advances.
+fn wikilink_lines<F>(body: &str, mut checkpoint: F) -> Result<HashMap<String, usize>, BackendError>
+where
+    F: FnMut() -> Result<(), BackendError>,
+{
+    let mut lines = HashMap::new();
+    for (index, line) in body.lines().enumerate() {
+        if index % 256 == 0 {
+            checkpoint()?;
+        }
+        for target in extract_wikilinks(line) {
+            lines
+                .entry(target.to_ascii_lowercase())
+                .or_insert(index + 1);
+        }
+    }
+    Ok(lines)
 }
 
 fn snapshot_structural_issues(
@@ -644,6 +690,9 @@ fn snapshot_structural_issues(
             None,
         );
         issue.id = format!("index_drift:{index_path}:missing");
+        issue.suggested_action = Some(format!(
+            "Create {index_path} or use the project workflow that maintains its index."
+        ));
         issues.push(issue);
         return issues;
     };
@@ -661,6 +710,7 @@ fn snapshot_structural_issues(
         );
         issue.id = format!("index_drift:{index_path}:{target}");
         issue.fixability = Fixability::HighRisk;
+        issue.suggested_action = Some("Remove the stale link or create the page.".into());
         issues.push(issue);
     }
     let targets = index
@@ -668,21 +718,20 @@ fn snapshot_structural_issues(
         .iter()
         .filter_map(|target| lookup.get(&target.to_ascii_lowercase()))
         .collect::<HashSet<_>>();
-    for page in pages.iter().filter(|page| is_derived_page(page)) {
+    for page in pages.iter().filter(|page| is_derived_page(context, page)) {
         if !targets.contains(&page.path) {
-            if let Some(stem) = file_stem(&page.path) {
-                let mut issue = local_issue(
-                    LintIssueType::IndexDrift,
-                    LintSeverity::Error,
-                    index_path,
-                    &format!("Index does not reference `{}`.", page.path),
-                    None,
-                    Some(stem.clone()),
-                );
-                issue.id = format!("index_drift:{index_path}:{stem}");
-                issue.fixability = Fixability::HighRisk;
-                issues.push(issue);
-            }
+            let mut issue = local_issue(
+                LintIssueType::IndexDrift,
+                LintSeverity::Error,
+                index_path,
+                &format!("Index does not reference `{}`.", page.path),
+                None,
+                Some(page.path.clone()),
+            );
+            issue.id = format!("index_drift:{index_path}:{}", page.path);
+            issue.fixability = Fixability::HighRisk;
+            issue.suggested_action = Some("Regenerate the index.".into());
+            issues.push(issue);
         }
     }
     issues
@@ -692,6 +741,135 @@ fn snapshot_structural_issues(
 mod tests {
     use super::super::test_support::{seed_clean_vault, tmp_context, write_file};
     use super::*;
+
+    #[test]
+    fn source_only_roots_are_valid_wikilink_destinations_without_wiki_rules() {
+        let (context, root) = tmp_context("health-source-link-targets");
+        write_file(
+            &context,
+            "raw/extracted/来源.md",
+            "---\ntitle: 来源\naliases: [原文]\n---\n\nSource text",
+        );
+        write_file(
+            &context,
+            "wiki/concepts/概念.md",
+            "# 概念\n\n[[raw/extracted/来源]] [[原文]] [[missing]]",
+        );
+        let report = LintService::default()
+            .run_local_lint(&context, &SearchService::default())
+            .unwrap();
+        let dead = report
+            .issues
+            .iter()
+            .filter(|issue| issue.issue_type == LintIssueType::DeadLink)
+            .collect::<Vec<_>>();
+        assert_eq!(dead.len(), 1);
+        assert_eq!(dead[0].target.as_deref(), Some("missing"));
+        assert!(!report
+            .issues
+            .iter()
+            .any(|issue| issue.path == "raw/extracted/来源.md"));
+        let complete = LintService::default()
+            .run_health_local_scan(&context, &SearchService::default(), |_| Ok(()))
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&report.issues).unwrap(),
+            serde_json::to_value(&complete.report.issues).unwrap(),
+            "AI sampling order must not change local findings"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn wikilink_locations_keep_first_body_line_and_cancel_inside_large_pages() {
+        let body = "# Page\n[[中文#小节|别名]] [[OTHER]]\n[[中文]]\n[[other]]";
+        let lines = wikilink_lines(body, || Ok(())).unwrap();
+        assert_eq!(lines["中文"], 2);
+        assert_eq!(lines["other"], 2);
+        let large = (0..10_000)
+            .map(|index| format!("[[target-{index}]]\n"))
+            .collect::<String>();
+        let mut checkpoints = 0;
+        let error = wikilink_lines(&large, || {
+            checkpoints += 1;
+            if checkpoints == 2 {
+                Err(BackendError::new(
+                    "TASK_CANCELLED",
+                    "cancelled",
+                    false,
+                    false,
+                ))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+        assert_eq!(error.code, "TASK_CANCELLED");
+        assert_eq!(checkpoints, 2);
+    }
+
+    #[test]
+    fn missing_index_entries_with_duplicate_stems_keep_unique_findings() {
+        let (context, root) = tmp_context("health-index-unique-paths");
+        write_file(&context, "wiki/index.md", "# Index\n");
+        for path in ["wiki/concepts/同名.md", "wiki/topics/同名.md"] {
+            write_file(&context, path, "---\ntype: concept\n---\n\n# Page\n\nText");
+        }
+        let report = LintService::default()
+            .run_local_lint(&context, &SearchService::default())
+            .unwrap();
+        let index = report
+            .issues
+            .iter()
+            .filter(|issue| issue.issue_type == LintIssueType::IndexDrift)
+            .collect::<Vec<_>>();
+        assert_eq!(index.len(), 2);
+        assert_ne!(index[0].id, index[1].id);
+        assert_eq!(
+            index
+                .iter()
+                .map(|issue| issue.target.as_deref().unwrap())
+                .collect::<HashSet<_>>(),
+            HashSet::from(["wiki/concepts/同名.md", "wiki/topics/同名.md"])
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bounded_deep_input_represents_both_source_and_wiki_roots() {
+        let (context, root) = tmp_context("health-balanced-deep");
+        for index in 0..150 {
+            for (folder, title) in [("raw/extracted", "Source"), ("wiki/concepts", "Concept")] {
+                write_file(
+                    &context,
+                    &format!("{folder}/{index:03}.md"),
+                    &format!(
+                        "---\ntitle: {title}-{index}\n---\n\n{}",
+                        "readable text ".repeat(100)
+                    ),
+                );
+            }
+        }
+        let lint = LintService::default();
+        let scan = lint
+            .run_health_local_scan(&context, &SearchService::default(), |_| Ok(()))
+            .unwrap();
+        let snapshot = lint.prepare_health_deep_snapshot_from_scan(&scan, "en");
+        let page_data = snapshot
+            .prompt
+            .split("--- Pages (untrusted-wiki-data) ---")
+            .nth(1)
+            .unwrap();
+        assert!(page_data.contains("path: wiki/concepts/000.md"));
+        assert!(page_data.contains("path: raw/extracted/000.md"));
+        assert!(snapshot.deep_truncated);
+        assert!(snapshot.prompt.chars().count() <= DEEP_LINT_PROMPT_BUDGET_CHARS);
+        assert_eq!(
+            snapshot.deep_covered_pages,
+            page_data.matches("\npath: ").count()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn health_scan_without_git_or_app_state_reuses_exact_inputs_and_matches_local_rules() {
@@ -983,6 +1161,102 @@ mod tests {
             .issues
             .iter()
             .any(|issue| issue.target.as_deref() == Some("lost-a")));
+        // Repair verification and the local IPC entry point must use exactly
+        // the same fresh metadata, even with a warmed SearchService cache.
+        let local = service.run_local_lint(&context, &search).unwrap();
+        assert_eq!(local.issues, scan.report.issues);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_only_scan_has_no_ai_excerpts_and_preserves_rule_results() {
+        let (context, root) = tmp_context("health-local-no-prompt");
+        seed_clean_vault(&context);
+        let lint = LintService::default();
+        let search = SearchService::default();
+        let local = lint
+            .run_health_scan(&context, &search, false, |_| Ok(()))
+            .unwrap();
+        let complete = lint
+            .run_health_scan(&context, &search, true, |_| Ok(()))
+            .unwrap();
+        assert!(local.prompt_blocks.is_empty());
+        assert!(!complete.prompt_blocks.is_empty());
+        assert_eq!(local.report.issues, complete.report.issues);
+        assert_eq!(local.input_hashes, complete.input_hashes);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn large_guidance_and_local_baseline_leave_room_for_analyzed_pages() {
+        let (context, root) = tmp_context("health-prompt-reservation");
+        seed_clean_vault(&context);
+        write_file(&context, "purpose.md", &"项目说明<数据>".repeat(30_000));
+        write_file(&context, "schema.md", &"页面规范".repeat(40_000));
+        let lint = LintService::default();
+        let mut scan = lint
+            .run_health_local_scan(&context, &SearchService::default(), |_| Ok(()))
+            .unwrap();
+        scan.report.issues = vec![
+            local_issue(
+                LintIssueType::DeadLink,
+                LintSeverity::Error,
+                "wiki/index.md",
+                &"long deterministic finding ".repeat(100),
+                None,
+                None,
+            );
+            2_000
+        ];
+        let deep = lint.prepare_health_deep_snapshot_from_scan(&scan, "zh-CN");
+        assert!(deep.prompt.chars().count() <= DEEP_LINT_PROMPT_BUDGET_CHARS);
+        assert_eq!(deep.deep_covered_pages, 4);
+        assert!(deep.prompt.contains("Links to [[react]]"));
+        assert!(deep.prompt.contains("additional local findings omitted"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn source_resource_findings_include_frontmatter_and_have_distinct_ids() {
+        let (context, root) = tmp_context("health-source-resources");
+        write_file(&context, "raw/extracted/来源.md",
+            "---\ntitle: 来源\nsources: ['../附件甲.pdf']\n---\n\n# 来源\n![乙](../附件乙.png)\n![丙](../附件丙.png)\n![乙](../附件乙.png)");
+        let report = LintService::default()
+            .run_local_lint(&context, &SearchService::default())
+            .unwrap();
+        let resources = report
+            .issues
+            .iter()
+            .filter(|issue| issue.issue_type == LintIssueType::MissingResource)
+            .collect::<Vec<_>>();
+        assert_eq!(resources.len(), 3);
+        assert_eq!(
+            resources
+                .iter()
+                .map(|issue| &issue.id)
+                .collect::<HashSet<_>>()
+                .len(),
+            3
+        );
+        assert!(resources
+            .iter()
+            .all(|issue| issue.fixability == Fixability::None && issue.scan_hash.is_some()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn layout_structural_pages_are_exempt_from_content_and_orphan_rules() {
+        let (mut context, root) = tmp_context("health-structural-layout");
+        context.layout.wiki_index_path = Some("wiki/入口.md".into());
+        context.layout.wiki_overview_path = Some("wiki/概览.md".into());
+        context.layout.activity_log_path = Some("wiki/记录.md".into());
+        for path in ["wiki/入口.md", "wiki/概览.md", "wiki/记录.md"] {
+            write_file(&context, path, "# 结构页\n\n说明内容");
+        }
+        let report = LintService::default()
+            .run_local_lint(&context, &SearchService::default())
+            .unwrap();
+        assert!(report.issues.is_empty(), "{:?}", report.issues);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
