@@ -556,3 +556,11 @@ export interface UpdateWikiSourcePage {
   nextOffset: number | null;
   unavailable: number;
 }
+
+export interface WorkflowFormCatalog {
+  kind: "health_check" | "generate_content";
+  routes: WorkflowRouteSelection[];
+  defaultRoute: WorkflowRouteSelection | null;
+  wikiPages: string[];
+  rememberedDraft: WorkflowPreparationDraft | null;
+}

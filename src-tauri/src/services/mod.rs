@@ -117,9 +117,10 @@ pub use workflow_service::{
     UpdateWikiConfirmationFailure, UpdateWikiExecutionServices, UpdateWikiHistoryState,
     UpdateWikiOptions, UpdateWikiRunner, UpdateWikiSourcePage, ValidatedWorkflowStart,
     WorkflowAccessSnapshot, WorkflowCoordinator, WorkflowDispatchFailure,
-    WorkflowExternalLaunchPermit, WorkflowLaunchCloseBarrier, WorkflowLaunchPublication,
-    WorkflowLaunchRegistry, WorkflowPersistenceBinding, WorkflowPreference, WorkflowPreferences,
-    WorkflowPreparationEnvironment, WorkflowPreparationService, WorkflowRunner, WorkflowService,
+    WorkflowExternalLaunchPermit, WorkflowFormCatalog, WorkflowLaunchCloseBarrier,
+    WorkflowLaunchPublication, WorkflowLaunchRegistry, WorkflowPersistenceBinding,
+    WorkflowPreference, WorkflowPreferences, WorkflowPreparationEnvironment,
+    WorkflowPreparationService, WorkflowRememberedDraft, WorkflowRunner, WorkflowService,
     WorkflowStageSink, WorkflowTrustTransition,
 };
 #[cfg(any(feature = "gui", test))]

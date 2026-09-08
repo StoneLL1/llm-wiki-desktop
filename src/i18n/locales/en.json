@@ -1,4 +1,11 @@
 {
+  "workflows.draft.wholeWiki": "Use the whole Wiki when this task starts.",
+  "workflows.draft.findPages": "Find Wiki pages",
+  "workflows.draft.selectFiltered": "Select matching pages",
+  "workflows.draft.loadingPages": "Loading Wiki page list…",
+  "workflows.draft.noPages": "No matching Wiki pages.",
+  "workflows.draft.missingPage": "Selected page is unavailable: {{path}}. Remove it or restore the file.",
+  "workflows.draft.catalogError": "Some form options could not be loaded. Your choices are retained.",
   "workflows.update.sources": "Sources",
   "workflows.update.automatic": "Select automatically",
   "workflows.update.manual": "Select sources",

@@ -12,9 +12,17 @@
 
 **Project-open boundary:** The no-project shell, compatible-folder assessment, restricted/trusted/read-only permissions, Git eligibility and repair behavior are defined by [`2026-07-30-first-run-project-open-workbench-design.md`](2026-07-30-first-run-project-open-workbench-design.md). Workflows consumes the backend-derived access policy; it does not grant trust or make a read-only project writable.
 
+## Health / Generate form amendment — 2026-09-08
+
+Opening any of the three workflows is local navigation to an editable draft. Health and Generate use a read-only form catalog for configured route summaries and remembered choices; only Generate lists Wiki filenames. Catalog latency never disables mode, artifact or save-mode editing. Health does not scan Markdown on entry; Generate does not parse Source registries or hash source bodies to display page choices.
+
+Start validates the final Health/Generate choices through the existing preparation and admission protocol. Sharing, overwrite and changed inputs retain the concrete review screen. These workflows have not migrated to Update's durable intent worker: execution validation can still take time after Start. A lost admission reply retries its real receipt; a confirmed success clears that pending submission, so the next deliberate run prepares anew. Navigation away does not discard task facts or reopen the old surface on a late reply.
+
+Generate remembers artifact type, page choices and route, but does not turn a previous generated filename into an overwrite request. Source version registries are not Generate inputs. Selected Wiki content and resources remain validated; project reports still cover all Markdown actually consumed by ExportService. Older queued Generate baselines containing Source versions may require renewed scope review.
+
 ## Update Wiki intent amendment — 2026-09-08
 
-This amendment follows the user's request to remove unnecessary preparation dependencies and takes precedence over the older Update-specific preparation/TTL wording below. Health, Generate Content and old persisted tasks retain their existing contracts.
+This amendment follows the user's request to remove unnecessary preparation dependencies and takes precedence over the older Update-specific preparation/TTL wording below. Health and Generate form navigation is further amended above; old persisted tasks retain their admission contracts.
 
 - Opening Update Wiki immediately exposes an editable form. Configured route summaries and a manually requested Source directory load independently. No full preparation, Git status, source-body scan or executable probe is required for navigation.
 - Automatic selection means “resolve applicable Sources when this queued task starts”; manual selection means exact source/version choices, and an explicitly empty manual selection is not Automatic. Mode and current draft survive leaving and re-entering the form in the same project session.

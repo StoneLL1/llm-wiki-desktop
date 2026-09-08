@@ -2194,6 +2194,14 @@
           "helper": "with_current_project_read_task_access"
         }
       ]
+    },
+    {
+      "name": "get_workflow_form_catalog",
+      "source": "src-tauri/src/commands/workflow_commands.rs",
+      "classifications": [
+        "read"
+      ],
+      "projectScoped": true
     }
   ],
   "serviceAuthorityContracts": [

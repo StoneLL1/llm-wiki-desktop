@@ -293,7 +293,7 @@ impl RequestEvaluationSnapshot {
             );
         #[cfg(test)]
         let inventory_started = std::time::Instant::now();
-        let source_versions = if health {
+        let source_versions = if input.is_some_and(|input| input.kind != WorkflowKind::UpdateWiki) {
             Vec::new()
         } else {
             #[cfg(test)]
@@ -818,7 +818,7 @@ fn build_snapshot_from_evaluation(
     let available_source_versions = evaluation
         .source_versions
         .iter()
-        .filter(|_| input.kind != WorkflowKind::HealthCheck)
+        .filter(|_| input.kind == WorkflowKind::UpdateWiki)
         .map(|source| WorkflowSourceVersionRef {
             source_id: source.source_id.clone(),
             version_id: source.version_id.clone(),
@@ -1412,7 +1412,7 @@ pub(super) fn resolve_update_execution_route(
         })
 }
 
-fn route_selection(route: &Option<WorkflowRoute>) -> Option<WorkflowRouteSelection> {
+pub(super) fn route_selection(route: &Option<WorkflowRoute>) -> Option<WorkflowRouteSelection> {
     match route {
         Some(WorkflowRoute::Agent { agent, .. }) => {
             Some(WorkflowRouteSelection::Agent { agent: *agent })
@@ -1645,7 +1645,10 @@ fn capture_baseline(
             .collect::<HashSet<_>>(),
         _ => HashSet::new(),
     };
-    for source in current_sources {
+    for source in current_sources
+        .iter()
+        .filter(|_| matches!(scope, WorkflowScope::UpdateWiki { .. }))
+    {
         if selected.is_empty()
             || selected.contains(&(source.source_id.as_str(), source.version_id.as_str()))
         {
@@ -1721,11 +1724,10 @@ pub fn workflow_baseline_for_scope(
     scope: &WorkflowScope,
 ) -> Result<WorkflowBaselineSummary, BackendError> {
     let current_sources = match scope {
-        WorkflowScope::HealthCheck { .. } => Vec::new(),
+        WorkflowScope::HealthCheck { .. } | WorkflowScope::GenerateContent { .. } => Vec::new(),
         WorkflowScope::UpdateWiki {
             source_versions, ..
         } => CompileService::selected_source_versions(context, source_versions)?,
-        _ => CompileService::list_source_versions(context)?,
     };
     Ok(capture_baseline(context, scope, &current_sources, None)?.summary)
 }
@@ -1845,7 +1847,10 @@ fn preparation_fingerprint(
     ))
 }
 
-fn wiki_pages_from_inventory(context: &ProjectContext, inventory: &[String]) -> Vec<String> {
+pub(super) fn wiki_pages_from_inventory(
+    context: &ProjectContext,
+    inventory: &[String],
+) -> Vec<String> {
     use crate::models::layout::ProjectMarkdownRootRole;
 
     let mut pages = inventory
@@ -2285,6 +2290,81 @@ mod batch_zero_cost_tests {
     use crate::tasks::TaskService;
     use std::collections::{HashSet, VecDeque};
     use std::sync::{mpsc, Arc, Mutex};
+
+    #[test]
+    fn generate_preparation_and_execution_baseline_ignore_unrelated_source_registry() {
+        let root = tempfile::tempdir().unwrap();
+        let context = ProjectContext::new("generate-scope", root.path().to_path_buf());
+        std::fs::create_dir_all(root.path().join(".app")).unwrap();
+        std::fs::create_dir_all(root.path().join("wiki/sources")).unwrap();
+        std::fs::write(
+            root.path().join(".app/source-index-v2.json"),
+            "invalid JSON",
+        )
+        .unwrap();
+        std::fs::write(root.path().join("wiki/page.md"), "# Selected page\n").unwrap();
+        std::fs::write(root.path().join("wiki/sources/unrelated.md"), [0xff]).unwrap();
+        assert!(CompileService::list_source_versions(&context).is_err());
+        let config = tempfile::tempdir().unwrap();
+        let settings = SettingsService::with_config_dir(config.path().to_path_buf());
+        let secrets = SecretService::memory();
+        let agents = AgentService::with_runner(Arc::new(DeterministicMissingProcessRunner));
+        let environment = WorkflowPreparationEnvironment {
+            context: &context,
+            access: WorkflowAccessSnapshot {
+                trust: WorkflowProjectTrust::Trusted,
+                trust_kind: Some(ProjectTrustKind::Native),
+                filesystem_access: WorkflowFilesystemAccess::Writable,
+                persistence: WorkflowPersistenceMode::Persistent,
+                git_state: WorkflowGitState::Unavailable,
+                authority_revision: "generate-authority".into(),
+            },
+            settings_service: &settings,
+            secret_service: &secrets,
+            agent_service: &agents,
+        };
+        reset_preparation_costs();
+        let prepared = WorkflowService::default()
+            .prepare(
+                &environment,
+                PrepareWorkflowInput {
+                    kind: WorkflowKind::GenerateContent,
+                    scope: Some(WorkflowScope::GenerateContent {
+                        artifact_type: WorkflowArtifactType::BeautifulRead,
+                        page_paths: vec!["wiki/page.md".into()],
+                        output_path: None,
+                    }),
+                    route_selection: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(preparation_costs().source_inventories, 0);
+        assert!(prepared.available_source_versions.is_empty());
+        assert_eq!(
+            prepared.baseline.fingerprint,
+            workflow_baseline_for_scope(&context, &prepared.scope)
+                .unwrap()
+                .fingerprint
+        );
+        std::fs::write(
+            root.path().join("wiki/sources/unrelated.md"),
+            "changed source",
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.baseline.fingerprint,
+            workflow_baseline_for_scope(&context, &prepared.scope)
+                .unwrap()
+                .fingerprint
+        );
+        std::fs::write(root.path().join("wiki/page.md"), "# Changed selection\n").unwrap();
+        assert_ne!(
+            prepared.baseline.fingerprint,
+            workflow_baseline_for_scope(&context, &prepared.scope)
+                .unwrap()
+                .fingerprint
+        );
+    }
 
     struct DeterministicMissingProcessRunner;
 

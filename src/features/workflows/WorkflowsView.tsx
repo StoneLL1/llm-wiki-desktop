@@ -1,4 +1,4 @@
-import { ArrowLeft, LoaderCircle, RefreshCw, X } from "lucide-react";
+import { RefreshCw, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -14,10 +14,10 @@ import type { WorkflowsController } from "./useWorkflowsController";
 import { WorkflowHistoryView } from "./WorkflowHistoryView";
 import { historyPageErrorRequiresRefresh } from "./workflowHistoryRecovery";
 import { WorkflowsOverviewView } from "./WorkflowsOverview";
+import { WorkflowDraftForm } from "./WorkflowDraftForm";
 import { UpdateWikiForm } from "./UpdateWikiForm";
 import { WorkflowPreparationView } from "./WorkflowPreparationView";
 import { WorkflowTaskDetail } from "./WorkflowTaskDetail";
-import { workflowKindKey } from "./workflowPresentation";
 
 export function WorkflowsView({ controller, onOpenTask }: { controller: WorkflowsController; onOpenTask: (taskId: string) => void }) {
   const { t } = useTranslation();
@@ -45,7 +45,7 @@ export function WorkflowsView({ controller, onOpenTask }: { controller: Workflow
   const surfaceError = latestOperationError(
     operations,
     surface === "preparation"
-      ? ["update:start", `prepare:${preparationKind ?? ""}`, `start:${preparation?.preparationId ?? ""}`, "prerequisite:"]
+      ? ["update:start", `draft:start:${preparationKind ?? ""}`, `prepare:${preparationKind ?? ""}`, `start:${preparation?.preparationId ?? ""}`, "prerequisite:"]
       : surface === "detail"
         ? [`task:${selectedTaskId ?? ""}:`]
         : surface === "history"
@@ -53,7 +53,8 @@ export function WorkflowsView({ controller, onOpenTask }: { controller: Workflow
           : ["overview:", "queue:", "prepare:", "task-open:"],
   );
   const surfacePending = surface === "preparation"
-    ? workflowOperationPending(operations, `prepare:${preparationKind ?? ""}`)
+    ? workflowOperationPending(operations, `draft:start:${preparationKind ?? ""}`)
+      || workflowOperationPending(operations, `prepare:${preparationKind ?? ""}`)
       || workflowOperationPending(operations, `start:${preparation?.preparationId ?? ""}`)
     : surface === "detail"
       ? workflowOperationPending(operations, `task:${selectedTaskId ?? ""}:`)
@@ -116,27 +117,17 @@ export function WorkflowsView({ controller, onOpenTask }: { controller: Workflow
     || surfaceError?.key.includes(":hydrate:")
     || surfaceError?.key.endsWith(":open")
     || historyTaskRetryError;
-  const preparing = preparingKind !== null && workflowOperationPending(operations, `prepare:${preparingKind}`);
   const panel = surface === "preparation" && preparationKind === "update_wiki"
     ? <UpdateWikiForm key={`${project.projectId}\0${project.rootPath}`} project={project} onBack={controller.backToOverview} onStart={controller.startUpdate} />
+    : surface === "preparation" && (preparingKind === "health_check" || preparingKind === "generate_content")
+    ? <WorkflowDraftForm key={`${project.projectId}\0${project.rootPath}\0${preparingKind}`} kind={preparingKind} project={project}
+        lastHealth={overview?.contextSummary?.lastHealth} onOpenLastHealth={(taskId) => void controller.openRun(taskId)}
+        onBack={controller.backToOverview} onStart={(draft) => controller.startDraft(preparingKind, draft)} />
     : surface === "preparation" && preparation
-    ? <>
-        {preparing ? <p className="workflow-scope-state" role="status"><LoaderCircle aria-hidden="true" size={14} />{t("workflows.action.preparing")}</p> : null}
-        <WorkflowPreparationView key={preparation.kind} lastHealth={overview?.contextSummary?.lastHealth} onOpenLastHealth={(taskId) => void controller.openRun(taskId)} preparation={preparation} onBack={controller.backToOverview} onPrerequisite={controller.handlePrerequisite} onStart={(restricted, remote, draft) => void controller.startPrepared(restricted, remote, draft)} />
-      </>
-    : surface === "preparation" && preparingKind
-      ? <div className="workflow-preparation">
-          <div className="workflow-panel-heading">
-            <h2 data-workflow-surface-title tabIndex={-1}>{t(workflowKindKey(preparingKind))}</h2>
-            <button className="workflow-back" onClick={controller.backToOverview} type="button"><ArrowLeft aria-hidden="true" size={14} />{t("workflows.action.cancel")}</button>
-          </div>
-          <div className="workflow-panel-body">
-            {preparing ? <p className="workflow-scope-state" role="status"><LoaderCircle aria-hidden="true" size={14} />{t("workflows.action.preparing")}</p> : null}
-          </div>
-        </div>
-      : surface === "detail" && selectedRun
-        ? <WorkflowTaskDetail run={selectedRun} queuedRuns={queuedRuns} controller={controller} onOpenLogs={onOpenTask} />
-        : null;
+    ? <WorkflowPreparationView key={preparation.kind} lastHealth={overview?.contextSummary?.lastHealth} onOpenLastHealth={(taskId) => void controller.openRun(taskId)} preparation={preparation} onBack={controller.backToOverview} onPrerequisite={controller.handlePrerequisite} onStart={(restricted, remote, draft) => void controller.startPrepared(restricted, remote, draft)} />
+    : surface === "detail" && selectedRun
+      ? <WorkflowTaskDetail run={selectedRun} queuedRuns={queuedRuns} controller={controller} onOpenLogs={onOpenTask} />
+      : null;
   const overviewView = (
     <WorkflowsOverviewView
       selectedKind={surface === "preparation" ? preparationKind : surface === "detail" ? selectedRun?.kind : null}

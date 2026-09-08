@@ -5,6 +5,16 @@
 状态：修复已完成并通过完整检查；下文 F1–F12 与行号记录的是修复前基线，不能作为当前仍有缺陷的判断。用户已确认卡死入口为“处理当前 Git 变更 → 创建检查点”，且只能强制退出；产品方向为“保留 Git 历史，由应用自动处理检查点，普通操作不要求手动提交”，并进一步确认“在应用内查看和撤销即可，避免干扰外部 Git”。已实施合同见 Workflows 设计 §12；验证记录随本次修复更新。
 
 
+## 第三轮：健康检查与生成内容入口（2026-09-08）
+
+原因与 Update 的旧入口相同：页面编辑依赖完整 `prepare_workflow`，fieldset 在返回前禁用。Generate 的准备另外读取与实际生成无关的 Source 注册表/版本，增加磁盘工作，也让损坏的未选 Source 阻塞生成。
+
+本轮实现：两个入口使用本地草稿；只读 catalog 提供配置、记忆选项及 Generate 的 Wiki 文件名，Health 不扫描正文，Generate 目录提前排除 Source 子树。点击 Start 才签发真实准备记录；外发/受限内容、覆盖和范围变化仍进入复核。移除 Generate 的 Source 版本基线，保留 ExportService 真正消费的 Markdown 与资源。没有新增任务系统，也没有把这两个工作流宣称为已迁移到 Update 意图 worker。
+
+衔接检查修正：复核保留显式路线和自动新文件意图；StrictMode 首次 effect 重放不覆盖绑定草稿；不确定启动回复通过独立 pendingStarts 复用真实 token，成功后清除，下一次主动运行重新准备；迟到回复只更新任务事实。记忆输出路径不会把上次生成变成下次覆盖。
+
+专项验证：175 项前端草稿/复核/控制器/store 测试通过；catalog 6 项、Generate 13 项、Health 21 项和 preparation 21 项后端专项通过。实际浏览器组件以 1.8 秒目录延迟验证加载期间切换成果类型、搜索与中文页选择，检查中文布局；未对真实知识库执行 AI 或写入。完整 `npm run check` 从头全部通过（17m31.5s）：1,440 项前端测试、1,350 项 Rust 单元测试、167 项 Workflow 集成测试；既有 ignored 测试未计入。日志：`/tmp/workflow-draft-check-complete.log`。旧版已排队 Generate 的额外 Source 基线可能触发现有 ReviewScope；正式 WebView 帧时间和真实 AI 并非本次验证证据。
+
 ## 第二轮：移除 Update 表单的执行依赖（2026-09-08）
 
 第一轮解决主线程自锁并让表单提前出现，但后台 preparation 仍把全量 Source 解析、路线发现、准备记录与表单状态绑在一起。缓存和 loading 提示只是遮蔽这条依赖链，不能消除等待。

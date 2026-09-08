@@ -79,6 +79,23 @@ pub async fn prepare_workflow(
     .await
 }
 
+/// Display metadata only; execution validation belongs to prepare/start.
+#[tauri::command]
+pub async fn get_workflow_form_catalog(
+    app: AppHandle,
+    request: crate::models::workflow_requests::WorkflowFormCatalogRequest,
+) -> Result<crate::services::WorkflowFormCatalog, BackendError> {
+    run_blocking(app, BlockingWorkClass::MetadataIo, move |app| {
+        let state = app.state::<AppState>();
+        let context =
+            state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+        state
+            .workflow_service
+            .form_catalog(&context, &state.settings_service, request.kind)
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn get_update_wiki_options(
     app: AppHandle,

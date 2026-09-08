@@ -90,10 +90,14 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
   const prerequisitePending = workflowOperationPending(operations, "prerequisite:project:");
   const [restricted, setRestricted] = useState(false);
   const [remote, setRemote] = useState(false);
-  const [explicitOutput, setExplicitOutput] = useState(preparation.gitPolicy === "required_before_overwrite");
-  const [scope, setScope] = useState<WorkflowScope>(preparation.scope);
-  const [routeChoice, setRouteChoice] = useState("auto");
-  const [preparedRouteChoice, setPreparedRouteChoice] = useState("auto");
+  const savedDraft = useWorkflowStore.getState().drafts[preparation.kind];
+  const initialDraft = savedDraft?.preparationId === preparation.preparationId ? savedDraft : null;
+  const initialRouteChoice = initialDraft?.routeSelection ? workflowRouteSelectionKey(initialDraft.routeSelection) : "auto";
+  const [explicitOutput, setExplicitOutput] = useState(initialDraft?.scope.kind === "generate_content"
+    ? initialDraft.scope.outputPath !== null : preparation.gitPolicy === "required_before_overwrite");
+  const [scope, setScope] = useState<WorkflowScope>(initialDraft?.scope ?? preparation.scope);
+  const [routeChoice, setRouteChoice] = useState(initialRouteChoice);
+  const [preparedRouteChoice, setPreparedRouteChoice] = useState(initialRouteChoice);
   const [updateAutoDetect, setUpdateAutoDetect] = useState(false);
   const [scopeQuery, setScopeQuery] = useState("");
   const [scopePage, setScopePage] = useState(0);
@@ -105,7 +109,8 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
     const saved = useWorkflowStore.getState().drafts[preparation.kind];
     const currentDraft = saved?.preparationId === preparation.preparationId ? saved : null;
     setScope(currentDraft?.scope ?? preparation.scope);
-    setExplicitOutput(preparation.gitPolicy === "required_before_overwrite");
+    setExplicitOutput(currentDraft?.scope.kind === "generate_content"
+      ? currentDraft.scope.outputPath !== null : preparation.gitPolicy === "required_before_overwrite");
     const nextRouteChoice = pendingRouteChoiceRef.current
       ?? (currentDraft?.routeSelection ? workflowRouteSelectionKey(currentDraft.routeSelection) : "auto");
     pendingRouteChoiceRef.current = null;
@@ -126,10 +131,11 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
   useEffect(() => {
     useWorkflowStore.getState().setDraft(preparation.kind, { preparationId: preparation.preparationId, scope, routeSelection });
   }, [preparation.kind, preparation.preparationId, scope, routeSelection]);
-  const scopeChanged = !workflowScopeEqual(scope, preparation.scope) || routeChoice !== preparedRouteChoice;
+  const preparedScope = useWorkflowStore((state) => state.preparedDrafts[preparation.kind]?.scope) ?? preparation.scope;
+  const scopeChanged = !workflowScopeEqual(scope, preparedScope) || routeChoice !== preparedRouteChoice;
   const outputScopeChanged = scope.kind === "generate_content"
     && preparation.scope.kind === "generate_content"
-    && !workflowScopeEqual(scope, preparation.scope);
+    && !workflowScopeEqual(scope, preparedScope);
   const sourceOptions = preparation.availableSourceVersions
     ?? (preparation.scope.kind === "update_wiki" ? preparation.scope.sourceVersions : []);
   const pageOptions = preparation.availableWikiPages

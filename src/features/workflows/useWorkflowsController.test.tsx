@@ -214,10 +214,106 @@ describe("useWorkflowsController", () => {
     await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
     await act(() => result.current.openRun(run.taskId));
     await act(() => result.current.prepare("health_check"));
-    await act(() => result.current.startPrepared(false, false));
+    await act(() => result.current.startDraft("health_check", { scope: preparation.scope, routeSelection: null }));
     expect({ overview: mocks.getOverview.mock.calls.length, history: mocks.listRuns.mock.calls.length,
       detail: mocks.getRun.mock.calls.length, prepare: mocks.prepare.mock.calls.length, start: mocks.start.mock.calls.length,
     }).toEqual({ overview: 2, history: 0, detail: 1, prepare: 1, start: 1 });
+  });
+
+  it("reuses a validated token after an uncertain reply but prepares a later intentional run anew", async () => {
+    const { result } = renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
+    await act(() => result.current.prepare("health_check"));
+    const draft = { scope: preparation.scope, routeSelection: null };
+    mocks.start.mockRejectedValueOnce(new Error("IPC response lost"));
+    await act(() => result.current.startDraft("health_check", draft));
+    await act(() => result.current.startDraft("health_check", draft));
+    expect(mocks.prepare).toHaveBeenCalledOnce();
+    expect(mocks.start).toHaveBeenCalledTimes(2);
+    expect(mocks.start.mock.calls[0]).toEqual(mocks.start.mock.calls[1]);
+    await act(() => result.current.prepare("health_check"));
+    await act(() => result.current.startDraft("health_check", draft));
+    expect(mocks.prepare).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves an explicit route through review and prepares a subsequent run afresh", async () => {
+    const routeSelection = { kind: "byok" as const, provider: "ollama" as const };
+    const reviewed = { ...preparation, prerequisites: [{ code: "RESTRICTED", messageKey: "restricted", blocking: false,
+      action: "acknowledge_restricted_content" as const }] };
+    mocks.prepare.mockResolvedValue(reviewed);
+    const { result } = renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
+    await act(() => result.current.prepare("health_check"));
+    await act(() => result.current.startDraft("health_check", { scope: preparation.scope, routeSelection }));
+    expect(useWorkflowStore.getState().drafts.health_check).toMatchObject({ preparationId: preparation.preparationId, routeSelection });
+    await act(() => result.current.startPrepared(true, false, useWorkflowStore.getState().drafts.health_check));
+    expect(mocks.prepare).toHaveBeenCalledOnce();
+    expect(mocks.start).toHaveBeenCalledOnce();
+    expect(useWorkflowStore.getState().pendingStarts).toEqual({});
+    await act(() => result.current.prepare("health_check"));
+    await act(() => result.current.startDraft("health_check", { scope: preparation.scope, routeSelection }));
+    expect(mocks.prepare).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries an edited review with the same submitted receipt after a lost reply", async () => {
+    const scope = { kind: "health_check" as const, mode: "local_quick" as const };
+    const fresh = { ...preparation, preparationId: "edited-receipt", scope };
+    mocks.prepare.mockResolvedValue(fresh);
+    mocks.start.mockRejectedValueOnce(new Error("IPC response lost"));
+    const { result } = renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
+    act(() => useWorkflowStore.getState().setPreparation(preparation));
+    const draft = { scope, routeSelection: null };
+    await act(() => result.current.startPrepared(false, false, draft));
+    await act(() => result.current.startPrepared(false, false, draft));
+    expect(mocks.prepare).toHaveBeenCalledOnce();
+    expect(mocks.start).toHaveBeenCalledTimes(2);
+    expect(mocks.start.mock.calls[0]).toEqual(mocks.start.mock.calls[1]);
+    expect(mocks.start.mock.calls[1][0]).toMatchObject({ preparationId: "edited-receipt" });
+  });
+
+  it("records a late reviewed start without reopening the form or task", async () => {
+    const pending = deferred<{ kind: "created"; run: WorkflowRun }>();
+    mocks.start.mockReturnValue(pending.promise);
+    const { result } = renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
+    act(() => useWorkflowStore.getState().setPreparation(preparation));
+    let submission!: Promise<void>;
+    act(() => { submission = result.current.startPrepared(false, false); });
+    await waitFor(() => expect(mocks.start).toHaveBeenCalledOnce());
+    act(() => useWorkflowStore.getState().setSurface("overview"));
+    await act(async () => { pending.resolve({ kind: "created", run }); await submission; });
+    expect(useWorkflowStore.getState().surface).toBe("overview");
+    expect(useWorkflowStore.getState().selectedTaskId).toBeNull();
+    expect(useTaskStore.getState().workflowById[run.taskId]).toMatchObject({ taskId: run.taskId });
+    expect(useWorkflowStore.getState().pendingStarts).toEqual({});
+  });
+
+  it.each(["sharing", "overwrite", "changed-input"])("retains backend review for %s instead of silently starting", async (reason) => {
+    const scope = { kind: "generate_content" as const, artifactType: "knowledge_card" as const, pagePaths: ["wiki/a.md"], outputPath: null };
+    const fresh: WorkflowPreparation = { ...preparation, kind: "generate_content", scope: { ...scope, outputPath: "exports/card.html" },
+      ...(reason === "sharing" ? { prerequisites: [{ code: "REMOTE", messageKey: "remote", blocking: false, action: "acknowledge_remote_provider" as const }] } : {}),
+      ...(reason === "overwrite" ? { gitPolicy: "required_before_overwrite" as const } : {}),
+      ...(reason === "changed-input" ? { scope: { ...scope, pagePaths: ["wiki/other.md"], outputPath: "exports/card.html" } } : {}),
+    };
+    mocks.prepare.mockResolvedValue(fresh);
+    const { result } = renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
+    await act(() => result.current.prepare("generate_content"));
+    await act(() => result.current.startDraft("generate_content", { scope, routeSelection: null }));
+    expect(mocks.start).not.toHaveBeenCalled();
+    expect(useWorkflowStore.getState().preparation).toEqual(fresh);
+    expect(useWorkflowStore.getState().preparingKind).toBeNull();
+  });
+
+  it("starts a new artifact without reviewing its backend-generated filename", async () => {
+    const scope = { kind: "generate_content" as const, artifactType: "knowledge_card" as const, pagePaths: ["wiki/a.md"], outputPath: null };
+    mocks.prepare.mockResolvedValue({ ...preparation, kind: "generate_content", scope: { ...scope, outputPath: "exports/new-card.html" } });
+    const { result } = renderHook(() => useWorkflowsController(project, true));
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
+    await act(() => result.current.prepare("generate_content"));
+    await act(() => result.current.startDraft("generate_content", { scope, routeSelection: null }));
+    expect(mocks.start).toHaveBeenCalledOnce();
   });
 
   it("handles 200 summary events with one terminal overview refresh and no history, preparation, or detail IPC", async () => {
@@ -235,41 +331,34 @@ describe("useWorkflowsController", () => {
     expect(mocks.getRun).not.toHaveBeenCalled();
   });
 
-  it("opens preparation immediately and restores the saved form while refreshing", async () => {
-    const pending = deferred<WorkflowPreparation>();
+  it("opens all draft forms without preparation and preserves choices across navigation", async () => {
     const { result } = renderHook(() => useWorkflowsController(project, true));
     await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
-    mocks.prepare.mockReturnValueOnce(pending.promise);
-    let request!: Promise<void>;
-    act(() => { request = result.current.prepare("health_check"); });
-    expect(useWorkflowStore.getState()).toMatchObject({ surface: "preparation", preparation: null, preparingKind: "health_check" });
-    await act(async () => { pending.resolve(preparation); await request; });
+    const draft = { scope: { kind: "health_check" as const, mode: "complete" as const }, routeSelection: null };
+    await act(() => result.current.prepare("health_check", draft.scope));
+    expect(useWorkflowStore.getState()).toMatchObject({ surface: "preparation", preparingKind: "health_check", drafts: { health_check: draft } });
     act(() => result.current.backToOverview());
-    const refresh = deferred<WorkflowPreparation>();
-    mocks.prepare.mockReturnValueOnce(refresh.promise);
-    act(() => { request = result.current.prepare("health_check"); });
-    expect(useWorkflowStore.getState()).toMatchObject({ surface: "preparation", preparation, preparingKind: "health_check" });
-    await act(async () => { refresh.resolve(preparation); await request; });
+    await act(() => result.current.prepare("health_check"));
+    expect(useWorkflowStore.getState().drafts.health_check).toEqual(draft);
+    await act(() => result.current.prepare("generate_content"));
+    expect(mocks.prepare).not.toHaveBeenCalled();
   });
 
-  it.each(["overview", "history", "hidden"])("does not reopen delayed preparation after navigating to %s", async (destination) => {
+  it.each(["overview", "history", "hidden"] as const)("does not launch or reopen a draft after navigating to %s during validation", async (destination) => {
     const pending = deferred<WorkflowPreparation>();
-    const { result } = renderHook(() => useWorkflowsController(project, true));
+    const { result, rerender } = renderHook(({ enabled }) => useWorkflowsController(project, enabled), { initialProps: { enabled: true } });
     await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
     mocks.prepare.mockReturnValueOnce(pending.promise);
+    await act(() => result.current.prepare("health_check"));
     let request!: Promise<void>;
-    act(() => { request = result.current.prepare("health_check"); });
-    act(() => {
-      if (destination === "hidden") useNavigationStore.getState().setActiveView("wiki");
-      else if (destination === "overview") result.current.backToOverview();
-      else useWorkflowStore.getState().setSurface("history");
-    });
-    expect(useWorkflowStore.getState().operations["prepare:health_check"]?.pending).toBe(false);
+    act(() => { request = result.current.startDraft("health_check", { scope: preparation.scope, routeSelection: null }); });
+    await waitFor(() => expect(mocks.prepare).toHaveBeenCalledOnce());
+    if (destination === "hidden") rerender({ enabled: false });
+    else act(() => useWorkflowStore.getState().setSurface(destination));
     await act(async () => { pending.resolve(preparation); await request; });
     expect(useWorkflowStore.getState().preparation).toBeNull();
-    expect(useWorkflowStore.getState().preparingKind).toBeNull();
-    expect(useWorkflowStore.getState().surface).toBe(destination === "history" ? "history" : "overview");
-    expect(useWorkflowStore.getState().operations["prepare:health_check"]?.pending).toBe(false);
+    expect(mocks.start).not.toHaveBeenCalled();
+    expect(useWorkflowStore.getState().operations["draft:start:health_check"]?.pending).toBe(false);
   });
 
   it("re-prepares changed structured choices before starting", async () => {
@@ -512,7 +601,8 @@ describe("useWorkflowsController", () => {
     await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
 
     let request!: Promise<void>;
-    act(() => { request = result.current.prepare("health_check"); });
+    await act(() => result.current.prepare("health_check"));
+    act(() => { request = result.current.startDraft("health_check", { scope: preparation.scope, routeSelection: null }); });
     act(() => useWorkflowStore.getState().setOverviewSnapshot(replacementOverview));
     await act(async () => {
       oldPreparation.resolve(preparation);
@@ -538,7 +628,8 @@ describe("useWorkflowsController", () => {
     const { result } = renderHook(() => useWorkflowsController(project, true));
     await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
     let request!: Promise<void>;
-    act(() => { request = result.current.prepare("health_check"); });
+    await act(() => result.current.prepare("health_check"));
+    act(() => { request = result.current.startDraft("health_check", { scope: preparation.scope, routeSelection: null }); });
     await waitFor(() => expect(mocks.prepare).toHaveBeenCalledOnce());
 
     act(() => useProjectStore.setState({
@@ -591,7 +682,8 @@ describe("useWorkflowsController", () => {
     const { result } = renderHook(() => useWorkflowsController(project, true));
     await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
     let request!: Promise<void>;
-    act(() => { request = result.current.prepare("health_check"); });
+    await act(() => result.current.prepare("health_check"));
+    act(() => { request = result.current.startDraft("health_check", { scope: preparation.scope, routeSelection: null }); });
     await waitFor(() => expect(mocks.prepare).toHaveBeenCalledOnce());
 
     await act(async () => {
@@ -613,9 +705,7 @@ describe("useWorkflowsController", () => {
     mocks.start.mockReset().mockReturnValueOnce(staleStart.promise);
     const { result } = renderHook(() => useWorkflowsController(project, true));
     await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
-    useWorkflowStore.setState({
-      preparation,
-    });
+    useWorkflowStore.getState().setPreparation(preparation);
     mocks.getOverview.mockReturnValueOnce(postStartOverview.promise);
 
     let request!: Promise<void>;
@@ -650,7 +740,7 @@ describe("useWorkflowsController", () => {
     mocks.start.mockReset().mockReturnValue(pendingStart.promise);
     const { result } = renderHook(() => useWorkflowsController(project, true));
     await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
-    useWorkflowStore.setState({ preparation });
+    useWorkflowStore.getState().setPreparation(preparation);
 
     let first!: Promise<void>;
     let second!: Promise<void>;
@@ -1100,20 +1190,15 @@ describe("useWorkflowsController", () => {
     });
   });
 
-  it("re-prepares the current structured preparation for prepare_again", async () => {
+  it("returns prepare_again to an editable draft without scanning", async () => {
     const { result } = renderHook(() => useWorkflowsController(project, true));
     await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
     useWorkflowStore.setState({ preparation, surface: "preparation" });
-
-    await act(async () => { await result.current.handlePrerequisite("prepare_again"); });
-
-    await waitFor(() => expect(mocks.prepare).toHaveBeenCalledWith({
-      projectId: project.projectId,
-      projectRootPath: project.rootPath,
-      kind: preparation.kind,
-      scope: preparation.scope,
-      routeSelection: { kind: "byok", provider: "ollama" },
-    }));
+    await act(() => result.current.handlePrerequisite("prepare_again"));
+    expect(mocks.prepare).not.toHaveBeenCalled();
+    expect(useWorkflowStore.getState()).toMatchObject({ preparingKind: "health_check", drafts: { health_check: {
+      scope: preparation.scope, routeSelection: { kind: "byok", provider: "ollama" },
+    } } });
   });
 
   it("carries an edited preparation draft through Settings without starting", async () => {

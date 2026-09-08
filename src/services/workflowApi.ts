@@ -139,3 +139,7 @@ export function listUpdateWikiSources(request: WorkflowProjectRequest & { query:
 export function startUpdateWiki(request: WorkflowProjectRequest & { intent: UpdateWikiRequest }): Promise<WorkflowStartOutcome> {
   return invoke<WorkflowStartOutcome>("start_update_wiki", { request }).then((outcome) => { recordWorkflowFacts([outcome.run]); return outcome; });
 }
+
+export function getWorkflowFormCatalog(request: WorkflowProjectRequest & { kind: "health_check" | "generate_content" }): Promise<import("../types/workflow").WorkflowFormCatalog> {
+  return invoke("get_workflow_form_catalog", { request });
+}

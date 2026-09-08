@@ -1,5 +1,7 @@
 pub mod coordinator;
 pub mod fingerprint;
+mod form_catalog;
+pub use form_catalog::{WorkflowFormCatalog, WorkflowRememberedDraft};
 pub mod launch_registry;
 pub mod overview;
 pub mod persistence;

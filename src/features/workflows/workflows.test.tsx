@@ -1,3 +1,4 @@
+import { StrictMode } from "react";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -19,6 +20,7 @@ vi.mock("react-i18next", () => ({
   }),
 }));
 vi.mock("../../services/workflowApi", () => ({
+  getWorkflowFormCatalog: vi.fn().mockResolvedValue({ routes: [], defaultRoute: null, wikiPages: [], rememberedDraft: null }),
   getUpdateWikiOptions: vi.fn().mockResolvedValue({ routes: [], defaultRoute: null }),
   listUpdateWikiSources: vi.fn().mockResolvedValue({ sources: [], total: 0, nextOffset: null, unavailable: 0 }),
   getWorkflowFileDiff: workflowApiMocks.getWorkflowFileDiff,
@@ -118,6 +120,20 @@ afterEach(() => {
 });
 
 describe("Workflows overview", () => {
+  it("retains the bound BYOK route and automatic output in StrictMode review", () => {
+    const routeSelection = { kind: "byok" as const, provider: "ollama" as const };
+    const scope = { kind: "generate_content" as const, artifactType: "knowledge_card" as const,
+      pagePaths: ["wiki/中文.md"], outputPath: null };
+    const preparation: WorkflowPreparation = { ...makePreparationWithOptions(), kind: "generate_content",
+      scope: { ...scope, outputPath: "exports/generated-card.html" }, availableRoutes: [routeSelection],
+      prerequisites: [], gitPolicy: "not_required" };
+    useWorkflowStore.getState().setPreparation(preparation, routeSelection, scope);
+    render(<StrictMode><WorkflowPreparationView preparation={preparation} onBack={vi.fn()} onStart={vi.fn()} onPrerequisite={vi.fn()} /></StrictMode>);
+    expect(useWorkflowStore.getState().drafts.generate_content).toMatchObject({ scope, routeSelection });
+    expect(screen.getByRole("combobox")).toHaveValue("byok:ollama");
+    expect(screen.getByRole("radio", { name: "workflows.preparation.createArtifact" })).toBeChecked();
+  });
+
   it("routes Generate Content from the overview into full Workflows preparation", () => {
     const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "filterHistory", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
     const currentProject = useProjectStore.getState().currentProject;

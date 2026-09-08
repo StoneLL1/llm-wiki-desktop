@@ -4,7 +4,7 @@ Project-scoped presentation for the three fixed product workflows: Update Wiki, 
 
 ## Presentation
 
-The three reference-style function cards remain above the selected preparation/task panel and bounded recent history. Card clicks use the existing guarded preparation or task-opening actions; rendering the selectors never preloads all forms or starts a workflow. Forms use grouped options, a scope/output summary and one start action. Four semantic phases render horizontally, while detailed stages/logs remain on demand. Responsive layouts use the actual content width; full history retains its fixed virtual row geometry.
+The three reference-style function cards remain above the selected preparation/task panel and bounded recent history. Card clicks open local editable drafts or the corresponding task; rendering the selectors never preloads all forms or starts a workflow. Forms use grouped options, a scope/output summary and one start action. Four semantic phases render horizontally, while detailed stages/logs remain on demand. Responsive layouts use the actual content width; full history retains its fixed virtual row geometry.
 
 ## Ownership
 
@@ -34,6 +34,8 @@ The three reference-style function cards remain above the selected preparation/t
 
 ## Health Check
 
+- `WorkflowDraftForm` exposes Local Quick / Complete immediately. The optional form catalog reads configuration and remembered choices without executable probes, credentials or Markdown scanning. A late catalog cannot replace edited choices.
+- Health and Generate request full preparation only on Start. Sensitive disclosure, overwrite or changed inputs use `WorkflowPreparationView`; bound draft choices remain separate from resolved output names. `pendingStarts` retains a real receipt only for uncertain admission replies, independently of editable drafts. Confirmed submissions clear it; late task facts never take over navigation.
 - Local Quick starts from the readable knowledge base at execution time, independently of Agent discovery, Provider settings/credentials, and Git. Enqueueing after Update Wiki therefore checks the new pages.
 - LintService owns the run-local read snapshot and shared rules. It reports actual page batches and observes cancellation at page boundaries; bounded AI excerpts reuse the same reads.
 - Trusted projects with writable app state persist reports and tasks for every route, including after queued-task recovery and explicit continuation. Restricted/read-only projects retain process-local reports. Reports do not authorize repairs or require content checkpoints.
@@ -42,6 +44,8 @@ The three reference-style function cards remain above the selected preparation/t
 
 ## Generate Content
 
+- Artifact and save-mode controls work before the filename-only Wiki catalog completes; scope search/selection loads independently. Source archive subtrees are skipped during catalog traversal. Remembered choices do not inherit a previous generated output path.
+- Preparation no longer parses the unrelated Source registry or hashes its versions. It still validates selected Wiki bodies/resources and the actual full Markdown input of project reports. Old queued Generate baselines that included Source versions can request renewed scope review.
 - Each built-in workflow presents four semantic phases; detailed backend stages mount only when expanded.
 - The four existing HTML artifact types are `beautiful_read`, `knowledge_card`, `concept_map`, and `project_report`. Preparation exposes artifact type, applicable Wiki pages, output path, and execution route; the concept map centers on the first selected page. Separate free-text topic, theme, report subtype, and optional report-exclusion controls are absent; the latter remains a target-design gap, not a completed capability.
 - A normal run prepares a new artifact path. Explicitly targeting an existing artifact preserves its checked overwrite, scoped Git checkpoint, and candidate confirmation. Changed queued inputs enter `review_scope`; re-preparation preserves the selected artifact/page intent and links the new task to the cancelled review task.

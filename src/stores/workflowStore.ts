@@ -13,6 +13,7 @@ import type {
   WorkflowRun,
   WorkflowRunSummary,
   WorkflowRouteSelection,
+  WorkflowScope,
   WorkflowsOverview,
 } from "../types/workflow";
 
@@ -40,6 +41,14 @@ export interface WorkflowOperationState {
   error: WorkflowOperationError | null;
 }
 
+export interface WorkflowPendingStart {
+  preparation: WorkflowPreparation;
+  draft: WorkflowPreparationDraft;
+  acknowledgeRestrictedContent: boolean;
+  acknowledgeRemoteProvider: boolean;
+  retryOfTaskId: string | null;
+}
+
 export interface WorkflowState {
   updateDraft: UpdateWikiDraft;
   setUpdateDraft: (draft: UpdateWikiDraft) => void;
@@ -54,10 +63,11 @@ export interface WorkflowState {
   preparation: WorkflowPreparation | null;
   preparingKind: WorkflowKind | null;
   preparations: Partial<Record<WorkflowKind, WorkflowPreparation>>;
-  preparedRouteSelections: Partial<Record<WorkflowKind, WorkflowRouteSelection | null>>;
+  preparedDrafts: Partial<Record<WorkflowKind, WorkflowPreparationDraft>>;
+  pendingStarts: Partial<Record<WorkflowKind, WorkflowPendingStart>>;
   beginPreparation: (kind: WorkflowKind) => void;
-  drafts: Partial<Record<WorkflowKind, WorkflowPreparationDraft & { preparationId: string }>>;
-  setDraft: (kind: WorkflowKind, draft: WorkflowPreparationDraft & { preparationId: string }) => void;
+  drafts: Partial<Record<WorkflowKind, WorkflowPreparationDraft & { preparationId?: string }>>;
+  setDraft: (kind: WorkflowKind, draft: WorkflowPreparationDraft & { preparationId?: string }) => void;
   selectedTaskId: string | null;
   surface: WorkflowsSurface;
   historyKind: WorkflowKind | null;
@@ -77,7 +87,7 @@ export interface WorkflowState {
   upsertRun: (run: WorkflowRun) => void;
   upsertRuns: (runs: readonly WorkflowRun[]) => void;
   hydrateDecisionReview: (taskId: string, actionId: string, review: WorkflowDecisionReview) => void;
-  setPreparation: (preparation: WorkflowPreparation | null, routeSelection?: WorkflowRouteSelection | null) => void;
+  setPreparation: (preparation: WorkflowPreparation | null, routeSelection?: WorkflowRouteSelection | null, draftScope?: WorkflowScope) => void;
   selectRun: (taskId: string | null) => void;
   setSurface: (surface: WorkflowsSurface) => void;
   setHistoryFilters: (kind: WorkflowKind | null, status: WorkflowDisplayStatus | null) => void;
@@ -104,7 +114,8 @@ const initialState = {
   preparation: null,
   preparingKind: null,
   preparations: {} as WorkflowState["preparations"],
-  preparedRouteSelections: {} as WorkflowState["preparedRouteSelections"],
+  preparedDrafts: {} as WorkflowState["preparedDrafts"],
+  pendingStarts: {} as WorkflowState["pendingStarts"],
   drafts: {} as WorkflowState["drafts"],
   selectedTaskId: null,
   surface: "overview" as WorkflowsSurface,
@@ -148,7 +159,8 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
               preparation: null,
               preparingKind: null,
               preparations: {},
-              preparedRouteSelections: {},
+              preparedDrafts: {},
+              pendingStarts: {},
               drafts: {},
               updateDraft: initialState.updateDraft,
               selectedTaskId: null,
@@ -230,18 +242,19 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       };
     }),
   setDraft: (kind, draft) => set((state) => ({ drafts: { ...state.drafts, [kind]: draft } })),
-  beginPreparation: (kind) => set((state) => ({
-    preparation: state.preparations[kind] ?? null,
+  beginPreparation: (kind) => set({
+    preparation: null,
     preparingKind: kind,
     selectedTaskId: null,
     surface: "preparation",
-  })),
-  setPreparation: (preparation, routeSelection = null) => set((state) => preparation
+  }),
+  setPreparation: (preparation, routeSelection = null, draftScope = preparation?.scope) => set((state) => preparation
     ? {
         preparation,
         preparingKind: null,
         preparations: { ...state.preparations, [preparation.kind]: preparation },
-        preparedRouteSelections: { ...state.preparedRouteSelections, [preparation.kind]: routeSelection },
+        preparedDrafts: { ...state.preparedDrafts, [preparation.kind]: { scope: draftScope!, routeSelection } },
+        drafts: { ...state.drafts, [preparation.kind]: { preparationId: preparation.preparationId, scope: draftScope!, routeSelection } },
         retryOfTaskId: null,
         selectedTaskId: null,
         surface: "preparation",

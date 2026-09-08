@@ -1,10 +1,11 @@
 import { prepareWorkflow, startWorkflow, cancelWorkflowRun, listUpdateWikiSources } from "../../services/workflowApi";
+import { normalizeBackendError } from "../../lib/backendError";
 import { workflowScopeEqual } from "../../services/workflowDraft";
 import { recordWorkflowFacts } from "../../stores/taskStore";
 import { useNavigationStore } from "../../stores/navigationStore";
 import type { ProjectSummary } from "../../types/project";
 import type { WorkflowsController, WorkflowsControllerOptions, WorkflowProjectPrerequisiteAction } from "./useWorkflowsController";
-import { useWorkflowStore } from "../../stores/workflowStore";
+import { type WorkflowPendingStart, useWorkflowStore, captureWorkflowRequestGuard, workflowRequestGuardMatches } from "../../stores/workflowStore";
 import type {
   WorkflowPreparation, WorkflowPreparationDraft, WorkflowProjectRequest,
   WorkflowRouteSelection, WorkflowRun, WorkflowStartOutcome, WorkflowPrerequisiteAction,
@@ -17,6 +18,58 @@ interface StartPreparedOptions {
   retryOfTaskId: string | null;
 }
 
+function sameDraft(a: WorkflowPreparationDraft, b: WorkflowPreparationDraft): boolean {
+  return workflowScopeEqual(a.scope, b.scope) && JSON.stringify(a.routeSelection) === JSON.stringify(b.routeSelection);
+}
+
+function pendingPreparation(kind: WorkflowPreparation["kind"], options: Omit<WorkflowPendingStart, "preparation">): WorkflowPreparation | undefined {
+  const pending = useWorkflowStore.getState().pendingStarts[kind];
+  return pending && sameDraft(pending.draft, options.draft)
+    && pending.acknowledgeRestrictedContent === options.acknowledgeRestrictedContent
+    && pending.acknowledgeRemoteProvider === options.acknowledgeRemoteProvider
+    && pending.retryOfTaskId === options.retryOfTaskId ? pending.preparation : undefined;
+}
+
+/** The real receipt is also the backend idempotency key. Retain it only while a
+ * submitted start has an uncertain outcome, separately from editable drafts. */
+async function submitWorkflow(request: WorkflowProjectRequest, pending: WorkflowPendingStart): Promise<WorkflowStartOutcome> {
+  const guard = captureWorkflowRequestGuard();
+  const { preparation, acknowledgeRestrictedContent, acknowledgeRemoteProvider, retryOfTaskId } = pending;
+  const kind = preparation.kind;
+  useWorkflowStore.setState((state) => ({ pendingStarts: { ...state.pendingStarts, [kind]: pending } }));
+  const clear = () => {
+    if (!workflowRequestGuardMatches(guard) || useWorkflowStore.getState().pendingStarts[kind] !== pending) return;
+    useWorkflowStore.setState((state) => {
+      const pendingStarts = { ...state.pendingStarts };
+      delete pendingStarts[kind];
+      return { pendingStarts };
+    });
+  };
+  try {
+    const outcome = await startWorkflow({ ...request, preparationId: preparation.preparationId,
+      preparationRevision: preparation.preparationRevision, acknowledgeRestrictedContent,
+      acknowledgeRemoteProvider, ...(retryOfTaskId ? { retryOfTaskId } : {}) });
+    clear();
+    return outcome;
+  } catch (error) {
+    if (normalizeBackendError(error).code === "WORKFLOW_PREPARATION_STALE") clear();
+    throw error;
+  }
+}
+
+function reviewDraft(preparation: WorkflowPreparation, draft: WorkflowPreparationDraft): WorkflowPreparationDraft {
+  // A generated filename is a result, not a request to overwrite it next time.
+  const scope = preparation.scope.kind === "generate_content" && draft.scope.kind === "generate_content"
+    && draft.scope.outputPath === null && preparation.gitPolicy !== "required_before_overwrite"
+    ? { ...preparation.scope, outputPath: null } : preparation.scope;
+  return { scope, routeSelection: draft.routeSelection };
+}
+
+function presentReview(preparation: WorkflowPreparation, draft: WorkflowPreparationDraft, retryOfTaskId: string | null): void {
+  useWorkflowStore.getState().setPreparation(preparation, draft.routeSelection, reviewDraft(preparation, draft).scope);
+  useWorkflowStore.setState({ retryOfTaskId });
+}
+
 /** Loaded only after the controller captures the approval and takes its operation lock. */
 export async function startPreparedWorkflow(
   request: WorkflowProjectRequest,
@@ -26,13 +79,13 @@ export async function startPreparedWorkflow(
 ): Promise<WorkflowStartOutcome | null> {
   if (!isCurrent()) return null;
   const { acknowledgeRestrictedContent, acknowledgeRemoteProvider, draft, retryOfTaskId } = options;
-  const latestDraft = draft ?? { scope: preparation.scope, routeSelection: routeSelectionOf(preparation.route) };
-  const preparedRouteSelection = useWorkflowStore.getState().preparedRouteSelections[preparation.kind] ?? null;
-  const unchanged = !draft || (workflowScopeEqual(latestDraft.scope, preparation.scope)
-    && JSON.stringify(latestDraft.routeSelection) === JSON.stringify(preparedRouteSelection));
+  const preparedDraft = useWorkflowStore.getState().preparedDrafts[preparation.kind]
+    ?? { scope: preparation.scope, routeSelection: null };
+  const latestDraft = draft ?? preparedDraft;
+  const submission = { draft: latestDraft, acknowledgeRestrictedContent, acknowledgeRemoteProvider, retryOfTaskId };
   // Admission validates the prepared baseline and current authority in Rust.
-  // Re-discover only when the user changed structured choices.
-  const fresh = unchanged ? preparation : await prepareWorkflow({ ...request, kind: preparation.kind, ...latestDraft });
+  const fresh = pendingPreparation(preparation.kind, submission)
+    ?? (sameDraft(latestDraft, preparedDraft) ? preparation : await prepareWorkflow({ ...request, kind: preparation.kind, ...latestDraft }));
   if (!isCurrent()
     || fresh.projectAccess.canonicalIdentityKey !== preparation.projectAccess.canonicalIdentityKey
     || fresh.projectAccess.identityRevision !== preparation.projectAccess.identityRevision) return null;
@@ -40,23 +93,44 @@ export async function startPreparedWorkflow(
   const sameApproval = workflowScopeEqual(preparation.scope, fresh.scope)
     && JSON.stringify(preparation.route) === JSON.stringify(fresh.route)
     && preparation.baseline.fingerprint === fresh.baseline.fingerprint;
-  const requiresReview = !workflowScopeEqual(latestDraft.scope, fresh.scope)
+  const requiresReview = !sameDraft(latestDraft, reviewDraft(fresh, latestDraft))
     || (!latestDraft.routeSelection && JSON.stringify(preparation.route) !== JSON.stringify(fresh.route))
     || fresh.prerequisites.some((item) => item.blocking && !acknowledgementActions.includes(item.action))
     || fresh.prerequisites.some((item) => item.action === "acknowledge_remote_provider" && (!acknowledgeRemoteProvider || !sameApproval))
     || fresh.prerequisites.some((item) => item.action === "acknowledge_restricted_content" && (!acknowledgeRestrictedContent || !sameApproval))
     || (fresh.kind === "update_wiki" && fresh.scope.kind === "update_wiki" && fresh.scope.sourceVersions.length === 0);
   if (requiresReview) {
-    useWorkflowStore.getState().setPreparation(fresh, latestDraft.routeSelection);
-    useWorkflowStore.setState({ retryOfTaskId });
+    presentReview(fresh, latestDraft, retryOfTaskId);
     return null;
   }
-  return startWorkflow({
-    ...request, preparationId: fresh.preparationId,
-    preparationRevision: fresh.preparationRevision,
-    acknowledgeRestrictedContent, acknowledgeRemoteProvider,
-    ...(retryOfTaskId ? { retryOfTaskId } : {}),
-  });
+  return submitWorkflow(request, { preparation: fresh, ...submission });
+}
+
+/** Draft navigation never signs a token. Prepare only the submitted choices. */
+export async function startDraftWorkflow(
+  request: WorkflowProjectRequest,
+  kind: "health_check" | "generate_content",
+  draft: WorkflowPreparationDraft,
+  retryOfTaskId: string | null,
+  isCurrent: () => boolean,
+): Promise<WorkflowStartOutcome | null> {
+  if (!isCurrent()) return null;
+  const owner = useWorkflowStore.getState().identityGuard;
+  const submission = { draft, acknowledgeRestrictedContent: false, acknowledgeRemoteProvider: false, retryOfTaskId };
+  const fresh = pendingPreparation(kind, submission) ?? await prepareWorkflow({ ...request, kind, ...draft });
+  if (!isCurrent()) return null;
+  if (fresh.projectAccess.projectId !== request.projectId
+    || (owner.canonicalIdentityKey !== null && (fresh.projectAccess.canonicalIdentityKey !== owner.canonicalIdentityKey
+      || fresh.projectAccess.identityRevision !== owner.identityRevision))) {
+    throw new Error("WORKFLOW_IDENTITY_CHANGED");
+  }
+  // Changed inputs, overwrite, and sharing still need the real backend review.
+  if (fresh.prerequisites.length > 0 || fresh.gitPolicy === "required_before_overwrite"
+    || !sameDraft(draft, reviewDraft(fresh, draft))) {
+    presentReview(fresh, draft, retryOfTaskId);
+    return null;
+  }
+  return submitWorkflow(request, { preparation: fresh, ...submission });
 }
 
 export async function reviewWorkflowScope(

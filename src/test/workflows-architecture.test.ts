@@ -36,6 +36,7 @@ const currentWorkflowSources = (): SourceFile[] =>
 const workflowApiPath = "src/services/workflowApi.ts";
 const workflowCommands = [
   "get_workflows_overview",
+  "get_workflow_form_catalog",
   "get_update_wiki_options",
   "list_update_wiki_sources",
   "start_update_wiki",
@@ -58,6 +59,7 @@ const workflowCommands = [
 
 const workflowApiExports = [
   "getWorkflowsOverview",
+  "getWorkflowFormCatalog",
   "getUpdateWikiOptions",
   "listUpdateWikiSources",
   "startUpdateWiki",

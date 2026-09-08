@@ -28,7 +28,7 @@
   "projectFactsBatch0Target": {
     "status": "green",
     "requiredExecution": "async",
-    "reviewedCommandTotal": 218,
+    "reviewedCommandTotal": 219,
     "targetBlockingSyncCeiling": 130
   },
   "projectFactsBatch4Target": {
@@ -53,9 +53,9 @@
   },
   "currentSnapshot": {
     "status": "project_facts_batch4_green",
-    "total": 218,
+    "total": 219,
     "sync": 111,
-    "async": 107,
+    "async": 108,
     "importTotal": 60,
     "importSync": 0,
     "blockingSync": 105,
@@ -1589,6 +1589,13 @@
       "classification": "LongTaskStart",
       "currentExecution": "async",
       "rationale": "Persists a deduplicated Update intent under task authority; the task worker binds input snapshots and probes only the selected route."
+    },
+    {
+      "command": "get_workflow_form_catalog",
+      "module": "workflow_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "async",
+      "rationale": "Reads configured route summaries and optional draft preferences. Health performs no content scan; Generate lists Wiki paths without reading bodies or Source registry. Does not create a preparation token."
     }
   ],
   "workflowAsyncTarget": {

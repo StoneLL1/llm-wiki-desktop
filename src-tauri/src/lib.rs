@@ -858,6 +858,7 @@ pub fn run() {
             commands::task_commands::continue_queued_workflows,
             commands::workflow_commands::get_workflows_overview,
             commands::workflow_commands::prepare_workflow,
+            commands::workflow_commands::get_workflow_form_catalog,
             commands::workflow_commands::get_update_wiki_options,
             commands::workflow_commands::list_update_wiki_sources,
             commands::workflow_commands::start_update_wiki,

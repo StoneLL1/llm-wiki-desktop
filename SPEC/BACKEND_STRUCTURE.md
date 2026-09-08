@@ -568,6 +568,8 @@ pub struct BackendTask {
 
 ### Update Wiki 意图入口（2026-09-08）
 
+`get_workflow_form_catalog` 在 MetadataIo worker 中提供 Health/Generate 的配置摘要、记忆草稿，以及 Generate 的纯 Wiki 文件名目录。它不探测 Agent/密钥、不签发 preparation，也不读取 Source 正文或注册表；Health 不遍历 Markdown。Generate 目录在遍历前排除 Source 子树，记忆输出路径重置为空，避免默认覆盖已有成果。Health/Generate 的完整 preparation 保留在显式 Start；Generate baseline 不再包含无关 Source 版本，仍校验实际消费的 Wiki/资源（项目报告仍包括实际消费的全部 Markdown）。旧队列若保存过额外 Source 基线，可进入现有 ReviewScope 流程。
+
 `get_update_wiki_options` 只读配置摘要，`list_update_wiki_sources` 独立分页读取来源元数据，`start_update_wiki` 用 `ProjectTaskMutationPermit` 持久化 `UpdateWikiRequest`。三者在异步 worker 执行；页面导航不再调用 `prepare_workflow`。`workflow_service/update_intent.rs` 负责入队与执行绑定，沿用 TaskService/coordinator，不另建准备任务或任务数据库。
 
 自动范围到执行时解析；手选范围校验精确版本。所选路线探测和正文校验在任务阶段运行，scope/route/baseline/fingerprint 一次持久更新。原始 requestId 用于恢复后的重复请求识别；重试生成新 ID 和未绑定基线。新版目录不读正文；旧版 Source 索引没有版本元数据，手动列目录仍需计算内容版本。Update 候选恢复和确认写入复用已解析的所选 Source，不重复全项目校验。BYOK 比较实际交给 LlmService 的不可变配置哈希，防止同模型更换端点。旧 preparation 记录、其他工作流、应用私有 Git 历史和 checked apply 合同保留。

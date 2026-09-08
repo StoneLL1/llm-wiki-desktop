@@ -13,7 +13,6 @@ import {
   discardWorkflowResult,
   getWorkflowRun,
   getWorkflowsOverview,
-  prepareWorkflow,
   startUpdateWiki,
   reorderQueuedWorkflow,
   retryWorkflow,
@@ -106,6 +105,7 @@ function workflowRequestGuardMatchesAuthority(
 
 export interface WorkflowsController {
   startUpdate: (intent: UpdateWikiRequest) => Promise<void>;
+  startDraft: (kind: "health_check" | "generate_content", draft: WorkflowPreparationDraft) => Promise<void>;
   refresh: () => Promise<void>;
   prepare: (kind: WorkflowKind, scope?: WorkflowScope | null, routeSelection?: WorkflowRouteSelection | null) => Promise<void>;
   startPrepared: (acknowledgeRestrictedContent: boolean, acknowledgeRemoteProvider: boolean, draft?: WorkflowPreparationDraft) => Promise<void>;
@@ -317,9 +317,6 @@ export function useWorkflowsController(
     const stopWorkflow = useWorkflowStore.subscribe((state, previous) => {
       if (state.surface !== previous.surface || state.preparingKind !== previous.preparingKind) {
         prepareRequestRef.current += 1;
-        for (const [key, operation] of Object.entries(state.operations)) {
-          if (key.startsWith("prepare:") && operation.pending) state.finishOperation(key, operation.requestId);
-        }
       }
     });
     const stopNavigation = useNavigationStore.subscribe((state, previous) => {
@@ -384,7 +381,8 @@ export function useWorkflowsController(
     async (kind: WorkflowKind, scope: WorkflowScope | null = null, routeSelection: WorkflowRouteSelection | null = null) => {
       cancelWorkflowNavigation();
       useWorkflowStore.getState().beginPreparation(kind);
-      const prepareRequest = ++prepareRequestRef.current;
+      useWorkflowStore.setState({ retryOfTaskId: null });
+      prepareRequestRef.current += 1;
       if (kind === "update_wiki") {
         const state = useWorkflowStore.getState();
         if (scope?.kind === "update_wiki") state.setUpdateDraft({
@@ -395,55 +393,11 @@ export function useWorkflowsController(
         else if (routeSelection) state.setUpdateDraft({ ...state.updateDraft, routeSelection });
         return;
       }
-      const operationKey = `prepare:${kind}`;
-      const operationRequest = useWorkflowStore.getState().beginOperation(operationKey);
-      let guard: WorkflowRequestGuard | null = null;
-      const isCurrent = () => enabledRef.current && prepareRequestRef.current === prepareRequest
-        && useWorkflowStore.getState().surface === "preparation"
-        && useWorkflowStore.getState().preparingKind === kind
-        && useProjectStore.getState().currentProject.projectId === project.projectId
-        && useProjectStore.getState().currentProject.rootPath === project.rootPath;
-      try {
-        if (
-          project.projectId
-          && project.rootPath
-          && !useWorkflowStore.getState().identityGuard.canonicalIdentityKey
-        ) {
-          await refresh();
-        }
-        if (!isCurrent()) return;
-        const state = useWorkflowStore.getState();
-        const savedDraft = state.drafts[kind];
-        const selectedScope = scope ?? savedDraft?.scope ?? null;
-        const selectedRoute = routeSelection ?? savedDraft?.routeSelection ?? null;
-        guard = captureWorkflowRequestGuard(state);
-        const preparation = await prepareWorkflow({
-          ...request(),
-          kind,
-          scope: selectedScope,
-          routeSelection: selectedRoute,
-        });
-        const latest = useWorkflowStore.getState();
-        if (
-          !isCurrent()
-          || !workflowRequestGuardMatchesAuthority(guard, project)
-          || preparation.projectAccess.canonicalIdentityKey !== guard.canonicalIdentityKey
-          || preparation.projectAccess.identityRevision !== guard.identityRevision
-        ) return;
-        latest.setPreparation(preparation, selectedRoute);
-      } catch (error) {
-        if (isCurrent() && (!guard || workflowRequestGuardMatchesAuthority(guard, project))) {
-          useWorkflowStore.getState().failOperation(
-            operationKey,
-            operationRequest,
-            operationError("workflows.operationError.prepare", error),
-          );
-        }
-      } finally {
-        useWorkflowStore.getState().finishOperation(operationKey, operationRequest);
-      }
+      const state = useWorkflowStore.getState();
+      if (scope) state.setDraft(kind, { scope, routeSelection });
+      else if (routeSelection && state.drafts[kind]) state.setDraft(kind, { ...state.drafts[kind], routeSelection });
     },
-    [project.projectId, project.rootPath, refresh, request],
+    [],
   );
 
   const loadHistoryMore = useCallback(async () => {
@@ -568,6 +522,23 @@ export function useWorkflowsController(
           && useWorkflowStore.getState().surface === "preparation"
           && useWorkflowStore.getState().preparingKind === "update_wiki");
       },
+      startDraft: async (kind, draft) => {
+        const state = useWorkflowStore.getState();
+        const key = `draft:start:${kind}`;
+        if (workflowOperationPending(state.operations, key)) return;
+        if (!state.drafts[kind]) state.setDraft(kind, draft);
+        const presentation = prepareRequestRef.current;
+        const guard = captureWorkflowRequestGuard(state);
+        const retryOfTaskId = state.retryOfTaskId;
+        const isCurrent = () => enabledRef.current && presentation === prepareRequestRef.current
+          && workflowRequestGuardMatchesAuthority(guard, project)
+          && useWorkflowStore.getState().surface === "preparation"
+          && useWorkflowStore.getState().preparingKind === kind;
+        await perform(key, "workflows.operationError.start", async () => {
+          const { startDraftWorkflow } = await loadWorkflowExecution();
+          return startDraftWorkflow(request(), kind, draft, retryOfTaskId, isCurrent);
+        }, isCurrent);
+      },
       startPrepared: async (acknowledgeRestrictedContent, acknowledgeRemoteProvider, draft) => {
         const state = useWorkflowStore.getState();
         const preparation = state.preparation;
@@ -580,6 +551,11 @@ export function useWorkflowsController(
           preparation.projectAccess.canonicalIdentityKey !== guard.canonicalIdentityKey
           || preparation.projectAccess.identityRevision !== guard.identityRevision
         ) return;
+        const presentation = prepareRequestRef.current;
+        const isCurrent = () => enabledRef.current && presentation === prepareRequestRef.current
+          && workflowRequestGuardMatchesAuthority(guard, project)
+          && useWorkflowStore.getState().surface === "preparation"
+          && useWorkflowStore.getState().preparation === preparation;
         await perform(
           operationKey,
           "workflows.operationError.start",
@@ -587,9 +563,9 @@ export function useWorkflowsController(
             const { startPreparedWorkflow } = await loadWorkflowExecution();
             return startPreparedWorkflow(request(), preparation, {
               acknowledgeRestrictedContent, acknowledgeRemoteProvider, draft, retryOfTaskId,
-            }, () => enabledRef.current && workflowRequestGuardMatchesAuthority(guard, project)
-              && useWorkflowStore.getState().preparation === preparation);
-          }
+            }, isCurrent);
+          },
+          isCurrent,
         );
       },
       cancel: (taskId) => perform(

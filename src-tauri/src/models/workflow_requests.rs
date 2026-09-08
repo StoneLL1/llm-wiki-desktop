@@ -14,6 +14,14 @@ pub struct WorkflowProjectRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WorkflowFormCatalogRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub kind: WorkflowKind,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PrepareWorkflowRequest {
     pub project_id: String,
     pub project_root_path: String,

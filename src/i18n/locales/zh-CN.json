@@ -1,4 +1,11 @@
 {
+  "workflows.draft.wholeWiki": "任务启动时使用整个 Wiki。",
+  "workflows.draft.findPages": "查找 Wiki 页面",
+  "workflows.draft.selectFiltered": "选择匹配页面",
+  "workflows.draft.loadingPages": "正在读取 Wiki 页面列表…",
+  "workflows.draft.noPages": "没有匹配的 Wiki 页面。",
+  "workflows.draft.missingPage": "所选页面暂不可用：{{path}}。请取消选择或恢复文件。",
+  "workflows.draft.catalogError": "部分选项未能加载，已保留你的选择。",
   "workflows.update.sources": "来源范围",
   "workflows.update.automatic": "自动选择",
   "workflows.update.manual": "手动选择",
