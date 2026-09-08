@@ -2,6 +2,7 @@ import { recordWorkflowFacts } from "../stores/taskStore";
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
+  UpdateWikiOptions, UpdateWikiSourcePage, UpdateWikiRequest,
   ConfirmWorkflowActionRequest,
   ListWorkflowRunsRequest,
   PrepareWorkflowRequest,
@@ -127,4 +128,14 @@ export function rollbackAgentLintRepair(
   },
 ): Promise<AgentLintRepairRollbackResult> {
   return invoke<AgentLintRepairRollbackResult>("rollback_agent_lint_repair", { request });
+}
+
+export function getUpdateWikiOptions(request: WorkflowProjectRequest): Promise<UpdateWikiOptions> {
+  return invoke("get_update_wiki_options", { request });
+}
+export function listUpdateWikiSources(request: WorkflowProjectRequest & { query: string; offset: number }): Promise<UpdateWikiSourcePage> {
+  return invoke("list_update_wiki_sources", { request });
+}
+export function startUpdateWiki(request: WorkflowProjectRequest & { intent: UpdateWikiRequest }): Promise<WorkflowStartOutcome> {
+  return invoke<WorkflowStartOutcome>("start_update_wiki", { request }).then((outcome) => { recordWorkflowFacts([outcome.run]); return outcome; });
 }

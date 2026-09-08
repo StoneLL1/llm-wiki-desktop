@@ -1092,6 +1092,177 @@ async fn real_generated_deletion_enters_persisted_waiting_without_mutating_wiki(
     fs::remove_dir_all(root).ok();
 }
 
+#[cfg(not(windows))]
+#[tokio::test]
+async fn selected_v2_source_can_generate_recover_and_apply_with_an_unselected_broken_manifest() {
+    use llm_wiki_desktop_lib::services::import_v2::source_finalization::{
+        finalize_source, CandidateMetadata, FinalizationInput,
+    };
+    use llm_wiki_desktop_lib::services::import_v2::source_registry::{
+        SourceIndex, SourceManifest, SourcePointer, SourceRegistry,
+    };
+    use std::collections::BTreeMap;
+
+    let root = tempfile::tempdir().unwrap();
+    let context = ProjectContext::new("selected-v2-recovery", root.path().to_path_buf());
+    for directory in [
+        ".app/tasks",
+        ".app/compile",
+        "wiki/concepts",
+        "wiki/sources",
+    ] {
+        fs::create_dir_all(root.path().join(directory)).unwrap();
+    }
+    for (path, content) in [
+        ("purpose.md", "# Purpose\n"),
+        ("schema.md", "# Schema\n"),
+        ("wiki/index.md", "# Index\n"),
+        ("wiki/overview.md", "# Overview\n"),
+        ("wiki/log.md", "# Log\n"),
+        ("wiki/concepts/旧名称.md", "---\ntype: concept\nsources:\n  - 资料.md\n---\n# 旧名称\n\n> Sources: [资料](../sources/资料.md)\n"),
+    ] {
+        fs::write(root.path().join(path), content).unwrap();
+    }
+    let mut manifest: SourceManifest = serde_json::from_str(include_str!(
+        "../../tests/fixtures/import-v2/source-manifest-v3.json"
+    ))
+    .unwrap();
+    manifest.wiki_path = "wiki/sources/local/资料.md".into();
+    manifest.compiled_consumptions.clear();
+    let version = manifest.versions[0].clone();
+    let candidate = CandidateMetadata {
+        source_kind: manifest.source_kind.clone(),
+        title: manifest.title.clone(),
+        canonical_url: manifest.canonical_url.clone(),
+        platform: manifest.platform.clone(),
+        platform_content_id: manifest.platform_content_id.clone(),
+        author: manifest.author.clone(),
+        published_at: manifest.published_at.clone(),
+        language: manifest.language.clone(),
+    };
+    let finalized = finalize_source(FinalizationInput {
+        candidate_markdown: b"# Source\n\nSelected source content.\n",
+        candidate: &candidate,
+        source_id: &manifest.source_id,
+        version_id: &version.version_id,
+        content_hash: &version.content_hash,
+        imported_at: &version.created_at,
+        quality: &version.quality,
+        restricted: false,
+    })
+    .unwrap();
+    manifest.versions[0].human_edit_hash = Some(finalized.human_edit_hash);
+    for path in [&manifest.wiki_path, &version.baseline_path] {
+        let absolute = root.path().join(path);
+        fs::create_dir_all(absolute.parent().unwrap()).unwrap();
+        fs::write(absolute, &finalized.bytes).unwrap();
+    }
+    let selected = WorkflowSourceVersionRef {
+        source_id: manifest.source_id.clone(),
+        version_id: version.version_id.clone(),
+    };
+    let pointer = SourcePointer {
+        source_id: selected.source_id.clone(),
+        version_id: selected.version_id.clone(),
+    };
+    let broken = SourcePointer {
+        source_id: "source-broken".into(),
+        version_id: "version-broken".into(),
+    };
+    FileStore
+        .write_json_atomic(
+            &context,
+            ".app/source-index-v2.json",
+            &SourceIndex {
+                schema_version: manifest.schema_version,
+                by_content_hash: BTreeMap::from([
+                    (version.content_hash.clone(), pointer.clone()),
+                    ("f".repeat(64), broken.clone()),
+                ]),
+                by_locator: BTreeMap::from([
+                    ("file:/selected.md".into(), pointer),
+                    ("file:/broken.md".into(), broken),
+                ]),
+            },
+        )
+        .unwrap();
+    let source_manifest_path = format!(".app/sources/{}.json", manifest.source_id);
+    FileStore
+        .write_json_atomic(&context, &source_manifest_path, &manifest)
+        .unwrap();
+    FileStore
+        .write_markdown(&context, ".app/sources/source-broken.json", "{broken")
+        .unwrap();
+    assert!(
+        CompileService::known_source_refs(&context).is_err(),
+        "the fixture must reject whole-project Source resolution"
+    );
+
+    let harness = UpdateHarness::new(Arc::new(SuccessfulAgent {
+        delete_path: Some("wiki/concepts/旧名称.md".into()),
+    }));
+    let run = enqueue_update(
+        &context,
+        &harness.tasks,
+        &harness.coordinator,
+        UpdateWikiMode::ChangedSources,
+        selected,
+    );
+    run_update_wiki(&context, run.clone(), &harness.services()).await;
+    let waiting = harness.tasks.get_workflow_run(&run.task_id).unwrap();
+    assert_eq!(
+        waiting.display_status,
+        WorkflowDisplayStatus::WaitingForConfirmation,
+        "{:?}",
+        waiting.error
+    );
+    assert!(root.path().join("wiki/concepts/旧名称.md").exists());
+    assert_eq!(
+        fs::read(root.path().join(&manifest.wiki_path)).unwrap(),
+        finalized.bytes
+    );
+    harness
+        .tasks
+        .persist_task(&run.task_id, root.path())
+        .unwrap();
+
+    let restarted = UpdateHarness::new(Arc::new(NoAgents));
+    restarted.tasks.recover_tasks(root.path()).unwrap();
+    let restored = restarted.tasks.get_workflow_run(&run.task_id).unwrap();
+    assert_eq!(
+        restored.display_status,
+        WorkflowDisplayStatus::WaitingForConfirmation,
+        "{:?}",
+        restored.error
+    );
+    restore_update_wiki_confirmation(
+        &context,
+        &restored,
+        &restarted.tasks,
+        &restarted.confirmations,
+    )
+    .unwrap();
+    let (completed, _) =
+        confirm_update_wiki_review(&context, &run.task_id, &restarted.services()).unwrap();
+    assert_eq!(completed.display_status, WorkflowDisplayStatus::Completed);
+    assert!(!root.path().join("wiki/concepts/旧名称.md").exists());
+    assert!(root.path().join("wiki/concepts/工作流成功.md").exists());
+    assert_eq!(
+        fs::read_to_string(root.path().join(".app/sources/source-broken.json")).unwrap(),
+        "{broken"
+    );
+    assert_eq!(
+        fs::read(root.path().join(&manifest.wiki_path)).unwrap(),
+        finalized.bytes
+    );
+    let consumed =
+        SourceRegistry::read_manifest(&context, &FileStore, &source_manifest_path).unwrap();
+    assert!(consumed
+        .compiled_consumptions
+        .iter()
+        .any(|record| record.compile_task_id == run.task_id));
+}
+
 #[tokio::test]
 async fn changed_queued_inputs_wait_for_scope_review_and_survive_restart_without_a_candidate() {
     use llm_wiki_desktop_lib::models::confirmation::PendingActionType;

@@ -100,3 +100,22 @@ pub struct ConfirmWorkflowActionRequest {
     pub task_id: String,
     pub action_id: String,
 }
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartUpdateWikiRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    pub intent: crate::models::workflow::UpdateWikiRequest,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListUpdateWikiSourcesRequest {
+    pub project_id: String,
+    pub project_root_path: String,
+    #[serde(default)]
+    pub query: String,
+    #[serde(default)]
+    pub offset: usize,
+}

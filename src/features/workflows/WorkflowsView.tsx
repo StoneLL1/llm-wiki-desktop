@@ -14,6 +14,7 @@ import type { WorkflowsController } from "./useWorkflowsController";
 import { WorkflowHistoryView } from "./WorkflowHistoryView";
 import { historyPageErrorRequiresRefresh } from "./workflowHistoryRecovery";
 import { WorkflowsOverviewView } from "./WorkflowsOverview";
+import { UpdateWikiForm } from "./UpdateWikiForm";
 import { WorkflowPreparationView } from "./WorkflowPreparationView";
 import { WorkflowTaskDetail } from "./WorkflowTaskDetail";
 import { workflowKindKey } from "./workflowPresentation";
@@ -44,7 +45,7 @@ export function WorkflowsView({ controller, onOpenTask }: { controller: Workflow
   const surfaceError = latestOperationError(
     operations,
     surface === "preparation"
-      ? [`prepare:${preparationKind ?? ""}`, `start:${preparation?.preparationId ?? ""}`, "prerequisite:"]
+      ? ["update:start", `prepare:${preparationKind ?? ""}`, `start:${preparation?.preparationId ?? ""}`, "prerequisite:"]
       : surface === "detail"
         ? [`task:${selectedTaskId ?? ""}:`]
         : surface === "history"
@@ -116,7 +117,9 @@ export function WorkflowsView({ controller, onOpenTask }: { controller: Workflow
     || surfaceError?.key.endsWith(":open")
     || historyTaskRetryError;
   const preparing = preparingKind !== null && workflowOperationPending(operations, `prepare:${preparingKind}`);
-  const panel = surface === "preparation" && preparation
+  const panel = surface === "preparation" && preparationKind === "update_wiki"
+    ? <UpdateWikiForm key={`${project.projectId}\0${project.rootPath}`} project={project} onBack={controller.backToOverview} onStart={controller.startUpdate} />
+    : surface === "preparation" && preparation
     ? <>
         {preparing ? <p className="workflow-scope-state" role="status"><LoaderCircle aria-hidden="true" size={14} />{t("workflows.action.preparing")}</p> : null}
         <WorkflowPreparationView key={preparation.kind} lastHealth={overview?.contextSummary?.lastHealth} onOpenLastHealth={(taskId) => void controller.openRun(taskId)} preparation={preparation} onBack={controller.backToOverview} onPrerequisite={controller.handlePrerequisite} onStart={(restricted, remote, draft) => void controller.startPrepared(restricted, remote, draft)} />

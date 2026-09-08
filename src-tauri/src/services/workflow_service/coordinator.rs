@@ -165,6 +165,28 @@ impl WorkflowCoordinator {
         }) {
             return Err("Workflow project identity changed before task creation".into());
         }
+        if let Some(intent) = request.execution_options.update_request.as_ref() {
+            if let Some(existing) = tasks.find_workflow_run_by_execution_options(
+                &identity.canonical_identity_key,
+                &identity.identity_revision,
+                |options| {
+                    options
+                        .update_request
+                        .as_ref()
+                        .is_some_and(|old| old.request_id == intent.request_id)
+                },
+            ) {
+                if tasks
+                    .workflow_execution_options(&existing.task_id)
+                    .and_then(|o| o.update_request)
+                    .as_ref()
+                    != Some(intent)
+                {
+                    return Err("Update request ID already belongs to different choices".into());
+                }
+                return Ok(WorkflowStartOutcome::Existing { run: existing });
+            }
+        }
         validate_workflow_execution_contract(
             &request.kind,
             &request.scope,
@@ -1009,6 +1031,11 @@ impl WorkflowCoordinator {
             .ok_or_else(|| format!("Workflow execution options missing: {task_id}"))?;
         execution_options.preparation_fingerprint = None;
         let mut baseline_fingerprint = original.baseline_fingerprint.clone();
+        if let Some(intent) = execution_options.update_request.as_mut() {
+            intent.request_id = uuid::Uuid::new_v4().to_string();
+            execution_options.preparation_revision = intent.request_id.clone();
+            baseline_fingerprint = format!("update-intent:{}", intent.request_id);
+        }
         let was_persistent = tasks.workflow_persistence_dir(task_id).is_some()
             || original.persistence_transition
                 == Some(WorkflowPersistenceTransition::DowngradedToMemoryOnly);

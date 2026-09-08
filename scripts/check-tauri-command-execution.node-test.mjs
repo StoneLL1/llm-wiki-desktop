@@ -82,7 +82,7 @@ test("Batch 1 closes the Project Facts P0 async execution target", async () => {
   assert.deepEqual(target, {
     status: "green",
     requiredExecution: "async",
-    reviewedCommandTotal: 215,
+    reviewedCommandTotal: 218,
     targetBlockingSyncCeiling: 130,
   });
   assert.equal(result.counts.total, target.reviewedCommandTotal);
@@ -237,7 +237,7 @@ test("Workflow commands offload blocking work without sharing the preparation la
     path.join(repositoryRoot, "src-tauri", "src", "commands", "workflow_commands.rs"),
     "utf8",
   );
-  assert.equal(commands.length, 14);
+  assert.equal(commands.length, 17);
   for (const entry of commands) {
     assert.equal(entry.currentExecution, "async", entry.command);
     const start = source.indexOf(`pub async fn ${entry.command}(`);

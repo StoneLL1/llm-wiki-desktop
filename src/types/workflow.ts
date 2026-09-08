@@ -534,3 +534,25 @@ export interface ReorderQueuedWorkflowRequest extends WorkflowRunRequest {
 export interface ConfirmWorkflowActionRequest extends WorkflowRunRequest {
   actionId: string;
 }
+
+export type UpdateWikiSelection = { kind: "automatic" } | { kind: "selected"; sourceVersions: WorkflowSourceVersionRef[] };
+export interface UpdateWikiDraft {
+  mode: UpdateWikiMode;
+  selection: UpdateWikiSelection;
+  routeSelection: WorkflowRouteSelection | null;
+}
+export interface UpdateWikiRequest extends UpdateWikiDraft {
+  requestId: string;
+  retryOfTaskId?: string;
+  acknowledgeRemoteProvider: boolean;
+}
+export interface UpdateWikiOptions {
+  routes: WorkflowRouteSelection[];
+  defaultRoute: WorkflowRouteSelection | null;
+}
+export interface UpdateWikiSourcePage {
+  sources: Array<WorkflowSourceVersionRef & { title: string; consumed: boolean }>;
+  total: number;
+  nextOffset: number | null;
+  unavailable: number;
+}

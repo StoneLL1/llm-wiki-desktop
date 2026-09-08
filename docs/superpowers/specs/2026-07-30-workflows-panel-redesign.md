@@ -12,6 +12,17 @@
 
 **Project-open boundary:** The no-project shell, compatible-folder assessment, restricted/trusted/read-only permissions, Git eligibility and repair behavior are defined by [`2026-07-30-first-run-project-open-workbench-design.md`](2026-07-30-first-run-project-open-workbench-design.md). Workflows consumes the backend-derived access policy; it does not grant trust or make a read-only project writable.
 
+## Update Wiki intent amendment — 2026-09-08
+
+This amendment follows the user's request to remove unnecessary preparation dependencies and takes precedence over the older Update-specific preparation/TTL wording below. Health, Generate Content and old persisted tasks retain their existing contracts.
+
+- Opening Update Wiki immediately exposes an editable form. Configured route summaries and a manually requested Source directory load independently. No full preparation, Git status, source-body scan or executable probe is required for navigation.
+- Automatic selection means “resolve applicable Sources when this queued task starts”; manual selection means exact source/version choices, and an explicitly empty manual selection is not Automatic. Mode and current draft survive leaving and re-entering the form in the same project session.
+- Start persists one user intent with a request ID before slow execution checks. Duplicate delivery of that request opens its original task. Analysis, selected-route validation and input binding are observable task work and cancellation remains available. No changes is a successful no-op, not a reason to run AI or create history.
+- Binding persists actual scope, route and baseline together. Queued continuation and retries do not re-enter the old preparation protocol. Explicit versions, provider destination, trust, paths and checked writes remain validated at their consuming boundaries.
+- App-private Git history and in-app undo remain automatic and do not touch the user's branch or staging area. Full preparation and manual Git submission are not Update prerequisites.
+- V2 manual directories use metadata. Legacy indexes lack current version metadata, so legacy manual selection retains on-demand body hashing; this never blocks the default form.
+
 ## 1. Decision Summary
 
 The current Agent page mixes execution-engine configuration, BYOK availability, workflow launchers, tasks, raw logs, and safety settings. The replacement surface is organized around work the user wants to complete.

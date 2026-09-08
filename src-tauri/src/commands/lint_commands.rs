@@ -554,6 +554,8 @@ fn revalidate_and_enqueue_agent_lint_repair(
                 route: Some(current_route),
                 baseline_fingerprint: binding.baseline_fingerprint.clone(),
                 execution_options: WorkflowExecutionOptions {
+                    update_request: None,
+                    update_config_revision: None,
                     preparation_revision: binding.preparation_revision.clone(),
                     operation,
                     preparation_fingerprint: Some(binding.preparation_revision.clone()),

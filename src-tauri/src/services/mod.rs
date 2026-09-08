@@ -115,12 +115,12 @@ pub use workflow_service::{
     GenerateContentConfirmationFailure, GenerateContentExecutionServices, GenerateContentRunner,
     HealthCheckExecutionServices, HealthCheckRunner, PrepareWorkflowInput, ProjectWorkflowIdentity,
     UpdateWikiConfirmationFailure, UpdateWikiExecutionServices, UpdateWikiHistoryState,
-    UpdateWikiRunner, ValidatedWorkflowStart, WorkflowAccessSnapshot, WorkflowCoordinator,
-    WorkflowDispatchFailure, WorkflowExternalLaunchPermit, WorkflowLaunchCloseBarrier,
-    WorkflowLaunchPublication, WorkflowLaunchRegistry, WorkflowPersistenceBinding,
-    WorkflowPreference, WorkflowPreferences, WorkflowPreparationEnvironment,
-    WorkflowPreparationService, WorkflowRunner, WorkflowService, WorkflowStageSink,
-    WorkflowTrustTransition,
+    UpdateWikiOptions, UpdateWikiRunner, UpdateWikiSourcePage, ValidatedWorkflowStart,
+    WorkflowAccessSnapshot, WorkflowCoordinator, WorkflowDispatchFailure,
+    WorkflowExternalLaunchPermit, WorkflowLaunchCloseBarrier, WorkflowLaunchPublication,
+    WorkflowLaunchRegistry, WorkflowPersistenceBinding, WorkflowPreference, WorkflowPreferences,
+    WorkflowPreparationEnvironment, WorkflowPreparationService, WorkflowRunner, WorkflowService,
+    WorkflowStageSink, WorkflowTrustTransition,
 };
 #[cfg(any(feature = "gui", test))]
 pub(crate) use workflow_service::{

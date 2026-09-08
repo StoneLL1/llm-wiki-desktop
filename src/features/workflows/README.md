@@ -25,10 +25,12 @@ The three reference-style function cards remain above the selected preparation/t
 
 ## Update Wiki
 
-- Start prepares the current source/route draft automatically. A changed scope, automatically resolved route, or sensitive-content acknowledgement returns the fresh preparation for review before starting.
-- Generation reuses CompileService and an isolated candidate workspace. The Agent receives exact approved input filenames; Source originals remain outside its write scope.
-- A changed queued baseline enters `review_scope` without a candidate. Re-preparing retains selected source IDs and creates a retry-linked task only after reviewing current versions.
-- Candidate confirmation and checked apply preserve Source, checkpoints, user edits, conflict hashes, and current project authority. The result precedes the four visible phases; logs remain collapsed by default.
+- Opening the form is a local navigation change, with no `prepare_workflow` request. `UpdateWikiForm` owns independent route-summary and optional paged Source-directory queries; neither disables mode/selection editing. Automatic selection remains intent, not a cached list from a previous run. Manual empty selection is distinct and cannot start.
+- `start_update_wiki` persists a typed request ID, mode, selection and configured route under task authority. Duplicate delivery of the same request reuses its task, including after recovery. The task worker resolves current automatic inputs or verifies explicit versions, checks only the selected route, then atomically persists scope, route, baseline and fingerprint. Queued replay uses this intent path; old preparation-based tasks remain compatible.
+- V2 directory queries read manifest metadata without source-body hashes. Legacy source indexes do not contain version metadata, so manual legacy listing still computes content versions on demand. Directory work is never a prerequisite for opening the form or choosing Automatic.
+- A no-change run completes without Agent discovery, credentials, external invocation or Git history. Actual generation still uses CompileService and an isolated candidate workspace. Source originals remain outside the Agent's writable scope.
+- Selected-source validation continues through candidate recovery and checked apply; an unrelated broken Source does not poison a manually selected update. Changed fixed inputs retain scope review. Provider configuration is checked against the exact immutable config sent to LlmService.
+- Candidate confirmation, app-private Git history, external-edit conflict checks, trust/path authority and cancellation remain owned by existing backend services. Navigating away preserves accepted task facts without reopening its detail panel.
 
 ## Health Check
 

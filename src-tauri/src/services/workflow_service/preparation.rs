@@ -423,7 +423,8 @@ impl WorkflowPreparationService {
                 &snapshot.project_access.canonical_identity_key,
                 &snapshot.project_access.identity_revision,
                 &snapshot.project_access.persistence,
-            )?
+            )
+            .unwrap_or_default()
             .into_iter()
             .find(|entry| entry.kind == input.kind);
         let remembered_input = previous.as_ref().and_then(|entry| {
@@ -948,6 +949,8 @@ fn build_snapshot_from_evaluation(
         _ => None,
     };
     let execution_options = WorkflowExecutionOptions {
+        update_request: None,
+        update_config_revision: None,
         preparation_revision: "pending".into(),
         operation: crate::models::workflow::WorkflowOperation::BuiltIn,
         preparation_fingerprint: None,
@@ -1376,6 +1379,39 @@ fn resolve_route(
     )
 }
 
+pub(super) fn resolve_update_execution_route(
+    environment: &WorkflowPreparationEnvironment<'_>,
+    selected: &WorkflowRouteSelection,
+) -> Result<WorkflowRoute, BackendError> {
+    let identity = project_identity(&environment.context.root)
+        .map_err(|e| BackendError::new("WORKFLOW_IDENTITY_FAILED", e, true, false))?;
+    let access = WorkflowProjectAccessSummary {
+        project_id: environment.context.project_id.clone(),
+        canonical_identity_key: identity.canonical_identity_key,
+        identity_revision: identity.identity_revision,
+        trust: environment.access.trust.clone(),
+        filesystem_access: environment.access.filesystem_access.clone(),
+        persistence: environment.access.persistence.clone(),
+        git_state: environment.access.git_state.clone(),
+    };
+    if matches!(selected, WorkflowRouteSelection::Agent { .. }) {
+        // Executable wrappers can stay byte-identical while their installed
+        // package/version changes. Execution must freshly probe the chosen route.
+        environment.agent_service.invalidate_workflow_route_cache();
+    }
+    let catalog = RouteCatalog::load(environment, &access, Some(selected))?;
+    resolve_external_route(Some(selected), &catalog, AgentRoutePolicy::Any, false)
+        .route
+        .ok_or_else(|| {
+            BackendError::new(
+                "WORKFLOW_ROUTE_UNAVAILABLE",
+                "The selected execution route is unavailable. Check its configuration.",
+                true,
+                true,
+            )
+        })
+}
+
 fn route_selection(route: &Option<WorkflowRoute>) -> Option<WorkflowRouteSelection> {
     match route {
         Some(WorkflowRoute::Agent { agent, .. }) => {
@@ -1684,10 +1720,12 @@ pub fn workflow_baseline_for_scope(
     context: &ProjectContext,
     scope: &WorkflowScope,
 ) -> Result<WorkflowBaselineSummary, BackendError> {
-    let current_sources = if matches!(scope, WorkflowScope::HealthCheck { .. }) {
-        Vec::new()
-    } else {
-        CompileService::list_source_versions(context)?
+    let current_sources = match scope {
+        WorkflowScope::HealthCheck { .. } => Vec::new(),
+        WorkflowScope::UpdateWiki {
+            source_versions, ..
+        } => CompileService::selected_source_versions(context, source_versions)?,
+        _ => CompileService::list_source_versions(context)?,
     };
     Ok(capture_baseline(context, scope, &current_sources, None)?.summary)
 }

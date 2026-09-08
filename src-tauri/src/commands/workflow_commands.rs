@@ -80,6 +80,71 @@ pub async fn prepare_workflow(
 }
 
 #[tauri::command]
+pub async fn get_update_wiki_options(
+    app: AppHandle,
+    request: WorkflowProjectRequest,
+) -> Result<crate::services::UpdateWikiOptions, BackendError> {
+    run_blocking(app, BlockingWorkClass::MetadataIo, move |app| {
+        let state = app.state::<AppState>();
+        let context =
+            state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+        state
+            .workflow_service
+            .update_wiki_options(&context, &state.settings_service)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn list_update_wiki_sources(
+    app: AppHandle,
+    request: crate::models::workflow_requests::ListUpdateWikiSourcesRequest,
+) -> Result<crate::services::UpdateWikiSourcePage, BackendError> {
+    run_blocking(app, BlockingWorkClass::MetadataIo, move |app| {
+        let state = app.state::<AppState>();
+        let context =
+            state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+        state
+            .workflow_service
+            .list_update_wiki_sources(&context, &request.query, request.offset)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn start_update_wiki(
+    app: AppHandle,
+    request: crate::models::workflow_requests::StartUpdateWikiRequest,
+) -> Result<WorkflowStartOutcome, BackendError> {
+    run_blocking(app, BlockingWorkClass::MetadataIo, move |app| {
+        let state = app.state::<AppState>();
+        let outcome = state.with_current_project_read_task_access(
+            &request.project_id,
+            &request.project_root_path,
+            |permit| {
+                state.workflow_service.enqueue_update_wiki(
+                    permit,
+                    &state.task_service,
+                    &state.settings_service,
+                    request.intent,
+                )
+            },
+        )?;
+        if let WorkflowStartOutcome::Created { run } = &outcome {
+            if run.display_status == WorkflowDisplayStatus::Running {
+                state.workflow_service.dispatch_claimed_run_with_settings(
+                    &state.task_service,
+                    &state.settings_service,
+                    run,
+                )?;
+            }
+        }
+        Ok(outcome)
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn start_workflow(
     app: AppHandle,
     request: StartWorkflowRequest,
@@ -440,7 +505,12 @@ pub(crate) fn retry_workflow_for_state(
         original.operation,
         crate::models::workflow::WorkflowOperation::AgentLintRepair { .. }
     );
-    if is_builtin_health(&original) {
+    if is_builtin_health(&original)
+        || state
+            .task_service
+            .workflow_execution_options(&original.task_id)
+            .is_some_and(|o| o.update_request.is_some())
+    {
         let outcome = state.with_current_project_read_task_access(
             &request.project_id,
             &request.project_root_path,
@@ -624,6 +694,29 @@ pub(crate) fn revalidate_workflow_replay_with_access(
         });
     }
     state.require_workflow_content_write_root(context, &run.kind)?;
+    if state
+        .task_service
+        .workflow_execution_options(&run.task_id)
+        .is_some_and(|o| o.update_request.is_some())
+    {
+        let persistence = resolve_workflow_persistence_binding(context, access.persistence)?;
+        let eligibility = if access.trust == crate::models::workflow::WorkflowProjectTrust::Trusted
+            && access.filesystem_access
+                == crate::models::workflow::WorkflowFilesystemAccess::Writable
+        {
+            Ok(())
+        } else {
+            Err(workflow_error(
+                "WORKFLOW_PROJECT_ACCESS_REQUIRED",
+                "Trust a writable knowledge base before updating the Wiki.",
+            ))
+        };
+        return Ok(WorkflowReplayValidation {
+            persistence,
+            eligibility,
+        });
+    }
+
     let route_selection = run.route.as_ref().and_then(|route| match route {
         crate::models::workflow::WorkflowRoute::Agent { agent, .. } => {
             Some(WorkflowRouteSelection::Agent {

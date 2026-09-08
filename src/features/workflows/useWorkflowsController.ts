@@ -14,6 +14,7 @@ import {
   getWorkflowRun,
   getWorkflowsOverview,
   prepareWorkflow,
+  startUpdateWiki,
   reorderQueuedWorkflow,
   retryWorkflow,
   undoCancelQueuedWorkflow,
@@ -38,6 +39,7 @@ import {
 } from "../../services/workflowNavigation";
 import type { ProjectSummary } from "../../types/project";
 import type {
+  UpdateWikiRequest,
   WorkflowDisplayStatus,
   WorkflowKind,
   WorkflowPrerequisiteAction,
@@ -103,6 +105,7 @@ function workflowRequestGuardMatchesAuthority(
 
 
 export interface WorkflowsController {
+  startUpdate: (intent: UpdateWikiRequest) => Promise<void>;
   refresh: () => Promise<void>;
   prepare: (kind: WorkflowKind, scope?: WorkflowScope | null, routeSelection?: WorkflowRouteSelection | null) => Promise<void>;
   startPrepared: (acknowledgeRestrictedContent: boolean, acknowledgeRemoteProvider: boolean, draft?: WorkflowPreparationDraft) => Promise<void>;
@@ -339,6 +342,7 @@ export function useWorkflowsController(
       operationKey: string,
       summaryKey: string,
       operation: () => Promise<WorkflowRun | WorkflowStartOutcome | { runs: WorkflowRun[] } | null>,
+      canPresent: () => boolean = () => true,
     ) => {
       const state = useWorkflowStore.getState();
       const guard = captureWorkflowRequestGuard(state);
@@ -348,7 +352,7 @@ export function useWorkflowsController(
         if (!result) return;
         recordWorkflowFacts("run" in result ? [result.run] : "runs" in result ? result.runs : [result]);
         const latest = useWorkflowStore.getState();
-        if (!workflowRequestGuardMatchesAuthority(guard, project)) return;
+        if (!workflowRequestGuardMatchesAuthority(guard, project) || !canPresent()) return;
         if ("kind" in result && (result.kind === "created" || result.kind === "existing")) {
           if (!workflowRunMatchesGuard(result.run, project.projectId, guard)) return;
           commitOutcome(result);
@@ -362,7 +366,7 @@ export function useWorkflowsController(
         }
         await reconcileOverview();
       } catch (error) {
-        if (workflowRequestGuardMatchesAuthority(guard, project)) {
+        if (workflowRequestGuardMatchesAuthority(guard, project) && canPresent()) {
           useWorkflowStore.getState().failOperation(
             operationKey,
             operationRequest,
@@ -381,6 +385,16 @@ export function useWorkflowsController(
       cancelWorkflowNavigation();
       useWorkflowStore.getState().beginPreparation(kind);
       const prepareRequest = ++prepareRequestRef.current;
+      if (kind === "update_wiki") {
+        const state = useWorkflowStore.getState();
+        if (scope?.kind === "update_wiki") state.setUpdateDraft({
+          mode: scope.mode,
+          selection: scope.sourceVersions.length ? { kind: "selected", sourceVersions: scope.sourceVersions } : { kind: "automatic" },
+          routeSelection,
+        });
+        else if (routeSelection) state.setUpdateDraft({ ...state.updateDraft, routeSelection });
+        return;
+      }
       const operationKey = `prepare:${kind}`;
       const operationRequest = useWorkflowStore.getState().beginOperation(operationKey);
       let guard: WorkflowRequestGuard | null = null;
@@ -544,6 +558,16 @@ export function useWorkflowsController(
     () => ({
       refresh,
       prepare: prepareKind,
+      startUpdate: async (intent) => {
+        if (workflowOperationPending(useWorkflowStore.getState().operations, "update:start")) return;
+        const presentation = prepareRequestRef.current;
+        const retryOfTaskId = useWorkflowStore.getState().retryOfTaskId;
+        await perform("update:start", "workflows.operationError.start", () => startUpdateWiki({
+          ...request(), intent: { ...intent, ...(retryOfTaskId ? { retryOfTaskId } : {}) },
+        }), () => enabledRef.current && presentation === prepareRequestRef.current
+          && useWorkflowStore.getState().surface === "preparation"
+          && useWorkflowStore.getState().preparingKind === "update_wiki");
+      },
       startPrepared: async (acknowledgeRestrictedContent, acknowledgeRemoteProvider, draft) => {
         const state = useWorkflowStore.getState();
         const preparation = state.preparation;

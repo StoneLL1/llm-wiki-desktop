@@ -400,6 +400,21 @@ impl CompileService {
                         true,
                     )
                 })?;
+                // Validate the exact immutable configuration passed to LlmService below.
+                // A same-model endpoint edit must not change a queued task's destination.
+                if let Some(expected) = services
+                    .task_service
+                    .workflow_execution_options(task_id)
+                    .and_then(|options| options.update_config_revision)
+                {
+                    let encoded = crate::services::workflow_service::canonical_json(&config)
+                        .map_err(task_operation_error)?;
+                    use sha2::Digest;
+                    let actual = format!("{:x}", sha2::Sha256::digest(encoded.as_bytes()));
+                    if expected != actual {
+                        return Err(BackendError::new("WORKFLOW_ROUTE_CHANGED", "The provider configuration changed. Start a new update with the current configuration.", true, true));
+                    }
+                }
                 let secret =
                     LlmService::bound_secret_for_config(context, services.secret_service, &config)?;
                 services
@@ -571,6 +586,54 @@ impl CompileService {
             .into_iter()
             .map(|source| source.reference)
             .collect())
+    }
+
+    /// Resolve only selected manifest versions. Directory presentation never needs content validation.
+    pub fn selected_source_versions(
+        context: &ProjectContext,
+        selected: &[crate::models::workflow::WorkflowSourceVersionRef],
+    ) -> Result<Vec<SourceVersionRef>, BackendError> {
+        if selected.is_empty() {
+            return Ok(Vec::new());
+        }
+        if !context.app_dir.join("source-index-v2.json").is_file() {
+            let current = Self::list_source_versions(context)?;
+            return selected
+                .iter()
+                .map(|item| {
+                    current
+                        .iter()
+                        .find(|r| r.source_id == item.source_id && r.version_id == item.version_id)
+                        .cloned()
+                        .ok_or_else(invalid_source_version)
+                })
+                .collect();
+        }
+        selected
+            .iter()
+            .map(|item| {
+                let manifest = SourceRegistry::read_manifest(
+                    context,
+                    &FileStore,
+                    &context.layout.source_paths()?.manifest(&item.source_id)?,
+                )?;
+                if manifest.source_id != item.source_id
+                    || manifest.current_version_id != item.version_id
+                {
+                    return Err(invalid_source_version());
+                }
+                let version = manifest
+                    .versions
+                    .iter()
+                    .find(|v| v.version_id == item.version_id)
+                    .ok_or_else(invalid_source_version)?;
+                Ok(SourceVersionRef {
+                    source_id: item.source_id.clone(),
+                    version_id: item.version_id.clone(),
+                    content_hash: version.content_hash.clone(),
+                })
+            })
+            .collect()
     }
 
     pub fn resolve_source_versions(
@@ -1678,6 +1741,7 @@ impl CompileService {
             accepted_plan,
             expected_current_hashes,
             CompileGenerationPolicy::LegacyNoDeletes,
+            None,
         )
     }
 
@@ -1693,6 +1757,26 @@ impl CompileService {
             accepted_plan,
             expected_current_hashes,
             CompileGenerationPolicy::WorkflowReviewableDeletes,
+            None,
+        )
+    }
+
+    /// Update Wiki validates its selected inputs before apply. Reuse that exact
+    /// citation scope, matching candidate generation, without resolving unrelated Sources.
+    pub(crate) fn apply_confirmed_workflow_manifest_for_sources(
+        context: &ProjectContext,
+        manifest: &CompileManifest,
+        accepted_plan: Option<&CompilePlan>,
+        expected_current_hashes: &HashMap<String, String>,
+        known_sources: &HashSet<String>,
+    ) -> Result<Vec<String>, BackendError> {
+        Self::apply_confirmed_manifest_with_policy(
+            context,
+            manifest,
+            accepted_plan,
+            expected_current_hashes,
+            CompileGenerationPolicy::WorkflowReviewableDeletes,
+            Some(known_sources),
         )
     }
 
@@ -1707,6 +1791,7 @@ impl CompileService {
             None,
             expected_current_hashes,
             CompileGenerationPolicy::LintRepair,
+            None,
         )
     }
 
@@ -1716,18 +1801,26 @@ impl CompileService {
         accepted_plan: Option<&CompilePlan>,
         expected_current_hashes: &HashMap<String, String>,
         policy: CompileGenerationPolicy,
+        selected_known_sources: Option<&HashSet<String>>,
     ) -> Result<Vec<String>, BackendError> {
         // Defense in depth: even on the confirmed-apply path, refuse any
         // write or deletion under the compile-protected wiki/sources/ subtree.
         if policy == CompileGenerationPolicy::LintRepair {
             Self::validate_lint_repair_manifest(manifest)?;
         } else {
-            let known_sources = Self::known_source_refs(context)?;
+            let all_sources;
+            let known_sources = match selected_known_sources {
+                Some(selected) => selected,
+                None => {
+                    all_sources = Self::known_source_refs(context)?;
+                    &all_sources
+                }
+            };
             Self::validate_manifest_semantics_with_policy(
                 context,
                 manifest,
                 accepted_plan,
-                &known_sources,
+                known_sources,
                 policy.allows_reviewable_deletions(),
             )?;
         }

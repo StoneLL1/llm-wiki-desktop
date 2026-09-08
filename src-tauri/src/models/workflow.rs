@@ -310,12 +310,44 @@ pub enum WorkflowScope {
     },
 }
 
+/// User intent survives queueing; input snapshots belong to the running task.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum UpdateWikiSelection {
+    Automatic,
+    Selected {
+        source_versions: Vec<WorkflowSourceVersionRef>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateWikiRequest {
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_of_task_id: Option<String>,
+    pub mode: UpdateWikiMode,
+    pub selection: UpdateWikiSelection,
+    pub route_selection: Option<WorkflowRouteSelection>,
+    #[serde(default)]
+    pub acknowledge_remote_provider: bool,
+}
+
 /// Bounded, non-secret execution facts that may be reused for a linked retry.
 /// Free-form prompts, credentials, source text, model output, raw arguments,
 /// and temporary paths have no representation in this persisted type.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkflowExecutionOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_request: Option<UpdateWikiRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_config_revision: Option<String>,
     pub preparation_revision: String,
     #[serde(default)]
     pub operation: WorkflowOperation,
@@ -333,6 +365,34 @@ impl WorkflowExecutionOptions {
     pub fn validate(&self) -> Result<(), String> {
         validate_revision("preparationRevision", &self.preparation_revision)?;
         self.operation.validate()?;
+        match (&self.update_request, &self.update_config_revision) {
+            (Some(intent), Some(revision)) => {
+                validate_revision("updateConfigRevision", revision)?;
+                if uuid::Uuid::parse_str(&intent.request_id).is_err() {
+                    return Err("Update request requires a UUID".into());
+                }
+                if let UpdateWikiSelection::Selected { source_versions } = &intent.selection {
+                    let mut ids = std::collections::HashSet::new();
+                    if source_versions.is_empty()
+                        || source_versions.iter().any(|s| {
+                            s.source_id.is_empty()
+                                || s.version_id.is_empty()
+                                || !ids.insert(&s.source_id)
+                        })
+                    {
+                        return Err(
+                            "Update requires a nonempty unambiguous source selection".into()
+                        );
+                    }
+                }
+            }
+            (None, None) => {}
+            _ => {
+                return Err(
+                    "Update request and configuration revision must be stored together".into(),
+                )
+            }
+        }
         if let Some(fingerprint) = self.preparation_fingerprint.as_deref() {
             validate_revision("preparationFingerprint", fingerprint)?;
         }
@@ -358,6 +418,16 @@ pub(crate) fn validate_workflow_execution_contract(
     execution_options: &WorkflowExecutionOptions,
 ) -> Result<(), String> {
     execution_options.validate()?;
+    if let Some(intent) = &execution_options.update_request {
+        if kind != &WorkflowKind::UpdateWiki
+            || !matches!(scope, WorkflowScope::UpdateWiki { mode, .. } if mode == &intent.mode)
+            || !matches!(execution_options.operation, WorkflowOperation::BuiltIn)
+        {
+            return Err(
+                "Update intent must belong to the matching built-in Update Wiki operation".into(),
+            );
+        }
+    }
     if !matches!(
         execution_options.operation,
         WorkflowOperation::AgentLintRepair { .. }

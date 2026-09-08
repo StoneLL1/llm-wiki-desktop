@@ -19,6 +19,8 @@ vi.mock("react-i18next", () => ({
   }),
 }));
 vi.mock("../../services/workflowApi", () => ({
+  getUpdateWikiOptions: vi.fn().mockResolvedValue({ routes: [], defaultRoute: null }),
+  listUpdateWikiSources: vi.fn().mockResolvedValue({ sources: [], total: 0, nextOffset: null, unavailable: 0 }),
   getWorkflowFileDiff: workflowApiMocks.getWorkflowFileDiff,
   rollbackAgentLintRepair: workflowApiMocks.rollbackAgentLintRepair,
   getWorkflowHistoryState: workflowApiMocks.getWorkflowHistoryState,
@@ -150,7 +152,7 @@ describe("Workflows overview", () => {
     expect(controller.prepare).not.toHaveBeenCalled();
   });
 
-  it("shows the selected preparation and a cancel action before discovery completes", () => {
+  it("shows an editable Update form independently of legacy preparation requests", () => {
     const controller = { backToOverview: vi.fn(), refresh: vi.fn() } as unknown as WorkflowsController;
     useWorkflowStore.setState({ overview, overviewStatus: "ready" });
     useWorkflowStore.getState().beginPreparation("update_wiki");
@@ -158,8 +160,9 @@ describe("Workflows overview", () => {
     render(<WorkflowsView controller={controller} onOpenTask={vi.fn()} />);
     expect(screen.getByRole("heading", { name: "workflows.kind.update_wiki", level: 2 })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "workflows.action.run: workflows.kind.update_wiki" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("status")).toHaveTextContent("workflows.action.preparing");
-    fireEvent.click(screen.getByRole("button", { name: "workflows.action.cancel" }));
+    expect(screen.getByRole("radio", { name: "workflows.update.automatic" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "workflows.action.cancelPreparation" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.back" }));
     expect(controller.backToOverview).toHaveBeenCalledOnce();
   });
 

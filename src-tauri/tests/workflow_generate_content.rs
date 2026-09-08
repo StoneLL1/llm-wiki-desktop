@@ -241,6 +241,8 @@ impl Fixture {
                     route: Some(route),
                     baseline_fingerprint: baseline.fingerprint,
                     execution_options: WorkflowExecutionOptions {
+                        update_request: None,
+                        update_config_revision: None,
                         preparation_revision: "generate-test-v1".into(),
                         operation: Default::default(),
                         preparation_fingerprint: None,

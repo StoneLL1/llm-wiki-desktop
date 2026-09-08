@@ -4,6 +4,7 @@ import { create } from "zustand";
 import { registerProjectScopeResetHandler } from "./projectScopeResetRegistry";
 
 import type {
+  UpdateWikiDraft,
   WorkflowDecisionReview,
   WorkflowDisplayStatus,
   WorkflowKind,
@@ -40,6 +41,8 @@ export interface WorkflowOperationState {
 }
 
 export interface WorkflowState {
+  updateDraft: UpdateWikiDraft;
+  setUpdateDraft: (draft: UpdateWikiDraft) => void;
   projectKey: string;
   identityGuard: WorkflowIdentityGuard;
   overview: WorkflowsOverview | null;
@@ -86,6 +89,7 @@ export interface WorkflowState {
 }
 
 const initialState = {
+  updateDraft: { mode: "changed_sources", selection: { kind: "automatic" }, routeSelection: null } as UpdateWikiDraft,
   projectKey: "",
   identityGuard: {
     canonicalIdentityKey: null,
@@ -116,6 +120,7 @@ let workflowOperationSequence = 0;
 
 export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   ...initialState,
+  setUpdateDraft: (updateDraft) => set({ updateDraft }),
   activateProject: (projectKey) => {
     const requestEpoch = get().requestEpoch + 1;
     set({ ...initialState, projectKey, requestEpoch });
@@ -145,6 +150,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
               preparations: {},
               preparedRouteSelections: {},
               drafts: {},
+              updateDraft: initialState.updateDraft,
               selectedTaskId: null,
               surface: "overview" as WorkflowsSurface,
               operations: {},

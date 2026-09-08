@@ -126,11 +126,20 @@ where
 {
     let task_id = run.task_id.as_str();
     let sink = WorkflowStageSink::new(services.compile.task_service, services.coordinator, task_id);
-    sink.start(ANALYZE_SOURCES).map_err(task_error)?;
+    if run.current_stage_id.as_deref() != Some(ANALYZE_SOURCES) {
+        sink.start(ANALYZE_SOURCES).map_err(task_error)?;
+    }
     let (mode, selected_refs) = update_scope(run)?;
-    let current_baseline =
-        super::super::preparation::workflow_baseline_for_scope(context, &run.scope)?;
-    if current_baseline.fingerprint != run.baseline_fingerprint {
+    let baseline_changed =
+        match super::super::preparation::workflow_baseline_for_scope(context, &run.scope) {
+            Ok(current) => current.fingerprint != run.baseline_fingerprint,
+            // A queued fixed selection can disappear when the Source gains a new
+            // version. That still needs the existing scope-review flow, even though
+            // the selected-only resolver can no longer construct its old baseline.
+            Err(error) if error.code == "COMPILE_SOURCE_VERSION_INVALID" => true,
+            Err(error) => return Err(error),
+        };
+    if baseline_changed {
         // No candidate or external invocation exists yet. Keep the original
         // approved scope on the task and ask the user to prepare it again;
         // changed input is a scope decision, not a failed model invocation.
@@ -150,7 +159,11 @@ where
         return Ok(UpdateWikiOutcome::Waiting);
     }
     let source_versions = resolve_selected_versions(context, &selected_refs)?;
-    let resolved = CompileService::resolve_source_versions(context, &source_versions)?;
+    let resolved = if source_versions.is_empty() {
+        Vec::new()
+    } else {
+        CompileService::resolve_source_versions(context, &source_versions)?
+    };
     let selected_sources = match mode {
         UpdateWikiMode::ChangedSources => resolved
             .into_iter()
@@ -436,27 +449,7 @@ fn resolve_selected_versions(
     context: &ProjectContext,
     selected: &[crate::models::workflow::WorkflowSourceVersionRef],
 ) -> Result<Vec<SourceVersionRef>, BackendError> {
-    let current = CompileService::list_source_versions(context)?;
-    selected
-        .iter()
-        .map(|selected| {
-            current
-                .iter()
-                .find(|current| {
-                    current.source_id == selected.source_id
-                        && current.version_id == selected.version_id
-                })
-                .cloned()
-                .ok_or_else(|| {
-                    BackendError::new(
-                        "WORKFLOW_SOURCE_SCOPE_STALE",
-                        "A selected Source version changed before Update Wiki started.",
-                        true,
-                        true,
-                    )
-                })
-        })
-        .collect()
+    CompileService::selected_source_versions(context, selected)
 }
 
 fn workflow_compile_route(run: &WorkflowRun) -> Result<ResolvedCompileRoute, BackendError> {
@@ -1035,7 +1028,7 @@ fn apply_persisted_update_wiki_candidate(
             true,
         ));
     }
-    let known_sources = CompileService::known_source_refs(context)?;
+    let known_sources = CompileService::known_source_refs_for_sources(&resolved_sources);
     CompileService::validate_workflow_manifest_semantics(
         context,
         &descriptor.candidate.manifest,
@@ -1112,11 +1105,12 @@ fn apply_persisted_update_wiki_candidate(
             .map_err(task_error)?;
         return Err(error);
     }
-    let affected_paths = match CompileService::apply_confirmed_workflow_manifest(
+    let affected_paths = match CompileService::apply_confirmed_workflow_manifest_for_sources(
         context,
         &descriptor.candidate.manifest,
         Some(&descriptor.candidate.plan),
         &descriptor.current_hashes,
+        &known_sources,
     ) {
         Ok(paths) => paths,
         Err(error) => {
@@ -2856,12 +2850,12 @@ fn load_update_wiki_candidate_for_workflow(
     else {
         return None;
     };
-    if CompileService::resolve_source_versions(&context, &descriptor.source_versions).is_err() {
-        return None;
-    }
-    let Ok(known_sources) = CompileService::known_source_refs(&context) else {
+    let Ok(resolved_sources) =
+        CompileService::resolve_source_versions(&context, &descriptor.source_versions)
+    else {
         return None;
     };
+    let known_sources = CompileService::known_source_refs_for_sources(&resolved_sources);
     CompileService::validate_workflow_manifest_semantics(
         &context,
         &descriptor.candidate.manifest,
@@ -2974,10 +2968,19 @@ fn load_valid_update_wiki_candidate(
         .current_hashes
         .keys()
         .all(|path| affected.contains(path.as_str()))
-        && descriptor
-            .baseline_hashes
-            .keys()
-            .all(|path| crate::services::compile_service::is_safe_wiki_markdown(path))
+        && descriptor.baseline_hashes.keys().all(|path| {
+            // The read-only Wiki snapshot also includes Source documents.
+            // Candidate writes are checked separately above and must still
+            // reject wiki/sources; applying that write rule to the baseline
+            // would make every V2 Source candidate unrecoverable.
+            crate::services::compile_service::is_safe_wiki_markdown(path)
+                || (path.starts_with("wiki/sources/")
+                    && path.ends_with(".md")
+                    && !path.contains('\\')
+                    && std::path::Path::new(path)
+                        .components()
+                        .all(|component| matches!(component, std::path::Component::Normal(_))))
+        })
         && descriptor.checkpoint_hash.as_deref().map_or(true, |hash| {
             GitService::checkpoint_exists(project_root, hash)
         });

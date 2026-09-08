@@ -14,6 +14,8 @@ const mocks = vi.hoisted(() => ({
   listRuns: vi.fn(),
   getRun: vi.fn(),
   prepare: vi.fn(),
+  sources: vi.fn(),
+  startUpdate: vi.fn(),
   start: vi.fn(),
   cancel: vi.fn(),
   confirm: vi.fn(),
@@ -25,6 +27,7 @@ vi.mock("../../services/workflowApi", () => ({
   getWorkflowsOverview: mocks.getOverview,
   listWorkflowRuns: mocks.listRuns,
   getWorkflowRun: mocks.getRun,
+  listUpdateWikiSources: mocks.sources, startUpdateWiki: mocks.startUpdate,
   prepareWorkflow: mocks.prepare, startWorkflow: mocks.start, cancelWorkflowRun: mocks.cancel,
   undoCancelQueuedWorkflow: vi.fn(), reorderQueuedWorkflow: vi.fn(), retryWorkflow: vi.fn(),
   confirmWorkflowAction: mocks.confirm, discardWorkflowResult: mocks.discard, continueQueuedWorkflows: vi.fn(),
@@ -896,6 +899,25 @@ describe("useWorkflowsController", () => {
     expect(useWorkflowStore.getState().operations["history:page"]?.error ?? null).toBeNull();
   });
 
+  it.each(["surface", "project", "hidden"])("keeps accepted Update task facts without taking over after %s changes", async (change) => {
+    const pending = deferred<{ kind: "created"; run: WorkflowRun }>();
+    mocks.startUpdate.mockReturnValueOnce(pending.promise);
+    const { result, rerender } = renderHook(({ enabled }) => useWorkflowsController(project, enabled), { initialProps: { enabled: true } });
+    await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
+    await act(() => result.current.prepare("update_wiki"));
+    expect(mocks.prepare).not.toHaveBeenCalled();
+    let request!: Promise<void>;
+    act(() => { request = result.current.startUpdate({ ...useWorkflowStore.getState().updateDraft, requestId: "request-id", acknowledgeRemoteProvider: false }); });
+    act(() => {
+      if (change === "surface") result.current.backToOverview();
+      if (change === "project") useProjectStore.setState({ currentProject: { ...project, projectId: "another", rootPath: "/another" } });
+    });
+    if (change === "hidden") rerender({ enabled: false });
+    await act(async () => { pending.resolve({ kind: "created", run }); await request; });
+    expect(useTaskStore.getState().workflowById[run.taskId]).toBeDefined();
+    expect(useWorkflowStore.getState().selectedTaskId).toBeNull();
+  });
+
   it("prepares the selected source versions before cancelling a scope review and links the new attempt", async () => {
     const waiting: WorkflowRun = { ...run, kind: "update_wiki", revision: "2", displayStatus: "waiting_for_confirmation",
       scope: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [{ sourceId: "source-a", versionId: "old" }] },
@@ -903,20 +925,21 @@ describe("useWorkflowsController", () => {
     const fresh: WorkflowPreparation = { ...preparation, kind: "update_wiki", route: waiting.route,
       scope: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [{ sourceId: "source-a", versionId: "new" }] },
       availableSourceVersions: [{ sourceId: "source-a", versionId: "new" }, { sourceId: "source-b", versionId: "unselected" }] };
-    mocks.prepare.mockResolvedValue(fresh);
+    mocks.sources.mockResolvedValue({ sources: fresh.availableSourceVersions, total: 2, nextOffset: null, unavailable: 0 });
     mocks.cancel.mockResolvedValue({ ...waiting, revision: "3", displayStatus: "cancelled", pendingAction: null });
-    mocks.start.mockResolvedValue({ kind: "created", run: { ...waiting, taskId: "new-attempt", revision: "1", displayStatus: "running", pendingAction: null,
+    mocks.startUpdate.mockResolvedValue({ kind: "created", run: { ...waiting, taskId: "new-attempt", revision: "1", displayStatus: "running", pendingAction: null,
       scope: fresh.scope, retry: { attemptOf: waiting.taskId, attemptNumber: 2 } } });
     const { result } = renderHook(() => useWorkflowsController(project, true));
     await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
     await act(() => result.current.adjustAndPrepare(waiting));
-    expect(mocks.prepare).toHaveBeenNthCalledWith(2, expect.objectContaining({ scope: fresh.scope }));
+    expect(mocks.sources).toHaveBeenCalledOnce();
+    expect(mocks.prepare).not.toHaveBeenCalled();
     expect(mocks.cancel).toHaveBeenCalledWith(expect.objectContaining({ taskId: waiting.taskId }));
-    expect(mocks.prepare.mock.invocationCallOrder[1]).toBeLessThan(mocks.cancel.mock.invocationCallOrder[0]);
+    expect(mocks.sources.mock.invocationCallOrder[0]).toBeLessThan(mocks.cancel.mock.invocationCallOrder[0]);
     expect(mocks.start).not.toHaveBeenCalled();
-    expect(useWorkflowStore.getState()).toMatchObject({ preparation: fresh, retryOfTaskId: waiting.taskId, surface: "preparation" });
-    await act(() => result.current.startPrepared(false, false));
-    expect(mocks.start).toHaveBeenCalledWith(expect.objectContaining({ retryOfTaskId: waiting.taskId }));
+    expect(useWorkflowStore.getState()).toMatchObject({ updateDraft: { selection: { kind: "selected", sourceVersions: fresh.availableSourceVersions!.slice(0, 1) } }, retryOfTaskId: waiting.taskId, surface: "preparation" });
+    await act(() => result.current.startUpdate({ ...useWorkflowStore.getState().updateDraft, requestId: "request-new", acknowledgeRemoteProvider: false }));
+    expect(mocks.startUpdate).toHaveBeenCalledWith(expect.objectContaining({ intent: expect.objectContaining({ retryOfTaskId: waiting.taskId }) }));
     expect(useWorkflowStore.getState().selectedTaskId).toBe("new-attempt");
   });
 
@@ -958,7 +981,7 @@ describe("useWorkflowsController", () => {
     const waiting: WorkflowRun = { ...run, kind: "update_wiki", revision: "2", displayStatus: "waiting_for_confirmation",
       scope: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [{ sourceId: "source-a", versionId: "old" }] },
       pendingAction: { id: "review-scope", actionType: "review_scope", riskLevel: "high", affectedPaths: [], candidate: null, expiresAt: null, checkpointHash: null } };
-    mocks.prepare.mockRejectedValueOnce(new Error("source currently unavailable"));
+    mocks.sources.mockRejectedValueOnce(new Error("source currently unavailable"));
     const { result } = renderHook(() => useWorkflowsController(project, true));
     await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
     act(() => { useWorkflowStore.getState().upsertRun(waiting); useWorkflowStore.getState().selectRun(waiting.taskId); });
@@ -970,23 +993,23 @@ describe("useWorkflowsController", () => {
   });
 
   it("does not cancel or open an old scope-review task after the current project changes", async () => {
-    const pending = deferred<WorkflowPreparation>();
+    const pending = deferred<{ sources: []; total: number; nextOffset: null; unavailable: number }>();
     const waiting: WorkflowRun = { ...run, kind: "update_wiki", displayStatus: "waiting_for_confirmation",
       scope: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [{ sourceId: "source-a", versionId: "old" }] },
       pendingAction: { id: "review-scope", actionType: "review_scope", riskLevel: "high", affectedPaths: [], candidate: null, expiresAt: null, checkpointHash: null } };
-    mocks.prepare.mockReturnValueOnce(pending.promise);
+    mocks.sources.mockReturnValueOnce(pending.promise);
     const { result } = renderHook(() => useWorkflowsController(project, true));
     await waitFor(() => expect(useWorkflowStore.getState().overview).toEqual(overview));
     let request!: Promise<void>;
     act(() => { request = result.current.adjustAndPrepare(waiting); });
-    await waitFor(() => expect(mocks.prepare).toHaveBeenCalledOnce());
+    await waitFor(() => expect(mocks.sources).toHaveBeenCalledOnce());
     await act(async () => {
       useProjectStore.setState({ currentProject: { ...project, projectId: "project-b", rootPath: "D:/b" } });
-      pending.resolve(preparation);
+      pending.resolve({ sources: [], total: 0, nextOffset: null, unavailable: 0 });
       await request;
     });
     expect(mocks.cancel).not.toHaveBeenCalled();
-    expect(mocks.prepare).toHaveBeenCalledTimes(1);
+    expect(mocks.sources).toHaveBeenCalledTimes(1);
     expect(useWorkflowStore.getState().preparation).toBeNull();
     expect(useWorkflowStore.getState().selectedTaskId).toBeNull();
   });

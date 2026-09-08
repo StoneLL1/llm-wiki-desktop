@@ -566,6 +566,12 @@ pub struct BackendTask {
 
 当前实现状态（2026-08-13）：H3–H5 复用本节的 ProjectContext、Workflow queue、TaskService、confirmation、Git checkpoint、candidate manifest 与 typed result 边界完成 Agent Health/repair bridge；H6 未改变 backend runtime。由于最终 full gate 与完整验证矩阵未全绿，Gate H / Batch 7 继续 fail closed。
 
+### Update Wiki 意图入口（2026-09-08）
+
+`get_update_wiki_options` 只读配置摘要，`list_update_wiki_sources` 独立分页读取来源元数据，`start_update_wiki` 用 `ProjectTaskMutationPermit` 持久化 `UpdateWikiRequest`。三者在异步 worker 执行；页面导航不再调用 `prepare_workflow`。`workflow_service/update_intent.rs` 负责入队与执行绑定，沿用 TaskService/coordinator，不另建准备任务或任务数据库。
+
+自动范围到执行时解析；手选范围校验精确版本。所选路线探测和正文校验在任务阶段运行，scope/route/baseline/fingerprint 一次持久更新。原始 requestId 用于恢复后的重复请求识别；重试生成新 ID 和未绑定基线。新版目录不读正文；旧版 Source 索引没有版本元数据，手动列目录仍需计算内容版本。Update 候选恢复和确认写入复用已解析的所选 Source，不重复全项目校验。BYOK 比较实际交给 LlmService 的不可变配置哈希，防止同模型更换端点。旧 preparation 记录、其他工作流、应用私有 Git 历史和 checked apply 合同保留。
+
 ### 10.3 Workflow 读模型与三条内置旅程实现（2026-09-07）
 
 2026-09-07 响应与历史修复：权限变更 permit 负责单次持锁及锁内验证，内部调用不能重新获取同一 transition mutex；Git/确认/相关文件 IPC 通过异步 blocking worker 执行。启动先在权限锁外准备，再在短许可内复核 access/identity 并入队。队列锁按项目隔离。Update Wiki 准备不探测 Git、不全量读取 Wiki；执行阶段固定 Wiki 基线，在写入前保存私有 `before` / `planned` refs，成功后只发布 `after` 引用，用户 HEAD/index 不变。恢复以精确 bytes 做比较写入，`undo-started` / `undo` refs 持久记录恢复进度；未完成恢复阻止新的 Update Wiki 发布。

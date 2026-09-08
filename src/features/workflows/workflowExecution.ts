@@ -1,4 +1,4 @@
-import { prepareWorkflow, startWorkflow, cancelWorkflowRun } from "../../services/workflowApi";
+import { prepareWorkflow, startWorkflow, cancelWorkflowRun, listUpdateWikiSources } from "../../services/workflowApi";
 import { workflowScopeEqual } from "../../services/workflowDraft";
 import { recordWorkflowFacts } from "../../stores/taskStore";
 import { useNavigationStore } from "../../stores/navigationStore";
@@ -66,16 +66,26 @@ export async function reviewWorkflowScope(
   isCurrent: () => boolean,
 ): Promise<void> {
   if (!isCurrent()) return;
-  let scope = run.scope;
+  const scope = run.scope;
   if (scope.kind === "update_wiki") {
-    const available = await prepareWorkflow({ ...request, kind: run.kind, scope: null, routeSelection });
-    if (!isCurrent()) return;
     const selectedIds = new Set(scope.sourceVersions.map((source) => source.sourceId));
-    const versions = (available.availableSourceVersions ?? []).filter((source) => selectedIds.has(source.sourceId));
-    if ([...selectedIds].some((id) => !versions.some((source) => source.sourceId === id))) {
-      throw new Error("WORKFLOW_SELECTED_SOURCE_UNAVAILABLE");
-    }
-    scope = { ...scope, sourceVersions: versions };
+    const versions: typeof scope.sourceVersions = [];
+    let offset: number | null = 0;
+    do {
+      const page = await listUpdateWikiSources({ ...request, query: "", offset });
+      if (!isCurrent()) return;
+      versions.push(...page.sources.filter((source) => selectedIds.has(source.sourceId)).map(({ sourceId, versionId }) => ({ sourceId, versionId })));
+      offset = page.nextOffset;
+    } while (offset !== null && versions.length < selectedIds.size);
+    if (versions.length !== selectedIds.size) throw new Error("WORKFLOW_SELECTED_SOURCE_UNAVAILABLE");
+    const cancelled = await cancelWorkflowRun({ ...request, taskId: run.taskId });
+    recordWorkflowFacts([cancelled]);
+    if (!isCurrent()) return;
+    const state = useWorkflowStore.getState();
+    state.setUpdateDraft({ mode: scope.mode, selection: { kind: "selected", sourceVersions: versions }, routeSelection });
+    state.beginPreparation("update_wiki");
+    useWorkflowStore.setState({ retryOfTaskId: run.taskId });
+    return;
   }
   const fresh = await prepareWorkflow({ ...request, kind: run.kind, scope, routeSelection });
   if (!isCurrent()) return;

@@ -39,7 +39,7 @@ pub fn workflow_fingerprint(
     route: &Option<WorkflowRoute>,
     baseline_fingerprint: &str,
 ) -> Result<String, String> {
-    let parts = [
+    let mut parts = vec![
         WORKFLOW_SCHEMA_VERSION.to_string(),
         canonical_identity_key.to_string(),
         identity_revision.to_string(),
@@ -54,6 +54,12 @@ pub fn workflow_fingerprint(
         canonical_json(route)?,
         baseline_fingerprint.to_string(),
     ];
+    if let Some(intent) = &execution_options.update_request {
+        parts.push(canonical_json(&(
+            intent,
+            &execution_options.update_config_revision,
+        ))?);
+    }
     Ok(hex_sha256(parts.join("\n").as_bytes()))
 }
 

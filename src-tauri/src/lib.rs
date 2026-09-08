@@ -261,6 +261,20 @@ pub fn run() {
                                 );
                                 return;
                             }
+                            let run = match state.workflow_service.bind_update_wiki_inputs(
+                                &services::WorkflowPreparationEnvironment {
+                                    context: &context, access,
+                                    settings_service: &state.settings_service,
+                                    secret_service: &state.secret_service,
+                                    agent_service: &state.agent_service,
+                                }, &state.task_service, &run,
+                            ) {
+                                Ok(run) => run,
+                                Err(error) => {
+                                    reject_workflow_dispatch(&state, &run.task_id, &error.code, error.message);
+                                    return;
+                                }
+                            };
                             let compile = services::CompileExecutionServices {
                                 agent_service: &state.agent_service,
                                 llm_service: &state.llm_service,
@@ -844,6 +858,9 @@ pub fn run() {
             commands::task_commands::continue_queued_workflows,
             commands::workflow_commands::get_workflows_overview,
             commands::workflow_commands::prepare_workflow,
+            commands::workflow_commands::get_update_wiki_options,
+            commands::workflow_commands::list_update_wiki_sources,
+            commands::workflow_commands::start_update_wiki,
             commands::workflow_commands::start_workflow,
             commands::workflow_commands::list_workflow_runs,
             commands::workflow_commands::get_workflow_run,

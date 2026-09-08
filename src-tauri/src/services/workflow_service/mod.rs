@@ -7,6 +7,8 @@ pub mod preferences;
 pub mod preparation;
 pub mod runners;
 pub mod stage_sink;
+mod update_intent;
+pub use update_intent::{UpdateWikiOptions, UpdateWikiSourcePage};
 
 use std::sync::{Arc, RwLock};
 

@@ -79,6 +79,7 @@ const importWorkflow: ImportWorkflow = {
   loadHistoryDetail: vi.fn(),
 };
 const workflowsController: WorkflowsController = {
+  startUpdate: vi.fn(),
   refresh: vi.fn(),
   prepare: vi.fn(),
   startPrepared: vi.fn(),
