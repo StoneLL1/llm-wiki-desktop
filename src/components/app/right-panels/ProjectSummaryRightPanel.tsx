@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 
 import { useProjectStatus } from "../../../hooks/useProjectStatus";
+import { useNavigationStore } from "../../../stores/navigationStore";
 import { useProjectStore } from "../../../stores/projectStore";
 import { selectRunningCountForProject, useTaskStore } from "../../../stores/taskStore";
 import type { GraphState, IndexState } from "../../../types/project";
@@ -13,12 +14,10 @@ export function ProjectSummaryRightPanel({ currentProject }: RightPanelHostProps
   const pendingAction = useProjectStore((state) => state.pendingAction);
   const runningCount = useTaskStore((state) =>
     selectRunningCountForProject(state, currentProject.projectId));
-  const status = useProjectStatus(currentProject.projectId, currentProject.rootPath, true);
+  const status = useProjectStatus(currentProject.projectId, currentProject.rootPath, true, ["agents", "providers"]);
   const health = currentProject.health;
   const pendingCount = pendingAction ? 1 : 0;
   const inventoryState = currentProject.inventoryState ?? "ready";
-  const gitBranch = status?.git?.branch ?? null;
-  const gitHead = status?.git?.head ?? null;
   const installedAgents = (status?.agents ?? []).filter((agent) => agent.state === "installed");
   const configuredProviders = (status?.providers ?? []).filter(
     (provider) => provider.config.enabled
@@ -43,8 +42,6 @@ export function ProjectSummaryRightPanel({ currentProject }: RightPanelHostProps
               <dd className="m-0 text-right text-[var(--text-secondary)]">{t(`projectAssessment.filesystem.${authority.filesystemAccess}`)}</dd>
               <dt className="font-medium text-[var(--text-muted)]">{t("projectAssessment.dimension.health")}</dt>
               <dd className="m-0 text-right text-[var(--text-secondary)]">{t(`projectAssessment.health.${authority.health}`)}</dd>
-              <dt className="font-medium text-[var(--text-muted)]">{t("projectAssessment.dimension.git")}</dt>
-              <dd className="m-0 text-right text-[var(--text-secondary)]">{t(authority.git.isRepository ? "projectAssessment.git.repository" : "projectAssessment.git.none")}</dd>
             </dl>
             {authority.layoutWarnings.filter((warning) => warning.code === "UNSAFE_ENTRY_SKIPPED").map((warning) => (
               <div
@@ -60,6 +57,7 @@ export function ProjectSummaryRightPanel({ currentProject }: RightPanelHostProps
           </div>
         ) : null}
 
+        <button type="button" className="btn btn--ghost btn--sm mb-2" onClick={() => useNavigationStore.getState().openSettings("versions")}>{t("versions.title")}</button>
         <div className="border-b border-[var(--border-subtle)] py-3">
           <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--text-muted)]">{t("rightpanel.section.paths")}</h4>
           <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-[12px]">
@@ -69,10 +67,6 @@ export function ProjectSummaryRightPanel({ currentProject }: RightPanelHostProps
             <dd className="m-0 font-mono text-[11.5px]">{health.hasSchema ? "schema.md" : "—"}</dd>
             <dt className="font-medium text-[var(--text-muted)]">{t("rightpanel.path.purpose")}</dt>
             <dd className="m-0 font-mono text-[11.5px]">{health.hasPurpose ? "purpose.md" : "—"}</dd>
-            <dt className="font-medium text-[var(--text-muted)]">{t("rightpanel.path.gitBranch")}</dt>
-            <dd className="m-0 font-mono text-[11.5px]">{gitBranch ?? "—"}</dd>
-            <dt className="font-medium text-[var(--text-muted)]">{t("rightpanel.path.gitHead")}</dt>
-            <dd className="m-0 font-mono text-[11.5px]">{gitHead ?? "—"}</dd>
           </dl>
         </div>
 

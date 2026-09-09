@@ -667,12 +667,12 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
   const pendingItemIds = useMemo(() => new Set([...(workflow.pendingItemIds ?? []), ...pendingActionItemIds]), [pendingActionItemIds, workflow.pendingItemIds]);
 
   if (workflow.bootstrapState === "loading") {
-    return <div className="import-v2-layout"><ImportV2Header session={null} progress={workflow.progress} discoveryTask={workflow.discoveryTask} syncing={workflow.isSyncingSession} activeSection={activeSection} onSectionChange={handleSectionChange} /><div role="status" className="import-v2-state">{t("importV2.state.loading")}</div></div>;
+    return <div className="import-v2-layout"><ImportV2Header activeSection={activeSection} onSectionChange={handleSectionChange} /><div role="status" className="import-v2-state">{t("importV2.state.loading")}</div></div>;
   }
 
   return (
     <div className="import-v2-layout">
-      <ImportV2Header session={session} progress={workflow.progress} discoveryTask={workflow.discoveryTask} syncing={workflow.isSyncingSession} activeSection={activeSection} onSectionChange={handleSectionChange} />
+      <ImportV2Header activeSection={activeSection} onSectionChange={handleSectionChange} />
       <div
         ref={scrollRef}
         className="import-v2-scroll app-pane-scrollbar"
@@ -702,25 +702,6 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
                 onAction={() => workflow.retryRecovery?.()}
               />
             ) : null}
-            {workflow.completion ? (
-              <ImportCompletionSummary
-                completion={workflow.completion}
-                remainingCount={workflow.overview?.remainingCount ?? 0}
-                onContinueRemaining={() => workflow.setFilter("all")}
-                onViewSources={() => {
-                  void workflow.viewImportedSources();
-                }}
-                onViewSource={(wikiPath) => {
-                  void workflow.viewImportedSources(workflow.completion, wikiPath);
-                }}
-                onUpdateWiki={() => {
-                  void workflow.updateWiki();
-                }}
-                onRetryFailure={(itemId) => {
-                  void workflow.retryItem(itemId);
-                }}
-              />
-            ) : null}
             <ImportSourceMethods
               onAddPaths={workflow.addPaths}
               onAddText={workflow.addText}
@@ -744,6 +725,25 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
               readinessRetrying={workflow.readinessRetrying}
               onRetryReadiness={workflow.retryReadiness}
             />
+            {workflow.completion ? (
+              <ImportCompletionSummary
+                completion={workflow.completion}
+                remainingCount={workflow.overview?.remainingCount ?? 0}
+                onContinueRemaining={() => workflow.setFilter("all")}
+                onViewSources={() => {
+                  void workflow.viewImportedSources();
+                }}
+                onViewSource={(wikiPath) => {
+                  void workflow.viewImportedSources(workflow.completion, wikiPath);
+                }}
+                onUpdateWiki={() => {
+                  void workflow.updateWiki();
+                }}
+                onRetryFailure={(itemId) => {
+                  void workflow.retryItem(itemId);
+                }}
+              />
+            ) : null}
             <ImportDiscoveryStatus
               task={workflow.discoveryTask ?? null}
               scan={workflow.discoveryScan}

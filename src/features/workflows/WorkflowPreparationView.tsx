@@ -15,6 +15,9 @@ import type {
   WorkflowScope,
 } from "../../types/workflow";
 import { workflowKindKey } from "./workflowPresentation";
+import { WorkflowChoice, WorkflowPageLabel, WorkflowSearchField, workflowRouteLabel } from "./WorkflowFormControls";
+
+import { WorkflowOutputPathPicker } from "./WorkflowOutputPathPicker";
 
 const MAX_VISIBLE_SCOPE_OPTIONS = 200;
 const ARTIFACT_OPTIONS = [
@@ -303,14 +306,8 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
             </div>
           ) : scope.kind === "health_check" ? (
             <div className="workflow-mode-options" role="radiogroup" aria-label={t("workflows.preparation.healthMode")}>
-              <label className={scope.mode === "local_quick" ? "is-selected" : undefined}>
-                <input aria-label={t("workflows.mode.localQuick")} checked={scope.mode === "local_quick"} name="health-mode" onChange={() => setScope({ ...scope, mode: "local_quick" })} type="radio" />
-                <Zap size={18} aria-hidden="true" /><span><strong>{t("workflows.mode.localQuick")}</strong><small>{t("workflows.design.localHint")}</small></span>
-              </label>
-              <label className={scope.mode === "complete" ? "is-selected" : undefined}>
-                <input aria-label={t("workflows.mode.complete")} checked={scope.mode === "complete"} name="health-mode" onChange={() => setScope({ ...scope, mode: "complete" })} type="radio" />
-                <Bot size={18} aria-hidden="true" /><span><strong>{t("workflows.mode.complete")}</strong><small>{t("workflows.design.completeHint")}</small></span>
-              </label>
+              <WorkflowChoice name="health-mode" label={t("workflows.mode.localQuick")} description={t("workflows.design.localHint")} icon={Zap} checked={scope.mode === "local_quick"} onChange={() => setScope({ ...scope, mode: "local_quick" })} />
+              <WorkflowChoice name="health-mode" label={t("workflows.mode.complete")} description={t("workflows.design.completeHint")} icon={Bot} checked={scope.mode === "complete"} onChange={() => setScope({ ...scope, mode: "complete" })} />
             </div>
           ) : (
             <p>{t("workflows.preparation.exportValidation")}</p>
@@ -322,11 +319,7 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
           <div className="workflow-preparation-step__label">{t("workflows.preparation.artifactType")}</div>
           <div className="workflow-artifact-options" role="radiogroup" aria-label={t("workflows.preparation.artifactType")}>
               {ARTIFACT_OPTIONS.map(({ type: artifactType, label, icon: ArtifactIcon }) => (
-                <label className={scope.artifactType === artifactType ? "is-selected" : undefined} key={artifactType}>
-                  <input
-                    aria-label={t(`workflows.artifact.${label}`)}
-                    checked={scope.artifactType === artifactType}
-                    name="workflow-artifact-type"
+                <WorkflowChoice key={artifactType} name="workflow-artifact-type" label={t(`workflows.artifact.${label}`)} description={t(`workflows.preparation.generate.${artifactType}`)} icon={ArtifactIcon} checked={scope.artifactType === artifactType}
                     onChange={() => {
                       setScope({
                         ...scope,
@@ -340,11 +333,7 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
                       });
                       setScopePage(0);
                     }}
-                    type="radio"
-                  />
-                  <ArtifactIcon size={19} aria-hidden="true" />
-                  <span><strong>{t(`workflows.artifact.${label}`)}</strong><small>{t(`workflows.preparation.generate.${artifactType}`)}</small></span>
-                </label>
+                />
               ))}
             </div>
         </li>
@@ -438,7 +427,7 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
                         name={scope.artifactType === "beautiful_read" ? "workflow-reading-page" : undefined}
                         type={scope.artifactType === "beautiful_read" ? "radio" : "checkbox"}
                       />
-                      <code title={path}>{path}</code>
+                      <WorkflowPageLabel path={path} />
                     </label>
                   );
                 })}
@@ -451,7 +440,7 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
         <li className="workflow-preparation-step is-expanded" data-decision-step="3">
           <div className="workflow-preparation-step__label">{t("workflows.preparation.output")}</div>
           <div>
-              <div className="workflow-option-row" role="radiogroup" aria-label={t("workflows.preparation.saveMode")}>
+              <div className="workflow-segmented" role="radiogroup" aria-label={t("workflows.preparation.saveMode")}>
                 <label>
                   <input checked={!explicitOutput} name="workflow-save-mode" onChange={() => { setExplicitOutput(false); setScope({ ...scope, outputPath: null }); }} type="radio" />
                   {t("workflows.preparation.createArtifact")}
@@ -462,15 +451,7 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
                 </label>
               </div>
               <p className="workflow-scope-state">{t(!explicitOutput ? "workflows.preparation.createArtifactHint" : "workflows.preparation.explicitTargetHint")}</p>
-              {explicitOutput ? <label className="workflow-field">
-                {t("workflows.preparation.outputPath")}
-                <input
-                  onChange={(event) => setScope({ ...scope, outputPath: event.target.value })}
-                  placeholder={t("workflows.preparation.outputPathPlaceholder")}
-                  type="text"
-                  value={scope.outputPath ?? ""}
-                />
-              </label> : null}
+              {explicitOutput ? <WorkflowOutputPathPicker key={`${preparation.preparationId}:${preparation.preparationRevision}:${scope.artifactType}`} value={scope.outputPath ?? ""} onChange={(outputPath) => setScope({ ...scope, outputPath })} /> : null}
             </div>
         </li>
         ) : null}
@@ -586,9 +567,7 @@ export function WorkflowPreparationView({ preparation, onBack, onStart, onPrereq
                 const key = workflowRouteSelectionKey(route);
                 return (
                   <option key={key} value={key}>
-                    {route.kind === "agent"
-                      ? `${t("workflows.route.agent")} · ${route.agent}`
-                      : `${t("workflows.route.byok")} · ${route.provider}`}
+                    {workflowRouteLabel(route, t)}
                   </option>
                 );
               })}
@@ -659,7 +638,7 @@ function ScopeOptionToolbar({
   return (
     <div className="workflow-scope-toolbar">
       <label className="workflow-field">
-        <input aria-label={t("workflows.preparation.searchOptions")} placeholder={t("workflows.preparation.searchOptions")} onChange={(event) => onQueryChange(event.target.value)} type="search" value={query} />
+        <WorkflowSearchField aria-label={t("workflows.preparation.searchOptions")} placeholder={t("workflows.preparation.searchOptions")} onChange={(event) => onQueryChange(event.target.value)} type="search" value={query} />
       </label>
       <div className="workflow-scope-toolbar__actions">
         <span aria-live="polite">

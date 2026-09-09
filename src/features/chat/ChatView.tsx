@@ -1,3 +1,4 @@
+import { VersionProtectedAction } from "../../components/app/VersionProtectedAction";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
@@ -454,14 +455,13 @@ export function ChatOverwritePrompt({ request, onConfirm, onCancel, busy = false
         {t("chat.thread.overwriteBody", { path: request.path })}
       </p>
       <div className="flex gap-2">
-        <button
-          type="button"
+        <VersionProtectedAction
           disabled={busy}
-          onClick={onConfirm}
+          onConfirm={onConfirm}
           className="h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--primary-hover)] disabled:cursor-wait disabled:opacity-50"
         >
           {t("chat.thread.overwrite")}
-        </button>
+        </VersionProtectedAction>
         <button
           type="button"
           disabled={busy}

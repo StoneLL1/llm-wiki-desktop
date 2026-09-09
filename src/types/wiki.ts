@@ -83,6 +83,7 @@ export interface SaveWikiPageRequest {
 }
 
 export interface SaveWikiPageResponse {
+  operationId?: string;
   relativePath: string;
   hash: string;
   savedAt: string;
@@ -96,6 +97,7 @@ export interface CreateWikiPageInput {
 }
 
 export interface RenameWikiPageResponse {
+  operationId?: string;
   relativePath: string;
   hash: string;
   savedAt: string;

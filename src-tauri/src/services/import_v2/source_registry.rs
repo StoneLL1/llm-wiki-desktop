@@ -132,12 +132,7 @@ impl SourceIndex {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SourcePointer {
-    pub source_id: String,
-    pub version_id: String,
-}
+pub use crate::models::source::SourcePointer;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -551,6 +546,18 @@ impl SourceRegistry {
             installed,
             consumed,
         })
+    }
+
+    /// Parse and bind the same bytes, so a newer index cannot authorize writing
+    /// an older parsed map over external changes.
+    pub fn read_index_with_hash(context: &ProjectContext, files: &FileStore) -> Result<(SourceIndex, String), BackendError> {
+        let path = context.layout.source_paths()?.index();
+        let bytes = files.read_bytes_bounded(context, &path, 8 * 1024 * 1024)?;
+        let hash = files.content_hash(&bytes);
+        let mut index: SourceIndex = serde_json::from_slice(&bytes).map_err(|_| invalid_index())?;
+        if index.schema_version == LEGACY_SOURCE_REGISTRY_SCHEMA_VERSION { index.schema_version = SOURCE_REGISTRY_SCHEMA_VERSION; }
+        validate_index(&index)?;
+        Ok((index, hash))
     }
 
     pub fn read_index(

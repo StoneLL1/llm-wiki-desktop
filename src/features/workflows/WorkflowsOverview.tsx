@@ -79,7 +79,7 @@ export function WorkflowsOverviewView({
     : false;
   const AttentionIcon = leadingRow ? workflowIcons[leadingRow.kind] : Activity;
   return (
-    <div className="workflows-overview">
+    <div className={`workflows-overview${children ? " has-panel" : ""}`}>
       {waitingForOverview ? <div role={overviewStatus === "error" ? "alert" : "status"} className={overviewStatus === "error" ? "workflow-error-banner" : "workflow-overview-section__empty"}>
         <span>{t(overviewStatus === "error" ? "workflows.loadError.description" : "workflows.loading.description")}</span>
         {errorSummary ? <span>{errorSummary}</span> : null}

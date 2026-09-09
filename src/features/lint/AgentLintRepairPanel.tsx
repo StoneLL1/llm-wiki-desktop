@@ -140,7 +140,7 @@ export function AgentLintRepairPanel({
             <button
               ref={confirmButtonRef}
               type="button"
-              className="h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--primary-hover)] disabled:opacity-40"
+              className="h-[28px] rounded-[var(--radius-md)] lint-primary bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--primary-hover)] disabled:opacity-40"
               disabled={pending}
               onClick={onConfirm}
             >
@@ -170,7 +170,7 @@ export function AgentLintRepairPanel({
             <button
               ref={prepareButtonRef}
               type="button"
-              className="h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--primary-hover)] disabled:opacity-40"
+              className="h-[28px] rounded-[var(--radius-md)] lint-primary bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--primary-hover)] disabled:opacity-40"
               disabled={disabled || pending || selectedCount === 0 || selectionOverLimit}
               onClick={onPrepare}
             >

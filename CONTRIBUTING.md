@@ -1,19 +1,18 @@
 # Contributing to LLM Wiki Desktop
 
-Thanks for considering a contribution. This project has unusually strict
-boundaries because it manages users' local knowledge bases and their AI
-credentials — please read this document before opening a PR.
+Thanks for considering a contribution. The app manages local files and AI
+credentials; the boundaries below help keep those safe.
 
 ## Getting started
 
 ```bash
-npm install
+npm ci
 npm run dev          # run the app in development
 npm run check:quick  # lint + frontend build + Rust core compile (fast loop)
 npm run check        # the full gate (run before requesting review)
 ```
 
-Prerequisites: Node.js 20+, Rust stable, and the
+Prerequisites: Node.js 22.23.1+, Rust 1.92.0, Python 3.10+ (the `python` command), and the
 [Tauri v2 platform dependencies](https://v2.tauri.app/start/prerequisites/).
 
 ## Hard boundaries
@@ -49,15 +48,22 @@ Scale the gate to your change:
 - Features, cross-layer changes, release/CI/security-adjacent code: the full
   `npm run check`, plus the focused test files you touched.
 
-Cross-platform behavior matters: tests run on Ubuntu, Windows, and macOS. If
+Public frontend/tooling checks run once on Ubuntu. Native compilation, Rust
+service tests and platform runner tests run on Ubuntu, Windows, and macOS. Four
+exhaustive crash/format/scale sweeps run on Ubuntu and in the local full check;
+`test:rust:platform` skips those four on the other CI runners. If
 you add filesystem tests, remember that directory iteration order, symlink
 permissions, non-UTF-8 filenames, and line endings all differ per platform
 (several past CI failures came from exactly this class).
 
+Release configuration (`npm run check:release-config`) and historical product
+evidence (`npm run check:acceptance`) are separate from the development loop.
+See the [release runbook](docs/release/release-runbook.md).
+
 ## Generated files
 
-- `src-tauri/gen/schemas/` is committed; regenerate rather than hand-editing,
-  and keep it consistent in CI.
+- `src-tauri/gen/schemas/` is committed; regenerate rather than hand-editing
+  when changing Tauri capabilities.
 - `capabilities/install-catalog.json` and the embedded capability catalog are
   derived from `capabilities/product-manifest.json` by release tooling —
   don't edit the derived files directly.

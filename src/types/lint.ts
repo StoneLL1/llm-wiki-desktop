@@ -319,6 +319,7 @@ export interface GetDeepLintReportRequest {
 export type LintFixOutcomeKind = "applied" | "needs_confirmation";
 
 export interface LintFixOutcome {
+  operationId?: string;
   kind: LintFixOutcomeKind;
   affectedPaths: string[];
   checkpoint?: string;
@@ -371,6 +372,7 @@ export interface LintBatchSkip {
 }
 
 export interface LintBatchOutcome {
+  operationId?: string;
   /** Single Git checkpoint hash covering every applied safe fix. */
   checkpoint?: string;
   finalCommit?: string;

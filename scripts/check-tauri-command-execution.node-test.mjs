@@ -82,7 +82,7 @@ test("Batch 1 closes the Project Facts P0 async execution target", async () => {
   assert.deepEqual(target, {
     status: "green",
     requiredExecution: "async",
-    reviewedCommandTotal: 219,
+    reviewedCommandTotal: 226,
     targetBlockingSyncCeiling: 130,
   });
   assert.equal(result.counts.total, target.reviewedCommandTotal);

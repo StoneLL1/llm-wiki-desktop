@@ -1,4 +1,4 @@
-import { ArrowLeft, Play, RefreshCw } from "lucide-react";
+import { ArrowLeft, FileText, Play, RefreshCw, RotateCcw, Sparkles } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getUpdateWikiOptions, listUpdateWikiSources } from "../../services/workflowApi";
@@ -7,6 +7,8 @@ import { useWorkflowStore, workflowOperationPending } from "../../stores/workflo
 import { useNavigationStore } from "../../stores/navigationStore";
 import type { ProjectSummary } from "../../types/project";
 import type { UpdateWikiOptions, UpdateWikiRequest, UpdateWikiSourcePage, WorkflowRouteSelection } from "../../types/workflow";
+
+import { WorkflowChoice, WorkflowSearchField, workflowRouteLabel } from "./WorkflowFormControls";
 
 const routeKey = (route: WorkflowRouteSelection) => route.kind === "agent" ? `agent:${route.agent}` : `byok:${route.provider}`;
 
@@ -72,64 +74,64 @@ export function UpdateWikiForm({ project, onBack, onStart }: {
     </div>
     <div className="workflow-panel-body">
       <fieldset className="workflow-preparation-controls" disabled={starting}>
-        <div className="workflow-preparation-step">
-          <div className="workflow-preparation-step__label">{t("workflows.preparation.updateMode")}</div>
-          <div className="workflow-option-row">
-            {(["changed_sources", "full_recompile"] as const).map((mode) => <label key={mode}>
-              <input type="radio" name="update-mode" checked={draft.mode === mode} onChange={() => setDraft({ ...draft, mode })} />
-              {t(mode === "changed_sources" ? "workflows.mode.changedSources" : "workflows.mode.fullRecompile")}
-            </label>)}
+        <section className="workflow-form-section">
+          <h3 className="workflow-form-label">{t("workflows.preparation.updateMode")}</h3>
+          <div className="workflow-mode-options" role="radiogroup" aria-label={t("workflows.preparation.updateMode")}>
+            <WorkflowChoice name="update-mode" label={t("workflows.mode.changedSources")} description={t("workflows.form.changedHint")} icon={Sparkles} checked={draft.mode === "changed_sources"} onChange={() => setDraft({ ...draft, mode: "changed_sources" })} />
+            <WorkflowChoice name="update-mode" label={t("workflows.mode.fullRecompile")} description={t("workflows.form.rebuildHint")} icon={RotateCcw} checked={draft.mode === "full_recompile"} onChange={() => setDraft({ ...draft, mode: "full_recompile" })} />
           </div>
-        </div>
-        <div className="workflow-preparation-step">
-          <div className="workflow-preparation-step__label">{t("workflows.update.sources")}</div>
+        </section>
+        <section className="workflow-form-section">
+          <h3 className="workflow-form-label">{t("workflows.update.sources")}</h3>
           <div>
-          <div className="workflow-option-row">
+          <div className="workflow-segmented" role="radiogroup" aria-label={t("workflows.update.sources")}>
             <label><input type="radio" name="update-selection" checked={!manual} onChange={() => setDraft({ ...draft, selection: { kind: "automatic" } })} />{t("workflows.update.automatic")}</label>
             <label><input type="radio" name="update-selection" checked={manual} onChange={() => setDraft({ ...draft, selection: { kind: "selected", sourceVersions: [] } })} />{t("workflows.update.manual")}</label>
           </div>
           {!manual && <p className="workflow-scope-state">{t("workflows.update.automaticHint")}</p>}
           {manual && <>
-            <div className="workflow-option-row">
-              <input className="input" placeholder={t("workflows.update.search")} aria-label={t("workflows.update.search")} value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { setSearch(query); setOffset(0); setRefresh((value) => value + 1); } }} />
+            <div className="workflow-source-search">
+              <WorkflowSearchField placeholder={t("workflows.update.search")} aria-label={t("workflows.update.search")} value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { setSearch(query); setOffset(0); setRefresh((value) => value + 1); } }} />
               <button className="btn btn--secondary btn--sm" type="button" onClick={() => { setSearch(query); setOffset(0); setRefresh((value) => value + 1); }}>{t("workflows.update.search")}</button>
-              <span>{t("workflows.update.selected", { count: selected.length })}</span>
-              <button className="btn btn--secondary btn--sm" type="button" onClick={() => setDraft({ ...draft, selection: { kind: "selected", sourceVersions: [] } })}>{t("workflows.update.clear")}</button>
+            </div>
+            <div className="workflow-scope-toolbar__actions">
+              <span aria-live="polite">{t("workflows.update.selected", { count: selected.length })}</span>
+              <button className="btn btn--ghost btn--sm" type="button" disabled={selected.length === 0} onClick={() => setDraft({ ...draft, selection: { kind: "selected", sourceVersions: [] } })}>{t("workflows.update.clear")}</button>
             </div>
             {listing && <p role="status" className="workflow-scope-state">{t("workflows.update.loadingSources")}</p>}
-            {listError && <p role="alert">{t("workflows.update.sourceError")} <button type="button" onClick={() => setRefresh((value) => value + 1)}>{t("workflows.action.retry")}</button></p>}
+            {listError && <p role="alert">{t("workflows.update.sourceError")} <button type="button" className="btn btn--secondary btn--sm" onClick={() => setRefresh((value) => value + 1)}>{t("workflows.action.retry")}</button></p>}
             <div className="workflow-scope-items">{!listing && page?.sources.map((source) => {
               const checked = selected.some((item) => item.sourceId === source.sourceId && item.versionId === source.versionId);
               return <label key={`${source.sourceId}:${source.versionId}`}>
                 <input type="checkbox" checked={checked} disabled={draft.mode === "changed_sources" && source.consumed} onChange={(event) => {
                   const remaining = selected.filter((item) => item.sourceId !== source.sourceId);
                   setDraft({ ...draft, selection: { kind: "selected", sourceVersions: event.target.checked ? [...remaining, { sourceId: source.sourceId, versionId: source.versionId }] : remaining } });
-                }} />{source.title}{source.consumed ? ` · ${t("workflows.update.consumed")}` : ""}
+                }} /><FileText size={15} aria-hidden="true" /><span className="workflow-source-title">{source.title}</span>{source.consumed && <span className="workflow-source-status">{t("workflows.update.consumed")}</span>}
               </label>;
             })}</div>
             {!listing && page?.total === 0 && <p className="workflow-scope-state">{t("workflows.update.empty")}</p>}
             {!!page?.unavailable && <p className="workflow-scope-state">{t("workflows.update.unavailable", { count: page.unavailable })}</p>}
-            <div className="workflow-option-row">
+            {(offset > 0 || page?.nextOffset != null) && <div className="workflow-option-row">
               <button type="button" className="btn btn--secondary btn--sm" disabled={listing || offset === 0} onClick={() => setOffset(Math.max(0, offset - 100))}>{t("workflows.update.previous")}</button>
               <button type="button" className="btn btn--secondary btn--sm" disabled={listing || page?.nextOffset == null} onClick={() => setOffset(page?.nextOffset ?? 0)}>{t("workflows.update.next")}</button>
-            </div>
+            </div>}
           </>}
           </div>
-        </div>
-        <div className="workflow-preparation-step">
-          <div className="workflow-preparation-step__label">{t("workflows.preparation.routeOverride")}</div>
-          <div>
-          <label className="workflow-field"><span className="sr-only">{t("workflows.preparation.routeOverride")}</span>
+        </section>
+        <details className="workflow-execution-details">
+          <summary><span>{t("workflows.preparation.executionDetails")}</span><span className="workflow-disclosure-value">{chosen ? workflowRouteLabel(chosen, t) : t("workflows.route.auto")}</span></summary>
+          <div className="workflow-route-settings">
+          <label className="workflow-field"><span>{t("workflows.preparation.routeOverride")}</span>
             <select value={draft.routeSelection ? routeKey(draft.routeSelection) : "auto"} onChange={(event) => { setRemote(false); setDraft({ ...draft, routeSelection: options?.routes.find((route) => routeKey(route) === event.target.value) ?? null }); }}>
-              <option value="auto">{t("workflows.route.auto")}{options?.defaultRoute ? ` · ${routeKey(options.defaultRoute)}` : ""}</option>
-              {options?.routes.map((route) => <option key={routeKey(route)} value={routeKey(route)}>{routeKey(route)}</option>)}
+              <option value="auto">{t("workflows.route.auto")}{options?.defaultRoute ? ` · ${workflowRouteLabel(options.defaultRoute, t)}` : ""}</option>
+              {options?.routes.map((route) => <option key={routeKey(route)} value={routeKey(route)}>{workflowRouteLabel(route, t)}</option>)}
             </select>
           </label>
-          {optionsError && <p role="status">{t("workflows.update.optionsError")} <button type="button" onClick={() => setRefresh((value) => value + 1)}>{t("workflows.action.retry")}</button></p>}
           <button className="btn btn--secondary btn--sm" type="button" onClick={openSettings}>{t("workflows.action.openSettings")}</button>
-          {chosen?.kind === "byok" && <div className="workflow-option-row"><label><input type="checkbox" checked={remote} onChange={(event) => setRemote(event.target.checked)} />{t("workflows.update.remote")}</label></div>}
           </div>
-        </div>
+        </details>
+          {optionsError && <p role="status">{t("workflows.update.optionsError")} <button type="button" className="btn btn--secondary btn--sm" onClick={() => setRefresh((value) => value + 1)}>{t("workflows.action.retry")}</button></p>}
+        {chosen?.kind === "byok" && <label className="workflow-confirm"><input type="checkbox" checked={remote} onChange={(event) => setRemote(event.target.checked)} />{t("workflows.update.remote")}</label>}
         <div className="workflow-start-bar">
           <span className="workflow-start-summary">{t("workflows.git.automaticUpdateHistory")}</span>
           <button type="button" className="btn btn--primary" aria-busy={starting} disabled={starting || (manual && selected.length === 0)} onClick={start}><Play size={14} aria-hidden="true" />{t(starting ? "workflows.action.starting" : "workflows.action.start")}</button>

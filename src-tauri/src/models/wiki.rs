@@ -215,6 +215,8 @@ pub struct SaveWikiPageRequest {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveWikiPageResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
     pub relative_path: String,
     pub hash: String,
     pub saved_at: String,
@@ -271,6 +273,8 @@ pub struct RenameWikiPageRequest {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenameWikiPageResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
     /// The new project-relative path of the renamed page.
     pub relative_path: String,
     pub hash: String,

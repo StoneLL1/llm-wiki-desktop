@@ -1,130 +1,107 @@
-# LLM Wiki Desktop
+<div align="center">
+  <img src="src/assets/app-logo.png" alt="LLM Wiki Desktop" width="88" />
+  <h1>LLM Wiki Desktop</h1>
+  <p><strong>Your sources. Your wiki. Your AI.</strong></p>
+  <p>A local-first workspace for turning documents, links, and media into a connected Markdown knowledge base.</p>
+  <p>
+    <a href="https://github.com/StoneLL1/llm-wiki-desktop/releases/latest"><img src="https://img.shields.io/github/v/release/StoneLL1/llm-wiki-desktop?style=flat-square&color=30363d" alt="Latest release" /></a>
+    <a href="https://github.com/StoneLL1/llm-wiki-desktop/actions/workflows/ci.yml"><img src="https://github.com/StoneLL1/llm-wiki-desktop/actions/workflows/ci.yml/badge.svg?branch=master" alt="CI" /></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-30363d?style=flat-square" alt="Apache 2.0 license" /></a>
+  </p>
+  <p><a href="https://github.com/StoneLL1/llm-wiki-desktop/releases/latest">Download</a> · <a href="#get-started">Get started</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="CONTRIBUTING.md">Contributing</a></p>
+</div>
 
-A local-first desktop app for building a personal knowledge base from raw
-material — import documents, web pages, audio, and images; curate them into a
-Markdown wiki; explore it as a graph; and ask questions of your own notes with
-AI you configure yourself.
+![LLM Wiki Desktop — a Markdown wiki built from connected research notes](docs/images/wiki-workspace.png)
 
-**Status: pre-release (0.2.0 RC).** The application is feature-complete for
-its first supported journeys and covered by an extensive local test suite, but
-no stable public release exists yet. Expect rough edges, and read
-[Known limitations](#known-limitations) before trusting it with important
-data.
+## A workspace that keeps the source in sight
 
-## What it does
+Bring your material together, read it as a **Source**, then explicitly organize it into a **Wiki**. Explore connections, ask questions, and publish what you learn. Your knowledge base stays a folder you can open in a text editor.
 
-- **Local-first, no database.** A knowledge base is a plain folder of
-  Markdown, JSON, and media files. Your notes work in Obsidian and any text
-  editor; nothing is uploaded, and there is no server-side account.
-- **Import → Sources → Wiki.** Raw imports become immutable evidence plus
-  readable *Source* pages; the wiki is a derived layer you explicitly update
-  (the Karpathy LLM Wiki pattern: Raw Sources → Wiki → Schema). The app opens
-  knowledge bases laid out in its native format, legacy LLM Wiki /
-  `nashsu/llm_wiki` conventions, and Obsidian-compatible Markdown vaults
-  (see `SPEC/SPEC.md`).
-- **All-format ingestion.** Documents (PDF, Office), web pages (URL
-  readability extraction), audio/video (ASR transcripts), and images (OCR)
-  — the heavier engines ship as optional, separately downloadable
-  *capability packs* that are signature-verified before use.
-- **Knowledge graph.** Every readable page becomes a node (sigma.js +
-  ForceAtlas2 + Louvain communities); works without any prior "compilation"
-  step and stays read-only in restricted project modes.
-- **Chat with your wiki.** Natural-language Q&A grounded in readable Sources
-  or wiki pages, driven by your own AI configuration (see below). Plain
-  keyword search never calls a model.
-- **Workflows, not background magic.** AI-assisted updates, deep lint, and
-  content generation run as explicit, cancelable, observable workflows with
-  confirmation gates for destructive steps.
-- **Git as the safety net.** Destructive operations (bulk replace, raw-source
-  removal, agent-driven fixes) require a Git checkpoint first.
+| | What you can do |
+| :-- | :-- |
+| **Collect** | Import documents, web pages, images, audio, and video. Optional engines add OCR, transcription, browser extraction, and document conversion. |
+| **Connect** | Read and edit Markdown, follow backlinks, search locally, and explore a knowledge graph. Open native projects or compatible Markdown vaults. |
+| **Ask** | Chat with your Sources and wiki using your own API provider, local Ollama service, or supported Agent CLI. |
+| **Create** | Update Wiki, run a health check, generate content, and export HTML through explicit Workflows with visible progress and cancellation. |
+| **Keep control** | Review sensitive changes and protect supported write operations with local Git version history. Keep original sources alongside derived pages. |
 
-## AI providers
+English and 简体中文 interfaces. Light and dark themes. No application account required.
 
-The app never bundles model access. You choose the execution path in Settings:
+## Download
 
-- **Agent CLI** (an external agent binary you install and authorize), and/or
-- **BYOK API** keys for OpenAI / Anthropic / Google / Ollama / any
-  OpenAI-compatible endpoint.
+**[Get v0.2.1 →](https://github.com/StoneLL1/llm-wiki-desktop/releases/tag/app-v0.2.1)**
 
-Keys are stored only in the OS credential store (Windows Credential Manager,
-macOS Keychain, Linux Secret Service) — never in project files or logs. No
-telemetry is collected.
+| Platform | Download |
+| :-- | :-- |
+| macOS · Apple Silicon | [DMG installer](https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v0.2.1/darwin-aarch64-LLM.Wiki.Desktop_0.2.1_aarch64.dmg) |
+| macOS · Intel | [DMG installer](https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v0.2.1/darwin-x86_64-LLM.Wiki.Desktop_0.2.1_x64.dmg) |
+| Windows · x64 | [Setup installer](https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v0.2.1/windows-x86_64-LLM.Wiki.Desktop_0.2.1_x64-setup.exe) |
+| Linux · x64 | [AppImage](https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v0.2.1/linux-x86_64-LLM.Wiki.Desktop_0.2.1_amd64.AppImage) |
 
-## Platforms
+On macOS, drag the app into Applications. On Windows, run the setup file. On Linux, make the AppImage executable and launch it; Ubuntu 24.04 is the CI target.
 
-| Platform | Installer |
-| --- | --- |
-| Windows 10/11 x64 | NSIS `.exe` |
-| macOS 13+ (Apple Silicon) | `.dmg` / `.app` |
-| macOS 13+ (Intel) | `.dmg` / `.app` |
-| Linux x64 | `.AppImage` |
+The macOS app is not Apple-notarized and the Windows installer does not carry an Authenticode identity, so the OS may show a first-launch warning. See [installation notes](docs/release/known-limitations.md) for details. App updates and optional capability packs are signature-verified.
 
-Installers are published from [Releases](../../releases) once the first
-stable version passes real-machine acceptance. In-app updates are
-signature-verified (minisign).
+The release also contains automatic-update files and `CHECKSUMS.sha256`. Optional engines are downloaded from the app when needed; you do not need to install all the capability packs.
 
-## Developing
+## Get started
 
-Prerequisites: Node.js 20+, Rust stable, platform Tauri v2 dependencies
-([Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)).
+1. **Create or open a knowledge base.** Start in a new folder, or open a compatible Markdown vault. Existing vaults keep their layout.
+2. **Import a source.** Add a document or link and review the readable Source. Install an optional import engine only when the format requires it.
+3. **Choose your AI.** Configure a provider in Settings, connect local Ollama, or select an installed Agent CLI. Reading, editing, graph navigation, and keyword search work without AI.
+4. **Build your wiki.** Run **Update Wiki** from Workflows, inspect the result, and explore the connected pages. Use Chat for questions and HTML export for sharing.
+
+### Bring your own AI
+
+API providers include OpenAI, Anthropic, Google, Ollama, and OpenAI-compatible endpoints. API access and external Agent CLIs are configured separately; this app does not include a paid model subscription.
+
+Credentials use the operating system's credential store. AI actions send task content to the provider or Agent you choose; remote models are not offline. Optional import engines may also download runtimes and models on first use.
+
+### Files you own
+
+Native projects use a readable directory structure:
+
+```text
+my-knowledge-base/
+├── raw/       Original material and readable Sources
+├── wiki/      Connected Markdown pages
+├── .app/      Project settings and operation state
+├── exports/   Generated HTML and other outputs
+└── skills/    Project-specific guidance
+```
+
+There is no content database or mandatory cloud sync. Compatible vaults retain their Markdown structure, and app guidance stays under `.app/compat/`. Local version history provides recovery for supported operations; it complements your usual backups.
+
+## Development
+
+Built with **Tauri 2 · React 19 · TypeScript · Rust**.
+
+Use Node.js **22.23.1** and Rust **1.92.0** to match CI, plus the [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/). Git is required for version-history features.
 
 ```bash
-npm install
-npm run dev        # dev app with hot reload
-npm run check      # full gate: lint, frontend build+tests, Rust tests
+git clone https://github.com/StoneLL1/llm-wiki-desktop.git
+cd llm-wiki-desktop
+npm ci
+npm run tauri -- dev
 ```
 
-Shorter loop during normal development: `npm run check:quick`.
-
-The frontend is React 19 + TypeScript + Vite + Tailwind v4 + shadcn/ui; the
-backend is Rust behind thin Tauri IPC commands. Architecture boundaries are
-specified in `SPEC/TECH_STACK.md` and `SPEC/BACKEND_STRUCTURE.md` — please
-read them before non-trivial changes. Contribution rules live in
-[CONTRIBUTING.md](CONTRIBUTING.md).
-
-## Repository layout
-
-```
-src/                  React frontend (features, stores, components)
-src-tauri/            Rust backend (commands -> services -> local files)
-capabilities/         Capability-pack manifests, runners, release tooling
-skills/               Agent skill definitions (wiki-lint, html-*, …)
-SPEC/                 Product/architecture specifications
-docs/                 Architecture decisions, release runbooks, maintainers
-UI-Frontend-design/   Authoritative UI design reference
-release/              Release contracts and machine-checked checklists
+```bash
+npm run check:quick   # Short development check
+npm run check         # Frontend, tooling, capability runners, and Rust checks
+npm run tauri -- build
 ```
 
-## Privacy and data
+`npm run dev` starts only the frontend server; use `npm run tauri -- dev` for the desktop app. Local builds use the development capability configuration; signed release catalogs are assembled by the release workflow.
 
-Everything the app writes stays inside your knowledge-base folder (plus app
-state under `.app/`). AI features send only the content you explicitly submit
-to the provider you configured. See [SECURITY.md](SECURITY.md) for how to
-report vulnerabilities — please do not open public issues for suspected
-security problems.
-
-## Known limitations
-
-- No stable release yet; upgrade/rollback acceptance is still being completed
-  per platform.
-- macOS binaries are not notarized and Windows binaries are not
-  Authenticode-signed; first launch requires the OS manual-override path
-  (documented in the release notes of each version).
-- Deep AI lint and some workflows require project *trust* escalation; opening
-  a folder read-only is always available.
-- The UI is bilingual (English / 简体中文); AI-generated content follows your
-  language preference.
+| Resource | Purpose |
+| :-- | :-- |
+| [Contributing](CONTRIBUTING.md) | Development workflow and verification |
+| [Architecture](SPEC/TECH_STACK.md) | Frontend, IPC, and Rust service boundaries |
+| [Troubleshooting](docs/maintainers/troubleshooting.md) | Known development pitfalls |
+| [Release runbook](docs/release/release-runbook.md) | Builds, signing, and release recovery |
+| [Changelog](CHANGELOG.md) | User-visible changes |
+| [Security](SECURITY.md) | Private vulnerability reporting |
 
 ## License
 
-[Apache-2.0](LICENSE). The application license covers this repository's code.
-Optional capability packs bundle their own third-party components (for
-example FFmpeg under LGPLv3+) and ship with their own per-pack license
-notices, SBOMs, and signatures — see `capabilities/` and each release's
-manifest.
-
----
-
-中文说明：本项目是一个本地优先的个人知识库桌面应用（导入 → Source → Wiki →
-图谱/对话），详细产品与架构规格见 `SPEC/`（中文）。当前处于 0.2.0 候选阶段，
-尚无稳定版本发布。
+[Apache-2.0](LICENSE). Optional capability packs include their own third-party licenses and notices inside each archive.

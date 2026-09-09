@@ -120,6 +120,52 @@ test("catalog accepts SemVer build metadata in an exact asset name", () => {
   );
 });
 
+test("capability release URLs retain the desktop version and app-v provenance", () => {
+  for (const version of ["0.2.1", "0.2.1-rc.2"]) {
+    const expectedTag = "app-v" + version;
+    const provenance = {
+      schemaVersion: 1,
+      releaseTag: expectedTag,
+      commitSha: "a".repeat(40),
+      workflowRunId: "1234567890",
+    };
+    for (const prefix of ["app-v", "capabilities-v"]) {
+      const catalog = releaseCatalog(fullMatrix().map((entry) => ({
+        ...entry, url: entry.url.replace("app-v0.1.0", prefix + version),
+      })));
+      assert.deepEqual(verify({ catalog, expectedTag, provenance,
+        expectedCommit: provenance.commitSha, expectedRunId: provenance.workflowRunId }).errors, []);
+      assert.ok(verify({ catalog, expectedTag: "app-v0.2.2" }).errors.length > 0);
+      assert.ok(verify({ catalog, expectedTag, provenance: {
+        ...provenance, releaseTag: "capabilities-v" + version,
+      } }).errors.length > 0);
+      assert.ok(verify({ catalog, expectedTag, provenance,
+        expectedCommit: "b".repeat(40) }).errors.length > 0);
+      assert.ok(verify({ catalog, expectedTag, provenance,
+        expectedRunId: "9876543210" }).errors.length > 0);
+    }
+  }
+});
+
+test("capability URL channels cannot weaken tag grammar or cross prerelease versions", () => {
+  for (const tag of ["capabilities-v0.2.1-rc.1", "capabilities-v0.2.1-rc.3",
+    "capabilities-v0.2.1", "capabilities-v0.2.2-rc.2"]) {
+    const catalog = releaseCatalog(fullMatrix().map((entry) => ({
+      ...entry, url: entry.url.replace("app-v0.1.0", tag),
+    })));
+    assert.ok(verify({ catalog, expectedTag: "app-v0.2.1-rc.2" }).errors.length > 0, tag);
+  }
+  for (const tag of ["capabilities-v01.2.1", "capabilities-v0.2.1-rc.0",
+    "capabilities-v0.2.1-rc.01", "capabilities-v0.2.1-beta.1", "capabilities-v0.2.1+build",
+    "capabilities-vlatest", "capabilities-vapp-v0.2.1", "other-v0.2.1"]) {
+    const catalog = releaseCatalog(fullMatrix().map((entry) => ({
+      ...entry, url: entry.url.replace("app-v0.1.0", tag),
+    })));
+    assert.ok(verify({ catalog, expectedTag: null, mode: "source" }).errors.length > 0, tag);
+  }
+  assert.ok(verify({ expectedTag: "" }).errors.length > 0);
+});
+
 test("entry measurements and identities must be complete", () => {
   const invalidEntries = [
     { archiveSha256: "z".repeat(64) },

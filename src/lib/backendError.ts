@@ -80,6 +80,12 @@ const EXACT_ACTIONS: Record<string, BackendErrorActionKind> = {
 };
 
 const EXACT_SUMMARIES: Record<string, string> = {
+  VERSION_NOT_ENABLED: "versions.enableDescription",
+  VERSION_RESTORE_CONFLICT: "versions.conflict",
+  VERSION_RECORD_INVALID: "versions.invalidRecord",
+  VERSION_SIZE_LIMIT: "versions.sizeLimit",
+  VERSION_SCOPE_CHANGED: "versions.scopeChanged",
+  SOURCE_DELETE_VERSION_UNSUPPORTED: "versions.legacySource",
   AGENT_UNAVAILABLE: "backendError.summary.chat",
   IMPORT_V2_CAPABILITY_INVALID: "backendError.summary.importCapabilityInvalid",
   IMPORT_V2_CAPABILITY_UNAVAILABLE: "backendError.summary.importCapabilityUnavailable",

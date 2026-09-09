@@ -454,7 +454,7 @@ describe("Source reader and lifecycle boundaries", () => {
         guardToken: "guard",
       },
     });
-    invokeMock.mockResolvedValueOnce({
+    invokeMock.mockResolvedValueOnce({ enabled: true }).mockResolvedValueOnce({
       sourceId: "source-1",
       versionId: "version-1",
       wikiPath: "wiki/sources/local/访谈.md",
@@ -474,7 +474,7 @@ describe("Source reader and lifecycle boundaries", () => {
     expect(screen.getByText("version-1 · current")).toBeVisible();
     expect(screen.getAllByText("2.0 KB")).toHaveLength(2);
     fireEvent.click(
-      screen.getByRole("button", { name: "Permanently delete this Source" }),
+      screen.getByRole("button", { name: "Delete this Source" }),
     );
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith("delete_source", {

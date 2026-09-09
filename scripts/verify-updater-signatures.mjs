@@ -11,7 +11,7 @@ import {
 } from "./release-assets-contract.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
-const cargoManifest = path.join(repositoryRoot, "src-tauri", "Cargo.toml");
+const cargoManifest = path.join(repositoryRoot, "scripts", "updater-verifier", "Cargo.toml");
 
 const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 
@@ -61,7 +61,7 @@ export function verifyUpdaterSignatures({ root, updaterPublicKey, manifestPath, 
       : updaterPairsFromCandidate(root);
   const cargo = process.platform === "win32" ? "cargo.exe" : "cargo";
   const result = spawnSync(cargo, [
-    "run", "--quiet", "--locked", "--no-default-features",
+    "run", "--quiet", "--locked",
     "--manifest-path", cargoManifest,
     "--bin", "verify_update_signature", "--",
     updaterPublicKey.trim(), ...pairs,

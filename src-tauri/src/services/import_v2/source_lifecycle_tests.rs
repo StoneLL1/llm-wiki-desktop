@@ -1225,6 +1225,8 @@ fn package_delete_lists_and_removes_every_owned_artifact_but_keeps_references() 
     assert!(paths.contains(&fixture.child_path.as_str()));
     assert_eq!(preview.reference_count, 1);
     assert!(preview.expected_freed_bytes > 0);
+    let saved_bytes = preview.paths.iter().map(|entry| (entry.path.clone(), fs::read(fixture.root.join(&entry.path)).unwrap())).collect::<BTreeMap<_, _>>();
+    let saved_index = SourceRegistry::read_index(&fixture.context, &FileStore).unwrap();
     let result = service
         .delete_source(
             &fixture.context,
@@ -1253,6 +1255,37 @@ fn package_delete_lists_and_removes_every_owned_artifact_but_keeps_references() 
     let index = SourceRegistry::read_index(&fixture.context, &FileStore).unwrap();
     assert!(index.by_content_hash.is_empty());
     assert!(index.by_locator.is_empty());
+    let history = crate::services::VersionHistoryService.list(&fixture.context, None, 50).unwrap();
+    let operation_id = &history.operations[0].operation_id;
+    let record = crate::services::VersionHistoryService.load(&fixture.context, operation_id).unwrap();
+    let mut damaged = record.clone();
+    damaged.source_deletion.as_mut().unwrap().by_content_hash.clear();
+    damaged.source_deletion.as_mut().unwrap().by_locator.clear();
+    crate::services::VersionHistoryService.persist(&fixture.context, &damaged).unwrap();
+    assert!(ImportV2Service::preview_deleted_source_restore(&fixture.context, operation_id).is_err());
+    assert!(!fixture.root.join(&fixture.wiki_path).exists());
+    crate::services::VersionHistoryService.persist(&fixture.context, &record).unwrap();
+    let other = SourcePointer { source_id: uuid::Uuid::new_v4().to_string(), version_id: uuid::Uuid::new_v4().to_string() };
+    let mut newer_index = index;
+    newer_index.by_content_hash.insert("new-source-content".into(), other.clone());
+    let reserved_hash = saved_index.by_content_hash.keys().next().unwrap();
+    newer_index.by_content_hash.insert(reserved_hash.clone(), other.clone());
+    FileStore.write_json_atomic(&fixture.context, SOURCE_INDEX_PATH, &newer_index).unwrap();
+    assert!(ImportV2Service::preview_deleted_source_restore(&fixture.context, operation_id).unwrap().conflicts.contains(&SOURCE_INDEX_PATH.to_string()));
+    newer_index.by_content_hash.remove(reserved_hash);
+    FileStore.write_json_atomic(&fixture.context, SOURCE_INDEX_PATH, &newer_index).unwrap();
+    write(&fixture.root, &fixture.wiki_path, b"a newly created file at the same path");
+    assert!(ImportV2Service::preview_deleted_source_restore(&fixture.context, operation_id).unwrap().conflicts.contains(&fixture.wiki_path));
+    fs::remove_file(fixture.root.join(&fixture.wiki_path)).unwrap();
+    let restore_preview = ImportV2Service::preview_deleted_source_restore(&fixture.context, operation_id).unwrap();
+    assert!(restore_preview.conflicts.is_empty());
+    let expected = restore_preview.paths.iter().map(|path| (path.clone(), FileStore.file_hash_if_exists(&fixture.context, path).unwrap())).collect();
+    service.restore_deleted_source(&fixture.context, operation_id, &expected).unwrap();
+    for (path, bytes) in saved_bytes { assert_eq!(fs::read(fixture.root.join(path)).unwrap(), bytes); }
+    let restored_index = SourceRegistry::read_index(&fixture.context, &FileStore).unwrap();
+    assert_eq!(restored_index.by_content_hash.get("new-source-content"), Some(&other));
+    for (key, pointer) in saved_index.by_content_hash { assert_eq!(restored_index.by_content_hash.get(&key), Some(&pointer)); }
+    assert_eq!(restored_index.by_locator, saved_index.by_locator);
     fs::remove_dir_all(fixture.root).unwrap();
 }
 
@@ -1308,6 +1341,26 @@ fn package_delete_rolls_back_every_path_when_atomic_audit_install_fails() {
         index_before
     );
     assert!(fixture.root.join("wiki/concepts/引用.md").exists());
+    fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn package_delete_rejects_unrestorable_index_bindings_before_deleting_evidence() {
+    let fixture = package_fixture("delete-invalid-index");
+    GitService.initialize_repository(&fixture.context, "fixture baseline").unwrap();
+    let service = ImportV2Service::default();
+    let preview = service.preview_delete_source(&fixture.context, &FileStore, &PreviewDeleteSourceRequest {
+        project_id: fixture.context.project_id.clone(), project_root_path: fixture.root.to_string_lossy().into_owned(), source_id: fixture.source_id.clone(),
+    }).unwrap();
+    let mut index = SourceRegistry::read_index(&fixture.context, &FileStore).unwrap();
+    let pointer = index.by_content_hash.values().next().unwrap().clone();
+    index.by_content_hash.insert("inconsistent-historical-hash".into(), pointer);
+    FileStore.write_json_atomic(&fixture.context, SOURCE_INDEX_PATH, &index).unwrap();
+    assert!(service.delete_source(&fixture.context, &FileStore, &GitService, &DeleteSourceRequest {
+        project_id: fixture.context.project_id.clone(), project_root_path: fixture.root.to_string_lossy().into_owned(), source_id: fixture.source_id.clone(), guard_token: preview.guard_token, confirmation_text: DELETE_CONFIRMATION_TEXT.into(),
+    }).is_err());
+    assert!(preview.paths.iter().all(|entry| fixture.root.join(&entry.path).is_file()));
+    assert!(crate::services::VersionHistoryService.list(&fixture.context, None, 50).unwrap().operations.is_empty());
     fs::remove_dir_all(fixture.root).unwrap();
 }
 

@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { AlertTriangle } from "lucide-react";
 
 import { useModalDialog } from "../../hooks/useModalDialog";
+import { VersionProtectedAction } from "../../components/app/VersionProtectedAction";
 import type { WikiSaveConflict } from "./wikiStore";
 
 interface ConflictDiffDialogProps {
@@ -66,20 +67,20 @@ export function ConflictDiffDialog({
           ) : null}
         </div>
 
-        <footer className="flex min-h-[52px] items-center justify-end gap-2 border-t border-[var(--border)] px-4">
+        <footer className="flex min-h-[52px] flex-wrap items-center justify-end gap-2 border-t border-[var(--border)] px-4 py-3">
           <button type="button" onClick={onCancel} className="h-[28px] rounded-[var(--radius-md)] border border-[var(--border)] px-3 text-[12px]">
             {t("confirmation.cancel")}
           </button>
           <button type="button" onClick={onKeepCurrent} className="h-[28px] rounded-[var(--radius-md)] border border-[var(--border)] px-3 text-[12px]">
             {t("wiki.conflict.keepCurrent")}
           </button>
-          <button type="button" onClick={onUseIncoming} className="h-[28px] rounded-[var(--radius-md)] border border-[var(--border)] px-3 text-[12px]">
+          <VersionProtectedAction onConfirm={onUseIncoming} className="h-[28px] rounded-[var(--radius-md)] border border-[var(--border)] px-3 text-[12px]">
             {t("wiki.conflict.useIncoming")}
-          </button>
+          </VersionProtectedAction>
           {manual ? (
-            <button type="button" onClick={() => onManualMerge(merged)} className="h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)]">
+            <VersionProtectedAction onConfirm={() => onManualMerge(merged)} className="h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--surface)]">
               {t("wiki.conflict.applyManual")}
-            </button>
+            </VersionProtectedAction>
           ) : (
             <button type="button" onClick={() => setManual(true)} className="h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)]">
               {t("wiki.conflict.manualMerge")}

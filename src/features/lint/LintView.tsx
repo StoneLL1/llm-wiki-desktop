@@ -1,4 +1,5 @@
-import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AlertCircle, History, EyeOff, Search, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ResizableSplitter } from "../../components/app/ResizableSplitter";
@@ -14,12 +15,14 @@ import type { LintIssue, LintIssueType } from "../../types/lint";
 import { AgentLintRepairPanel } from "./AgentLintRepairPanel";
 import { LintBatchConfirmDialog } from "./LintBatchConfirmDialog";
 import { HealthCheckReportSummary } from "./HealthCheckReportSummary";
-import { LintHistoryList } from "./LintHistoryList";
+import { LintManagementPanel } from "./LintManagementPanel";
 import { LintIssueDetails } from "./LintIssueDetails";
 import { LintIssueList } from "./LintIssueList";
 import { LintPassedSection } from "./LintPassedSection";
 import { LintSummaryCards } from "./LintSummaryCards";
 import { LintTaskStatus } from "./LintTaskStatus";
+import { LintGitNotice } from "./LintGitNotice";
+import { useLintGitPreflight } from "./useLintGitPreflight";
 
 /** Local deterministic rules that earn a "passed" badge when absent. */
 const PASSED_RULES: LintIssueType[] = [
@@ -47,6 +50,8 @@ export function LintView() {
   const fixStatus = useLintStore((state) => state.fixStatus);
   const fixConfirm = useLintStore((state) => state.fixConfirm);
   const error = useLintStore((state) => state.error);
+  const errorCode = useLintStore((state) => state.errorCode);
+  const errorDetails = useLintStore((state) => state.errorDetails);
   const mode = useLintStore((state) => state.mode);
   const batchRunning = useLintStore((state) => state.batchRunning);
   const fixApplying = useLintStore((state) =>
@@ -87,6 +92,16 @@ export function LintView() {
 
 
   const { projectId, rootPath } = currentProject;
+  const gitPreflight = useLintGitPreflight(projectId, rootPath);
+  const resumeIntent = useRef<{ scope: ReturnType<typeof captureProjectScope>; issue?: LintIssue } | null>(null);
+  const [lastOperation, setLastOperation] = useState<{ projectKey: string; id: string } | null>(null);
+  const onGitConfigured = useCallback(() => {
+    gitPreflight.clearError();
+    const state = useLintStore.getState();
+    if (/^(GIT_|VERSION_)/.test(state.errorCode ?? "")) useLintStore.setState({ error: null, errorCode: null, errorDetails: null });
+  }, [gitPreflight.clearError]);
+  const gitError = gitPreflight.error ?? (error && /^(GIT_|VERSION_)/.test(errorCode ?? "") ? { code: errorCode, message: error, details: errorDetails } : null);
+  useEffect(() => { resumeIntent.current = null; }, [projectId, rootPath]);
   const layoutRef = useRef<HTMLDivElement>(null);
   const issueListScrollRef = useRouteScrollRestoration(projectId, rootPath, "lint:issues");
   const authorityIdentity = authority?.projectId === projectId
@@ -107,9 +122,44 @@ export function LintView() {
     if (mode === "agent") return deepIssues;
     return allIssues;
   }, [mode, localIssues, deepIssues, allIssues]);
-  const selectedIssue = selectedIssueId
-    ? allIssues.find((issue) => issue.id === selectedIssueId) ?? null
-    : null;
+  const [query, setQuery] = useState("");
+  const filteredIssues = useMemo(() => {
+    const needle = query.trim().toLocaleLowerCase();
+    return needle ? modeIssues.filter((issue) =>
+      [issue.path, issue.target, issue.message, t(`lint.issueType.${issue.issueType}`)]
+        .some((value) => value?.toLocaleLowerCase().includes(needle))) : modeIssues;
+  }, [modeIssues, query, t]);
+  const selectedIssue = fixConfirm?.issue ?? (selectedIssueId
+    ? filteredIssues.find((issue) => issue.id === selectedIssueId) ?? null
+    : null);
+  const hasReport = Boolean(localReport || healthReport || deepReport);
+  const projectKey = `${projectId}\0${rootPath}`;
+  const [management, setManagement] = useState<{ projectKey: string; view: "history" | "ignores" } | null>(null);
+  const managementView = !fixConfirm && management?.projectKey === projectKey ? management.view : null;
+  const managementEpoch = useRef(0);
+  const historyButtonRef = useRef<HTMLButtonElement>(null);
+  const ignoresButtonRef = useRef<HTMLButtonElement>(null);
+  const openManagement = (view: "history" | "ignores") => {
+    managementEpoch.current += 1;
+    setManagement({ projectKey, view });
+  };
+  const closeManagement = () => {
+    managementEpoch.current += 1;
+    setManagement(null);
+    selectIssue(null);
+    const trigger = managementView === "history" ? historyButtonRef : ignoresButtonRef;
+    requestAnimationFrame(() => trigger.current?.focus());
+  };
+  const handleOpenReport = async (id: string) => {
+    const scope = captureProjectScope();
+    const epoch = managementEpoch.current;
+    const isCurrent = () => isProjectScopeCurrent(scope) && epoch === managementEpoch.current;
+    const report = await openHistoryReport({ projectId, projectRootPath: rootPath, id }, isCurrent);
+    if (report && isCurrent()) {
+      setQuery("");
+      closeManagement();
+    }
+  };
   const eligibleAgentFindings = useMemo(
     () => !localReport ? healthReport?.issues.filter((issue) => isAgentLintRepairEligible(issue, healthReport)) ?? [] : [],
     [healthReport, localReport],
@@ -121,31 +171,52 @@ export function LintView() {
   const repairSelectionSet = useMemo(() => new Set(agentRepairSelection), [agentRepairSelection]);
 
   const localOperationPending = loadingLocal || batchRunning || fixApplying;
-  const actionsDisabled = localOperationPending || hasPendingBatchConfirmations || Boolean(fixConfirm)
+  const actionsDisabled = localOperationPending || gitPreflight.checking || hasPendingBatchConfirmations || Boolean(fixConfirm)
     || agentRepairPending || Boolean(agentRepairPreparation);
 
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [ignoringId, setIgnoringId] = useState<string | null>(null);
   const [removingIgnoreKey, setRemovingIgnoreKey] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  useEffect(() => { setQuery(""); }, [projectId, rootPath]);
+  const selectFinding = (id: string) => {
+    if (!fixConfirm) {
+      managementEpoch.current += 1;
+      setManagement(null);
+      selectIssue(id);
+    }
+  };
+  const closeDetails = () => {
+    selectIssue(null);
+    // Restore keyboard focus to the row that opened the compact details pane.
+    requestAnimationFrame(() => {
+      const rows = layoutRef.current?.querySelectorAll<HTMLButtonElement>("[data-lint-issue-id]");
+      const row = Array.from(rows ?? []).find((entry) => entry.dataset.lintIssueId === selectedIssueId);
+      (row ?? layoutRef.current?.querySelector<HTMLInputElement>("input[type=search]"))?.focus();
+    });
+  };
 
   const autoFixable = useMemo(
-    () => modeIssues.filter((issue) => issue.fixability !== "none" && issue.scanHash),
-    [modeIssues],
+    () => filteredIssues.filter((issue) => issue.fixability !== "none" && issue.scanHash),
+    [filteredIssues],
   );
 
   const presentRules = useMemo(
-    () => new Set(localIssues.map((issue) => issue.issueType)),
-    [localIssues],
+    () => new Set((localReport?.issues ?? healthReport?.issues ?? [])
+      .map((issue) => issue.issueType)),
+    [localReport, healthReport],
   );
   const passedRules = useMemo(() => {
+    if (!localReport && !healthReport) return [];
+    if ((localReport?.scannedPages ?? healthReport?.coverage.scannedPages ?? 0) === 0) return [];
     const notApplicable = new Set(
       healthReport?.coverage.notApplicableRules as LintIssueType[] | undefined,
     );
+    const ignoredRules = new Set(ignores.map((entry) => entry.rule));
     return PASSED_RULES.filter(
-      (rule) => !presentRules.has(rule) && !notApplicable.has(rule),
+      (rule) => !presentRules.has(rule) && !notApplicable.has(rule) && !ignoredRules.has(rule),
     );
-  }, [presentRules, healthReport]);
+  }, [presentRules, healthReport, localReport, ignores]);
 
   // Load ignored-issue entries + the persisted deep-lint report when the
   // background task lands.
@@ -239,16 +310,27 @@ export function LintView() {
   };
 
   const handleApplyFix = async (issue: LintIssue) => {
+    resumeIntent.current = { scope: captureProjectScope(), issue };
+    if (!await gitPreflight.check()) return;
+    resumeIntent.current = null;
+    const scope = captureProjectScope();
     // Fixes must use the immutable scan snapshot. Reading the live page here
     // would silently replace the report baseline after an external edit.
     const expectedHash = issue.fixability === "safe" ? issue.scanHash ?? null : null;
     const outcome = await applyFix(projectId, rootPath, issue, expectedHash);
-    if (outcome?.kind === "applied") refreshAfterFix(true);
+    if (outcome?.kind === "applied" && isProjectScopeCurrent(scope)) {
+      if (outcome.operationId) setLastOperation({ projectKey: `${projectId}\0${rootPath}`, id: outcome.operationId });
+      refreshAfterFix(true);
+    }
   };
 
   const handleConfirmHighRisk = (expectedHash: string) => {
+    const scope = captureProjectScope();
     void confirmHighRisk(projectId, rootPath, expectedHash).then((outcome) => {
-      if (outcome?.kind === "applied") refreshAfterFix(true);
+      if (outcome?.kind === "applied" && isProjectScopeCurrent(scope)) {
+      if (outcome.operationId) setLastOperation({ projectKey: `${projectId}\0${rootPath}`, id: outcome.operationId });
+      refreshAfterFix(true);
+    }
     });
   };
 
@@ -312,12 +394,12 @@ export function LintView() {
     })
       .then((outcome) => {
         if (!outcome || !isProjectScopeCurrent(scope)) return;
+        if (outcome.operationId) setLastOperation({ projectKey: `${projectId}\0${rootPath}`, id: outcome.operationId });
         const parts: string[] = [];
         if (outcome.applied.length > 0) {
           parts.push(
             t("lint.batch.applied", {
               count: outcome.applied.length,
-              hash: outcome.finalCommit ?? outcome.checkpoint ?? "—",
             }),
           );
         }
@@ -340,6 +422,7 @@ export function LintView() {
     <button
       type="button"
       aria-pressed={mode === key}
+      disabled={confirmOpen || Boolean(fixConfirm)}
       className={mode === key ? "is-active" : ""}
       onClick={() => {
         setNotice(null);
@@ -351,14 +434,56 @@ export function LintView() {
   );
 
   return (
-    <div ref={layoutRef} className="lint-view-layout" style={layoutStyle}>
-      <div className="lint-view__list-pane">
-        <div className="view-toolbar border-b border-[var(--border)] px-4">
-          <div className="seg" role="group" aria-label={t("view.lint.paneTitle")}>
-            {segButton("all", t("lint.mode.all"), allIssues.length)}
-            {segButton("local", t("lint.mode.local"), localIssues.length)}
-            {segButton("agent", t("lint.mode.agent"), deepIssues.length)}
+    <div ref={layoutRef} className={`lint-view-layout ${selectedIssue || managementView ? "has-selection" : ""}`} style={layoutStyle}>
+      <div className="lint-feedback">
+        {notice ? (
+          <div className="border-b border-[var(--accent-border)] bg-[var(--accent-soft)] px-4 py-2 text-[12px] text-[var(--accent-hover)]">
+            {notice}
           </div>
+        ) : null}
+        {lastOperation?.projectKey === `${projectId}\0${rootPath}` ? (
+          <div className="border-b border-[var(--border)] px-4 py-2">
+            <button type="button" className="btn btn--ghost btn--sm" onClick={() => useNavigationStore.getState().openVersionHistory(lastOperation.id)}>{t("versions.viewChanges")}</button>
+          </div>
+        ) : null}
+        {gitError ? (
+          <LintGitNotice
+            error={gitError}
+            checking={gitPreflight.checking}
+            onConfigure={() => {
+              const intent = resumeIntent.current;
+              void gitPreflight.enable().then((ready) => {
+                if (!ready) return;
+                onGitConfigured();
+                if (!intent || !isProjectScopeCurrent(intent.scope)) return;
+                resumeIntent.current = null;
+                if (intent.issue) void handleApplyFix(intent.issue);
+                else setConfirmOpen(true);
+              });
+            }}
+            onRefresh={() => {
+              void gitPreflight.check().then((ready) => { if (ready) onGitConfigured(); });
+            }}
+          />
+        ) : error ? (
+          <div className="flex items-center justify-between gap-3 border-b border-[var(--border-subtle)] bg-[var(--warning-soft)] px-4 py-2 text-[12px] text-[var(--text-primary)]">
+            <span>{error}</span>
+            <button
+              type="button"
+              className="btn btn--secondary btn--sm"
+              onClick={() => {
+                void ensureIgnores({ projectId, projectRootPath: rootPath });
+                void runLocalLint(projectId, rootPath, { preserveBatchConfirmations: hasPendingBatchConfirmations });
+              }}
+            >
+              {t("lint.git.refreshReport")}
+            </button>
+          </div>
+        ) : null}
+
+      </div>
+      <div className="lint-view__list-pane">
+        <div className="view-toolbar lint-toolbar border-b border-[var(--border)] px-4">
           <button
             type="button"
             onClick={handleRunLocal}
@@ -377,34 +502,20 @@ export function LintView() {
           </button>
           <button
             type="button"
-            onClick={() => setConfirmOpen(true)}
+            onClick={() => {
+              resumeIntent.current = { scope: captureProjectScope() };
+              void gitPreflight.check().then((ready) => { if (ready) { resumeIntent.current = null; setConfirmOpen(true); } });
+            }}
             disabled={autoFixable.length === 0 || actionsDisabled}
-            className="ml-auto h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--primary-hover)] disabled:opacity-40"
+            className="ml-auto h-[28px] rounded-[var(--radius-md)] lint-primary bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--primary-hover)] disabled:opacity-40"
           >
-            {batchRunning ? "…" : t("lint.actions.autoFix", { count: autoFixable.length })}
+            {gitPreflight.checking ? t("lint.git.checking") : batchRunning ? "…" : t("lint.actions.autoFix", { count: autoFixable.length })}
           </button>
         </div>
 
         <LintTaskStatus key={`${projectId}\0${rootPath}\0${authorityIdentity}`} />
 
-        {notice ? (
-          <div className="border-b border-[var(--accent-border)] bg-[var(--accent-soft)] px-4 py-2 text-[12px] text-[var(--accent-hover)]">
-            {notice}
-          </div>
-        ) : null}
-        {error ? (
-          <div className="flex items-center justify-between gap-3 border-b border-[var(--border-subtle)] bg-[var(--warning-soft)] px-4 py-2 text-[12px] text-[var(--text-primary)]">
-            <span>{error}</span>
-            <button
-              type="button"
-              className="btn btn--secondary btn--sm"
-              onClick={() => void ensureIgnores({ projectId, projectRootPath: rootPath })}
-            >
-              {t("workflows.action.retry")}
-            </button>
-          </div>
-        ) : null}
-
+        <div className="lint-context">
         {healthReport ? <HealthCheckReportSummary report={healthReport} /> : null}
 
         <AgentLintRepairPanel
@@ -424,68 +535,59 @@ export function LintView() {
           onCancel={() => void cancelAgentLintRepairPreparation()}
         />
 
-        <LintHistoryList
-          entries={history}
-          activeId={activeHistoryId}
-          loading={historyLoading}
-          error={historyError}
-          onOpen={(id) =>
-            void openHistoryReport({ projectId, projectRootPath: rootPath, id })
-          }
-          onRetry={() => void ensureHistory({ projectId, projectRootPath: rootPath })}
-        />
 
-        {ignores.length > 0 ? (
-          <section className="border-b border-[var(--border)] px-4 py-3" aria-label={t("lint.ignores.title")}>
-            <div className="mb-2 flex items-center justify-between">
-              <span className="text-[10.5px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)]">
-                {t("lint.ignores.title")}
-              </span>
-              <span className="font-mono text-[11px] text-[var(--text-muted)]">{ignores.length}</span>
-            </div>
-            <div className="space-y-1">
-              {ignores.map((entry) => {
-                const key = `${entry.path}:${entry.rule}`;
-                return (
-                  <div key={key} className="flex items-center gap-2 rounded-[var(--radius-sm)] border border-[var(--border-subtle)] bg-[var(--surface-raised)] px-2 py-1.5">
-                    <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--text-secondary)]" title={entry.path}>
-                      {entry.path}
-                    </span>
-                    <span className="shrink-0 text-[11px] text-[var(--text-muted)]">
-                      {t(`lint.issueType.${entry.rule}`)}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveIgnore(entry.path, entry.rule)}
-                      disabled={removingIgnoreKey === key || actionsDisabled}
-                      className="shrink-0 rounded-[var(--radius-sm)] border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)] disabled:opacity-40"
-                    >
-                      {removingIgnoreKey === key ? t("lint.ignores.restoring") : t("lint.ignores.restore")}
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-        ) : null}
+        </div>
 
-        {localReport || healthReport ? (
+        {hasReport ? (
           <LintSummaryCards issues={modeIssues} passedCount={passedRules.length} />
         ) : null}
 
+        {hasReport ? <div className="lint-filters">
+          <div className="seg" role="group" aria-label={t("view.lint.paneTitle")}>
+            {segButton("all", t("lint.mode.all"), allIssues.length)}
+            {segButton("local", t("lint.mode.local"), localIssues.length)}
+            {segButton("agent", t("lint.mode.agent"), deepIssues.length)}
+          </div>
+          <div className="lint-search">
+            <Search size={14} aria-hidden="true" />
+            <input type="search" disabled={confirmOpen || Boolean(fixConfirm)} value={query} onChange={(event) => setQuery(event.target.value)}
+              aria-label={t("lint.search")} placeholder={t("lint.search")} />
+            {query ? <button type="button" disabled={confirmOpen || Boolean(fixConfirm)} onClick={() => setQuery("")} aria-label={t("lint.search.clear")} title={t("lint.search.clear")}><X size={13} aria-hidden="true" /></button> : null}
+          </div>
+        </div> : null}
+
         <LintIssueList
           scrollRef={issueListScrollRef}
-          issues={modeIssues}
+          issues={filteredIssues}
+          selectionDisabled={Boolean(fixConfirm)}
+          emptyMessage={t(loadingLocal || historyLoading && !hasReport ? "lint.empty.loading" : !hasReport ? "lint.empty.initial" : query.trim() || mode !== "all" ? "lint.empty.filtered" : "lint.empty.clean")}
           selectedIssueId={selectedIssueId}
           actionsDisabled={actionsDisabled}
-          onSelect={selectIssue}
+          onSelect={selectFinding}
           onApplyFix={handleApplyFix}
           repairSelection={repairSelectionSet}
           repairEligibleIds={eligibleAgentFindingIds}
           onToggleRepairSelection={handleToggleRepairSelection}
         />
 
-        {localReport || healthReport ? <LintPassedSection passedRules={passedRules} /> : null}
+        <footer className="lint-footer">
+          {localReport || healthReport ? <LintPassedSection passedRules={passedRules} /> : null}
+          <div className="lint-footer__tools">
+            <button ref={historyButtonRef} type="button" className="btn btn--ghost btn--sm"
+              aria-pressed={managementView === "history"} aria-label={t("lint.history.title")}
+              disabled={Boolean(fixConfirm) || confirmOpen} onClick={() => openManagement("history")}>
+              {historyError ? <AlertCircle size={14} className="text-[var(--danger-text)]" aria-hidden="true" /> : <History size={14} aria-hidden="true" />}
+              {t("lint.history.title")}
+              {historyError ? <span>{t("lint.history.failed")}</span> : null}
+            </button>
+            <button ref={ignoresButtonRef} type="button" className="btn btn--ghost btn--sm"
+              aria-pressed={managementView === "ignores"} aria-label={t("lint.ignores.title")}
+              disabled={Boolean(fixConfirm) || confirmOpen} onClick={() => openManagement("ignores")}>
+              <EyeOff size={14} aria-hidden="true" />{t("lint.ignores.title")}
+              {ignores.length > 0 ? <span>{ignores.length}</span> : null}
+            </button>
+          </div>
+        </footer>
 
         {batchConfirmations.length > 0 ? (
           <div className="flex flex-wrap items-center gap-2 border-t border-[var(--border)] bg-[var(--warning-soft)] px-4 py-2 text-[12px]">
@@ -512,18 +614,27 @@ export function LintView() {
         min={PANE_WIDTH_LIMITS.lintDetails.min}
         max={PANE_WIDTH_LIMITS.lintDetails.max}
         value={lintDetailsWidth}
+        direction={-1}
         previewTargetRef={layoutRef}
         previewCssVariable="--lint-details-w-current"
         onCommit={(value) => setPaneSize("lintDetails", value)}
         onReset={() => resetPaneSize("lintDetails")}
       />
 
-      <LintIssueDetails
+      {managementView ? (
+        <LintManagementPanel key={`${projectKey}:${managementView}`} view={managementView}
+          history={history} activeHistoryId={activeHistoryId} historyLoading={historyLoading}
+          historyError={historyError} ignores={ignores} removingIgnoreKey={removingIgnoreKey}
+          disabled={actionsDisabled || confirmOpen} onOpenReport={handleOpenReport}
+          onRetryHistory={() => void ensureHistory({ projectId, projectRootPath: rootPath })}
+          onRestore={handleRemoveIgnore} onClose={closeManagement} />
+      ) : <LintIssueDetails
+        onBack={fixConfirm ? undefined : closeDetails}
         issue={selectedIssue}
         fixStatus={selectedIssue ? fixStatus[selectedIssue.id] ?? "idle" : "idle"}
         fixConfirm={fixConfirm}
         ignoring={selectedIssue ? ignoringId === selectedIssue.id : false}
-        actionsDisabled={localOperationPending || agentRepairPending || Boolean(agentRepairPreparation)
+        actionsDisabled={localOperationPending || gitPreflight.checking || agentRepairPending || Boolean(agentRepairPreparation)
           || (hasPendingBatchConfirmations && !fixConfirm)}
         safetyPrefs={safetyPrefs}
         onSafetyPrefsChange={setSafetyPrefs}
@@ -531,7 +642,7 @@ export function LintView() {
         onConfirmHighRisk={handleConfirmHighRisk}
         onCancelHighRisk={cancelHighRisk}
         onIgnore={handleIgnore}
-      />
+      />}
 
       {confirmOpen ? (
         <LintBatchConfirmDialog

@@ -1,7 +1,7 @@
 # LLM Wiki Desktop 技术栈与架构边界
 
 > Import V2 的产品与跨层技术不变量见 [`../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md)。本文描述技术边界；任何实现建议不得恢复“导入后自动编译”、URL 不写 Source 或 OCR / ASR 后移到编译阶段的旧行为。
-> 全量门禁先运行只读 `check:import-source-media`，验证证据 ID、可执行测试声明、被测试实际消费的真实夹具、禁止项和设置专属迁移入口，再运行前后端测试、构建与静态检查。
+> 日常检查使用 `check:quick`，完整源码检查使用 `check`；发布配置与历史 Import/Source 验收证据分开运行，分别为 `check:release-config` 与 `check:acceptance`。
 > Workflows 的产品行为与跨层契约见 [`../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md`](../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md)。Agent CLI、BYOK 和本地规则继续作为后端执行能力，但不得再把配置型 Agent 页面作为目标信息架构。
 > 无项目工作台、新建知识库、typed 项目打开评估、受限 / 信任 / 只读、兼容启用、修复和深度扫描的跨层合同见 [`../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md`](../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md)。该管线已迁入持续挂载的 `AppShell`；普通资料目录只允许“新建知识库并导入”，不会原地初始化、重排或隐式初始化 Git。
 
@@ -126,7 +126,7 @@ IPC 层负责把前端意图转成后端服务调用。
 - Import commands：文件 / 文本 / URL 预览、URL 抓取与校验、来源目录、删除 / 替换请求、确认导入和提取文本预览。
 - Wiki commands：扫描、读取、保存、创建、重命名、删除请求和书签切换。
 - Search commands：legacy command 名 `search_wiki` 提供 layout-readable Source/Wiki Markdown 的本地关键词 / 过滤搜索，不调用模型。
-- Git commands：状态、仓库初始化、检查点和 Markdown diff；当前未注册通用提交或恢复 command。
+- Git commands：状态、仓库初始化、检查点和 Markdown diff；版本历史通过专用 typed IPC 查询、预览、确认恢复，不暴露任意 Git reset/commit。
 - Agent commands：检测 CLI、读取 Agent 配置和设置默认 Agent；任务取消与日志归 `Task commands`，当前 Agent command 不直接启动任务。
 - LLM commands：Provider 列表 / 保存、密钥保存 / 删除 / 状态、Ollama 可达性和 Provider 测试；当前未注册通用 BYOK 执行 command。
 - Chat commands：会话创建 / 列表 / 加载 / 重命名 / 删除、发送消息、保存回答和便捷写入的确认 / 回滚。
@@ -283,6 +283,8 @@ OCR 和 ASR 属于导入层的显式用户授权能力。图片视觉理解不�
 - 原始资料替换或删除。
 
 新建原生知识库自动初始化本地 Git。评估或打开外部知识库绝不自动初始化、`git add`、提交或 stash；只有用户在兼容启用确认页选择后才初始化。用户拒绝 Git 时，阅读、搜索和 Chat 可继续，但所有需要 checkpoint 的写入能力禁用。已有 dirty worktree 不自动处理，只有用户明确授权时才把当前全部变更作为检查点。
+
+新格式版本保护也可在已有知识库的首次修改确认中显式启用。`VersionHistoryService` 复用 GitService 私有快照，按操作保存 durable intent、前后哈希和恢复关联。列表首屏 50 条、最多 100 条，读取轻量摘要；正文和 Diff 按选中文件读取。单次捕获上限 64 MiB / 10,000 路径，文本预览上限 256 KiB，超限在受保护写入前拒绝。设置查询及冲突处理/重命名 IPC 在 HeavyIo worker 执行。旧消费者不因该门面存在而放宽 HEAD/clean 限制；Git 随包交付仍待平台验收。
 
 ## 13. AgentService
 
@@ -578,7 +580,7 @@ Agent 生成内容时，应根据用户语言偏好输出对应语言。
 
 应用更新使用 pinned `tauri-plugin-updater` v2.9.0 vendor patch：除 upstream API 外，当前 patch 强制 transport-level manifest size limit，并在 Windows 检查 `ShellExecuteW` launch result。升级 vendor 时必须证明两个边界等价并保留 root integration contracts。
 
-发布技术合同由 `.github/workflows/desktop-release.yml` 和 `release/release-contract.json` 固定：精确 Node/Rust、`npm ci`、Cargo `--locked`、actions SHA pin、同 tag/commit/run 的 4×5 capability catalog 与四 target desktop artifacts、强制 updater signature 与明确的 OS vendor identity policy evidence、checksums、SBOM、provenance/attestation、packaged smoke、draft reverse verification，以及 protected final publisher。初始发布不要求 Windows Authenticode 或 Apple Developer ID/notarization，相关平台警告必须如实披露；只有最终 job 可请求 `contents: write`，publish-through-anonymous-verification 使用 guarded `EXIT/INT/TERM` rollback，硬 runner/GitHub control-plane loss仍需 release owner incident response。
+发布流程由 `.github/workflows/desktop-release.yml` 编排，操作说明见 `docs/release/release-runbook.md`：CI 负责源码测试，发布负责同 tag/commit 的 capability catalog、四 target desktop artifacts、updater/capability 签名、checksums、SBOM/attestation 和 packaged smoke。最终 publisher 在一个 job 校验本地制品与 GitHub 上传摘要后公开 draft；网络探测异常只告警，不自动删除 Release。两个 release environment 保留 tag/branch 限制与 secrets，不再要求唯一维护者逐阶段自我审批；只有最终 stable job 请求 `contents: write`。初始发布不要求 Windows Authenticode 或 Apple Developer ID/notarization，相关平台警告必须如实披露。
 
 本地 fixture、jsdom、`cargo check` 或 unsigned artifact 不代表真实签名安装、升级、公证或匿名 endpoint。当前 Batch 6 Public beta No-Go 与外部 Pending 见 `docs/release/batch-6-acceptance-evidence.md`。
 

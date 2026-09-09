@@ -1,149 +1,58 @@
 # AGENTS.md
 
-## Project Brief
+## Project Overview
 
-LLM Wiki Desktop is a local-first, cross-platform Tauri v2 desktop app for turning personal sources into a Markdown wiki with graph, chat, project-scoped Workflows, lint, and HTML export capabilities.
+LLM Wiki Desktop is a local-first Tauri v2 app that turns personal sources into a Markdown wiki with graph, chat, Workflows, lint, and HTML export. The main stack is React + TypeScript + Tailwind, with thin typed Tauri commands calling Rust services.
 
-Before implementation, read the relevant docs:
+Within platform instructions and permissions, follow the user's current request and existing authorization. Complete scoped work with proportionate verification; ask only about material unresolved choices. Preserve unrelated edits. Routine repository code/document edits do not require additional confirmation or a Git checkpoint. This file owns repository check/review policy; `CLAUDE.md` is a compatibility entrypoint and Skills supply task-specific methods.
 
-- Product and scope: `SPEC/PRD.md`, `SPEC/SPEC.md`
-- App flows: `SPEC/APP_flow.md`
-- Tech and architecture: `SPEC/TECH_STACK.md`, `SPEC/BACKEND_STRUCTURE.md`
-- Frontend style: `SPEC/FRONTEND_GUIDELINES.md`, `SPEC/DESIGN.md`
+## Core Boundaries
 
-## Hard Rules
+The following govern application behavior and real knowledge-base data, not extra approval steps for repository development:
 
-- Project content stays as Markdown + JSON + local files. Do not introduce a database for user wiki content.
-- For a new native knowledge base, use the project folder as the source of truth: `raw/`, `wiki/`, `.app/`, `exports/`, `skills/`. Compatible vaults keep their existing Markdown layout; app-owned guidance lives only under `.app/compat/`.
-- Keep `raw/sources/` immutable by default. Replacing or deleting original sources requires explicit confirmation.
-- API keys and tokens must use OS credential storage. Never write secrets to project files, logs, or exported artifacts.
-- Checkpoint-required file operations need Git checkpoints first: delete, overwrite, batch rewrite, workflow/Agent auto-fix, conflict merge, source replacement. Update Wiki manages private operation refs and a temporary index automatically, including recovery of interrupted writes; it does not require a clean worktree or change the user’s HEAD/index.
-- Search is local keyword/filter search only. Natural-language answers must enter Chat or an explicit product workflow; Agent / BYOK is the execution route, not the navigation model.
-- Agent CLI is an enhancement, not the only path. After a readable Source exists, BYOK API must support core AI organization, Update Wiki, and Chat flows; it is not an Import parser or recovery route.
-- Do not silently install or run Agent install commands.
-- Long tasks must be cancellable, logged, progress-visible, and safe to run in the background.
-- React UI must not own filesystem, Git, Agent process, or secret-storage logic. Use Tauri IPC and backend services.
-- A canonical path registered in `ProjectRegistry` is not user trust. External AI/Agent/Skill execution requires a trusted project; mutations require writable access, and commands must revalidate access and any required Git policy in the backend.
+- **Local files:** User content stays Markdown + JSON + local files, with no content database. Native projects use `raw/`, `wiki/`, `.app/`, `exports/`, and `skills/`; compatible vaults retain their Markdown layout, with app guidance only under `.app/compat/`. Never initialize or reorganize an ordinary materials folder in place.
+- **Data safety:** Preserve original `raw/sources/` and external Markdown edits. Source replacement/deletion, compatibility enablement, repair writes, destructive edits, conflict merges, and high-risk generated changes require explicit user confirmation. Checkpoint-required operations (delete, overwrite, batch rewrite, workflow/Agent auto-fix, conflict merge, source replacement) need a Git checkpoint first. Update Wiki manages private operation refs and a temporary index automatically, including recovery of interrupted writes; it does not require a clean worktree or change the user’s HEAD/index. Low-risk conflict-free generated changes may apply after the required checkpoint. Show affected paths, changes, and checkpoint status.
+- **Secrets and access:** Store keys/tokens only in OS credentials, never project files, logs, or exports. Backend commands revalidate project trust, writable access, paths, and required Git policy. Registry membership is not trust; external AI/Agent/Skill execution requires trust.
+- **Product flow:** Search is local keyword/filter search. Natural-language answers enter Chat or an explicit workflow. Import produces a readable Source; Wiki compilation is a separate explicit flow. Agent/BYOK are execution routes, not navigation models. BYOK supports core AI organization, Update Wiki, and Chat after Source creation; it is not an Import parser or recovery route. Do not silently switch routes or install Agents.
+- **Ownership and tasks:** Filesystem, Git, Agent processes, and secrets belong in Rust services behind typed IPC, not React. Long application tasks must be cancellable, observable, logged, and safe in the background.
+- **Validation data:** Test on disposable copies of [sample knowledge bases](docs/testing/sample-knowledge-base.md), never in place. For path-related changes, cover relevant CJK/Unicode, OS path styles, and case-sensitivity behavior.
 
-## Tech Direction
+## Documentation and Design
 
-- Frontend: React 19 + TypeScript + Vite, Tailwind CSS v4, shadcn/ui, Lucide React, Zustand, react-i18next.
-- Desktop/backend: Tauri v2 + Rust services.
-- Editor: Milkdown / ProseMirror WYSIWYG.
-- Graph: sigma.js + graphology + ForceAtlas2 + Louvain-style community detection.
-- Markdown rendering: remark-gfm, remark-math, rehype-katex, rehype-highlight.
-- URL extraction: Readability.js.
-- Backend shape: thin Tauri commands -> typed DTOs -> services -> local files / Git / Agent / LLM / OS secrets.
-- Use structured data and typed interfaces. Avoid ad hoc string protocols.
+Read only the relevant sections. The feature authorities below take precedence over general specs, legacy HTML behavior, and historical plans; implementation drift does not change product decisions.
 
-## Frontend Style
+| Topic | Source |
+| --- | --- |
+| Product and scope | [PRD](SPEC/PRD.md), [Specification](SPEC/SPEC.md) |
+| General app flows | [App flow](SPEC/APP_flow.md) |
+| Architecture and technology | [Tech stack](SPEC/TECH_STACK.md), [Backend structure](SPEC/BACKEND_STRUCTURE.md) |
+| Frontend implementation and visual details | [Frontend guidelines](SPEC/FRONTEND_GUIDELINES.md); [Design](SPEC/DESIGN.md) supplies visual tone |
+| Import / Source authority | [Import and Source design](docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md) |
+| First-run / project-open authority | [Project-open workbench design](docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md) |
+| Workflows authority | [Workflows panel design](docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md) |
 
-Build the app to look and feel very close to Codex desktop:
+Keep the compact Codex-like desktop shell, quiet near-monochrome palette, dense panes/lists/toolbars, Lucide controls, and Chinese/English fit. Use the frontend guidelines for typography, dimensions, fonts, icons, and interactions; components use `src/styles.css` tokens rather than hardcoded values.
 
-- Compact desktop shell, left sidebar, central work surface, right context panel, bottom status area.
-- Quiet near-monochrome palette: white, near-black, gray, hairline borders, sparse teal accent.
-- Dense but readable tool UI. Prefer panes, lists, tables, toolbars, drawers, and log panels over marketing cards.
-- No landing-page hero, decorative gradients, bokeh blobs, glossy AI visuals, or nested cards.
-- Use Lucide icons for controls and tooltips for icon-only buttons.
-- All text must fit in Chinese and English.
+`UI-Frontend-design/`, when available locally, is a read-only design reference outside version control, not app source: do not modify or commit it. Consult relevant HTML structure, behavior, and `assets/app.css` tokens for UI work when available, subject to the feature authorities above. Avoid marketing heroes, decorative gradients, and nested cards.
 
-### Design alignment (authoritative source: `UI-Frontend-design/` folder)
+Use an existing graph and working graphify CLI for useful relationship navigation; otherwise continue with `rg` and source reads. After code changes, update an existing graph once if the tool is available; graph maintenance must not block delivery. Detailed modes belong in the graphify Skill.
 
-The entire `UI-Frontend-design/` folder is the design spec — not just `app.css`, but HTML structure, page components, and JS behavior. Do not treat it as app source; do not modify or commit it. Before any UI work, consult:
+## Verification and Review
 
-Import / Source exception: `docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md` is the sole authority for Import and Source product flow, information architecture, state, copy, media actions, login, OCR / ASR, and AI 整理. Legacy `UI-Frontend-design/import*.html` files remain visual-density and structure references only where they do not conflict; do not restore their compile-after-import, Git toggle, or compile-time OCR behavior.
+Choose checks by actual scope and risk, including for new features:
 
-First-run / project-open exception: `docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md` is the sole authority for the no-project workbench, new knowledge-base flow, opening native or compatible knowledge bases, folder assessment, restricted/trusted/read-only modes, compatibility enablement, repair, and the handoff into Import. Legacy launch HTML and completed launch-page plans remain historical visual evidence only where they do not conflict. Do not restore a standalone launch/marketing page, a third “open folder as project” action, in-place initialization of an ordinary materials folder, Agent/BYOK setup on the first screen, or creation that lands on Dashboard.
+| Change | Required verification |
+| --- | --- |
+| Documentation/instruction prose only | Relevant consistency/link checks; no npm gate or code-review subagents |
+| Localized code with limited impact | `npm run check:quick`; focused behavior tests where useful |
+| Cross-layer, broad architecture/refactor, dependency/build, release-facing, or critical behavior changes | `npm run check` |
 
-Workflows exception: `docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md` is the sole authority for the former Agent main surface, Workflows information architecture, built-in workflows, project-scoped queueing, observable pipelines, state, confirmation, copy, and cross-surface launch ownership. Legacy `UI-Frontend-design/agent.html` remains a visual-density reference only where it does not conflict. Do not restore the Agent configuration dashboard, BYOK card grid, four-card launcher, or generic “Run Agent” dialog as the target product.
+Critical behavior includes filesystem mutation, Git safety, secrets, IPC, concurrency, and background tasks. Run the full gate when the user requests it. Fix scoped failures and rerun the applicable gate; when the full gate is required, rerun it from the beginning after fixes. Reuse passing results while relevant code/configuration is unchanged. For environmental or unrelated failures, identify the cause, complete available verification, and report the unmet check without expanding into unrelated repairs or retrying indefinitely.
 
-1. **Page layout & component structure** — `dashboard.html` defines the full shell: left sidebar (3 labeled sections + agent foot), right panel (project info with paths/index/route/tasks), topbar, status bar. Preserve that hierarchy, but the former workflow section label is now `知识处理 / Knowledge Processing`, its Agent item is `工作流 / Workflows` with the Lucide `Workflow` icon, and the existing agent foot remains unchanged.
-2. **CSS tokens & visual density** — `assets/app.css` is the canonical style reference. Implement in Tailwind v4 + `src/styles.css`:
-   - Font sizes in absolute px: UI body 13px, secondary 12px, muted/mono 11px, micro-labels 10.5px, reading 14–15px. Write `text-[13px]`, not `text-sm`.
-   - Component heights: topbar 48px, main header 52px, right panel header 52px, status bar 28px, nav items 30px (small 26px), panel header 44px.
-   - Section labels: 10.5px, uppercase, `letter-spacing: 0.08em`, muted.
-   - Single token source: `src/styles.css` `:root` mirrors `app.css` `:root` (including `--sp-*` spacing, `--text-inverse`); components reference tokens, never hardcode hex.
-3. **Fonts** — Inter (UI), JetBrains Mono (code/paths), Source Serif Pro (reading). Bundled via @fontsource, no CDN.
-4. **Interaction & JS** — Sidebar nav `aria-current`, language switch, search shortcut hints from the design HTML should carry into React components.
-5. **Icons** — Lucide React, sizes matching the design (nav 16px, file 14px, etc.).
+The main agent reviews changed code. Use independent reviewers when another perspective materially improves confidence, especially for high-risk or complex cross-layer changes; choose the number and context as needed. If unavailable, review manually. Resolve supported findings and follow up only on affected changes; do not repeat complete reviews for logs, wording changes, or already resolved issues.
 
-## Safety And UX Boundaries
+## Delivery and Records
 
-- Ordinary materials folders must never be initialized or reorganized in place. Compatibility enablement, repair writes, source replacement, destructive edits, conflict merges, and high-risk workflow-generated changes require explicit user confirmation. Low-risk, conflict-free generated changes may apply automatically only after the required Git checkpoint.
-- Show what changed, what paths are affected, and whether a Git checkpoint exists.
-- Preserve external Markdown edits; never silently overwrite user changes.
-- CJK filenames, Unicode paths, Windows/macOS/Linux path styles, and case-sensitivity edge cases are required test concerns.
-- The sample knowledge base is maintained outside this repository (see `docs/testing/sample-knowledge-base.md`); it is validation data, not app source code. Any local copy follows the same rule: never test in place.
-
-## Required Checks
-
-Use checks proportionally to the change:
-
-1. **Documentation-only work** — Markdown/docs, research notes, plans, reviews, and progress/gotchas logging do not require an npm check unless they also change executable configuration or code.
-2. **Ordinary development** — For small or localized code changes, run `npm run check:quick`. It covers lint, the production frontend build/import resolution, the console-log scan, and Rust core compilation.
-3. **Large or high-risk completion** — Run the full `npm run check` when finishing a feature, cross-layer change, architecture or dependency/build change, broad refactor, release-facing work, or code that affects filesystem mutation, Git safety, secrets, IPC, concurrency, background tasks, or other critical paths. Also run it whenever the user explicitly requests the full gate.
-4. If a required check fails because of the scoped change, fix it and rerun that same gate. When the full gate is required, rerun `npm run check` from the beginning after fixes.
-
-Use judgment rather than treating every edit as a release gate. If the project is not initialized or a required script does not exist, report the exact missing file or script instead of pretending it passed.
-
-
-
-## Review Workflow
-
-Review effort must be proportional and is only required when executable code changes:
-
-- **Documentation-only work** — Do not launch review subagents for Markdown/docs, research, plans, reviews, progress logs, or gotchas-only changes.
-- **Small localized code changes** — Perform a focused review of the changed code. A review subagent is optional when the change is straightforward and low risk.
-- **Features, meaningful fixes, cross-layer changes, or high-risk code** — Launch two review subagents:（Single-turn dialogue should only be used once.）
-  - Subagent A with shared context: review design intent, logic, consistency, and integration with existing docs.
-  - Subagent B with fresh context: review with no assumptions, looking for blind spots, missing tests, and unclear behavior.
-
-Merge applicable review results, fix valid issues, and run the check level required by the change classification above. If subagents are unavailable when a two-review pass is warranted, perform the equivalent reviews manually and say so in the final report.
-
-## Progress And Gotchas Logging
-
-This is mandatory for all agents (main and subagents).
-
-- **`progress.txt`** — Append a record after every important milestone (feature landed, architecture decision, milestone reached, significant fix). Newest on top (reverse chronological). Format: `[YYYY-MM-DD] Module/Task — Summary of what was done — Key decision or open issue`. Only append; never overwrite or edit history.
-- **`gotchas.txt`** — Record a single entry whenever an error recurs, is subtle, or is easy to trip over once. Format: `Symptom — Root cause — How to avoid`. When hitting a similar issue later, check here first.
-- **Local-only, never tracked** — Both files live under `SPEC/` (root-level copies of the same names are legacy duplicates, also maintained locally) and are intentionally untracked since 2026-08-31: they do not exist in a fresh clone and `.gitignore` excludes them. The public, machine-detail-free extract for outside contributors is `docs/maintainers/troubleshooting.md`. Never commit secrets to either file; keep machine-specific paths and environment details out of anything that will be distilled into the public guide.
-
-These rules are mirrored in `CLAUDE.md`.
-
-## Delivery Standard
-
-- Keep changes scoped to the task.
-- Do not rewrite product decisions without user approval.
-- Cite changed files and verification results in the final response.
-- If checks cannot run because the app skeleton is not initialized, state the exact missing file or script.
-
-
-<claude-mem-context>
-# Memory Context
-
-# claude-mem status
-
-This project has no memory yet. The current session will seed it; subsequent sessions will receive auto-injected context for relevant past work.
-
-Memory injection starts on your second session in a project.
-
-`/learn-codebase` is available if the user wants to front-load the entire repo into memory in a single pass (~5 minutes on a typical repo, optional). Otherwise memory builds passively as work happens.
-
-Live activity: http://localhost:37777
-How it works: `/how-it-works`
-
-This message disappears once the first observation lands.
-</claude-mem-context>
-
-## graphify
-
-This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
-
-When the user types `/graphify`, use the installed graphify skill or instructions before doing anything else.
-
-Rules:
-- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
-- Dirty graphify-out/ files are expected after hooks or incremental updates; dirty graph files are not a reason to skip graphify. Only skip graphify if the task is about stale or incorrect graph output, or the user explicitly says not to use it.
-- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
-- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
-- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
+- Deliver the requested outcome with changed-file links, relevant verification, and material limitations. Finish when the applicable checks pass and identified substantive issues are resolved; optional improvements do not delay delivery. If blocked, complete independent work and state exactly what remains and what is needed.
+- Record durable milestones in `SPEC/progress.txt`: prepend `[YYYY-MM-DD] Module/Task — Summary — Decision or open issue`, preserving history. Add nonduplicate reusable lessons to `SPEC/gotchas.txt`: `Symptom — Root cause — How to avoid`. The main agent owns shared log writes; routine reads/checks need no entry.
+- Both logs are local-only and Git-ignored; skip them if absent, creating them only when there is something to record. Do not maintain legacy duplicates or store secrets. Public guidance belongs in [maintainer troubleshooting](docs/maintainers/troubleshooting.md).

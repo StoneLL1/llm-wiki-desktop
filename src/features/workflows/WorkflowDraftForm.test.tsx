@@ -4,6 +4,8 @@ import { WorkflowDraftForm } from "./WorkflowDraftForm";
 import { useWorkflowStore } from "../../stores/workflowStore";
 import { useNavigationStore } from "../../stores/navigationStore";
 import type { WorkflowFormCatalog } from "../../types/workflow";
+const picker = vi.hoisted(() => vi.fn().mockResolvedValue(null));
+vi.mock("./workflowOutputPicker", () => ({ pickWorkflowOutputPath: picker }));
 const api = vi.hoisted(() => ({ catalog: vi.fn() }));
 vi.mock("../../services/workflowApi", () => ({ getWorkflowFormCatalog: api.catalog }));
 vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (key: string) => key, i18n: { resolvedLanguage: "zh-CN" } }) }));
@@ -14,6 +16,18 @@ const props = { project, onStart: vi.fn().mockResolvedValue(undefined), onBack: 
 beforeEach(() => { useWorkflowStore.getState().reset(); useNavigationStore.setState({ settingsOpen: false }); api.catalog.mockReset().mockResolvedValue(catalog); props.onStart.mockClear(); });
 afterEach(cleanup);
 describe("Workflow editable drafts", () => {
+  it("uses single selection for a reading page and preserves the exact Unicode path", async () => {
+    render(<WorkflowDraftForm {...props} kind="generate_content" />);
+    const first = await screen.findByRole("radio", { name: "wiki/中文.md" });
+    const second = screen.getByRole("radio", { name: "wiki/Café.md" });
+    expect(screen.queryByRole("button", { name: "workflows.draft.selectFiltered" })).not.toBeInTheDocument();
+    fireEvent.click(first);
+    fireEvent.click(second);
+    expect(first).not.toBeChecked();
+    expect(second).toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.start" }));
+    expect(props.onStart).toHaveBeenCalledWith(expect.objectContaining({ scope: expect.objectContaining({ pagePaths: ["wiki/Café.md"] }) }));
+  });
   it("can choose and submit Health before catalog loading finishes", () => {
     api.catalog.mockReturnValue(new Promise(() => {}));
     render(<WorkflowDraftForm {...props} kind="health_check" />);
@@ -45,14 +59,16 @@ describe("Workflow editable drafts", () => {
     fireEvent.click(screen.getByRole("radio", { name: "workflows.artifact.projectReport" }));
     expect(screen.getByRole("button", { name: "workflows.action.start" })).toBeEnabled();
     fireEvent.click(screen.getByRole("radio", { name: "workflows.preparation.explicitTarget" }));
-    fireEvent.change(screen.getByRole("textbox", { name: "workflows.preparation.outputPath" }), { target: { value: "exports/报告.html" } });
+    picker.mockResolvedValueOnce("exports/报告.html");
+    fireEvent.click(screen.getByRole("button", { name: "workflows.preparation.outputPath" }));
+    await screen.findByText("exports/报告.html");
     await act(async () => pending.resolve(catalog));
     fireEvent.click(screen.getByRole("button", { name: "workflows.action.start" }));
     expect(props.onStart).toHaveBeenCalledWith(expect.objectContaining({ scope: { kind: "generate_content", artifactType: "project_report", pagePaths: [], outputPath: "exports/报告.html" } }));
   });
   it("preserves exact selected pages and explicitly empty selection", async () => {
     render(<WorkflowDraftForm {...props} kind="generate_content" />);
-    await screen.findByRole("checkbox", { name: "wiki/中文.md" });
+    await screen.findByRole("radio", { name: "wiki/中文.md" });
     fireEvent.click(screen.getByRole("radio", { name: "workflows.artifact.knowledgeCard" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "wiki/中文.md" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "wiki/Café.md" }));

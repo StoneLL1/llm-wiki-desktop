@@ -224,6 +224,30 @@ impl FileStore {
         Ok(bytes)
     }
 
+    /// Bound memory even if a file grows after inspection, and reject links
+    /// swapped into the selected path while opening it.
+    pub(crate) fn read_bytes_bounded(
+        &self,
+        context: &ProjectContext,
+        relative_path: &str,
+        limit: u64,
+    ) -> Result<Vec<u8>, BackendError> {
+        use std::io::Read;
+        let path = context.resolve_project_path(relative_path)?;
+        let binding = BoundProjectMutationRoot::bind_read(&context.root, &path)
+            .map_err(|err| io_error("FILE_READ_FAILED", err, &path))?;
+        let file = binding.open_regular_pinned(&path)
+            .map_err(|err| io_error("FILE_READ_FAILED", err, &path))?;
+        let mut bytes = Vec::new();
+        file.take(limit.saturating_add(1)).read_to_end(&mut bytes)
+            .map_err(|err| io_error("FILE_READ_FAILED", err, &path))?;
+        observe_file_read(&path, bytes.len());
+        if bytes.len() as u64 > limit {
+            return Err(BackendError::new("VERSION_SIZE_LIMIT", "The recovery version exceeds its supported size budget.", true, true));
+        }
+        Ok(bytes)
+    }
+
     #[cfg(feature = "performance-observers")]
     pub fn read_project_bytes_absolute(
         &self,

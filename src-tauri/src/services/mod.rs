@@ -23,6 +23,7 @@ mod search_service;
 mod secret_service;
 mod settings_service;
 mod update_service;
+mod version_history;
 mod wiki_index;
 #[cfg(any(feature = "gui", test))]
 mod workflow_history;
@@ -88,6 +89,7 @@ pub use search_service::SearchService;
 pub use secret_service::SecretService;
 pub use settings_service::SettingsService;
 pub use update_service::{verify_signed_update_artifact, UpdateDownloadPermit, UpdateService};
+pub use version_history::VersionHistoryService;
 pub use wiki_index::{IndexEntry, WikiIndex};
 pub(crate) use workflow_service::recover_workflow;
 pub use workflow_service::{

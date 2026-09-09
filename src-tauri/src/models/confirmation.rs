@@ -213,6 +213,13 @@ pub enum ConfirmationClaimDisposition {
     deny_unknown_fields
 )]
 pub enum ConfirmationExecution {
+    VersionHistory {
+        project_id: String,
+        root_path: String,
+        canonical_identity_key: String,
+        identity_revision: String,
+        mutation: crate::models::version_history::VersionHistoryMutation,
+    },
     RepairProject {
         assessment_id: crate::models::project::AssessmentId,
         project_id: String,

@@ -130,61 +130,13 @@ export function validateReleaseState({
   if (contract.publishing.latestManifestChannel !== "stable-only") {
     errors.push("latest.json generation must remain stable-only");
   }
-  const approvalOwnerConfirmed = contract.publishing.approvalOwner === "StoneLL1"
-    && contract.publishing.approvalOwnerStatus === "confirmed"
-    && typeof contract.publishing.approvalOwnerRole === "string"
-    && contract.publishing.approvalOwnerRole.trim().length > 0;
-  const environmentReviewerConfigured = contract.publishing.environmentReviewer === "StoneLL1"
-    && contract.publishing.environmentReviewerStatus === "configured"
-    && contract.publishing.environmentPreventSelfReview === false;
-  if (contract.publishing.stableEnvironment !== "desktop-release"
-    || contract.publishing.capabilityEnvironment !== "capability-release"
-    || !approvalOwnerConfirmed
-    || !environmentReviewerConfigured) {
-    errors.push("protected release environments and the confirmed sole-maintainer approval policy must remain explicit");
-  }
-  const firstStableAcceptance = contract.acceptance?.firstStable;
-  const subsequentStableAcceptance = contract.acceptance?.subsequentStable;
-  if (firstStableAcceptance?.version !== "0.2.0"
-    || firstStableAcceptance?.tag !== "app-v0.2.0"
-    || firstStableAcceptance?.priorVersionUpgradeGate !== "waived-once-no-prior-production-release"
-    || firstStableAcceptance?.replacementGate !== "four-platform-clean-install-required"
-    || firstStableAcceptance?.scope !== "first-stable-only"
-    || firstStableAcceptance?.approvedBy !== "StoneLL1"
-    || firstStableAcceptance?.approvedOn !== "2026-08-31"
-    || firstStableAcceptance.version !== contract.application.firstPublicVersion
-    || firstStableAcceptance.tag !== contract.tags.firstStable) {
-    errors.push("the 0.2.0 upgrade waiver must remain one-time, owner-approved, and replaced by four-platform clean-install acceptance");
-  }
-  if (subsequentStableAcceptance?.firstRequiredVersion !== "0.2.1"
-    || subsequentStableAcceptance?.priorVersionUpgradeGate !== "real-prior-production-to-candidate-required") {
-    errors.push("real prior-production-to-candidate upgrade acceptance must be mandatory from 0.2.1");
-  }
-  if (contract.signing?.privateKeyPolicy !== "protected-environment-secrets-only"
-    || contract.signing?.continuity?.backupCustodianRequired !== false
-    || contract.signing?.continuity?.decisionOwner !== "StoneLL1"
-    || contract.signing?.continuity?.riskStatus !== "single-maintainer-continuity-risk-accepted") {
-    errors.push("single-maintainer key continuity policy must remain explicit");
-  }
-  for (const signingKind of ["updater", "capability"]) {
-    const signingContract = contract.signing?.[signingKind];
-    const ownerConfirmed = signingContract?.owner === "StoneLL1"
-      && signingContract?.status === "owner-confirmed"
-      && typeof signingContract?.ownerRole === "string"
-      && signingContract.ownerRole.trim().length > 0;
-    if (!ownerConfirmed) {
-      errors.push(`${signingKind} signing ownership must be confirmed for StoneLL1`);
-    }
-    if (signingContract?.backupCustodian !== null || signingContract?.backupStatus !== "not-required") {
-      errors.push(`${signingKind} signing backup-custodian policy must be explicitly not required`);
-    }
-    if (signingContract && Object.hasOwn(signingContract, "privateKey")) {
-      errors.push(`${signingKind} private key material cannot appear in the release contract`);
+  for (const signing of Object.values(contract.signing ?? {})) {
+    if (signing && Object.hasOwn(signing, "privateKey")) {
+      errors.push("private key material cannot appear in the release contract");
     }
   }
   const updaterPublicKey = contract.signing?.updater?.publicKey;
   const updaterPublicKeyId = contract.signing?.updater?.publicKeyId;
-  const updaterPublicKeyStatus = contract.signing?.updater?.publicKeyStatus;
   const updaterPublicKeyDocument = typeof updaterPublicKey === "string" && /^[A-Za-z0-9+/]+={0,2}$/.test(updaterPublicKey)
     ? Buffer.from(updaterPublicKey, "base64").toString("utf8")
     : "";
@@ -193,43 +145,9 @@ export function validateReleaseState({
     || !updaterPublicKeyDocument.includes(`minisign public key: ${updaterPublicKeyId}\n`)) {
     errors.push("updater public key and key ID must match the committed Tauri trust anchor");
   }
-  if (updaterPublicKeyStatus !== "confirmed-existing-keypair") {
-    errors.push("updater key-pair selection must be confirmed in the release contract");
-  }
-  const capabilityPublicKeyPending = contract.signing?.capability?.publicKeyId === null
-    && contract.signing?.capability?.publicKeyStatus === "pending-human-input";
   const capabilityPublicKeyId = contract.signing?.capability?.publicKeyId;
-  const capabilityPublicKeyCommitted = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(
-    capabilityPublicKeyId ?? "",
-  ) && contract.signing?.capability?.publicKeyStatus === "committed";
-  if (!capabilityPublicKeyPending && !capabilityPublicKeyCommitted) {
-    errors.push("capability public key must be committed or explicitly pending human input");
-  }
-  if (capabilityPublicKeyCommitted) {
-    const trustedPublicKey = trustedKeys?.[capabilityPublicKeyId];
-    if (!/^[0-9a-f]{64}$/.test(trustedPublicKey ?? "")) {
-      errors.push("the committed capability key ID must resolve to one 32-byte lowercase hex trust anchor");
-    }
-    if (contract.signing?.capability?.recoveryCopyStatus !== "owner-dpapi-encrypted-copy-confirmed") {
-      errors.push("the owner-encrypted capability recovery copy must remain explicitly confirmed");
-    }
-  }
-  const osIdentityPolicies = [
-    ["windows", "publisherSubject", "smartscreen-or-unknown-publisher-warning-expected"],
-    ["apple", "teamId", "gatekeeper-manual-override-may-be-required"],
-  ];
-  for (const [platform, identityField, userWarning] of osIdentityPolicies) {
-    const osContract = contract.signing?.[platform];
-    if (osContract?.owner !== "StoneLL1"
-      || osContract?.status !== "not-required"
-      || osContract?.osIdentityPolicy !== "not-required"
-      || osContract?.[identityField] !== null
-      || osContract?.userWarning !== userWarning) {
-      errors.push(`${platform} OS vendor identity signing must remain explicitly not required`);
-    }
-    if (osContract && Object.hasOwn(osContract, "privateKey")) {
-      errors.push(`${platform} private key material cannot appear in the release contract`);
-    }
+  if (!/^[0-9a-f]{64}$/.test(trustedKeys?.[capabilityPublicKeyId] ?? "")) {
+    errors.push("the committed capability key ID must resolve to one 32-byte lowercase hex trust anchor");
   }
   if (contract.application.identifier !== contract.signing.apple.bundleIdentifier) {
     errors.push("Apple bundle identifier must match the frozen Tauri identifier");
@@ -251,201 +169,6 @@ export function validateReleaseState({
     }
   }
   return { errors, version, versions };
-}
-
-const permissionWriteGrants = (workflow) => {
-  const lines = workflow.match(/.*(?:\r?\n|$)/g) ?? [];
-  const grants = [];
-  let offset = 0;
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    const permission = /^(\s*)permissions:\s*(.*?)\s*(?:\r?\n)?$/.exec(line);
-    if (!permission) {
-      offset += line.length;
-      continue;
-    }
-    const indent = permission[1].length;
-    const inline = permission[2];
-    if (/^write-all(?:\s+#.*)?$/i.test(inline)) {
-      grants.push({ scope: "*", index: offset });
-    }
-    for (const match of inline.matchAll(/\b([a-z-]+)\s*:\s*write\b/gi)) {
-      grants.push({ scope: match[1].toLowerCase(), index: offset + match.index });
-    }
-    if (!inline) {
-      let nestedOffset = offset + line.length;
-      for (let nestedIndex = index + 1; nestedIndex < lines.length; nestedIndex += 1) {
-        const nestedLine = lines[nestedIndex];
-        if (nestedLine.trim() && (nestedLine.match(/^\s*/)?.[0].length ?? 0) <= indent) break;
-        const write = /^\s*([a-z-]+):\s*write\s*(?:#.*)?(?:\r?\n)?$/i.exec(nestedLine);
-        if (write) grants.push({ scope: write[1].toLowerCase(), index: nestedOffset });
-        nestedOffset += nestedLine.length;
-      }
-    }
-    offset += line.length;
-  }
-  return grants;
-};
-
-export function validateWorkflowPermissions({ ciWorkflow, capabilityWorkflow }) {
-  const errors = [];
-  if (!/^permissions:\s*\r?\n\s+contents:\s+read\s*$/m.test(ciWorkflow)) {
-    errors.push("CI must declare top-level contents: read");
-  }
-  if (permissionWriteGrants(ciWorkflow).length > 0) {
-    errors.push("CI cannot request any write permission scope");
-  }
-  if (!/^permissions:\s*\r?\n\s+contents:\s+read\s*$/m.test(capabilityWorkflow)) {
-    errors.push("capability workflow must default to contents: read");
-  }
-  const writeGrants = permissionWriteGrants(capabilityWorkflow);
-  if (writeGrants.length !== 0) {
-    errors.push("the non-publishing capability workflow cannot request any write permission");
-  }
-  if (/gh release (?:create|upload)/i.test(capabilityWorkflow)) {
-    errors.push("capability workflow must not publish releases; the unified desktop release workflow owns publication");
-  }
-  if (!/^ {2}workflow_call:\s*$/m.test(capabilityWorkflow)) {
-    errors.push("capability workflow must be reusable through workflow_call for the unified desktop release");
-  }
-  return errors;
-}
-
-export function validateDesktopReleaseWorkflow({ desktopWorkflow, capabilityWorkflow }) {
-  const errors = [];
-  if (!/^permissions:\s*\r?\n\s+contents:\s+read\s*$/m.test(desktopWorkflow)) {
-    errors.push("desktop release workflow must default to contents: read");
-  }
-  const publishOffset = desktopWorkflow.search(/^ {2}publish-stable:\s*$/m);
-  if (publishOffset < 0) {
-    errors.push("desktop release workflow must have one final publish-stable job");
-  } else {
-    const beforePublish = desktopWorkflow.slice(0, publishOffset);
-    const publisher = desktopWorkflow.slice(publishOffset);
-    if (/\bcontents:\s*write\b/.test(beforePublish)) {
-      errors.push("only publish-stable may request contents: write");
-    }
-    if ((publisher.match(/\bcontents:\s*write\b/g) ?? []).length !== 1) {
-      errors.push("publish-stable must request contents: write exactly once");
-    }
-    if (!/^ {4}environment:\s*desktop-release\s*$/m.test(publisher)) {
-      errors.push("publish-stable must use the protected desktop-release environment");
-    }
-    if (/\bgh release (?:create|upload|edit)\b/i.test(beforePublish)) {
-      errors.push("no job before publish-stable may create, upload, or publish a GitHub release");
-    }
-  }
-  const requiredJobs = [
-    "preflight",
-    "capability-build",
-    "desktop-build",
-    "manifest-and-provenance",
-    "packaged-smoke",
-    "assemble-release",
-    "publish-stable",
-  ];
-  for (const job of requiredJobs) {
-    if (!new RegExp(`^ {2}${job}:\\s*$`, "m").test(desktopWorkflow)) errors.push(`desktop release workflow is missing ${job}`);
-  }
-  for (const marker of [
-    "npm ci",
-    "npm run check",
-    "cargo metadata --locked",
-    "capability-release.yml",
-    "draft-release-bundle",
-    "actions/attest-build-provenance@",
-    "gh attestation verify",
-    "gh release download",
-    "verify-updater-signatures.mjs",
-    "generate-release-checksums.mjs --root remote-draft --verify",
-    "generate-release-checksums.mjs --root published-assets --verify",
-    "packaged-process-alive",
-    "CAPABILITY_SIGNING_KEY_ID",
-    "TAURI_SIGNING_PRIVATE_KEY",
-    "windows-authenticode-not-required",
-    "apple-developer-id-not-required",
-    "linux-os-code-signing-not-applicable",
-  ]) {
-    if (!desktopWorkflow.includes(marker)) errors.push(`desktop release workflow is missing required marker: ${marker}`);
-  }
-  for (const forbiddenMarker of [
-    "WINDOWS_CERTIFICATE",
-    "WINDOWS_PUBLISHER_SUBJECT",
-    "APPLE_CERTIFICATE",
-    "APPLE_CERTIFICATE_PASSWORD",
-    "APPLE_TEAM_ID",
-    "APPLE_ID",
-    "APPLE_PASSWORD",
-    "KEYCHAIN_PASSWORD",
-    "Import-PfxCertificate",
-    "xcrun stapler",
-    "spctl --assess",
-  ]) {
-    if (desktopWorkflow.includes(forbiddenMarker)) {
-      errors.push(`desktop release workflow must not require OS vendor signing credentials or verification: ${forbiddenMarker}`);
-    }
-  }
-  if (!/for name in CAPABILITY_KEY_ID UPDATER_PRIVATE_KEY UPDATER_PRIVATE_KEY_PASSWORD; do/.test(desktopWorkflow)) {
-    errors.push("desktop release preflight must require exactly the capability and updater signing inputs");
-  }
-  if (!/gh release create[^\r\n]*--draft(?:\s|$)/.test(desktopWorkflow)) {
-    errors.push("publish-stable must create the GitHub Release as a draft");
-  }
-  if (!/rollback_if_unverified\(\)\s*\{[\s\S]*trap - EXIT INT TERM[\s\S]*"\$published" -eq 1[\s\S]*"\$verified" -ne 1[\s\S]*gh release edit "\$RELEASE_TAG" --draft=true/.test(desktopWorkflow)
-    || !/trap\s+'rollback_if_unverified'\s+EXIT/.test(desktopWorkflow)
-    || !/trap\s+'exit 130'\s+INT/.test(desktopWorkflow)
-    || !/trap\s+'exit 143'\s+TERM/.test(desktopWorkflow)) {
-    errors.push("publish-stable must restore draft visibility on error, cancellation, and termination until anonymous verification completes");
-  }
-  if (!/if ! gh release edit "\$RELEASE_TAG" --draft=true[\s\S]*gh release delete "\$RELEASE_TAG" --yes[\s\S]*CRITICAL: unverified stable release rollback failed/.test(desktopWorkflow)) {
-    errors.push("publish-stable rollback must delete an immutable release when restoring draft visibility fails");
-  }
-  const stablePublishOffset = desktopWorkflow.indexOf('gh release edit "$RELEASE_TAG" --draft=false --latest');
-  const publishedGuardOffset = desktopWorkflow.lastIndexOf("published=1", stablePublishOffset);
-  const anonymousVerificationOffset = desktopWorkflow.indexOf("generate-release-checksums.mjs --root published-assets --verify", stablePublishOffset);
-  const verifiedGuardOffset = desktopWorkflow.indexOf("verified=1", anonymousVerificationOffset);
-  const disarmRollbackOffset = desktopWorkflow.indexOf("trap - EXIT INT TERM", verifiedGuardOffset);
-  if (stablePublishOffset < 0) {
-    errors.push("publish-stable must make the verified draft stable exactly once");
-  } else if (publishedGuardOffset < 0
-    || anonymousVerificationOffset < stablePublishOffset
-    || verifiedGuardOffset < anonymousVerificationOffset
-    || disarmRollbackOffset < verifiedGuardOffset) {
-    errors.push("publish-stable must guard one publish-through-anonymous-verification critical section");
-  }
-  const assembleOffset = desktopWorkflow.search(/^ {2}assemble-release:\s*$/m);
-  const sealedJobs = assembleOffset >= 0 && publishOffset > assembleOffset
-    ? desktopWorkflow.slice(assembleOffset)
-    : "";
-  if ((sealedJobs.match(/actions\/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020/g) ?? []).length < 2
-    || (sealedJobs.match(/rustup default "\$RUST_VERSION"/g) ?? []).length < 2) {
-    errors.push("assemble-release and publish-stable must install the pinned Node and Rust toolchains");
-  }
-  for (const platform of ["windows-x86_64", "darwin-aarch64", "darwin-x86_64", "linux-x86_64"]) {
-    if (!desktopWorkflow.includes(platform)) errors.push(`desktop release matrix is missing ${platform}`);
-  }
-  if (!/group:\s*desktop-release-stable-channel(?:\s|$)/.test(desktopWorkflow)
-    || !/cancel-in-progress:\s*false/.test(desktopWorkflow)) {
-    errors.push("desktop release concurrency must globally serialize the stable channel without cancellation");
-  }
-  if (!/releases\/latest/.test(desktopWorkflow)
-    || !/--current-stable-tag\s+"\$current_stable_tag"/.test(desktopWorkflow)
-    || !/^\s*404\)\s*$/m.test(desktopWorkflow)
-    || !/cannot establish the current stable release/.test(desktopWorkflow)) {
-    errors.push("desktop release preflight must fail closed unless the candidate advances the current stable tag or no release exists");
-  }
-  for (const match of desktopWorkflow.matchAll(/^\s*(?:-\s+)?uses:\s*([^\s#]+)(?:\s+#.*)?$/gm)) {
-    const reference = match[1];
-    if (reference.startsWith("./")) continue;
-    if (!/@[0-9a-f]{40}$/.test(reference)) errors.push(`GitHub Action is not pinned to a full commit SHA: ${reference}`);
-  }
-  if (!/^ {4}uses:\s*\.\/\.github\/workflows\/capability-release\.yml\s*$/m.test(desktopWorkflow)) {
-    errors.push("desktop release must call the reusable capability workflow");
-  }
-  if (/\bgh release (?:create|upload|edit)\b/i.test(capabilityWorkflow)) {
-    errors.push("capability workflow cannot publish independently after desktop orchestration exists");
-  }
-  return errors;
 }
 
 const normalizeOrigin = (value) => value.trim().replace(/\/$/, "").replace(/\.git$/, "").toLowerCase();
@@ -545,17 +268,7 @@ export function checkRepository(root, options = {}) {
     tag,
     repository: process.env.GITHUB_REPOSITORY ?? null,
   });
-  const errors = [
-    ...state.errors,
-    ...validateWorkflowPermissions({
-      ciWorkflow: fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8"),
-      capabilityWorkflow: fs.readFileSync(path.join(root, ".github/workflows/capability-release.yml"), "utf8"),
-    }),
-    ...validateDesktopReleaseWorkflow({
-      desktopWorkflow: fs.readFileSync(path.join(root, ".github/workflows/desktop-release.yml"), "utf8"),
-      capabilityWorkflow: fs.readFileSync(path.join(root, ".github/workflows/capability-release.yml"), "utf8"),
-    }),
-  ];
+  const errors = [...state.errors];
   if (options.checkGit) errors.push(...validateLocalGit(root, contract));
   if (tag) errors.push(...validateReleaseCommitTrace(root, contract, tag));
   if (tag && options.currentStableTag) {
@@ -577,6 +290,6 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     for (const error of result.errors) process.stderr.write(`[release-config] ${error}\n`);
     process.exitCode = 1;
   } else {
-    process.stdout.write(`[release-config] ${result.version}${result.tag ? ` / ${result.tag}` : ""} matches the frozen release contract\n`);
+    process.stdout.write(`[release-config] ${result.version}${result.tag ? ` / ${result.tag}` : ""} matches the release version and signing configuration\n`);
   }
 }

@@ -259,6 +259,9 @@ pub(crate) fn confirm_pending_action_for_state(
     }
 
     match stored.execution {
+        Some(ConfirmationExecution::VersionHistory { .. }) => Err(BackendError::new(
+            "CONFIRMATION_COMMAND_INVALID", "Version actions must use confirm_version_action.", true, true,
+        )),
         Some(
             ConfirmationExecution::RepairProject { .. }
             | ConfirmationExecution::EnableCompatibleProject { .. }

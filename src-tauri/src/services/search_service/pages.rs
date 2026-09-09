@@ -2,7 +2,6 @@ use crate::app_state::ProjectWritePermit;
 use crate::errors::BackendError;
 use crate::models::paths::ProjectContext;
 use crate::models::wiki::{CreateWikiPageRequest, RenameWikiPageResponse, SaveWikiPageResponse};
-use crate::services::import_v2::transaction::FileTransaction;
 use crate::services::WriteMode;
 use crate::utils::markdown_utils::{extract_wikilinks, rewrite_wikilinks, split_frontmatter};
 use crate::utils::safe_project_dir::remove_project_file;
@@ -11,6 +10,30 @@ use super::catalog::file_read_error;
 use super::SearchService;
 
 impl SearchService {
+    pub(crate) fn resolve_conflict_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        path: &str,
+        contents: &str,
+        expected_hash: &str,
+    ) -> Result<SaveWikiPageResponse, BackendError> {
+        let context = permit.context();
+        self.file_store.preflight_markdown_overwrite_hash(context, path, expected_hash)?;
+        let record = crate::services::VersionHistoryService.apply_wiki_files(
+            context,
+            crate::models::version_history::VersionOperationKind::PageChange,
+            &std::collections::BTreeMap::from([(path.to_string(), Some(expected_hash.to_string()))]),
+            &std::collections::BTreeMap::from([(path.to_string(), Some(contents.as_bytes().to_vec()))]),
+        )?;
+        Ok(SaveWikiPageResponse {
+            relative_path: path.to_string(),
+            hash: self.file_store.content_hash(contents.as_bytes()),
+            saved_at: crate::utils::time_utils::now_rfc3339(),
+            graph_cache_invalidated: self.invalidate_graph_cache(context),
+            operation_id: Some(record.summary.operation_id),
+        })
+    }
+
     /// Capability-bearing production entry point for wiki-page saves.
     pub(crate) fn save_page_authorized(
         &self,
@@ -60,6 +83,7 @@ impl SearchService {
         self.append_save_log(context, relative_path);
 
         Ok(SaveWikiPageResponse {
+            operation_id: None,
             relative_path: relative_path.to_string(),
             hash,
             saved_at: crate::utils::time_utils::now_rfc3339(),
@@ -121,6 +145,7 @@ impl SearchService {
         self.append_save_log(context, &request.relative_path);
 
         Ok(SaveWikiPageResponse {
+            operation_id: None,
             relative_path: request.relative_path.clone(),
             hash,
             saved_at: created,
@@ -204,7 +229,8 @@ impl SearchService {
         // One retained-capability transaction owns every rewrite, the new page,
         // and source deletion. A failure rolls back only files whose installed
         // identity/hash still belongs to this operation.
-        let mut transaction = FileTransaction::new_for_project(&context.root);
+        let mut outputs = std::collections::BTreeMap::new();
+        let mut expected = std::collections::BTreeMap::new();
         let files = self.file_store.list_markdown_files(&context.wiki_dir)?;
         let mut updated_references: Vec<String> = Vec::new();
         for file_absolute in &files {
@@ -218,16 +244,14 @@ impl SearchService {
                 continue;
             }
             let project_relative = context.to_project_relative(file_absolute)?;
+            if Some(project_relative.as_str()) == context.layout.activity_log_path.as_deref() { continue; }
             let writable_path = context.resolve_wiki_write_path(&project_relative)?;
             let body = std::fs::read_to_string(&writable_path)
                 .map_err(|err| file_read_error(err, &writable_path))?;
             let (rewritten, n) = rewrite_wikilinks(&body, &old_stem, &new_stem);
             if n > 0 {
-                transaction.write_if_hash_matches(
-                    &writable_path,
-                    rewritten.as_bytes(),
-                    &self.file_store.content_hash(body.as_bytes()),
-                )?;
+                expected.insert(project_relative.clone(), Some(self.file_store.content_hash(body.as_bytes())));
+                outputs.insert(project_relative.clone(), Some(rewritten.into_bytes()));
                 updated_references.push(project_relative);
             }
         }
@@ -245,9 +269,11 @@ impl SearchService {
                 None => rewritten_body,
             }
         };
-        transaction.write_new(&new_absolute, final_contents.as_bytes())?;
-        transaction.delete_if_hash_matches(&old_absolute, &source_hash)?;
-        transaction.commit()?;
+        expected.insert(relative_path.to_string(), Some(source_hash));
+        expected.insert(new_relative_path.to_string(), None);
+        outputs.insert(relative_path.to_string(), None);
+        outputs.insert(new_relative_path.to_string(), Some(final_contents.into_bytes()));
+        let operation = crate::services::VersionHistoryService.apply_wiki_files(context, crate::models::version_history::VersionOperationKind::PageChange, &expected, &outputs)?;
 
         let hash = self.file_store.file_hash(context, new_relative_path)?;
         let graph_cache_invalidated = self.invalidate_graph_cache(context);
@@ -255,6 +281,7 @@ impl SearchService {
         self.append_save_log(context, new_relative_path);
 
         Ok(RenameWikiPageResponse {
+            operation_id: Some(operation.summary.operation_id),
             relative_path: new_relative_path.to_string(),
             hash,
             saved_at: crate::utils::time_utils::now_rfc3339(),
@@ -336,11 +363,10 @@ impl SearchService {
     fn apply_page_delete_unchecked(
         &self,
         context: &ProjectContext,
-        git_service: &crate::services::GitService,
+        _git_service: &crate::services::GitService,
         target_path: &str,
         target_hash: &str,
     ) -> Result<bool, BackendError> {
-        use crate::models::git::CheckpointPurpose;
 
         let absolute = context.resolve_wiki_write_path(target_path)?;
         if !absolute.exists() || !absolute.is_file() {
@@ -378,42 +404,14 @@ impl SearchService {
             .with_details(details));
         }
 
-        // Pre-delete safety checkpoint (CLAUDE.md). Scoped to the target path
-        // so unrelated working-tree changes are not swept in. `created` may be
-        // false when the file is already committed and clean — that is fine;
-        // the file is still recoverable from HEAD.
-        let checkpoint = git_service.create_scoped_checkpoint(
+        let record = crate::services::VersionHistoryService.apply_wiki_files(
             context,
-            CheckpointPurpose::HighRiskOperation,
-            "Before deleting wiki page",
-            &[target_path.to_string()],
+            crate::models::version_history::VersionOperationKind::PageChange,
+            &std::collections::BTreeMap::from([(target_path.to_string(), Some(target_hash.to_string()))]),
+            &std::collections::BTreeMap::from([(target_path.to_string(), None)]),
         )?;
-
-        let mut transaction = FileTransaction::new_for_project(&context.root);
-        let result = (|| {
-            transaction.delete_if_hash_matches(&absolute, target_hash)?;
-            // Drop the deleted page from the graph cache so a stale node
-            // doesn't linger; scan will rebuild it. Best-effort.
-            if let Ok(graph_cache) = context.resolve_project_write_path(".app/graph-cache.json") {
-                let _ = remove_project_file(&context.root, &graph_cache);
-            }
-            // Commit the deletion itself so the change lands in history and is
-            // recoverable (PRD-GIT-003: 成功操作后提交最终结果).
-            git_service.create_scoped_checkpoint(
-                context,
-                CheckpointPurpose::FinalResult,
-                "Delete wiki page",
-                &[target_path.to_string()],
-            )?;
-            Ok::<(), BackendError>(())
-        })();
-        if let Err(error) = result {
-            let _ = git_service.unstage_paths(context, &[target_path.to_string()]);
-            return Err(error);
-        }
-        transaction.commit()?;
-
-        Ok(checkpoint.commit_hash.is_some())
+        self.invalidate_graph_cache(context);
+        Ok(!record.before.is_empty())
     }
 
     pub(crate) fn apply_page_delete_authorized(
@@ -706,6 +704,7 @@ mod tests {
     fn rename_page_moves_file_and_rewrites_references_including_self() {
         let (context, root) = tmp_context("rename");
         seed_sample_vault(&context);
+        crate::services::GitService.enable_local_history(&context).unwrap();
         // agent-memory.md links [[react-pattern]]; rename react-pattern so
         // agent-memory.md must be rewritten.
         let service = SearchService::default();
@@ -755,6 +754,7 @@ mod tests {
     fn rename_page_rejects_outside_wiki_and_existing_destination_and_cjk() {
         let (context, root) = tmp_context("rename-cjk");
         seed_sample_vault(&context);
+        crate::services::GitService.enable_local_history(&context).unwrap();
         let service = SearchService::default();
 
         // Destination outside wiki/ rejected.

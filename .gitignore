@@ -66,3 +66,14 @@ docs/release/2026-08-30-batch-5-runner-confinement-evidence.md
 docs/release/2026-08-30-batch-8-capability-evidence.md
 docs/release/2026-08-30-batch-9-preflight-evidence.md
 docs/release/batch-6-acceptance-evidence.md
+
+# Local previews, generated IPC schemas, and private design workspace
+/.tmp-*/
+/UI-Frontend-design/
+/src-tauri/gen/schemas/
+/docs/maintainers/*-audit-20*.md
+/docs/maintainers/local-version-history-20*.md
+
+# Local agent tooling; project guidance lives in AGENTS.md and .codex/skills/llm-wiki-desktop-context
+/.claude/
+/.codex/skills/graphify/

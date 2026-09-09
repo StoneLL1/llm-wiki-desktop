@@ -1,5 +1,7 @@
 # First updater/capability-signed draft and packaged acceptance checklist
 
+> Historical record for the initial release. For releases after 2026-09-06, use [release-runbook.md](release-runbook.md); the repeated approvals, reverse-download gates and first-release waivers below are not the current workflow.
+
 Status: **`app-v0.2.0-rc.1` sealed and Windows x64 accepted; owner approved on 2026-09-01 to create `app-v0.2.0` and publish stable with the macOS arm64 / macOS x64 / Ubuntu 24.04 x64 rows executed post-publication (tracked in [#34](https://github.com/StoneLL1/llm-wiki-desktop/issues/34))**
 
 Prepared: 2026-08-26

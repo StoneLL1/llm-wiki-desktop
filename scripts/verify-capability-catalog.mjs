@@ -70,12 +70,15 @@ const catalogUrlErrors = (entry, label, expectedTag) => {
   }
   const errors = [];
   const tag = match[1];
+  // Capability assets may live in their own release while retaining the exact
+  // desktop version and its app-v provenance. Keep old desktop URLs readable.
+  const desktopTag = tag.replace(/^capabilities-v/, "app-v");
   const fileName = match[2];
-  if (!RELEASE_TAG_PATTERN.test(tag)) {
-    errors.push(label + " url tag does not match the frozen app-v grammar");
+  if (!RELEASE_TAG_PATTERN.test(desktopTag)) {
+    errors.push(label + " url tag must use the app-v or capabilities-v release grammar");
   }
-  if (expectedTag && tag !== expectedTag) {
-    errors.push(label + " url tag must equal the release tag " + expectedTag);
+  if (expectedTag && desktopTag !== expectedTag) {
+    errors.push(label + " url tag must match the desktop release version " + expectedTag);
   }
   const expectedFileName = typeof entry.capabilityId === "string" && typeof entry.version === "string"
     && typeof entry.targetTriple === "string"
@@ -188,6 +191,8 @@ export function verifyCapabilityCatalog({
   const errors = [];
   if (releaseMode && typeof expectedTag !== "string") {
     errors.push("release mode requires the exact release tag");
+  } else if (expectedTag !== null && !RELEASE_TAG_PATTERN.test(expectedTag)) {
+    errors.push("expected release tag must match the frozen app-v grammar");
   }
   if (!isObject(catalog)) {
     return {

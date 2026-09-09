@@ -13,6 +13,17 @@ const page: UpdateWikiSourcePage = { sources: [{ sourceId: "a", versionId: "v1",
 beforeEach(() => { useWorkflowStore.getState().reset(); useNavigationStore.setState({ settingsOpen: false }); api.options.mockReset().mockResolvedValue({ routes: [], defaultRoute: null }); api.sources.mockReset().mockResolvedValue(page); });
 afterEach(cleanup);
 describe("Update Wiki intent form", () => {
+  it("keeps remote consent visible while execution settings are collapsed", async () => {
+    api.options.mockResolvedValue({ routes: [{ kind: "byok", provider: "openai" }], defaultRoute: { kind: "byok", provider: "openai" } });
+    const start = vi.fn().mockResolvedValue(undefined);
+    render(<UpdateWikiForm project={project} onBack={vi.fn()} onStart={start} />);
+    const consent = await screen.findByRole("checkbox", { name: "workflows.update.remote" });
+    expect(consent).toBeVisible();
+    expect(screen.getByText("workflows.preparation.executionDetails").closest("details")).not.toHaveAttribute("open");
+    fireEvent.click(consent);
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.start" }));
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ acknowledgeRemoteProvider: true }));
+  });
   it("allows editing and submitting while route discovery is unresolved, without reading sources", () => {
     api.options.mockReturnValue(new Promise(() => {}));
     const start = vi.fn().mockResolvedValue(undefined);
@@ -65,7 +76,8 @@ describe("Update Wiki intent form", () => {
     render(<UpdateWikiForm project={project} onBack={vi.fn()} onStart={vi.fn()} />);
     fireEvent.click(screen.getByRole("radio", { name: "workflows.mode.fullRecompile" }));
     options.resolve({ routes: [{ kind: "agent", agent: "codex" }], defaultRoute: { kind: "agent", agent: "codex" } });
-    await screen.findByRole("option", { name: "agent:codex" });
+    fireEvent.click(screen.getByText("workflows.preparation.executionDetails"));
+    await screen.findByRole("option", { name: "Codex · workflows.route.agent" });
     expect(screen.getByRole("radio", { name: "workflows.mode.fullRecompile" })).toBeChecked();
   });
 });

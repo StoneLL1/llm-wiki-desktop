@@ -38,7 +38,8 @@ use crate::services::import_v2::source_registry::{
 use crate::services::import_v2::transaction::{read_project_file_nofollow, FileTransaction};
 use crate::services::import_v2::url_policy::UrlPolicy;
 use crate::services::import_v2::ImportV2Service;
-use crate::services::{FileStore, GitService};
+use crate::services::{FileStore, GitService, VersionHistoryService};
+use crate::models::version_history::{SourceDeletionVersion, VersionOperation, VersionOperationKind, VersionOperationState, VersionRestorePreview};
 use crate::tasks::task_model::CancellationToken;
 use crate::utils::markdown_utils::extract_wikilinks;
 use crate::utils::markdown_utils::rewrite_wikilinks;
@@ -789,7 +790,7 @@ impl ImportV2Service {
         &self,
         context: &ProjectContext,
         files: &FileStore,
-        git: &GitService,
+        _git: &GitService,
         request: &DeleteSourceRequest,
     ) -> Result<SourceMutationResult, BackendError> {
         if request.confirmation_text != DELETE_CONFIRMATION_TEXT {
@@ -809,29 +810,40 @@ impl ImportV2Service {
             return Err(source_changed(&loaded.current_hash));
         }
         let inventory = source_inventory(context, files, &loaded)?;
+        if inventory_guard_token(&loaded.manifest.source_id, &loaded.manifest_hash, &inventory) != request.guard_token {
+            return Err(source_changed(&loaded.current_hash));
+        }
+        // Prove the exact archived format is recoverable before deleting any
+        // evidence. Legacy registry migration remains a separate operation.
+        let archived_manifest: SourceManifest = serde_json::from_slice(&files.read_bytes(context, &loaded.manifest_path)?)
+            .map_err(|_| BackendError::new("SOURCE_DELETE_VERSION_UNSUPPORTED", "Upgrade this Source's registry format before deleting it with recoverable history.", true, true))?;
+        SourceRegistry::validate_manifest_contract_for_layout(&archived_manifest, &context.layout)
+            .map_err(|_| BackendError::new("SOURCE_DELETE_VERSION_UNSUPPORTED", "Upgrade this Source's registry format before deleting it with recoverable history.", true, true))?;
         let source_paths = context.layout.source_paths()?;
         let index_path = source_paths.index();
-        let affected_paths = inventory
-            .iter()
-            .map(|entry| entry.path.clone())
-            .chain(std::iter::once(index_path.clone()))
-            .collect::<Vec<_>>();
-        let checkpoint = git.create_scoped_checkpoint(
-            context,
-            CheckpointPurpose::HighRiskOperation,
-            "Before permanently deleting Source",
-            &affected_paths,
-        )?;
-        let checkpoint_hash = checkpoint.commit_hash.clone();
-
-        let mut next_index = SourceRegistry::read_index(context, files)?;
-        next_index
-            .by_content_hash
-            .retain(|_, pointer| pointer.source_id != request.source_id);
-        next_index
-            .by_locator
-            .retain(|_, pointer| pointer.source_id != request.source_id);
-        let index_hash = files.file_hash(context, &index_path)?;
+        let affected_paths = inventory.iter().map(|entry| entry.path.clone()).collect::<Vec<_>>();
+        let (index, index_hash) = SourceRegistry::read_index_with_hash(context, files)?;
+        let deletion = SourceDeletionVersion {
+            source_id: request.source_id.clone(), version_id: loaded.version.version_id.clone(),
+            wiki_path: loaded.manifest.wiki_path.clone(), title: loaded.manifest.title.clone(),
+            artifact_kinds: inventory.iter().map(|entry| (entry.path.clone(), entry.kind.clone())).collect(),
+            by_content_hash: index.by_content_hash.iter().filter(|(_, pointer)| pointer.source_id == request.source_id).map(|(key, pointer)| (key.clone(), pointer.clone())).collect(),
+            by_locator: index.by_locator.iter().filter(|(_, pointer)| pointer.source_id == request.source_id).map(|(key, pointer)| (key.clone(), pointer.clone())).collect(),
+        };
+        validate_deleted_source_index(&loaded.manifest, &deletion)?;
+        let mut operation = VersionHistoryService.begin(context, VersionOperationKind::SourceChange, &affected_paths, None)?;
+        if inventory.iter().any(|entry| operation.before_hashes.get(&entry.path).and_then(Option::as_ref) != Some(&entry.hash)) {
+            operation.summary.state = VersionOperationState::Aborted;
+            VersionHistoryService.persist(context, &operation)?;
+            return Err(source_changed(&loaded.current_hash));
+        }
+        operation.source_deletion = Some(deletion);
+        for expected in operation.expected_hashes.values_mut() { *expected = None; }
+        VersionHistoryService.persist(context, &operation)?;
+        let checkpoint_hash = Some(operation.before.clone());
+        let mut next_index = index;
+        next_index.by_content_hash.retain(|_, pointer| pointer.source_id != request.source_id);
+        next_index.by_locator.retain(|_, pointer| pointer.source_id != request.source_id);
         let audit_path = source_paths.deletion_audit(&uuid::Uuid::new_v4().to_string())?;
         let audit = serde_json::json!({
             "schemaVersion": 1,
@@ -842,6 +854,7 @@ impl ImportV2Service {
             "result": "succeeded"
         });
 
+        let result = (|| {
         let mut transaction = FileTransaction::new_for_context(context)?;
         for entry in &inventory {
             transaction
@@ -856,14 +869,94 @@ impl ImportV2Service {
             &context.resolve_project_path(&audit_path)?,
             &pretty_json(&audit)?,
         )?;
-        transaction.commit()?;
-        remove_empty_source_directories(context, &request.source_id)?;
+        transaction.commit()
+        })();
+        if let Err(failure) = result {
+            let current = VersionHistoryService.capture(context, &affected_paths)?;
+            if current.iter().all(|(path, bytes)| bytes.as_ref().map(|bytes| files.content_hash(bytes)).as_ref() == operation.before_hashes.get(path).and_then(Option::as_ref))
+                && files.file_hash(context, &index_path).is_ok_and(|hash| hash == index_hash) {
+                operation.summary.state = VersionOperationState::Aborted;
+                VersionHistoryService.persist(context, &operation)?;
+            }
+            return Err(failure);
+        }
+        VersionHistoryService.finish(context, &mut operation)?;
+        let _ = remove_empty_source_directories(context, &request.source_id);
         Ok(SourceMutationResult {
             source_id: request.source_id.clone(),
             version_id: loaded.version.version_id,
             wiki_path: loaded.manifest.wiki_path,
-            checkpoint: checkpoint.commit_hash,
+            checkpoint: checkpoint_hash,
         })
+    }
+
+    pub fn preview_deleted_source_restore(context: &ProjectContext, id: &str) -> Result<VersionRestorePreview, BackendError> {
+        let operation = VersionHistoryService.load(context, id)?;
+        let (_, _, _, conflicts) = prepare_deleted_source_restore(context, &operation)?;
+        let mut paths = operation.before_hashes.keys().cloned().collect::<Vec<_>>();
+        paths.push(context.layout.source_paths()?.index());
+        Ok(VersionRestorePreview {
+            operation_id: id.into(), paths, conflicts,
+            already_restored: matches!(operation.summary.state, VersionOperationState::Restored | VersionOperationState::Aborted),
+        })
+    }
+
+    pub(crate) fn restore_deleted_source_authorized(
+        &self,
+        permit: &ProjectWritePermit<'_>,
+        id: &str,
+        expected_current: &BTreeMap<String, Option<String>>,
+    ) -> Result<VersionOperation, BackendError> {
+        self.restore_deleted_source_unchecked(permit.context(), id, expected_current)
+    }
+
+    #[cfg(test)]
+    pub fn restore_deleted_source(&self, context: &ProjectContext, id: &str, expected_current: &BTreeMap<String, Option<String>>) -> Result<VersionOperation, BackendError> {
+        self.restore_deleted_source_unchecked(context, id, expected_current)
+    }
+
+    fn restore_deleted_source_unchecked(&self, context: &ProjectContext, id: &str, expected_current: &BTreeMap<String, Option<String>>) -> Result<VersionOperation, BackendError> {
+        let locks = self.project_locks(context)?;
+        let _guard = self.lock_project(&locks);
+        FileTransaction::reconcile_context(context)?;
+        let mut operation = VersionHistoryService.load(context, id)?;
+        if operation.summary.state == VersionOperationState::Restored { return Ok(operation); }
+        let (before, next_index, index_hash, conflicts) = prepare_deleted_source_restore(context, &operation)?;
+        if !conflicts.is_empty() { return Err(deleted_source_conflict(conflicts)); }
+        let index_path = context.layout.source_paths()?.index();
+        let paths = operation.before_hashes.keys().cloned().collect::<Vec<_>>();
+        let current = VersionHistoryService.capture(context, &paths)?;
+        let mut current_hashes = current.iter().map(|(path, bytes)| (path.clone(), bytes.as_ref().map(|bytes| FileStore.content_hash(bytes)))).collect::<BTreeMap<_, _>>();
+        current_hashes.insert(index_path.clone(), Some(index_hash.clone()));
+        if &current_hashes != expected_current { return Err(deleted_source_conflict(expected_current.keys().cloned().collect())); }
+        let mut restoration = if let Some(restore_id) = operation.restoration_id.as_deref() {
+            VersionHistoryService.load(context, restore_id)?
+        } else {
+            let mut restoration = VersionHistoryService.begin(context, VersionOperationKind::SourceChange, &paths, None)?;
+            if restoration.before_hashes.iter().any(|(path, hash)| current_hashes.get(path) != Some(hash)) { return Err(deleted_source_conflict(paths)); }
+            restoration.restored_from = Some(id.into());
+            restoration.expected_hashes = operation.before_hashes.clone();
+            VersionHistoryService.persist(context, &restoration)?;
+            operation.restoration_id = Some(restoration.summary.operation_id.clone());
+            operation.summary.state = VersionOperationState::Restoring;
+            VersionHistoryService.persist(context, &operation)?;
+            restoration
+        };
+        let mut transaction = FileTransaction::new_for_context(context)?;
+        for (path, bytes) in &before {
+            let Some(bytes) = bytes else { return Err(source_invalid()); };
+            let absolute = context.resolve_project_write_path(path)?;
+            match current_hashes.get(path).and_then(Option::as_deref) {
+                Some(hash) => transaction.write_if_hash_matches(&absolute, bytes, hash)?,
+                None => transaction.write_new(&absolute, bytes)?,
+            }
+        }
+        transaction.write_if_hash_matches(&context.resolve_project_write_path(&index_path)?, &pretty_json(&next_index)?, &index_hash)?;
+        transaction.commit()?;
+        VersionHistoryService.finish(context, &mut restoration)?;
+        operation.summary.state = VersionOperationState::Restored;
+        VersionHistoryService.persist(context, &operation)?;
+        Ok(operation)
     }
 
     pub(crate) fn store_source_ai_organize_candidate_authorized(
@@ -2897,6 +2990,66 @@ fn build_delete_preview(
         expected_freed_bytes: inventory.iter().map(|entry| entry.size_bytes).sum(),
         guard_token,
     })
+}
+
+fn deleted_source_conflict(paths: Vec<String>) -> BackendError {
+    BackendError::new("VERSION_RESTORE_CONFLICT", "Source paths or index entries are now used by newer content. Current data was preserved.", true, true)
+        .with_details(serde_json::json!({ "paths": paths }))
+}
+
+fn validate_deleted_source_index(manifest: &SourceManifest, deletion: &SourceDeletionVersion) -> Result<(), BackendError> {
+    let current = current_version(manifest)?;
+    if deletion.by_content_hash.get(&current.content_hash).is_none_or(|pointer| pointer.source_id != manifest.source_id || pointer.version_id != current.version_id)
+        || deletion.by_content_hash.iter().any(|(hash, pointer)| pointer.source_id != manifest.source_id || !manifest.versions.iter().any(|version| version.version_id == pointer.version_id && &version.content_hash == hash))
+        || deletion.by_locator.values().any(|pointer| pointer.source_id != manifest.source_id || !deletion.by_content_hash.values().any(|saved| saved == pointer)) {
+        return Err(source_invalid());
+    }
+    Ok(())
+}
+
+type DeletedSourceRestore = (BTreeMap<String, Option<Vec<u8>>>, SourceIndex, String, Vec<String>);
+
+fn prepare_deleted_source_restore(context: &ProjectContext, operation: &VersionOperation) -> Result<DeletedSourceRestore, BackendError> {
+    let deletion = operation.source_deletion.as_ref().ok_or_else(source_invalid)?;
+    if operation.summary.kind != VersionOperationKind::SourceChange
+        || deletion.artifact_kinds.keys().ne(operation.before_hashes.keys()) { return Err(source_invalid()); }
+    VersionHistoryService.validate_snapshots(context, operation)?;
+    let paths = operation.before_hashes.keys().cloned().collect::<Vec<_>>();
+    for path in &paths { validate_source_inventory_path(context, path, &deletion.source_id)?; }
+    let before = GitService.read_history_files_bounded(context, &operation.before, &paths, 64 * 1024 * 1024)?;
+    if before.iter().any(|(path, bytes)| bytes.as_ref().map(|bytes| FileStore.content_hash(bytes)).as_ref() != operation.before_hashes.get(path).and_then(Option::as_ref)) { return Err(source_invalid()); }
+    let manifest_path = context.layout.source_paths()?.manifest(&deletion.source_id)?;
+    let manifest: SourceManifest = serde_json::from_slice(before.get(&manifest_path).and_then(Option::as_deref).ok_or_else(source_invalid)?).map_err(|_| source_invalid())?;
+    SourceRegistry::validate_manifest_contract_for_layout(&manifest, &context.layout)?;
+    if manifest.source_id != deletion.source_id || manifest.current_version_id != deletion.version_id || manifest.wiki_path != deletion.wiki_path { return Err(source_invalid()); }
+    let version = current_version(&manifest)?;
+    validate_deleted_source_index(&manifest, deletion)?;
+    validate_source_version_binding(before.get(&manifest.wiki_path).and_then(Option::as_deref).ok_or_else(source_invalid)?, &manifest, version).map_err(|_| source_invalid())?;
+    let current = VersionHistoryService.capture(context, &paths)?;
+    let restoration = operation.restoration_id.as_deref().map(|id| VersionHistoryService.load(context, id)).transpose()?;
+    if restoration.as_ref().is_some_and(|record| record.restored_from.as_deref() != Some(operation.summary.operation_id.as_str()) || record.expected_hashes != operation.before_hashes) { return Err(source_invalid()); }
+    let mut conflicts = Vec::new();
+    for (path, bytes) in &current {
+        let hash = bytes.as_ref().map(|bytes| FileStore.content_hash(bytes));
+        let allowed = if let Some(restoration) = &restoration {
+            restoration.before_hashes.get(path) == Some(&hash) || restoration.expected_hashes.get(path) == Some(&hash)
+        } else { hash.is_none() || (operation.summary.state == VersionOperationState::Prepared && operation.before_hashes.get(path) == Some(&hash)) };
+        if !allowed { conflicts.push(path.clone()); }
+    }
+    let (mut index, index_hash) = SourceRegistry::read_index_with_hash(context, &FileStore)?;
+    for (saved, current) in [(&deletion.by_content_hash, &mut index.by_content_hash), (&deletion.by_locator, &mut index.by_locator)] {
+        for (key, pointer) in saved {
+            if pointer.source_id != deletion.source_id || !manifest.versions.iter().any(|version| version.version_id == pointer.version_id) { return Err(source_invalid()); }
+            if current.get(key).is_some_and(|current| current != pointer) {
+                conflicts.push(context.layout.source_paths()?.index());
+            } else { current.insert(key.clone(), pointer.clone()); }
+        }
+    }
+    if conflicts.is_empty() {
+        crate::services::import_v2::source_registry::validate_for_migration(&index)?;
+    }
+    conflicts.sort(); conflicts.dedup();
+    Ok((before, index, index_hash, conflicts))
 }
 
 fn source_inventory(

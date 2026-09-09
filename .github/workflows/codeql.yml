@@ -1,15 +1,8 @@
 name: CodeQL
 
-# Static analysis for JavaScript/TypeScript (audit §3.6 recommendation:
-# "Dependabot、CodeQL 或等价静态分析"). This lives in its own workflow
-# file because the frozen release contract requires ci.yml to carry no
-# write permission scope at all, while uploading CodeQL results needs
-# security-events: write. The scope here is job-level and cannot touch
-# repository contents or releases.
 on:
   push:
-    branches:
-      - "**"
+    branches: [master]
   pull_request:
 
 concurrency:

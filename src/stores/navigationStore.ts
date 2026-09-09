@@ -30,6 +30,7 @@ export type RightPanelMode = "default" | "wikiAssistant";
 export type WorkspaceFocus = "exportPreview";
 
 export type SettingsSectionKey =
+  | "versions"
   | "general"
   | "appearance"
   | "language"
@@ -94,6 +95,8 @@ export interface NavigationState {
   paneSizes: Record<ResizablePaneId, number>;
   settingsOpen: boolean;
   settingsSection: SettingsSectionKey;
+  versionHistoryTarget: { operationId: string } | null;
+  openVersionHistory: (operationId: string) => void;
   workflowSettingsReturnIntent: WorkflowSettingsReturnIntent | null;
   workflowLaunchIntent: WorkflowLaunchIntent | null;
   importSuccessNotice: ImportSuccessNotice | null;
@@ -137,6 +140,8 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   paneSizes: initialLayoutPreferences.paneSizes,
   settingsOpen: false,
   settingsSection: "general",
+  versionHistoryTarget: null,
+  openVersionHistory: (operationId) => set({ settingsOpen: true, settingsSection: "versions", versionHistoryTarget: { operationId } }),
   workflowSettingsReturnIntent: null,
   workflowLaunchIntent: null,
   importSuccessNotice: null,
@@ -274,7 +279,7 @@ export const useNavigationStore = create<NavigationState>((set) => ({
       };
     }),
   openSettings: (settingsSection = "general", workflowSettingsReturnIntent = null) =>
-    set({ settingsOpen: true, settingsSection, workflowSettingsReturnIntent }),
+    set({ settingsOpen: true, settingsSection, workflowSettingsReturnIntent, versionHistoryTarget: null }),
   closeSettings: () => set({ settingsOpen: false }),
   toggleSettings: () =>
     set((state) => ({
@@ -295,5 +300,6 @@ export const useNavigationStore = create<NavigationState>((set) => ({
 }));
 
 registerProjectScopeResetHandler("navigation", () => {
+  useNavigationStore.setState({ versionHistoryTarget: null });
   useNavigationStore.getState().setActiveView("dashboard");
 });

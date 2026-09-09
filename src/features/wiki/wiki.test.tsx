@@ -466,21 +466,12 @@ describe("wikiStore", () => {
       },
     });
     invokeMock
-      .mockResolvedValueOnce({ created: true, commitHash: "checkpoint-1", message: "Before conflict merge", purpose: "high_risk_operation", affectedPaths: ["wiki/concepts/transformer.md"] })
       .mockResolvedValueOnce({ relativePath: "wiki/concepts/transformer.md", hash: "hash-3", savedAt: "2026-06-21", graphCacheInvalidated: true })
       .mockResolvedValueOnce(pageContent({ rawMarkdown: "# Incoming", bodyMarkdown: "# Incoming", meta: pageMeta({ hash: "hash-3" }) }));
 
     await useWikiStore.getState().resolveConflict("proj-1", "D:/wiki", "use_incoming");
 
-    expect(invokeMock).toHaveBeenNthCalledWith(1, "create_git_checkpoint", {
-      request: {
-        projectId: "proj-1",
-        projectRootPath: "D:/wiki",
-        purpose: "high_risk_operation",
-        message: "Before resolving wiki conflict: wiki/concepts/transformer.md",
-      },
-    });
-    expect(invokeMock).toHaveBeenNthCalledWith(2, "save_wiki_page", {
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "resolve_wiki_conflict", {
       request: {
         projectId: "proj-1",
         projectRootPath: "D:/wiki",
@@ -1485,7 +1476,7 @@ describe("Wiki HTML preview", () => {
 
       await waitFor(() => expect(useExportStore.getState().runningTaskId).toBeNull());
       expect(useWikiStore.getState().mode).toBe("read");
-      expect(screen.queryByTitle("HTML preview")).not.toBeInTheDocument();
+      expect(document.querySelector<HTMLIFrameElement>('iframe[title="HTML preview"]')).not.toBeInTheDocument();
       expect(listExportsCalls).toBe(2);
 
       act(() => terminalRefresh.resolve([]));
@@ -1887,7 +1878,7 @@ describe("Wiki HTML preview", () => {
       await waitFor(() => expect(useExportStore.getState().records).toEqual([record]));
       fireEvent.click(screen.getByRole("tab", { name: "HTML preview" }));
       await waitFor(() =>
-        expect(screen.getByTitle("HTML preview")).toHaveAttribute(
+        expect(document.querySelector<HTMLIFrameElement>('iframe[title="HTML preview"]')).toHaveAttribute(
           "srcdoc",
           "<h1>Transformer card v1</h1>",
         ),
@@ -1922,7 +1913,7 @@ describe("Wiki HTML preview", () => {
         expect(useExportStore.getState().runningTaskId).toBe(regeneratedTask.id),
       );
       expect(screen.getAllByText(record.outputPath)).toHaveLength(2);
-      expect(screen.getByTitle("HTML preview")).toHaveAttribute(
+      expect(document.querySelector<HTMLIFrameElement>('iframe[title="HTML preview"]')).toHaveAttribute(
         "srcdoc",
         "<h1>Transformer card v1</h1>",
       );
@@ -1947,7 +1938,7 @@ describe("Wiki HTML preview", () => {
       expect(useExportStore.getState().records).toEqual([regeneratedRecord, record]);
       expect(screen.getAllByText(regeneratedRecord.outputPath)).toHaveLength(2);
       expect(screen.queryByText(record.outputPath)).not.toBeInTheDocument();
-      expect(screen.getByTitle("HTML preview")).toHaveAttribute(
+      expect(document.querySelector<HTMLIFrameElement>('iframe[title="HTML preview"]')).toHaveAttribute(
         "srcdoc",
         "<h1>Transformer card v2</h1>",
       );
@@ -2325,7 +2316,7 @@ describe("Wiki HTML preview", () => {
       />,
     );
 
-    const frame = screen.getByTitle("HTML preview");
+    const frame = document.querySelector<HTMLIFrameElement>('iframe[title="HTML preview"]');
     expect(frame).toHaveAttribute("sandbox", "");
     expect(frame).toHaveAttribute("srcdoc", "<h1>Preview</h1>");
     expect(screen.getAllByText("exports/html/agent.html")).toHaveLength(2);

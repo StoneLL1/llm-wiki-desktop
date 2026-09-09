@@ -107,6 +107,7 @@ export interface ChatSessionSummary {
 }
 
 export interface SaveAnswerResult {
+  operationId?: string;
   path: string;
   created: boolean;
   checkpoint?: string;

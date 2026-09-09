@@ -185,7 +185,7 @@ describe("ImportSourceMethods", () => {
     expect(matrixSummary).toHaveAccessibleName(/Platforms: 0\/0 available/);
     expect(matrixSummary).toHaveAccessibleName(/Abilities: 0\/0 available/);
     expect(screen.queryByLabelText("HTTP: available")).not.toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "URL" }).closest("form")).toHaveClass("import-v2-compact-url");
+    expect(screen.getByRole("textbox", { name: "URL" }).closest("form")).toHaveClass("import-v2-entry-block");
 
     fireEvent.click(screen.getByRole("button", { name: "Collapse add methods" }));
     expect(screen.queryByRole("textbox", { name: "URL" })).not.toBeInTheDocument();
@@ -195,6 +195,26 @@ describe("ImportSourceMethods", () => {
     expandMatrix();
     expect(screen.getByRole("button", { name: /^Collapse supported sources\./ })).toHaveAttribute("aria-expanded", "true");
     expect(screen.queryByLabelText("HTTP: available")).not.toBeInTheDocument();
+  });
+
+  it("keeps text entry independent from web links and omits repeated entry explanations", () => {
+    render(<ImportSourceMethods onAddPaths={vi.fn()} onAddText={vi.fn()} onAddUrl={vi.fn()} />);
+    expect(screen.getByRole("heading", { name: "Local files" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Web links" })).toBeInTheDocument();
+    const webEntry = screen.getByRole("textbox", { name: "URL" }).closest("form")!;
+    expect(webEntry).not.toContainElement(screen.getByRole("button", { name: "Paste text or Markdown" }));
+    expect(screen.queryByText(i18next.t("importV2.files.description"))).not.toBeInTheDocument();
+    expect(screen.queryByText(i18next.t("importV2.url.description"))).not.toBeInTheDocument();
+    expect(screen.queryByText(i18next.t("importV2.files.formats"))).not.toBeInTheDocument();
+  });
+
+  it("reopens a text draft from the collapsed add section", () => {
+    render(<ImportSourceMethods onAddPaths={vi.fn()} onAddText={vi.fn()} onAddUrl={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Paste text or Markdown" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Text or Markdown" }), { target: { value: "Retain my draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Collapse add methods" }));
+    fireEvent.click(screen.getByRole("button", { name: "Paste text or Markdown" }));
+    expect(screen.getByRole("textbox", { name: "Text or Markdown" })).toHaveValue("Retain my draft");
   });
 
   it("shows localized validation for malformed public URLs", () => {

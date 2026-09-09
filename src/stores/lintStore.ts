@@ -59,6 +59,12 @@ function errorCode(error: unknown): string | null {
   return null;
 }
 
+function errorDetails(error: unknown): unknown | null {
+  return typeof error === "object" && error !== null && "details" in error
+    ? error.details ?? null
+    : null;
+}
+
 function isTerminalConfirmationError(error: unknown): boolean {
   return [
     "CONFIRMATION_EXPIRED",
@@ -172,6 +178,8 @@ export interface LintState {
   healthReport: HealthCheckReport | null;
   loadingLocal: boolean;
   error: string | null;
+  errorCode: string | null;
+  errorDetails: unknown | null;
   selectedIssueId: string | null;
   /** Per-issue fix status keyed by issue id. */
   fixStatus: Record<string, "idle" | "applying" | "applied" | "error">;
@@ -259,6 +267,8 @@ const initial = {
   healthReport: null as HealthCheckReport | null,
   loadingLocal: false,
   error: null as string | null,
+  errorCode: null as string | null,
+  errorDetails: null as unknown | null,
   selectedIssueId: null as string | null,
   fixStatus: {} as LintState["fixStatus"],
   fixConfirm: null as LintFixConfirmRequest | null,
@@ -307,6 +317,7 @@ export const useLintStore = create<LintState>((set, get) => ({
     set({
       loadingLocal: true,
       error: null,
+      errorCode: null, errorDetails: null,
       agentRepairErrorCode: null,
       // Keep the last report visible while refreshing its deterministic layer.
       healthReport: current.healthReport?.execution ? {
@@ -338,7 +349,7 @@ export const useLintStore = create<LintState>((set, get) => ({
       void get().loadHistory({ projectId, projectRootPath: rootPath });
     } catch (error) {
       if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch) return;
-      set({ loadingLocal: false, error: errorMessage(error) });
+      set({ loadingLocal: false, error: errorMessage(error), errorCode: errorCode(error), errorDetails: errorDetails(error) });
     }
   },
 
@@ -510,7 +521,7 @@ export const useLintStore = create<LintState>((set, get) => ({
       });
     } catch (error) {
       if (!isProjectScopeCurrent(scope) || !ignoresResource.isCurrent(requestEpoch)) return;
-      set({ error: errorMessage(error) });
+      set({ error: errorMessage(error), errorCode: errorCode(error), errorDetails: errorDetails(error) });
     }
   },
 
@@ -542,7 +553,7 @@ export const useLintStore = create<LintState>((set, get) => ({
       return true;
     } catch (error) {
       if (!isProjectScopeCurrent(scope) || !ignoresResource.isCurrent(requestEpoch)) return false;
-      set({ error: errorMessage(error) });
+      set({ error: errorMessage(error), errorCode: errorCode(error), errorDetails: errorDetails(error) });
       return false;
     }
   },
@@ -568,7 +579,7 @@ export const useLintStore = create<LintState>((set, get) => ({
       return true;
     } catch (error) {
       if (!isProjectScopeCurrent(scope) || !ignoresResource.isCurrent(requestEpoch)) return false;
-      set({ error: errorMessage(error) });
+      set({ error: errorMessage(error), errorCode: errorCode(error), errorDetails: errorDetails(error) });
       return false;
     }
   },
@@ -593,6 +604,7 @@ export const useLintStore = create<LintState>((set, get) => ({
       fixStatus: { ...state.fixStatus, [issue.id]: "applying" },
       fixConfirm: null,
       error: null,
+      errorCode: null, errorDetails: null,
     }));
     const request: ApplyLintFixRequest = {
       projectId,
@@ -642,12 +654,14 @@ export const useLintStore = create<LintState>((set, get) => ({
           ),
           fixStatus: { ...state.fixStatus, [issue.id]: "error" },
           error: errorMessage(error),
+          errorCode: errorCode(error), errorDetails: errorDetails(error),
         }));
         return null;
       }
       set((state) => ({
         fixStatus: { ...state.fixStatus, [issue.id]: "error" },
         error: errorMessage(error),
+        errorCode: errorCode(error), errorDetails: errorDetails(error),
       }));
       return null;
     }
@@ -667,7 +681,7 @@ export const useLintStore = create<LintState>((set, get) => ({
     ) return null;
     const operationEpoch = ++lintOperationEpoch;
     const scope = captureProjectScope();
-    set({ batchRunning: true, error: null });
+    set({ batchRunning: true, error: null, errorCode: null, errorDetails: null });
     try {
       const outcome = await invoke<LintBatchOutcome>("apply_lint_fixes", {
         request,
@@ -685,7 +699,7 @@ export const useLintStore = create<LintState>((set, get) => ({
       return outcome;
     } catch (error) {
       if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch) return null;
-      set({ batchRunning: false, error: errorMessage(error) });
+      set({ batchRunning: false, error: errorMessage(error), errorCode: errorCode(error), errorDetails: errorDetails(error) });
       return null;
     }
   },
@@ -752,12 +766,14 @@ export const useLintStore = create<LintState>((set, get) => ({
           ),
           fixStatus: { ...state.fixStatus, [issue.id]: "error" },
           error: errorMessage(error),
+          errorCode: errorCode(error), errorDetails: errorDetails(error),
         }));
         return null;
       }
       set((state) => ({
         fixStatus: { ...state.fixStatus, [issue.id]: "error" },
         error: errorMessage(error),
+        errorCode: errorCode(error), errorDetails: errorDetails(error),
       }));
       return null;
     }
@@ -808,7 +824,7 @@ export const useLintStore = create<LintState>((set, get) => ({
           fixStatus: { ...state.fixStatus, [issueId]: "idle" },
         }));
       }
-      set({ error: errorMessage(error) });
+      set({ error: errorMessage(error), errorCode: errorCode(error), errorDetails: errorDetails(error) });
     }
   },
 

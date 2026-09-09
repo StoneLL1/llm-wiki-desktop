@@ -2202,6 +2202,69 @@
         "read"
       ],
       "projectScoped": true
+    },
+    {
+      "name": "get_version_history_status",
+      "source": "src-tauri/src/commands/version_history_commands.rs",
+      "classifications": [
+        "read",
+        "external-process"
+      ],
+      "projectScoped": true
+    },
+    {
+      "name": "list_version_operations",
+      "source": "src-tauri/src/commands/version_history_commands.rs",
+      "classifications": [
+        "read"
+      ],
+      "projectScoped": true
+    },
+    {
+      "name": "get_version_operation",
+      "source": "src-tauri/src/commands/version_history_commands.rs",
+      "classifications": [
+        "read"
+      ],
+      "projectScoped": true
+    },
+    {
+      "name": "get_version_file_diff",
+      "source": "src-tauri/src/commands/version_history_commands.rs",
+      "classifications": [
+        "read",
+        "external-process"
+      ],
+      "projectScoped": true
+    },
+    {
+      "name": "prepare_version_action",
+      "source": "src-tauri/src/commands/version_history_commands.rs",
+      "classifications": [
+        "mutation"
+      ],
+      "projectScoped": true,
+      "writeAuthority": "ProjectWritePermit"
+    },
+    {
+      "name": "confirm_version_action",
+      "source": "src-tauri/src/commands/version_history_commands.rs",
+      "classifications": [
+        "mutation",
+        "external-process"
+      ],
+      "projectScoped": true,
+      "writeAuthority": "ProjectWritePermit"
+    },
+    {
+      "name": "resolve_wiki_conflict",
+      "source": "src-tauri/src/commands/wiki_commands.rs",
+      "classifications": [
+        "mutation",
+        "external-process"
+      ],
+      "projectScoped": true,
+      "writeAuthority": "ProjectWritePermit"
     }
   ],
   "serviceAuthorityContracts": [

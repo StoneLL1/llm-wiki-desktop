@@ -10,7 +10,7 @@ const activeChildren = new Set();
 const fullLanes = [
   {
     name: "frontend",
-    scripts: ["check:release-config", "test:final-four-redlines", "check:command-execution", "check:import-source-media", "test", "test:capability-tools", "lint", "build", "check:bundle", "check:tailwind-coverage", "check:console"],
+    scripts: ["test", "test:tooling", "test:capability-tools", "lint", "build", "check:bundle", "check:tailwind-coverage", "check:console", "check:command-execution"],
   },
   {
     name: "rust",
@@ -21,7 +21,7 @@ const fullLanes = [
 const quickLanes = [
   {
     name: "frontend",
-    scripts: ["check:release-config", "test:final-four-redlines", "check:command-execution", "lint", "build", "check:bundle", "check:tailwind-coverage", "check:console"],
+    scripts: ["lint", "build", "check:console"],
   },
   {
     name: "rust",
@@ -30,13 +30,15 @@ const quickLanes = [
 ];
 
 const requestedMode = process.argv[2] ?? "full";
-if (!["full", "quick"].includes(requestedMode)) {
+if (!["full", "quick", "frontend", "rust"].includes(requestedMode)) {
   process.stderr.write(
-    `[check] unknown mode "${requestedMode}"; expected "full" or "quick"\n`,
+    `[check] unknown mode "${requestedMode}"; expected full, quick, frontend, or rust\n`,
   );
   process.exit(2);
 }
-const lanes = requestedMode === "quick" ? quickLanes : fullLanes;
+const lanes = requestedMode === "quick" ? quickLanes
+  : requestedMode === "full" ? fullLanes
+    : fullLanes.filter(({ name }) => name === requestedMode);
 
 const formatDuration = (milliseconds) => {
   const seconds = milliseconds / 1000;

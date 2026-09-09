@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef } from "react";
+import { ArrowLeft, FileSearch } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import type {
-  LintFixChoice,
   LintFixConfirmRequest,
   LintIssue,
   LintSafetyPrefs,
@@ -20,20 +20,13 @@ interface LintIssueDetailsProps {
   onConfirmHighRisk: (expectedHash: string) => void;
   onCancelHighRisk: () => void;
   onIgnore: (issue: LintIssue) => void;
-}
-
-function SectionTitle({ children }: { children: React.ReactNode }) {
-  return (
-    <h3 className="mb-2 mt-1 text-[10.5px] font-medium uppercase tracking-[0.08em] text-[var(--text-muted)]">
-      {children}
-    </h3>
-  );
+  onBack?: () => void;
 }
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex flex-col gap-0.5">
-      <span className="text-[10.5px] uppercase tracking-[0.08em] text-[var(--text-muted)]">{label}</span>
+      <span className="text-[11px] text-[var(--text-muted)]">{label}</span>
       <span className="text-[12px] leading-5 text-[var(--text-primary)]">{children}</span>
     </div>
   );
@@ -51,44 +44,36 @@ export function LintIssueDetails({
   onConfirmHighRisk,
   onCancelHighRisk,
   onIgnore,
+  onBack,
 }: LintIssueDetailsProps) {
   const { t } = useTranslation();
+  const headingRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (issue && window.matchMedia?.("(max-width: 980px)").matches) headingRef.current?.focus();
+  }, [issue?.id]);
   const hasSnapshot = Boolean(issue?.scanHash);
   const fixable = issue ? issue.fixability !== "none" && hasSnapshot : false;
-  const [choice, setChoice] = useState<LintFixChoice>(fixable ? "fix" : "ignore");
-
-  // Reset the fix-plan choice when switching issues, defaulting to "fix" when
-  // the issue is auto-fixable and "ignore" otherwise.
-  useEffect(() => {
-    setChoice(
-      fixConfirm?.issue.id === issue?.id || fixable ? "fix" : "ignore",
-    );
-  }, [issue?.id, issue?.fixability, hasSnapshot, fixable, fixConfirm?.issue.id]);
-
   if (!issue) {
     return (
-      <div className="flex h-full items-center justify-center px-6 text-center text-[12px] text-[var(--text-muted)]">
-        {t("lint.details.empty")}
+      <div className="lint-view__details lint-empty">
+        <FileSearch size={22} aria-hidden="true" /><p>{t("lint.details.empty")}</p>
       </div>
     );
   }
 
   const confirmForThisIssue = fixConfirm && fixConfirm.issue.id === issue.id ? fixConfirm : null;
-  const effectiveChoice = fixConfirm ? "fix" : choice;
   const pageHash = confirmForThisIssue?.expectedHash || issue.scanHash || null;
   const preview = confirmForThisIssue?.pendingAction.preview ?? null;
-  const applyHint =
-    issue.fixability === "high_risk"
-      ? t("lint.plan.applyHighRiskHint")
-      : t("lint.plan.applySafeHint");
 
   return (
     <div className="lint-view__details flex h-full flex-col overflow-y-auto">
-      <div className="border-b border-[var(--border)] px-4 py-3">
+      <div ref={headingRef} tabIndex={-1} className="lint-detail-heading border-b border-[var(--border)] px-4 py-3">
+        {onBack ? <button type="button" className="btn btn--ghost btn--sm lint-details-back" onClick={onBack}><ArrowLeft size={14} aria-hidden="true" />{t("lint.details.back")}</button> : null}
         <div className="flex items-center gap-2">
           <span className="text-[13px] font-semibold text-[var(--text-primary)]">
             {t(`lint.issueType.${issue.issueType}`)}
           </span>
+          {issue.fixability === "high_risk" ? <span className="badge badge--warn">{t("lint.tag.highRisk")}</span> : null}
           {(issue.origins ?? [issue.source]).map((source) => (
             <span
               key={source}
@@ -104,13 +89,6 @@ export function LintIssueDetails({
         <Row label={t("lint.details.path")}>
           <span className="font-mono text-[11.5px]">{issue.path}</span>
         </Row>
-        {issue.scanHash ? (
-          <Row label={t("lint.details.scanBaseline")}>
-            <span className="font-mono text-[10.5px]" title={issue.scanHash}>
-              {issue.scanHash.slice(0, 12)}
-            </span>
-          </Row>
-        ) : null}
         <Row label={t("lint.details.message")}>{issue.message}</Row>
         {issue.target ? (
           <Row label={t("lint.details.target")}>
@@ -132,74 +110,19 @@ export function LintIssueDetails({
         ) : null}
       </div>
 
-      {/* Fix plan: apply fix vs ignore this issue. */}
-      <div className="flex flex-col gap-1 px-4 pb-3">
-        <SectionTitle>{t("lint.plan.title")}</SectionTitle>
-        <label className={`check-row ${effectiveChoice === "fix" ? "is-selected" : ""}`}>
-          <input
-            type="radio"
-            name={`lint-fix-${issue.id}`}
-            checked={effectiveChoice === "fix"}
-            disabled={!fixable || Boolean(fixConfirm)}
-            onChange={() => setChoice("fix")}
-          />
-          <div className="min-w-0 flex-1">
-            <div className="font-medium text-[var(--text-primary)]">{t("lint.plan.apply")}</div>
-            <div className="font-mono text-[11px] text-[var(--text-muted)]">{applyHint}</div>
-          </div>
-          {fixable && issue.fixability === "high_risk" ? (
-            <span className="badge badge--danger">{t("lint.tag.highRisk")}</span>
-          ) : null}
-        </label>
-        <label className={`check-row ${effectiveChoice === "ignore" ? "is-selected" : ""}`}>
-          <input
-            type="radio"
-            name={`lint-fix-${issue.id}`}
-            checked={effectiveChoice === "ignore"}
-            disabled={Boolean(fixConfirm) || actionsDisabled}
-            onChange={() => setChoice("ignore")}
-          />
-          <div className="min-w-0 flex-1">
-            <div className="font-medium text-[var(--text-primary)]">{t("lint.plan.ignore")}</div>
-            <div className="font-mono text-[11px] text-[var(--text-muted)]">{t("lint.plan.ignoreHint")}</div>
-          </div>
-        </label>
-      </div>
-
-      {/* Safety checks: checkpoint + commit are hard boundaries (always on). */}
-      <div className="flex flex-col gap-1 px-4 pb-3">
-        <SectionTitle>{t("lint.safety.title")}</SectionTitle>
-        <label className="check-row" style={{ cursor: "default" }}>
-          <input type="checkbox" checked disabled onChange={() => undefined} />
-          <span className="flex-1 text-[var(--text-primary)]">{t("lint.safety.checkpoint")}</span>
-          <span className="text-[10.5px] text-[var(--text-muted)]">{t("lint.safety.mandatory")}</span>
-        </label>
-        <label className="check-row" style={{ cursor: "default" }}>
-          <input type="checkbox" checked disabled onChange={() => undefined} />
-          <span className="flex-1 text-[var(--text-primary)]">{t("lint.safety.commit")}</span>
-          <span className="text-[10.5px] text-[var(--text-muted)]">{t("lint.safety.mandatory")}</span>
-        </label>
-        <label className="check-row">
-          <input
-            type="checkbox"
-            checked={safetyPrefs.recompile}
-            onChange={(event) => onSafetyPrefsChange({ recompile: event.target.checked })}
-          />
-          <span className="flex-1 text-[var(--text-primary)]">{t("lint.safety.recompile")}</span>
-        </label>
-      </div>
+      {fixable ? (
+        <div className="lint-fix-options">
+          <p>{t("lint.safety.recoveryNote")}</p>
+          <label>
+            <input type="checkbox" checked={safetyPrefs.recompile} disabled={actionsDisabled || Boolean(fixConfirm)}
+              onChange={(event) => onSafetyPrefsChange({ recompile: event.target.checked })} />
+            {t("lint.safety.recompile")}
+          </label>
+        </div>
+      ) : null}
 
       <div className="mt-auto border-t border-[var(--border)] px-4 py-3">
-        {effectiveChoice === "ignore" ? (
-          <button
-            type="button"
-            disabled={ignoring || actionsDisabled || Boolean(fixConfirm)}
-            onClick={() => onIgnore(issue)}
-            className="h-[28px] w-full rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] text-[12px] hover:bg-[var(--surface-muted)] disabled:opacity-40"
-          >
-            {ignoring ? "…" : t("lint.plan.ignoreAction")}
-          </button>
-        ) : fixStatus === "applied" ? (
+        {fixStatus === "applied" ? (
           <span className="text-[12px] text-[var(--text-muted)]">{t("lint.details.applied")}</span>
         ) : confirmForThisIssue ? (
           <div className="flex flex-col gap-2">
@@ -210,7 +133,7 @@ export function LintIssueDetails({
             {preview ? (
               <div className="grid grid-cols-2 gap-2">
                 <div className="flex flex-col gap-1">
-                  <span className="text-[10.5px] uppercase tracking-[0.08em] text-[var(--text-muted)]">
+                  <span className="text-[11px] text-[var(--text-muted)]">
                     {t("lint.details.before")}
                   </span>
                   <code className="block max-h-[120px] overflow-y-auto whitespace-pre-wrap rounded-[var(--radius-sm)] bg-[var(--surface-muted)] px-2 py-1 font-mono text-[11px]">
@@ -218,7 +141,7 @@ export function LintIssueDetails({
                   </code>
                 </div>
                 <div className="flex flex-col gap-1">
-                  <span className="text-[10.5px] uppercase tracking-[0.08em] text-[var(--text-muted)]">
+                  <span className="text-[11px] text-[var(--text-muted)]">
                     {t("lint.details.after")}
                   </span>
                   <code className="block max-h-[120px] overflow-y-auto whitespace-pre-wrap rounded-[var(--radius-sm)] bg-[var(--surface-muted)] px-2 py-1 font-mono text-[11px]">
@@ -232,7 +155,7 @@ export function LintIssueDetails({
                 type="button"
                 disabled={!pageHash || fixStatus === "applying" || actionsDisabled}
                 onClick={() => pageHash && onConfirmHighRisk(pageHash)}
-                className="btn--block h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--primary-hover)] disabled:opacity-40"
+                className="btn--block h-[28px] rounded-[var(--radius-md)] lint-primary bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--primary-hover)] disabled:opacity-40"
               >
                 {fixStatus === "applying" ? "…" : t("lint.details.confirm")}
               </button>
@@ -257,11 +180,18 @@ export function LintIssueDetails({
               fixStatus === "applying" || actionsDisabled || Boolean(fixConfirm)
             }
             onClick={() => onApplyFix(issue)}
-            className="btn--block h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--primary-hover)] disabled:opacity-40"
+            className="btn--block h-[28px] rounded-[var(--radius-md)] lint-primary bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] hover:bg-[var(--primary-hover)] disabled:opacity-40"
           >
             {fixStatus === "applying" ? "…" : t("lint.details.applyFix")}
           </button>
         )}
+        {!fixConfirm ? (
+          <button type="button" className="btn btn--ghost btn--sm lint-ignore-action"
+            title={t("lint.plan.ignoreHint")} disabled={ignoring || actionsDisabled}
+            onClick={() => onIgnore(issue)}>
+            {ignoring ? t("lint.details.ignoring") : t("lint.plan.ignoreAction")}
+          </button>
+        ) : null}
       </div>
     </div>
   );

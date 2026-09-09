@@ -1378,7 +1378,7 @@ impl AppState {
             } else {
                 false
             };
-            if !git.is_repository {
+            if !git.is_repository || git.head.is_none() {
                 WorkflowGitState::Unavailable
             } else if content_changes {
                 WorkflowGitState::Dirty
@@ -3743,6 +3743,32 @@ mod project_registry_tests {
         assert_eq!(access.trust, WorkflowProjectTrust::Trusted);
         assert_eq!(access.persistence, WorkflowPersistenceMode::Persistent);
         assert_eq!(access.git_state, WorkflowGitState::Unavailable);
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn workflow_access_requires_head_even_when_an_unborn_repository_looks_clean() {
+        let state = AppState::default();
+        let project = strict_native_project("workflow-unborn-git");
+        let context = state
+            .project_registry
+            .register_trusted_native("project-a", &project)
+            .unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&project)
+            .status()
+            .unwrap()
+            .success());
+        fs::write(project.join(".git/info/exclude"), "*\n").unwrap();
+        let git = state.git_service.repository_status(&context).unwrap();
+        assert!(git.is_repository);
+        assert!(git.head.is_none());
+        assert!(!git.has_changes);
+        assert_eq!(
+            state.resolve_workflow_access(&context).unwrap().git_state,
+            WorkflowGitState::Unavailable
+        );
         fs::remove_dir_all(project).unwrap();
     }
 

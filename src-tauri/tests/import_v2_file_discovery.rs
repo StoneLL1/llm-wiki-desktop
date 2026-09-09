@@ -55,7 +55,12 @@ const LOCAL_FORMAT_CASES: &[LocalFormatCase] = &[
         fixture: "legacy.doc",
         format: FileFormat::Doc,
         content_kind: FileContentKind::Document,
-        routes: &["pack.office-legacy", "pack.markitdown", "pack.office-oxide", "agent.office"],
+        routes: &[
+            "pack.office-legacy",
+            "pack.markitdown",
+            "pack.office-oxide",
+            "agent.office",
+        ],
     },
     LocalFormatCase {
         fixture: "document.docx",
@@ -72,7 +77,12 @@ const LOCAL_FORMAT_CASES: &[LocalFormatCase] = &[
         fixture: "legacy.xls",
         format: FileFormat::Xls,
         content_kind: FileContentKind::Document,
-        routes: &["pack.office-legacy", "pack.markitdown", "pack.office-oxide", "agent.office"],
+        routes: &[
+            "pack.office-legacy",
+            "pack.markitdown",
+            "pack.office-oxide",
+            "agent.office",
+        ],
     },
     LocalFormatCase {
         fixture: "workbook.xlsx",
@@ -89,7 +99,12 @@ const LOCAL_FORMAT_CASES: &[LocalFormatCase] = &[
         fixture: "legacy.ppt",
         format: FileFormat::Ppt,
         content_kind: FileContentKind::Document,
-        routes: &["pack.office-legacy", "pack.markitdown", "pack.office-oxide", "agent.office"],
+        routes: &[
+            "pack.office-legacy",
+            "pack.markitdown",
+            "pack.office-oxide",
+            "agent.office",
+        ],
     },
     LocalFormatCase {
         fixture: "presentation.pptx",
@@ -343,16 +358,8 @@ fn ocr_asr_and_companion_edge_fixtures_reach_their_batch_three_routes() {
             FileFormat::Png,
             &["ocr.cjk-accurate", "ocr.basic"][..],
         ),
-        (
-            "speech.wav",
-            FileFormat::Wav,
-            MEDIA_ROUTE_MATRIX,
-        ),
-        (
-            "silence.wav",
-            FileFormat::Wav,
-            MEDIA_ROUTE_MATRIX,
-        ),
+        ("speech.wav", FileFormat::Wav, MEDIA_ROUTE_MATRIX),
+        ("silence.wav", FileFormat::Wav, MEDIA_ROUTE_MATRIX),
         (
             "companion-lrc.lrc",
             FileFormat::Lrc,
@@ -740,7 +747,11 @@ fn reports_non_utf8_paths_as_typed_visible_skips() {
         // EILSEQ), so a non-UTF-8 path can never reach a scan on macOS and
         // the NonUtf8Path skip is unreachable there. Any other failure is a
         // real fixture defect and must fail the test.
-        assert_eq!(error.raw_os_error(), Some(92), "unexpected write failure: {error}");
+        assert_eq!(
+            error.raw_os_error(),
+            Some(92),
+            "unexpected write failure: {error}"
+        );
         return;
     }
 

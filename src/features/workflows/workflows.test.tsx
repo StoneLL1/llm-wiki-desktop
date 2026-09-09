@@ -2,6 +2,9 @@ import { StrictMode } from "react";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+const outputPicker = vi.hoisted(() => vi.fn().mockResolvedValue(null));
+vi.mock("./workflowOutputPicker", () => ({ pickWorkflowOutputPath: outputPicker }));
+
 const i18nMocks = vi.hoisted(() => ({
   t: (key: string) => key,
   language: "en-US",
@@ -485,7 +488,7 @@ describe("Workflows overview", () => {
     expect(handlePrerequisite).toHaveBeenCalledWith("open_or_create_project");
   });
 
-  it("starts with the edited structured scope and no manual preparation step", () => {
+  it("starts with the edited structured scope and no manual preparation step", async () => {
     const start = vi.fn();
     const base = {
       schemaVersion: 1, preparationId: "prep", preparationRevision: "r1",
@@ -509,14 +512,16 @@ describe("Workflows overview", () => {
     fireEvent.click(screen.getByRole("radio", { name: "workflows.artifact.knowledgeCard" }));
     fireEvent.click(screen.getByLabelText("wiki/中文.md"));
     fireEvent.click(screen.getByLabelText("workflows.preparation.explicitTarget"));
-    fireEvent.change(screen.getByLabelText("workflows.preparation.outputPath"), { target: { value: "exports/知识卡.html" } });
+    outputPicker.mockResolvedValueOnce("exports/知识卡.html");
+    fireEvent.click(screen.getByRole("button", { name: "workflows.preparation.outputPath" }));
+    await screen.findByText("exports/知识卡.html", { selector: ".workflow-output-picker__value > span" });
     expect(screen.getByRole("button", { name: "workflows.action.runAgain" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: /workflows.action.(start|runAgain)$/ }));
     expect(start).toHaveBeenLastCalledWith(false, false, { scope: expect.objectContaining({ artifactType: "knowledge_card", outputPath: "exports/知识卡.html" }), routeSelection: null });
     expect(screen.getByRole("button", { name: "workflows.action.runAgain" })).toBeInTheDocument();
   });
 
-  it("selects legal HTML scopes and preserves a prepared new target until the user changes the output", () => {
+  it("selects legal HTML scopes and preserves a prepared new target until the user changes the output", async () => {
     const start = vi.fn();
     const preparation: WorkflowPreparation = {
       schemaVersion: 2, preparationId: "export-options", preparationRevision: "export-options-1",
@@ -550,7 +555,9 @@ describe("Workflows overview", () => {
     fireEvent.click(screen.getByRole("radio", { name: "workflows.preparation.explicitTarget" }));
     expect(screen.getByRole("button", { name: "workflows.action.start" })).toBeDisabled();
     fireEvent.click(screen.getByLabelText("workflows.preparation.explicitTarget"));
-    fireEvent.change(screen.getByLabelText("workflows.preparation.outputPath"), { target: { value: "exports/已有报告.html" } });
+    outputPicker.mockResolvedValueOnce("exports/已有报告.html");
+    fireEvent.click(screen.getByRole("button", { name: "workflows.preparation.outputPath" }));
+    await screen.findByText("exports/已有报告.html", { selector: ".workflow-output-picker__value > span" });
     expect(screen.getByText("workflows.preparation.explicitTargetHint")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "workflows.action.start" }));
     expect(start).toHaveBeenLastCalledWith(false, false, expect.objectContaining({ scope: expect.objectContaining({ pagePaths: [], outputPath: "exports/已有报告.html" }) }));
@@ -742,14 +749,14 @@ describe("Workflows overview", () => {
     expect(screen.getByText("workflows.preparation.agent")).toBeInTheDocument();
     expect(screen.getByText("workflows.preparation.model")).toBeInTheDocument();
     const routeOverride = screen.getByLabelText("workflows.preparation.routeOverride");
-    expect(within(routeOverride).getByRole("option", { name: /codex/ })).toBeInTheDocument();
+    expect(within(routeOverride).getByRole("option", { name: /Codex/ })).toBeInTheDocument();
     expect(within(routeOverride).getByRole("option", { name: /ollama/ })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "workflows.action.chooseRoute" }));
     expect(view.container.querySelector(".workflow-execution-details")).toHaveAttribute("open");
     expect(prerequisite).not.toHaveBeenCalled();
   });
 
-  it("preserves a one-run route override across later preparation edits", () => {
+  it("preserves a one-run route override across later preparation edits", async () => {
     const start = vi.fn();
     const preparation = {
       schemaVersion: 1,
@@ -779,14 +786,16 @@ describe("Workflows overview", () => {
 
     view.rerender(<WorkflowPreparationView preparation={{ ...preparation, preparationRevision: "revision-route-draft-b", route: { kind: "byok", provider: "open_ai", model: "gpt-5", routeRevision: "route-override" } }} {...props} />);
     fireEvent.click(screen.getByLabelText("workflows.preparation.explicitTarget"));
-    fireEvent.change(screen.getByLabelText("workflows.preparation.outputPath"), { target: { value: "exports/b.html" } });
+    outputPicker.mockResolvedValueOnce("exports/b.html");
+    fireEvent.click(screen.getByRole("button", { name: "workflows.preparation.outputPath" }));
+    await screen.findByText("exports/b.html", { selector: ".workflow-output-picker__value > span" });
     const updateButton = screen.getByRole("button", { name: "workflows.action.start" });
     expect(view.container.querySelector(".workflow-execution-details")).not.toContainElement(updateButton);
     fireEvent.click(updateButton);
     expect(start).toHaveBeenLastCalledWith(false, false, { scope: expect.objectContaining({ outputPath: "exports/b.html" }), routeSelection: { kind: "byok", provider: "open_ai" } });
   });
 
-  it("keeps edited Settings drafts and treats route choice as an in-place advanced action", () => {
+  it("keeps edited Settings drafts and treats route choice as an in-place advanced action", async () => {
     const prerequisite = vi.fn();
     const preparation = {
       schemaVersion: 1,
@@ -808,7 +817,9 @@ describe("Workflows overview", () => {
     const view = render(<WorkflowPreparationView preparation={preparation} {...props} />);
     fireEvent.click(screen.getByLabelText("wiki/b.md"));
     fireEvent.click(screen.getByLabelText("workflows.preparation.explicitTarget"));
-    fireEvent.change(screen.getByLabelText("workflows.preparation.outputPath"), { target: { value: "exports/draft.html" } });
+    outputPicker.mockResolvedValueOnce("exports/draft.html");
+    fireEvent.click(screen.getByRole("button", { name: "workflows.preparation.outputPath" }));
+    await screen.findByText("exports/draft.html", { selector: ".workflow-output-picker__value > span" });
     fireEvent.click(screen.getByRole("button", { name: "workflows.action.openSettings" }));
     expect(prerequisite).toHaveBeenCalledWith("configure_execution_route", {
       scope: expect.objectContaining({ pagePaths: ["wiki/a.md", "wiki/b.md"], outputPath: "exports/draft.html" }),
@@ -861,8 +872,9 @@ describe("Workflows overview", () => {
     view.rerender(<WorkflowPreparationView preparation={generation} {...props} />);
     expect(view.container.querySelector("[data-decision-step='2']")).toHaveTextContent("workflows.preparation.fixedScopeCount");
     fireEvent.click(screen.getByLabelText("workflows.preparation.explicitTarget"));
-    fireEvent.change(screen.getByLabelText("workflows.preparation.outputPath"), { target: { value: "" } });
-    expect(screen.getByLabelText("workflows.preparation.outputPath")).toHaveValue("");
+    fireEvent.click(screen.getByLabelText("workflows.preparation.createArtifact"));
+    fireEvent.click(screen.getByLabelText("workflows.preparation.explicitTarget"));
+    expect(screen.getByRole("button", { name: "workflows.preparation.outputPath" })).toHaveTextContent("workflows.outputPicker.choose");
     expect(screen.getByRole("button", { name: "workflows.action.start" })).toBeDisabled();
     fireEvent.click(screen.getByLabelText("workflows.preparation.createArtifact"));
     expect(screen.queryByLabelText("workflows.preparation.outputPath")).not.toBeInTheDocument();

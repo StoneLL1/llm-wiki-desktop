@@ -4,12 +4,33 @@ All notable changes to LLM Wiki Desktop are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project's first stable version line starts at 0.2.0.
 
-## [Unreleased]
+## [0.2.1] — 2026-09-09
 
-### Planned
+### Added
 
-- First stable release `0.2.0`, cut from release candidate
-  `app-v0.2.0-rc.1` after four-platform clean-install acceptance.
+- Local version history and recovery settings for supported write operations.
+- System output-path selection in content-generation Workflows.
+- English and Simplified Chinese getting-started documentation with an application screenshot.
+
+### Changed
+
+- Streamlined Import preparation, queue status, and completion summaries.
+- Simplified Update Wiki, Health Check, and content-generation forms.
+- Unified health scans and clarified lint repair management.
+- Separated optional capability packs from the desktop release's eight download assets.
+- Consolidated CI: full validation on Linux, native and capability-runner checks across supported desktop hosts.
+
+### Fixed
+
+- Navigation stalls and recovery handling during long-running Workflows.
+- Supported Xiaohongshu Source extraction and browser/media runner edge cases.
+- Git protection and error handling around wiki, Source, lint, and saved-answer writes.
+
+## [0.2.0] — 2026-09-05
+
+First stable release: local Markdown knowledge bases, Source import, editing and
+search, knowledge graphs, AI chat, explicit Workflows, HTML export, signed optional
+capability packs, and signed application updates for four desktop targets.
 
 ## History of the 0.1.0 coordinate (never a stable release)
 
@@ -29,7 +50,7 @@ For the record, because the tags will not be reused:
 Development between these attempts continued on `master` (import pipeline
 v2, capability packs with signed catalogs, performance remediation, Graph
 focus handling, release-contract tooling). Those changes are not enumerated
-per-commit here; `0.2.0` will summarize user-visible behavior at its release.
+per-commit here; the stable `0.2.0` entry above summarizes the shipped foundation.
 
 ## [0.2.0-rc.1] — 2026-09-01
 

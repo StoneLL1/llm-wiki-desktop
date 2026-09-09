@@ -313,6 +313,8 @@ pub struct RollbackLastChatConvenienceEditRequest {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveAnswerResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
     pub path: String,
     pub created: bool,
     #[serde(skip_serializing_if = "Option::is_none")]

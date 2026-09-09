@@ -40,6 +40,7 @@ Raw Sources
 - `.app/` 保存应用状态、任务、缓存、聊天记录、设置等 JSON 数据。
 - `exports/html/` 保存 HTML、知识卡片和项目报告输出。
 - Git 用于检查点、恢复和冲突保护，普通用户不需要理解 Git。
+- 本地操作历史集中在“设置 → 版本与恢复”；状态栏不常驻显示分支、HEAD 或 Git dirty。首次保护说明嵌入操作确认，启用后继续原意图；操作详情按需查看文件变化并确认恢复。旧工作流历史暂保留在对应任务详情。
 
 首次价值在 `Sources` 这一层完成：用户确认导入后能立即打开一篇可读 Source。Wiki 编译、Graph 和 Chat 是后续能力，不是首次成功的前置条件。
 
@@ -560,7 +561,7 @@ API Key 必须存系统钥匙串或凭据管理器，不能明文写入项目文
 6. 安装/重启需要显式 consent；确认临界区重新采集未保存编辑与 Import commit 等 UI presentation facts，并在 handoff 期间锁定编辑器；后端 barrier 原子复查其拥有的等待确认、关键任务和 Workflow apply facts。任一 blocker 出现时保持当前版本运行并给出下一步。
 7. 安装 handoff 前写 app-global receipt；Shell/installer 启动失败返回 error 并保留旧版本，成功 handoff 后由重启恢复 reconciliation 解释最终状态。更新不得写用户项目。
 
-真实发布流程仍是 draft → 四平台 signed packaged smoke/upgrade/recovery → protected approval → stable → anonymous exact-tag reverse verification。当前 Batch 6 为 Public beta No-Go，证据见 `docs/release/batch-6-acceptance-evidence.md`。
+发布按维护者推送 tag → 签名构建 → 四平台安装/启动 smoke → 校验本地制品和远端上传摘要 → 公开 draft 执行；发布后 updater manifest 网络探测只告警，不自动删除版本。当前流程见 `docs/release/release-runbook.md`，历史 Batch 验收文档不作为重复审批门禁。
 
 ## 16. 后台任务与通知
 

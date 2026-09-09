@@ -171,14 +171,14 @@ describe("responsive UI CSS contracts", () => {
     expect(styles).toContain(".app-topbar__project-menu-row.is-missing");
   });
 
-  it("defines the Import V2 dense panes, sticky commit bar, and narrow-screen wrapping", () => {
+  it("defines symmetric Import entries with container-based wrapping and a scrollable queue", () => {
     const css = readStyles();
     expect(css).toContain(".import-v2-layout");
     expect(css).toContain(".import-v2-scroll");
     expect(css).toContain(".import-v2-commit-bar");
     expect(css).toContain(".import-v2-queue__paging");
-    expect(css).toMatch(/\.import-v2-methods\s*\{[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/s);
-    expect(css).toMatch(/@media \(max-width: 820px\)[\s\S]*\.import-v2-methods\s*\{[^}]*grid-template-columns:\s*1fr/s);
+    expect(css).toMatch(/\.import-v2-entry-grid\s*\{[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/s);
+    expect(css).toMatch(/@container import-v2 \(max-width: 560px\)[\s\S]*\.import-v2-entry-grid\s*\{[^}]*grid-template-columns:\s*1fr/s);
     expect(css).toMatch(/\.import-v2-queue__list\s*\{[^}]*overflow-y:\s*auto/s);
   });
 

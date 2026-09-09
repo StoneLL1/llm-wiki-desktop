@@ -1,0 +1,16 @@
+[package]
+name = "llm-wiki-updater-verifier"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "verify_update_signature"
+path = "../../src-tauri/src/bin/verify_update_signature.rs"
+
+[dependencies]
+base64 = "0.22"
+minisign-verify = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

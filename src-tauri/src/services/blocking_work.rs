@@ -1091,8 +1091,7 @@ mod tests {
                 Ok(())
             }))
         };
-        let project_a_poll =
-            poll_fn(|context| Poll::Ready(project_a.as_mut().poll(context))).await;
+        let project_a_poll = poll_fn(|context| Poll::Ready(project_a.as_mut().poll(context))).await;
         assert!(project_a_poll.is_pending());
         let project_b = {
             let coordinator = coordinator.clone();

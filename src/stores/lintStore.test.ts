@@ -44,6 +44,15 @@ const report = (overrides: Partial<LintReport> = {}): LintReport => ({
 
 const PROJECT = { projectId: "p", rootPath: "/x" };
 
+it("retains the Git recovery code after a batch checkpoint failure", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
+  invokeMock.mockRejectedValue({ code: "GIT_REPOSITORY_MISSING", message: "A local repository is required.", details: { paths: ["wiki/未跟踪.md"] } });
+  await useLintStore.getState().applyFixesBatch({ projectId: "p", projectRootPath: "/x", issues: [], expectedHashes: {} });
+  expect(useLintStore.getState()).toMatchObject({ batchRunning: false, errorCode: "GIT_REPOSITORY_MISSING", errorDetails: { paths: ["wiki/未跟踪.md"] } });
+  useLintStore.getState().reset();
+  expect(useLintStore.getState().errorCode).toBeNull();
+});
+
 function healthReport(issues: LintIssue[]): HealthCheckReport {
   return {
     reportId: "health-current", taskId: "health-current", mode: "complete",

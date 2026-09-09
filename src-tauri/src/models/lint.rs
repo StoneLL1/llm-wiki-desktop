@@ -637,6 +637,8 @@ pub struct ApplyLintFixesBatchRequest {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LintBatchOutcome {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
     /// Single Git checkpoint hash covering every applied safe fix (the rollback
     /// point). `None` when no safe fixes ran.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -718,6 +720,8 @@ pub struct ListLintIgnoresRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LintFixOutcome {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
     /// `"applied"` or `"needs_confirmation"`.
     pub kind: LintFixOutcomeKind,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -776,6 +780,7 @@ mod tests {
     #[test]
     fn outcome_round_trips_both_kinds() {
         let applied = LintFixOutcome {
+            operation_id: None,
             kind: LintFixOutcomeKind::Applied,
             affected_paths: vec!["wiki/a.md".into()],
             checkpoint: Some("abc123".into()),
@@ -787,6 +792,7 @@ mod tests {
         assert_eq!(value["checkpoint"], json!("abc123"));
 
         let needs = LintFixOutcome {
+            operation_id: None,
             kind: LintFixOutcomeKind::NeedsConfirmation,
             affected_paths: Vec::new(),
             checkpoint: None,

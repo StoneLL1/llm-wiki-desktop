@@ -38,8 +38,8 @@ export function LintPassedSection({ passedRules }: LintPassedSectionProps) {
   if (labeled.length === 0) return null;
 
   return (
-    <div className="lint-passed">
-      <div className="lint-passed__label">{t("lint.passed.title")}</div>
+    <details className="lint-passed lint-disclosure">
+      <summary className="lint-passed__label">{t("lint.passed.title")} · {labeled.length}</summary>
       <div className="lint-passed__badges">
         {labeled.map((key) => (
           <span key={key} className="badge badge--success">
@@ -48,6 +48,6 @@ export function LintPassedSection({ passedRules }: LintPassedSectionProps) {
           </span>
         ))}
       </div>
-    </div>
+    </details>
   );
 }

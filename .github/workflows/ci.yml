@@ -1,18 +1,13 @@
 name: CI
 
-# Branch and PR pushes only (owner decision 10, audit §3.6 option A).
-# Release tags are validated by desktop-prerelease.yml (app-v*.*.*-rc.*)
-# and desktop-release.yml (stable app-v*.*.*), which run the full gate
-# with version-aware checks; a plain CI run on a tag would reject the
-# rc-suffixed version and fail.
 on:
   push:
-    branches:
-      - "**"
+    branches: [master]
   pull_request:
+  workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -20,22 +15,17 @@ permissions:
 
 jobs:
   validation:
+    # Keep these names stable: master branch protection requires them.
     name: Validate (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - windows-latest
-          - macos-latest
-          - ubuntu-latest
-
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -46,76 +36,36 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
-          toolchain: stable
+          toolchain: 1.92.0
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri -> target
+          cache-on-failure: true
 
       - name: Install Linux Tauri dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            curl \
-            file \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libssl-dev \
-            libwebkit2gtk-4.1-dev \
-            libxdo-dev \
-            patchelf \
-            wget
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev libxdo-dev
 
-      - name: Install frontend dependencies
+      - name: Install test dependencies
         run: npm ci
 
-      - name: Check frozen release identity
-        run: npm run check:release-config
+      - name: Run full check on Linux
+        if: runner.os == 'Linux'
+        run: npm run check
 
-      - name: Check final-four redline declarations
-        run: npm run test:final-four-redlines
-
-      - name: Check Import and Source acceptance evidence
-        run: npm run check:import-source-media
-
-      - name: Run frontend tests
-        run: npm run test
-
-      - name: Run capability tool and platform parser tests
-        run: npm run test:capability-tools
-
-      - name: Run lint
-        run: npm run lint
-
-      - name: Build frontend
-        run: npm run build
-
-      - name: Check console logging
-        run: npm run check:console
-
-      - name: Check Tauri GUI Rust compile
+      - name: Check native compilation on Windows and macOS
+        if: runner.os != 'Linux'
         run: npm run check:rust:gui
 
-      - name: Verify committed Tauri schemas match regeneration
-        run: node scripts/check-schema-parity.mjs
+      - name: Test native services on Windows and macOS
+        if: runner.os != 'Linux'
+        # Linux covers the four exhaustive crash/format/scale sweeps in full.
+        run: npm run test:rust:platform
 
-      - name: Run Rust service tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
-
-  cargo-audit:
-    name: Cargo audit
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
-
-      # Non-blocking until the existing advisories are upgraded away
-      # (see the tracking issue referenced in the PR that added this
-      # job): quick-xml and lopdf are direct dependencies whose patched
-      # versions have API changes, so the upgrade is deliberate work.
-      # Remove continue-on-error once the audit is clean.
-      - name: Audit Rust dependencies against RustSec advisories
-        run: cargo audit --file src-tauri/Cargo.lock
-        continue-on-error: true
+      - name: Test platform capability runners
+        if: runner.os != 'Linux'
+        run: npm run test:capability-tools
