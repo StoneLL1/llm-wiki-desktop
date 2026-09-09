@@ -39,7 +39,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout exact default-branch commit with release history
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ inputs.release_tag }}
           fetch-depth: 0
@@ -94,7 +94,7 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Checkout the exact release commit
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with: { ref: "${{ inputs.release_tag }}" }
 
       - name: Setup Node.js
@@ -102,7 +102,7 @@ jobs:
         with: { node-version: 22.23.1, cache: npm }
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with: { version: "0.10.8", enable-cache: false }
 
       - name: Setup Rust
@@ -231,7 +231,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout the exact release commit
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with: { ref: "${{ inputs.release_tag }}" }
 
       - name: Setup Node.js

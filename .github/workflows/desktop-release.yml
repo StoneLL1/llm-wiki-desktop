@@ -42,7 +42,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout the exact release tag with full history
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ inputs.release_tag || github.ref_name }}
           fetch-depth: 0
@@ -155,7 +155,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Checkout exact release commit
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ needs.preflight.outputs.commit_sha }}
 
@@ -332,7 +332,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout exact release commit
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ needs.preflight.outputs.commit_sha }}
 
@@ -422,7 +422,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout exact release commit
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ inputs.source_run_id && github.sha || needs.preflight.outputs.commit_sha }}
 
@@ -545,7 +545,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout exact release commit
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ inputs.source_run_id && github.sha || needs.preflight.outputs.commit_sha }}
 
@@ -598,7 +598,7 @@ jobs:
 
       - name: Generate GitHub artifact attestation for the complete candidate payload
         id: attest
-        uses: actions/attest-build-provenance@00014ed6ed5efc5b1ab7f7f34a39eb55d41aa4f8 # v3.1.0
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
         with:
           subject-path: candidate/**
 
