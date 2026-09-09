@@ -88,10 +88,10 @@ npm run tauri -- dev
 ```bash
 npm run check:quick   # Short development check
 npm run check         # Frontend, tooling, capability runners, and Rust checks
-npm run tauri -- build
+npm run tauri -- build --config '{"bundle":{"createUpdaterArtifacts":false}}'
 ```
 
-`npm run dev` starts only the frontend server; use `npm run tauri -- dev` for the desktop app. Local builds use the development capability configuration; signed release catalogs are assembled by the release workflow.
+`npm run dev` starts only the frontend server; use `npm run tauri -- dev` for the desktop app. Local builds use the development capability configuration; signed release catalogs are assembled by the release workflow. The local build command disables updater artifact signing; official releases are signed in CI.
 
 | Resource | Purpose |
 | :-- | :-- |

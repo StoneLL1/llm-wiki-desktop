@@ -81,10 +81,10 @@ npm run tauri -- dev
 ```bash
 npm run check:quick   # 日常快速检查
 npm run check         # 完整验证
-npm run tauri -- build
+npm run tauri -- build --config '{"bundle":{"createUpdaterArtifacts":false}}'
 ```
 
-`npm run dev` 仅启动前端服务器；完整桌面应用使用 `npm run tauri -- dev`。本地构建使用开发能力配置，签名的分发目录由 release 工作流生成。
+`npm run dev` 仅启动前端服务器；完整桌面应用使用 `npm run tauri -- dev`。本地构建使用开发能力配置，签名的分发目录由 release 工作流生成。上述本地构建命令关闭更新包签名，正式版本由 CI 签名发布。
 
 [贡献指南](CONTRIBUTING.md) · [架构说明](SPEC/TECH_STACK.md) · [维护排错](docs/maintainers/troubleshooting.md) · [发布流程](docs/release/release-runbook.md) · [版本记录](CHANGELOG.md) · [安全反馈](SECURITY.md)
 
