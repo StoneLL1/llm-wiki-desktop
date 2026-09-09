@@ -52,7 +52,7 @@ describe("import locator policy", () => {
     expect(isSupportedMediaPlatformUrl("https://www.bilibili.com/video/BV1xx")).toBe(true);
   });
 
-  it.each(["file:///tmp/a.md", "data:text/plain,a", "javascript:alert(1)", "http://localhost:3000/a", "http://127.0.0.1/a", "http://[::1]/a"])(
+  it.each(["file:///tmp/a.md", "data:text/plain,a", "javascript:alert(1)", "vbscript:msgbox(1)", "JaVa\nScRiPt:alert(1)", "VBScript:msgbox(1)", "ftp://example.com/a", "mailto:user@example.com", "http://localhost:3000/a", "http://127.0.0.1/a", "http://[::1]/a"])(
     "rejects unsupported local URL %s",
     (locator) => {
       expect(isUnsupportedImportUrl(locator)).toBe(true);

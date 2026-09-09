@@ -61,13 +61,11 @@ export function isSupportedMediaPlatformUrl(locator: string): boolean {
 
 export function isUnsupportedImportUrl(value: string): boolean {
   const normalized = value.trim().toLowerCase();
-  if (normalized.startsWith("file:") || normalized.startsWith("data:") || normalized.startsWith("javascript:")) {
-    return true;
-  }
   try {
     const parsed = new URL(normalized);
     const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
-    return host === "localhost"
+    return (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+      || host === "localhost"
       || host === "0.0.0.0"
       || host === "::1"
       || host === "[::1]"
