@@ -38,7 +38,13 @@ export function stagePublicRelease({ root, output }) {
       const name = path.basename(file);
       if (names.has(name)) throw new Error(`duplicate public asset: ${name}`);
       names.add(name);
-      fs.copyFileSync(file, path.join(directory, name));
+      // Capability archives span many gigabytes. Link the already sealed bytes
+      // on CI's shared filesystem instead of doubling peak disk usage.
+      try { fs.linkSync(file, path.join(directory, name)); }
+      catch (error) {
+        if (error.code !== "EXDEV") throw error;
+        fs.copyFileSync(file, path.join(directory, name));
+      }
     }
     writeChecksums(directory, path.join(directory, "CHECKSUMS.sha256"));
   }
