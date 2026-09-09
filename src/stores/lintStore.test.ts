@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
+  HealthCheckReport,
   LintBatchOutcome,
   LintFixOutcome,
   LintHistoryFile,
@@ -11,6 +12,7 @@ import type {
 } from "../types/lint";
 import { useProjectStore } from "./projectStore";
 import { useWorkflowStore } from "./workflowStore";
+import { useTaskStore } from "./taskStore";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 
@@ -42,15 +44,116 @@ const report = (overrides: Partial<LintReport> = {}): LintReport => ({
 
 const PROJECT = { projectId: "p", rootPath: "/x" };
 
+it("retains the Git recovery code after a batch checkpoint failure", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
+  invokeMock.mockRejectedValue({ code: "GIT_REPOSITORY_MISSING", message: "A local repository is required.", details: { paths: ["wiki/未跟踪.md"] } });
+  await useLintStore.getState().applyFixesBatch({ projectId: "p", projectRootPath: "/x", issues: [], expectedHashes: {} });
+  expect(useLintStore.getState()).toMatchObject({ batchRunning: false, errorCode: "GIT_REPOSITORY_MISSING", errorDetails: { paths: ["wiki/未跟踪.md"] } });
+  useLintStore.getState().reset();
+  expect(useLintStore.getState().errorCode).toBeNull();
+});
+
+function healthReport(issues: LintIssue[]): HealthCheckReport {
+  return {
+    reportId: "health-current", taskId: "health-current", mode: "complete",
+    route: { kind: "agent", agent: "codex", model: "model", routeRevision: "route" },
+    persistent: true, issues,
+    findingOrigins: Object.fromEntries(issues.map((issue) => [issue.id, [issue.source]])),
+    coverage: { scannedPages: 2, sourcePages: 0, wikiPages: 2, deepCoveredPages: 2, notApplicableRules: [] },
+    errorCount: 0, warningCount: issues.length, infoCount: 0, findingsByType: {},
+    durationMs: 10, generatedAt: "2026-08-10T00:00:00Z",
+    execution: { inputFingerprint: "original-input", scannedAt: "2026-08-10T00:00:00Z", freshness: "current", deepStatus: "completed" },
+  };
+}
+
 beforeEach(() => {
   invokeMock.mockReset();
   useLintStore.getState().reset();
   useProjectStore.setState({ currentProject: PROJECT, authority: null } as never);
   useWorkflowStore.getState().reset();
+  useTaskStore.setState({ workflowById: {} });
   Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
 });
 
 describe("lintStore", () => {
+  it("retains AI evidence when a refreshed local finding shares the merged report identity", () => {
+    const current = localIssue({ scanHash: "current-hash", evidence: "Current local evidence", suggestedAction: "Local suggestion" });
+    const saved = healthReport([{ ...current, evidence: "AI evidence", suggestedAction: "AI suggestion" }]);
+    saved.findingOrigins[current.id] = ["local", "agent"];
+    useLintStore.setState({ healthReport: saved, localReport: report({ issues: [current] }) });
+    expect(selectAllIssues(useLintStore.getState())).toEqual([expect.objectContaining({
+      id: current.id, scanHash: current.scanHash, origins: ["local", "agent"],
+      evidence: "Current local evidence\n\nAI evidence",
+      suggestedAction: "Local suggestion\n\nAI suggestion",
+    })]);
+  });
+
+  it("refreshes local findings while keeping AI evidence and its original coverage visibly stale", async () => {
+    const semantic = localIssue({ id: "semantic", source: "agent", issueType: "contradiction", fixability: "none" });
+    const original = healthReport([localIssue(), semantic]);
+    const replacement = localIssue({ id: "new-local", path: "wiki/新页面.md" });
+    useLintStore.setState({ healthReport: original, agentRepairSelection: [semantic.id], agentRepairSelectionReportId: original.reportId });
+    let finish!: (value: LintReport) => void;
+    invokeMock.mockImplementation((command: string) => command === "run_local_lint"
+      ? new Promise<LintReport>((resolve) => { finish = resolve; })
+      : Promise.resolve({ version: 1, entries: [] }));
+
+    const refreshing = useLintStore.getState().runLocalLint(PROJECT.projectId, PROJECT.rootPath);
+    expect(selectAllIssues(useLintStore.getState())).toEqual(original.issues);
+    finish(report({ issues: [replacement], scannedPages: 3 }));
+    await refreshing;
+
+    const state = useLintStore.getState();
+    expect(selectAllIssues(state).map((issue) => issue.id)).toEqual([replacement.id, semantic.id]);
+    expect(state.healthReport).toMatchObject({
+      reportId: original.reportId, issues: original.issues, coverage: original.coverage,
+      execution: { ...original.execution, freshness: "stale" },
+    });
+    expect(state.agentRepairSelection).toEqual([]);
+    state.setAgentRepairSelection(original.reportId, [semantic.id]);
+    expect(useLintStore.getState().agentRepairSelection).toEqual([]);
+
+    useLintStore.setState({ ignores: [{ path: semantic.path, rule: semantic.issueType, createdAt: "now" }] });
+    expect(selectAllIssues(useLintStore.getState()).map((issue) => issue.id)).toEqual([replacement.id]);
+  });
+
+  it("does not let Agent preparation supersede an in-flight local fix", async () => {
+    const semantic = localIssue({ id: "semantic", source: "agent", issueType: "contradiction", fixability: "none" });
+    const snapshot = healthReport([semantic]);
+    useLintStore.setState({ healthReport: snapshot, agentRepairSelection: [semantic.id], agentRepairSelectionReportId: snapshot.reportId });
+    let finish!: (value: LintFixOutcome) => void;
+    invokeMock.mockReturnValueOnce(new Promise<LintFixOutcome>((resolve) => { finish = resolve; }));
+    const fixing = useLintStore.getState().applyFix(PROJECT.projectId, PROJECT.rootPath, localIssue(), "hash");
+
+    await expect(useLintStore.getState().prepareAgentLintRepair(PROJECT.projectId, PROJECT.rootPath, snapshot.reportId)).resolves.toBeNull();
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    finish({ kind: "applied", affectedPaths: ["wiki/a.md"] });
+    await fixing;
+    expect(useLintStore.getState().fixStatus[localIssue().id]).toBe("applied");
+  });
+
+  it.each(["local", "agent"] as const)("ignores a late %s confirmation cancellation after the state is replaced", async (kind) => {
+    const oldAction = { id: "old-action" };
+    const newAction = { id: "new-action" };
+    const preparation = { preparationId: "old-prep", preparationRevision: "revision", pendingAction: oldAction };
+    const confirmation = { issue: localIssue(), expectedHash: "hash", pendingAction: oldAction };
+    useLintStore.setState(kind === "local"
+      ? { fixConfirm: confirmation as never }
+      : { agentRepairPreparation: preparation as never, agentRepairProjectId: "p", agentRepairRootPath: "/x" });
+    let finish!: (value: unknown) => void;
+    invokeMock.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const cancelling = kind === "local" ? useLintStore.getState().cancelHighRisk() : useLintStore.getState().cancelAgentLintRepairPreparation();
+    useLintStore.getState().reset();
+    useLintStore.setState(kind === "local"
+      ? { fixConfirm: { ...confirmation, pendingAction: newAction } as never }
+      : { agentRepairPreparation: { ...preparation, pendingAction: newAction } as never, agentRepairPending: true });
+    finish({});
+    await cancelling;
+    const state = useLintStore.getState();
+    expect((kind === "local" ? state.fixConfirm : state.agentRepairPreparation)?.pendingAction.id).toBe("new-action");
+    if (kind === "agent") expect(state.agentRepairPending).toBe(true);
+  });
+
   it("single-flights ignore and history ensures within one project", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "list_lint_ignores") return { ignored: [] } satisfies LintIgnoreFile;
@@ -228,19 +331,6 @@ describe("lintStore", () => {
     expect(invokeMock.mock.calls[0][0]).toBe("confirm_pending_action");
   });
 
-  it("startDeepLint stores the returned task id", async () => {
-    invokeMock.mockResolvedValueOnce({ id: "task-1" });
-    const taskId = await useLintStore.getState().startDeepLint(
-      PROJECT.projectId,
-      PROJECT.rootPath,
-      "auto",
-    );
-    expect(taskId).toBe("task-1");
-    expect(useLintStore.getState().deepTaskId).toBe("task-1");
-    expect(useLintStore.getState().runningDeep).toBe(true);
-    expect(invokeMock.mock.calls[0][1].request.route).toBe("auto");
-  });
-
   it("filters Agent repair selection to the current persisted Health findings", () => {
     const eligible = localIssue({
       id: "duplicate_topic:wiki/重复.md",
@@ -381,10 +471,16 @@ describe("lintStore", () => {
     useProjectStore.setState({
       authority: { ...originalAuthority, canonicalIdentityKey: "identity-b", identityRevision: "revision-b" },
     } as never);
-    resolveOutcome({ kind: "created", run: { taskId: "stale-run", updatedAt: "2026-08-10T00:02:00Z" } });
+    resolveOutcome({ kind: "created", run: {
+      taskId: "stale-run", updatedAt: "2026-08-10T00:02:00Z", startedAt: "2026-08-10T00:02:00Z",
+      projectId: PROJECT.projectId, canonicalIdentityKey: "identity-a", identityRevision: "revision-a",
+      schemaVersion: 2, kind: "health_check", operation: { kind: "built_in" }, displayStatus: "queued",
+      retry: null, completedAt: null,
+    } });
 
     await expect(confirming).resolves.toBeNull();
     expect(useWorkflowStore.getState().runs).toEqual([]);
+    expect(useTaskStore.getState().workflowById["stale-run"]?.projectId).toBe(PROJECT.projectId);
     expect(useLintStore.getState().agentRepairErrorCode).toBe("LINT_REPAIR_IDENTITY_CHANGED");
   });
 

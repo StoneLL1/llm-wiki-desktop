@@ -4,6 +4,9 @@ import { useTranslation } from "react-i18next";
 import type { CreateWikiPageInput, WikiPageType } from "../../types/wiki";
 import { CREATABLE_WIKI_PAGE_TYPES } from "../../types/wiki";
 import { useModalDialog } from "../../hooks/useModalDialog";
+import { useVersionProtection } from "../../hooks/useVersionProtection";
+import { useProjectStore } from "../../stores/projectStore";
+import { LazyActionableErrorNotice } from "../../components/app/LazyActionableErrorNotice";
 
 interface WikiPageFormDialogProps {
   mode: "create" | "rename";
@@ -39,6 +42,9 @@ export function WikiPageFormDialog({
   onSubmit,
 }: WikiPageFormDialogProps) {
   const { t } = useTranslation();
+  const project = useProjectStore((state) => state.currentProject);
+  const protection = useVersionProtection(project.projectId, project.rootPath);
+  const needsEnable = protection.error?.code === "VERSION_NOT_ENABLED" || protection.error?.code === "GIT_REPOSITORY_MISSING";
   const pathRef = useRef<HTMLInputElement>(null);
   const dialogRef = useModalDialog({ open: true, onClose: onCancel, initialFocusRef: pathRef });
   const [path, setPath] = useState(initialPath);
@@ -66,12 +72,14 @@ export function WikiPageFormDialog({
         className="w-full max-w-[480px] rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--surface-raised)] shadow-lg"
         onSubmit={(event) => {
           event.preventDefault();
-          if (!valid) return;
-          onSubmit({
+          if (!valid || protection.checking) return;
+          const input = {
             relativePath: normalizedPath,
             title: mode === "create" && title.trim() ? title.trim() : null,
             pageType: mode === "create" ? pageType : null,
-          });
+          };
+          if (mode === "create") onSubmit(input);
+          else void (needsEnable ? protection.enable() : protection.check()).then((ready) => { if (ready) onSubmit(input); });
         }}
       >
         <header className="flex h-[52px] items-center border-b border-[var(--border)] px-4">
@@ -80,6 +88,7 @@ export function WikiPageFormDialog({
           </h2>
         </header>
         <div className="space-y-4 px-4 py-4">
+          {needsEnable ? <p className="text-[12px] text-[var(--text-secondary)]">{t("versions.enableDescription")}</p> : protection.error ? <LazyActionableErrorNotice error={protection.error} /> : null}
           <label className="block text-[12px] text-[var(--text-secondary)]">
             <span className="mb-1 block">{t("wiki.pageForm.path")}</span>
             <input
@@ -122,8 +131,8 @@ export function WikiPageFormDialog({
           <button type="button" onClick={onCancel} className="h-[28px] rounded-[var(--radius-md)] border border-[var(--border)] px-3 text-[12px]">
             {t("confirmation.cancel")}
           </button>
-          <button type="submit" disabled={!valid} className="h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--text-inverse)] disabled:opacity-40">
-            {t(`wiki.pageForm.${mode}.submit`)}
+          <button type="submit" disabled={!valid || protection.checking} className="h-[28px] rounded-[var(--radius-md)] bg-[var(--foreground)] px-3 text-[12px] font-medium text-[var(--surface)] disabled:opacity-40">
+            {t(protection.checking ? "versions.checking" : needsEnable ? "versions.enableContinueAction" : `wiki.pageForm.${mode}.submit`)}
           </button>
         </footer>
       </form>

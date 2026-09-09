@@ -483,15 +483,24 @@ impl BoundProjectMutationRoot {
     }
 
     pub(crate) fn hard_link(&self, source: &Path, target: &Path) -> io::Result<()> {
+        self.hard_link_to(source, self, target)
+    }
+
+    pub(crate) fn hard_link_to(
+        &self,
+        source: &Path,
+        destination: &Self,
+        target: &Path,
+    ) -> io::Result<()> {
         let source_name = self.entry_name(source)?;
-        let target_name = self.entry_name(target)?;
+        let target_name = destination.entry_name(target)?;
         let source = open_existing_relative(&self.anchor, source_name, OpenPurpose::Mutate)?;
         require_regular(&source)?;
         hard_link_open_file(
             &self.anchor,
             &source,
             source_name,
-            &self.anchor,
+            &destination.anchor,
             target_name,
         )
     }

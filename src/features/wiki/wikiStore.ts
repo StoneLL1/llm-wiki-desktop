@@ -381,16 +381,7 @@ export const useWikiStore = create<WikiState>((set, get) => ({
       resolution === "manual_merge" ? (manualContent ?? "") : conflict.incomingContent;
     set({ saveState: "saving", error: null });
     try {
-      await invoke("create_git_checkpoint", {
-        request: {
-          projectId,
-          projectRootPath: rootPath,
-          purpose: "high_risk_operation",
-          message: `Before resolving wiki conflict: ${conflict.path}`,
-        },
-      });
-      if (!isProjectScopeCurrent(scope)) return;
-      const response = await invoke<SaveWikiPageResponse>("save_wiki_page", {
+      const response = await invoke<SaveWikiPageResponse>("resolve_wiki_conflict", {
         request: {
           projectId,
           projectRootPath: rootPath,

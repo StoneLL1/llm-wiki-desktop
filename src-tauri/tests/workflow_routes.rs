@@ -726,7 +726,7 @@ fn later_health_preparation_remembers_the_last_confirmed_mode() {
 }
 
 #[test]
-fn overview_uses_remembered_health_mode_when_the_route_disappears() {
+fn overview_does_not_revalidate_remembered_health_route() {
     let (_root, context, _config, settings, secrets, agents) = fixture();
     save_routes(
         &context,
@@ -770,11 +770,27 @@ fn overview_uses_remembered_health_mode_when_the_route_disappears() {
     let overview = service
         .project_overview(&context, trusted(), &settings, &secrets, &agents, &tasks)
         .unwrap();
-    assert_eq!(
-        overview.rows[1]
-            .prerequisite
-            .as_ref()
-            .map(|item| &item.action),
-        Some(&WorkflowPrerequisiteAction::ConfigureExecutionRoute)
+    assert!(
+        overview.rows[1].prerequisite.is_none(),
+        "route availability belongs to preparation and must not block overview"
     );
+    let prepared_again = prepare(
+        &service,
+        &context,
+        &settings,
+        &secrets,
+        &agents,
+        trusted(),
+        Some(WorkflowScope::HealthCheck {
+            mode: HealthCheckMode::Complete,
+        }),
+        Some(WorkflowRouteSelection::Byok {
+            provider: LlmProviderKind::Ollama,
+        }),
+    )
+    .unwrap();
+    assert!(prepared_again
+        .prerequisites
+        .iter()
+        .any(|item| item.action == WorkflowPrerequisiteAction::ConfigureExecutionRoute));
 }

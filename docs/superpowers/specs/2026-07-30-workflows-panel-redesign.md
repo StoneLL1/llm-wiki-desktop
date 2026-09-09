@@ -12,6 +12,25 @@
 
 **Project-open boundary:** The no-project shell, compatible-folder assessment, restricted/trusted/read-only permissions, Git eligibility and repair behavior are defined by [`2026-07-30-first-run-project-open-workbench-design.md`](2026-07-30-first-run-project-open-workbench-design.md). Workflows consumes the backend-derived access policy; it does not grant trust or make a read-only project writable.
 
+## Health / Generate form amendment — 2026-09-08
+
+Opening any of the three workflows is local navigation to an editable draft. Health and Generate use a read-only form catalog for configured route summaries and remembered choices; only Generate lists Wiki filenames. Catalog latency never disables mode, artifact or save-mode editing. Health does not scan Markdown on entry; Generate does not parse Source registries or hash source bodies to display page choices.
+
+Start validates the final Health/Generate choices through the existing preparation and admission protocol. Sharing, overwrite and changed inputs retain the concrete review screen. These workflows have not migrated to Update's durable intent worker: execution validation can still take time after Start. A lost admission reply retries its real receipt; a confirmed success clears that pending submission, so the next deliberate run prepares anew. Navigation away does not discard task facts or reopen the old surface on a late reply.
+
+Generate remembers artifact type, page choices and route, but does not turn a previous generated filename into an overwrite request. Source version registries are not Generate inputs. Selected Wiki content and resources remain validated; project reports still cover all Markdown actually consumed by ExportService. Older queued Generate baselines containing Source versions may require renewed scope review.
+
+## Update Wiki intent amendment — 2026-09-08
+
+This amendment follows the user's request to remove unnecessary preparation dependencies and takes precedence over the older Update-specific preparation/TTL wording below. Health and Generate form navigation is further amended above; old persisted tasks retain their admission contracts.
+
+- Opening Update Wiki immediately exposes an editable form. Configured route summaries and a manually requested Source directory load independently. No full preparation, Git status, source-body scan or executable probe is required for navigation.
+- Automatic selection means “resolve applicable Sources when this queued task starts”; manual selection means exact source/version choices, and an explicitly empty manual selection is not Automatic. Mode and current draft survive leaving and re-entering the form in the same project session.
+- Start persists one user intent with a request ID before slow execution checks. Duplicate delivery of that request opens its original task. Analysis, selected-route validation and input binding are observable task work and cancellation remains available. No changes is a successful no-op, not a reason to run AI or create history.
+- Binding persists actual scope, route and baseline together. Queued continuation and retries do not re-enter the old preparation protocol. Explicit versions, provider destination, trust, paths and checked writes remain validated at their consuming boundaries.
+- App-private Git history and in-app undo remain automatic and do not touch the user's branch or staging area. Full preparation and manual Git submission are not Update prerequisites.
+- V2 manual directories use metadata. Legacy indexes lack current version metadata, so legacy manual selection retains on-demand body hashing; this never blocks the default form.
+
 ## 1. Decision Summary
 
 The current Agent page mixes execution-engine configuration, BYOK availability, workflow launchers, tasks, raw logs, and safety settings. The replacement surface is organized around work the user wants to complete.
@@ -83,31 +102,30 @@ The Workflows surface has four views inside the existing desktop shell:
 
 ### Overview
 
-The overview is state-adaptive:
+The 2026-09-07 visual refresh follows the user's `UI-Frontend-design/workflow.html` reference as a style direction, adapted to actual capabilities and window width:
 
-- When a task is running, failed, interrupted, queued, or waiting for confirmation, task state leads.
-- When no task needs attention, the three available workflows lead.
-- Completed history remains secondary.
+- Three equal function cards stay at the top in the fixed Update / Health / Generate order. Cards show real status and open preparation or the corresponding task; selection alone never starts execution.
+- The selected preparation or task occupies an inline bordered panel below the cards. Without an open panel, the actionable attention summary appears here instead.
+- The latest five runs remain below the panel, with independent access to full history.
+- A narrow content pane stacks cards/options; the shared shell still owns pane collapse. Do not restore the previous 154px stacked operation-row layout at ordinary desktop content widths.
 
 ```text
-┌ Workflows · Update / Check / Generate ───────────── Run history ┐
-├───────────────────────────────────────────────┬─────────────────┤
-│ Needs attention / Active task                 │ Context panel   │
-│ ────────────────────────────────────────────  │                 │
-│ Available workflows                           │ Selected        │
-│  [↻] Update Wiki        status        action  │ workflow or     │
-│  [✓] Health Check       status        action  │ task scope,     │
-│  [▣] Generate Content   status        action  │ route, Git,     │
-│                                               │ files, actions  │
-│ Recent runs · latest five                     │                 │
-└───────────────────────────────────────────────┴─────────────────┘
+┌ Workflows · Update / Check / Generate ───── Run history ┐
+│ [ Update Wiki ] [ Health Check ] [ Generate Content ]   │
+│ ┌ Selected configuration / current task ─────────────┐ │
+│ │ Short form or horizontal phases · result / review │ │
+│ └───────────────────────────────────────────────────┘ │
+│ Recent runs · latest five                             │
+└───────────────────────────────────────────────────────┘
 ```
 
-Use compact list rows rather than large feature cards. Preserve the established 13px UI density, pane hierarchy, token system, and quiet near-monochrome treatment.
+Use the reference's quiet white/gray surfaces, subtle borders, selected teal accent, grouped choices and execution summary bar. Retain real authority, conflict review and route semantics. Prototype automation, fake counts/timings, automatic repairs and multi-type launches do not become capabilities through this visual update. `UI-Frontend-design/` stays read-only.
+
+Keep visible copy limited to choices, scope, actionable blockers, and the primary action. Do not show an empty prerequisite success section or repeat form facts in the context panel. Default export filenames and execution metadata belong in collapsed details; the path input appears only for a specific destination. Use 13–14 px for primary content and at least 12 px for secondary Workflow text.
 
 ### Run preparation
 
-Selecting a workflow opens a full main-area preparation view rather than a modal:
+Selecting a workflow opens its preparation panel in the same main area beneath the function cards:
 
 ```text
 Workflows → Update Wiki → Run preparation
@@ -115,9 +133,13 @@ Workflows → Update Wiki → Run preparation
 
 It contains only product-defined structured settings. Starting the workflow replaces this view with its task detail.
 
+Starting automatically prepares the current draft and revalidates it before admission; there is no separate “Update preparation” action or redundant first-run scope checkbox. Changed scope, automatic route changes, and newly required sensitive-content acknowledgements are presented for review before starting. Overview and history load independently, so waiting for history or execution-route detection cannot block the three workflow entries. Unobserved content changes stay unknown rather than being displayed as “up to date”.
+
+Update Wiki uses four visible phases (prepare, generate, review, save), with exact execution stages and logs available on demand. Completed results and their open action appear before stage details. A queued baseline change enters a recoverable scope review without an applicable candidate; reviewing the current selected Source versions creates a linked new attempt after the previous wait is cancelled.
+
 ### Task detail
 
-Task detail uses the full main area for the observable pipeline. The right panel shows scope, execution route, Git state, affected files, output location, and current actions.
+Task detail uses the inline main-area panel for four horizontal semantic phases, results, and observable task state. Technical stages and logs stay collapsed until requested. The right panel shows scope, execution route, Git state, affected files, output location, and current actions.
 
 ### Run history
 
@@ -127,7 +149,7 @@ Task detail uses the full main area for the observable pipeline. The right panel
 - Retention limits and the exact first-release filter set remain implementation decisions.
 - Retrying creates a new record linked to the original attempt.
 
-## 5. Workflow List Behavior
+## 5. Workflow Selection Behavior
 
 Keep the workflow order fixed:
 
@@ -135,9 +157,9 @@ Keep the workflow order fixed:
 2. Health Check
 3. Generate Content
 
-Only one workflow receives a “recommended next step” treatment at a time. Rows do not reorder as project state changes.
+Only one workflow receives a “recommended next step” treatment at a time. Cards do not reorder as project state changes.
 
-Each row shows:
+Each card shows:
 
 - Workflow icon and name
 - One-line outcome description
@@ -229,6 +251,10 @@ Wiki has one deliberate quick-export exception: the current article's `生成 HT
 
 When the user starts Generate Content from Workflows, ask for the applicable scope in the full preparation view. Exports new and regenerate actions also enter this full path, with the existing record's type, source, and output path carried into preparation where applicable.
 
+The implemented typed preparation carries artifact type, applicable Wiki page paths, output path, and execution route. The current concept-map input uses the first selected page as its center and the selected related pages. There are no separate free-text topic, theme, report subtype, or optional-exclusion controls in this schema; the optional report exclusions in the target scope table remain unimplemented and are not claimed as accepted. A normal run creates a new artifact; only an explicit existing output path requests overwrite, with its checkpoint and candidate confirmation. If queued inputs change, Generate Content enters `review_scope` and re-prepares the selected artifact/page intent before a retry-linked task starts.
+
+Workflow and Wiki quick export reuse ExportService validation, create-new checked publication, and ExportRecord/receipt handling. Opening a Workflow result selects its exact record and task association, then opens that record's preview; it does not substitute the latest export. After restart an exact durable result may remain available on an interrupted task without relaunching AI or changing the interrupted task to success.
+
 Expose user-facing template names. Keep Skill IDs in technical details:
 
 | User-facing template | Technical Skill |
@@ -279,8 +305,9 @@ Workflow entries remain visible in an empty or partially configured context, but
 | No knowledge base is open | 新建知识库 / 打开已有知识库 |
 | External knowledge base is restricted | 本地健康检查可继续；外部 AI 或写入工作流提供“信任知识库” |
 | Project is read-only | 只读检查可继续；写入工作流说明“需要可写知识库” |
-| Checkpoint-required write has no Git capability | 启用本地 Git或保持只读能力 |
-| Dirty Git blocks a high-risk write | 先自行处理，或明确确认把当前全部变更作为检查点 |
+| Update Wiki has no project-local Git | 应用在任务开始后自动准备本地历史；Git 不可用时在写入前失败 |
+| Other checkpoint-required writes have no Git capability | 启用本地 Git或保持只读能力 |
+| Dirty Git blocks another high-risk write (excluding Update Wiki) | 先自行处理，或明确确认把当前全部变更作为检查点 |
 | Update Wiki has no Sources | 先添加来源 → Import |
 | Health Check has no readable Source or Wiki Markdown | 导入资料 / 等待扫描 |
 | Generate Content has no pages | 先更新 Wiki |
@@ -288,7 +315,7 @@ Workflow entries remain visible in an empty or partially configured context, but
 
 Completing a prerequisite returns the user to the intended preparation context when possible, but does not automatically launch work.
 
-External AI, Agent and Skill execution requires a trusted project. Any mutation additionally requires writable permission, and checkpoint-required mutation requires usable Git. These conditions are revalidated by the backend when the user starts or confirms work; frontend disabled state is not authorization.
+External AI, Agent and Skill execution requires a trusted project. Any mutation additionally requires writable permission, and checkpoint-required mutation requires recoverable Git history. Update Wiki establishes its application-owned history automatically during execution; other workflows retain their existing checkpoint policy. These conditions are revalidated by the backend when the user starts or confirms work; frontend disabled state is not authorization.
 
 ## 9. Queue and Project Isolation
 
@@ -404,7 +431,10 @@ Use the term **Git 检查点** directly.
 
 Rules:
 
-- Update Wiki creates a Git checkpoint before applying changes.
+- Update Wiki automatically stores exact before/planned snapshots under private `refs/llm-wiki/operations/<task-id>/` using a temporary index. Only successful publication promotes the planned snapshot to `after`; the ordinary branch, HEAD, staging area and unrelated files remain unchanged. Dirty files are valid input. Users do not manually submit a checkpoint as a prerequisite.
+- A project without local Git may initialize object storage when the user starts Update Wiki, without an all-files initial commit. A project nested inside an external Git repository is rejected before initialization to preserve that repository’s behavior. Preparation and navigation never initialize Git.
+- Completed updates expose undo in their task detail. Failed/interrupted publication can restore from the durable before/planned snapshots. Restore compares current bytes with the operation’s before/installed bytes, preserving later external edits. Durable `undo-started`/`undo` refs distinguish incomplete and completed recovery; new Update Wiki publication waits for incomplete recovery to finish.
+- Preparation opens immediately and restores the selected workflow’s local draft. Discovery runs in the background; cancelling preparation dismisses UI intent and ignores late results. Selected Source versions and guidance bind start admission; the Wiki baseline is captured when the queued update runs, rather than hashing the whole Wiki during navigation.
 - Health Check itself creates no checkpoint. After a selected repair batch is approved, queued dispatch must create the required clean-HEAD project-local checkpoint before the first Agent repair invocation; checkpoint failure means zero Agent invocations and zero candidate or real-project mutation.
 - Generate Content requires a checkpoint before overwriting an existing artifact; creating a new artifact does not require one.
 - Users cannot disable a checkpoint required by a high-risk action.
@@ -460,7 +490,7 @@ Completion prioritizes product outcomes over terminal output.
 
 - Pages created, updated, and skipped
 - Affected file paths
-- Git checkpoint and completion commit
+- Application-owned before/after history and undo or interrupted recovery (Update Wiki); other workflows retain their checkpoint/result identifiers
 - Duration and execution route
 - **查看更新内容**
 - **再次运行**
@@ -501,7 +531,7 @@ Keep all current task-relevant launch points, with the Wiki single-page exceptio
 
 - Dashboard → Update Wiki
 - Wiki article quick actions → Wiki-local `GenerateHtmlDialog` → direct single-page Export task
-- Workflows Generate Content → full preparation with single-page, multi-page, topic, or project scope
+- Workflows Generate Content → full preparation with applicable single-page, selected multi-page, or project Wiki scope
 - Lint → Run Health Check again
 - Exports new / generate again → full Generate Content preparation
 - Workflows → all three built-in workflows
@@ -556,4 +586,4 @@ The three workflow rows explain their outcomes and the current project state. Pr
 
 This document defines product behavior and interface structure only. It does not itself authorize implementation changes to the current React or Rust code.
 
-The affected living product, flow, frontend, architecture, backend, and roadmap documents were reconciled with this authority on 2026-07-30. Implementation must now follow the [batched execution plan](../plans/2026-07-30-workflows-panel-implementation.md) and scoped migration roadmap in `SPEC/roadmap/agent.md`, update typed task DTOs and IPC contracts before relying on new state, and treat the current `AgentView` route and folder as a legacy implementation baseline rather than target information architecture.
+The current implementation uses the Workflows route and the typed task/IPC contracts described in the [module guide](../../../src/features/workflows/README.md) and [backend structure](../../../SPEC/BACKEND_STRUCTURE.md). The former AgentView route and migration controller are retired. Historical implementation plans record migration decisions; the living module and architecture documents describe current ownership and verification commands.

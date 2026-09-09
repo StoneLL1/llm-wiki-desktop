@@ -22,7 +22,7 @@ describe("ImportBatchStatus", () => {
       />,
     );
 
-    expect(screen.getByText("1/3 tasks finished")).toBeInTheDocument();
+    expect(screen.getByText(/1\/3 tasks finished/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /cancel batch/i }));
     expect(onCancel).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("button", { name: /dismiss batch status/i })).not.toBeInTheDocument();
@@ -53,9 +53,10 @@ describe("ImportBatchStatus", () => {
       />,
     );
 
-    const disclosure = screen.getByText("View 1 task details").closest("details");
+    const disclosure = screen.getByLabelText(/^View 1 task details:/).closest("details");
     expect(disclosure).not.toHaveAttribute("open");
-    fireEvent.click(screen.getByText("View 1 task details"));
+    expect(disclosure?.querySelector("summary")).toHaveAccessibleName(/0\/1 tasks finished/);
+    fireEvent.click(screen.getByLabelText(/^View 1 task details:/));
     expect(disclosure).toHaveAttribute("open");
     fireEvent.click(screen.getByRole("button", { name: /view log for import notes\.md/i }));
     expect(onViewTask).toHaveBeenCalledWith("task-1");
@@ -98,8 +99,8 @@ describe("ImportBatchStatus", () => {
       />,
     );
 
-    expect(screen.getByText("1/1 tasks finished")).toBeInTheDocument();
-    expect(screen.getByText(/ready to review/)).toBeInTheDocument();
+    expect(screen.getByText(/1\/1 tasks finished/)).toBeInTheDocument();
+    expect(screen.getAllByText(/ready to review/)[0]).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /cancel batch/i })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /dismiss batch status/i })).toBeInTheDocument();
     expect(onCancel).not.toHaveBeenCalled();

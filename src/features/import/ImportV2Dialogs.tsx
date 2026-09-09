@@ -146,6 +146,16 @@ export function ImportV2Dialogs({ workflow, privateItem, asrItem, asrItemIds = [
         itemId={capabilityItem?.itemId ?? null}
         onCancel={closeCapability}
         onInstall={async (capabilityId) => {
+          if (capabilityItem && capability?.available) {
+            const projectKey = workflow.projectKey;
+            if (capability.route.startsWith("ocr.")) {
+              await workflow.authorizeLocalOcr(capabilityItem.itemId);
+            } else {
+              await workflow.retryItem(capabilityItem.itemId);
+            }
+            if (activeProjectKeyRef.current === projectKey) closeCapability();
+            return null;
+          }
           if (capabilityItem && capability) return workflow.installCapability(
             capabilityItem.itemId,
             capabilityId,
@@ -180,6 +190,7 @@ export function ImportV2Dialogs({ workflow, privateItem, asrItem, asrItemIds = [
             capabilityId,
             asrPlan!.requirementRevision,
             options,
+            asrItemIds.filter((id) => id !== asrItem.itemId),
           );
         }}
       />

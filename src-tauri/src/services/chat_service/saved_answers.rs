@@ -75,7 +75,7 @@ impl ChatService {
     pub fn save_answer_to_wiki(
         &self,
         context: &ProjectContext,
-        git_service: &GitService,
+        _git_service: &GitService,
         target_path: Option<&str>,
         expected_hash: Option<&str>,
         allow_overwrite: bool,
@@ -119,44 +119,28 @@ impl ChatService {
             // identity-and-hash CAS against external edits.
             self.file_store
                 .preflight_markdown_overwrite_hash(context, &resolved, expected)?;
-            // The Git checkpoint is the data-safety boundary for an overwrite.
-            // A checkpoint failure must stop the write rather than silently
-            // replacing a user-visible query page without recovery history.
-            let checkpoint = git_service
-                .create_scoped_checkpoint(
-                    context,
-                    crate::models::git::CheckpointPurpose::HighRiskOperation,
-                    "Before overwriting saved chat answer",
-                    std::slice::from_ref(&resolved),
-                )
-                .map_err(|err| {
-                    BackendError::new(
-                        "GIT_CHECKPOINT_FAILED",
-                        format!(
-                            "Could not create a Git checkpoint before overwriting: {}",
-                            err.message
-                        ),
-                        true,
-                        true,
-                    )
-                    .with_details(serde_json::json!({ "path": resolved }))
-                })?
-                .commit_hash;
-            (
-                WriteMode::OverwriteIfHashMatches(expected.to_string()),
-                checkpoint,
-            )
+            (WriteMode::OverwriteIfHashMatches(expected.to_string()), None)
         };
 
         // The checkpoint can take time; revalidate the semantic write root
         // immediately before the mutation so a linked wiki descendant cannot
         // become a write target between the initial preflight and this write.
         context.resolve_wiki_write_path(&resolved)?;
-        self.file_store
-            .write_markdown_checked(context, &resolved, markdown, mode)?;
+        let mut operation_id = None;
+        let checkpoint = if exists {
+            let expected = std::collections::BTreeMap::from([(resolved.clone(), expected_hash.map(str::to_string))]);
+            let outputs = std::collections::BTreeMap::from([(resolved.clone(), Some(markdown.as_bytes().to_vec()))]);
+            let record = crate::services::VersionHistoryService.apply_wiki_files(context, crate::models::version_history::VersionOperationKind::ChatEdit, &expected, &outputs)?;
+            operation_id = Some(record.summary.operation_id);
+            Some(record.before)
+        } else {
+            self.file_store.write_markdown_checked(context, &resolved, markdown, mode)?;
+            checkpoint
+        };
         invalidate_graph_cache(context);
         append_save_log(context, &resolved);
         Ok(SaveAnswerResult {
+            operation_id,
             path: resolved,
             created: !exists,
             checkpoint,
@@ -458,7 +442,7 @@ mod tests {
                 "q",
             )
             .expect_err("a matching hash must still require a valid checkpoint");
-        assert_eq!(error.code, "GIT_CHECKPOINT_FAILED");
+        assert_eq!(error.code, "GIT_COMMAND_FAILED");
         assert_eq!(
             std::fs::read_to_string(context.resolve_project_path("wiki/queries/q.md").unwrap())
                 .unwrap(),

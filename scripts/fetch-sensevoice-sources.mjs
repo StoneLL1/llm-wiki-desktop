@@ -172,7 +172,7 @@ async function buildMacFfmpeg(sourceRoot, destination) {
     osRelease: os.release(),
     compiler: compact(await run("cc", ["--version"], sourceRoot, true)),
     make: compact(await run("make", ["--version"], sourceRoot, true)),
-    xcode: compact(await run("xcodebuild", ["-version"], sourceRoot, true)),
+    xcode: compact(await run("xcodebuild", ["-version"], sourceRoot, true).catch(() => "Command Line Tools")),
     sdk: compact(await run("xcrun", ["--show-sdk-version"], sourceRoot, true)),
   };
 }

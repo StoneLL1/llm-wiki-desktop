@@ -669,7 +669,7 @@ fn batch_worker_preparation_builds_one_frozen_snapshot_per_item_with_near_linear
 fn production_worker_job_carries_a_frozen_snapshot() {
     let commands = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/src/commands/import_v2_commands.rs"
+        "/src/services/import_execution.rs"
     ))
     .unwrap();
     let worker_job = commands

@@ -304,6 +304,10 @@ fn assemble(options: &AssembleOptions) -> Result<AssembleResult, String> {
         compressed_bytes,
         installed_bytes,
         model_bytes: options.model_bytes,
+        archive_chunks:
+            llm_wiki_desktop_lib::services::import_v2::capability_payload::archive_chunks(
+                &archive_path,
+            )?,
         license: template.license_expression,
     };
     verify_archive(&archive_path, &manifest, &manifest_bytes, &entry)?;
@@ -705,19 +709,22 @@ fn merge_catalog(
 fn validate_expected_tag(tag: &str) -> Result<(), String> {
     let version = tag.strip_prefix("app-v");
     let valid = version.is_some_and(|version| {
-        let (core, prerelease) = version.split_once('-').unwrap_or((version, ""));
+        let (core, prerelease) = version
+            .split_once('-')
+            .map_or((version, None), |(core, pre)| (core, Some(pre)));
         let core_valid = core.split('.').count() == 3
             && core.split('.').all(|component| {
                 !component.is_empty()
                     && component.bytes().all(|value| value.is_ascii_digit())
                     && (component == "0" || !component.starts_with('0'))
             });
-        let prerelease_valid = prerelease.is_empty()
-            || prerelease.strip_prefix("rc.").is_some_and(|number| {
+        let prerelease_valid = prerelease.is_none_or(|pre| {
+            pre.strip_prefix("rc.").is_some_and(|number| {
                 !number.is_empty()
                     && number.bytes().all(|value| value.is_ascii_digit())
                     && !number.starts_with('0')
-            });
+            })
+        });
         core_valid && prerelease_valid
     });
     if valid {
@@ -746,9 +753,13 @@ fn verify_release_entry(
     let expected_url = format!(
         "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/{expected_tag}/{file_name}"
     );
-    if entry.url != expected_url {
+    let capability_tag = expected_tag.replacen("app-v", "capabilities-v", 1);
+    let capability_url = format!(
+        "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/{capability_tag}/{file_name}"
+    );
+    if entry.url != expected_url && entry.url != capability_url {
         return Err(format!(
-            "catalog entry {file_name} must use the exact immutable url {expected_url}"
+            "catalog entry {file_name} must use the exact immutable url {expected_url} or {capability_url}"
         ));
     }
     let archive_sha256 = sha256_file(&archive_path)?;
@@ -1094,6 +1105,39 @@ mod tests {
     }
 
     #[test]
+    fn merge_catalog_accepts_separate_capability_channel_with_exact_version_and_signed_bytes() {
+        for version in ["0.2.1", "0.2.1-rc.2"] {
+            let fixture = Fixture::new();
+            let mut options = fixture.options();
+            options.base_url = format!(
+                "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-v{version}"
+            );
+            let result = assemble(&options).unwrap();
+            let merged = fixture.root.join("catalog.json");
+            let expected_tag = format!("app-v{version}");
+            merge_catalog(&fixture.output, &merged, &fixture.trusted, &expected_tag).unwrap();
+            let catalog: CatalogFragment =
+                serde_json::from_slice(&fs::read(&merged).unwrap()).unwrap();
+            assert_eq!(catalog.entries, vec![result.entry]);
+            for wrong_tag in ["app-v0.2.0", "app-v0.2.1-rc.1", "app-v0.2.1-rc.3"] {
+                assert!(
+                    merge_catalog(&fixture.output, &merged, &fixture.trusted, wrong_tag)
+                        .unwrap_err()
+                        .contains("exact immutable url")
+                );
+            }
+            let mut bytes = fs::read(&result.archive_path).unwrap();
+            bytes.push(0);
+            fs::write(&result.archive_path, bytes).unwrap();
+            assert!(
+                merge_catalog(&fixture.output, &merged, &fixture.trusted, &expected_tag)
+                    .unwrap_err()
+                    .contains("digest differs")
+            );
+        }
+    }
+
+    #[test]
     fn merge_catalog_rejects_tampered_archives_and_manifest_digests() {
         let fixture = Fixture::new();
         let result = assemble(&fixture.options()).unwrap();
@@ -1181,6 +1225,8 @@ mod tests {
             "app-v1.2.3-rc.01",
             "app-v1.2.3-preview.1",
             "app-v1.2.3_unsafe",
+            "app-v1.2.3-",
+            "capabilities-v1.2.3",
         ] {
             assert!(
                 validate_expected_tag(tag).is_err(),

@@ -377,3 +377,27 @@ test("SBOM generation is deterministic and derives components only from locked i
   assert.deepEqual(rustSbom(cargoLock).components.map(({ name }) => name), ["serde"]);
   assert.equal(JSON.stringify(nodeSbom(packageLock)), JSON.stringify(nodeSbom(packageLock)));
 });
+
+test("public release staging publishes only installer/updater payloads and keeps capabilities separate", async (context) => {
+  const { stagePublicRelease } = await import("./stage-public-release.mjs");
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "public-release-"));
+  context.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
+  const root = path.join(temporary, "candidate");
+  createReleaseBundle(root);
+  fs.writeFileSync(path.join(root, "private-diagnostic.json"), "do not publish");
+  const output = path.join(temporary, "public");
+  stagePublicRelease({ root, output });
+  const desktopRoot = path.join(output, "desktop");
+  const capabilityRoot = path.join(output, "capabilities");
+  const desktop = fs.readdirSync(desktopRoot);
+  assert.equal(desktop.length, 10); // Fixture has separate installer/updater on all four platforms.
+  assert.ok(desktop.includes("latest.json") && desktop.includes("CHECKSUMS.sha256"));
+  assert.ok(desktop.every((name) => !/\.sig$|\.zip$|diagnostic|provenance|smoke|notes|cdx/.test(name)));
+  const capabilities = fs.readdirSync(capabilityRoot);
+  assert.equal(capabilities.filter((name) => name.endsWith(".zip")).length, expectedReleaseMatrix().length);
+  assert.ok(!capabilities.includes("latest.json"));
+  verifyChecksums(desktopRoot, path.join(desktopRoot, "CHECKSUMS.sha256"));
+  verifyChecksums(capabilityRoot, path.join(capabilityRoot, "CHECKSUMS.sha256"));
+  assert.throws(() => stagePublicRelease({ root, output }), /already exists/);
+  assert.throws(() => stagePublicRelease({ root, output: path.join(root, "public") }), /outside/);
+});

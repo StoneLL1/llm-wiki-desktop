@@ -466,21 +466,12 @@ describe("wikiStore", () => {
       },
     });
     invokeMock
-      .mockResolvedValueOnce({ created: true, commitHash: "checkpoint-1", message: "Before conflict merge", purpose: "high_risk_operation", affectedPaths: ["wiki/concepts/transformer.md"] })
       .mockResolvedValueOnce({ relativePath: "wiki/concepts/transformer.md", hash: "hash-3", savedAt: "2026-06-21", graphCacheInvalidated: true })
       .mockResolvedValueOnce(pageContent({ rawMarkdown: "# Incoming", bodyMarkdown: "# Incoming", meta: pageMeta({ hash: "hash-3" }) }));
 
     await useWikiStore.getState().resolveConflict("proj-1", "D:/wiki", "use_incoming");
 
-    expect(invokeMock).toHaveBeenNthCalledWith(1, "create_git_checkpoint", {
-      request: {
-        projectId: "proj-1",
-        projectRootPath: "D:/wiki",
-        purpose: "high_risk_operation",
-        message: "Before resolving wiki conflict: wiki/concepts/transformer.md",
-      },
-    });
-    expect(invokeMock).toHaveBeenNthCalledWith(2, "save_wiki_page", {
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "resolve_wiki_conflict", {
       request: {
         projectId: "proj-1",
         projectRootPath: "D:/wiki",
@@ -720,6 +711,14 @@ describe("wikiStore", () => {
 });
 
 describe("MarkdownReader", () => {
+  it("starts Source reading with metadata collapsed and preserves the article", () => {
+    const { container } = render(<MarkdownReader bodyMarkdown={"# Original article\n\nReadable source text."}
+      frontmatterYaml={'type: source\nsourceId: "original-id"'} pages={[]} onOpenPage={vi.fn()} />);
+    expect(container.querySelector("details.frontmatter")).not.toHaveAttribute("open");
+    expect(screen.getByRole("heading", { name: "Original article" })).toBeVisible();
+    expect(container.querySelector(".frontmatter")?.textContent).toContain("original-id");
+  });
+
   it("renders frontmatter as ordered key-value rows instead of raw YAML", () => {
     const { container } = render(
       <MarkdownReader
@@ -928,6 +927,39 @@ describe("MarkdownReader", () => {
 
     fireEvent.click(link);
     await waitFor(() => expect(onOpenPage).toHaveBeenCalledWith("wiki/concepts/attention.md"));
+  });
+
+  it("opens explicit wiki paths with or without root and suffix, distinguishing same-name pages", async () => {
+    const onOpenPage = vi.fn();
+    const conceptsPath = "wiki/concepts/compile-and-verify-pipeline.md";
+    const topicsPath = "wiki/topics/compile-and-verify-pipeline.md";
+    const cjkPath = "wiki/概念/编译流程.md";
+    const links = [
+      ["concepts/compile-and-verify-pipeline", "relative path", conceptsPath],
+      ["concepts/compile-and-verify-pipeline.md", "relative file", conceptsPath],
+      ["wiki/concepts/compile-and-verify-pipeline", "project path", conceptsPath],
+      ["wiki/concepts/compile-and-verify-pipeline.md", "project file", conceptsPath],
+      ["topics/compile-and-verify-pipeline", "other same-name page", topicsPath],
+      ["概念/编译流程.md", "中文路径", cjkPath],
+    ];
+    render(
+      <MarkdownReader
+        bodyMarkdown={links.map(([target, label]) => `[[${target}|${label}]]`).join("\n\n")}
+        frontmatterYaml={null}
+        pages={[
+          pageMeta({ path: conceptsPath, title: "Pipeline" }),
+          pageMeta({ path: topicsPath, title: "Pipeline", aliases: ["concepts/compile-and-verify-pipeline"] }),
+          pageMeta({ path: cjkPath, title: "编译流程" }),
+        ]}
+        onOpenPage={onOpenPage}
+      />,
+    );
+    for (const [index, [, label, expectedPath]] of links.entries()) {
+      const link = await screen.findByRole("link", { name: label });
+      expect(link).not.toHaveClass("wikilink--missing");
+      fireEvent.click(link);
+      expect(onOpenPage).toHaveBeenNthCalledWith(index + 1, expectedPath);
+    }
   });
 
   it("flags a wikilink with no matching page as missing", async () => {
@@ -1444,7 +1476,7 @@ describe("Wiki HTML preview", () => {
 
       await waitFor(() => expect(useExportStore.getState().runningTaskId).toBeNull());
       expect(useWikiStore.getState().mode).toBe("read");
-      expect(screen.queryByTitle("HTML preview")).not.toBeInTheDocument();
+      expect(document.querySelector<HTMLIFrameElement>('iframe[title="HTML preview"]')).not.toBeInTheDocument();
       expect(listExportsCalls).toBe(2);
 
       act(() => terminalRefresh.resolve([]));
@@ -1846,7 +1878,7 @@ describe("Wiki HTML preview", () => {
       await waitFor(() => expect(useExportStore.getState().records).toEqual([record]));
       fireEvent.click(screen.getByRole("tab", { name: "HTML preview" }));
       await waitFor(() =>
-        expect(screen.getByTitle("HTML preview")).toHaveAttribute(
+        expect(document.querySelector<HTMLIFrameElement>('iframe[title="HTML preview"]')).toHaveAttribute(
           "srcdoc",
           "<h1>Transformer card v1</h1>",
         ),
@@ -1881,7 +1913,7 @@ describe("Wiki HTML preview", () => {
         expect(useExportStore.getState().runningTaskId).toBe(regeneratedTask.id),
       );
       expect(screen.getAllByText(record.outputPath)).toHaveLength(2);
-      expect(screen.getByTitle("HTML preview")).toHaveAttribute(
+      expect(document.querySelector<HTMLIFrameElement>('iframe[title="HTML preview"]')).toHaveAttribute(
         "srcdoc",
         "<h1>Transformer card v1</h1>",
       );
@@ -1906,7 +1938,7 @@ describe("Wiki HTML preview", () => {
       expect(useExportStore.getState().records).toEqual([regeneratedRecord, record]);
       expect(screen.getAllByText(regeneratedRecord.outputPath)).toHaveLength(2);
       expect(screen.queryByText(record.outputPath)).not.toBeInTheDocument();
-      expect(screen.getByTitle("HTML preview")).toHaveAttribute(
+      expect(document.querySelector<HTMLIFrameElement>('iframe[title="HTML preview"]')).toHaveAttribute(
         "srcdoc",
         "<h1>Transformer card v2</h1>",
       );
@@ -2284,7 +2316,7 @@ describe("Wiki HTML preview", () => {
       />,
     );
 
-    const frame = screen.getByTitle("HTML preview");
+    const frame = document.querySelector<HTMLIFrameElement>('iframe[title="HTML preview"]');
     expect(frame).toHaveAttribute("sandbox", "");
     expect(frame).toHaveAttribute("srcdoc", "<h1>Preview</h1>");
     expect(screen.getAllByText("exports/html/agent.html")).toHaveLength(2);

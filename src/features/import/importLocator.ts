@@ -61,13 +61,11 @@ export function isSupportedMediaPlatformUrl(locator: string): boolean {
 
 export function isUnsupportedImportUrl(value: string): boolean {
   const normalized = value.trim().toLowerCase();
-  if (normalized.startsWith("file:") || normalized.startsWith("data:") || normalized.startsWith("javascript:")) {
-    return true;
-  }
   try {
     const parsed = new URL(normalized);
     const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
-    return host === "localhost"
+    return (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+      || host === "localhost"
       || host === "0.0.0.0"
       || host === "::1"
       || host === "[::1]"
@@ -84,6 +82,18 @@ export function isValidPublicHttpImportUrl(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Accept one platform share link without dropping its signed query parameters. */
+export function extractImportUrl(value: string): string | null {
+  const trimmed = value.trim();
+  if (!/\s/u.test(trimmed) && isValidPublicHttpImportUrl(trimmed)) return trimmed;
+  const links = trimmed.match(/https?:\/\/[^\s<>"“”「」]+/giu) ?? [];
+  if (links.length !== 1) return null;
+  const link = links[0].replace(/[。，、；！：）】》]+$/u, "");
+  return isValidPublicHttpImportUrl(link) && importPlatformForLocator(link) === "xiaohongshu"
+    ? link
+    : null;
 }
 
 export function routeForImportItem(item: ImportItem): string {

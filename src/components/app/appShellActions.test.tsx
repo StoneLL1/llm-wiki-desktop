@@ -10,6 +10,13 @@ import {
   resetProjectFactsStoreForTests,
 } from "../../stores/projectFactsStore";
 import { AppShell } from "./AppShell";
+import { useProjectStatus } from "../../hooks/useProjectStatus";
+
+function GitFactsObserver() {
+  const project = useProjectStore((state) => state.currentProject);
+  useProjectStatus(project.projectId, project.rootPath, true, ["git"]);
+  return null;
+}
 import type { PendingAction } from "../../types/backend";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -373,7 +380,7 @@ describe("AppShell first-screen agent detection", () => {
     render(<StrictMode><AppShell /></StrictMode>);
 
     await waitFor(() => {
-      expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(1);
+      expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(0);
       expect(invokeMock.mock.calls.filter(([command]) => command === "detect_agents")).toHaveLength(1);
       expect(invokeMock.mock.calls.filter(([command]) => command === "list_llm_providers")).toHaveLength(1);
     });
@@ -392,6 +399,7 @@ describe("AppShell first-screen agent detection", () => {
         canonicalIdentityKey: "identity-focus-target",
         identityRevision: "revision-1",
         authorityRevision: "authority-1",
+        layoutWarnings: [],
       } as never,
     });
     invokeMock.mockImplementation((command: string) => {
@@ -405,7 +413,7 @@ describe("AppShell first-screen agent detection", () => {
       }
       return Promise.resolve([]);
     });
-    render(<AppShell />);
+    render(<><GitFactsObserver /><AppShell /></>);
     await waitFor(() => {
       expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(1);
       expect(invokeMock.mock.calls.filter(([command]) => command === "detect_agents")).toHaveLength(1);
@@ -436,6 +444,7 @@ describe("AppShell first-screen agent detection", () => {
         canonicalIdentityKey: "identity-focus-coalesced",
         identityRevision: "revision-1",
         authorityRevision: "authority-1",
+        layoutWarnings: [],
       } as never,
     });
     const firstFocus = deferred<{
@@ -465,7 +474,7 @@ describe("AppShell first-screen agent detection", () => {
       });
     });
 
-    render(<AppShell />);
+    render(<><GitFactsObserver /><AppShell /></>);
     await waitFor(() => expect(gitCalls).toBe(1));
     fireEvent.blur(window);
     for (let index = 0; index < 20; index += 1) fireEvent.focus(window);
@@ -498,6 +507,7 @@ describe("AppShell first-screen agent detection", () => {
         canonicalIdentityKey: "identity-focus-delayed-pair",
         identityRevision: "revision-1",
         authorityRevision: "authority-1",
+        layoutWarnings: [],
       } as never,
     });
     invokeMock.mockImplementation((command: string) => command === "git_status"
@@ -509,7 +519,7 @@ describe("AppShell first-screen agent detection", () => {
       })
       : Promise.resolve([]));
     const now = vi.spyOn(Date, "now");
-    render(<AppShell />);
+    render(<><GitFactsObserver /><AppShell /></>);
     await waitFor(() => {
       expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(1);
     });
@@ -548,6 +558,7 @@ describe("AppShell first-screen agent detection", () => {
         canonicalIdentityKey: "identity-a",
         identityRevision: "revision-1",
         authorityRevision: "authority-1",
+        layoutWarnings: [],
       } as never,
     });
     invokeMock.mockImplementation((command: string) => {
@@ -563,7 +574,7 @@ describe("AppShell first-screen agent detection", () => {
     });
     render(<AppShell />);
     await waitFor(() => {
-      expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(1);
+      expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(0);
       expect(invokeMock.mock.calls.filter(([command]) => command === "detect_agents")).toHaveLength(1);
       expect(invokeMock.mock.calls.filter(([command]) => command === "list_llm_providers")).toHaveLength(1);
     });
@@ -574,11 +585,12 @@ describe("AppShell first-screen agent detection", () => {
         canonicalIdentityKey: "identity-a",
         identityRevision: "revision-1",
         authorityRevision: "authority-2",
+        layoutWarnings: [],
       } as never,
     }));
 
     await waitFor(() => {
-      expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(2);
+      expect(invokeMock.mock.calls.filter(([command]) => command === "git_status")).toHaveLength(0);
       expect(invokeMock.mock.calls.filter(([command]) => command === "detect_agents")).toHaveLength(2);
       expect(invokeMock.mock.calls.filter(([command]) => command === "list_llm_providers")).toHaveLength(2);
     });

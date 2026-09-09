@@ -240,7 +240,11 @@ function toUserIssue(
 ): UserIssue | null {
   if (!item.issue) return null;
   const typedPrimaryAction = primaryAction ? ITEM_TO_ISSUE_ACTION[primaryAction] ?? null : null;
-  const copyKey = issueCopyKey(typedPrimaryAction, item.status);
+  const optionalOcr = item.status === "preview_ready"
+    && item.issue.recoveryActions?.some((action) => action === "enable_ocr" || action === "install_ocr_capability");
+  const copyKey = item.issue.code === "IMPORT_WEB_LINK_UNAVAILABLE"
+    ? "linkUnavailable"
+    : optionalOcr ? (item.input.kind === "url" ? "optionalImageOcr" : "optionalOcr") : issueCopyKey(typedPrimaryAction, item.status);
   const latestAttempt = item.attempts.at(-1);
   return {
     code: copyKey,
@@ -299,6 +303,7 @@ export function presentImportItem(item: ImportItem): ImportItemPresentation {
   }
   if (
     item.input.kind === "url"
+    && item.issue?.code !== "IMPORT_WEB_LINK_UNAVAILABLE"
     && item.input.mediaSaveMode !== "preserve_original"
     && (item.status === "preview_ready" || item.status === "failed" || item.status === "paused")
   ) {

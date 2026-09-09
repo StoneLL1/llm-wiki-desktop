@@ -79,6 +79,7 @@ const importWorkflow: ImportWorkflow = {
   loadHistoryDetail: vi.fn(),
 };
 const workflowsController: WorkflowsController = {
+  startUpdate: vi.fn(), startDraft: vi.fn(),
   refresh: vi.fn(),
   prepare: vi.fn(),
   startPrepared: vi.fn(),
@@ -135,6 +136,14 @@ afterEach(() => {
 });
 
 describe("WorkspaceRouter", () => {
+  it("keeps the Workflow loading fallback until its controller is ready", async () => {
+    const view = render(<WorkspaceRouter activeView="workflows" {...sharedProps} workflowsController={null} />);
+    expect(screen.queryByTestId("workflows-view")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    view.rerender(<WorkspaceRouter activeView="workflows" {...sharedProps} />);
+    expect(await screen.findByTestId("workflows-view")).toBeInTheDocument();
+  });
+
   it("maps every workspace view while keeping Dashboard static", async () => {
     const views = [
       "dashboard",

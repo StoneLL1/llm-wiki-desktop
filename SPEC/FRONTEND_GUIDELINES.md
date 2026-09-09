@@ -1,7 +1,7 @@
 # LLM Wiki Desktop Frontend Guidelines
 
 > Purpose: Define the frontend design system and implementation guardrails for LLM Wiki Desktop.
-> Implementation authority: the entire `UI-Frontend-design/` folder is authoritative for exact DOM hierarchy, interaction structure, CSS tokens, absolute-pixel font sizes, and component heights. `DESIGN.md` remains a high-level visual reference; when exact values or structure differ, follow `UI-Frontend-design/`.
+> Implementation guidance: use this specification and `src/styles.css` for shared tokens, typography, component dimensions, and interactions, subject to the feature authorities in `AGENTS.md`. The optional, local-only `UI-Frontend-design/` folder supplies historical visual references; it is not required in a public clone. `DESIGN.md` describes the visual tone.
 > Import interaction authority: [`../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md) defines the confirmed information architecture, states, media actions, Source preview and AI 整理 behavior. Existing design HTML is visual evidence only where it conflicts with that flow.
 > Compatibility migration UI is Settings-only. The normal Import workbench must remain free of migration terminology and legacy source actions; icon-only dialog controls require a localized accessible name and matching tooltip.
 > Workflows interaction authority: [`../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md`](../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md) defines the confirmed navigation, information architecture, preparation, project-scoped task presentation, pipelines and safety behavior. Legacy `agent.html` remains a density and component-style reference only; do not restore its configuration dashboard, BYOK cards, four-card launcher, or Run Agent dialog.
@@ -147,7 +147,7 @@ Every asynchronous UI commit must prove that it still belongs to the active proj
 
 ## 4. Color System
 
-Use `UI-Frontend-design/assets/app.css` `:root` as the exact token source, including spacing and `--text-inverse`; mirror it through `src/styles.css` and reference tokens from components. Use `DESIGN.md` only for high-level palette intent.
+Use `src/styles.css` `:root` as the shared implementation token source, including spacing and `--text-inverse`, and reference tokens from components. Use `DESIGN.md` only for high-level palette intent.
 
 ### 4.1 Core Tokens
 
@@ -219,7 +219,7 @@ Bundle Inter, JetBrains Mono, and Source Serif Pro with `@fontsource`; do not us
 | Micro-label | 10.5px | Uppercase section labels and compact badges |
 | Reading body | 14-15px | Markdown articles, reports, and message prose |
 
-Larger titles and feature-specific text must copy the exact pixel values from the corresponding `UI-Frontend-design/` page/CSS selector. Do not derive them from a generic responsive type scale.
+Larger titles and feature-specific text should follow the applicable feature specification and existing component tokens. Do not derive them from a generic responsive type scale.
 
 ### 5.3 Typography Rules
 

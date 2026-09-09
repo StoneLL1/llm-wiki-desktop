@@ -51,6 +51,8 @@ test("requires verified OCR for XHS image posts but never for video covers", () 
   assert.equal(xiaohongshuImageOcrRequired({ contentType: "image_post" }, false), true);
   assert.equal(xiaohongshuImageOcrRequired({ contentType: "image_post" }, true), false);
   assert.equal(xiaohongshuImageOcrRequired({ contentType: "video" }, false), false);
+  assert.equal(xiaohongshuImageOcrRequired({ contentType: "image_post", description: "有完整的作者配文".repeat(12) }, false), false);
+  assert.equal(xiaohongshuImageOcrRequired({ contentType: "image_post", description: "#职场成长 #生活记录 #分享".repeat(20) }, false), true);
   assert.equal(xiaohongshuImageEvidenceReady({ contentType: "image_post" }, 0), false);
   assert.equal(xiaohongshuImageEvidenceReady({ contentType: "image_post" }, 1), true);
   assert.equal(xiaohongshuImageEvidenceReady({ contentType: "video" }, 0), true);
@@ -204,6 +206,8 @@ test("classifies XHS captcha login and removal separately", () => {
   assert.equal(classifyPlatformPage("xiaohongshu", fixture("captcha.html")), "IMPORT_WEB_CAPTCHA_REQUIRED");
   assert.equal(classifyPlatformPage("xiaohongshu", fixture("login-required.html")), "IMPORT_WEB_LOGIN_REQUIRED");
   assert.equal(classifyPlatformPage("xiaohongshu", fixture("removed.html")), "IMPORT_WEB_CONTENT_REMOVED");
+  assert.equal(classifyPlatformPage("xiaohongshu", "你访问的页面不见了", "https://www.xiaohongshu.com/404?error_code=300031"), "IMPORT_WEB_LINK_UNAVAILABLE");
+  assert.equal(classifyPlatformPage("xiaohongshu", "", "https://www.xiaohongshu.com/website-login/error"), "IMPORT_WEB_LOGIN_REQUIRED");
 });
 
 test("renders the shared XHS source Markdown contract", () => {
@@ -218,6 +222,8 @@ test("renders the shared XHS source Markdown contract", () => {
     "https://www.xiaohongshu.com/explore/67f00abc1234",
     ["asset://webasset-0", "asset://webasset-1"],
   );
+  assert.ok(markdown.indexOf("asset://webasset-0") < markdown.indexOf("<!-- OCR_IMAGE_001 -->"));
+  assert.ok(markdown.indexOf("<!-- OCR_IMAGE_001 -->") < markdown.indexOf("asset://webasset-1"));
   for (const expected of [
     "type: source",
     "source_platform: \"xiaohongshu\"",

@@ -1,5 +1,7 @@
 # Release identity, repository access, and signing ownership
 
+> Current process: [release-runbook.md](release-runbook.md). The 2026-09-06 target configuration retains secrets and `master`/`app-v*` restrictions, with no required reviewer; these remote settings were applied after explicit owner approval and verified on 2026-09-06. `app-v0.2.0` is published. Earlier Batch statuses below are historical.
+
 Status: Batch 6 local automated acceptance and cross-platform CI complete; updater and capability signing inputs are configured; the capability public trust anchor and the `0.2.0` one-time bootstrap policy (re-approved 2026-08-31) are merged to `master`; Public beta No-Go pending the sealed `app-v0.2.0-rc.1` candidate and the deferred four-platform clean-install acceptance
 Last verified: 2026-08-26
 
@@ -72,7 +74,7 @@ The updater private key must not be reused as a capability-catalog key, OS code-
 
 Recovery and rotation are fail-closed. The current static `releases/latest` channel has one trust anchor and no version-aware routing or dual-key verification, so it cannot guarantee a lossless key rotation for clients that miss a bridge release:
 
-1. Stop publication if the protected secret, password, or owner approval is unavailable.
+1. Stop publication if the signing key is unavailable or cannot produce a valid signature; an unencrypted key may use an empty password.
 2. Restore the exact existing key only through approved protected-environment secret administration, then produce a signed release candidate and verify an upgrade from the previous signed installer.
 3. A planned rotation requires a separately approved migration design before changing this repository's committed key. It must keep an old-key-signed bridge manifest and artifact reachable for older clients while a new channel serves clients that already trust the new key, or add an audited dual-trust/version-aware mechanism. Shipping one bridge build through `releases/latest` and then replacing it is not sufficient.
 4. If the project deliberately switches the single static channel after a bridge period, clients that missed the bridge require an explicit manually downloaded reinstall whose checksum, GitHub attestation, and new updater signature are verified. Windows/macOS OS-identity warnings remain expected under the current policy. Record that continuity loss in the release approval; never describe it as transparent rotation.
@@ -87,7 +89,7 @@ Current updater custody record: existing updater key pair selected; primary owne
 - The reusable capability workflow has `contents: read`, accepts the unified release tag, and uploads only same-run workflow artifacts. It cannot create or upload to a GitHub Release.
 - `.github/workflows/desktop-release.yml` owns the atomic capability + four-platform desktop transaction. Only its final `publish-stable` job receives `contents: write`, and that job is protected by the `desktop-release` environment.
 - The sealed candidate remains a workflow artifact through build, manifest, packaged-smoke, attestation, and full asset rehearsal. The protected publisher creates one draft only after those gates, uploads the complete bundle, then publishes and performs anonymous post-publish verification.
-- Both `capability-release` and `desktop-release` require reviewer `StoneLL1`, allow sole-maintainer self-review, and allow deployments only from `master` or tags matching `app-v*`.
+- Both `capability-release` and `desktop-release` allow deployments only from `master` or tags matching `app-v*`. There is no required reviewer; the maintainer initiates publication through a tag or dispatch.
 
 No remote release workflow rehearsal is claimed for Batch 5 or Batch 6. The 2026-08-25 configuration pass closed public access, `master` protection, required reviewers, and Environment deployment policy. On 2026-08-26, names-only audits confirmed both updater secrets, the capability private-key secret, and `CAPABILITY_SIGNING_KEY_ID=llm-wiki-capability-v1`; no tag or Release exists. The public capability trust anchor and first-release acceptance contract are prepared on a review branch. Reviewed merge, same-SHA CI, sealed release assets, and the deferred four-platform clean-install matrix remain release blockers, not local test failures. The complete Batch 6 decision and platform matrix are in [`batch-6-acceptance-evidence.md`](batch-6-acceptance-evidence.md).
 
@@ -100,7 +102,7 @@ npm run test:final-four-redlines
 npm run check:final-four-redlines
 ```
 
-The first command validates versions, identity, endpoints, tag grammar, and workflow permission shape. The local variant additionally validates `origin` and the local default-branch ref. The quarantined redline tests are green only when the declared expected red/green state still matches the repository; they contain no skipped tests. The strict final command intentionally exits nonzero while any release blocker remains and is the command later Batch owners must turn green.
+The first command validates versions, identity, endpoints, tag grammar, and public signing keys. The local variant additionally validates `origin` and the local default-branch ref. The quarantined redline tests are green only when the declared expected red/green state still matches the repository; they contain no skipped tests. The strict final command intentionally exits nonzero while any release blocker remains and is the command later Batch owners must turn green.
 
 ## Batch ownership of current redlines
 

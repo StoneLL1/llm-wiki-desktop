@@ -5,8 +5,8 @@ import { ChevronDown, Circle, ClipboardPaste, FileText, FolderOpen, Image, Link,
 import { pickDirectory, selectImportFiles } from "./nativeFilePicker";
 import { subscribeToDragDrop } from "./dragDrop";
 import {
+  extractImportUrl,
   isUnsupportedImportUrl,
-  isValidPublicHttpImportUrl,
 } from "./importLocator";
 
 export interface ImportSourceMethodsProps {
@@ -71,7 +71,8 @@ export function ImportSourceMethods({
   const expanded = controlledExpanded ?? internalExpanded;
   const matrixExpanded = controlledMatrixExpanded ?? internalMatrixExpanded;
   const unsupportedLocalUrl = useMemo(() => isUnsupportedImportUrl(url), [url]);
-  const invalidUrl = useMemo(() => Boolean(url.trim()) && !unsupportedLocalUrl && !isValidPublicHttpImportUrl(url.trim()), [unsupportedLocalUrl, url]);
+  const extractedUrl = useMemo(() => extractImportUrl(url), [url]);
+  const invalidUrl = Boolean(url.trim()) && !unsupportedLocalUrl && !extractedUrl;
   const hasUrlFeedback = unsupportedLocalUrl || invalidUrl || inputError === "url";
   const pathBusy = sessionSyncing || addingPaths || addingText || pickingPaths;
   const textBusy = sessionSyncing || addingPaths || addingUrl || addingText || submittingText;
@@ -80,10 +81,7 @@ export function ImportSourceMethods({
     if (heading) return heading.replace(/^#\s+/, "").trim();
     return textSourceName.replace(/\.(md|markdown|txt)$/i, "") || t("importV2.clipboard.fallbackTitle");
   }, [t, text, textSourceName]);
-  const pastedUrl = useMemo(() => {
-    const value = text.trim();
-    return value && !/\s/u.test(value) && isValidPublicHttpImportUrl(value) ? value : null;
-  }, [text]);
+  const pastedUrl = useMemo(() => extractImportUrl(text), [text]);
 
   const importPathsFrom = useCallback(async (selectPaths: () => Promise<string[]>) => {
     if (pathBusy) return;
@@ -141,7 +139,7 @@ export function ImportSourceMethods({
     });
 
   const submitUrl = () => {
-    const value = url.trim();
+    const value = extractedUrl;
     if (!value || unsupportedLocalUrl || invalidUrl || submittingUrl || addingUrl || sessionSyncing) return;
     setInputError(null);
     setSubmittingUrl(true);
@@ -182,21 +180,15 @@ export function ImportSourceMethods({
 
   const matrixGroups = [
     {
-      id: "files",
       label: t("importV2.matrix.files"),
-      icon: FileText,
       entries: files,
     },
     {
-      id: "platforms",
       label: t("importV2.matrix.platforms"),
-      icon: Circle,
       entries: platforms,
     },
     {
-      id: "abilities",
       label: t("importV2.matrix.abilities"),
-      icon: MessageSquareText,
       entries: abilities,
     },
   ] as const;
@@ -204,33 +196,40 @@ export function ImportSourceMethods({
   return (
     <section className="import-v2-methods" aria-label={t("importV2.methods.label")}>
       <header className="import-v2-methods__header">
-        <div>
-          <h2>{t("importV2.methods.title")}</h2>
-          <p>{t("importV2.methods.description")}</p>
+        <h2>{t("importV2.methods.title")}</h2>
+        <div className="import-v2-entry-actions">
+          <button
+            type="button"
+            className="btn btn--ghost btn--sm"
+            aria-expanded={textComposerOpen && expanded}
+            aria-controls="import-v2-text-composer"
+            onClick={() => { setExpanded(true); setTextComposerOpen((open) => !expanded || !open); }}
+            disabled={!onAddText}
+          >
+            <ClipboardPaste size={14} aria-hidden="true" />
+            {t("importV2.clipboard.title")}
+          </button>
+          <button
+            type="button"
+            className="icon-button"
+            aria-label={t(expanded ? "importV2.methods.collapse" : "importV2.methods.expand")}
+            title={t(expanded ? "importV2.methods.collapse" : "importV2.methods.expand")}
+            aria-expanded={expanded}
+            onClick={() => setExpanded(!expanded)}
+          >
+            <ChevronDown
+              size={14}
+              aria-hidden="true"
+              className={expanded ? "rotate-180" : undefined}
+            />
+          </button>
         </div>
-        <button
-          type="button"
-          className="btn btn--ghost btn--sm"
-          aria-expanded={expanded}
-          onClick={() => setExpanded(!expanded)}
-        >
-          {t(expanded ? "importV2.methods.collapse" : "importV2.methods.expand")}
-          <ChevronDown
-            size={14}
-            aria-hidden="true"
-            className={expanded ? "rotate-180" : undefined}
-          />
-        </button>
       </header>
       {expanded ? (
         <>
           <div className="import-v2-entry-grid">
-            <section className="import-v2-entry-block import-v2-entry-block--files" aria-labelledby="import-v2-files-entry-title">
-              <div className="import-v2-entry-block__heading">
-                <span className="import-v2-entry-block__eyebrow">{t("importV2.files.eyebrow")}</span>
-                <h3 id="import-v2-files-entry-title">{t("importV2.files.title")}</h3>
-                <p>{t("importV2.files.description")}</p>
-              </div>
+            <section className="import-v2-entry-block" aria-labelledby="import-v2-files-entry-title">
+              <h3 id="import-v2-files-entry-title">{t("importV2.files.title")}</h3>
               <div
                 className={`import-v2-dropzone ${dropActive ? "is-active" : ""}`}
                 role="button"
@@ -238,6 +237,7 @@ export function ImportSourceMethods({
                 aria-label={t("importV2.files.drop")}
                 aria-busy={pathBusy}
                 aria-disabled={pathBusy}
+                onClick={() => void addFiles()}
                 onDragOver={(event) => event.preventDefault()}
                 onDragEnter={() => { if (!pathBusy) setDropActive(true); }}
                 onDragLeave={() => setDropActive(false)}
@@ -260,9 +260,8 @@ export function ImportSourceMethods({
                 {pathBusy ? <LoaderCircle className="animate-spin" size={14} /> : <Upload size={14} />}
                 <span>{pathBusy ? t("importV2.status.adding") : t("importV2.files.drop")}</span>
               </div>
-              {inputError === "files" ? <p role="alert" className="m-0 text-[11px] text-[var(--danger)]">{t("importV2.files.error")}</p> : null}
               <div className="import-v2-entry-actions">
-                <button type="button" className="btn btn--sm btn--primary" aria-label={t("importV2.files.choose")} onClick={() => void addFiles()} disabled={pathBusy}>
+                <button type="button" className="btn btn--sm" aria-label={t("importV2.files.choose")} onClick={() => void addFiles()} disabled={pathBusy}>
                   {pathBusy ? <LoaderCircle className="animate-spin" size={14} /> : <Upload size={14} />}
                   {pathBusy ? t("importV2.status.adding") : t("importV2.files.choose")}
                 </button>
@@ -271,26 +270,24 @@ export function ImportSourceMethods({
                   {t("importV2.files.chooseFolder")}
                 </button>
               </div>
-              <span className="import-v2-entry-block__meta">{t("importV2.files.formats")}</span>
+              {inputError === "files" ? <p role="alert" className="m-0 text-[12px] text-[var(--danger)]">{t("importV2.files.error")}</p> : null}
             </section>
-            <section className="import-v2-entry-block import-v2-entry-block--remote" aria-labelledby="import-v2-url-entry-title">
-              <div className="import-v2-entry-block__heading">
-                <span className="import-v2-entry-block__eyebrow">{t("importV2.url.eyebrow")}</span>
-                <h3 id="import-v2-url-entry-title">{t("importV2.url.title")}</h3>
-                <p>{t("importV2.url.description")}</p>
-              </div>
-              <form
-                className={`import-v2-compact-url ${hasUrlFeedback ? "is-invalid" : ""}`}
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  submitUrl();
-                }}
-              >
+            <form
+              className="import-v2-entry-block"
+              aria-labelledby="import-v2-url-entry-title"
+              onSubmit={(event) => {
+                event.preventDefault();
+                submitUrl();
+              }}
+            >
+              <h3 id="import-v2-url-entry-title">{t("importV2.url.title")}</h3>
+              <div className={`input-group import-v2-compact-url ${hasUrlFeedback ? "is-invalid" : ""}`}>
                 <label className="sr-only" htmlFor="import-v2-url">{t("importV2.url.label")}</label>
                 <span className="input-group__lead"><Link size={14} aria-hidden="true" /></span>
                 <input
                   id="import-v2-url"
-                  type="url"
+                  type="text"
+                  inputMode="url"
                   className="input input--mono"
                   aria-label={t("importV2.url.label")}
                   aria-describedby={hasUrlFeedback ? "import-v2-url-feedback" : undefined}
@@ -306,11 +303,13 @@ export function ImportSourceMethods({
                     }
                   }}
                 />
-                <button type="submit" className="btn btn--sm btn--primary" aria-label={t("importV2.url.submit")} disabled={!url.trim() || unsupportedLocalUrl || invalidUrl || submittingUrl || addingUrl || pathBusy}>
+              </div>
+              <div className="import-v2-entry-actions">
+                <button type="submit" className="btn btn--sm" aria-label={t("importV2.url.submit")} disabled={!url.trim() || unsupportedLocalUrl || invalidUrl || submittingUrl || addingUrl || pathBusy}>
                   {submittingUrl || addingUrl ? <LoaderCircle className="animate-spin" size={14} /> : <Plus size={14} />}
                   <span>{t("importV2.url.submit")}</span>
                 </button>
-              </form>
+              </div>
               {hasUrlFeedback ? (
                 <div id="import-v2-url-feedback">
                   {unsupportedLocalUrl ? <p role="alert" className="m-0 text-[11px] text-[var(--danger)]">{t("importV2.url.localUnsupported")}</p> : null}
@@ -318,18 +317,7 @@ export function ImportSourceMethods({
                   {inputError === "url" ? <p role="alert" className="m-0 text-[11px] text-[var(--danger)]">{t("importV2.url.error")}</p> : null}
                 </div>
               ) : null}
-              <button
-                type="button"
-                className="btn btn--sm import-v2-entry-actions__secondary"
-                aria-expanded={textComposerOpen}
-                aria-controls="import-v2-text-composer"
-                onClick={() => setTextComposerOpen((open) => !open)}
-                disabled={!onAddText}
-              >
-                <ClipboardPaste size={14} aria-hidden="true" />
-                {t("importV2.clipboard.title")}
-              </button>
-            </section>
+            </form>
           </div>
           {textComposerOpen ? (
             <section id="import-v2-text-composer" className="import-v2-text-composer" aria-label={t("importV2.clipboard.title")}>
@@ -372,7 +360,6 @@ export function ImportSourceMethods({
                     disabled={textBusy || Boolean(pastedUrl)}
                     onChange={(event) => setTextSourceName(event.target.value)}
                   />
-                  <p className="m-0 mt-2 text-[10.5px] text-[var(--text-muted)]">{t("importV2.clipboard.privacy")}</p>
                 </div>
               </div>
               {text.trim() ? (
@@ -424,30 +411,8 @@ export function ImportSourceMethods({
           aria-controls="import-v2-source-matrix-content"
           onClick={() => setMatrixExpanded(!matrixExpanded)}
         >
-          <span className="import-v2-source-matrix__title">{t("importV2.matrix.label")}</span>
-          <span className="import-v2-source-matrix__metrics">
-            {matrixGroups.map((group) => {
-              const available = group.entries.filter((entry) => entry.available).length;
-              const Icon = group.icon;
-              return (
-                <span
-                  key={group.id}
-                  className="import-v2-source-matrix__metric"
-                  aria-label={t("importV2.matrix.summary", {
-                    label: group.label,
-                    available,
-                    total: group.entries.length,
-                  })}
-                >
-                  <Icon size={13} aria-hidden="true" />
-                  <span>{group.label}</span>
-                  <strong>{available}/{group.entries.length}</strong>
-                </span>
-              );
-            })}
-          </span>
+          <span className="import-v2-source-matrix__title">{t("importV2.matrix.title")}</span>
           <span className="import-v2-source-matrix__toggle">
-            {t(matrixExpanded ? "importV2.matrix.collapse" : "importV2.matrix.expand")}
             <ChevronDown
               size={14}
               aria-hidden="true"

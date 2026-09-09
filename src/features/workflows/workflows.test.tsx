@@ -1,11 +1,19 @@
+import { StrictMode } from "react";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+const outputPicker = vi.hoisted(() => vi.fn().mockResolvedValue(null));
+vi.mock("./workflowOutputPicker", () => ({ pickWorkflowOutputPath: outputPicker }));
 
 const i18nMocks = vi.hoisted(() => ({
   t: (key: string) => key,
   language: "en-US",
 }));
-const workflowApiMocks = vi.hoisted(() => ({ getWorkflowFileDiff: vi.fn(), rollbackAgentLintRepair: vi.fn() }));
+const workflowApiMocks = vi.hoisted(() => ({
+  getWorkflowFileDiff: vi.fn(), rollbackAgentLintRepair: vi.fn(),
+  getWorkflowHistoryState: vi.fn().mockResolvedValue({ available: false, undone: false, recovery: false, undoInProgress: false, checkpointHash: null, finalCommit: null }),
+  undoWorkflowUpdate: vi.fn(),
+}));
 
 vi.mock("react-i18next", () => ({
   initReactI18next: { type: "3rdParty", init: vi.fn() },
@@ -15,20 +23,26 @@ vi.mock("react-i18next", () => ({
   }),
 }));
 vi.mock("../../services/workflowApi", () => ({
+  getWorkflowFormCatalog: vi.fn().mockResolvedValue({ routes: [], defaultRoute: null, wikiPages: [], rememberedDraft: null }),
+  getUpdateWikiOptions: vi.fn().mockResolvedValue({ routes: [], defaultRoute: null }),
+  listUpdateWikiSources: vi.fn().mockResolvedValue({ sources: [], total: 0, nextOffset: null, unavailable: 0 }),
   getWorkflowFileDiff: workflowApiMocks.getWorkflowFileDiff,
   rollbackAgentLintRepair: workflowApiMocks.rollbackAgentLintRepair,
+  getWorkflowHistoryState: workflowApiMocks.getWorkflowHistoryState,
+  undoWorkflowUpdate: workflowApiMocks.undoWorkflowUpdate,
 }));
 
 import type { WorkflowFileDiffPage, WorkflowPreparation, WorkflowRun, WorkflowRunSummary, WorkflowsOverview } from "../../types/workflow";
 import { WIKI_LINT_SKILL_SHA256 } from "../../types/lint";
 import { WorkflowHistoryView } from "./WorkflowHistoryView";
+import { makePreparationWithOptions } from "./workflowBaselineFixtures";
 import { WorkflowPipeline } from "./WorkflowPipeline";
 import { WorkflowPreparationView } from "./WorkflowPreparationView";
 import { WorkflowTaskDetail } from "./WorkflowTaskDetail";
 import type { WorkflowsController } from "./useWorkflowsController";
 import { WorkflowsOverviewView } from "./WorkflowsOverview";
 import { WorkflowsView } from "./WorkflowsView";
-import { attentionRun, groupWorkflowAttempts, WORKFLOW_STATUSES } from "./workflowPresentation";
+import { groupWorkflowAttempts, WORKFLOW_STATUSES } from "./workflowPresentation";
 import { WorkflowsRightPanel } from "./WorkflowsRightPanel";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
@@ -109,6 +123,20 @@ afterEach(() => {
 });
 
 describe("Workflows overview", () => {
+  it("retains the bound BYOK route and automatic output in StrictMode review", () => {
+    const routeSelection = { kind: "byok" as const, provider: "ollama" as const };
+    const scope = { kind: "generate_content" as const, artifactType: "knowledge_card" as const,
+      pagePaths: ["wiki/中文.md"], outputPath: null };
+    const preparation: WorkflowPreparation = { ...makePreparationWithOptions(), kind: "generate_content",
+      scope: { ...scope, outputPath: "exports/generated-card.html" }, availableRoutes: [routeSelection],
+      prerequisites: [], gitPolicy: "not_required" };
+    useWorkflowStore.getState().setPreparation(preparation, routeSelection, scope);
+    render(<StrictMode><WorkflowPreparationView preparation={preparation} onBack={vi.fn()} onStart={vi.fn()} onPrerequisite={vi.fn()} /></StrictMode>);
+    expect(useWorkflowStore.getState().drafts.generate_content).toMatchObject({ scope, routeSelection });
+    expect(screen.getByRole("combobox")).toHaveValue("byok:ollama");
+    expect(screen.getByRole("radio", { name: "workflows.preparation.createArtifact" })).toBeChecked();
+  });
+
   it("routes Generate Content from the overview into full Workflows preparation", () => {
     const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "filterHistory", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
     const currentProject = useProjectStore.getState().currentProject;
@@ -143,6 +171,20 @@ describe("Workflows overview", () => {
     expect(controller.prepare).not.toHaveBeenCalled();
   });
 
+  it("shows an editable Update form independently of legacy preparation requests", () => {
+    const controller = { backToOverview: vi.fn(), refresh: vi.fn() } as unknown as WorkflowsController;
+    useWorkflowStore.setState({ overview, overviewStatus: "ready" });
+    useWorkflowStore.getState().beginPreparation("update_wiki");
+    useWorkflowStore.getState().beginOperation("prepare:update_wiki");
+    render(<WorkflowsView controller={controller} onOpenTask={vi.fn()} />);
+    expect(screen.getByRole("heading", { name: "workflows.kind.update_wiki", level: 2 })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "workflows.action.run: workflows.kind.update_wiki" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("radio", { name: "workflows.update.automatic" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "workflows.action.cancelPreparation" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.back" }));
+    expect(controller.backToOverview).toHaveBeenCalledOnce();
+  });
+
   it("renders exactly the three fixed workflows and a single recommendation", () => {
     const prepare = vi.fn();
     render(<WorkflowsOverviewView overview={overview} overviewStatus="ready" error={null} onRetry={vi.fn()} onPrepare={prepare} onPrerequisite={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
@@ -155,7 +197,7 @@ describe("Workflows overview", () => {
     expect(prepare).toHaveBeenCalledWith("generate_content");
   });
 
-  it("orders attention, the three available workflows, and the backend-bounded recent five", () => {
+  it("keeps the three selectors above the selected panel and the backend-bounded recent five", () => {
     const waiting = workflowRun({
       taskId: "waiting-review",
       kind: "update_wiki",
@@ -182,7 +224,7 @@ describe("Workflows overview", () => {
     const attention = screen.getByRole("region", { name: "workflows.overview.attention" });
     const available = screen.getByRole("region", { name: "workflows.overview.available" });
     const recent = screen.getByRole("region", { name: "workflows.overview.recent" });
-    expect(attention.compareDocumentPosition(available) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(available.compareDocumentPosition(attention) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(available.compareDocumentPosition(recent) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(within(attention).getByText("workflows.status.waiting_for_confirmation")).toBeInTheDocument();
     expect(within(available).getAllByRole("listitem")).toHaveLength(3);
@@ -247,7 +289,7 @@ describe("Workflows overview", () => {
     const { container } = render(<WorkflowsOverviewView overview={snapshot} overviewStatus="ready" error={null} onRetry={vi.fn()} onPrepare={vi.fn()} onPrerequisite={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
     const row = container.querySelector<HTMLElement>(".workflow-row")!;
     expect(within(row).getByText("workflows.prerequisite.routeRequired")).toBeInTheDocument();
-    expect(within(row).getByText("workflows.overview.lastCompleted")).toBeInTheDocument();
+    expect(row.querySelector("time")).toHaveAttribute("dateTime", "2026-08-10T08:01:00Z");
   });
 
   it("continues a recovered queue from row truth when the active run is outside the bounded snapshot", () => {
@@ -340,7 +382,7 @@ describe("Workflows overview", () => {
     const { container } = render(<WorkflowsOverviewView overview={duplicateRecommendations} overviewStatus="ready" error={null} onRetry={vi.fn()} onPrepare={vi.fn()} onPrerequisite={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
 
     expect(screen.getAllByText("workflows.recommended")).toHaveLength(1);
-    expect(container.querySelectorAll(".workflow-row .btn--primary")).toHaveLength(1);
+    expect(container.querySelectorAll('.workflow-row[aria-pressed="true"]')).toHaveLength(1);
   });
 
   it("formats recent run time with the selected application language", () => {
@@ -446,34 +488,99 @@ describe("Workflows overview", () => {
     expect(handlePrerequisite).toHaveBeenCalledWith("open_or_create_project");
   });
 
-  it("re-prepares each workflow from structured scope controls", () => {
-    const reprepare = vi.fn();
+  it("starts with the edited structured scope and no manual preparation step", async () => {
+    const start = vi.fn();
     const base = {
       schemaVersion: 1, preparationId: "prep", preparationRevision: "r1",
       projectAccess: overview.projectAccess!, baseline: { fingerprint: "base", capturedAt: "2026-08-01T00:00:00Z", itemCount: 2 },
       route: null, prerequisites: [], output: { labelKey: "workflows.output.session", location: null, mayChangeWiki: false }, gitPolicy: "not_required" as const,
       requiresScopeConfirmation: false, quickRerunEligible: false,
     };
-    const props = { onBack: vi.fn(), onStart: vi.fn(), onPrerequisite: vi.fn(), onReprepare: reprepare };
+    const props = { onBack: vi.fn(), onStart: start, onPrerequisite: vi.fn() };
     const update: WorkflowPreparation = { ...base, kind: "update_wiki", scope: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [{ sourceId: "来源一", versionId: "v1" }] } };
     const view = render(<WorkflowPreparationView preparation={update} {...props} />);
     fireEvent.click(screen.getByLabelText("workflows.mode.fullRecompile"));
-    fireEvent.click(screen.getByRole("button", { name: "workflows.action.updatePreparation" }));
-    expect(reprepare).toHaveBeenLastCalledWith(expect.objectContaining({ mode: "full_recompile" }), null);
+    fireEvent.click(screen.getByRole("button", { name: /workflows.action.(start|runAgain)$/ }));
+    expect(start).toHaveBeenLastCalledWith(false, false, { scope: expect.objectContaining({ mode: "full_recompile" }), routeSelection: null });
 
     view.rerender(<WorkflowPreparationView preparation={{ ...base, kind: "health_check", scope: { kind: "health_check", mode: "local_quick" } }} {...props} />);
     fireEvent.click(screen.getByLabelText("workflows.mode.complete"));
-    fireEvent.click(screen.getByRole("button", { name: "workflows.action.updatePreparation" }));
-    expect(reprepare).toHaveBeenLastCalledWith({ kind: "health_check", mode: "complete" }, null);
+    fireEvent.click(screen.getByRole("button", { name: /workflows.action.(start|runAgain)$/ }));
+    expect(start).toHaveBeenLastCalledWith(false, false, { scope: { kind: "health_check", mode: "complete" }, routeSelection: null });
 
     view.rerender(<WorkflowPreparationView preparation={{ ...base, kind: "generate_content", scope: { kind: "generate_content", artifactType: "project_report", pagePaths: [], outputPath: "exports/project-report.html" }, availableWikiPages: ["wiki/中文.md"], quickRerunEligible: true }} {...props} />);
-    fireEvent.change(screen.getByLabelText("workflows.preparation.artifactType"), { target: { value: "knowledge_card" } });
+    fireEvent.click(screen.getByRole("radio", { name: "workflows.artifact.knowledgeCard" }));
     fireEvent.click(screen.getByLabelText("wiki/中文.md"));
-    fireEvent.change(screen.getByLabelText("workflows.preparation.outputPath"), { target: { value: "exports/知识卡.html" } });
-    expect(screen.getByRole("button", { name: "workflows.action.runAgain" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "workflows.action.updatePreparation" }));
-    expect(reprepare).toHaveBeenLastCalledWith(expect.objectContaining({ artifactType: "knowledge_card", outputPath: "exports/知识卡.html" }), null);
+    fireEvent.click(screen.getByLabelText("workflows.preparation.explicitTarget"));
+    outputPicker.mockResolvedValueOnce("exports/知识卡.html");
+    fireEvent.click(screen.getByRole("button", { name: "workflows.preparation.outputPath" }));
+    await screen.findByText("exports/知识卡.html", { selector: ".workflow-output-picker__value > span" });
+    expect(screen.getByRole("button", { name: "workflows.action.runAgain" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: /workflows.action.(start|runAgain)$/ }));
+    expect(start).toHaveBeenLastCalledWith(false, false, { scope: expect.objectContaining({ artifactType: "knowledge_card", outputPath: "exports/知识卡.html" }), routeSelection: null });
     expect(screen.getByRole("button", { name: "workflows.action.runAgain" })).toBeInTheDocument();
+  });
+
+  it("selects legal HTML scopes and preserves a prepared new target until the user changes the output", async () => {
+    const start = vi.fn();
+    const preparation: WorkflowPreparation = {
+      schemaVersion: 2, preparationId: "export-options", preparationRevision: "export-options-1",
+      projectAccess: overview.projectAccess!, kind: "generate_content",
+      scope: { kind: "generate_content", artifactType: "knowledge_card", pagePaths: ["wiki/甲.md", "wiki/乙.md"], outputPath: "exports/新制品-unique.html" },
+      availableWikiPages: ["wiki/甲.md", "wiki/乙.md"],
+      baseline: { fingerprint: "b", capturedAt: "2026-09-07T00:00:00Z", itemCount: 2 },
+      route: null, prerequisites: [], output: { labelKey: "workflows.output.artifact", location: "exports/新制品-unique.html", mayChangeWiki: false },
+      gitPolicy: "not_required", requiresScopeConfirmation: false, quickRerunEligible: false,
+    };
+    render(<WorkflowPreparationView preparation={preparation} onBack={vi.fn()} onStart={start} onPrerequisite={vi.fn()} />);
+    const types = screen.getByRole("radiogroup", { name: "workflows.preparation.artifactType" });
+    expect(within(types).getAllByRole("radio")).toHaveLength(4);
+    expect(screen.getByRole("radio", { name: "workflows.preparation.createArtifact" })).toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.start" }));
+    expect(start).toHaveBeenLastCalledWith(false, false, expect.objectContaining({ scope: preparation.scope }));
+    fireEvent.click(screen.getByRole("radio", { name: "workflows.artifact.beautifulRead" }));
+    expect(screen.getByRole("radio", { name: "wiki/甲.md" })).toBeChecked();
+    fireEvent.change(screen.getByLabelText("workflows.preparation.searchOptions"), { target: { value: "乙" } });
+    fireEvent.click(screen.getByRole("button", { name: "workflows.preparation.selectResults" }));
+    expect(screen.getByRole("radio", { name: "wiki/乙.md" })).toBeChecked();
+    fireEvent.change(screen.getByLabelText("workflows.preparation.searchOptions"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.start" }));
+    expect(start).toHaveBeenLastCalledWith(false, false, expect.objectContaining({ scope: expect.objectContaining({ pagePaths: ["wiki/乙.md"], outputPath: null }) }));
+    fireEvent.click(screen.getByRole("radio", { name: "workflows.artifact.conceptMap" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "wiki/甲.md" }));
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.start" }));
+    expect(start).toHaveBeenLastCalledWith(false, false, expect.objectContaining({ scope: expect.objectContaining({ pagePaths: ["wiki/乙.md", "wiki/甲.md"] }) }));
+    fireEvent.click(screen.getByRole("radio", { name: "workflows.artifact.projectReport" }));
+    expect(screen.queryByRole("checkbox", { name: "wiki/甲.md" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("radio", { name: "workflows.preparation.explicitTarget" }));
+    expect(screen.getByRole("button", { name: "workflows.action.start" })).toBeDisabled();
+    fireEvent.click(screen.getByLabelText("workflows.preparation.explicitTarget"));
+    outputPicker.mockResolvedValueOnce("exports/已有报告.html");
+    fireEvent.click(screen.getByRole("button", { name: "workflows.preparation.outputPath" }));
+    await screen.findByText("exports/已有报告.html", { selector: ".workflow-output-picker__value > span" });
+    expect(screen.getByText("workflows.preparation.explicitTargetHint")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.start" }));
+    expect(start).toHaveBeenLastCalledWith(false, false, expect.objectContaining({ scope: expect.objectContaining({ pagePaths: [], outputPath: "exports/已有报告.html" }) }));
+    fireEvent.click(screen.getByRole("radio", { name: "workflows.preparation.createArtifact" }));
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.start" }));
+    expect(start).toHaveBeenLastCalledWith(false, false, expect.objectContaining({ scope: expect.objectContaining({ outputPath: null }) }));
+  });
+
+  it.each(["persistent", "memory_only"] as const)("describes a Health report with %s persistence even without an output path", (persistence) => {
+    const preparation: WorkflowPreparation = {
+      schemaVersion: 2, preparationId: "health-output", preparationRevision: "health-output-1",
+      projectAccess: { ...overview.projectAccess!, persistence }, kind: "health_check",
+      scope: { kind: "health_check", mode: "local_quick" },
+      baseline: { fingerprint: "b", capturedAt: "2026-09-07T00:00:00Z", itemCount: 2 },
+      route: { kind: "local", routeRevision: "local" }, prerequisites: [],
+      output: { labelKey: "workflows.output.healthReport", location: null, mayChangeWiki: false },
+      gitPolicy: "not_required", requiresScopeConfirmation: false, quickRerunEligible: false,
+    };
+    const { container } = render(<WorkflowPreparationView preparation={preparation} onBack={vi.fn()} onStart={vi.fn()} onPrerequisite={vi.fn()} />);
+    const output = container.querySelector("[data-decision-step='3']")!;
+    expect(output).toHaveTextContent("workflows.output.healthReport");
+    expect(output).toHaveTextContent(persistence === "persistent" ? "workflows.preparation.healthReportPersistent" : "workflows.output.session");
+    if (persistence === "persistent") expect(output).not.toHaveTextContent("workflows.output.session");
   });
 
   it("orders non-Health preparation decisions and keeps technical details collapsed", () => {
@@ -500,20 +607,22 @@ describe("Workflows overview", () => {
       availableRoutes: [{ kind: "byok", provider: "open_ai" }],
     } satisfies WorkflowPreparation;
 
-    const view = render(<WorkflowPreparationView preparation={preparation} onBack={vi.fn()} onStart={vi.fn()} onPrerequisite={vi.fn()} onReprepare={vi.fn()} />);
+    const view = render(<WorkflowPreparationView preparation={preparation} onBack={vi.fn()} onStart={vi.fn()} onPrerequisite={vi.fn()} />);
     const steps = [...view.container.querySelectorAll<HTMLElement>("[data-decision-step]")]
       .map((node) => node.dataset.decisionStep);
 
-    expect(steps).toEqual(["1", "2", "3", "4", "5", "6", "7", "8"]);
+    expect(steps).toEqual(["1", "2", "3", "4", "5", "6", "8"]);
     const details = view.container.querySelector<HTMLDetailsElement>(".workflow-execution-details");
     expect(details).not.toHaveAttribute("open");
     expect(within(details!).getByText("baseline-fingerprint")).toBeInTheDocument();
     expect(within(details!).getByText("gpt-5")).toBeInTheDocument();
     expect(within(details!).getByText("html-knowledge-card")).toBeInTheDocument();
-    expect(view.container.querySelector("[data-decision-step='1']")).toHaveTextContent("workflows.kind.generate_content.description");
+    expect(screen.queryByText("workflows.kind.generate_content.description")).not.toBeInTheDocument();
+    expect(screen.queryByText("workflows.preparation.ready")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("workflows.preparation.outputPath")).not.toBeInTheDocument();
   });
 
-  it("requires first-run scope confirmation but keeps an eligible quick rerun explicit", () => {
+  it("uses Start as scope approval and preserves explicit quick rerun", () => {
     const start = vi.fn();
     const firstRun = {
       schemaVersion: 1,
@@ -531,16 +640,14 @@ describe("Workflows overview", () => {
       quickRerunEligible: false,
       availableSourceVersions: [{ sourceId: "source-a", versionId: "v1" }],
     } satisfies WorkflowPreparation;
-    const props = { onBack: vi.fn(), onStart: start, onPrerequisite: vi.fn(), onReprepare: vi.fn() };
+    const props = { onBack: vi.fn(), onStart: start, onPrerequisite: vi.fn() };
     const view = render(<WorkflowPreparationView preparation={firstRun} {...props} />);
 
-    expect(screen.getByRole("button", { name: "workflows.action.start" })).toBeDisabled();
-    fireEvent.click(screen.getByLabelText("workflows.confirm.scope"));
+    expect(screen.queryByLabelText("workflows.confirm.scope")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "workflows.action.start" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "workflows.preparation.clearSelection" }));
-    expect(screen.getByLabelText("workflows.confirm.scope")).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "workflows.action.start" })).toBeDisabled();
     fireEvent.click(screen.getByLabelText("source-a:v1"));
-    fireEvent.click(screen.getByLabelText("workflows.confirm.scope"));
     fireEvent.click(screen.getByRole("button", { name: "workflows.action.start" }));
     expect(start).toHaveBeenCalledOnce();
 
@@ -567,15 +674,15 @@ describe("Workflows overview", () => {
       quickRerunEligible: false,
       availableSourceVersions: [{ sourceId: "source-a", versionId: "v1" }],
     } satisfies WorkflowPreparation;
-    const view = render(<WorkflowPreparationView preparation={preparation} onBack={vi.fn()} onStart={start} onPrerequisite={vi.fn()} onReprepare={vi.fn()} />);
+    const view = render(<WorkflowPreparationView preparation={preparation} onBack={vi.fn()} onStart={start} onPrerequisite={vi.fn()} />);
 
     expect(screen.getByText("workflows.preparation.noChanges")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "workflows.action.start" })).toBeDisabled();
 
-    view.rerender(<WorkflowPreparationView preparation={{ ...preparation, preparationId: "prep-selection", preparationRevision: "revision-selection", scope: { ...preparation.scope, sourceVersions: [{ sourceId: "source-a", versionId: "v1" }] }, baseline: { ...preparation.baseline, itemCount: 1 } }} onBack={vi.fn()} onStart={start} onPrerequisite={vi.fn()} onReprepare={vi.fn()} />);
+    view.rerender(<WorkflowPreparationView preparation={{ ...preparation, preparationId: "prep-selection", preparationRevision: "revision-selection", scope: { ...preparation.scope, sourceVersions: [{ sourceId: "source-a", versionId: "v1" }] }, baseline: { ...preparation.baseline, itemCount: 1 } }} onBack={vi.fn()} onStart={start} onPrerequisite={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "workflows.preparation.clearSelection" }));
     expect(screen.getByRole("alert")).toHaveTextContent("workflows.preparation.invalid.updateWikiEmpty");
-    expect(screen.getByRole("button", { name: "workflows.action.updatePreparation" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "workflows.action.updatePreparation" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "workflows.action.start" })).toBeDisabled();
     expect(start).not.toHaveBeenCalled();
   });
@@ -598,18 +705,18 @@ describe("Workflows overview", () => {
       quickRerunEligible: false,
       availableWikiPages: ["wiki/a.md", "wiki/b.md"],
     } satisfies WorkflowPreparation;
-    const view = render(<WorkflowPreparationView preparation={preparation} onBack={vi.fn()} onStart={vi.fn()} onPrerequisite={prerequisite} onReprepare={vi.fn()} />);
+    const view = render(<WorkflowPreparationView preparation={preparation} onBack={vi.fn()} onStart={vi.fn()} onPrerequisite={prerequisite} />);
 
     expect(screen.getByText("workflows.preparation.generate.knowledge_card")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "workflows.action.openSettings" }));
     expect(prerequisite).toHaveBeenCalledWith("configure_execution_route");
-    fireEvent.change(screen.getByLabelText("workflows.preparation.artifactType"), { target: { value: "project_report" } });
+    fireEvent.click(screen.getByRole("radio", { name: "workflows.artifact.projectReport" }));
     expect(screen.getByText("workflows.preparation.generate.project_report")).toBeInTheDocument();
-    expect(screen.getByText("workflows.preparation.fixedScopePending")).toBeInTheDocument();
+    expect(screen.getAllByText("workflows.preparation.fixedScopePending").length).toBeGreaterThan(0);
     expect(screen.queryByLabelText("wiki/a.md")).not.toBeInTheDocument();
 
     useWorkflowStore.setState({ operations: { [`start:${preparation.preparationId}`]: { requestId: 1, pending: true, error: null } } });
-    view.rerender(<WorkflowPreparationView preparation={preparation} onBack={vi.fn()} onStart={vi.fn()} onPrerequisite={prerequisite} onReprepare={vi.fn()} />);
+    view.rerender(<WorkflowPreparationView preparation={preparation} onBack={vi.fn()} onStart={vi.fn()} onPrerequisite={prerequisite} />);
     expect(screen.getByRole("button", { name: "workflows.action.starting" })).toBeDisabled();
   });
 
@@ -634,7 +741,7 @@ describe("Workflows overview", () => {
       ],
     } satisfies WorkflowPreparation;
     const prerequisite = vi.fn();
-    const view = render(<WorkflowPreparationView preparation={preparation} onBack={vi.fn()} onStart={vi.fn()} onPrerequisite={prerequisite} onReprepare={vi.fn()} />);
+    const view = render(<WorkflowPreparationView preparation={preparation} onBack={vi.fn()} onStart={vi.fn()} onPrerequisite={prerequisite} />);
 
     expect(view.container.querySelector("[data-decision-step='2']")).toHaveTextContent("workflows.preparation.fixedScopeCount");
     expect(view.container.querySelector("[data-decision-step='6']")).toHaveTextContent("workflows.route.agent");
@@ -642,15 +749,15 @@ describe("Workflows overview", () => {
     expect(screen.getByText("workflows.preparation.agent")).toBeInTheDocument();
     expect(screen.getByText("workflows.preparation.model")).toBeInTheDocument();
     const routeOverride = screen.getByLabelText("workflows.preparation.routeOverride");
-    expect(within(routeOverride).getByRole("option", { name: /codex/ })).toBeInTheDocument();
+    expect(within(routeOverride).getByRole("option", { name: /Codex/ })).toBeInTheDocument();
     expect(within(routeOverride).getByRole("option", { name: /ollama/ })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "workflows.action.chooseRoute" }));
     expect(view.container.querySelector(".workflow-execution-details")).toHaveAttribute("open");
     expect(prerequisite).not.toHaveBeenCalled();
   });
 
-  it("preserves a one-run route override across later preparation edits", () => {
-    const reprepare = vi.fn();
+  it("preserves a one-run route override across later preparation edits", async () => {
+    const start = vi.fn();
     const preparation = {
       schemaVersion: 1,
       preparationId: "prep-route-draft",
@@ -668,24 +775,27 @@ describe("Workflows overview", () => {
       availableWikiPages: ["wiki/a.md"],
       availableRoutes: [{ kind: "byok", provider: "ollama" }, { kind: "byok", provider: "open_ai" }],
     } satisfies WorkflowPreparation;
-    const props = { onBack: vi.fn(), onStart: vi.fn(), onPrerequisite: vi.fn(), onReprepare: reprepare };
+    const props = { onBack: vi.fn(), onStart: start, onPrerequisite: vi.fn() };
     const view = render(<WorkflowPreparationView preparation={preparation} {...props} />);
 
     fireEvent.change(screen.getByLabelText("workflows.preparation.routeOverride"), { target: { value: "byok:open_ai" } });
-    expect(view.container.querySelector("[data-decision-step='3']")).toHaveTextContent("exports/default.html");
-    expect(view.container.querySelector("[data-decision-step='3']")).not.toHaveTextContent("workflows.output.defaultPending");
-    fireEvent.click(screen.getByRole("button", { name: "workflows.action.updatePreparation" }));
-    expect(reprepare).toHaveBeenLastCalledWith(preparation.scope, { kind: "byok", provider: "open_ai" });
+    expect(view.container.querySelector(".workflow-execution-details")).toHaveTextContent("exports/default.html");
+    expect(view.container.querySelector(".workflow-execution-details")).not.toHaveTextContent("workflows.output.defaultPending");
+    fireEvent.click(screen.getByRole("button", { name: /workflows.action.(start|runAgain)$/ }));
+    expect(start).toHaveBeenLastCalledWith(false, false, { scope: preparation.scope, routeSelection: { kind: "byok", provider: "open_ai" } });
 
     view.rerender(<WorkflowPreparationView preparation={{ ...preparation, preparationRevision: "revision-route-draft-b", route: { kind: "byok", provider: "open_ai", model: "gpt-5", routeRevision: "route-override" } }} {...props} />);
-    fireEvent.change(screen.getByLabelText("workflows.preparation.outputPath"), { target: { value: "exports/b.html" } });
-    const updateButton = screen.getByRole("button", { name: "workflows.action.updatePreparation" });
+    fireEvent.click(screen.getByLabelText("workflows.preparation.explicitTarget"));
+    outputPicker.mockResolvedValueOnce("exports/b.html");
+    fireEvent.click(screen.getByRole("button", { name: "workflows.preparation.outputPath" }));
+    await screen.findByText("exports/b.html", { selector: ".workflow-output-picker__value > span" });
+    const updateButton = screen.getByRole("button", { name: "workflows.action.start" });
     expect(view.container.querySelector(".workflow-execution-details")).not.toContainElement(updateButton);
     fireEvent.click(updateButton);
-    expect(reprepare).toHaveBeenLastCalledWith(expect.objectContaining({ outputPath: "exports/b.html" }), { kind: "byok", provider: "open_ai" });
+    expect(start).toHaveBeenLastCalledWith(false, false, { scope: expect.objectContaining({ outputPath: "exports/b.html" }), routeSelection: { kind: "byok", provider: "open_ai" } });
   });
 
-  it("keeps edited Settings drafts and treats route choice as an in-place advanced action", () => {
+  it("keeps edited Settings drafts and treats route choice as an in-place advanced action", async () => {
     const prerequisite = vi.fn();
     const preparation = {
       schemaVersion: 1,
@@ -703,10 +813,13 @@ describe("Workflows overview", () => {
       quickRerunEligible: false,
       availableWikiPages: ["wiki/a.md", "wiki/b.md"],
     } satisfies WorkflowPreparation;
-    const props = { onBack: vi.fn(), onStart: vi.fn(), onPrerequisite: prerequisite, onReprepare: vi.fn() };
+    const props = { onBack: vi.fn(), onStart: vi.fn(), onPrerequisite: prerequisite };
     const view = render(<WorkflowPreparationView preparation={preparation} {...props} />);
     fireEvent.click(screen.getByLabelText("wiki/b.md"));
-    fireEvent.change(screen.getByLabelText("workflows.preparation.outputPath"), { target: { value: "exports/draft.html" } });
+    fireEvent.click(screen.getByLabelText("workflows.preparation.explicitTarget"));
+    outputPicker.mockResolvedValueOnce("exports/draft.html");
+    fireEvent.click(screen.getByRole("button", { name: "workflows.preparation.outputPath" }));
+    await screen.findByText("exports/draft.html", { selector: ".workflow-output-picker__value > span" });
     fireEvent.click(screen.getByRole("button", { name: "workflows.action.openSettings" }));
     expect(prerequisite).toHaveBeenCalledWith("configure_execution_route", {
       scope: expect.objectContaining({ pagePaths: ["wiki/a.md", "wiki/b.md"], outputPath: "exports/draft.html" }),
@@ -720,7 +833,7 @@ describe("Workflows overview", () => {
   });
 
   it("supports Full to Changed auto-detection and shows truthful draft output and fixed-scope counts", () => {
-    const reprepare = vi.fn();
+    const start = vi.fn();
     const preparation = {
       schemaVersion: 1,
       preparationId: "prep-update-mode",
@@ -737,12 +850,12 @@ describe("Workflows overview", () => {
       quickRerunEligible: false,
       availableSourceVersions: [{ sourceId: "source-a", versionId: "v1" }],
     } satisfies WorkflowPreparation;
-    const props = { onBack: vi.fn(), onStart: vi.fn(), onPrerequisite: vi.fn(), onReprepare: reprepare };
+    const props = { onBack: vi.fn(), onStart: start, onPrerequisite: vi.fn() };
     const view = render(<WorkflowPreparationView preparation={preparation} {...props} />);
     fireEvent.click(screen.getByLabelText("workflows.mode.changedSources"));
     expect(screen.getByText("workflows.preparation.autoDetectChanges")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "workflows.action.updatePreparation" }));
-    expect(reprepare).toHaveBeenLastCalledWith({ kind: "update_wiki", mode: "changed_sources", sourceVersions: [] }, null);
+    fireEvent.click(screen.getByRole("button", { name: /workflows.action.(start|runAgain)$/ }));
+    expect(start).toHaveBeenLastCalledWith(false, false, { scope: { kind: "update_wiki", mode: "changed_sources", sourceVersions: [] }, routeSelection: null });
 
     const generation = {
       ...preparation,
@@ -758,9 +871,15 @@ describe("Workflows overview", () => {
     } satisfies WorkflowPreparation;
     view.rerender(<WorkflowPreparationView preparation={generation} {...props} />);
     expect(view.container.querySelector("[data-decision-step='2']")).toHaveTextContent("workflows.preparation.fixedScopeCount");
-    fireEvent.change(screen.getByLabelText("workflows.preparation.outputPath"), { target: { value: "" } });
-    expect(view.container.querySelector("[data-decision-step='3']")).toHaveTextContent("workflows.output.defaultPending");
-    expect(view.container.querySelector("[data-decision-step='3']")).not.toHaveTextContent("exports/report.html");
+    fireEvent.click(screen.getByLabelText("workflows.preparation.explicitTarget"));
+    fireEvent.click(screen.getByLabelText("workflows.preparation.createArtifact"));
+    fireEvent.click(screen.getByLabelText("workflows.preparation.explicitTarget"));
+    expect(screen.getByRole("button", { name: "workflows.preparation.outputPath" })).toHaveTextContent("workflows.outputPicker.choose");
+    expect(screen.getByRole("button", { name: "workflows.action.start" })).toBeDisabled();
+    fireEvent.click(screen.getByLabelText("workflows.preparation.createArtifact"));
+    expect(screen.queryByLabelText("workflows.preparation.outputPath")).not.toBeInTheDocument();
+    expect(view.container.querySelector(".workflow-execution-details")).toHaveTextContent("workflows.output.defaultPending");
+    expect(view.container.querySelector(".workflow-execution-details")).not.toHaveTextContent("exports/report.html");
   });
 
   it("renders indeterminate counts without claiming 100 percent completion", () => {
@@ -770,14 +889,6 @@ describe("Workflows overview", () => {
     expect(screen.queryByRole("progressbar", { name: "running" })).not.toBeInTheDocument();
     expect(screen.getAllByRole("listitem")).toHaveLength(6);
     expect(WORKFLOW_STATUSES).toEqual(["queued", "running", "waiting_for_confirmation", "completed", "failed", "cancelled", "interrupted"]);
-  });
-
-  it("prioritizes queue-owning work before terminal recovery", () => {
-    const base = { taskId: "running", displayStatus: "running" } as WorkflowRun;
-    expect(attentionRun([{ ...base }, { ...base, taskId: "failed", displayStatus: "failed" }, { ...base, taskId: "waiting", displayStatus: "waiting_for_confirmation" }])?.taskId).toBe("waiting");
-    expect(attentionRun([{ ...base }, { ...base, taskId: "failed", displayStatus: "failed" }])?.taskId).toBe("running");
-    expect(attentionRun([base])?.taskId).toBe("running");
-    expect(attentionRun([{ ...base, taskId: "queued", displayStatus: "queued" }])?.taskId).toBe("queued");
   });
 
   it("keeps an explicitly selected completed run ahead of another attention run", () => {
@@ -898,10 +1009,10 @@ describe("Workflows overview", () => {
     });
 
     const view = render(<WorkflowsRightPanel />);
-    expect(screen.getByText("workflows.context.prerequisites")).toBeInTheDocument();
-    expect(screen.getByText("workflows.prerequisite.resolveDirtyGit")).toBeInTheDocument();
-    expect(screen.getByText("workflows.git.required_before_write")).toBeInTheDocument();
-    expect(screen.getByText("wiki")).toHaveAttribute("title", "wiki");
+    expect(screen.queryByText("workflows.context.prerequisites")).not.toBeInTheDocument();
+    expect(screen.queryByText("workflows.prerequisite.resolveDirtyGit")).not.toBeInTheDocument();
+    expect(screen.getByText("workflows.git.automaticUpdateHistory")).toBeInTheDocument();
+    expect(screen.getByText("workflows.output.wiki")).toBeInTheDocument();
     expect(screen.queryByText("workflows.context.queue")).not.toBeInTheDocument();
 
     useWorkflowStore.setState({ surface: "detail", selectedTaskId: run.taskId, preparation: null });
@@ -1077,12 +1188,12 @@ describe("Workflows overview", () => {
 
   it("does not mislabel a pending overview as no project", () => {
     const { container } = render(<WorkflowsOverviewView overview={null} overviewStatus="loading" error={null} onRetry={vi.fn()} onPrepare={vi.fn()} onPrerequisite={vi.fn()} onOpenRun={vi.fn()} onContinueQueue={vi.fn()} />);
-    expect(screen.getByRole("status")).toHaveAttribute("aria-busy", "true");
-    expect(screen.getByRole("heading", { name: "workflows.loading.title" })).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("workflows.loading.description");
+    expect(screen.getByText("workflows.design.choose")).toBeInTheDocument();
     expect(screen.queryByText("workflows.noProject.title")).not.toBeInTheDocument();
-    expect(container.querySelector(".workflows-overview.is-loading")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /^workflows.action.run:/ }).every((button) => !button.hasAttribute("disabled"))).toBe(true);
     expect(container.querySelectorAll(".workflow-row")).toHaveLength(3);
-    expect(container.querySelectorAll(".workflow-recent-row")).toHaveLength(5);
+    expect(container.querySelectorAll(".workflow-recent-row")).toHaveLength(0);
   });
 
   it("uses the same icon-and-label status treatment across overview, history, and task detail without repeating detail status", () => {
@@ -1196,6 +1307,19 @@ describe("Workflows overview", () => {
     expect(controller.refresh).toHaveBeenCalledOnce();
   });
 
+  it("offers a direct preparation retry when backend admission rejects a stale token", () => {
+    const prep = makePreparationWithOptions(1);
+    const controller = { prepare: vi.fn(), refresh: vi.fn() } as unknown as WorkflowsController;
+    useWorkflowStore.setState({ overview, overviewStatus: "ready" });
+    useWorkflowStore.getState().setPreparation(prep);
+    const key = `start:${prep.preparationId}`;
+    useWorkflowStore.setState({ operations: { [key]: { requestId: 1, pending: false, error: { summary: "Preparation expired", technicalDetails: "WORKFLOW_PREPARATION_STALE" } } } });
+    render(<WorkflowsView controller={controller} onOpenTask={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.prepareAgain" }));
+    expect(controller.prepare).toHaveBeenCalledExactlyOnceWith(prep.kind);
+    expect(useWorkflowStore.getState().operations[key]?.error).toBeNull();
+  });
+
   it("keeps background reconcile state from blocking or overwriting preparation", () => {
     const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
     const prep = {
@@ -1231,6 +1355,16 @@ describe("Workflows overview", () => {
     expect(screen.queryByText("refresh unavailable")).not.toBeInTheDocument();
     expect(document.querySelector(".workflows-view")).toHaveAttribute("aria-busy", "false");
     expect(screen.getByRole("button", { name: "workflows.action.start" })).toBeEnabled();
+    const selectors = screen.getByRole("region", { name: "workflows.overview.available" });
+    expect(within(selectors).getAllByRole("button")).toHaveLength(3);
+    expect(within(selectors).getByRole("button", { name: "workflows.action.run: workflows.kind.health_check" })).toHaveAttribute("aria-pressed", "true");
+    expect(document.querySelectorAll("[data-workflow-surface-title]")).toHaveLength(1);
+    expect(document.querySelector("[data-workflow-surface-title]")).toHaveTextContent("workflows.kind.health_check");
+    expect(controller.prepare).not.toHaveBeenCalled();
+    expect(controller.startPrepared).not.toHaveBeenCalled();
+    fireEvent.click(within(selectors).getByRole("button", { name: "workflows.action.run: workflows.kind.generate_content" }));
+    expect(useNavigationStore.getState().workflowLaunchIntent?.kind).toBe("generate_content");
+    expect(controller.startPrepared).not.toHaveBeenCalled();
   });
 
   it("retries detail hydration with a targeted open and clears only its error", () => {
@@ -1299,6 +1433,8 @@ describe("Workflows overview", () => {
     };
     render(<WorkflowTaskDetail run={waiting} controller={controller} queuedRuns={[]} onOpenLogs={vi.fn()} />);
     expect(screen.getByText("abc123")).toBeInTheDocument();
+    expect(screen.queryByText("workflows.attention.noCheckpoint")).not.toBeInTheDocument();
+    expect(screen.getByText("workflows.attention.userEdits").closest("p")).toHaveTextContent("workflows.result.no");
     expect(screen.getByText("wiki/甲.md")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "workflows.action.applyChanges" }));
     expect(controller.confirm).toHaveBeenCalledWith("waiting-a", "action-a");
@@ -1488,6 +1624,10 @@ describe("Workflows overview", () => {
     expect(within(failureRegion).getByText("stage.apply")).toBeInTheDocument();
     expect(within(failureRegion).queryByText("apply")).not.toBeInTheDocument();
     expect(screen.getByText("workflows.prerequisiteAction.prepare_again")).toBeInTheDocument();
+    const technical = view.container.querySelector<HTMLDetailsElement>(".workflow-pipeline-shell > .workflow-execution-details")!;
+    expect(technical).not.toHaveAttribute("open");
+    technical.open = true;
+    fireEvent(technical, new Event("toggle"));
     expect(view.container.querySelector('details[data-stage-status="failed"]')).toHaveAttribute("open");
     const logs = screen.getByText("workflows.logs.title").closest("details")!;
     expect(logs).not.toHaveAttribute("open");
@@ -1499,6 +1639,20 @@ describe("Workflows overview", () => {
     view.rerender(<WorkflowTaskDetail run={workflowRun({ taskId: "cancelled-pipeline", kind: "update_wiki", displayStatus: "cancelled" })} controller={controller} queuedRuns={[]} onOpenLogs={vi.fn()} />);
     expect(screen.getByRole("status")).toHaveTextContent("workflows.cancelled.description");
     expect(screen.queryByRole("region", { name: "workflows.failure.title" })).not.toBeInTheDocument();
+  });
+
+  it.each(["failed", "interrupted"] as const)("shows recovery for a %s Update with no result", async (displayStatus) => {
+    const controller = { refresh: vi.fn() } as unknown as WorkflowsController;
+    useProjectStore.setState({
+      currentProject: { ...useProjectStore.getState().currentProject, projectId: "project-a", rootPath: "D:/知识库" },
+      authority: null,
+    });
+    workflowApiMocks.getWorkflowHistoryState.mockResolvedValueOnce({
+      available: true, undone: false, recovery: true, undoInProgress: false, checkpointHash: "before", finalCommit: null,
+    });
+    render(<WorkflowTaskDetail run={workflowRun({ taskId: `recover-${displayStatus}`, kind: "update_wiki", displayStatus })} controller={controller} queuedRuns={[]} onOpenLogs={vi.fn()} />);
+    expect(await screen.findByRole("button", { name: "workflows.updateHistory.restore" })).toBeInTheDocument();
+    expect(workflowApiMocks.getWorkflowHistoryState).toHaveBeenLastCalledWith({ projectId: "project-a", projectRootPath: "D:/知识库", taskId: `recover-${displayStatus}` });
   });
 
   it("exposes truthful overall and stage progress with expanded current work and real duration", () => {
@@ -1516,6 +1670,57 @@ describe("Workflows overview", () => {
     expect(container.querySelector('details[data-stage-status="completed"]')).not.toHaveAttribute("open");
     expect(screen.getByText("workflows.duration.seconds")).toBeInTheDocument();
     expect(screen.getByText("wiki/非常长的路径/页面.md")).toHaveAttribute("title", "wiki/非常长的路径/页面.md");
+  });
+
+  it("keeps failed deep-check local results openable without recommending export", () => {
+    const controller = Object.fromEntries(["refresh", "prepare", "startPrepared", "cancel", "undoCancel", "reorder", "retry", "adjustAndPrepare", "openRun", "openResult", "confirm", "discard", "continueQueue", "loadHistoryMore", "handlePrerequisite", "backToOverview"].map((key) => [key, vi.fn()])) as unknown as WorkflowsController;
+    const failed = workflowRun({ taskId: "failed-local-retained", kind: "health_check", displayStatus: "failed", result: {
+      kind: "health_check", reportId: "retained-local", persistent: true, errorCount: 0, warningCount: 1, infoCount: 0,
+      coverage: { mode: "complete", scannedPages: 65, deepStatus: "failed", deepCoveredPages: null, deepTruncated: false },
+    } });
+    render(<WorkflowTaskDetail run={failed} controller={controller} queuedRuns={[]} onOpenLogs={vi.fn()} />);
+    expect(screen.getByText("workflows.result.health_check.localRetained")).toBeInTheDocument();
+    expect(screen.getByText("lint.healthReport.deep.failed")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "workflows.action.prepareNext" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "workflows.action.openLintResults" }));
+    expect(controller.openResult).toHaveBeenCalledWith(failed);
+  });
+
+  it("shows Health page counts without stage-derived overall progress", () => {
+    render(<WorkflowPipeline kind="health_check" currentStageId="check_markdown" stages={[
+      { id: "check_markdown", ordinal: 2, status: "running", labelKey: "stage.local", startedAt: null, completedAt: null, currentItem: "wiki/主题.md", progress: { current: 16, total: 65 }, decision: null },
+    ]} />);
+    expect(screen.queryByRole("progressbar", { name: "workflows.pipeline.overallProgress" })).not.toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "workflows.healthPhase.local" })).toHaveAttribute("value", "16");
+    expect(screen.getByRole("progressbar", { name: "workflows.healthPhase.local" })).toHaveAttribute("max", "65");
+  });
+
+  it("shows optional Health deep checks as skipped and keeps technical stages disclosed", () => {
+    const { container } = render(<WorkflowPipeline kind="health_check" displayStatus="completed" stages={[
+      { id: "deep_check", ordinal: 4, status: "skipped", labelKey: "stage.deep", startedAt: null, completedAt: null, currentItem: null, progress: null, decision: null },
+      { id: "complete", ordinal: 8, status: "completed", labelKey: "stage.complete", startedAt: null, completedAt: null, currentItem: null, progress: null, decision: null },
+    ]} />);
+    expect(screen.getAllByRole("listitem")).toHaveLength(4);
+    expect(screen.getByText("workflows.healthPhase.deep").closest("li")).toHaveTextContent("workflows.stageStatus.skipped");
+    expect(container.querySelector(".workflow-execution-details")).not.toHaveAttribute("open");
+    const details = container.querySelector<HTMLDetailsElement>(".workflow-execution-details")!;
+    details.open = true;
+    fireEvent(details, new Event("toggle"));
+    expect(screen.getByText("stage.deep")).toBeVisible();
+  });
+
+  it("shows four export phases with an indeterminate active save and exact waiting state", () => {
+    const stages = [
+      { id: "write_export", ordinal: 7, status: "running" as const, labelKey: "stage.write", startedAt: null, completedAt: null, currentItem: "exports/中文.html", progress: null, decision: null },
+    ];
+    const { rerender } = render(<WorkflowPipeline kind="generate_content" currentStageId="write_export" stages={stages} />);
+    expect(screen.getAllByRole("listitem")).toHaveLength(4);
+    expect(screen.getByRole("progressbar", { name: "workflows.exportPhase.save" })).not.toHaveAttribute("value");
+    expect(screen.queryByRole("progressbar", { name: "workflows.pipeline.overallProgress" })).not.toBeInTheDocument();
+    expect(screen.getByText("exports/中文.html", { selector: ".workflow-pipeline-shell > ol code" })).toBeVisible();
+    rerender(<WorkflowPipeline kind="generate_content" currentStageId="write_export" displayStatus="waiting_for_confirmation" stages={[{ ...stages[0]!, status: "waiting" }]} />);
+    expect(screen.getByText("workflows.exportPhase.save").closest("li")).toHaveTextContent("workflows.stageStatus.waiting");
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
   });
 
   it("disables the recommended preparation action while its own request is pending", () => {
@@ -1741,9 +1946,9 @@ describe("Workflows overview", () => {
     render(<WorkflowsView controller={controller} onOpenTask={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "workflows.action.refresh" }));
 
-    expect(controller.refresh).toHaveBeenCalledTimes(1);
+    expect(controller.refresh).not.toHaveBeenCalled();
     expect(controller.loadHistoryMore).not.toHaveBeenCalled();
-    expect(controller.filterHistory).not.toHaveBeenCalled();
+    expect(controller.filterHistory).toHaveBeenCalledWith(null, null);
   });
 
   it("surfaces and retries a task retry failure from History", () => {

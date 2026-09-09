@@ -1,20 +1,32 @@
-# LLM Wiki Desktop 0.2.0
+# LLM Wiki Desktop v0.2.1
 
-This first public release establishes the local-first desktop foundation for importing personal sources, organizing a Markdown wiki, searching and editing locally, using project-scoped workflows, and receiving signed application updates. The release candidate coordinate is `app-v0.2.0-rc.1`; the 0.1.0 coordinate was retired without any stable publication (see `CHANGELOG.md`).
+A more focused workflow for collecting sources, maintaining your wiki, and protecting local changes.
 
-Release highlights:
+## Highlights
 
-- project trust, writable-access, Git checkpoint, provider-origin, and process-lifetime guards are enforced in the backend;
-- optional OCR, ASR, browser, and media capabilities are distributed as a signed cross-platform catalog (every capability covers Windows x64, macOS arm64, macOS x64, and Linux x64 except document-layout, which does not ship on Intel macOS because current PyTorch releases no longer provide x86_64 macOS wheels; pdf.layout falls back to document-standard there);
-- global update checks, release notes, cancellable downloads, install blockers, and restart-to-update are available from the desktop shell;
-- Windows x64, macOS arm64, macOS x64, and Linux x64 artifacts are built from one tag and one commit;
-- installers, updater signatures, capability packs, SBOMs, checksums, provenance, and packaged-smoke evidence are published atomically;
-- updater and capability signatures are mandatory, while the initial Windows/macOS installers intentionally do not carry Authenticode or Apple Developer ID/notarization identity and may trigger platform warnings documented in `known-limitations.md`.
+- **Clearer imports:** streamlined preparation, queue status, and completion summaries; improved supported Xiaohongshu page extraction and browser/media runner behavior.
+- **Simpler Workflows:** Update Wiki, Health Check, and content generation have focused controls, responsive navigation, and a system file picker for output paths.
+- **Local version history:** version protection and recovery are available across supported wiki, Source, chat-save, and lint operations, with Git preflight checks and visible recovery settings.
+- **Better health checks:** unified scans, clearer issue details, and a dedicated management panel for repairs.
+- **Cleaner downloads:** desktop installers and automatic-update files are listed here; optional OCR, transcription, and other engines are downloaded separately from within the app.
 
-First-release acceptance policy:
+## Download and install
 
-- `0.2.0` has no prior production release from which to exercise the real updater path, so that single upgrade row is waived once (re-approved by the owner on 2026-08-31 for the 0.2.0 line) and replaced by mandatory clean-install, launch/restart, uninstall, project-preservation, signature, and OS-warning acceptance on all four targets;
-- real-machine acceptance order, revised by the owner on 2026-09-01: the Windows x64 clean-install row completed before publication with no blocker (see `2026-09-01-app-v0.2.0-rc.1-windows-x64-acceptance.md`); the owner then explicitly approved publishing this stable release before the remaining rows execute, so macOS arm64, macOS x64, and Linux x64 are built and published here with their acceptance rows tracked as Pending in the owner-approved tracking issue [#34](https://github.com/StoneLL1/llm-wiki-desktop/issues/34); the four-platform gate itself is not waived, and the pending rows must be executed and recorded;
-- beginning with `0.2.1`, release acceptance again requires a real installed production-signed predecessor to upgrade to the candidate on Windows x64, macOS arm64, macOS x64, and Linux x64.
+| Platform | Installer |
+| --- | --- |
+| macOS · Apple Silicon | [DMG](https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v0.2.1/darwin-aarch64-LLM.Wiki.Desktop_0.2.1_aarch64.dmg) |
+| macOS · Intel | [DMG](https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v0.2.1/darwin-x86_64-LLM.Wiki.Desktop_0.2.1_x64.dmg) |
+| Windows · x64 | [Setup EXE](https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v0.2.1/windows-x86_64-LLM.Wiki.Desktop_0.2.1_x64-setup.exe) |
+| Linux · x64 | [AppImage](https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v0.2.1/linux-x86_64-LLM.Wiki.Desktop_0.2.1_amd64.AppImage) |
 
-See `known-limitations.md` in the release assets before installing.
+The `.app.tar.gz` files and `latest.json` support automatic updates. `CHECKSUMS.sha256` covers the public desktop downloads. Optional engine archives live in the separate [capability release](https://github.com/StoneLL1/llm-wiki-desktop/releases/tag/capabilities-v0.2.1); most users should let the app install them as needed.
+
+## Updating from v0.2.0
+
+Use **Check for updates**, or quit the old app and install v0.2.1 over it. Keep your knowledge-base folder in place. The application identity and update-signing key are unchanged.
+
+macOS binaries are not Apple-notarized, and Windows installers do not carry an Authenticode identity. First-launch OS warnings may appear. See [installation notes and limitations](https://github.com/StoneLL1/llm-wiki-desktop/blob/app-v0.2.1/docs/release/known-limitations.md).
+
+Source CI, signed-artifact verification, and packaged launch checks are part of the release pipeline. Hosted checks do not constitute a completed interactive upgrade and rollback test on every supported operating system.
+
+[Full changelog](https://github.com/StoneLL1/llm-wiki-desktop/compare/app-v0.2.0...app-v0.2.1) · [Quick start](https://github.com/StoneLL1/llm-wiki-desktop#get-started)

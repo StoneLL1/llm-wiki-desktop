@@ -248,9 +248,9 @@
           "function": "begin_import_login_v2",
           "authority": "ProjectWritePermit"
         },
-    {
-      "function": "begin_import_login_v2",
-      "authority": "ProjectExecutionLease",
+        {
+          "function": "begin_import_login_v2",
+          "authority": "ProjectExecutionLease",
           "helper": "begin_project_external_execution",
           "requiredCalls": [
             "begin_project_external_execution",
@@ -349,7 +349,8 @@
           "authority": "ProjectTaskMutationPermit",
           "forbiddenCalls": [
             "with_current_project_write_access"
-          ]
+          ],
+          "helper": "with_current_project_read_task_access"
         }
       ]
     },
@@ -454,7 +455,7 @@
       "writeAuthority": "ProjectWritePermit",
       "authorityPaths": [
         {
-          "function": "confirm_pending_action",
+          "function": "confirm_pending_action_for_state",
           "authority": "ProjectAuthorityMutationPermit",
           "requiredCalls": [
             "execute_claimed_project_authority_action"
@@ -462,14 +463,16 @@
           "orderedCalls": [
             "with_current_project_authority_mutation",
             "execute_claimed_project_authority_action"
-          ]
+          ],
+          "commandDelegate": "confirm_pending_action_for_state"
         },
         {
-          "function": "confirm_pending_action",
+          "function": "confirm_pending_action_for_state",
           "authority": "ProjectWritePermit",
           "requiredCalls": [
             "execute_wiki_page_delete"
-          ]
+          ],
+          "commandDelegate": "confirm_pending_action_for_state"
         }
       ]
     },
@@ -490,7 +493,15 @@
         "mutation"
       ],
       "projectScoped": true,
-      "writeAuthority": "ProjectWritePermit"
+      "writeAuthority": "ProjectWritePermit",
+      "authorityPaths": [
+        {
+          "source": "src-tauri/src/services/workflow_review.rs",
+          "function": "confirm_workflow_action_for_state",
+          "commandDelegate": "confirm_workflow_action_for_state",
+          "authority": "ProjectWritePermit"
+        }
+      ]
     },
     {
       "name": "continue_queued_workflows",
@@ -1371,7 +1382,18 @@
         "mutation"
       ],
       "projectScoped": true,
-      "writeAuthority": "ProjectWritePermit"
+      "writeAuthority": "ProjectWritePermit",
+      "authorityPaths": [
+        {
+          "function": "reorder_queued_workflow",
+          "authority": "ProjectWritePermit"
+        },
+        {
+          "function": "reorder_queued_workflow",
+          "authority": "ProjectTaskMutationPermit",
+          "helper": "with_current_project_read_task_access"
+        }
+      ]
     },
     {
       "name": "reprocess_source_asr",
@@ -1491,7 +1513,20 @@
       ],
       "projectScoped": true,
       "writeAuthority": "ProjectWritePermit",
-      "authorityFunction": "retry_workflow_for_state"
+      "authorityFunction": "retry_workflow_for_state",
+      "authorityPaths": [
+        {
+          "function": "retry_workflow_for_state",
+          "authority": "ProjectWritePermit",
+          "commandDelegate": "retry_workflow_for_state"
+        },
+        {
+          "function": "retry_workflow_for_state",
+          "authority": "ProjectTaskMutationPermit",
+          "helper": "with_current_project_read_task_access",
+          "commandDelegate": "retry_workflow_for_state"
+        }
+      ]
     },
     {
       "name": "revoke_all_chat_convenience_authorizations",
@@ -1842,6 +1877,7 @@
           ]
         },
         {
+          "source": "src-tauri/src/services/import_execution.rs",
           "function": "run_import_worker_job",
           "authority": "ProjectExecutionLease",
           "requiredCalls": [
@@ -1914,7 +1950,20 @@
         "secret"
       ],
       "projectScoped": true,
-      "writeAuthority": "ProjectTaskMutationPermit"
+      "writeAuthority": "ProjectTaskMutationPermit",
+      "authorityPaths": [
+        {
+          "function": "start_workflow_for_state",
+          "authority": "ProjectTaskMutationPermit",
+          "commandDelegate": "start_workflow_for_state"
+        },
+        {
+          "function": "start_workflow_for_state",
+          "authority": "ProjectTaskMutationPermit",
+          "helper": "with_current_project_read_task_access",
+          "commandDelegate": "start_workflow_for_state"
+        }
+      ]
     },
     {
       "name": "store_provider_secret",
@@ -1980,7 +2029,18 @@
         "mutation"
       ],
       "projectScoped": true,
-      "writeAuthority": "ProjectWritePermit"
+      "writeAuthority": "ProjectWritePermit",
+      "authorityPaths": [
+        {
+          "function": "undo_cancel_queued_workflow",
+          "authority": "ProjectWritePermit"
+        },
+        {
+          "function": "undo_cancel_queued_workflow",
+          "authority": "ProjectTaskMutationPermit",
+          "helper": "with_current_project_read_task_access"
+        }
+      ]
     },
     {
       "name": "write_json_file",
@@ -2003,54 +2063,208 @@
     {
       "name": "cancel_app_capability_install_v1",
       "source": "src-tauri/src/commands/app_capability_commands.rs",
-      "classifications": ["mutation"],
+      "classifications": [
+        "mutation"
+      ],
       "projectScoped": false,
       "writeAuthority": "AppCapabilityCoordinator"
     },
     {
       "name": "get_app_capability_task_activities_v1",
       "source": "src-tauri/src/commands/app_capability_commands.rs",
-      "classifications": ["read"],
+      "classifications": [
+        "read"
+      ],
       "projectScoped": false
     },
     {
       "name": "get_app_capability_task_logs_v1",
       "source": "src-tauri/src/commands/app_capability_commands.rs",
-      "classifications": ["read"],
+      "classifications": [
+        "read"
+      ],
       "projectScoped": false
     },
     {
       "name": "install_app_capability_v1",
       "source": "src-tauri/src/commands/app_capability_commands.rs",
-      "classifications": ["mutation", "network"],
+      "classifications": [
+        "mutation",
+        "network"
+      ],
       "projectScoped": false,
       "writeAuthority": "AppCapabilityCoordinator"
     },
     {
       "name": "list_app_capabilities_v1",
       "source": "src-tauri/src/commands/app_capability_commands.rs",
-      "classifications": ["read"],
+      "classifications": [
+        "read"
+      ],
       "projectScoped": false
     },
     {
       "name": "list_app_tasks_v1",
       "source": "src-tauri/src/commands/app_capability_commands.rs",
-      "classifications": ["read"],
+      "classifications": [
+        "read"
+      ],
       "projectScoped": false
     },
     {
       "name": "pause_app_capability_install_v1",
       "source": "src-tauri/src/commands/app_capability_commands.rs",
-      "classifications": ["mutation"],
+      "classifications": [
+        "mutation"
+      ],
       "projectScoped": false,
       "writeAuthority": "AppCapabilityCoordinator"
     },
     {
       "name": "resume_app_capability_install_v1",
       "source": "src-tauri/src/commands/app_capability_commands.rs",
-      "classifications": ["mutation", "network"],
+      "classifications": [
+        "mutation",
+        "network"
+      ],
       "projectScoped": false,
       "writeAuthority": "AppCapabilityCoordinator"
+    },
+    {
+      "name": "get_workflow_history_state",
+      "source": "src-tauri/src/commands/workflow_commands.rs",
+      "classifications": [
+        "read",
+        "external-process"
+      ],
+      "projectScoped": true
+    },
+    {
+      "name": "undo_workflow_update",
+      "source": "src-tauri/src/commands/workflow_commands.rs",
+      "classifications": [
+        "mutation",
+        "external-process"
+      ],
+      "projectScoped": true,
+      "writeAuthority": "ProjectWritePermit",
+      "authorityPaths": [
+        {
+          "function": "undo_workflow_update",
+          "authority": "ProjectWritePermit",
+          "orderedCalls": [
+            "with_current_project_write_access",
+            "ensure_workflow_identity",
+            "undo_update_wiki_history"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "get_update_wiki_options",
+      "source": "src-tauri/src/commands/workflow_commands.rs",
+      "classifications": [
+        "read"
+      ],
+      "projectScoped": true
+    },
+    {
+      "name": "list_update_wiki_sources",
+      "source": "src-tauri/src/commands/workflow_commands.rs",
+      "classifications": [
+        "read"
+      ],
+      "projectScoped": true
+    },
+    {
+      "name": "start_update_wiki",
+      "source": "src-tauri/src/commands/workflow_commands.rs",
+      "classifications": [
+        "mutation",
+        "network",
+        "external-process",
+        "secret"
+      ],
+      "projectScoped": true,
+      "writeAuthority": "ProjectTaskMutationPermit",
+      "authorityPaths": [
+        {
+          "function": "start_update_wiki",
+          "authority": "ProjectTaskMutationPermit",
+          "helper": "with_current_project_read_task_access"
+        }
+      ]
+    },
+    {
+      "name": "get_workflow_form_catalog",
+      "source": "src-tauri/src/commands/workflow_commands.rs",
+      "classifications": [
+        "read"
+      ],
+      "projectScoped": true
+    },
+    {
+      "name": "get_version_history_status",
+      "source": "src-tauri/src/commands/version_history_commands.rs",
+      "classifications": [
+        "read",
+        "external-process"
+      ],
+      "projectScoped": true
+    },
+    {
+      "name": "list_version_operations",
+      "source": "src-tauri/src/commands/version_history_commands.rs",
+      "classifications": [
+        "read"
+      ],
+      "projectScoped": true
+    },
+    {
+      "name": "get_version_operation",
+      "source": "src-tauri/src/commands/version_history_commands.rs",
+      "classifications": [
+        "read"
+      ],
+      "projectScoped": true
+    },
+    {
+      "name": "get_version_file_diff",
+      "source": "src-tauri/src/commands/version_history_commands.rs",
+      "classifications": [
+        "read",
+        "external-process"
+      ],
+      "projectScoped": true
+    },
+    {
+      "name": "prepare_version_action",
+      "source": "src-tauri/src/commands/version_history_commands.rs",
+      "classifications": [
+        "mutation"
+      ],
+      "projectScoped": true,
+      "writeAuthority": "ProjectWritePermit"
+    },
+    {
+      "name": "confirm_version_action",
+      "source": "src-tauri/src/commands/version_history_commands.rs",
+      "classifications": [
+        "mutation",
+        "external-process"
+      ],
+      "projectScoped": true,
+      "writeAuthority": "ProjectWritePermit"
+    },
+    {
+      "name": "resolve_wiki_conflict",
+      "source": "src-tauri/src/commands/wiki_commands.rs",
+      "classifications": [
+        "mutation",
+        "external-process"
+      ],
+      "projectScoped": true,
+      "writeAuthority": "ProjectWritePermit"
     }
   ],
   "serviceAuthorityContracts": [

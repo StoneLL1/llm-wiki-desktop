@@ -171,6 +171,7 @@ export interface ImportCapabilityRequirement {
   available: boolean;
   installable: boolean;
   compressedBytes: number | null;
+  downloadBytes?: number | null;
   installedBytes: number | null;
   modelBytes: number | null;
   license: string | null;
@@ -191,6 +192,7 @@ export interface InstallImportCapabilityV2Request {
   projectRootPath: string;
   sessionId: string;
   itemId: string;
+  additionalItemIds?: string[];
   capabilityId: string;
   requirementRevision: string;
   acknowledgeInstall: boolean;

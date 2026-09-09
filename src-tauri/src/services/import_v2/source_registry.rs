@@ -132,12 +132,7 @@ impl SourceIndex {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SourcePointer {
-    pub source_id: String,
-    pub version_id: String,
-}
+pub use crate::models::source::SourcePointer;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -324,6 +319,41 @@ pub struct ValidatedCompileSourceVersion {
     pub project_path: String,
     pub manifest: SourceManifest,
     pub version: SourceVersion,
+    // The bytes decoded into `manifest`, also used as the write precondition.
+    manifest_bytes: Vec<u8>,
+}
+
+/// Values prepared by the registry, before any filesystem mutation. History
+/// and rollback must use these bytes instead of claiming a later disk read.
+pub(crate) struct PreparedCompileConsumption {
+    pub(crate) before: BTreeMap<String, Option<Vec<u8>>>,
+    pub(crate) installed: BTreeMap<String, Option<Vec<u8>>>,
+    consumed: Vec<SourceVersionRef>,
+}
+
+impl PreparedCompileConsumption {
+    pub(crate) fn commit(
+        &self,
+        context: &ProjectContext,
+    ) -> Result<Vec<SourceVersionRef>, BackendError> {
+        let mut transaction = FileTransaction::new_for_context(context)?;
+        for (relative, installed) in &self.installed {
+            let absolute = context.resolve_project_path(relative)?;
+            let bytes = installed
+                .as_deref()
+                .expect("consumption only installs files");
+            match self.before.get(relative).and_then(Option::as_deref) {
+                Some(before) => transaction.write_if_hash_matches(
+                    &absolute,
+                    bytes,
+                    &format!("{:x}", sha2::Sha256::digest(before)),
+                )?,
+                None => transaction.write_new(&absolute, bytes)?,
+            }
+        }
+        transaction.commit()?;
+        Ok(self.consumed.clone())
+    }
 }
 
 #[derive(Deserialize)]
@@ -391,8 +421,9 @@ impl SourceRegistry {
             .layout
             .source_paths()?
             .manifest(&reference.source_id)?;
-        let manifest = Self::read_manifest(context, files, &manifest_path)
-            .map_err(|_| compile_source_version_changed())?;
+        let (manifest, manifest_bytes) =
+            Self::read_manifest_with_bytes(context, files, &manifest_path)
+                .map_err(|_| compile_source_version_changed())?;
         if manifest.source_id != reference.source_id {
             return Err(compile_source_version_changed());
         }
@@ -428,6 +459,7 @@ impl SourceRegistry {
             project_path,
             manifest,
             version,
+            manifest_bytes,
         })
     }
 
@@ -436,6 +468,14 @@ impl SourceRegistry {
         files: &FileStore,
         record: &CompileConsumptionRecord,
     ) -> Result<Vec<SourceVersionRef>, BackendError> {
+        Self::prepare_compile_consumption(context, files, record)?.commit(context)
+    }
+
+    pub(crate) fn prepare_compile_consumption(
+        context: &ProjectContext,
+        files: &FileStore,
+        record: &CompileConsumptionRecord,
+    ) -> Result<PreparedCompileConsumption, BackendError> {
         let record_path = format!(".app/compile/{}.json", record.compile_task_id);
         let record_absolute = context.resolve_project_path(&record_path)?;
         if record_absolute.exists() {
@@ -452,7 +492,8 @@ impl SourceRegistry {
             .any(|reference| !reference.source_id.starts_with("legacy-"))
             .then(|| Self::read_index(context, files))
             .transpose()?;
-        let mut manifests = Vec::new();
+        let mut before = BTreeMap::new();
+        let mut installed = BTreeMap::new();
         let mut consumed = Vec::new();
         for reference in &record.source_versions {
             validate_identity(&reference.source_id)?;
@@ -470,8 +511,9 @@ impl SourceRegistry {
                 reference,
             )?;
             let relative = validated.manifest_path;
-            let absolute = context.resolve_project_path(&relative)?;
-            let expected_hash = files.file_hash(context, &relative)?;
+            if before.contains_key(&relative) {
+                return Err(compile_source_version_changed());
+            }
             let mut manifest = validated.manifest;
             if manifest.compiled_consumptions.iter().any(|entry| {
                 entry.version_id == reference.version_id
@@ -486,41 +528,36 @@ impl SourceRegistry {
                 consumed_at: record.consumed_at.clone(),
             });
             validate_manifest_for_layout(&manifest, &context.layout)?;
-            manifests.push((absolute, expected_hash, manifest));
+            before.insert(relative.clone(), Some(validated.manifest_bytes));
+            installed.insert(relative, Some(compile_consumption_bytes(&manifest)?));
             consumed.push(reference.clone());
         }
         let persisted_record = CompileConsumptionRecord {
             source_versions: consumed.clone(),
             ..record.clone()
         };
-        let mut transaction = FileTransaction::new_for_context(context)?;
-        for (absolute, expected_hash, manifest) in manifests {
-            transaction.write_if_hash_matches(
-                &absolute,
-                &serde_json::to_vec_pretty(&manifest).map_err(|error| {
-                    BackendError::new(
-                        "COMPILE_CONSUMPTION_WRITE_FAILED",
-                        error.to_string(),
-                        true,
-                        false,
-                    )
-                })?,
-                &expected_hash,
-            )?;
-        }
-        transaction.write_new(
-            &record_absolute,
-            &serde_json::to_vec_pretty(&persisted_record).map_err(|error| {
-                BackendError::new(
-                    "COMPILE_CONSUMPTION_WRITE_FAILED",
-                    error.to_string(),
-                    true,
-                    false,
-                )
-            })?,
-        )?;
-        transaction.commit()?;
-        Ok(consumed)
+        before.insert(record_path.clone(), None);
+        installed.insert(
+            record_path,
+            Some(compile_consumption_bytes(&persisted_record)?),
+        );
+        Ok(PreparedCompileConsumption {
+            before,
+            installed,
+            consumed,
+        })
+    }
+
+    /// Parse and bind the same bytes, so a newer index cannot authorize writing
+    /// an older parsed map over external changes.
+    pub fn read_index_with_hash(context: &ProjectContext, files: &FileStore) -> Result<(SourceIndex, String), BackendError> {
+        let path = context.layout.source_paths()?.index();
+        let bytes = files.read_bytes_bounded(context, &path, 8 * 1024 * 1024)?;
+        let hash = files.content_hash(&bytes);
+        let mut index: SourceIndex = serde_json::from_slice(&bytes).map_err(|_| invalid_index())?;
+        if index.schema_version == LEGACY_SOURCE_REGISTRY_SCHEMA_VERSION { index.schema_version = SOURCE_REGISTRY_SCHEMA_VERSION; }
+        validate_index(&index)?;
+        Ok((index, hash))
     }
 
     pub fn read_index(
@@ -547,10 +584,20 @@ impl SourceRegistry {
         files: &FileStore,
         manifest_path: &str,
     ) -> Result<SourceManifest, BackendError> {
-        let value: serde_json::Value = files
-            .read_json(context, manifest_path)
+        Self::read_manifest_with_bytes(context, files, manifest_path).map(|(manifest, _)| manifest)
+    }
+
+    fn read_manifest_with_bytes(
+        context: &ProjectContext,
+        files: &FileStore,
+        manifest_path: &str,
+    ) -> Result<(SourceManifest, Vec<u8>), BackendError> {
+        let bytes = files
+            .read_bytes(context, manifest_path)
             .map_err(|_| invalid_index())?;
-        match value
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|_| invalid_index())?;
+        let manifest = match value
             .get("schemaVersion")
             .and_then(serde_json::Value::as_u64)
         {
@@ -566,7 +613,8 @@ impl SourceRegistry {
                 migrate_legacy_manifest(context, files, legacy)
             }
             _ => Err(invalid_index()),
-        }
+        }?;
+        Ok((manifest, bytes))
     }
 
     /// Upgrade the complete project registry as one hash-guarded transaction.
@@ -1138,6 +1186,17 @@ fn pretty_json_bytes(value: &impl Serialize) -> Result<Vec<u8>, BackendError> {
     let mut bytes = serde_json::to_vec_pretty(value).map_err(|_| invalid_index())?;
     bytes.push(b'\n');
     Ok(bytes)
+}
+
+fn compile_consumption_bytes(value: &impl Serialize) -> Result<Vec<u8>, BackendError> {
+    serde_json::to_vec_pretty(value).map_err(|error| {
+        BackendError::new(
+            "COMPILE_CONSUMPTION_WRITE_FAILED",
+            error.to_string(),
+            true,
+            false,
+        )
+    })
 }
 
 fn migrate_legacy_manifest(
@@ -2992,6 +3051,121 @@ mod tests {
             .unwrap();
         assert_eq!(record.schema_version, 1);
         assert_eq!(record.source_versions, consumed);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prepared_compile_consumption_preserves_edits_before_commit() {
+        let (context, root) = super::super::test_support::test_context("consumption-before-commit");
+        let files = FileStore;
+        let (_, reference) = persist_compile_fixture(&context, &files);
+        let prepared = SourceRegistry::prepare_compile_consumption(
+            &context,
+            &files,
+            &CompileConsumptionRecord {
+                schema_version: 1,
+                compile_task_id: "task-before-edit".into(),
+                route: CompileRoute::Byok,
+                consumed_at: "2026-07-26T00:00:00Z".into(),
+                source_versions: vec![reference],
+                affected_paths: vec!["wiki/index.md".into()],
+                checkpoint: None,
+            },
+        )
+        .unwrap();
+        let relative = ".app/sources/source-1.json";
+        let mut external = prepared.before[relative].clone().unwrap();
+        external.extend_from_slice(b"\r\n ");
+        std::fs::write(root.join(relative), &external).unwrap();
+
+        assert!(prepared.commit(&context).is_err());
+        assert_eq!(std::fs::read(root.join(relative)).unwrap(), external);
+        assert!(!root.join(".app/compile/task-before-edit.json").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prepared_compile_consumption_undo_uses_owned_bytes_and_exact_baseline() {
+        let (context, root) = super::super::test_support::test_context("consumption-owned-history");
+        let files = FileStore;
+        let (_, reference) = persist_compile_fixture(&context, &files);
+        let relative = ".app/sources/source-1.json";
+        let original = std::fs::read_to_string(root.join(relative))
+            .unwrap()
+            .replace('\n', "\r\n");
+        std::fs::write(root.join(relative), original.as_bytes()).unwrap();
+        let prepared = SourceRegistry::prepare_compile_consumption(
+            &context,
+            &files,
+            &CompileConsumptionRecord {
+                schema_version: 1,
+                compile_task_id: "task-owned-history".into(),
+                route: CompileRoute::Byok,
+                consumed_at: "2026-07-26T00:00:00Z".into(),
+                source_versions: vec![reference],
+                affected_paths: vec!["wiki/index.md".into()],
+                checkpoint: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.before[relative].as_deref(),
+            Some(original.as_bytes())
+        );
+        let metadata_paths = prepared.before.keys().cloned().collect::<Vec<_>>();
+        let mut backup = crate::services::CompileService::backup_workflow_outputs(
+            &context,
+            &crate::models::compile::CompileManifest {
+                files: vec![],
+                deletions: vec![],
+                summary: String::new(),
+            },
+            &metadata_paths,
+        )
+        .unwrap();
+        backup
+            .claim_prepared_history_values(&prepared.before, &prepared.installed)
+            .unwrap();
+        prepared.commit(&context).unwrap();
+        let owned = prepared.installed[relative].clone().unwrap();
+        assert_eq!(std::fs::read(root.join(relative)).unwrap(), owned);
+        let mut external = owned.clone();
+        external.extend_from_slice(b"\r\n ");
+        std::fs::write(root.join(relative), &external).unwrap();
+
+        let error = crate::services::CompileService::restore_history_outputs(
+            &context,
+            &prepared.before,
+            &prepared.installed,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "WORKFLOW_UNDO_CONFLICT");
+        assert_eq!(std::fs::read(root.join(relative)).unwrap(), external);
+        assert!(root.join(".app/compile/task-owned-history.json").exists());
+        // The same ownership values protect rollback after a final Git error.
+        let rollback =
+            crate::services::CompileService::restore_outputs(&context, &backup).unwrap_err();
+        assert_eq!(rollback.code, "WORKFLOW_ROLLBACK_CONFLICT");
+        assert_eq!(std::fs::read(root.join(relative)).unwrap(), external);
+
+        std::fs::write(root.join(relative), &owned).unwrap();
+        crate::services::CompileService::restore_history_outputs(
+            &context,
+            &prepared.before,
+            &prepared.installed,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(root.join(relative)).unwrap(),
+            original.as_bytes()
+        );
+        assert!(!root.join(".app/compile/task-owned-history.json").exists());
+        crate::services::CompileService::restore_history_outputs(
+            &context,
+            &prepared.before,
+            &prepared.installed,
+        )
+        .unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 

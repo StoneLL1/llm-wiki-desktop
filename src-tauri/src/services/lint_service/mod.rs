@@ -1,5 +1,6 @@
 mod deep;
 mod fixes;
+mod health;
 mod ignores;
 mod repair;
 mod reports;
@@ -12,9 +13,10 @@ use crate::models::lint::{LintIssue, PersistedLintReport};
 use crate::models::paths::ProjectContext;
 use crate::services::file_store::FileStore;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, MutexGuard, RwLock};
+use std::sync::{Mutex, RwLock};
 
 pub use deep::DeepLintSnapshot;
+pub use health::{HealthLocalScan, HealthScanPhase, HealthScanProgress};
 pub use repair::{
     AgentLintRepairCandidate, AgentLintRepairWorkspaceDescriptor, AgentLintRepairWorkspaceLease,
 };
@@ -34,100 +36,22 @@ pub struct LintService {
     /// optimistic hash checks, writes, verification, and checkpoint cleanup.
     /// External editors are still guarded by the FileStore post-write check.
     pub(super) fix_write_lock: Mutex<()>,
-    /// Serialize the check-and-create section of `start_deep_lint`. The task
-    /// itself still runs asynchronously, but only one active deep run may be
-    /// attached to a project at a time.
-    pub(super) deep_start_lock: Mutex<()>,
     /// Read-only/restricted Health Check reports live here for the current
     /// process. The outer key combines the canonical project identity with its
     /// identity revision and the inner key is the report/task id, so a replaced
     /// folder at the same path cannot observe the previous project's result.
-    pub(super) memory_reports: RwLock<HashMap<String, HashMap<String, PersistedLintReport>>>,
-    /// Retain the root object behind every process-local report namespace.
-    /// On Unix the open directory handle pins its inode, preventing an
-    /// immediately recreated path from receiving the same `(dev, ino)` pair.
-    /// This is intentionally separate from the durable workflow identity:
-    /// directory ctime is not stable across ordinary child mutations.
-    #[cfg(unix)]
-    pub(super) memory_project_roots: Mutex<HashMap<String, MemoryProjectRootAnchor>>,
+    pub(super) memory_reports: RwLock<HashMap<String, MemoryLintReports>>,
 }
 
-#[cfg(unix)]
-pub(super) struct MemoryProjectRootAnchor {
+/// The root handle and its reports have one lifetime and one lock. Eviction
+/// cannot release an anchor independently of the namespace it protects.
+pub(super) struct MemoryLintReports {
+    pub(super) reports: HashMap<String, PersistedLintReport>,
+    #[cfg(unix)]
     pub(super) _anchor: std::fs::File,
 }
 
 impl LintService {
-    pub fn lock_deep_start(&self) -> Result<MutexGuard<'_, ()>, crate::errors::BackendError> {
-        self.deep_start_lock.lock().map_err(|_| {
-            crate::errors::BackendError::new(
-                "LINT_DEEP_START_LOCK_FAILED",
-                "Deep Lint could not reserve its project-scoped start slot.",
-                true,
-                false,
-            )
-        })
-    }
-
-    /// Attach the content version that was current when a report was built.
-    /// Fix commands use this value as their optimistic-lock baseline.
-    pub fn attach_scan_hashes(&self, context: &ProjectContext, issues: &mut [LintIssue]) {
-        for issue in issues {
-            issue.scan_hash = self.file_store.file_hash(context, &issue.path).ok();
-        }
-    }
-
-    pub fn capture_page_hashes(
-        &self,
-        context: &ProjectContext,
-        paths: &HashSet<String>,
-    ) -> std::collections::HashMap<String, String> {
-        paths
-            .iter()
-            .filter_map(|path| {
-                self.file_store
-                    .file_hash(context, path)
-                    .ok()
-                    .map(|hash| (path.clone(), hash))
-            })
-            .collect()
-    }
-
-    /// Hash every input that can affect the deep-lint prompt, including
-    /// optional project guidance files. The pinned built-in Skill is represented
-    /// by a synthetic immutable key; project-local Skill files are never inputs.
-    /// `None` is retained for missing files
-    /// so creation/deletion is detected as a snapshot change too.
-    pub fn capture_prompt_input_hashes(
-        &self,
-        context: &ProjectContext,
-        page_paths: &HashSet<String>,
-    ) -> Result<std::collections::HashMap<String, Option<String>>, crate::errors::BackendError>
-    {
-        let mut paths = page_paths.clone();
-        paths.extend([
-            "wiki/index.md".to_string(),
-            "purpose.md".to_string(),
-            "schema.md".to_string(),
-        ]);
-        let mut hashes = paths
-            .into_iter()
-            .map(|path| {
-                let hash = self.file_store.file_hash_if_exists(context, &path)?;
-                Ok((path, hash))
-            })
-            .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
-        hashes.insert(
-            format!(
-                "builtin://{}/{}",
-                crate::models::lint::WIKI_LINT_SKILL_ID,
-                crate::models::lint::WIKI_LINT_SKILL_VERSION
-            ),
-            Some(crate::models::lint::WIKI_LINT_SKILL_SHA256.into()),
-        );
-        Ok(hashes)
-    }
-
     /// Apply the same persisted ignore rules to deterministic and deep
     /// findings so the Lint surface never shows an issue the user dismissed.
     pub fn filter_ignored_issues(

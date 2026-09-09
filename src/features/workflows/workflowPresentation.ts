@@ -89,7 +89,7 @@ export interface WorkflowResultRowPresentation {
 
 export interface WorkflowResultPresentation {
   titleKey: string;
-  summaryKey: string;
+  summaryKey: string | null;
   primaryActionKey: string;
   rows: WorkflowResultRowPresentation[];
   paths: string[];
@@ -110,7 +110,7 @@ export function presentWorkflowResult(run: WorkflowRun): WorkflowResultPresentat
     case "update_wiki":
       return {
         titleKey: "workflows.result.update_wiki.title",
-        summaryKey: "workflows.result.update_wiki.summary",
+        summaryKey: null,
         primaryActionKey: "workflows.action.viewUpdates",
         paths: result.affectedPaths,
         rows: [
@@ -133,7 +133,9 @@ export function presentWorkflowResult(run: WorkflowRun): WorkflowResultPresentat
         }));
       return {
         titleKey: "workflows.result.health_check.title",
-        summaryKey: "workflows.result.health_check.summary",
+        summaryKey: result.coverage?.deepStatus === "failed" || result.coverage?.deepStatus === "pending"
+          ? "workflows.result.health_check.localRetained"
+          : null,
         primaryActionKey: "workflows.action.openLintResults",
         paths: [],
         rows: [
@@ -145,6 +147,7 @@ export function presentWorkflowResult(run: WorkflowRun): WorkflowResultPresentat
           { labelKey: "workflows.result.coverage", value: result.coverage
             ? { kind: "translation", key: `workflows.result.coverage.${result.coverage.mode}` }
             : { kind: "text", value: null } },
+          { labelKey: "lint.healthReport.deepStatus", value: { kind: "translation", key: `lint.healthReport.deep.${result.coverage?.deepStatus ?? (result.coverage?.mode === "local_quick" ? "not_requested" : "unknown")}` } },
           { labelKey: "workflows.result.scannedPages", value: result.coverage
             ? { kind: "count", value: result.coverage.scannedPages }
             : { kind: "text", value: null } },
@@ -154,7 +157,7 @@ export function presentWorkflowResult(run: WorkflowRun): WorkflowResultPresentat
           { labelKey: "workflows.result.deepTruncated", value: result.coverage
             ? { kind: "boolean", value: result.coverage.deepTruncated }
             : { kind: "text", value: null } },
-          { labelKey: "workflows.result.persistent", value: { kind: "boolean", value: result.persistent } },
+          { labelKey: "workflows.result.persistent", value: { kind: "translation", key: `lint.healthReport.storage.${result.persistent ? "persistent" : "memory"}` } },
           { labelKey: "workflows.result.reportId", value: { kind: "text", value: result.reportId, mono: true } },
           ...commonRows,
         ],
@@ -163,7 +166,7 @@ export function presentWorkflowResult(run: WorkflowRun): WorkflowResultPresentat
     case "generate_content":
       return {
         titleKey: "workflows.result.generate_content.title",
-        summaryKey: "workflows.result.generate_content.summary",
+        summaryKey: null,
         primaryActionKey: "workflows.action.viewGeneratedResult",
         paths: result.outputPaths,
         rows: [
@@ -185,7 +188,7 @@ export function presentWorkflowResult(run: WorkflowRun): WorkflowResultPresentat
         ]);
       return {
         titleKey: "workflows.result.agent_lint_repair.title",
-        summaryKey: "workflows.result.agent_lint_repair.summary",
+        summaryKey: null,
         primaryActionKey: "workflows.action.openLintResults",
         paths: result.affectedPaths,
         rows: [
@@ -214,16 +217,6 @@ export function workflowDurationMs(startedAt: string | null, completedAt: string
   const completed = Date.parse(completedAt);
   if (!Number.isFinite(start) || !Number.isFinite(completed) || completed < start) return null;
   return completed - start;
-}
-
-export function attentionRun(runs: WorkflowRun[]): WorkflowRun | null {
-  return (
-    runs.find((run) => run.displayStatus === "waiting_for_confirmation") ??
-    runs.find((run) => run.displayStatus === "running") ??
-    runs.find((run) => run.displayStatus === "queued") ??
-    runs.find((run) => run.displayStatus === "failed" || run.displayStatus === "interrupted") ??
-    null
-  );
 }
 
 export function attentionWorkflowRow(rows: WorkflowOverviewRow[]): WorkflowOverviewRow | null {

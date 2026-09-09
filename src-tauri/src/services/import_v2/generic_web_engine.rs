@@ -12,7 +12,7 @@ use crate::services::import_v2::engine::{
     ImportEngine,
 };
 use crate::services::import_v2::markdown_normalizer::{
-    decode_text, html_to_markdown, normalize_markdown,
+    decode_text, html_article_to_markdown, normalize_markdown,
 };
 use crate::services::import_v2::media_router::{link_or_copy, TemporaryMediaWorkspace};
 use crate::services::import_v2::platform_network_policy::{
@@ -345,11 +345,12 @@ impl ImportEngine for GenericWebEngine {
         } else {
             decode_text(&artifact.bytes)?
         };
-        if bilibili_api.is_none() && platform == Some(Platform::Xiaohongshu) {
-            if let Some(failure) = xiaohongshu::classify_page(&body) {
-                return Err(xiaohongshu_error(failure));
-            }
-        } else if bilibili_api.is_none() && is_platform_auth_challenge(request, &body) {
+        // The Xiaohongshu extractor first checks the requested note's data;
+        // login widgets or quoted verification words beside a note are not a wall.
+        if bilibili_api.is_none()
+            && platform != Some(Platform::Xiaohongshu)
+            && is_platform_auth_challenge(request, &body)
+        {
             return Err(BackendError::new(
                 "IMPORT_WEB_LOGIN_REQUIRED",
                 "The platform returned a login or verification page. Complete login and retry.",
@@ -395,7 +396,7 @@ impl ImportEngine for GenericWebEngine {
             .map(|markdown| (markdown, Vec::new()))
             .unwrap_or_else(|| {
                 if artifact.content_type.contains("html") {
-                    html_to_markdown(&body)
+                    html_article_to_markdown(&body)
                 } else {
                     (normalize_markdown(&body), Vec::new())
                 }
@@ -444,6 +445,17 @@ impl ImportEngine for GenericWebEngine {
         let mut continuation = None;
         let image_ocr_enabled =
             should_run_platform_image_ocr(platform_document.as_ref(), request.local_ocr_authorized);
+        if platform_document.as_ref().is_some_and(|document| {
+            document.platform == "xiaohongshu"
+                && document.content_type == "image_post"
+                && !request.local_ocr_authorized
+                && has_readable_platform_caption(document)
+        }) {
+            warnings.push("IMPORT_IMAGE_OCR_OPTIONAL".into());
+            for number in 1..=platform_document.as_ref().unwrap().images.len() {
+                markdown = markdown.replace(&format!("<!-- OCR_IMAGE_{number:03} -->"), "");
+            }
+        }
         let mut temporary_ocr_inputs = Vec::new();
         let image_urls = platform_document
             .as_ref()
@@ -580,7 +592,15 @@ impl ImportEngine for GenericWebEngine {
         let mut transcript_source = None::<String>;
         let mut transcript_language = None::<String>;
         if let Some(document) = platform_document.as_ref() {
-            for (subtitle_index, subtitle) in document.subtitles.iter().enumerate() {
+            for (subtitle_index, subtitle) in document
+                .subtitles
+                .iter()
+                .enumerate()
+                .filter(|(_, subtitle)| subtitle.kind.is_reliable_source())
+            {
+                if transcription_ready {
+                    break;
+                }
                 if !platform
                     .is_some_and(|platform| is_trusted_platform_asset_url(platform, &subtitle.url))
                 {
@@ -647,7 +667,7 @@ impl ImportEngine for GenericWebEngine {
                                 unavailable("The normalized subtitle segments could not be staged.")
                             })?;
                             asset_paths.push(segments_relative);
-                            if !transcription_ready && subtitle.kind.is_reliable_source() {
+                            if !transcription_ready {
                                 transcript_source = Some(
                                     match subtitle.kind {
                                         PlatformSubtitleKind::AuthorOriginal => {
@@ -687,10 +707,6 @@ impl ImportEngine for GenericWebEngine {
                                 ));
                                 markdown.push_str(&rendered);
                                 transcription_ready = true;
-                            } else if !subtitle.kind.is_reliable_source() {
-                                warnings.push(
-                                    "Machine-translated subtitle was retained as evidence but not used as the source transcript.".into(),
-                                );
                             }
                         }
                     }
@@ -833,7 +849,7 @@ impl ImportEngine for GenericWebEngine {
                     None
                 };
                 let media = match media {
-                    Some((media, download))
+                    Some((media, _download))
                         if platform.is_some_and(|platform| {
                             !is_trusted_platform_asset_url(platform, &media.final_public_url)
                         }) =>
@@ -984,11 +1000,6 @@ impl ImportEngine for GenericWebEngine {
             .map(|document| document.title.clone())
             .or_else(|| extract_html_title(&body))
             .unwrap_or_else(|| request.input.display_name.clone());
-        let text_coverage = if let Some(document) = platform_document.as_ref() {
-            (!document.description.trim().is_empty() || transcription_ready) as u8 as f64
-        } else {
-            (!markdown.trim().is_empty()) as u8 as f64
-        };
         let metadata_bytes = serde_json::to_vec_pretty(&metadata)
             .map_err(|_| unavailable("The web engine metadata could not be serialized."))?;
         let written = write_bound_bytes(
@@ -1019,7 +1030,10 @@ impl ImportEngine for GenericWebEngine {
             asset_paths,
             metadata_path: Some("metadata.json".into()),
             title,
-            text_coverage: Some(text_coverage),
+            text_coverage: platform_document.as_ref().and_then(|document| {
+                (document.content_type == "image_post" && !has_readable_platform_caption(document))
+                    .then_some(0.0)
+            }),
             table_cell_accuracy: None,
             sheet_count_exact: None,
             slide_count_exact: None,
@@ -1165,6 +1179,9 @@ fn render_platform_markdown(
         markdown.push_str("\n## 图片\n\n");
         for (index, image) in document.images.iter().enumerate() {
             markdown.push_str(&format!("{}. ![第 {} 张]({image})\n", index + 1, index + 1));
+            if document.platform == "xiaohongshu" {
+                markdown.push_str(&format!("\n<!-- OCR_IMAGE_{:03} -->\n\n", index + 1));
+            }
         }
     }
     if document.content_type == "video" {
@@ -1232,6 +1249,12 @@ fn xiaohongshu_error(failure: ConnectorFailure) -> BackendError {
         ConnectorFailure::Removed => (
             "IMPORT_WEB_CONTENT_REMOVED",
             "The Xiaohongshu note is unavailable or has been removed.",
+            false,
+            true,
+        ),
+        ConnectorFailure::LinkUnavailable => (
+            "IMPORT_WEB_LINK_UNAVAILABLE",
+            "This note link is unavailable. Copy the complete current share link from Xiaohongshu and add it again.",
             false,
             true,
         ),
@@ -1547,8 +1570,27 @@ fn platform_image_requires_ocr(
     authorized: bool,
 ) -> bool {
     document.is_some_and(|document| {
-        document.platform == "xiaohongshu" && document.content_type == "image_post" && !authorized
+        document.platform == "xiaohongshu"
+            && document.content_type == "image_post"
+            && !authorized
+            && !has_readable_platform_caption(document)
     })
+}
+
+fn has_readable_platform_caption(
+    document: &crate::services::import_v2::platform_provider::PlatformDocument,
+) -> bool {
+    // Keep substantive author captions immediately usable. Short captions and
+    // tag-only carousels still need image text; OCR remains optional otherwise.
+    document
+        .description
+        .split_whitespace()
+        .filter(|word| !word.starts_with('#'))
+        .flat_map(str::chars)
+        .filter(|character| character.is_alphanumeric())
+        .take(80)
+        .count()
+        == 80
 }
 
 fn platform_image_output_is_meaningful(
@@ -1694,18 +1736,37 @@ fn is_platform_auth_challenge(request: &EngineRequest, body: &str) -> bool {
         return false;
     }
     let lower = body.to_ascii_lowercase();
-    [
-        "captcha",
-        "challenge",
-        "security verification",
-        "verify you are human",
-        "请先登录",
-        "请完成验证",
-        "访问过于频繁",
-        "安全验证",
+    // Platform payloads and article roots may legitimately discuss login or
+    // challenges. Require a page-level wall signature, never a prose keyword.
+    if [
+        "__initial_state__",
+        "render_data",
+        "<article",
+        "itemprop=\"articlebody\"",
     ]
     .iter()
     .any(|marker| lower.contains(marker))
+    {
+        return false;
+    }
+    [
+        "id=\"challenge-form\"",
+        "id=\"captcha\"",
+        "class=\"captcha",
+        "class=\"signflow",
+        "id=\"login-wall\"",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+        || (lower.len() < 1024
+            && [
+                "verify you are human",
+                "请完成验证",
+                "请先登录",
+                "访问过于频繁",
+            ]
+            .iter()
+            .any(|marker| lower.contains(marker)))
 }
 
 fn extract_html_media_url(body: &str) -> Option<String> {
@@ -2730,6 +2791,12 @@ mod tests {
         assert!(!platform_image_requires_ocr(Some(&document), true));
         assert!(!should_run_platform_image_ocr(Some(&document), false));
         assert!(should_run_platform_image_ocr(Some(&document), true));
+        let mut captioned = document.clone();
+        captioned.description = "这是一段可以单独阅读的完整作者配文".repeat(6);
+        assert!(!platform_image_requires_ocr(Some(&captioned), false));
+        assert!(should_run_platform_image_ocr(Some(&captioned), true));
+        captioned.description = "#职场成长 #生活记录 #分享".repeat(20);
+        assert!(platform_image_requires_ocr(Some(&captioned), false));
         let mut video = document.clone();
         video.content_type = "video".into();
         video.subtitles.push(

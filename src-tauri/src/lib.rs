@@ -185,13 +185,22 @@ pub fn run() {
             state
                 .task_service
                 .set_event_bus(EventBus::new_tauri(handle.clone()));
+            // These runners still mix filesystem/Git calls with async Agent/BYOK
+            // waits. Keep that synchronous work off Tokio's async workers without
+            // holding a HeavyIo admission permit for the entire AI invocation.
+            // The workflow coordinator retains per-project queue/cancellation ownership.
+            fn spawn_mixed_io_workflow(future: impl std::future::Future<Output = ()> + Send + 'static) {
+                tauri::async_runtime::spawn_blocking(move || {
+                    tauri::async_runtime::block_on(future);
+                });
+            }
             let runner_handle = handle.clone();
             state
                 .workflow_service
                 .register_runner(std::sync::Arc::new(services::UpdateWikiRunner::new(
                     move |run| {
                         let app = runner_handle.clone();
-                        tauri::async_runtime::spawn(async move {
+                        spawn_mixed_io_workflow(async move {
                             let state = app.state::<app_state::AppState>();
                             let Some(root) = state.task_service.project_root_for_task(&run.task_id) else {
                                 reject_workflow_dispatch(&state, &run.task_id,
@@ -227,7 +236,7 @@ pub fn run() {
                                 }
                             };
                             let _ = identity;
-                            let access = match state.resolve_workflow_access(&context) {
+                            let access = match state.resolve_workflow_read_access(&context) {
                                 Ok(access) => access,
                                 Err(error) => {
                                     reject_workflow_dispatch(&state, &run.task_id, &error.code, error.message);
@@ -252,6 +261,20 @@ pub fn run() {
                                 );
                                 return;
                             }
+                            let run = match state.workflow_service.bind_update_wiki_inputs(
+                                &services::WorkflowPreparationEnvironment {
+                                    context: &context, access,
+                                    settings_service: &state.settings_service,
+                                    secret_service: &state.secret_service,
+                                    agent_service: &state.agent_service,
+                                }, &state.task_service, &run,
+                            ) {
+                                Ok(run) => run,
+                                Err(error) => {
+                                    reject_workflow_dispatch(&state, &run.task_id, &error.code, error.message);
+                                    return;
+                                }
+                            };
                             let compile = services::CompileExecutionServices {
                                 agent_service: &state.agent_service,
                                 llm_service: &state.llm_service,
@@ -289,7 +312,7 @@ pub fn run() {
                 .register_runner(std::sync::Arc::new(services::HealthCheckRunner::new(
                     move |run| {
                         let app = health_runner_handle.clone();
-                        tauri::async_runtime::spawn(async move {
+                        spawn_mixed_io_workflow(async move {
                             let state = app.state::<app_state::AppState>();
                             let Some(root) = state.task_service.project_root_for_task(&run.task_id)
                             else {
@@ -327,30 +350,12 @@ pub fn run() {
                                 }
                             };
                             let _ = identity;
-                            let access = match state.resolve_workflow_access(&context) {
-                                Ok(access) => access,
-                                Err(error) => {
-                                    reject_workflow_dispatch(&state, &run.task_id, &error.code, error.message);
-                                    return;
-                                }
-                            };
-                            let complete = matches!(
-                                &run.scope,
-                                models::workflow::WorkflowScope::HealthCheck {
-                                    mode: models::workflow::HealthCheckMode::Complete
-                                }
-                            );
-                            if complete
-                                && access.trust
-                                    != models::workflow::WorkflowProjectTrust::Trusted
-                            {
-                                reject_workflow_dispatch(&state, &run.task_id,
-                                    "WORKFLOW_PROJECT_UNTRUSTED",
-                                    "Complete Health Check requires a current trusted project access snapshot."
-                                        .into(),
-                                );
+                            if let Err(error) = state.resolve_workflow_read_access(&context) {
+                                reject_workflow_dispatch(&state, &run.task_id, &error.code, error.message);
                                 return;
                             }
+                            // Current external-AI authority is checked by the
+                            // launch permit after the local result is available.
                             let health = services::HealthCheckExecutionServices {
                                 lint_service: &state.lint_service,
                                 search_service: &state.search_service,
@@ -389,7 +394,7 @@ pub fn run() {
                 .register_runner(std::sync::Arc::new(services::AgentLintRepairRunner::new(
                     move |run| {
                         let app = lint_repair_runner_handle.clone();
-                        tauri::async_runtime::spawn(async move {
+                        spawn_mixed_io_workflow(async move {
                             let state = app.state::<app_state::AppState>();
                             let Some(root) = state.task_service.project_root_for_task(&run.task_id)
                             else {
@@ -494,7 +499,7 @@ pub fn run() {
                 .register_runner(std::sync::Arc::new(services::GenerateContentRunner::new(
                     move |run| {
                         let app = generate_runner_handle.clone();
-                        tauri::async_runtime::spawn(async move {
+                        spawn_mixed_io_workflow(async move {
                             let state = app.state::<app_state::AppState>();
                             let Some(root) = state.task_service.project_root_for_task(&run.task_id)
                             else {
@@ -567,10 +572,11 @@ pub fn run() {
                                 coordinator: &state.workflow_service.coordinator,
                             };
                             let authority_run = run.clone();
-                            if let Some(next) = services::run_generate_content_authorized(
+                            if let Some(next) = services::run_generate_content_with_authority(
                                 &context,
                                 run,
                                 &generate,
+                                || state.publish_workflow_external_launch(&context, &authority_run),
                                 || state.publish_workflow_external_launch(&context, &authority_run),
                             )
                             .await
@@ -589,16 +595,18 @@ pub fn run() {
                     .map_err(startup_backend_error)?;
                 #[cfg(debug_assertions)]
                 {
-                    let development_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                        .join("../.dev-capabilities");
+                    // Packaged debug builds must start without touching the
+                    // build machine's checkout (including protected folders).
+                    let development_root = std::env::var_os("LLM_WIKI_DEV_CAPABILITIES")
+                        .map(std::path::PathBuf::from);
+                    let development = development_root.as_ref().map(|root| {
+                        (root.join("installed"), root.join("development-public-key.hex"))
+                    });
                     state
                         .import_capability_runtime
                         .load_startup(
                             &install_root,
-                            Some((
-                                &development_root.join("installed"),
-                                &development_root.join("development-public-key.hex"),
-                            )),
+                            development.as_ref().map(|(root, key)| (root.as_path(), key.as_path())),
                             &state.import_v2_service,
                         )
                         .map_err(startup_backend_error)?;
@@ -775,6 +783,12 @@ pub fn run() {
             commands::file_commands::get_file_hash,
             commands::file_commands::confirm_pending_action,
             commands::git_commands::git_status,
+            commands::version_history_commands::get_version_history_status,
+            commands::version_history_commands::list_version_operations,
+            commands::version_history_commands::get_version_operation,
+            commands::version_history_commands::get_version_file_diff,
+            commands::version_history_commands::prepare_version_action,
+            commands::version_history_commands::confirm_version_action,
             commands::git_commands::initialize_git_repository,
             commands::git_commands::request_assessed_git_checkpoint,
             commands::git_commands::create_git_checkpoint,
@@ -850,9 +864,15 @@ pub fn run() {
             commands::task_commands::continue_queued_workflows,
             commands::workflow_commands::get_workflows_overview,
             commands::workflow_commands::prepare_workflow,
+            commands::workflow_commands::get_workflow_form_catalog,
+            commands::workflow_commands::get_update_wiki_options,
+            commands::workflow_commands::list_update_wiki_sources,
+            commands::workflow_commands::start_update_wiki,
             commands::workflow_commands::start_workflow,
             commands::workflow_commands::list_workflow_runs,
             commands::workflow_commands::get_workflow_run,
+            commands::workflow_commands::get_workflow_history_state,
+            commands::workflow_commands::undo_workflow_update,
             commands::workflow_commands::get_workflow_file_diff,
             commands::workflow_commands::cancel_workflow_run,
             commands::workflow_commands::undo_cancel_queued_workflow,
@@ -864,6 +884,7 @@ pub fn run() {
             commands::wiki_commands::read_wiki_page,
             commands::wiki_commands::read_wiki_asset,
             commands::wiki_commands::save_wiki_page,
+            commands::wiki_commands::resolve_wiki_conflict,
             commands::wiki_commands::create_wiki_page,
             commands::wiki_commands::rename_wiki_page,
             commands::wiki_commands::request_delete_wiki_page,

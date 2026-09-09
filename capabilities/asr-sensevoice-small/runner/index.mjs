@@ -178,6 +178,9 @@ try {
       verifySignedFile(packRoot, manifest, "models/model.int8.onnx"),
       verifySignedFile(packRoot, manifest, "models/tokens.txt"),
     ]);
+    const environment = restrictedEnvironment(packRoot, os.tmpdir());
+    await runFile(path.join(packRoot, ffmpegRelativePath()), ["-version"], { cwd: packRoot, env: environment, timeout: 15000 }, "decode");
+    await runFile(path.join(packRoot, sherpaRelativePath()), ["--help"], { cwd: packRoot, env: environment, timeout: 15000 }, "asr");
     process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { healthy: true, protocolVersion: "2", capabilityId: "asr-sensevoice-small", route }, error: null })}\n`);
     process.exit(0);
   }

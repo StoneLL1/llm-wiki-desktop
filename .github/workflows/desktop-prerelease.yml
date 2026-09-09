@@ -85,6 +85,14 @@ jobs:
           rustup default $env:RUST_VERSION
           rustup target add '${{ matrix.target }}'
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: |
+            src-tauri -> target
+            scripts/updater-verifier -> target
+          cache-on-failure: true
+
       - name: Install exact locked dependencies
         run: npm ci
 
@@ -132,6 +140,7 @@ jobs:
           name: desktop-${{ matrix.platform }}
           path: prerelease-assets/*
           if-no-files-found: error
+          overwrite: true
           retention-days: 14
 
   publish-prerelease:

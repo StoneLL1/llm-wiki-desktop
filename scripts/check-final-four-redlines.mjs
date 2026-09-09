@@ -120,7 +120,7 @@ const projectWriteAuthorityIsImplemented = (root, entry) => {
   const helpersForAuthority = {
     ProjectWritePermit: ["with_current_project_write_access"],
     ProjectAuthorityMutationPermit: ["with_current_project_authority_mutation"],
-    ProjectTaskMutationPermit: ["with_current_project_task_access"],
+    ProjectTaskMutationPermit: ["with_current_project_task_access", "with_current_project_read_task_access"],
     ProjectExecutionLease: ["begin_project_external_task", "begin_project_external_execution"],
   };
   const paths = hasExplicitAuthorityPaths
@@ -218,7 +218,8 @@ export function evaluateFinalFourRedlines(root) {
     ["src/components/app/TaskLogDrawer.tsx", ["ActionableErrorNotice"]],
     ["src/hooks/useTaskLauncher.ts", ["translateBackendError"]],
     ["src/hooks/useTaskEvents.ts", ["translateBackendError"]],
-    ["src/features/workflows/useWorkflowsController.ts", ["normalizeBackendError", "backendErrorCode"]],
+    ["src/features/workflows/useWorkflowsController.ts", ["normalizeBackendError"]],
+    ["src/features/workflows/workflowHistory.ts", ["normalizeBackendError", "backendErrorCode"]],
     ["src/features/workflows/WorkflowsRightPanel.tsx", ["normalizeBackendError"]],
     ["src/features/workflows/WorkflowTaskDetail.tsx", ["backendErrorCode"]],
   ];

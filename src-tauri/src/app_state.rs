@@ -50,6 +50,7 @@ pub struct ProjectWritePermit<'permit> {
 /// cannot require a normal [`ProjectWritePermit`]; they do still retain the
 /// authority transition lock and prove that the registered root is writable.
 pub(crate) struct ProjectAuthorityMutationPermit<'permit> {
+    issuer: &'permit AppState,
     context: ProjectContext,
     _update_mutation_lease: UpdateMutationLease,
     _transition_guard: &'permit MutexGuard<'permit, ()>,
@@ -97,6 +98,28 @@ impl ProjectWritePermit<'_> {
 impl ProjectAuthorityMutationPermit<'_> {
     pub(crate) fn context(&self) -> &ProjectContext {
         &self.context
+    }
+
+    /// Revalidate under the authority lock already owned by this permit.
+    /// Calling an independently locking AppState entry point here would deadlock.
+    pub(crate) fn workflow_access(
+        &self,
+    ) -> Result<crate::services::WorkflowAccessSnapshot, BackendError> {
+        self.issuer.resolve_workflow_access_locked(&self.context)
+    }
+
+    pub(crate) fn grant_compatible_project_trust(&self) -> Result<ProjectContext, BackendError> {
+        self.issuer
+            .grant_compatible_project_trust_locked(&self.context.project_id, &self.context.root)
+    }
+
+    pub(crate) fn refresh_native_authority_after_repair(
+        &self,
+    ) -> Result<ProjectContext, BackendError> {
+        self.issuer.refresh_native_authority_after_repair_locked(
+            &self.context.project_id,
+            &self.context.root,
+        )
     }
 }
 
@@ -226,6 +249,8 @@ struct RegisteredProject {
     root: PathBuf,
     trust: ProjectTrustAuthority,
     trusted_identity_revision: Option<String>,
+    observed_identity: Option<crate::services::ProjectWorkflowIdentity>,
+    workflow_access: Option<crate::services::WorkflowAccessSnapshot>,
     authority_revision: String,
 }
 
@@ -321,7 +346,9 @@ impl ProjectRegistry {
             update_recent()?;
             registered.root = canonical_root.clone();
             registered.trust = ProjectTrustAuthority::TrustedNative;
-            registered.trusted_identity_revision = Some(identity.identity_revision);
+            registered.trusted_identity_revision = Some(identity.identity_revision.clone());
+            registered.observed_identity = Some(identity.clone());
+            registered.workflow_access = None;
             registered.authority_revision = uuid::Uuid::new_v4().to_string();
         } else {
             update_recent()?;
@@ -330,7 +357,9 @@ impl ProjectRegistry {
                 RegisteredProject {
                     root: canonical_root.clone(),
                     trust: ProjectTrustAuthority::TrustedNative,
-                    trusted_identity_revision: Some(identity.identity_revision),
+                    trusted_identity_revision: Some(identity.identity_revision.clone()),
+                    observed_identity: Some(identity.clone()),
+                    workflow_access: None,
                     authority_revision: uuid::Uuid::new_v4().to_string(),
                 },
             );
@@ -428,6 +457,7 @@ impl ProjectRegistry {
                 ));
             }
         }
+        let observed_identity = crate::services::project_identity(&canonical_root).ok();
         let trusted_identity_revision = trusted_identity
             .as_ref()
             .map(|identity| identity.identity_revision.clone());
@@ -437,6 +467,8 @@ impl ProjectRegistry {
             if registered.root != canonical_root {
                 return Err(context_mismatch());
             }
+            registered.observed_identity = observed_identity.clone();
+            registered.workflow_access = None;
             if requested_trust != ProjectTrustAuthority::Untrusted {
                 registered.trust = requested_trust;
                 registered.trusted_identity_revision = trusted_identity_revision;
@@ -449,11 +481,57 @@ impl ProjectRegistry {
                     root: canonical_root.clone(),
                     trust: requested_trust,
                     trusted_identity_revision,
+                    observed_identity,
+                    workflow_access: None,
                     authority_revision: uuid::Uuid::new_v4().to_string(),
                 },
             );
         }
         ProjectContext::new(project_id, canonical_root).with_resolved_layout()
+    }
+
+    /// Display binding only: no filesystem, Git, layout or execution checks.
+    /// Commands that act on files must still resolve current authority.
+    pub fn workflow_overview_access(
+        &self,
+        project_id: &str,
+        asserted_root: &Path,
+    ) -> Result<crate::models::workflow::WorkflowProjectAccessSummary, BackendError> {
+        let projects = self.projects.read().map_err(|_| registry_locked())?;
+        let registered = projects.get(project_id).ok_or_else(context_mismatch)?;
+        if lexical_root_match_key(asserted_root) != lexical_root_match_key(&registered.root) {
+            return Err(context_mismatch());
+        }
+        let identity = registered
+            .observed_identity
+            .as_ref()
+            .ok_or_else(context_mismatch)?;
+        let access = registered.workflow_access.as_ref();
+        Ok(crate::models::workflow::WorkflowProjectAccessSummary {
+            project_id: project_id.to_string(),
+            canonical_identity_key: identity.canonical_identity_key.clone(),
+            identity_revision: identity.identity_revision.clone(),
+            trust: if registered.trust != ProjectTrustAuthority::Untrusted
+                && registered.trusted_identity_revision.as_deref()
+                    == Some(identity.identity_revision.as_str())
+                && access.is_none_or(|value| value.trust == WorkflowProjectTrust::Trusted)
+            {
+                WorkflowProjectTrust::Trusted
+            } else {
+                WorkflowProjectTrust::Untrusted
+            },
+            // Conservative hints until a real preparation has observed access;
+            // overview readiness never grants filesystem or execution access.
+            filesystem_access: access
+                .map(|value| value.filesystem_access.clone())
+                .unwrap_or(WorkflowFilesystemAccess::Unknown),
+            persistence: access
+                .map(|value| value.persistence.clone())
+                .unwrap_or(WorkflowPersistenceMode::MemoryOnly),
+            git_state: access
+                .map(|value| value.git_state.clone())
+                .unwrap_or(WorkflowGitState::Unknown),
+        })
     }
 
     pub fn resolve(
@@ -491,6 +569,10 @@ impl ProjectRegistry {
             return Err(context_mismatch());
         }
         let current_identity = crate::services::project_identity(&context.root).ok();
+        if registered.observed_identity != current_identity {
+            registered.workflow_access = None;
+        }
+        registered.observed_identity = current_identity.clone();
         let identity_matches =
             registered
                 .trusted_identity_revision
@@ -516,6 +598,7 @@ impl ProjectRegistry {
             // recreating the missing path must not make an old preparation
             // token valid again; a backend-owned reopen/reassessment is needed.
             registered.trust = ProjectTrustAuthority::Untrusted;
+            registered.workflow_access = None;
             registered.trusted_identity_revision = None;
             registered.authority_revision = uuid::Uuid::new_v4().to_string();
         }
@@ -545,6 +628,7 @@ impl ProjectRegistry {
         }
         if registered.trust != ProjectTrustAuthority::Untrusted {
             registered.trust = ProjectTrustAuthority::Untrusted;
+            registered.workflow_access = None;
             registered.trusted_identity_revision = None;
             registered.authority_revision = uuid::Uuid::new_v4().to_string();
         }
@@ -669,6 +753,14 @@ impl AppState {
         self.with_workflow_access(context, Ok)
     }
 
+    /// Read-only Health and task metadata need authority, never Git status.
+    pub(crate) fn resolve_workflow_read_access(
+        &self,
+        context: &ProjectContext,
+    ) -> Result<crate::services::WorkflowAccessSnapshot, BackendError> {
+        self.with_workflow_read_access(context, Ok)
+    }
+
     /// External AI and Agent execution is an explicit privacy boundary. A
     /// registry entry alone is never sufficient: the project must retain a
     /// current trusted authority after layout, identity, and health are
@@ -713,7 +805,12 @@ impl AppState {
         context: &ProjectContext,
         run: &crate::models::workflow::WorkflowRun,
     ) -> Result<crate::services::WorkflowExternalLaunchPermit, BackendError> {
-        self.with_workflow_access(context, |access| {
+        let inspect_git = run.kind == crate::models::workflow::WorkflowKind::GenerateContent
+            || matches!(
+                run.operation,
+                crate::models::workflow::WorkflowOperation::AgentLintRepair { .. }
+            );
+        self.with_workflow_access_mode(context, inspect_git, |access| {
             let current = self
                 .task_service
                 .get_workflow_run(&run.task_id)
@@ -796,7 +893,7 @@ impl AppState {
         context: &ProjectContext,
         run: &crate::models::workflow::WorkflowRun,
     ) -> Result<Option<crate::services::WorkflowExternalLaunchPermit>, BackendError> {
-        self.with_workflow_access(context, |access| {
+        self.with_workflow_read_access(context, |access| {
             let current = self
                 .task_service
                 .get_workflow_run(&run.task_id)
@@ -935,6 +1032,7 @@ impl AppState {
             ));
         }
         let permit = ProjectAuthorityMutationPermit {
+            issuer: self,
             context: context.clone(),
             _update_mutation_lease: update_mutation_lease,
             _transition_guard: &transition,
@@ -948,6 +1046,25 @@ impl AppState {
         asserted_root: &str,
         operation: impl FnOnce(&ProjectTaskMutationPermit<'_>) -> Result<T, BackendError>,
     ) -> Result<T, BackendError> {
+        self.with_current_project_task_access_mode(project_id, asserted_root, true, operation)
+    }
+
+    pub(crate) fn with_current_project_read_task_access<T>(
+        &self,
+        project_id: &str,
+        asserted_root: &str,
+        operation: impl FnOnce(&ProjectTaskMutationPermit<'_>) -> Result<T, BackendError>,
+    ) -> Result<T, BackendError> {
+        self.with_current_project_task_access_mode(project_id, asserted_root, false, operation)
+    }
+
+    fn with_current_project_task_access_mode<T>(
+        &self,
+        project_id: &str,
+        asserted_root: &str,
+        inspect_git: bool,
+        operation: impl FnOnce(&ProjectTaskMutationPermit<'_>) -> Result<T, BackendError>,
+    ) -> Result<T, BackendError> {
         let transition_lane = self
             .project_trust_transition
             .lane(Path::new(asserted_root))?;
@@ -958,7 +1075,7 @@ impl AppState {
             .project_registry
             .resolve(project_id, Path::new(asserted_root))
             .and_then(ProjectContext::with_resolved_layout)?;
-        let workflow_access = self.resolve_workflow_access_locked(&context)?;
+        let workflow_access = self.resolve_workflow_access_mode_locked(&context, inspect_git)?;
         if workflow_access.persistence == WorkflowPersistenceMode::MemoryOnly {
             self.task_service
                 .rebind_workflows_for_root(&context.root, None)
@@ -1199,17 +1316,42 @@ impl AppState {
         context: &ProjectContext,
         operation: impl FnOnce(crate::services::WorkflowAccessSnapshot) -> Result<T, BackendError>,
     ) -> Result<T, BackendError> {
+        self.with_workflow_access_mode(context, true, operation)
+    }
+
+    pub(crate) fn with_workflow_read_access<T>(
+        &self,
+        context: &ProjectContext,
+        operation: impl FnOnce(crate::services::WorkflowAccessSnapshot) -> Result<T, BackendError>,
+    ) -> Result<T, BackendError> {
+        self.with_workflow_access_mode(context, false, operation)
+    }
+
+    fn with_workflow_access_mode<T>(
+        &self,
+        context: &ProjectContext,
+        inspect_git: bool,
+        operation: impl FnOnce(crate::services::WorkflowAccessSnapshot) -> Result<T, BackendError>,
+    ) -> Result<T, BackendError> {
         let transition_lane = self.project_trust_transition.lane(&context.root)?;
         let _transition = transition_lane
             .lock()
             .map_err(|_| trust_transition_locked())?;
-        let access = self.resolve_workflow_access_locked(context)?;
+        let access = self.resolve_workflow_access_mode_locked(context, inspect_git)?;
         operation(access)
     }
 
     fn resolve_workflow_access_locked(
         &self,
         context: &ProjectContext,
+    ) -> Result<crate::services::WorkflowAccessSnapshot, BackendError> {
+        self.resolve_workflow_access_mode_locked(context, true)
+    }
+
+    fn resolve_workflow_access_mode_locked(
+        &self,
+        context: &ProjectContext,
+        inspect_git: bool,
     ) -> Result<crate::services::WorkflowAccessSnapshot, BackendError> {
         let resolved = self.resolve_external_ai_authority_locked(context)?;
         let authority = resolved.authority;
@@ -1222,8 +1364,32 @@ impl AppState {
             && self
                 .project_service
                 .has_writable_task_state_root(&authority.context);
-        let git = self.git_service.repository_status(&authority.context)?;
-        Ok(crate::services::WorkflowAccessSnapshot {
+        let git_state = if inspect_git {
+            let git = self.git_service.repository_status(&authority.context)?;
+            let content_changes = if git.has_changes {
+                let runtime_paths = crate::services::WorkflowService::runtime_metadata_paths(
+                    &authority.context,
+                    &self.task_service,
+                );
+                self.git_service
+                    .changed_paths(&authority.context)?
+                    .iter()
+                    .any(|path| !runtime_paths.contains(path))
+            } else {
+                false
+            };
+            if !git.is_repository || git.head.is_none() {
+                WorkflowGitState::Unavailable
+            } else if content_changes {
+                WorkflowGitState::Dirty
+            } else {
+                WorkflowGitState::Clean
+            }
+        } else {
+            // This access view makes no claim about repository availability.
+            WorkflowGitState::Unavailable
+        };
+        let access = crate::services::WorkflowAccessSnapshot {
             trust: if trusted {
                 WorkflowProjectTrust::Trusted
             } else {
@@ -1239,15 +1405,25 @@ impl AppState {
             } else {
                 WorkflowPersistenceMode::MemoryOnly
             },
-            git_state: if !git.is_repository {
-                WorkflowGitState::Unavailable
-            } else if git.has_changes {
-                WorkflowGitState::Dirty
-            } else {
-                WorkflowGitState::Clean
-            },
+            git_state,
             authority_revision: authority.authority_revision,
-        })
+        };
+        if let Some(registered) = self
+            .project_registry
+            .projects
+            .write()
+            .map_err(|_| registry_locked())?
+            .get_mut(&context.project_id)
+        {
+            let mut observed = access.clone();
+            if !inspect_git {
+                if let Some(previous) = registered.workflow_access.as_ref() {
+                    observed.git_state = previous.git_state.clone();
+                }
+            }
+            registered.workflow_access = Some(observed);
+        }
+        Ok(access)
     }
 
     fn resolve_external_ai_authority_locked(
@@ -1335,15 +1511,11 @@ impl AppState {
     /// proven and binds workflow persistence only to a safe writable task
     /// directory.  If the bind fails, runtime trust is revoked rather than
     /// leaving a half-refreshed authority behind.
-    pub(crate) fn refresh_native_authority_after_repair(
+    fn refresh_native_authority_after_repair_locked(
         &self,
         project_id: &str,
         root: &Path,
     ) -> Result<ProjectContext, BackendError> {
-        let transition_lane = self.project_trust_transition.lane(root)?;
-        let _transition = transition_lane
-            .lock()
-            .map_err(|_| trust_transition_locked())?;
         if !ProjectRegistry::is_strict_native_layout(root) {
             return Err(BackendError::new(
                 "PROJECT_NATIVE_REPAIR_STALE",
@@ -1392,6 +1564,14 @@ impl AppState {
         let _transition = transition_lane
             .lock()
             .map_err(|_| trust_transition_locked())?;
+        self.grant_compatible_project_trust_locked(project_id, root)
+    }
+
+    fn grant_compatible_project_trust_locked(
+        &self,
+        project_id: &str,
+        root: &Path,
+    ) -> Result<ProjectContext, BackendError> {
         self.project_registry.resolve(project_id, root)?;
         if !ProjectRegistry::is_verified_compatible_layout(root) {
             return Err(invalid_trust_authority(
@@ -1856,6 +2036,148 @@ mod project_registry_tests {
         fs::remove_dir_all(project).unwrap();
     }
 
+    #[test]
+    fn workflow_overview_binding_preserves_cjk_and_reads_no_files() {
+        let registry = ProjectRegistry::default();
+        let project = temp_project("概览-中文资料库");
+        let context = registry.register("project-cjk-overview", &project).unwrap();
+        let before = registry
+            .workflow_overview_access("project-cjk-overview", &context.root)
+            .unwrap();
+        assert_eq!(before.filesystem_access, WorkflowFilesystemAccess::Unknown);
+        assert_eq!(before.git_state, WorkflowGitState::Unknown);
+        assert_eq!(before.trust, WorkflowProjectTrust::Untrusted);
+        assert!(context.root.to_string_lossy().contains("中文资料库"));
+        assert!(registry
+            .workflow_overview_access("project-cjk-overview", &context.root.join("other"))
+            .is_err());
+        assert!(registry
+            .workflow_overview_access("other-project", &context.root)
+            .is_err());
+        fs::remove_dir_all(&project).unwrap();
+        for _ in 0..50 {
+            assert_eq!(registry.workflow_overview_access("project-cjk-overview", &context.root).unwrap(), before,
+                "display reads remain possible after the directory disappears; execution must revalidate separately");
+        }
+        assert!(registry
+            .resolve("project-cjk-overview", &context.root)
+            .is_err());
+    }
+
+    #[test]
+    fn workflow_overview_access_observation_is_cleared_by_trust_revocation() {
+        let state = AppState::default();
+        let project = strict_native_project("workflow-overview-revoke");
+        let context = state
+            .project_registry
+            .register_trusted_native("overview", &project)
+            .unwrap();
+        let initial = state
+            .project_registry
+            .workflow_overview_access("overview", &context.root)
+            .unwrap();
+        assert_eq!(initial.trust, WorkflowProjectTrust::Trusted);
+        assert_eq!(initial.filesystem_access, WorkflowFilesystemAccess::Unknown);
+        assert_eq!(initial.git_state, WorkflowGitState::Unknown);
+        let access = state.resolve_workflow_access(&context).unwrap();
+        let observed = state
+            .project_registry
+            .workflow_overview_access("overview", &context.root)
+            .unwrap();
+        assert_eq!(observed.filesystem_access, access.filesystem_access);
+        assert_eq!(observed.git_state, access.git_state);
+        assert_eq!(observed.persistence, access.persistence);
+        state
+            .project_registry
+            .revoke_trust("overview", &context.root)
+            .unwrap();
+        let revoked = state
+            .project_registry
+            .workflow_overview_access("overview", &context.root)
+            .unwrap();
+        assert_eq!(revoked.trust, WorkflowProjectTrust::Untrusted);
+        assert_eq!(revoked.filesystem_access, WorkflowFilesystemAccess::Unknown);
+        assert_eq!(revoked.git_state, WorkflowGitState::Unknown);
+        assert_eq!(revoked.persistence, WorkflowPersistenceMode::MemoryOnly);
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn workflow_overview_tracks_observed_identity_without_renewing_old_trust() {
+        let registry = ProjectRegistry::default();
+        let project = compatible_project("workflow-overview-replaced");
+        let displaced = project.with_extension("displaced");
+        let context = registry
+            .register_trusted_compatible("overview", &project)
+            .unwrap();
+        let before = registry
+            .workflow_overview_access("overview", &context.root)
+            .unwrap();
+        fs::rename(&project, &displaced).unwrap();
+        fs::create_dir_all(project.join(".obsidian")).unwrap();
+        fs::write(project.join("新页面.md"), "# Replacement\n").unwrap();
+        assert_eq!(
+            registry
+                .workflow_overview_access("overview", &context.root)
+                .unwrap(),
+            before,
+            "a display read must not perform an implicit filesystem assessment"
+        );
+        registry.register("overview", &project).unwrap();
+        let changed = registry
+            .workflow_overview_access("overview", &context.root)
+            .unwrap();
+        assert_ne!(changed.identity_revision, before.identity_revision);
+        assert_eq!(
+            changed.trust,
+            WorkflowProjectTrust::Untrusted,
+            "observing a replacement folder never transfers the previous trust grant"
+        );
+        assert_eq!(changed.filesystem_access, WorkflowFilesystemAccess::Unknown);
+        assert_eq!(
+            registry
+                .resolve_authority("overview", &project)
+                .unwrap()
+                .trust,
+            ProjectTrustAuthority::Untrusted
+        );
+        fs::remove_dir_all(&project).unwrap();
+        fs::remove_dir_all(&displaced).unwrap();
+    }
+
+    #[test]
+    fn workflow_overview_does_not_override_a_degraded_access_observation() {
+        let state = AppState::default();
+        let project = strict_native_project("workflow-overview-degraded");
+        let context = state
+            .project_registry
+            .register_trusted_native("overview", &project)
+            .unwrap();
+        let mut access = state.resolve_workflow_access(&context).unwrap();
+        access.trust = WorkflowProjectTrust::Untrusted;
+        access.filesystem_access = WorkflowFilesystemAccess::ReadOnly;
+        access.persistence = WorkflowPersistenceMode::MemoryOnly;
+        state
+            .project_registry
+            .projects
+            .write()
+            .unwrap()
+            .get_mut("overview")
+            .unwrap()
+            .workflow_access = Some(access);
+        let observed = state
+            .project_registry
+            .workflow_overview_access("overview", &context.root)
+            .unwrap();
+        assert_eq!(observed.trust, WorkflowProjectTrust::Untrusted);
+        assert_eq!(
+            observed.filesystem_access,
+            WorkflowFilesystemAccess::ReadOnly
+        );
+        assert_eq!(observed.persistence, WorkflowPersistenceMode::MemoryOnly);
+        fs::remove_dir_all(project).unwrap();
+    }
+
     #[cfg(windows)]
     #[test]
     fn project_execution_owner_folds_case_on_windows() {
@@ -2311,6 +2633,166 @@ mod project_registry_tests {
         }
         assert!(!project.join(".app/lint-reports").exists());
         cleanup_paths(&[&project, &config]);
+    }
+
+    #[test]
+    fn export_commit_revocation_waits_for_started_publication_and_rejects_unstarted_one() {
+        use crate::models::agent::AgentKind;
+        use crate::models::export::{ExportRoute, ExportType};
+        use crate::models::workflow::WorkflowArtifactType;
+        use crate::services::ExportService;
+        for started in [true, false] {
+            let (state, config) = state_with_temp_config("export-commit-revoke-config");
+            let state = Arc::new(state);
+            let project = strict_native_project("export-commit-revoke");
+            let context = state
+                .project_registry
+                .register_trusted_native("project-a", &project)
+                .unwrap();
+            let outcome = state
+                .workflow_service
+                .coordinator
+                .enqueue(
+                    &state.task_service,
+                    EnqueueWorkflow {
+                        project_id: "project-a".into(),
+                        project_root: project.clone(),
+                        task_state_root: Some(project.join(".app/tasks")),
+                        title: "Export".into(),
+                        kind: WorkflowKind::GenerateContent,
+                        scope: WorkflowScope::GenerateContent {
+                            artifact_type: WorkflowArtifactType::BeautifulRead,
+                            page_paths: vec!["wiki/index.md".into()],
+                            output_path: Some("exports/html/中文结果.html".into()),
+                        },
+                        route: Some(WorkflowRoute::Agent {
+                            agent: AgentKind::Claude,
+                            model: None,
+                            route_revision: "test-route".into(),
+                        }),
+                        baseline_fingerprint: "test-baseline".into(),
+                        execution_options: WorkflowExecutionOptions {
+                            preparation_revision: "test-preparation".into(),
+                            ..WorkflowExecutionOptions::default()
+                        },
+                        stages: vec![WorkflowStage {
+                            id: "write_export".into(),
+                            ordinal: 1,
+                            status: WorkflowStageStatus::Pending,
+                            label_key: "write_export".into(),
+                            started_at: None,
+                            completed_at: None,
+                            current_item: None,
+                            progress: None,
+                            decision: None,
+                        }],
+                        retry: None,
+                    },
+                )
+                .unwrap();
+            let WorkflowStartOutcome::Created { run } = outcome else {
+                panic!("new export")
+            };
+            state
+                .task_service
+                .start_workflow_stage(&run.task_id, "write_export")
+                .unwrap();
+            let permit = state
+                .publish_workflow_external_launch(&context, &run)
+                .unwrap();
+            if started {
+                let publication = permit.begin().unwrap();
+                state
+                    .task_service
+                    .set_task_cancellable(&run.task_id, false)
+                    .unwrap();
+                let worker_state = state.clone();
+                let worker_project = project.clone();
+                let (tx, rx) = mpsc::channel();
+                let worker = std::thread::spawn(move || {
+                    tx.send(worker_state.revoke_project_trust("project-a", &worker_project))
+                        .unwrap();
+                });
+                assert!(
+                    rx.recv_timeout(Duration::from_millis(100)).is_err(),
+                    "revocation must wait for the accepted publication"
+                );
+                assert_eq!(
+                    state.resolve_workflow_access(&context).unwrap().trust,
+                    WorkflowProjectTrust::Untrusted
+                );
+                assert!(
+                    state
+                        .publish_workflow_external_launch(&context, &run)
+                        .is_err(),
+                    "no new publication can enter the revoked epoch"
+                );
+                let artifact = state
+                    .export_service
+                    .validate_html_artifact(
+                        "<!doctype html><html><head></head><body>中文结果</body></html>",
+                    )
+                    .unwrap();
+                let record = ExportService::new_validated_record(
+                    ExportType::BeautifulRead,
+                    "中文结果".into(),
+                    Some("wiki/index.md".into()),
+                    "exports/html/中文结果.html".into(),
+                    ExportRoute::Agent,
+                    Some(run.task_id.clone()),
+                    artifact.preview.clone(),
+                );
+                let record_id = record.id.clone();
+                state
+                    .export_service
+                    .save_new_artifact(&context, &artifact, record)
+                    .unwrap();
+                state
+                    .task_service
+                    .complete_workflow_stage(&run.task_id, "write_export")
+                    .unwrap();
+                state
+                    .task_service
+                    .complete_workflow(
+                        &run.task_id,
+                        WorkflowResult::GenerateContent {
+                            artifact_type: WorkflowArtifactType::BeautifulRead,
+                            record_id: Some(record_id),
+                            output_paths: vec!["exports/html/中文结果.html".into()],
+                            artifact_count: Some(1),
+                            validation_passed: true,
+                        },
+                    )
+                    .unwrap();
+                assert!(!state.task_service.is_cancelled(&run.task_id));
+                drop(publication);
+                rx.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+                worker.join().unwrap();
+                assert!(project.join("exports/html/中文结果.html").is_file());
+                assert_eq!(
+                    state.export_service.list_records(&context).unwrap().len(),
+                    1
+                );
+            } else {
+                state.revoke_project_trust("project-a", &project).unwrap();
+                assert!(
+                    permit.begin().is_err(),
+                    "issued but unstarted publication is revoked"
+                );
+                assert!(state.task_service.is_cancelled(&run.task_id));
+                assert!(state
+                    .task_service
+                    .set_task_cancellable(&run.task_id, false)
+                    .is_err());
+                assert!(!project.join("exports/html/中文结果.html").exists());
+                assert!(state
+                    .export_service
+                    .list_records(&context)
+                    .unwrap()
+                    .is_empty());
+            }
+            cleanup_paths(&[&project, &config]);
+        }
     }
 
     #[test]
@@ -2874,6 +3356,98 @@ mod project_registry_tests {
     }
 
     #[test]
+    fn health_task_and_report_authority_never_probe_git() {
+        let (mut state, config) = state_with_temp_config("health-no-git-config");
+        state.settings_service = crate::services::SettingsService::with_config_dir(config.clone());
+        fs::write(config.join("settings.json"), "invalid JSON").unwrap();
+        let project = strict_native_project("health-no-git-中文");
+        // Any repository probe would start a subprocess against this broken
+        // marker; Health metadata and report writes have no Git dependency.
+        fs::create_dir(project.join(".git")).unwrap();
+        let context = state
+            .project_registry
+            .register_trusted_native("project-a", &project)
+            .unwrap();
+        GitService::reset_process_attempts_for_test();
+        let access = state.resolve_workflow_read_access(&context).unwrap();
+        assert_eq!(access.persistence, WorkflowPersistenceMode::Persistent);
+        let preparation = state
+            .workflow_service
+            .prepare(
+                &crate::services::WorkflowPreparationEnvironment {
+                    context: &context,
+                    access,
+                    settings_service: &state.settings_service,
+                    secret_service: &state.secret_service,
+                    agent_service: &state.agent_service,
+                },
+                crate::services::PrepareWorkflowInput {
+                    kind: WorkflowKind::HealthCheck,
+                    scope: None,
+                    route_selection: None,
+                },
+            )
+            .unwrap();
+        state
+            .workflow_service
+            .register_runner(std::sync::Arc::new(
+                crate::services::HealthCheckRunner::new(|_| {}),
+            ))
+            .unwrap();
+        let outcome = state
+            .with_current_project_read_task_access(
+                "project-a",
+                project.to_str().unwrap(),
+                |permit| {
+                    state.workflow_service.enqueue_with_acknowledgements(
+                        permit,
+                        &state.settings_service,
+                        &state.secret_service,
+                        &state.agent_service,
+                        &state.task_service,
+                        &preparation.preparation_id,
+                        &preparation.preparation_revision,
+                        false,
+                        false,
+                        None,
+                    )
+                },
+            )
+            .unwrap();
+        let WorkflowStartOutcome::Created { run } = outcome else {
+            panic!("new Health run")
+        };
+        assert_eq!(run.persistence, WorkflowPersistenceMode::Persistent);
+        assert!(state
+            .publish_workflow_persistent_report(&context, &run)
+            .unwrap()
+            .is_some());
+        state
+            .with_current_project_read_task_access(
+                "project-a",
+                project.to_str().unwrap(),
+                |_permit| {
+                    state
+                        .workflow_service
+                        .coordinator
+                        .cancel(&state.task_service, &run.task_id)
+                        .map_err(|message| BackendError::new("TEST_CANCEL", message, false, false))
+                },
+            )
+            .unwrap();
+        assert_eq!(GitService::process_attempts_for_test(), 0);
+        state.project_service.force_read_only_for_test(&project);
+        let read_only = state.resolve_workflow_read_access(&context).unwrap();
+        assert_eq!(read_only.persistence, WorkflowPersistenceMode::MemoryOnly);
+        assert_eq!(
+            read_only.filesystem_access,
+            WorkflowFilesystemAccess::ReadOnly
+        );
+        assert_eq!(GitService::process_attempts_for_test(), 0);
+        cleanup_paths(&[&project, &config]);
+    }
+
+    #[test]
     fn external_ai_access_assesses_health_once_without_starting_git() {
         let (state, config) = state_with_temp_config("external-ai-minimal-config");
         let project = strict_native_project("external-ai-minimal");
@@ -3170,6 +3744,233 @@ mod project_registry_tests {
         assert_eq!(access.persistence, WorkflowPersistenceMode::Persistent);
         assert_eq!(access.git_state, WorkflowGitState::Unavailable);
         fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn workflow_access_requires_head_even_when_an_unborn_repository_looks_clean() {
+        let state = AppState::default();
+        let project = strict_native_project("workflow-unborn-git");
+        let context = state
+            .project_registry
+            .register_trusted_native("project-a", &project)
+            .unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&project)
+            .status()
+            .unwrap()
+            .success());
+        fs::write(project.join(".git/info/exclude"), "*\n").unwrap();
+        let git = state.git_service.repository_status(&context).unwrap();
+        assert!(git.is_repository);
+        assert!(git.head.is_none());
+        assert!(!git.has_changes);
+        assert_eq!(
+            state.resolve_workflow_access(&context).unwrap().git_state,
+            WorkflowGitState::Unavailable
+        );
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn workflow_access_ignores_only_known_runtime_metadata() {
+        let state = AppState::default();
+        let project = strict_native_project("workflow-runtime-metadata");
+        let context = state
+            .project_registry
+            .register_trusted_native("project-a", &project)
+            .unwrap();
+        state
+            .git_service
+            .initialize_repository(&context, "initial")
+            .unwrap();
+        state
+            .task_service
+            .set_project_context(
+                "project-a".into(),
+                project.clone(),
+                project.join(".app/tasks"),
+            )
+            .unwrap();
+        let task = state.task_service.create_task(
+            crate::models::task::TaskType::Import,
+            Some("project-a".into()),
+            "Source import".into(),
+            true,
+        );
+        fs::create_dir_all(project.join(".app/workflows")).unwrap();
+        fs::write(project.join(".app/workflows/preferences.json"), "{}").unwrap();
+        assert!(project
+            .join(format!(".app/tasks/{}.json", task.id))
+            .is_file());
+        assert_eq!(
+            state.resolve_workflow_access(&context).unwrap().git_state,
+            WorkflowGitState::Clean
+        );
+
+        fs::write(project.join(".app/tasks/unknown.json"), "{}").unwrap();
+        assert_eq!(
+            state.resolve_workflow_access(&context).unwrap().git_state,
+            WorkflowGitState::Dirty
+        );
+        fs::remove_file(project.join(".app/tasks/unknown.json")).unwrap();
+        fs::write(project.join("wiki/index.md"), "# User edit\n").unwrap();
+        assert_eq!(
+            state.resolve_workflow_access(&context).unwrap().git_state,
+            WorkflowGitState::Dirty
+        );
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn workflow_access_ignores_only_known_health_report_metadata() {
+        use crate::models::git::CheckpointPurpose;
+        for compatible in [false, true] {
+            let (state, config) = state_with_temp_config("health-checkpoint-metadata");
+            let project = if compatible {
+                compatible_project("health-checkpoint-兼容")
+            } else {
+                strict_native_project("health-checkpoint-原生")
+            };
+            let context = if compatible {
+                let restricted = state
+                    .project_registry
+                    .register("project-a", &project)
+                    .unwrap();
+                state
+                    .project_service
+                    .enable_compatible_guidance(&restricted, ProjectTemplate::General)
+                    .unwrap();
+                state
+                    .grant_compatible_project_trust("project-a", &project)
+                    .unwrap()
+            } else {
+                state
+                    .project_registry
+                    .register_trusted_native("project-a", &project)
+                    .unwrap()
+            };
+            state
+                .git_service
+                .initialize_repository(&context, "initial")
+                .unwrap();
+            let outcome = state
+                .workflow_service
+                .coordinator
+                .enqueue(
+                    &state.task_service,
+                    EnqueueWorkflow {
+                        project_id: context.project_id.clone(),
+                        project_root: project.clone(),
+                        task_state_root: Some(
+                            project.join(context.layout.task_state_root.as_deref().unwrap()),
+                        ),
+                        title: "Health Check".into(),
+                        kind: WorkflowKind::HealthCheck,
+                        scope: WorkflowScope::HealthCheck {
+                            mode: HealthCheckMode::LocalQuick,
+                        },
+                        route: Some(WorkflowRoute::Local {
+                            route_revision: "local-v1".into(),
+                        }),
+                        baseline_fingerprint: "current-at-start".into(),
+                        execution_options: WorkflowExecutionOptions {
+                            preparation_revision: "health-checkpoint-metadata".into(),
+                            ..Default::default()
+                        },
+                        stages: workflow_stages(&WorkflowKind::HealthCheck),
+                        retry: None,
+                    },
+                )
+                .unwrap();
+            let WorkflowStartOutcome::Created { run } = outcome else {
+                panic!("new Health owner")
+            };
+            let report_root = context.layout.lint_report_root.as_deref().unwrap();
+            let report_path = format!("{report_root}/{}.json", run.task_id);
+            let history_path = format!(
+                "{}/lint-history.json",
+                context.layout.app_state_root.as_deref().unwrap()
+            );
+            fs::create_dir_all(project.join(report_root)).unwrap();
+            fs::write(project.join(&report_path), "{}\n").unwrap();
+            fs::write(project.join(&history_path), "{}\n").unwrap();
+            assert_eq!(
+                state.resolve_workflow_access(&context).unwrap().git_state,
+                WorkflowGitState::Clean
+            );
+            let runtime_paths = crate::services::WorkflowService::runtime_metadata_paths(
+                &context,
+                &state.task_service,
+            );
+            let checkpoint = state
+                .git_service
+                .clean_head_checkpoint_allowing_paths(
+                    &context,
+                    CheckpointPurpose::HighRiskOperation,
+                    "Before Update Wiki workflow",
+                    &runtime_paths,
+                )
+                .unwrap();
+            assert!(!checkpoint.created);
+            for path in [&report_path, &history_path] {
+                assert!(GitService::file_at_checkpoint(
+                    &context,
+                    checkpoint.commit_hash.as_deref().unwrap(),
+                    path
+                )
+                .unwrap()
+                .is_none());
+            }
+            // Merely residing in the report directory is not task ownership.
+            let unknown = project.join(report_root).join("unknown.json");
+            fs::write(&unknown, "{}\n").unwrap();
+            assert_eq!(
+                state.resolve_workflow_access(&context).unwrap().git_state,
+                WorkflowGitState::Dirty
+            );
+            assert_eq!(
+                state
+                    .git_service
+                    .clean_head_checkpoint_allowing_paths(
+                        &context,
+                        CheckpointPurpose::HighRiskOperation,
+                        "Before Update Wiki workflow",
+                        &runtime_paths,
+                    )
+                    .unwrap_err()
+                    .code,
+                "GIT_WORKTREE_DIRTY"
+            );
+            fs::remove_file(unknown).unwrap();
+            fs::write(
+                project.join(if compatible {
+                    "index.md"
+                } else {
+                    "wiki/index.md"
+                }),
+                "# User edit\n",
+            )
+            .unwrap();
+            assert_eq!(
+                state.resolve_workflow_access(&context).unwrap().git_state,
+                WorkflowGitState::Dirty
+            );
+            assert_eq!(
+                state
+                    .git_service
+                    .clean_head_checkpoint_allowing_paths(
+                        &context,
+                        CheckpointPurpose::HighRiskOperation,
+                        "Before Update Wiki workflow",
+                        &runtime_paths,
+                    )
+                    .unwrap_err()
+                    .code,
+                "GIT_WORKTREE_DIRTY"
+            );
+            cleanup_paths(&[&project, &config]);
+        }
     }
 
     #[test]

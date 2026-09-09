@@ -90,6 +90,16 @@ function buildResolver(pages: WikiPageMeta[]): Map<string, string> {
       if (alias) index.set(alias.toLowerCase(), page.path);
     }
   }
+  // Match the backend Lint path keys: canonical project paths and paths
+  // relative to wiki/, both with and without .md. Register paths last so an
+  // unrelated title/alias cannot redirect an explicit path to another page.
+  for (const page of pages) {
+    const path = page.path.replace(/\\/g, "/").toLowerCase();
+    for (const key of [path, path.replace(/\.md$/, "")]) {
+      index.set(key, page.path);
+      if (key.startsWith("wiki/")) index.set(key.slice(5), page.path);
+    }
+  }
   return index;
 }
 
@@ -371,14 +381,15 @@ export const MarkdownReader = memo(function MarkdownReader({
   return (
     <article className="wiki-prose" role="article">
       {frontmatterRows.length > 0 ? (
-        <div className="frontmatter">
+        <details className="frontmatter" open={frontmatterRows.some((row) => row.key === "type" && row.value.replace(/["']/g, "") === "source") ? undefined : true}>
+          <summary className="cursor-pointer text-[11px] text-[var(--text-muted)]">{t("wiki.sourceMetadata")}</summary>
           {frontmatterRows.map((row, index) => (
             <div className="frontmatter__row" key={`${row.key}-${index}`}>
               <span className="frontmatter__k">{row.key ? `${row.key}:` : ""}</span>
               <span className="frontmatter__v">{row.value}</span>
             </div>
           ))}
-        </div>
+        </details>
       ) : null}
       <ReactMarkdown
         remarkPlugins={REMARK_PLUGINS}

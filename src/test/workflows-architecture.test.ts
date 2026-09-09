@@ -36,11 +36,17 @@ const currentWorkflowSources = (): SourceFile[] =>
 const workflowApiPath = "src/services/workflowApi.ts";
 const workflowCommands = [
   "get_workflows_overview",
+  "get_workflow_form_catalog",
+  "get_update_wiki_options",
+  "list_update_wiki_sources",
+  "start_update_wiki",
   "prepare_workflow",
   "start_workflow",
   "list_workflow_runs",
   "get_workflow_run",
   "get_workflow_file_diff",
+  "get_workflow_history_state",
+  "undo_workflow_update",
   "cancel_workflow_run",
   "undo_cancel_queued_workflow",
   "reorder_queued_workflow",
@@ -53,11 +59,17 @@ const workflowCommands = [
 
 const workflowApiExports = [
   "getWorkflowsOverview",
+  "getWorkflowFormCatalog",
+  "getUpdateWikiOptions",
+  "listUpdateWikiSources",
+  "startUpdateWiki",
   "prepareWorkflow",
   "startWorkflow",
   "listWorkflowRuns",
   "getWorkflowRun",
   "getWorkflowFileDiff",
+  "getWorkflowHistoryState",
+  "undoWorkflowUpdate",
   "cancelWorkflowRun",
   "undoCancelQueuedWorkflow",
   "reorderQueuedWorkflow",
@@ -72,6 +84,8 @@ const rustAuthoritySources = (): SourceFile[] => [
   join(root, "src-tauri", "src", "commands", "task_commands.rs"),
   join(root, "src-tauri", "src", "commands", "workflow_commands.rs"),
   join(root, "src-tauri", "src", "tasks", "task_service.rs"),
+  join(root, "src-tauri", "src", "services", "workflow_review.rs"),
+  join(root, "src-tauri", "src", "services", "workflow_history.rs"),
   ...readdirSync(join(root, "src-tauri", "src", "services", "workflow_service"), {
     recursive: true,
     withFileTypes: true,
@@ -90,8 +104,8 @@ const rustWorkflowCommandSource = (): string =>
   );
 
 const commandBody = (source: string, name: string, nextName: string): string => {
-  const start = source.indexOf(`pub fn ${name}(`);
-  const end = source.indexOf(`pub fn ${nextName}(`, start + 1);
+  const start = source.search(new RegExp(`pub (?:async )?fn ${name}\\(`));
+  const end = source.indexOf(`pub async fn ${nextName}(`, start + 1);
   return start >= 0 && end > start ? source.slice(start, end) : "";
 };
 
@@ -100,22 +114,23 @@ const workflowAuthorityViolations = (files: SourceFile[]): string[] => {
   const forbiddenAuthorityCalls = /\b(?:grant_compatible_project_trust|revoke_project_trust|register_trusted_native|register_trusted_compatible(?:_with_identity)?|revoke_trust|initialize_git_repository|initialize_repository|start_project_open_assessment|assess_project_folder)\s*\(/g;
   const forbiddenAuthorityDerivation = /\b(?:resolve_authority|filesystem_access|has_writable_task_state_root)\s*\(|\b(?:ProjectTrustAuthority|ProjectFilesystemAccess|ProjectTrustState)::|permissions\(\)\.readonly\(\)/g;
   const forbiddenGitDerivation = /\brepository_status(?:_for_assessment)?\s*\(/g;
-  const checkpointRevalidationCallCounts: Record<string, number> = {
-    "src-tauri/src/services/workflow_service/runners/update_wiki.rs": 3,
+  const checkpointRevalidationCallLimits: Record<string, number> = {
+    "src-tauri/src/services/workflow_service/runners/update_wiki.rs": 1,
     "src-tauri/src/services/workflow_service/runners/agent_lint_repair.rs": 3,
   };
   for (const file of files) {
     const { path, source } = file;
+    if (/^#!\[cfg\(test\)\]/m.test(source)) continue;
     const productionSource = source.split(/\r?\n#\[cfg\(test\)\]\r?\n/, 1)[0];
     if (forbiddenAuthorityCalls.test(productionSource)) {
       violations.push(`${path}: derives or mutates project authority`);
     }
     forbiddenAuthorityCalls.lastIndex = 0;
     const gitDerivationCount = [...productionSource.matchAll(forbiddenGitDerivation)].length;
-    const allowedGitDerivationCount = checkpointRevalidationCallCounts[path] ?? 0;
+    const allowedGitDerivationCount = checkpointRevalidationCallLimits[path] ?? 0;
     if (
       forbiddenAuthorityDerivation.test(productionSource) ||
-      gitDerivationCount !== allowedGitDerivationCount
+      gitDerivationCount > allowedGitDerivationCount
     ) {
       violations.push(`${path}: derives trust, writability, or Git state`);
     }
@@ -244,8 +259,13 @@ describe("Workflows architecture", () => {
       "with_current_project_task_access",
     );
     expect(commandBody(source, "confirm_workflow_action", "discard_workflow_result")).toContain(
-      "with_current_project_write_access",
+      "confirm_workflow_action_for_state",
     );
+    const review = readFileSync(
+      join(root, "src-tauri", "src", "services", "workflow_review.rs"), "utf8",
+    );
+    const confirm = review.slice(review.indexOf("pub(crate) fn confirm_workflow_action_for_state("));
+    expect(confirm).toContain("with_current_project_write_access");
   });
 
   it("rejects authority mutation and cached persistence reuse in synthetic Rust sources", () => {

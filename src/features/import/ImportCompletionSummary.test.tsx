@@ -65,7 +65,7 @@ describe("ImportCompletionSummary", () => {
   it("keeps waiting items out of completion and offers one continuation action", () => {
     const onContinueRemaining = vi.fn();
     render(<ImportCompletionSummary completion={completion} remainingCount={3} onContinueRemaining={onContinueRemaining} onViewSources={vi.fn()} onViewSource={vi.fn()} onUpdateWiki={vi.fn()} onRetryFailure={vi.fn()} />);
-    expect(screen.getByText(/3 item\(s\).*not complete/i)).toBeInTheDocument();
+    expect(screen.getByText("3 remaining")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Continue remaining 3" }));
     expect(onContinueRemaining).toHaveBeenCalledTimes(1);
   });
@@ -91,6 +91,10 @@ describe("ImportCompletionSummary", () => {
     expect(screen.queryByText("internal-version-id")).not.toBeInTheDocument();
     expect(screen.queryByText("a".repeat(64))).not.toBeInTheDocument();
 
+    const details = screen.getByRole("heading", { name: "Import complete" }).closest("details")!;
+    expect(details).not.toHaveAttribute("open");
+    expect(screen.getByText("研究资料.md")).not.toBeVisible();
+    fireEvent.click(details.querySelector("summary")!);
     fireEvent.click(screen.getByRole("link", { name: "研究资料.md" }));
     expect(onViewSource).toHaveBeenCalledWith("wiki/sources/本地/研究资料.md");
     fireEvent.click(screen.getByRole("button", { name: "View imported Sources" }));

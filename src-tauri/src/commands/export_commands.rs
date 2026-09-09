@@ -19,7 +19,7 @@ use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::paths::ProjectContext;
 use crate::models::task::{BackendTask, TaskResult, TaskStatus, TaskType};
 use crate::services::{
-    AgentService, BlockingWorkClass, BlockingWorkOperation, ExportService, LlmService, WriteMode,
+    AgentService, BlockingWorkClass, BlockingWorkOperation, ExportService, LlmService,
 };
 use crate::tasks::task_model::LogLevel;
 use crate::utils::private_directory::{create_private_directory, ensure_private_directory};
@@ -405,12 +405,18 @@ async fn run_export(
         &directive.project_id,
         context.root.to_string_lossy().as_ref(),
         |_permit, current| {
-            state.export_service.write_html_checked(
-                current,
-                &output_path,
-                &artifact.html,
-                WriteMode::CreateNew,
-            )?;
+            if state.task_service.is_cancelled(task_id) {
+                return Err(BackendError::new(
+                    "EXPORT_CANCELLED",
+                    "Export was cancelled.",
+                    true,
+                    false,
+                ));
+            }
+            state
+                .task_service
+                .close_export_cancellation(task_id)
+                .map_err(task_error)?;
             let title = title_for(
                 current,
                 directive.export_type,
@@ -423,9 +429,11 @@ async fn run_export(
                 output_path.clone(),
                 route,
                 Some(task_id.to_string()),
-                artifact.preview,
+                artifact.preview.clone(),
             );
-            state.export_service.append_record(current, record)
+            state
+                .export_service
+                .save_new_artifact(current, &artifact, record)
         },
     )?;
 

@@ -28,7 +28,7 @@
   "projectFactsBatch0Target": {
     "status": "green",
     "requiredExecution": "async",
-    "reviewedCommandTotal": 213,
+    "reviewedCommandTotal": 226,
     "targetBlockingSyncCeiling": 130
   },
   "projectFactsBatch4Target": {
@@ -53,13 +53,13 @@
   },
   "currentSnapshot": {
     "status": "project_facts_batch4_green",
-    "total": 213,
-    "sync": 133,
-    "async": 80,
+    "total": 226,
+    "sync": 110,
+    "async": 116,
     "importTotal": 60,
     "importSync": 0,
-    "blockingSync": 127,
-    "measuredAt": "2026-08-30",
+    "blockingSync": 104,
+    "measuredAt": "2026-09-09",
     "sourceCommit": "CONTAINING_COMMIT"
   },
   "legacyBlockingSyncCeiling": 130,
@@ -453,35 +453,35 @@
       "command": "read_markdown_file",
       "module": "file_commands",
       "classification": "BlockingRead",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
     },
     {
       "command": "write_markdown_file",
       "module": "file_commands",
       "classification": "BlockingMutation",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
     },
     {
       "command": "write_json_file",
       "module": "file_commands",
       "classification": "BlockingMutation",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
     },
     {
       "command": "get_file_hash",
       "module": "file_commands",
       "classification": "BlockingRead",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
     },
     {
       "command": "confirm_pending_action",
       "module": "file_commands",
       "classification": "BlockingMutation",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
     },
     {
@@ -495,28 +495,28 @@
       "command": "initialize_git_repository",
       "module": "git_commands",
       "classification": "BlockingMutation",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
     },
     {
       "command": "request_assessed_git_checkpoint",
       "module": "git_commands",
       "classification": "LongTaskStart",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
     },
     {
       "command": "create_git_checkpoint",
       "module": "git_commands",
       "classification": "BlockingMutation",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
     },
     {
       "command": "git_diff_markdown",
       "module": "git_commands",
       "classification": "BlockingRead",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
     },
     {
@@ -1006,84 +1006,84 @@
       "command": "get_workflows_overview",
       "module": "workflow_commands",
       "classification": "BlockingRead",
-      "currentExecution": "sync",
-      "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
+      "currentExecution": "async",
+      "rationale": "Reads only the in-memory project display binding and bounded task summaries through the metadata worker; no preparation, files, Git, credentials, or Agent probes."
     },
     {
       "command": "prepare_workflow",
       "module": "workflow_commands",
-      "classification": "LongTaskStart",
-      "currentExecution": "sync",
-      "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
+      "classification": "BlockingRead",
+      "currentExecution": "async",
+      "rationale": "Validates the selected workflow scope and route in the bounded heavy-I/O worker; does not run blocking checks on the command executor."
     },
     {
       "command": "start_workflow",
       "module": "workflow_commands",
       "classification": "LongTaskStart",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
     },
     {
       "command": "list_workflow_runs",
       "module": "workflow_commands",
       "classification": "BlockingRead",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
     },
     {
       "command": "get_workflow_run",
       "module": "workflow_commands",
       "classification": "BlockingRead",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
     },
     {
       "command": "get_workflow_file_diff",
       "module": "workflow_commands",
       "classification": "BlockingRead",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
     },
     {
       "command": "cancel_workflow_run",
       "module": "workflow_commands",
       "classification": "BlockingMutation",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
     },
     {
       "command": "undo_cancel_queued_workflow",
       "module": "workflow_commands",
       "classification": "BlockingMutation",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
     },
     {
       "command": "reorder_queued_workflow",
       "module": "workflow_commands",
       "classification": "BlockingMutation",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
     },
     {
       "command": "retry_workflow",
       "module": "workflow_commands",
       "classification": "LongTaskStart",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "Creates or coordinates a durable background task; the command boundary must remain bounded and return the task identity promptly."
     },
     {
       "command": "confirm_workflow_action",
       "module": "workflow_commands",
       "classification": "BlockingMutation",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
     },
     {
       "command": "discard_workflow_result",
       "module": "workflow_commands",
       "classification": "BlockingMutation",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
     },
     {
@@ -1125,7 +1125,7 @@
       "command": "rename_wiki_page",
       "module": "wiki_commands",
       "classification": "BlockingMutation",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
     },
     {
@@ -1461,7 +1461,7 @@
       "command": "read_lint_history_report",
       "module": "lint_commands",
       "classification": "BlockingRead",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
     },
     {
@@ -1554,6 +1554,103 @@
       "classification": "ProcessOrMedia",
       "currentExecution": "sync",
       "rationale": "Touches an external process, Agent, capability, OCR/ASR/media runner, shell integration, or application restart boundary."
+    },
+    {
+      "command": "get_workflow_history_state",
+      "module": "workflow_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "async",
+      "rationale": "Read application-owned Git history refs on the bounded blocking worker."
+    },
+    {
+      "command": "undo_workflow_update",
+      "module": "workflow_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "async",
+      "rationale": "Restore exact operation files with content comparison under current write authority on the blocking worker."
+    },
+    {
+      "command": "get_update_wiki_options",
+      "module": "workflow_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "async",
+      "rationale": "Reads execution configuration summaries without probing executables, credentials, or source bodies."
+    },
+    {
+      "command": "list_update_wiki_sources",
+      "module": "workflow_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "async",
+      "rationale": "Pages Source metadata independently of the editable form. Legacy sources resolve content versions on demand."
+    },
+    {
+      "command": "start_update_wiki",
+      "module": "workflow_commands",
+      "classification": "LongTaskStart",
+      "currentExecution": "async",
+      "rationale": "Persists a deduplicated Update intent under task authority; the task worker binds input snapshots and probes only the selected route."
+    },
+    {
+      "command": "get_workflow_form_catalog",
+      "module": "workflow_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "async",
+      "rationale": "Reads configured route summaries and optional draft preferences. Health performs no content scan; Generate lists Wiki paths without reading bodies or Source registry. Does not create a preparation token."
+    },
+    {
+      "command": "get_version_history_status",
+      "module": "version_history_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "async",
+      "rationale": "Reads or writes bounded local recovery records and Git snapshots through the HeavyIo blocking worker; never runs filesystem work on the GUI command thread."
+    },
+    {
+      "command": "list_version_operations",
+      "module": "version_history_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "async",
+      "rationale": "Reads or writes bounded local recovery records and Git snapshots through the HeavyIo blocking worker; never runs filesystem work on the GUI command thread."
+    },
+    {
+      "command": "get_version_operation",
+      "module": "version_history_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "async",
+      "rationale": "Reads or writes bounded local recovery records and Git snapshots through the HeavyIo blocking worker; never runs filesystem work on the GUI command thread."
+    },
+    {
+      "command": "get_version_file_diff",
+      "module": "version_history_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "async",
+      "rationale": "Reads or writes bounded local recovery records and Git snapshots through the HeavyIo blocking worker; never runs filesystem work on the GUI command thread."
+    },
+    {
+      "command": "prepare_version_action",
+      "module": "version_history_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "async",
+      "rationale": "Reads or writes bounded local recovery records and Git snapshots through the HeavyIo blocking worker; never runs filesystem work on the GUI command thread."
+    },
+    {
+      "command": "confirm_version_action",
+      "module": "version_history_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "async",
+      "rationale": "Reads or writes bounded local recovery records and Git snapshots through the HeavyIo blocking worker; never runs filesystem work on the GUI command thread."
+    },
+    {
+      "command": "resolve_wiki_conflict",
+      "module": "wiki_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "async",
+      "rationale": "Reads or writes bounded local recovery records and Git snapshots through the HeavyIo blocking worker; never runs filesystem work on the GUI command thread."
     }
-  ]
+  ],
+  "workflowAsyncTarget": {
+    "status": "async_boundaries",
+    "reviewedAt": "2026-09-07",
+    "commandCount": 12,
+    "targetBlockingSyncCeiling": 115
+  }
 }

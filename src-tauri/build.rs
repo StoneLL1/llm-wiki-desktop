@@ -29,7 +29,16 @@ fn main() {
         .expect("the manifest directory always has a repository parent")
         .join("capabilities");
     let mode = env::var(CATALOG_MODE_ENV).unwrap_or_default();
-    let staging = env::var_os(STAGING_DIR_ENV).map(PathBuf::from);
+    let development_catalog = manifest_dir
+        .parent()
+        .unwrap()
+        .join(".dev-capabilities/catalog");
+    let staging = env::var_os(STAGING_DIR_ENV).map(PathBuf::from).or_else(|| {
+        (matches!(mode.as_str(), "" | "source" | "development")
+            && development_catalog.join("install-catalog.json").is_file())
+        .then_some(development_catalog.clone())
+    });
+    println!("cargo:rerun-if-changed={}", development_catalog.display());
     let product_manifest = product_capability::ProductCapabilityManifest::embedded()
         .unwrap_or_else(|error| panic!("product capability manifest is invalid: {error}"));
     capability_embed::stage_embed_inputs(&source_root, staging.as_deref(), &out_dir, &mode)

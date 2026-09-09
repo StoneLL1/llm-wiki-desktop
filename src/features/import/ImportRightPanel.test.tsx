@@ -229,7 +229,10 @@ describe("ImportRightPanel", () => {
     const progressbar = screen.getByRole("progressbar", { name: /recognizing audio segments/i });
     expect(progressbar).toHaveAttribute("aria-valuenow", "48");
     expect(screen.getByText("48%")).toBeInTheDocument();
-    expect(screen.getByText(/preview appears here/i)).toBeInTheDocument();
+    expect(screen.queryByText(/preview appears here/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Quick preview" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Target and version" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Quality" })).not.toBeInTheDocument();
     expect(importV2Api.getPreviewContent).not.toHaveBeenCalled();
   });
 });

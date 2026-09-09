@@ -11,7 +11,7 @@ export function BottomStatusBar() {
     currentProject.projectId,
     currentProject.rootPath,
     true,
-    ["git", "agents"],
+    ["agents"],
   );
 
   if (!currentProject.projectId || !currentProject.rootPath) {
@@ -25,16 +25,6 @@ export function BottomStatusBar() {
   const defaultAgent = status?.agents?.find((a) => a.isDefault) ?? null;
   const agentReady = defaultAgent?.state === "installed";
   const agentLabel = defaultAgent ? `${defaultAgent.kind} · ${defaultAgent.version ?? "—"}` : "—";
-
-  const git = status?.git;
-  const gitLabel = git?.isRepository
-    ? `${git.branch ?? "—"} · ${(git.head ?? "—").slice(0, 7)}`
-    : t("status.gitNa");
-  const gitCleanLabel = git?.isRepository
-    ? git.hasChanges
-      ? t("status.gitDirty")
-      : t("status.gitClean")
-    : t("status.gitNa");
 
   const activeLanguage = i18n.resolvedLanguage ?? i18n.language;
   const languageLabel = activeLanguage === "zh-CN" ? t("language.zhCN") : t("language.en");
@@ -67,11 +57,6 @@ export function BottomStatusBar() {
         <span className="statusbar__item statusbar__tasks">{t("status.tasks", { count: runningCount })}</span>
         <span className="statusbar__item statusbar__index">
           {t("status.indexSync")} · {t("status.indexSync.unknown")}
-        </span>
-        <span className="statusbar__item statusbar__git-label">{gitLabel}</span>
-        <span className="statusbar__item statusbar__git-state">
-          <span className={`dotstatus ${!git?.isRepository || git?.hasChanges ? "dotstatus--busy" : "dotstatus--ok"}`} aria-hidden="true" />
-          {gitCleanLabel}
         </span>
         <span className="statusbar__item statusbar__language">{languageLabel}</span>
       </div>

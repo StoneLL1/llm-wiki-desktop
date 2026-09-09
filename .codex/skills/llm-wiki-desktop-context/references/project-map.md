@@ -11,7 +11,7 @@ Use this reference only after `llm-wiki-desktop-context/SKILL.md` triggers and t
 | App flows, state files, async guards, failure paths | `SPEC/APP_flow.md` |
 | Tech stack and layering | `SPEC/TECH_STACK.md` |
 | Tauri backend architecture | `SPEC/BACKEND_STRUCTURE.md` |
-| UI density, tokens, layout, interaction | `SPEC/FRONTEND_GUIDELINES.md`, `SPEC/DESIGN.md`, `UI-Frontend-design/dashboard.html`, `UI-Frontend-design/assets/app.css` |
+| UI density, tokens, layout, interaction | `SPEC/FRONTEND_GUIDELINES.md`, `SPEC/DESIGN.md`, `src/styles.css` (optional local references: `UI-Frontend-design/`) |
 | Recent progress and open decisions | newest entries in `SPEC/progress.txt` |
 | Recurring pitfalls | `SPEC/gotchas.txt`, searched by symptom/module |
 | Active implementation plans | `docs/plans/`, `docs/superpowers/plans/` (verify status against code and progress) |
@@ -63,13 +63,7 @@ Use this reference only after `llm-wiki-desktop-context/SKILL.md` triggers and t
 
 ## Build And Verification
 
-Use this authoritative full check from the repository root:
-
-```powershell
-npm run check
-```
-
-If any stage fails, fix it and rerun `npm run check` from the beginning. The script already includes frontend tests, lint, build/import resolution, console-log scan, Tauri GUI Cargo check, and Rust no-default-features tests.
+Use the verification/review table in `AGENTS.md`; choose the level by actual scope and risk, not whether a change is called a feature. The examples below are iteration aids, not additional completion gates.
 
 Useful targeted commands:
 
@@ -80,21 +74,21 @@ cargo test --manifest-path src-tauri/Cargo.toml --no-default-features services::
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --test service_facade_contracts
 ```
 
-`rg.exe` may be blocked in this Windows environment. If it fails with access denied, use:
+If `rg` is unavailable, use a platform-appropriate fallback. For PowerShell:
 
 ```powershell
 Get-ChildItem -Recurse -File src,src-tauri/src | Select-String -Pattern "needle"
 ```
 
-Focused commands accelerate iteration; they do not satisfy final verification.
+Focused commands support the applicable gate; no full gate is required for tasks classified as prose-only or quick-check work.
 
 ## Before Editing Checklist
 
 - Check `git status --short`; assume unrelated dirty files belong to the user.
-- Search `SPEC/gotchas.txt` for the feature/module and exact error text.
+- When diagnosing an issue, search `SPEC/gotchas.txt` if it exists for the feature/module and exact error text.
 - Read only the docs needed for the task, but include `AGENTS.md` and current SPEC alignment when behavior may affect product constraints.
-- For UI work, compare against `UI-Frontend-design/` structure and CSS tokens without modifying that folder.
+- For UI work, use the frontend specification and `src/styles.css`; compare optional local `UI-Frontend-design/` references without modifying that folder.
 - For filesystem, Git, Agent, secret, task, or source operations, keep logic in backend services and expose typed IPC.
 - For workflow changes, list every `await` and every following UI commit; verify the project key/epoch before state, drawer, navigation, or toast changes.
 - For backend facade changes, trace command -> DTO -> `AppState` -> facade -> private module -> persistence -> registration -> contract test before editing.
-- Add focused tests for changed behavior, then broaden checks when shared services or UI contracts are touched.
+- Test meaningful changed behavior and real edge cases; do not add tests that only mirror prose or implementation wording. Select final checks using `AGENTS.md`.

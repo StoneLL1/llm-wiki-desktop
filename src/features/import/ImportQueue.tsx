@@ -158,14 +158,9 @@ const ImportQueueRow = memo(function ImportQueueRow({
             ) : null}
             <span className="shrink-0 font-mono text-[10.5px] text-[var(--text-muted)]">{t(`importV2.queue.kind.${item.input.kind}`)}</span>
           </div>
-          {presentation.userIssue ? (
-            <p className="m-0 truncate text-[11px] text-[var(--warning-text)]">
-              {t(presentation.userIssue.title)}
-            </p>
-          ) : null}
         </div>
       </div>
-      <ImportItemStatus item={item} presentation={presentation} />
+      <ImportItemStatus item={item} presentation={presentation} compact />
       <ImportItemActions item={item} presentation={presentation} pending={pending} onAction={onAction} onCopyLocator={onCopyLocator} />
     </article>
   );
@@ -321,7 +316,6 @@ export function ImportQueue({
         </div>
         <div className="flex items-center gap-2 font-mono text-[11px] text-[var(--text-muted)]">
           <span>{discoveryActive ? t("importV2.queue.discoveryProgress", { count: discoveryCount }) : sessionSyncing ? t("importV2.queue.syncing") : t("importV2.queue.progress", { percent, processed, total: progress.total })}</span>
-          {progress.active > 0 || failed > 0 || needsAction > 0 ? <span className="text-[var(--text-secondary)]">{t("importV2.queue.summary", { active: progress.active, failed, needsAction })}</span> : null}
         </div>
       </header>
       <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">

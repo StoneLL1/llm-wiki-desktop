@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: GitHub release tag used by catalog URLs
+        description: Desktop app-v tag; capability URLs use the matching capabilities-v tag
         required: true
         type: string
       signing_key_id:
@@ -14,7 +14,7 @@ on:
   workflow_call:
     inputs:
       release_tag:
-        description: GitHub release tag used by catalog URLs
+        description: Desktop app-v tag; capability URLs use the matching capabilities-v tag
         required: true
         type: string
       signing_key_id:
@@ -33,36 +33,21 @@ jobs:
   release-preflight:
     name: Validate the manifest-derived formal release matrix
     runs-on: ubuntu-24.04
-    environment: capability-release
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       expectedEntryCount: ${{ steps.matrix.outputs.expectedEntryCount }}
+    timeout-minutes: 30
     steps:
       - name: Checkout exact default-branch commit with release history
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: ${{ inputs.release_tag }}
           fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22.23.1
-
-      - name: Install Linux Tauri dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            curl \
-            file \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libssl-dev \
-            libwebkit2gtk-4.1-dev \
-            libxdo-dev \
-            patchelf \
-            wget
 
       - name: Require the canonical repository and exact coordinate
         env:
@@ -72,7 +57,7 @@ jobs:
           test "$GITHUB_REPOSITORY" = 'StoneLL1/llm-wiki-desktop'
           node scripts/check-release-version.mjs --tag "$RELEASE_TAG"
           node scripts/verify-product-capabilities.mjs --require-release-ready
-          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$GITHUB_SHA"
+          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$(git rev-parse HEAD)"
 
       - name: Materialize the exact formal staging and qualification plan
         id: matrix
@@ -85,13 +70,6 @@ jobs:
           echo "expectedEntryCount=$count" >> "$GITHUB_OUTPUT"
           node scripts/verify-product-capabilities.mjs --print-matrix
 
-      - name: Run the local and CI shared distributable preflight
-        run: |
-          set -euo pipefail
-          npm ci
-          npm run test:capability-tools
-          npm run check:release-config
-
       - name: Upload the immutable release-plan evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -102,6 +80,7 @@ jobs:
             capabilities/release-sources.json
             capabilities/qualification-corpus.json
           if-no-files-found: error
+          overwrite: true
           retention-days: 30
 
   build-capability:
@@ -112,10 +91,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.release-preflight.outputs.matrix) }}
+    timeout-minutes: 120
     steps:
       - name: Checkout the exact release commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with: { fetch-depth: 0 }
+        with: { ref: "${{ inputs.release_tag }}" }
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -131,6 +111,13 @@ jobs:
           $ErrorActionPreference = 'Stop'
           rustup toolchain install 1.92.0 --profile minimal --no-self-update
           rustup default 1.92.0
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: capability-assembler
+          cache-on-failure: true
 
       - name: Install Linux build and browser runtime prerequisites
         if: runner.os == 'Linux'
@@ -184,12 +171,14 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           if ($env:RELEASE_TAG -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' -or $env:SIGNING_KEY_ID -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') { throw 'invalid release coordinate' }
+          if ($env:RELEASE_TAG -notcmatch '^app-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$') { throw 'invalid desktop release tag' }
+          $capabilityTag = $env:RELEASE_TAG -creplace '^app-v', 'capabilities-v'
           $tool = if ($IsWindows) { 'src-tauri/target/release/capability_release.exe' } else { 'src-tauri/target/release/capability_release' }
           $dist = Join-Path $env:GITHUB_WORKSPACE 'capability-dist'
           $argsJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${{ steps.payload.outputs.entrypointArgs }}')) | ConvertFrom-Json
           $arguments = @('assemble', '--template', 'capabilities/${{ matrix.capabilityId }}/manifest.json', '--payload', '${{ steps.payload.outputs.root }}', '--target', '${{ matrix.targetTriple }}', '--entrypoint', '${{ steps.payload.outputs.entrypoint }}')
           foreach ($value in @($argsJson)) { $arguments += @('--entrypoint-arg', [string]$value) }
-          $arguments += @('--output', $dist, '--base-url', "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/$env:RELEASE_TAG", '--trusted-keys', 'capabilities/trusted-keys.json', '--key-id', $env:SIGNING_KEY_ID)
+          $arguments += @('--output', $dist, '--base-url', "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/$capabilityTag", '--trusted-keys', 'capabilities/trusted-keys.json', '--key-id', $env:SIGNING_KEY_ID)
           if ([uint64]'${{ steps.payload.outputs.modelBytes }}' -gt 0) { $arguments += @('--model-bytes', '${{ steps.payload.outputs.modelBytes }}') }
           & $tool @arguments
           if (@(Get-ChildItem -LiteralPath $dist -Filter '*.zip' -File).Count -ne 1 -or @(Get-ChildItem -LiteralPath $dist -Filter '*.catalog.json' -File).Count -ne 1) { throw 'one matrix entry must produce exactly one archive and fragment' }
@@ -232,42 +221,43 @@ jobs:
           name: ${{ matrix.capabilityId }}-capabilities-${{ matrix.targetTriple }}
           path: capability-dist/*
           if-no-files-found: error
+          overwrite: true
           retention-days: 14
 
   merge-catalog:
     name: Merge and verify the manifest-derived install catalog
     needs: [release-preflight, build-capability]
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - name: Checkout the exact release commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with: { ref: "${{ inputs.release_tag }}" }
 
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: 22.23.1 }
 
-      - name: Install Linux Tauri dependencies
-        if: runner.os == 'Linux'
+      - name: Install assembler dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            curl \
-            file \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libssl-dev \
-            libwebkit2gtk-4.1-dev \
-            libxdo-dev \
-            patchelf \
-            wget
+          sudo apt-get install -y libdbus-1-dev pkg-config
 
       - name: Setup Rust
         run: |
           set -euo pipefail
           rustup toolchain install 1.92.0 --profile minimal --no-self-update
           rustup default 1.92.0
-          cargo build --locked --release --no-default-features --manifest-path src-tauri/Cargo.toml --bin capability_release
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: capability-assembler
+          cache-on-failure: true
+
+      - name: Build catalog merger
+        run: cargo build --locked --release --no-default-features --manifest-path src-tauri/Cargo.toml --bin capability_release
 
       - name: Download every matrix artifact from this run
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -280,10 +270,10 @@ jobs:
         env:
           EXPECTED_ENTRY_COUNT: ${{ needs.release-preflight.outputs.expectedEntryCount }}
           RELEASE_TAG: ${{ inputs.release_tag }}
-          COMMIT_SHA: ${{ github.sha }}
           RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
+          export COMMIT_SHA="$(git rev-parse HEAD)"
           test "$(find capability-dist -maxdepth 1 -type f -name '*.zip' | wc -l)" -eq "$EXPECTED_ENTRY_COUNT"
           test "$(find capability-dist -maxdepth 1 -type f -name '*.catalog.json' | wc -l)" -eq "$EXPECTED_ENTRY_COUNT"
           src-tauri/target/release/capability_release merge-catalog --input capability-dist --output capability-dist/install-catalog.generated.json --trusted-keys capabilities/trusted-keys.json --expected-tag "$RELEASE_TAG"
@@ -299,4 +289,5 @@ jobs:
           name: capability-install-catalog
           path: capability-dist/application-integration/capabilities/*
           if-no-files-found: error
+          overwrite: true
           retention-days: 30

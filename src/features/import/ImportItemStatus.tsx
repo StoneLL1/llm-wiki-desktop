@@ -22,19 +22,23 @@ const ICONS: Record<ImportItemIcon, typeof CircleDashed> = {
 export interface ImportItemStatusProps {
   item: ImportItem;
   presentation?: ImportItemPresentation;
+  compact?: boolean;
 }
 
-export function ImportItemStatus({ item, presentation = presentImportItem(item) }: ImportItemStatusProps) {
+export function ImportItemStatus({ item, presentation = presentImportItem(item), compact = false }: ImportItemStatusProps) {
   const { t } = useTranslation();
   const Icon = ICONS[presentation.icon];
   const progressLabel = presentation.progressLabel
     ? t(IMPORT_PROGRESS_LABEL_KEYS[presentation.progressLabel] ?? presentation.progressLabel)
     : t(presentation.labelKey);
   return (
-    <div className={`import-v2-item-status is-${presentation.tone}`} data-testid={`import-status-${item.itemId}`}>
+    <div className={`import-v2-item-status is-${presentation.tone}${compact ? " is-compact" : ""}`} data-testid={`import-status-${item.itemId}`}>
       <span className="flex items-center gap-1.5 text-[12px] font-medium" aria-label={t(presentation.labelKey)}>
         <Icon size={14} className={presentation.icon === "commit" ? "animate-spin" : undefined} />
         {t(presentation.labelKey)}
+      </span>
+      <span className="import-v2-item-status__detail" title={presentation.userIssue ? t(presentation.userIssue.title) : progressLabel}>
+        {compact && presentation.userIssue ? t(presentation.userIssue.title) : presentation.progressLabel ? progressLabel : t(presentation.detailLabelKey)}
       </span>
       {presentation.progressMode !== "none" ? (
         <div className="mt-1.5 flex items-center gap-2">
@@ -54,9 +58,6 @@ export function ImportItemStatus({ item, presentation = presentImportItem(item) 
           {presentation.progressValue !== null ? <span className="font-mono text-[10.5px]">{presentation.progressValue}%</span> : null}
         </div>
       ) : null}
-      <span className="mt-0.5 block truncate text-[10.5px] text-[var(--text-muted)]">
-        {presentation.progressLabel ? progressLabel : t(presentation.detailLabelKey)}
-      </span>
     </div>
   );
 }

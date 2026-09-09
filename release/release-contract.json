@@ -28,9 +28,10 @@
     "approvalOwner": "StoneLL1",
     "approvalOwnerRole": "sole repository owner and maintainer",
     "approvalOwnerStatus": "confirmed",
-    "environmentReviewer": "StoneLL1",
-    "environmentReviewerStatus": "configured",
-    "environmentPreventSelfReview": false
+    "environmentReviewer": null,
+    "environmentReviewerStatus": "not-required",
+    "environmentPreventSelfReview": false,
+    "approvalMode": "maintainer-tag-or-dispatch"
   },
   "acceptance": {
     "firstStable": {

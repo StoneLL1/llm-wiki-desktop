@@ -10,7 +10,6 @@ import type {
   ApplyLintFixesBatchRequest,
   DeepLintReport,
   HealthCheckReport,
-  GetDeepLintReportRequest,
   LintBatchConfirmation,
   LintBatchOutcome,
   LintFixConfirmRequest,
@@ -22,16 +21,12 @@ import type {
   LintMode,
   ListLintHistoryRequest,
   LintReport,
-  LintRoutePreference,
   LintSafetyPrefs,
   PersistedLintReport,
   ReadLintHistoryReportRequest,
   ListLintIgnoresRequest,
   RemoveLintIgnoreRequest,
-  StartDeepLintRequest,
 } from "../types/lint";
-import type { AgentKind } from "../types/agent";
-import type { LlmProviderKind } from "../types/llm";
 import type { WorkflowRun, WorkflowStartOutcome } from "../types/workflow";
 import {
   captureProjectScope,
@@ -43,6 +38,7 @@ import { createProjectResourceController } from "../lib/projectResourceFreshness
 import { useNavigationStore } from "./navigationStore";
 import { useProjectStore } from "./projectStore";
 import { useWorkflowStore } from "./workflowStore";
+import { recordWorkflowFacts } from "./taskStore";
 
 const hasTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -61,6 +57,12 @@ function errorCode(error: unknown): string | null {
     if (typeof code === "string") return code;
   }
   return null;
+}
+
+function errorDetails(error: unknown): unknown | null {
+  return typeof error === "object" && error !== null && "details" in error
+    ? error.details ?? null
+    : null;
 }
 
 function isTerminalConfirmationError(error: unknown): boolean {
@@ -172,12 +174,12 @@ function saveSafetyPrefs(prefs: LintSafetyPrefs): void {
 
 export interface LintState {
   localReport: LintReport | null;
-  deepTaskId: string | null;
   deepReport: DeepLintReport | null;
   healthReport: HealthCheckReport | null;
   loadingLocal: boolean;
-  runningDeep: boolean;
   error: string | null;
+  errorCode: string | null;
+  errorDetails: unknown | null;
   selectedIssueId: string | null;
   /** Per-issue fix status keyed by issue id. */
   fixStatus: Record<string, "idle" | "applying" | "applied" | "error">;
@@ -213,15 +215,6 @@ export interface LintState {
     rootPath: string,
     options?: { preserveBatchConfirmations?: boolean },
   ) => Promise<void>;
-  startDeepLint: (
-    projectId: string,
-    rootPath: string,
-    route: LintRoutePreference,
-    agent?: AgentKind | null,
-    provider?: LlmProviderKind | null,
-  ) => Promise<string | null>;
-  clearDeepTask: () => void;
-  loadDeepReport: (request: GetDeepLintReportRequest) => Promise<void>;
   selectIssue: (issueId: string | null) => void;
   setMode: (mode: LintMode) => void;
   setSafetyPrefs: (prefs: Partial<LintSafetyPrefs>) => void;
@@ -270,12 +263,12 @@ export interface LintState {
 
 const initial = {
   localReport: null as LintReport | null,
-  deepTaskId: null as string | null,
   deepReport: null as DeepLintReport | null,
   healthReport: null as HealthCheckReport | null,
   loadingLocal: false,
-  runningDeep: false,
   error: null as string | null,
+  errorCode: null as string | null,
+  errorDetails: null as unknown | null,
   selectedIssueId: null as string | null,
   fixStatus: {} as LintState["fixStatus"],
   fixConfirm: null as LintFixConfirmRequest | null,
@@ -324,9 +317,13 @@ export const useLintStore = create<LintState>((set, get) => ({
     set({
       loadingLocal: true,
       error: null,
+      errorCode: null, errorDetails: null,
       agentRepairErrorCode: null,
-      localReport: null,
-      healthReport: null,
+      // Keep the last report visible while refreshing its deterministic layer.
+      healthReport: current.healthReport?.execution ? {
+        ...current.healthReport,
+        execution: { ...current.healthReport.execution, freshness: "stale" },
+      } : current.healthReport,
       selectedIssueId: null,
       activeHistoryId: null,
       fixStatus: {},
@@ -352,67 +349,7 @@ export const useLintStore = create<LintState>((set, get) => ({
       void get().loadHistory({ projectId, projectRootPath: rootPath });
     } catch (error) {
       if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch) return;
-      set({ loadingLocal: false, error: errorMessage(error) });
-    }
-  },
-
-  startDeepLint: async (projectId, rootPath, route, agent, provider) => {
-    if (!hasTauri()) return null;
-    if (get().runningDeep) return null;
-    if (get().agentRepairPending || get().agentRepairPreparation) return null;
-    const scope = captureProjectScope();
-    // Claim the running slot before the IPC round-trip so a double click
-    // cannot enqueue two deep scans.
-    set({
-      error: null,
-      agentRepairErrorCode: null,
-      runningDeep: true,
-      healthReport: null,
-      agentRepairSelection: [],
-      agentRepairSelectionReportId: null,
-    });
-    try {
-      const request: StartDeepLintRequest = {
-        projectId,
-        projectRootPath: rootPath,
-        route,
-        agent: agent ?? null,
-        provider: provider ?? null,
-      };
-      const task = await invoke<{ id: string }>("start_deep_lint", { request });
-      if (!isProjectScopeCurrent(scope)) return null;
-      set({ deepTaskId: task.id, deepReport: null });
-      return task.id;
-    } catch (error) {
-      if (!isProjectScopeCurrent(scope)) return null;
-      set({ runningDeep: false, error: errorMessage(error) });
-      return null;
-    }
-  },
-
-  clearDeepTask: () => set({ deepTaskId: null, runningDeep: false }),
-
-  loadDeepReport: async (request) => {
-    if (!hasTauri()) return;
-    const scope = captureProjectScope();
-    try {
-      const report = await invoke<DeepLintReport>("get_deep_lint_report", { request });
-      if (!isProjectScopeCurrent(scope)) return;
-      set({
-        deepReport: report,
-        healthReport: null,
-        agentRepairSelection: [],
-        agentRepairSelectionReportId: null,
-        activeHistoryId: request.taskId,
-        runningDeep: false,
-      });
-      void get().loadHistory({
-        projectId: request.projectId,
-        projectRootPath: request.projectRootPath,
-      });
-    } catch (error) {
-      if (!isProjectScopeCurrent(scope)) return;
-      set({ runningDeep: false, error: errorMessage(error) });
+      set({ loadingLocal: false, error: errorMessage(error), errorCode: errorCode(error), errorDetails: errorDetails(error) });
     }
   },
 
@@ -584,7 +521,7 @@ export const useLintStore = create<LintState>((set, get) => ({
       });
     } catch (error) {
       if (!isProjectScopeCurrent(scope) || !ignoresResource.isCurrent(requestEpoch)) return;
-      set({ error: errorMessage(error) });
+      set({ error: errorMessage(error), errorCode: errorCode(error), errorDetails: errorDetails(error) });
     }
   },
 
@@ -616,7 +553,7 @@ export const useLintStore = create<LintState>((set, get) => ({
       return true;
     } catch (error) {
       if (!isProjectScopeCurrent(scope) || !ignoresResource.isCurrent(requestEpoch)) return false;
-      set({ error: errorMessage(error) });
+      set({ error: errorMessage(error), errorCode: errorCode(error), errorDetails: errorDetails(error) });
       return false;
     }
   },
@@ -642,7 +579,7 @@ export const useLintStore = create<LintState>((set, get) => ({
       return true;
     } catch (error) {
       if (!isProjectScopeCurrent(scope) || !ignoresResource.isCurrent(requestEpoch)) return false;
-      set({ error: errorMessage(error) });
+      set({ error: errorMessage(error), errorCode: errorCode(error), errorDetails: errorDetails(error) });
       return false;
     }
   },
@@ -651,6 +588,8 @@ export const useLintStore = create<LintState>((set, get) => ({
     if (!hasTauri()) return null;
     const current = get();
     if (
+      current.agentRepairPending ||
+      current.agentRepairPreparation ||
       current.fixConfirm ||
       current.loadingLocal ||
       current.batchRunning ||
@@ -665,6 +604,7 @@ export const useLintStore = create<LintState>((set, get) => ({
       fixStatus: { ...state.fixStatus, [issue.id]: "applying" },
       fixConfirm: null,
       error: null,
+      errorCode: null, errorDetails: null,
     }));
     const request: ApplyLintFixRequest = {
       projectId,
@@ -714,12 +654,14 @@ export const useLintStore = create<LintState>((set, get) => ({
           ),
           fixStatus: { ...state.fixStatus, [issue.id]: "error" },
           error: errorMessage(error),
+          errorCode: errorCode(error), errorDetails: errorDetails(error),
         }));
         return null;
       }
       set((state) => ({
         fixStatus: { ...state.fixStatus, [issue.id]: "error" },
         error: errorMessage(error),
+        errorCode: errorCode(error), errorDetails: errorDetails(error),
       }));
       return null;
     }
@@ -729,6 +671,8 @@ export const useLintStore = create<LintState>((set, get) => ({
     if (!hasTauri()) return null;
     const current = get();
     if (
+      current.agentRepairPending ||
+      current.agentRepairPreparation ||
       current.loadingLocal ||
       current.batchRunning ||
       current.fixConfirm ||
@@ -737,7 +681,7 @@ export const useLintStore = create<LintState>((set, get) => ({
     ) return null;
     const operationEpoch = ++lintOperationEpoch;
     const scope = captureProjectScope();
-    set({ batchRunning: true, error: null });
+    set({ batchRunning: true, error: null, errorCode: null, errorDetails: null });
     try {
       const outcome = await invoke<LintBatchOutcome>("apply_lint_fixes", {
         request,
@@ -755,7 +699,7 @@ export const useLintStore = create<LintState>((set, get) => ({
       return outcome;
     } catch (error) {
       if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch) return null;
-      set({ batchRunning: false, error: errorMessage(error) });
+      set({ batchRunning: false, error: errorMessage(error), errorCode: errorCode(error), errorDetails: errorDetails(error) });
       return null;
     }
   },
@@ -822,12 +766,14 @@ export const useLintStore = create<LintState>((set, get) => ({
           ),
           fixStatus: { ...state.fixStatus, [issue.id]: "error" },
           error: errorMessage(error),
+          errorCode: errorCode(error), errorDetails: errorDetails(error),
         }));
         return null;
       }
       set((state) => ({
         fixStatus: { ...state.fixStatus, [issue.id]: "error" },
         error: errorMessage(error),
+        errorCode: errorCode(error), errorDetails: errorDetails(error),
       }));
       return null;
     }
@@ -844,7 +790,10 @@ export const useLintStore = create<LintState>((set, get) => ({
         fixStatus: { ...state.fixStatus, [issueId]: "applying" },
       }));
     }
+    const scope = captureProjectScope();
+    const isCurrent = () => isProjectScopeCurrent(scope) && get().fixConfirm === confirm;
     const clearConfirmation = () => {
+      if (!isCurrent()) return;
       set((state) => ({
         fixConfirm: null,
         fixStatus: issueId
@@ -865,6 +814,7 @@ export const useLintStore = create<LintState>((set, get) => ({
       });
       clearConfirmation();
     } catch (error) {
+      if (!isCurrent()) return;
       // Keep the confirmation visible so a transient IPC failure can be retried;
       // the backend action must not become an orphaned, unreviewable request.
       if (isTerminalConfirmationError(error)) {
@@ -874,7 +824,7 @@ export const useLintStore = create<LintState>((set, get) => ({
           fixStatus: { ...state.fixStatus, [issueId]: "idle" },
         }));
       }
-      set({ error: errorMessage(error) });
+      set({ error: errorMessage(error), errorCode: errorCode(error), errorDetails: errorDetails(error) });
     }
   },
 
@@ -885,34 +835,20 @@ export const useLintStore = create<LintState>((set, get) => ({
       ...(state.fixConfirm ? [state.fixConfirm.pendingAction.id] : []),
       ...state.batchConfirmations.map((entry) => entry.pendingAction.id),
     ].filter((id, index, ids) => ids.indexOf(id) === index);
-    for (const actionId of actionIds) {
-      try {
-        await invoke("confirm_pending_action", {
-          request: { actionId, status: "cancelled" },
-        });
-      } catch {
-        // Teardown is best-effort. The registry also enforces expiry, and a
-        // cancellation failure must not leak an old project's error into the
-        // newly selected project after the synchronous store reset.
-      }
-    }
+    const cancellations = actionIds.map(cancelBackendActionBestEffort);
     if (state.agentRepairPreparation && state.agentRepairProjectId && state.agentRepairRootPath) {
-      try {
-        await cancelAgentRepairPreparationBestEffort(
-          state.agentRepairProjectId,
-          state.agentRepairRootPath,
-          state.agentRepairPreparation,
-        );
-      } catch {
-        // Project teardown and expiry are terminal from the UI's point of
-        // view; cancellation remains best-effort during global reset.
-      }
+      cancellations.push(cancelAgentRepairPreparationBestEffort(
+        state.agentRepairProjectId, state.agentRepairRootPath, state.agentRepairPreparation,
+      ));
     }
+    // Teardown cannot publish failures into the next project's UI. Each
+    // independent backend action is cancelled concurrently; expiry is the fallback.
+    await Promise.allSettled(cancellations);
   },
 
   setAgentRepairSelection: (reportId, findingIds) => {
     const report = get().healthReport;
-    if (!report || report.reportId !== reportId || get().agentRepairPreparation) return;
+    if (!report || get().localReport || report.reportId !== reportId || get().agentRepairPreparation) return;
     const eligibleIds = new Set(
       report.issues
         .filter((issue) => isAgentLintRepairEligible(issue, report))
@@ -957,6 +893,9 @@ export const useLintStore = create<LintState>((set, get) => ({
   prepareAgentLintRepair: async (projectId, rootPath, reportId) => {
     if (!hasTauri()) return null;
     const current = get();
+    if (current.loadingLocal || current.batchRunning || current.fixConfirm
+      || current.batchConfirmations.length > 0
+      || Object.values(current.fixStatus).some((status) => status === "applying")) return null;
     const report = current.healthReport;
     const selectedFindingIds = current.agentRepairSelection;
     const agent = report?.route.kind === "agent" ? report.route.agent : null;
@@ -968,6 +907,7 @@ export const useLintStore = create<LintState>((set, get) => ({
       current.agentRepairPending
       || current.agentRepairPreparation
       || !report
+      || current.localReport
       || report.reportId !== reportId
       || !agent
       || selectedFindingIds.length === 0
@@ -1046,6 +986,8 @@ export const useLintStore = create<LintState>((set, get) => ({
     }
     if (!preparation || !state.agentRepairProjectId || !state.agentRepairRootPath) return;
     if (state.agentRepairPending) return;
+    const scope = captureProjectScope();
+    const isCurrent = () => isProjectScopeCurrent(scope) && get().agentRepairPreparation === preparation;
     set({ agentRepairPending: true, agentRepairErrorCode: null });
     try {
       await cancelAgentRepairPreparationBestEffort(
@@ -1053,6 +995,7 @@ export const useLintStore = create<LintState>((set, get) => ({
         state.agentRepairRootPath,
         preparation,
       );
+      if (!isCurrent()) return;
       set({
         agentRepairPreparation: null,
         agentRepairPending: false,
@@ -1064,6 +1007,7 @@ export const useLintStore = create<LintState>((set, get) => ({
         agentRepairIdentityRevision: null,
       });
     } catch (error) {
+      if (!isCurrent()) return;
       set({ agentRepairPending: false, agentRepairErrorCode: errorCode(error) ?? "UNKNOWN" });
     }
   },
@@ -1097,6 +1041,7 @@ export const useLintStore = create<LintState>((set, get) => ({
           preparationRevision: preparation.preparationRevision,
         },
       });
+      recordWorkflowFacts([outcome.run]);
       if (!isProjectScopeCurrent(scope) || operationEpoch !== lintOperationEpoch || !isLintProjectGuardCurrent(projectGuard)) {
         if (isProjectScopeCurrent(scope) && operationEpoch === lintOperationEpoch) {
           set({ agentRepairPending: false, agentRepairErrorCode: "LINT_REPAIR_IDENTITY_CHANGED" });
@@ -1125,6 +1070,7 @@ export const useLintStore = create<LintState>((set, get) => ({
   },
 
   reset: () => {
+    lintOperationEpoch += 1;
     ignoresResource.reset();
     historyResource.reset();
     set({ ...initial });
@@ -1145,12 +1091,28 @@ registerProjectResource(
     useLintStore.getState().ensureHistory({ projectId, projectRootPath: rootPath }).then(() => undefined),
 );
 
-/** All issues currently in view: local pass + the latest deep-lint report. */
-export function selectAllIssues(state: LintState): LintIssue[] {
-  if (state.healthReport) return state.healthReport.issues;
-  const local = state.localReport?.issues ?? [];
-  const deep = state.deepReport?.issues ?? [];
-  return [...local, ...deep];
+/** A local refresh replaces local findings without discarding the saved AI evidence.
+ * The Health report remains an immutable scan snapshot apart from its freshness. */
+export function selectAllIssues(state: Pick<LintState, "healthReport" | "localReport" | "deepReport" | "ignores">): LintIssue[] {
+  const { healthReport, localReport, deepReport, ignores } = state;
+  const saved = healthReport?.issues ?? deepReport?.issues ?? [];
+  const ignored = new Set(ignores.map((entry) => `${entry.path}\0${entry.rule}`));
+  const isVisible = (issue: LintIssue) => !ignored.has(`${issue.path}\0${issue.issueType}`);
+  const combine = (current?: string, previous?: string): string | undefined =>
+    [...new Set([current?.trim(), previous?.trim()].filter(Boolean))].join("\n\n") || undefined;
+  if (!localReport && healthReport) return ignores.length ? saved.filter(isVisible) : saved;
+  const issues = new Map((localReport?.issues ?? []).map((issue) => [issue.id, issue]));
+  for (const issue of saved) {
+    const origins = healthReport?.findingOrigins[issue.id] ?? [issue.source];
+    if (!origins.includes("agent")) continue;
+    const local = issues.get(issue.id);
+    issues.set(issue.id, local
+      ? { ...local, origins: ["local", "agent"],
+        evidence: combine(local.evidence, issue.evidence),
+        suggestedAction: combine(local.suggestedAction, issue.suggestedAction) }
+      : { ...issue, source: "agent", origins: ["agent"], fixability: "none" });
+  }
+  return [...issues.values()].filter(isVisible);
 }
 
 registerProjectScopeResetHandler("lint", () => {

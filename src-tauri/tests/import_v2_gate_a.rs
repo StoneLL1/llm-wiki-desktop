@@ -983,8 +983,12 @@ fn run_gate_a_case(case: GateACase) {
     if case.needs_local_ocr {
         assert_eq!(
             first_result.status,
-            ImportItemStatus::WaitingAuthorization,
-            "{}: OCR must stop for explicit session authorization",
+            if case.name == "local_mixed_pdf_selective_ocr" {
+                ImportItemStatus::PreviewReady
+            } else {
+                ImportItemStatus::WaitingAuthorization
+            },
+            "{}: preserve readable text while OCR awaits explicit session authorization",
             case.name
         );
         service

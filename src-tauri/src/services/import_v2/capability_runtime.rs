@@ -364,51 +364,9 @@ struct SignedRuntimePermissions {
     filesystem: Vec<String>,
 }
 
-const RELEASE_RECIPES_JSON: &str =
-    include_str!("../../../../capabilities/release-recipes.json");
-const RELEASE_SOURCES_JSON: &str =
-    include_str!("../../../../capabilities/release-sources.json");
-
-fn expected_source_locks(
-    capability_id: &str,
-    target: &str,
-) -> Result<serde_json::Map<String, serde_json::Value>, BackendError> {
-    let recipes: serde_json::Value = serde_json::from_str(RELEASE_RECIPES_JSON)
-        .map_err(|_| capability_route_contract_error())?;
-    let sources: serde_json::Value = serde_json::from_str(RELEASE_SOURCES_JSON)
-        .map_err(|_| capability_route_contract_error())?;
-    let names = recipes.pointer(&format!("/recipes/{capability_id}/sources"))
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(capability_route_contract_error)?;
-    let mut locks = serde_json::Map::new();
-    for name in names {
-        let name = name.as_str().ok_or_else(capability_route_contract_error)?;
-        let source = sources.get(name).ok_or_else(capability_route_contract_error)?;
-        let mut lock = source.as_object().cloned().ok_or_else(capability_route_contract_error)?;
-        if let Some(distributions) = lock.get("distributions").and_then(serde_json::Value::as_object) {
-            let selected = distributions.get(target).cloned().ok_or_else(capability_route_contract_error)?;
-            let mut selected_distributions = serde_json::Map::new();
-            selected_distributions.insert(target.into(), selected);
-            lock.insert(
-                "distributions".into(),
-                serde_json::Value::Object(selected_distributions),
-            );
-        }
-        if lock.get("version").and_then(serde_json::Value::as_str).is_none()
-            || lock.get("license").and_then(serde_json::Value::as_str).is_none()
-        {
-            return Err(capability_route_contract_error());
-        }
-        locks.insert(name.into(), serde_json::Value::Object(lock));
-    }
-    if locks.is_empty() {
-        return Err(capability_route_contract_error());
-    }
-    Ok(locks)
-}
-
 fn validate_signed_product_contract(pack: &ResolvedCapabilityPack) -> Result<(), BackendError> {
-    let product = ProductCapabilityManifest::embedded().map_err(|_| capability_route_contract_error())?;
+    let product =
+        ProductCapabilityManifest::embedded().map_err(|_| capability_route_contract_error())?;
     let definition = product
         .definition(&pack.manifest.pack_id)
         .filter(|definition| definition.distribution_tier == "published")
@@ -417,7 +375,16 @@ fn validate_signed_product_contract(pack: &ResolvedCapabilityPack) -> Result<(),
     let bytes = std::fs::read(&contract_path).map_err(|_| capability_route_contract_error())?;
     let contract: SignedCapabilityContract =
         serde_json::from_slice(&bytes).map_err(|_| capability_route_contract_error())?;
-    let expected_locks = expected_source_locks(&pack.manifest.pack_id, &target_triple())?;
+    // The signed pack owns its actual dependency versions. Desktop recipes are
+    // build inputs, not a compatibility pin for already installed runtimes.
+    let source_locks_valid = !contract.source_locks.is_empty()
+        && contract.source_locks.values().all(|lock| {
+            ["version", "license"].iter().all(|key| {
+                lock.get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| !value.is_empty())
+            })
+        });
     if contract.schema_version != 1
         || contract.capability_id != pack.manifest.pack_id
         || contract.target_triple != target_triple()
@@ -430,7 +397,7 @@ fn validate_signed_product_contract(pack: &ResolvedCapabilityPack) -> Result<(),
         || contract.runtime.network != definition.runtime.network
         || contract.runtime.subprocess != definition.runtime.subprocess
         || contract.runtime.filesystem != definition.runtime.filesystem
-        || contract.source_locks != expected_locks
+        || !source_locks_valid
         || contract.license_expression != pack.manifest.license_expression
         || contract.license_expression != definition.license_policy.expression
     {
@@ -962,7 +929,7 @@ mod tests {
     }
 
     #[test]
-    fn signed_installed_pack_is_registered_but_untrusted_placeholder_is_not() {
+    fn compatible_signed_pack_keeps_its_dependency_versions_across_desktop_updates() {
         let root =
             std::env::temp_dir().join(format!("cap-runtime-signed-{}", uuid::Uuid::new_v4()));
         let pack_root = root.join("document-standard/1.2.0");
@@ -986,7 +953,9 @@ mod tests {
                 "filesystem": ["application_capability_root", "item_staging_input", "item_staging_output"]
             },
             "licenseExpression": "MIT AND PSF-2.0 AND MPL-2.0 AND LicenseRef-Bundled-Third-Party-Notices",
-            "sourceLocks": expected_source_locks("document-standard", &target_triple()).unwrap()
+            "sourceLocks": {
+                "compatibleOlderRuntime": { "version": "1.0.0-previous-desktop", "license": "MIT" }
+            }
         }))
         .unwrap();
         std::fs::write(pack_root.join("CAPABILITY-CONTRACT.json"), &contract).unwrap();
@@ -998,7 +967,8 @@ mod tests {
             protocol_version: "2".into(),
             target_triples: vec![target_triple()],
             archive_sha256: String::new(),
-            license_expression: "MIT AND PSF-2.0 AND MPL-2.0 AND LicenseRef-Bundled-Third-Party-Notices".into(),
+            license_expression:
+                "MIT AND PSF-2.0 AND MPL-2.0 AND LicenseRef-Bundled-Third-Party-Notices".into(),
             entrypoint: "runner.bin".into(),
             entrypoint_args: Vec::new(),
             executable_files: Vec::new(),

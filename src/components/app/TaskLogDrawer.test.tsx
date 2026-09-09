@@ -69,6 +69,16 @@ describe("TaskLogDrawer", () => {
     });
   });
 
+  it("keeps shared capability preparation visible when reopening the task drawer", () => {
+    useTaskStore.setState({ tasks: [{ ...runningTask, projectId: null,
+      taskType: "capability_install", batchId: "task-1", title: "Prepare OCR",
+    }], selectedTaskId: null });
+    render(<TaskLogDrawer />);
+    const taskButton = screen.getByRole("button", { name: /Prepare OCR/ });
+    fireEvent.click(taskButton);
+    expect(useTaskStore.getState().selectedTaskId).toBe("task-1");
+  });
+
   it("reports a cancellation IPC failure instead of swallowing it", async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === "cancel_task") return Promise.reject(new Error("backend unavailable"));

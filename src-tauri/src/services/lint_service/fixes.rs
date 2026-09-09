@@ -1,5 +1,6 @@
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use unicode_normalization::UnicodeNormalization;
 
 use crate::app_state::ProjectWritePermit;
 use crate::errors::BackendError;
@@ -11,7 +12,8 @@ use crate::models::lint::{
 use crate::models::paths::ProjectContext;
 use crate::models::wiki::WikiPageType;
 use crate::services::file_store::FileStore;
-use crate::services::{GitService, WriteMode};
+use crate::services::{GitService, VersionHistoryService, WriteMode};
+use crate::models::version_history::VersionOperationKind;
 use crate::utils::markdown_utils::{
     extract_title, parse_frontmatter, split_frontmatter, Frontmatter,
 };
@@ -40,24 +42,12 @@ impl LintService {
                 true,
             )
         })?;
-        // Defense in depth: fixes only ever touch `wiki/` pages. Agent-supplied
-        // issue payloads (and a crafted frontend request) could otherwise point
-        // at e.g. `.app/settings.json`; reject before any read/write.
-        if !issue.path.starts_with("wiki/") || issue.path.contains("..") {
-            return Err(BackendError::new(
-                "LINT_FIX_PATH_OUT_OF_SCOPE",
-                "Lint fixes may only target pages inside the wiki/ folder.",
-                true,
-                true,
-            )
-            .with_details(serde_json::json!({ "path": issue.path })));
-        }
-        context.resolve_wiki_write_path(&issue.path)?;
+        validate_fix_path(context, &issue.path)?;
         if matches!(
             issue.issue_type,
             LintIssueType::MissingFrontmatter | LintIssueType::DeadLink | LintIssueType::IndexDrift
         ) {
-            validate_issue_shape(issue)?;
+            validate_issue_shape(context, issue)?;
         }
         let mut outcome = match issue.issue_type {
             LintIssueType::MissingFrontmatter => {
@@ -108,10 +98,11 @@ impl LintService {
                         "cause": error,
                     }))
                 })?;
-            if let Err(error) = self.verify_local_fix(context, issue) {
+            if let Err(error) = self.verify_local_fixes(context, &[issue]) {
                 return Err(Self::rollback_after_failure_guarded(
                     context,
                     git_service,
+                    outcome.operation_id.as_deref(),
                     &outcome.affected_paths,
                     &post_write_hashes,
                     error,
@@ -122,12 +113,14 @@ impl LintService {
                 git_service,
                 &outcome.affected_paths,
                 "After applying wiki lint fix",
+                outcome.operation_id.as_deref(),
             ) {
                 Ok(commit) => commit,
                 Err(error) => {
                     return Err(Self::rollback_after_failure_guarded(
                         context,
                         git_service,
+                        outcome.operation_id.as_deref(),
                         &outcome.affected_paths,
                         &post_write_hashes,
                         error,
@@ -150,7 +143,8 @@ impl LintService {
         Ok(LintFixOutcome {
             kind: LintFixOutcomeKind::Applied,
             affected_paths,
-            checkpoint,
+            checkpoint: Self::operation_checkpoint(context, checkpoint.as_deref())?,
+            operation_id: checkpoint,
             final_commit: None,
             pending_action: None,
         })
@@ -172,6 +166,7 @@ impl LintService {
                 kind: LintFixOutcomeKind::NeedsConfirmation,
                 affected_paths: Vec::new(),
                 checkpoint: None,
+                operation_id: None,
                 final_commit: None,
                 pending_action: Some(dead_link_pending_action_with_preview(
                     path,
@@ -185,7 +180,8 @@ impl LintService {
         Ok(LintFixOutcome {
             kind: LintFixOutcomeKind::Applied,
             affected_paths,
-            checkpoint,
+            checkpoint: Self::operation_checkpoint(context, checkpoint.as_deref())?,
+            operation_id: checkpoint,
             final_commit: None,
             pending_action: None,
         })
@@ -199,7 +195,7 @@ impl LintService {
         confirm_high_risk: bool,
         expected_hash: Option<&str>,
     ) -> Result<LintFixOutcome, BackendError> {
-        let path = "wiki/index.md";
+        let path = &issue.path;
         if !confirm_high_risk {
             let target = issue.target.clone().unwrap_or_default();
             let preview = self.build_index_preview(context, issue)?;
@@ -207,6 +203,7 @@ impl LintService {
                 kind: LintFixOutcomeKind::NeedsConfirmation,
                 affected_paths: Vec::new(),
                 checkpoint: None,
+                operation_id: None,
                 final_commit: None,
                 pending_action: Some(index_drift_pending_action(
                     path,
@@ -221,14 +218,15 @@ impl LintService {
         Ok(LintFixOutcome {
             kind: LintFixOutcomeKind::Applied,
             affected_paths,
-            checkpoint,
+            checkpoint: Self::operation_checkpoint(context, checkpoint.as_deref())?,
+            operation_id: checkpoint,
             final_commit: None,
             pending_action: None,
         })
     }
 
     /// Read-transform-write for the missing-frontmatter fix without wrapping
-    /// the outcome. `shared_checkpoint` lets the batch flow pass a single
+    /// the outcome. `shared_operation` lets the batch flow pass a single
     /// pre-created checkpoint hash instead of creating one per path.
     fn write_missing_frontmatter_fix(
         &self,
@@ -236,7 +234,7 @@ impl LintService {
         git_service: &GitService,
         issue: &LintIssue,
         expected_hash: Option<&str>,
-        shared_checkpoint: Option<&str>,
+        shared_operation: Option<&str>,
     ) -> Result<(Vec<String>, Option<String>), BackendError> {
         let path = &issue.path;
         let expected = expected_hash.ok_or_else(|| {
@@ -263,7 +261,15 @@ impl LintService {
             .with_details(serde_json::json!({ "path": path })));
         }
 
-        let wiki_relative = path.strip_prefix("wiki/").unwrap_or(path);
+        let wiki_root = context
+            .layout
+            .wiki_write_root
+            .as_deref()
+            .unwrap_or_default();
+        let wiki_relative = path
+            .strip_prefix(wiki_root)
+            .unwrap_or(path)
+            .trim_start_matches('/');
         let page_type = WikiPageType::infer(None, wiki_relative);
         if page_type == WikiPageType::Other {
             return Err(BackendError::new(
@@ -285,14 +291,15 @@ impl LintService {
 
         let affected_paths = fix_affected_paths(context, path);
         let mut expected_after = self.capture_path_hashes(context, &affected_paths)?;
-        let checkpoint = self.resolve_checkpoint(
+        let checkpoint = self.resolve_operation(
             context,
             git_service,
             &affected_paths,
-            shared_checkpoint,
+            shared_operation,
             "Before applying wiki lint fix",
         )?;
         context.resolve_wiki_write_path(path)?;
+        Self::plan_version_write(context, checkpoint.as_deref(), path, &new_contents)?;
         self.file_store.write_markdown_checked(
             context,
             path,
@@ -301,10 +308,11 @@ impl LintService {
         )?;
         expected_after.insert(path.to_string(), Some(hash_text(&new_contents)));
         if let Err(error) = invalidate_graph_cache(context) {
-            return Err(if shared_checkpoint.is_none() {
+            return Err(if shared_operation.is_none() {
                 Self::rollback_after_failure_guarded(
                     context,
                     git_service,
+                    checkpoint.as_deref(),
                     &affected_paths,
                     &expected_after,
                     error,
@@ -313,17 +321,15 @@ impl LintService {
                 attach_post_write_hashes(error, &expected_after)
             });
         }
-        if context
-            .resolve_project_write_path(".app/graph-cache.json")
-            .is_ok_and(|path| path.exists())
-        {
-            expected_after.insert(".app/graph-cache.json".into(), None);
+        if let Some(path) = context.layout.graph_cache_path.as_deref() {
+            expected_after.insert(path.into(), None);
         }
         if let Err(error) = append_fix_log(context, path, "added frontmatter") {
-            return Err(if shared_checkpoint.is_none() {
+            return Err(if shared_operation.is_none() {
                 Self::rollback_after_failure_guarded(
                     context,
                     git_service,
+                    checkpoint.as_deref(),
                     &affected_paths,
                     &expected_after,
                     error,
@@ -332,10 +338,9 @@ impl LintService {
                 attach_post_write_hashes(error, &expected_after)
             });
         }
-        expected_after.insert(
-            "wiki/log.md".into(),
-            hash_relative_path(context, "wiki/log.md"),
-        );
+        if let Some(path) = context.layout.activity_log_path.as_deref() {
+            expected_after.insert(path.into(), hash_relative_path(context, path));
+        }
 
         Ok((affected_paths, checkpoint))
     }
@@ -348,7 +353,7 @@ impl LintService {
         git_service: &GitService,
         issue: &LintIssue,
         expected_hash: Option<&str>,
-        shared_checkpoint: Option<&str>,
+        shared_operation: Option<&str>,
     ) -> Result<(Vec<String>, Option<String>), BackendError> {
         let path = &issue.path;
         let target = issue.target.clone().unwrap_or_default();
@@ -387,11 +392,11 @@ impl LintService {
 
         let affected_paths = fix_affected_paths(context, path);
         let mut expected_after = self.capture_path_hashes(context, &affected_paths)?;
-        let checkpoint = self.resolve_checkpoint(
+        let checkpoint = self.resolve_operation(
             context,
             git_service,
             &affected_paths,
-            shared_checkpoint,
+            shared_operation,
             "Before applying wiki lint fix",
         )?;
         // Recheck after checkpoint creation, immediately before the guarded
@@ -407,6 +412,7 @@ impl LintService {
             .with_details(serde_json::json!({ "path": path, "target": target })));
         }
         context.resolve_wiki_write_path(path)?;
+        Self::plan_version_write(context, checkpoint.as_deref(), path, &new_contents)?;
         self.file_store.write_markdown_checked(
             context,
             path,
@@ -415,10 +421,11 @@ impl LintService {
         )?;
         expected_after.insert(path.to_string(), Some(hash_text(&new_contents)));
         if let Err(error) = invalidate_graph_cache(context) {
-            return Err(if shared_checkpoint.is_none() {
+            return Err(if shared_operation.is_none() {
                 Self::rollback_after_failure_guarded(
                     context,
                     git_service,
+                    checkpoint.as_deref(),
                     &affected_paths,
                     &expected_after,
                     error,
@@ -427,14 +434,17 @@ impl LintService {
                 attach_post_write_hashes(error, &expected_after)
             });
         }
-        expected_after.insert(".app/graph-cache.json".into(), None);
+        if let Some(path) = context.layout.graph_cache_path.as_deref() {
+            expected_after.insert(path.into(), None);
+        }
         if let Err(error) =
             append_fix_log(context, path, &format!("removed dead link [[{target}]]"))
         {
-            return Err(if shared_checkpoint.is_none() {
+            return Err(if shared_operation.is_none() {
                 Self::rollback_after_failure_guarded(
                     context,
                     git_service,
+                    checkpoint.as_deref(),
                     &affected_paths,
                     &expected_after,
                     error,
@@ -443,10 +453,9 @@ impl LintService {
                 attach_post_write_hashes(error, &expected_after)
             });
         }
-        expected_after.insert(
-            "wiki/log.md".into(),
-            hash_relative_path(context, "wiki/log.md"),
-        );
+        if let Some(path) = context.layout.activity_log_path.as_deref() {
+            expected_after.insert(path.into(), hash_relative_path(context, path));
+        }
 
         Ok((affected_paths, checkpoint))
     }
@@ -459,9 +468,9 @@ impl LintService {
         git_service: &GitService,
         issue: &LintIssue,
         expected_hash: Option<&str>,
-        shared_checkpoint: Option<&str>,
+        shared_operation: Option<&str>,
     ) -> Result<(Vec<String>, Option<String>), BackendError> {
-        let path = "wiki/index.md";
+        let path = &issue.path;
         let expected = expected_hash.ok_or_else(|| {
             BackendError::new(
                 "LINT_FIX_HASH_REQUIRED",
@@ -472,17 +481,18 @@ impl LintService {
         })?;
         validate_scan_hash(issue, expected)?;
         context.resolve_wiki_write_path(path)?;
-        let new_contents = regenerate_index(context, self)?;
+        let new_contents = regenerate_index(context)?;
         let affected_paths = fix_affected_paths(context, path);
         let mut expected_after = self.capture_path_hashes(context, &affected_paths)?;
-        let checkpoint = self.resolve_checkpoint(
+        let checkpoint = self.resolve_operation(
             context,
             git_service,
             &affected_paths,
-            shared_checkpoint,
+            shared_operation,
             "Before applying wiki lint fix",
         )?;
         context.resolve_wiki_write_path(path)?;
+        Self::plan_version_write(context, checkpoint.as_deref(), path, &new_contents)?;
         self.file_store.write_markdown_checked(
             context,
             path,
@@ -491,10 +501,11 @@ impl LintService {
         )?;
         expected_after.insert(path.to_string(), Some(hash_text(&new_contents)));
         if let Err(error) = invalidate_graph_cache(context) {
-            return Err(if shared_checkpoint.is_none() {
+            return Err(if shared_operation.is_none() {
                 Self::rollback_after_failure_guarded(
                     context,
                     git_service,
+                    checkpoint.as_deref(),
                     &affected_paths,
                     &expected_after,
                     error,
@@ -503,12 +514,15 @@ impl LintService {
                 attach_post_write_hashes(error, &expected_after)
             });
         }
-        expected_after.insert(".app/graph-cache.json".into(), None);
+        if let Some(path) = context.layout.graph_cache_path.as_deref() {
+            expected_after.insert(path.into(), None);
+        }
         if let Err(error) = append_fix_log(context, path, "regenerated index") {
-            return Err(if shared_checkpoint.is_none() {
+            return Err(if shared_operation.is_none() {
                 Self::rollback_after_failure_guarded(
                     context,
                     git_service,
+                    checkpoint.as_deref(),
                     &affected_paths,
                     &expected_after,
                     error,
@@ -517,10 +531,9 @@ impl LintService {
                 attach_post_write_hashes(error, &expected_after)
             });
         }
-        expected_after.insert(
-            "wiki/log.md".into(),
-            hash_relative_path(context, "wiki/log.md"),
-        );
+        if let Some(path) = context.layout.activity_log_path.as_deref() {
+            expected_after.insert(path.into(), hash_relative_path(context, path));
+        }
 
         Ok((affected_paths, checkpoint))
     }
@@ -584,7 +597,7 @@ impl LintService {
         context: &ProjectContext,
         issue: &LintIssue,
     ) -> Result<(String, String, String), BackendError> {
-        let path = "wiki/index.md";
+        let path = &issue.path;
         let expected = issue.scan_hash.as_deref().ok_or_else(|| {
             BackendError::new(
                 "LINT_FIX_SCAN_BASELINE_REQUIRED",
@@ -608,7 +621,7 @@ impl LintService {
             })));
         }
         let before = self.file_store.read_markdown(context, path)?;
-        let after = regenerate_index(context, self)?;
+        let after = regenerate_index(context)?;
         let diff = render_text_diff(path, &before, &after);
         Ok((before, after, diff))
     }
@@ -617,49 +630,49 @@ impl LintService {
     /// checkpoint (batch flow) or create a per-path scoped checkpoint
     /// (single-fix flow). A missing repo surfaces as an error so the user can
     /// init Git rather than lose the prior content to an un-checkpointed write.
-    fn resolve_checkpoint(
+    fn resolve_operation(
         &self,
         context: &ProjectContext,
-        git_service: &GitService,
+        _git_service: &GitService,
         paths: &[String],
-        shared_checkpoint: Option<&str>,
-        message: &str,
+        shared_operation: Option<&str>,
+        _message: &str,
     ) -> Result<Option<String>, BackendError> {
-        if let Some(hash) = shared_checkpoint {
-            return Ok(Some(hash.to_string()));
-        }
-        let checkpoint = git_service
-            .create_scoped_checkpoint(
-                context,
-                crate::models::git::CheckpointPurpose::HighRiskOperation,
-                message,
-                paths,
-            )
-            .map_err(|err| {
-                BackendError::new(
-                    "GIT_CHECKPOINT_FAILED",
-                    format!(
-                        "Could not create a Git checkpoint before fixing: {}",
-                        err.message
-                    ),
-                    true,
-                    true,
-                )
-                .with_details(serde_json::json!({ "paths": paths }))
-            })?;
-        Ok(checkpoint.commit_hash)
+        if let Some(id) = shared_operation { return Ok(Some(id.to_string())); }
+        let content_paths = paths.iter().filter(|path| Some(path.as_str()) != context.layout.activity_log_path.as_deref() && Some(path.as_str()) != context.layout.graph_cache_path.as_deref() && validate_fix_path(context, path).is_ok()).cloned().collect::<Vec<_>>();
+        let record = VersionHistoryService.begin(context, VersionOperationKind::LintFix, &content_paths, None)?;
+        Ok(Some(record.summary.operation_id))
     }
 
-    fn verify_local_fix(
+    fn plan_version_write(context: &ProjectContext, operation_id: Option<&str>, path: &str, contents: &str) -> Result<(), BackendError> {
+        if let Some(id) = operation_id {
+            let mut record = VersionHistoryService.load(context, id)?;
+            VersionHistoryService.plan_write(context, &mut record, path, Some(contents.as_bytes()))?;
+        }
+        Ok(())
+    }
+
+    fn operation_checkpoint(context: &ProjectContext, operation_id: Option<&str>) -> Result<Option<String>, BackendError> {
+        operation_id.map(|id| VersionHistoryService.load(context, id).map(|record| record.before)).transpose()
+    }
+
+    fn verify_local_fixes(
         &self,
         context: &ProjectContext,
-        issue: &LintIssue,
+        issues: &[&LintIssue],
     ) -> Result<(), BackendError> {
+        if issues.is_empty() {
+            return Ok(());
+        }
         let report = self.run_local_lint(context, &crate::services::SearchService::default())?;
-        if report
+        let remaining_ids = report
             .issues
             .iter()
-            .any(|candidate| candidate.id == issue.id)
+            .map(|issue| issue.id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        if let Some(issue) = issues
+            .iter()
+            .find(|issue| remaining_ids.contains(issue.id.as_str()))
         {
             return Err(BackendError::new(
                 "LINT_FIX_VERIFY_FAILED",
@@ -693,84 +706,36 @@ impl LintService {
 
     fn rollback_after_failure_guarded(
         context: &ProjectContext,
-        git_service: &GitService,
+        _git_service: &GitService,
+        operation_id: Option<&str>,
         paths: &[String],
-        expected_after: &HashMap<String, Option<String>>,
+        _expected_after: &HashMap<String, Option<String>>,
         error: BackendError,
     ) -> BackendError {
-        let mut rollback_paths = Vec::new();
-        let mut preserved_paths = Vec::new();
-        for path in paths {
-            let current = hash_relative_path(context, path);
-            if expected_after.get(path) == Some(&current) {
-                rollback_paths.push(path.clone());
-            } else {
-                preserved_paths.push(path.clone());
-            }
-        }
-        let original_code = error.code.clone();
-        let original_message = error.message.clone();
-        match git_service.rollback_paths_to_head_preserving_ignored(context, &rollback_paths, &[]) {
-            Ok(()) => BackendError::new(
+        let Some(id) = operation_id else { return error; };
+        match VersionHistoryService.rollback_failed(context, id) {
+            Ok(preserved) => BackendError::new(
                 "LINT_FIX_ROLLED_BACK",
-                format!("Lint fix failed and was rolled back: {original_message}"),
-                true,
-                true,
-            )
-            .with_details(serde_json::json!({
-                "originalCode": original_code,
-                "affectedPaths": paths,
-                "rollbackPaths": rollback_paths,
-                "preservedExternalPaths": preserved_paths,
-                "rollback": "succeeded",
-            })),
-            Err(rollback_error) => BackendError::new(
-                "LINT_FIX_ROLLBACK_FAILED",
-                format!(
-                    "Lint fix failed ({original_code}) and rollback also failed: {}",
-                    rollback_error.message
-                ),
-                true,
-                true,
-            )
-            .with_details(serde_json::json!({
-                "originalCode": original_code,
-                "affectedPaths": paths,
-                "rollbackPaths": rollback_paths,
-                "preservedExternalPaths": preserved_paths,
-                "rollback": "failed",
-                "rollbackError": rollback_error.message,
-            })),
+                format!("Lint fix failed; its owned changes were restored: {}", error.message), true, true,
+            ).with_details(serde_json::json!({"originalCode":error.code,"operationId":id,"affectedPaths":paths,"preservedExternalPaths":preserved,"rollback":"succeeded"})),
+            Err(rollback) => BackendError::new(
+                "LINT_FIX_ROLLBACK_FAILED", format!("The repair needs recovery: {}", rollback.message), true, true,
+            ).with_details(serde_json::json!({"originalCode":error.code,"operationId":id,"affectedPaths":paths,"rollback":"failed","rollbackError":rollback.message})),
         }
     }
 
     fn finalize_result(
         &self,
         context: &ProjectContext,
-        git_service: &GitService,
-        paths: &[String],
-        message: &str,
+        _git_service: &GitService,
+        _paths: &[String],
+        _message: &str,
+        operation_id: Option<&str>,
     ) -> Result<Option<String>, BackendError> {
-        if paths.is_empty() {
-            return Ok(None);
-        }
-        let checkpoint = git_service
-            .create_scoped_checkpoint(
-                context,
-                crate::models::git::CheckpointPurpose::FinalResult,
-                message,
-                paths,
-            )
-            .map_err(|err| {
-                BackendError::new(
-                    "GIT_FINAL_COMMIT_FAILED",
-                    format!("Could not commit the verified lint result: {}", err.message),
-                    true,
-                    true,
-                )
-                .with_details(serde_json::json!({ "affectedPaths": paths }))
-            })?;
-        Ok(checkpoint.commit_hash)
+        let Some(id) = operation_id else { return Ok(None); };
+        let mut record = VersionHistoryService.load(context, id)?;
+        VersionHistoryService.finish(context, &mut record)?;
+        Ok(record.after)
     }
 
     /// Apply (or plan) fixes for many issues in one shot (PRD-LINT-003). A
@@ -794,20 +759,9 @@ impl LintService {
                 true,
             )
         })?;
-        // Defense in depth: validate every path is in-scope before touching
-        // anything, so a single out-of-scope payload can't slip through once
-        // other writes have started.
+        // Validate the complete payload before the shared checkpoint or writes.
         for issue in issues {
-            if !issue.path.starts_with("wiki/") || issue.path.contains("..") {
-                return Err(BackendError::new(
-                    "LINT_FIX_PATH_OUT_OF_SCOPE",
-                    "Lint fixes may only target pages inside the wiki/ folder.",
-                    true,
-                    true,
-                )
-                .with_details(serde_json::json!({ "path": issue.path })));
-            }
-            context.resolve_wiki_write_path(&issue.path)?;
+            validate_fix_path(context, &issue.path)?;
             match issue.issue_type {
                 LintIssueType::MissingFrontmatter => {
                     if issue.fixability != crate::models::lint::Fixability::Safe {
@@ -818,7 +772,7 @@ impl LintService {
                             true,
                         ));
                     }
-                    validate_issue_shape(issue)?;
+                    validate_issue_shape(context, issue)?;
                     if let Some(expected) = expected_hashes.get(&issue.path) {
                         validate_scan_hash(issue, expected)?;
                     }
@@ -832,7 +786,7 @@ impl LintService {
                             true,
                         ));
                     }
-                    validate_issue_shape(issue)?;
+                    validate_issue_shape(context, issue)?;
                     if issue.scan_hash.is_none() {
                         return Err(BackendError::new(
                             "LINT_FIX_SCAN_BASELINE_REQUIRED",
@@ -884,28 +838,10 @@ impl LintService {
         // One checkpoint over every ready safe path, created before any write.
         // Git is the data-safety boundary, so a checkpoint failure aborts the
         // batch wholesale rather than writing without a rollback point.
-        let shared_checkpoint: Option<String> = if safe_ready.is_empty() {
+        let shared_operation: Option<String> = if safe_ready.is_empty() {
             None
         } else {
-            let checkpoint = git_service
-                .create_scoped_checkpoint(
-                    context,
-                    crate::models::git::CheckpointPurpose::HighRiskOperation,
-                    "Before applying batch wiki lint fixes",
-                    &safe_checkpoint_paths,
-                )
-                .map_err(|err| {
-                    BackendError::new(
-                        "GIT_CHECKPOINT_FAILED",
-                        format!(
-                            "Could not create a Git checkpoint before batch fixing: {}",
-                            err.message
-                        ),
-                        true,
-                        true,
-                    )
-                })?;
-            checkpoint.commit_hash
+            self.resolve_operation(context, git_service, &safe_checkpoint_paths, None, "Before batch lint fixes")?
         };
 
         for issue in &safe_ready {
@@ -915,13 +851,14 @@ impl LintService {
                 git_service,
                 issue,
                 expected,
-                shared_checkpoint.as_deref(),
+                shared_operation.as_deref(),
             ) {
                 Ok((affected_paths, _)) => {
                     let hashes = self.capture_path_hashes(context, &affected_paths).map_err(|error| {
                         Self::rollback_after_failure_guarded(
                             context,
                             git_service,
+                            shared_operation.as_deref(),
                             &safe_checkpoint_paths,
                             &batch_post_write_hashes,
                             BackendError::new(
@@ -940,23 +877,14 @@ impl LintService {
                         )
                     })?;
                     batch_post_write_hashes.extend(hashes);
-                    if let Err(err) = self.verify_local_fix(context, issue) {
-                        return Err(Self::rollback_after_failure_guarded(
-                            context,
-                            git_service,
-                            &safe_checkpoint_paths,
-                            &batch_post_write_hashes,
-                            err,
-                        ));
-                    } else {
-                        applied.push(LintFixOutcome {
-                            kind: LintFixOutcomeKind::Applied,
-                            affected_paths,
-                            checkpoint: shared_checkpoint.clone(),
-                            final_commit: None,
-                            pending_action: None,
-                        });
-                    }
+                    applied.push(LintFixOutcome {
+                        kind: LintFixOutcomeKind::Applied,
+                        affected_paths,
+                        checkpoint: Self::operation_checkpoint(context, shared_operation.as_deref())?,
+                        operation_id: shared_operation.clone(),
+                        final_commit: None,
+                        pending_action: None,
+                    });
                 }
                 Err(err) => {
                     if let Some(post_write_hashes) = err
@@ -989,6 +917,7 @@ impl LintService {
                             let rollback_error = Self::rollback_after_failure_guarded(
                                 context,
                                 git_service,
+                                shared_operation.as_deref(),
                                 &prior_paths,
                                 &batch_post_write_hashes,
                                 err.clone(),
@@ -1010,12 +939,26 @@ impl LintService {
                     return Err(Self::rollback_after_failure_guarded(
                         context,
                         git_service,
+                        shared_operation.as_deref(),
                         &safe_checkpoint_paths,
                         &batch_post_write_hashes,
                         err,
                     ));
                 }
             }
+        }
+
+        // Verify the completed batch once, against the final page set. Every
+        // successful write still shares the same guarded rollback boundary.
+        if let Err(error) = self.verify_local_fixes(context, &safe_ready) {
+            return Err(Self::rollback_after_failure_guarded(
+                context,
+                git_service,
+                shared_operation.as_deref(),
+                &safe_checkpoint_paths,
+                &batch_post_write_hashes,
+                error,
+            ));
         }
 
         let mut confirmation_paths = std::collections::HashSet::new();
@@ -1071,13 +1014,12 @@ impl LintService {
                             issue: issue.clone(),
                             pending_action: {
                                 let mut action = index_drift_pending_action(
-                                    "wiki/index.md",
+                                    &issue.path,
                                     &target,
                                     &issue.message,
                                     Some(preview),
                                 );
-                                action.affected_paths =
-                                    fix_affected_paths(context, "wiki/index.md");
+                                action.affected_paths = fix_affected_paths(context, &issue.path);
                                 action
                             },
                         }),
@@ -1108,12 +1050,14 @@ impl LintService {
             git_service,
             &final_paths,
             "After applying batch wiki lint fixes",
+            shared_operation.as_deref(),
         ) {
             Ok(commit) => commit,
             Err(error) => {
                 return Err(Self::rollback_after_failure_guarded(
                     context,
                     git_service,
+                    shared_operation.as_deref(),
                     &safe_checkpoint_paths,
                     &batch_post_write_hashes,
                     error,
@@ -1125,7 +1069,8 @@ impl LintService {
         }
 
         Ok(LintBatchOutcome {
-            checkpoint: shared_checkpoint,
+            checkpoint: Self::operation_checkpoint(context, shared_operation.as_deref())?,
+            operation_id: shared_operation,
             final_commit,
             applied,
             needs_confirmation,
@@ -1235,22 +1180,28 @@ fn validate_scan_hash(issue: &LintIssue, expected: &str) -> Result<(), BackendEr
     Ok(())
 }
 
-fn validate_issue_shape(issue: &LintIssue) -> Result<(), BackendError> {
+fn validate_issue_shape(context: &ProjectContext, issue: &LintIssue) -> Result<(), BackendError> {
     let target = issue.target.as_deref().unwrap_or_default();
     let valid = issue.source == crate::models::lint::LintIssueSource::Local
         && match issue.issue_type {
             LintIssueType::MissingFrontmatter => {
-                issue.path != "wiki/index.md"
-                    && issue.path != "wiki/log.md"
+                ![
+                    context.layout.wiki_index_path.as_deref(),
+                    context.layout.wiki_overview_path.as_deref(),
+                    context.layout.activity_log_path.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|path| path == issue.path)
                     && issue.id == format!("missing_frontmatter:{}", issue.path)
             }
             LintIssueType::DeadLink => {
                 !target.is_empty() && issue.id == format!("dead_link:{}:{target}", issue.path)
             }
             LintIssueType::IndexDrift => {
-                issue.path == "wiki/index.md"
+                Some(issue.path.as_str()) == context.layout.wiki_index_path.as_deref()
                     && !target.is_empty()
-                    && issue.id == format!("index_drift:wiki/index.md:{target}")
+                    && issue.id == format!("index_drift:{}:{target}", issue.path)
             }
             _ => false,
         };
@@ -1266,19 +1217,18 @@ fn validate_issue_shape(issue: &LintIssue) -> Result<(), BackendError> {
     .with_details(serde_json::json!({ "issueId": issue.id, "path": issue.path })))
 }
 
-fn regenerate_index(
-    context: &ProjectContext,
-    service: &LintService,
-) -> Result<String, BackendError> {
-    // Re-scan to get the current page set. `FileStore` is private to the
-    // module; reach it through a fresh SearchService-free read of the tree by
-    // listing markdown files directly.
-    let store = FileStore;
-    let files = store.list_markdown_files(&context.wiki_dir)?;
+fn regenerate_index(context: &ProjectContext) -> Result<String, BackendError> {
+    // Follow the same readable roots and exclusions as the Wiki catalog.
+    let files = context.list_markdown_files_for_roles(&[
+        crate::models::layout::ProjectMarkdownRootRole::Wiki,
+        crate::models::layout::ProjectMarkdownRootRole::Mixed,
+    ])?;
     let mut pages: Vec<(String, String)> = Vec::new();
     for absolute in &files {
         let rel = context.to_project_relative(absolute)?;
-        if rel == "wiki/index.md" || rel == "wiki/log.md" {
+        if Some(rel.as_str()) == context.layout.wiki_index_path.as_deref()
+            || Some(rel.as_str()) == context.layout.activity_log_path.as_deref()
+        {
             continue;
         }
         let raw = std::fs::read_to_string(absolute).map_err(|error| {
@@ -1301,11 +1251,9 @@ fn regenerate_index(
         pages.push((rel, title));
     }
     pages.sort();
-    let _ = service; // service param kept for future reuse / symmetry.
     let mut body = String::from("# Index\n\nAutomatically generated by the lint fix flow.\n\n");
     for (rel, title) in &pages {
-        let stem = file_stem(rel).unwrap_or_else(|| rel.clone());
-        body.push_str(&format!("- [[{stem}]] — {}\n", markdown_label(title)));
+        body.push_str(&format!("- [[{rel}]] — {}\n", markdown_label(title)));
     }
     Ok(body)
 }
@@ -1316,13 +1264,13 @@ fn dead_link_pending_action(path: &str, target: &str) -> PendingAction {
         action_type: PendingActionType::AgentAutoFix,
         title: "Remove dead wikilink".into(),
         message: format!(
-            "Remove the unresolved `[[{target}]]` occurrence reported in {path}; the target is rechecked before writing."
+            "Remove every unresolved `[[{target}]]` link reported in {path}; the target is rechecked before writing."
         ),
         risk_level: RiskLevel::High,
         affected_paths: vec![path.into()],
         preview: Some(ActionPreview {
             summary: format!(
-                "Replace the reported `[[{target}]]` occurrence with plain text `{target}` and create a Git checkpoint."
+                "Replace all links to `{target}` on this page with their visible labels and create a Git checkpoint."
             ),
             before: Some(format!("…[[{target}]]…")),
             after: Some(format!("…{target}…")),
@@ -1344,7 +1292,7 @@ fn dead_link_pending_action_with_preview(
     if let Some((before, after, diff)) = preview {
         action.preview = Some(ActionPreview {
             summary: format!(
-                "Replace the reported [[{target}]] occurrence with plain text {target} and create a Git checkpoint."
+                "Replace all links to {target} on this page with their visible labels and create a Git checkpoint."
             ),
             before: Some(before),
             after: Some(after),
@@ -1378,9 +1326,9 @@ fn index_drift_pending_action(
                 )
             });
             ActionPreview {
-                summary:
-                    "Overwrite wiki/index.md with an auto-generated page list under a Git checkpoint."
-                        .into(),
+                summary: format!(
+                    "Overwrite {path} with an auto-generated page list under a Git checkpoint."
+                ),
                 before: Some(before),
                 after: Some(after),
                 diff: Some(diff),
@@ -1395,19 +1343,18 @@ fn lint_confirmation_expiry() -> String {
     (chrono::Utc::now() + chrono::Duration::minutes(15)).to_rfc3339()
 }
 
-/// Replace the first matching `[[target]]`/`[[target|alias]]` occurrence with
-/// its visible label, leaving every other occurrence untouched. A finding is
-/// one navigation edge, so replacing the whole page would exceed the reported
-/// mutation and make the confirmation preview misleading. Operates on raw
-/// markdown so the frontmatter block is preserved.
+/// Replace every body link to the reported target with its visible label.
+/// Findings are deduplicated by page and target, so a successful repair must
+/// remove every occurrence of that edge. Preserve the frontmatter verbatim.
 fn strip_wikilink(raw: &str, target: &str) -> String {
     let wanted = target
         .trim()
         .replace(char::from(92), "/")
         .to_ascii_lowercase();
+    let split = split_frontmatter(raw);
+    let mut cursor = raw.len() - split.body.len();
     let mut out = String::with_capacity(raw.len());
-    let mut cursor = 0;
-    let mut replaced = false;
+    out.push_str(&raw[..cursor]);
     while let Some(relative_start) = raw[cursor..].find("[[") {
         let start = cursor + relative_start;
         out.push_str(&raw[cursor..start]);
@@ -1425,9 +1372,8 @@ fn strip_wikilink(raw: &str, target: &str) -> String {
             .trim()
             .replace(char::from(92), "/")
             .to_ascii_lowercase();
-        if !replaced && normalized_base == wanted {
-            out.push_str(if alias.is_empty() { target } else { alias });
-            replaced = true;
+        if normalized_base == wanted {
+            out.push_str(if alias.is_empty() { base.trim() } else { alias });
         } else {
             out.push_str(&raw[start..end + 2]);
         }
@@ -1517,38 +1463,93 @@ fn page_type_name(page_type: WikiPageType) -> &'static str {
 
 fn fix_affected_paths(context: &ProjectContext, path: &str) -> Vec<String> {
     let mut paths = vec![path.to_string()];
-    if context
-        .resolve_wiki_write_path("wiki/log.md")
-        .is_ok_and(|path| path.exists())
+    for additional in [
+        context.layout.activity_log_path.as_deref(),
+        context.layout.graph_cache_path.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
     {
-        paths.push("wiki/log.md".to_string());
-    }
-    if context
-        .resolve_project_write_path(".app/graph-cache.json")
-        .is_ok_and(|path| path.exists())
-    {
-        paths.push(".app/graph-cache.json".to_string());
+        if additional != path
+            && context
+                .resolve_project_write_path(additional)
+                .is_ok_and(|path| path.exists())
+        {
+            paths.push(additional.to_string());
+        }
     }
     paths
+}
+
+fn validate_fix_path(context: &ProjectContext, path: &str) -> Result<(), BackendError> {
+    context.resolve_wiki_write_path(path).map_err(|error| {
+        BackendError::new(
+            "LINT_FIX_PATH_OUT_OF_SCOPE",
+            "Lint fixes must stay inside the layout's writable Wiki root.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({ "path": path, "cause": error }))
+    })?;
+    let path_key = path.nfc().flat_map(char::to_lowercase).collect::<String>();
+    let within = |root: &str| {
+        let root = root.nfc().flat_map(char::to_lowercase).collect::<String>();
+        root == "."
+            || path_key == root
+            || path_key.starts_with(&format!("{}/", root.trim_end_matches('/')))
+    };
+    let protected = [
+        Some("raw"),
+        context.layout.source_write_root.as_deref(),
+        context.layout.app_state_root.as_deref(),
+        context.layout.evidence_root.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(within)
+        || context.layout.markdown_roots.iter().any(|root| {
+            root.role == crate::models::layout::ProjectMarkdownRootRole::Source
+                && within(&root.path)
+        });
+    if protected
+        || path.contains('\\')
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+        || !path.to_ascii_lowercase().ends_with(".md")
+    {
+        return Err(BackendError::new(
+            "LINT_FIX_PATH_OUT_OF_SCOPE",
+            "Lint fixes may only target writable Wiki Markdown, never Source or app data.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({ "path": path })));
+    }
+    Ok(())
 }
 
 fn target_exists(context: &ProjectContext, target: &str) -> Result<bool, BackendError> {
     let normalized_target = target
         .trim()
         .replace('\\', "/")
-        .trim_start_matches("wiki/")
         .trim_end_matches(".md")
         .to_ascii_lowercase();
     if normalized_target.is_empty() {
         return Ok(false);
     }
-    for absolute in FileStore.list_markdown_files(&context.wiki_dir)? {
+    for absolute in context.list_markdown_files_for_roles(&[
+        crate::models::layout::ProjectMarkdownRootRole::Wiki,
+        crate::models::layout::ProjectMarkdownRootRole::Source,
+        crate::models::layout::ProjectMarkdownRootRole::Mixed,
+    ])? {
         let relative = context.to_project_relative(&absolute)?;
-        let candidate = relative
-            .trim_start_matches("wiki/")
-            .trim_end_matches(".md")
-            .to_ascii_lowercase();
-        if candidate == normalized_target {
+        let candidate = relative.trim_end_matches(".md").to_ascii_lowercase();
+        let wiki_relative =
+            context.layout.wiki_write_root.as_deref().and_then(|root| {
+                candidate.strip_prefix(&format!("{}/", root.to_ascii_lowercase()))
+            });
+        if candidate == normalized_target || wiki_relative == Some(normalized_target.as_str()) {
             return Ok(true);
         }
         let raw = std::fs::read_to_string(&absolute).map_err(|error| {
@@ -1566,7 +1567,8 @@ fn target_exists(context: &ProjectContext, target: &str) -> Result<bool, Backend
         let matches_label = |value: &str| {
             value.trim().trim_end_matches(".md").to_ascii_lowercase() == normalized_target
         };
-        if matches_label(&title)
+        if matches_label(&stem)
+            || matches_label(&title)
             || frontmatter
                 .get_list("aliases")
                 .iter()
@@ -1582,7 +1584,10 @@ fn target_exists(context: &ProjectContext, target: &str) -> Result<bool, Backend
 }
 
 fn invalidate_graph_cache(context: &ProjectContext) -> Result<(), BackendError> {
-    let path = context.resolve_project_write_path(".app/graph-cache.json")?;
+    let Some(relative_path) = context.layout.graph_cache_path.as_deref() else {
+        return Ok(());
+    };
+    let path = context.resolve_project_write_path(relative_path)?;
     if path.exists() {
         remove_project_file(&context.root, &path).map_err(|err| {
             BackendError::new(
@@ -1601,7 +1606,10 @@ fn append_fix_log(
     relative_path: &str,
     action: &str,
 ) -> Result<(), BackendError> {
-    let log_path = context.resolve_wiki_write_path("wiki/log.md")?;
+    let Some(relative_log_path) = context.layout.activity_log_path.as_deref() else {
+        return Ok(());
+    };
+    let log_path = context.resolve_project_write_path(relative_log_path)?;
     if !log_path.exists() {
         return Ok(());
     }
@@ -1829,8 +1837,325 @@ mod tests {
         let index = std::fs::read_to_string(context.resolve_project_path("wiki/index.md").unwrap())
             .unwrap();
         assert!(!index.contains("[[ghost]]"));
-        assert!(index.contains("[[agent]]"));
-        assert!(index.contains("[[react]]"));
+        assert!(index.contains("[[wiki/concepts/agent.md]]"));
+        assert!(index.contains("[[wiki/concepts/react.md]]"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn repeated_dead_link_fix_preserves_frontmatter_and_unrelated_links() {
+        let (context, root) = tmp_context("fix-repeated-deadlink");
+        let path = "wiki/concepts/agent.md";
+        let original = "---\ntitle: Agent\ntype: concept\nnote: '[[ghost]]'\n---\n\n# Agent\n[[ghost]] and [[Ghost#intro|幽灵]] and [[react]].";
+        write_file(&context, path, original);
+        write_file(
+            &context,
+            "wiki/concepts/react.md",
+            "---\ntitle: React\ntype: concept\n---\n# React",
+        );
+        let git = GitService;
+        git.initialize_repository(&context, "init").unwrap();
+        let service = LintService::default();
+        let report = service
+            .run_local_lint(&context, &SearchService::default())
+            .unwrap();
+        let issue = report
+            .issues
+            .iter()
+            .find(|issue| issue.issue_type == LintIssueType::DeadLink)
+            .unwrap();
+        let preview = service
+            .apply_fix(&context, &git, issue, false, None)
+            .unwrap();
+        let expected = original.replace("[[ghost]] and [[Ghost#intro|幽灵]]", "ghost and 幽灵");
+        assert_eq!(
+            preview
+                .pending_action
+                .unwrap()
+                .preview
+                .unwrap()
+                .after
+                .as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(std::fs::read_to_string(root.join(path)).unwrap(), original);
+        let applied = service
+            .apply_fix(&context, &git, issue, true, issue.scan_hash.as_deref())
+            .unwrap();
+        assert_eq!(applied.kind, LintFixOutcomeKind::Applied);
+        assert_eq!(std::fs::read_to_string(root.join(path)).unwrap(), expected);
+        let refreshed = service
+            .run_local_lint(&context, &SearchService::default())
+            .unwrap();
+        assert!(!refreshed
+            .issues
+            .iter()
+            .any(|candidate| candidate.id == issue.id));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn custom_layout_fixes_use_current_index_log_and_cache_paths() {
+        use crate::models::layout::{ProjectMarkdownRoot, ProjectMarkdownRootRole};
+        let (mut context, root) = tmp_context("fix-custom-layout");
+        context.layout.wiki_write_root = Some("知识库".into());
+        context.layout.source_write_root = Some("知识库/原文".into());
+        context.layout.wiki_index_path = Some("知识库/目录.md".into());
+        context.layout.wiki_overview_path = None;
+        context.layout.activity_log_path = Some(".app/compat/活动.md".into());
+        context.layout.graph_cache_path = Some(".app/compat/graph.json".into());
+        context.layout.markdown_roots = vec![
+            ProjectMarkdownRoot {
+                path: "知识库".into(),
+                role: ProjectMarkdownRootRole::Wiki,
+                exclude: None,
+            },
+            ProjectMarkdownRoot {
+                path: "知识库/原文".into(),
+                role: ProjectMarkdownRootRole::Source,
+                exclude: None,
+            },
+        ];
+        context.wiki_dir = root.join("知识库");
+        let path = "知识库/concepts/版本v1..v2.md";
+        write_file(&context, path, "# 版本\n");
+        write_file(&context, "知识库/目录.md", "# 目录\n[[ghost]]\n");
+        write_file(&context, ".app/compat/活动.md", "# 活动\n");
+        write_file(&context, ".app/compat/graph.json", "{}");
+        write_file(&context, "知识库/原文/source.md", "# Source\n");
+        let git = GitService;
+        git.initialize_repository(&context, "init").unwrap();
+        let service = LintService::default();
+        let report = service
+            .run_local_lint(&context, &SearchService::default())
+            .unwrap();
+        let issue = report
+            .issues
+            .iter()
+            .find(|issue| {
+                issue.path == path && issue.issue_type == LintIssueType::MissingFrontmatter
+            })
+            .unwrap();
+        assert_eq!(issue.fixability, Fixability::Safe);
+        let applied = service
+            .apply_fix(&context, &git, issue, false, issue.scan_hash.as_deref())
+            .unwrap();
+        assert_eq!(applied.kind, LintFixOutcomeKind::Applied);
+        assert!(std::fs::read_to_string(root.join(path))
+            .unwrap()
+            .contains("type: concept"));
+        assert!(!root.join(".app/compat/graph.json").exists());
+        assert!(std::fs::read_to_string(root.join(".app/compat/活动.md"))
+            .unwrap()
+            .contains("added frontmatter"));
+        let report = service
+            .run_local_lint(&context, &SearchService::default())
+            .unwrap();
+        let issue = report
+            .issues
+            .iter()
+            .find(|issue| issue.issue_type == LintIssueType::IndexDrift)
+            .unwrap();
+        let applied = service
+            .apply_fix(&context, &git, issue, true, issue.scan_hash.as_deref())
+            .unwrap();
+        assert_eq!(applied.kind, LintFixOutcomeKind::Applied);
+        let index = std::fs::read_to_string(root.join("知识库/目录.md")).unwrap();
+        assert!(index.contains("[[知识库/concepts/版本v1..v2.md]]"));
+        assert!(!index.contains("[[ghost]]"));
+        assert!(!root.join("wiki/index.md").exists());
+        assert!(!root.join("wiki/log.md").exists());
+        let protected = report
+            .issues
+            .iter()
+            .find(|issue| {
+                issue.path == "知识库/原文/source.md"
+                    && issue.issue_type == LintIssueType::MissingFrontmatter
+            })
+            .unwrap();
+        assert!(service
+            .apply_fix(
+                &context,
+                &git,
+                protected,
+                false,
+                protected.scan_hash.as_deref()
+            )
+            .is_err());
+        assert_eq!(
+            std::fs::read_to_string(root.join("知识库/原文/source.md")).unwrap(),
+            "# Source\n"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn index_fix_respects_layout_exclusions_and_additional_readable_roots() {
+        use crate::models::layout::{ProjectMarkdownRoot, ProjectMarkdownRootRole};
+        let (mut context, root) = tmp_context("fix-index-layout-scope");
+        context.layout.markdown_roots = vec![
+            ProjectMarkdownRoot {
+                path: "wiki".into(),
+                role: ProjectMarkdownRootRole::Wiki,
+                exclude: Some(vec!["wiki/排除".into()]),
+            },
+            ProjectMarkdownRoot {
+                path: "附加Wiki".into(),
+                role: ProjectMarkdownRootRole::Wiki,
+                exclude: None,
+            },
+            ProjectMarkdownRoot {
+                path: "材料".into(),
+                role: ProjectMarkdownRootRole::Mixed,
+                exclude: None,
+            },
+        ];
+        write_file(&context, "wiki/index.md", "# Index\n[[ghost]]\n");
+        write_file(&context, "wiki/log.md", "# Log\n");
+        for path in ["wiki/concepts/main.md", "附加Wiki/extra.md", "材料/note.md"] {
+            write_file(&context, path, "---\ntype: concept\n---\n# Page\n");
+        }
+        write_file(&context, "wiki/排除/private.md", "excluded");
+        std::fs::write(root.join("wiki/排除/private.md"), [0xff]).unwrap();
+        let git = GitService;
+        git.initialize_repository(&context, "init").unwrap();
+        let service = LintService::default();
+        let report = service
+            .run_local_lint(&context, &SearchService::default())
+            .unwrap();
+        let issue = report
+            .issues
+            .iter()
+            .find(|issue| issue.issue_type == LintIssueType::IndexDrift)
+            .unwrap();
+        let preview = service
+            .apply_fix(&context, &git, issue, false, None)
+            .unwrap();
+        let preview_after = preview
+            .pending_action
+            .unwrap()
+            .preview
+            .unwrap()
+            .after
+            .unwrap();
+        let applied = service
+            .apply_fix(&context, &git, issue, true, issue.scan_hash.as_deref())
+            .unwrap();
+        assert_eq!(applied.kind, LintFixOutcomeKind::Applied);
+        let index = std::fs::read_to_string(root.join("wiki/index.md")).unwrap();
+        assert_eq!(index, preview_after);
+        for path in ["wiki/concepts/main.md", "附加Wiki/extra.md", "材料/note.md"] {
+            assert!(index.contains(&format!("[[{path}]]")), "{path}");
+        }
+        assert!(!index.contains("排除"));
+        assert!(!index.contains("[[wiki/index.md]]"));
+        assert!(!index.contains("[[wiki/log.md]]"));
+        assert_eq!(
+            std::fs::read(root.join("wiki/排除/private.md")).unwrap(),
+            [0xff]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn source_path_aliases_cannot_bypass_fix_protection() {
+        let (context, root) = tmp_context("fix-source-alias");
+        write_file(&context, "wiki/sources/original.md", "# Source\n");
+        for path in [
+            "wiki/sources/original.md",
+            "wiki/SOURCES/original.md",
+            "wiki/./sources/original.md",
+            "wiki//sources/original.md",
+            "wiki\\sources\\original.md",
+            "wiki/../raw/original.md",
+        ] {
+            assert!(super::validate_fix_path(&context, path).is_err(), "{path}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn batch_verification_failure_rolls_back_every_applied_page() {
+        let (context, root) = tmp_context("batch-verify-rollback");
+        let paths = ["wiki/concepts/a.md", "wiki/concepts/b.md"];
+        for path in paths {
+            write_file(&context, path, "# Bare\n");
+        }
+        write_file(
+            &context,
+            "wiki/concepts/other.md",
+            "---\ntype: concept\n---\n# Other",
+        );
+        let git = GitService;
+        git.initialize_repository(&context, "init").unwrap();
+        let service = LintService::default();
+        let report = service
+            .run_local_lint(&context, &SearchService::default())
+            .unwrap();
+        let issues = report
+            .issues
+            .into_iter()
+            .filter(|issue| issue.issue_type == LintIssueType::MissingFrontmatter)
+            .collect::<Vec<_>>();
+        let hashes = issues
+            .iter()
+            .map(|issue| (issue.path.clone(), issue.scan_hash.clone().unwrap()))
+            .collect();
+        // The selected baselines stay valid, but final whole-vault verification fails.
+        std::fs::write(root.join("wiki/concepts/other.md"), [0xff]).unwrap();
+        let before = commit_count(&context);
+        let error = service
+            .apply_fixes_batch(&context, &git, &issues, &hashes)
+            .unwrap_err();
+        assert_eq!(error.code, "LINT_FIX_ROLLED_BACK");
+        for path in paths {
+            assert_eq!(
+                std::fs::read_to_string(root.join(path)).unwrap(),
+                "# Bare\n"
+            );
+        }
+        assert_eq!(
+            std::fs::read(root.join("wiki/concepts/other.md")).unwrap(),
+            [0xff]
+        );
+        assert_eq!(
+            commit_count(&context),
+            before,
+            "failed verification must not commit a result"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn log_write_failure_restores_content_and_keeps_derived_cache_invalidated() {
+        use std::os::unix::fs::PermissionsExt;
+        let (context, root) = tmp_context("fix-log-rollback");
+        write_file(&context, "wiki/concepts/bare.md", "# Bare\n");
+        write_file(&context, "wiki/log.md", "# Log\n");
+        write_file(&context, ".app/graph-cache.json", "{\"cached\": true}");
+        let git = GitService;
+        git.initialize_repository(&context, "init").unwrap();
+        let service = LintService::default();
+        let report = service
+            .run_local_lint(&context, &SearchService::default())
+            .unwrap();
+        let issue = report
+            .issues
+            .iter()
+            .find(|issue| issue.issue_type == LintIssueType::MissingFrontmatter)
+            .unwrap();
+        let log = root.join("wiki/log.md");
+        std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let result = service.apply_fix(&context, &git, issue, false, issue.scan_hash.as_deref());
+        std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let error = result.unwrap_err();
+        assert_eq!(error.code, "LINT_FIX_ROLLED_BACK");
+        assert_eq!(
+            std::fs::read_to_string(root.join(&issue.path)).unwrap(),
+            "# Bare\n"
+        );
+        assert!(!root.join(".app/graph-cache.json").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1841,7 +2166,7 @@ mod tests {
         assert_eq!(strip_wikilink("see [[ghost]].", "ghost"), "see ghost.");
         assert_eq!(
             strip_wikilink("see [[Ghost#intro]] and [[ghost#x|the ghost]].", "ghost"),
-            "see ghost and [[ghost#x|the ghost]]."
+            "see Ghost and the ghost."
         );
     }
 
@@ -1861,7 +2186,50 @@ mod tests {
     }
 
     #[test]
-    fn batch_fix_uses_one_shared_checkpoint_for_safe_writes() {
+    fn missing_git_preserves_recovery_code_and_files_for_single_and_batch_fixes() {
+        let (context, root) = tmp_context("fix-no-git");
+        let path = "wiki/concepts/未修复.md";
+        write_file(&context, path, "# Original\n");
+        let service = LintService::default();
+        let git = GitService;
+        let report = service
+            .run_local_lint(&context, &SearchService::default())
+            .unwrap();
+        let issue = report
+            .issues
+            .iter()
+            .find(|issue| {
+                issue.path == path && issue.issue_type == LintIssueType::MissingFrontmatter
+            })
+            .unwrap();
+        let error = service
+            .apply_fix(&context, &git, issue, false, issue.scan_hash.as_deref())
+            .unwrap_err();
+        assert_eq!(error.code, "GIT_REPOSITORY_MISSING");
+        let hashes = HashMap::from([(path.to_string(), issue.scan_hash.clone().unwrap())]);
+        let error = service
+            .apply_fixes_batch(&context, &git, std::slice::from_ref(issue), &hashes)
+            .unwrap_err();
+        assert_eq!(error.code, "GIT_REPOSITORY_MISSING");
+        assert_eq!(
+            std::fs::read_to_string(root.join(path)).unwrap(),
+            "# Original\n"
+        );
+        assert!(
+            !root.join(".git").exists(),
+            "fixes must not silently initialize a vault"
+        );
+        git.initialize_repository(&context, "init").unwrap();
+        let result = service
+            .apply_fixes_batch(&context, &git, std::slice::from_ref(issue), &hashes)
+            .unwrap();
+        assert_eq!(result.applied.len(), 1);
+        assert!(result.checkpoint.is_some());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn batch_fix_uses_one_shared_operation_for_safe_writes() {
         let (context, root) = tmp_context("batch-cp");
         write_file(&context, "wiki/concepts/bare.md", "# Bare\n\n[[react]].");
         write_file(&context, "wiki/concepts/bare2.md", "# Bare2\n\n[[react]].");
@@ -1909,8 +2277,8 @@ mod tests {
         assert_eq!(outcome.applied.len(), 2, "both safe fixes should apply");
         assert_eq!(
             after - before,
-            2,
-            "batch should create one pre-fix checkpoint and one final-result commit"
+            0,
+            "private operation history must preserve HEAD"
         );
         let cp = outcome.checkpoint.clone().expect("shared checkpoint hash");
         assert!(!cp.is_empty());

@@ -50,8 +50,8 @@ pub fn resolve_embed_sources(
 ) -> Result<(std::path::PathBuf, std::path::PathBuf, &'static str), String> {
     match mode {
         "" | "source" | "development" => Ok((
-            source_root.join("install-catalog.json"),
-            source_root.join("trusted-keys.json"),
+            staging.unwrap_or(source_root).join("install-catalog.json"),
+            staging.unwrap_or(source_root).join("trusted-keys.json"),
             DEVELOPMENT_MODE,
         )),
         "release" | "distributable" => {

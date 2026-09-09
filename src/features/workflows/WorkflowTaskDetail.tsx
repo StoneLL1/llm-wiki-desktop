@@ -7,9 +7,10 @@ import { useWorkflowStore, workflowOperationPending } from "../../stores/workflo
 import { useProjectStore } from "../../stores/projectStore";
 import { captureProjectScope, isProjectScopeCurrent } from "../../stores/projectScope";
 import { getWorkflowFileDiff, rollbackAgentLintRepair } from "../../services/workflowApi";
-import type { WorkflowRun } from "../../types/workflow";
+import type { WorkflowRun, WorkflowRunSummary } from "../../types/workflow";
 import type { WorkflowsController } from "./useWorkflowsController";
 import { WorkflowPipeline } from "./WorkflowPipeline";
+import { WorkflowUpdateHistory } from "./WorkflowUpdateHistory";
 import {
   presentWorkflowResult,
   workflowActionTypeKey,
@@ -28,7 +29,7 @@ export function WorkflowTaskDetail({
 }: {
   run: WorkflowRun;
   controller: WorkflowsController;
-  queuedRuns: WorkflowRun[];
+  queuedRuns: Array<Pick<WorkflowRunSummary, "taskId">>;
   onOpenLogs: (taskId: string) => void;
 }) {
   const { t, i18n } = useTranslation();
@@ -50,7 +51,7 @@ export function WorkflowTaskDetail({
     operations,
     run.result?.kind === "update_wiki"
       ? "health_check"
-      : run.result?.kind === "health_check" && run.result.errorCount === 0
+      : run.result?.kind === "health_check" && run.displayStatus === "completed" && run.result.errorCount === 0
         ? "generate_content"
         : null,
   );
@@ -73,7 +74,7 @@ export function WorkflowTaskDetail({
   const recommendedNext =
     run.result?.kind === "update_wiki"
       ? "health_check"
-      : run.result?.kind === "health_check" && run.result.errorCount === 0
+      : run.result?.kind === "health_check" && run.displayStatus === "completed" && run.result.errorCount === 0
         ? "generate_content"
         : null;
   const resultPresentation = presentWorkflowResult(run);
@@ -163,19 +164,29 @@ export function WorkflowTaskDetail({
 
   return (
     <div className="workflow-detail">
-      <button className="workflow-back" onClick={controller.backToOverview} type="button">
-        <ArrowLeft aria-hidden="true" size={14} />
-        {t("workflows.action.back")}
-      </button>
       <div className="workflow-detail__heading">
         <div>
           <h2 data-workflow-surface-title tabIndex={-1}>{t(workflowKindKey(run.kind))}</h2>
           <p><span className="font-mono">{run.taskId.slice(0, 8)}</span></p>
         </div>
         <WorkflowStatus className="workflow-detail__status" status={run.displayStatus} />
+        <button className="workflow-back" onClick={controller.backToOverview} type="button">
+          <ArrowLeft aria-hidden="true" size={14} />
+          {t("workflows.action.back")}
+        </button>
       </div>
 
-      {run.pendingAction ? (
+      {run.pendingAction?.actionType === "review_scope" ? (
+        <section className="workflow-attention" aria-label={t("workflows.scopeReview.title")}>
+          <h3>{t("workflows.scopeReview.title")}</h3>
+          <p>{t(run.kind === "health_check" ? "workflows.health.scopeReview" : "workflows.scopeReview.description")}</p>
+          <ul>{run.pendingAction.affectedPaths.map((path) => <li key={path}><code>{path}</code></li>)}</ul>
+          <div className="workflow-actions">
+            <button className="btn btn--primary" disabled={taskMutationPending} onClick={() => void controller.adjustAndPrepare(run)} type="button">{t("workflows.scopeReview.review")}</button>
+            <button className="btn btn--secondary" disabled={taskMutationPending} onClick={() => void controller.cancel(run.taskId)} type="button">{t("workflows.action.cancel")}</button>
+          </div>
+        </section>
+      ) : run.pendingAction ? (
         <section aria-labelledby={`workflow-review-${run.taskId}`} className="workflow-attention workflow-decision-review">
           <div className="workflow-attention__title">
             <AlertTriangle aria-hidden="true" size={15} />
@@ -249,10 +260,6 @@ export function WorkflowTaskDetail({
         </section>
       ) : null}
 
-      <section aria-labelledby={`workflow-pipeline-${run.taskId}`}>
-        <h3 className="workflow-section-title" id={`workflow-pipeline-${run.taskId}`}>{t("workflows.pipeline.title")}</h3>
-        <WorkflowPipeline currentStageId={run.currentStageId} displayStatus={run.displayStatus} stages={run.stages} />
-      </section>
       {run.displayStatus === "failed" && run.error ? (
         <section aria-label={t("workflows.failure.title")} className="workflow-error workflow-failure" role="region">
           <div className="workflow-attention__title">
@@ -289,7 +296,9 @@ export function WorkflowTaskDetail({
       {resultPresentation ? (
         <section aria-label={t(resultPresentation.titleKey)} className={`workflow-typed-result is-${run.result?.kind}`} role="region">
           <h3 className="workflow-section-title">{t(resultPresentation.titleKey)}</h3>
-          <p className="workflow-result-summary">{t(resultPresentation.summaryKey)}</p>
+          {resultPresentation.summaryKey ? (
+            <p className="workflow-result-summary">{t(resultPresentation.summaryKey)}</p>
+          ) : null}
           <dl className="workflow-result">
             {resultPresentation.rows.map((row) => (
               <div key={row.labelKey}>
@@ -331,6 +340,15 @@ export function WorkflowTaskDetail({
           {rollbackErrorKey ? <p className="workflow-conflict-notice" role="alert">{t(rollbackErrorKey)}</p> : null}
         </section>
       ) : null}
+      {run.kind === "update_wiki" && (retryable
+        || (run.displayStatus === "completed" && run.result?.kind === "update_wiki" && run.result.finalCommit)) ? (
+        <WorkflowUpdateHistory key={run.taskId} run={run} onChanged={controller.refresh} />
+      ) : null}
+
+      <section aria-labelledby={`workflow-pipeline-${run.taskId}`}>
+        <h3 className="workflow-section-title" id={`workflow-pipeline-${run.taskId}`}>{t("workflows.pipeline.title")}</h3>
+        <WorkflowPipeline kind={run.kind} currentStageId={run.currentStageId} displayStatus={run.displayStatus} stages={run.stages} />
+      </section>
 
       {confirmingCancel ? (
         <section className="workflow-attention" role="alert">

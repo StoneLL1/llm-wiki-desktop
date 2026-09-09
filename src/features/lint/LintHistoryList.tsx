@@ -1,4 +1,4 @@
-import { Clock3, FileSearch, ShieldCheck, TriangleAlert } from "lucide-react";
+import { Check, LoaderCircle, TriangleAlert } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import type { LintHistoryEntry } from "../../types/lint";
@@ -7,82 +7,60 @@ interface LintHistoryListProps {
   entries: LintHistoryEntry[];
   activeId: string | null;
   loading: boolean;
+  openingId?: string | null;
   error: string | null;
   onOpen: (id: string) => void;
   onRetry: () => void;
-}
-
-function formatHistoryTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString();
+  disabled?: boolean;
 }
 
 export function LintHistoryList({
-  entries,
-  activeId,
-  loading,
-  error,
-  onOpen,
-  onRetry,
+  entries, activeId, loading, openingId, error, onOpen, onRetry, disabled = false,
 }: LintHistoryListProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const displayError = error === "lint.history.waitForFix" ? t(error) : error;
 
   return (
-    <section className="lint-history" aria-label={t("lint.history.title")}>
-      <header className="lint-history__head">
-        <span>{t("lint.history.title")}</span>
-        {loading ? (
-          <span className="text-[11px] text-[var(--text-muted)]">
-            {t("lint.history.loading")}
-          </span>
-        ) : null}
-      </header>
+    <div className="lint-history">
       {displayError ? (
         <div className="lint-history__error" role="status">
-          <TriangleAlert size={13} aria-hidden />
+          <TriangleAlert size={14} aria-hidden="true" />
           <span>{displayError}</span>
-          <button type="button" className="btn btn--secondary btn--sm" onClick={onRetry}>
+          <button type="button" className="btn btn--secondary btn--sm" onClick={onRetry} disabled={loading}>
             {t("workflows.action.retry")}
           </button>
         </div>
       ) : null}
+      {loading ? <p className="lint-management__message" role="status">{t("lint.history.loading")}</p> : null}
       {entries.length === 0 && !loading ? (
-        <div className="lint-history__empty">{t("lint.history.empty")}</div>
+        <p className="lint-management__message">{t("lint.history.empty")}</p>
       ) : (
         <div className="lint-history__list">
-          {entries.map((entry) => (
-            <button
-              key={entry.id}
-              type="button"
-              className={`lint-history__row ${activeId === entry.id ? "is-active" : ""}`}
-              onClick={() => onOpen(entry.id)}
-            >
-              {entry.kind === "local" ? (
-                <ShieldCheck size={14} aria-hidden />
-              ) : (
-                <FileSearch size={14} aria-hidden />
-              )}
-              <span className="lint-history__copy">
-                <span className="lint-history__main">
-                  {t(`lint.history.kind.${entry.kind}`)}
-                  {entry.persistent === false ? (
-                    <span className="lint-history__count">
-                      {t("lint.history.nonPersistent")}
-                    </span>
-                  ) : null}
-                  <span className="lint-history__count">{entry.issueCount}</span>
+          {entries.map((entry) => {
+            const date = new Date(entry.createdAt);
+            const current = activeId === entry.id;
+            return (
+              <button key={entry.id} type="button"
+                className={`lint-history__row ${current ? "is-active" : ""}`}
+                onClick={() => onOpen(entry.id)} disabled={disabled || Boolean(openingId)} aria-pressed={current}>
+                <span className="lint-history__copy">
+                  <time className="lint-history__time" dateTime={entry.createdAt}>
+                    {Number.isNaN(date.getTime()) ? entry.createdAt : date.toLocaleString(i18n.resolvedLanguage, {
+                      year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+                    })}
+                  </time>
+                  <span className="lint-history__meta">
+                    {t(`lint.history.kind.${entry.kind}`)} · {t("lint.history.issueCount", { count: entry.issueCount })}
+                  </span>
+                  {entry.persistent === false ? <span className="lint-history__meta">{t("lint.history.nonPersistent")}</span> : null}
                 </span>
-                <span className="lint-history__meta">
-                  <Clock3 size={11} aria-hidden />
-                  {formatHistoryTime(entry.createdAt)}
-                </span>
-              </span>
-            </button>
-          ))}
+                {openingId === entry.id ? <LoaderCircle size={14} className="animate-spin" aria-label={t("lint.history.loading")} />
+                  : current ? <span className="lint-history__current"><Check size={13} aria-hidden="true" />{t("lint.history.current")}</span> : null}
+              </button>
+            );
+          })}
         </div>
       )}
-    </section>
+    </div>
   );
 }

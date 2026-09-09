@@ -800,33 +800,33 @@ export function WikiView({ capabilities }: WikiViewProps) {
         onReset={() => resetPaneSize("wikiTree")}
       />
 
-      <div className="flex min-w-0 flex-1 flex-col bg-[var(--background)]">
-        <div className="view-toolbar border-b border-[var(--border)] px-5">
-          <div className="flex min-w-0 items-center gap-1.5 font-mono text-[12px] text-[var(--text-muted)]">
-            {breadcrumbs.length === 0 ? (
-              <span>{t("wiki.content.noSelection")}</span>
-            ) : (
-              breadcrumbs.map((segment, index) => (
-                <span key={`${segment}-${index}`} className="flex items-center gap-1.5">
-                  <span
-                    className={
-                      index === breadcrumbs.length - 1
-                        ? "font-medium text-[var(--text-primary)]"
-                        : ""
-                    }
-                  >
-                    {segment}
+      <div className="wiki-content-pane flex min-w-0 flex-1 flex-col bg-[var(--background)]">
+        <div className="view-toolbar wiki-content-toolbar border-b border-[var(--border)]">
+          <div className="wiki-toolbar-location">
+            <div className="wiki-toolbar-breadcrumbs font-mono text-[12px] text-[var(--text-muted)]" title={breadcrumbs.join(" / ")}>
+              {breadcrumbs.length === 0 ? (
+                <span>{t("wiki.content.noSelection")}</span>
+              ) : (
+                breadcrumbs.map((segment, index) => (
+                  <span key={`${segment}-${index}`} className="flex items-center gap-1.5">
+                    <span
+                      className={
+                        index === breadcrumbs.length - 1
+                          ? "font-medium text-[var(--text-primary)]"
+                          : ""
+                      }
+                    >
+                      {segment}
+                    </span>
+                    {index < breadcrumbs.length - 1 ? (
+                      <span className="text-[var(--text-disabled)]">/</span>
+                    ) : null}
                   </span>
-                  {index < breadcrumbs.length - 1 ? (
-                    <span className="text-[var(--text-disabled)]">/</span>
-                  ) : null}
-                </span>
-              ))
-            )}
-          </div>
-          <div className="ml-auto flex items-center gap-2">
+                ))
+              )}
+            </div>
             <span
-              className={`hidden items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium sm:inline-flex ${
+              className={`wiki-toolbar-save-state inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium ${
                 saveState === "saved"
                   ? "bg-[var(--accent-soft)] text-[var(--accent-hover)]"
                   : saveState === "conflict" || saveState === "error"
@@ -845,7 +845,9 @@ export function WikiView({ capabilities }: WikiViewProps) {
               />
               {t(`wiki.editor.saveState.${saveState}`)}
             </span>
-            <div className="flex overflow-hidden rounded-[var(--radius-sm)] border border-[var(--border)]">
+          </div>
+          <div className="wiki-toolbar-actions">
+            <div className="wiki-toolbar-modes flex rounded-[var(--radius-sm)] border border-[var(--border)]">
               <ModeButton
                 active={mode === "read"}
                 onClick={() => setMode("read")}
@@ -889,7 +891,7 @@ export function WikiView({ capabilities }: WikiViewProps) {
                 Boolean(runningExportTaskId)
               }
               onClick={() => handleGenerateHtml("beautiful_read")}
-              className="inline-flex h-[28px] items-center gap-1.5 rounded-[var(--radius-sm)] bg-[var(--foreground)] px-3 text-[11.5px] font-medium text-[var(--text-inverse)] disabled:opacity-40"
+              className="wiki-html-generate inline-flex h-[28px] items-center gap-1.5 rounded-[var(--radius-sm)] bg-[var(--foreground)] px-3 text-[11.5px] font-medium text-[var(--text-inverse)] disabled:opacity-40"
             >
               <FileOutput size={13} />
               {t("wiki.html.generate")}
@@ -943,14 +945,14 @@ export function WikiView({ capabilities }: WikiViewProps) {
                     : t("source.aiOrganize.description")
                 }
                 aria-label={t("source.aiOrganize.label")}
-                className="inline-flex h-[28px] items-center gap-1.5 rounded-[var(--radius-sm)] border border-[var(--border)] px-2.5 text-[11.5px] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"
+                className="wiki-toolbar-organize inline-flex h-[28px] items-center gap-1.5 rounded-[var(--radius-sm)] border border-[var(--border)] px-2.5 text-[11.5px] text-[var(--text-secondary)] hover:bg-[var(--surface-muted)]"
               >
                 {activeSourceAiTask ? (
                   <LoaderCircle size={13} className="animate-spin" />
                 ) : (
                   <Sparkles size={13} />
                 )}
-                {t("source.aiOrganize.label")}
+                <span>{t("source.aiOrganize.label")}</span>
               </button>
             ) : (
               <button
@@ -1231,6 +1233,7 @@ export function WikiView({ capabilities }: WikiViewProps) {
       {pendingLifecycle ? (
         <ConfirmationDialog
           action={pendingLifecycle.action}
+          versionProtected
           checkpointExists={pendingLifecycle.action.checkpointHash != null}
           onCancel={handleLifecycleCancel}
           onConfirm={handleLifecycleConfirm}
@@ -1313,6 +1316,8 @@ function ModeButton({
       type="button"
       role="tab"
       aria-selected={active}
+      aria-label={label}
+      title={label}
       onClick={onClick}
       className={`inline-flex h-[26px] items-center gap-1 px-2 text-[11.5px] font-medium transition-colors ${
         active
@@ -1321,7 +1326,7 @@ function ModeButton({
       }`}
     >
       {icon}
-      {label}
+      <span className="wiki-mode-label">{label}</span>
     </button>
   );
 }

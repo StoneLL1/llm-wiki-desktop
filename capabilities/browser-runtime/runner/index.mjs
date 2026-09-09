@@ -311,7 +311,7 @@ try {
         extractRelevantBilibiliPlayerEvidence(candidate, finalUrl, platformPayload.targetAliases)),
     ]);
   }
-  const platformFailure = platformPayload ? null : classifyPlatformPage(platform, bodyText);
+  const platformFailure = platformPayload ? null : classifyPlatformPage(platform, bodyText, finalUrl);
   if (platformFailure) {
     process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "Platform access requires user action", data: { code: platformFailure } } })}\n`);
     process.exitCode = 0;
@@ -517,7 +517,7 @@ try {
       cleanDom.window.document.body.appendChild(paragraph);
     }
     const persistedHtml = cleanDom.window.document.body.innerHTML;
-    const markdown = platform !== "generic" && platformPayload
+    let markdown = platform !== "generic" && platformPayload
       ? renderPlatformMarkdown(
         platform,
         platformPayload,
@@ -527,6 +527,11 @@ try {
         params.mediaSaveMode,
       )
       : new TurndownService({ codeBlockStyle: "fenced", headingStyle: "atx" }).turndown(persistedHtml);
+    if (platform === "xiaohongshu" && platformPayload?.contentType === "image_post"
+      && !params.localOcrAuthorized && !xiaohongshuImageOcrRequired(platformPayload, false)) {
+      markdown = markdown.replace(/<!-- OCR_IMAGE_\d+ -->/gu, "");
+      warnings.push("IMPORT_IMAGE_OCR_OPTIONAL");
+    }
     const extractedText = platform === "generic"
       ? String(article?.textContent || bodyText || "").trim()
       : String(platformPayload?.description || "").trim();
@@ -564,7 +569,9 @@ try {
       sourceEvidencePaths.push(evidencePath);
       if (sourceEvidencePaths.length >= 3) break;
     }
-    process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { sourceSnapshotPath: "source.html", markdownPath: "candidate.md", assetPaths: sourceEvidencePaths, metadataPath: "metadata.json", title, textCoverage: extractedText ? 1 : 0, warnings }, error: null })}\n`);
+    const textCoverage = platform === "xiaohongshu" && xiaohongshuImageOcrRequired(platformPayload, false)
+      ? 0 : extractedText ? 1 : 0;
+    process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { sourceSnapshotPath: "source.html", markdownPath: "candidate.md", assetPaths: sourceEvidencePaths, metadataPath: "metadata.json", title, textCoverage, warnings }, error: null })}\n`);
   }
 } catch (error) {
   if (!(error instanceof RpcHandled)) throw error;

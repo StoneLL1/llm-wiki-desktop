@@ -164,13 +164,13 @@ export interface WorkflowBaselineSummary {
 }
 
 export type WorkflowProjectTrust = "trusted" | "untrusted";
-export type WorkflowFilesystemAccess = "writable" | "read_only";
+export type WorkflowFilesystemAccess = "unknown" | "writable" | "read_only";
 export type WorkflowPersistenceMode = "persistent" | "memory_only";
 export type WorkflowPersistenceTransition =
   | "unchanged"
   | "downgraded_to_memory_only"
   | "upgraded_to_persistent";
-export type WorkflowGitState = "clean" | "dirty" | "unavailable";
+export type WorkflowGitState = "unknown" | "clean" | "dirty" | "unavailable";
 
 export interface WorkflowProjectAccessSummary {
   projectId: string;
@@ -255,6 +255,7 @@ export type WorkflowResult =
       infoCount: number;
       coverage?: {
         mode: HealthCheckMode;
+        deepStatus?: import("./lint").HealthCheckDeepStatus;
         scannedPages: number;
         deepCoveredPages: number | null;
         deepTruncated: boolean;
@@ -321,6 +322,8 @@ export interface WorkflowDecisionReview {
 }
 
 export interface WorkflowRun {
+  revision?: string;
+  sessionId?: string;
   schemaVersion: number;
   taskId: string;
   projectId: string;
@@ -395,7 +398,7 @@ export interface WorkflowQueueContextItem {
 }
 
 export interface WorkflowContextSummary {
-  pendingSourceCount: number;
+  pendingSourceCount: number | null;
   lastHealth: WorkflowHealthContextSummary | null;
   recentArtifact: WorkflowArtifactContextSummary | null;
   queueCount: number;
@@ -403,6 +406,8 @@ export interface WorkflowContextSummary {
 }
 
 export interface WorkflowsOverview {
+  sessionId?: string;
+  activeRuns?: WorkflowRunSummary[];
   schemaVersion: number;
   projectAccess: WorkflowProjectAccessSummary | null;
   rows: WorkflowOverviewRow[];
@@ -442,6 +447,15 @@ export type WorkflowRunOutcomeSummary =
     };
 
 export interface WorkflowRunSummary {
+  revision?: string;
+  sessionId?: string;
+  queuePosition?: number | null;
+  continuationRequired?: boolean;
+  currentStageId?: string | null;
+  currentStage?: WorkflowStage | null;
+  /** Complete small stage snapshot; absent only on older backend summaries. */
+  stages?: WorkflowStage[];
+  cancellable?: boolean;
   schemaVersion: number;
   taskId: string;
   projectId: string;
@@ -479,6 +493,7 @@ export interface PrepareWorkflowRequest extends WorkflowProjectRequest {
 }
 
 export interface StartWorkflowRequest extends WorkflowProjectRequest {
+  retryOfTaskId?: string | null;
   preparationId: string;
   preparationRevision: string;
   acknowledgeRestrictedContent?: boolean;
@@ -518,4 +533,34 @@ export interface ReorderQueuedWorkflowRequest extends WorkflowRunRequest {
 
 export interface ConfirmWorkflowActionRequest extends WorkflowRunRequest {
   actionId: string;
+}
+
+export type UpdateWikiSelection = { kind: "automatic" } | { kind: "selected"; sourceVersions: WorkflowSourceVersionRef[] };
+export interface UpdateWikiDraft {
+  mode: UpdateWikiMode;
+  selection: UpdateWikiSelection;
+  routeSelection: WorkflowRouteSelection | null;
+}
+export interface UpdateWikiRequest extends UpdateWikiDraft {
+  requestId: string;
+  retryOfTaskId?: string;
+  acknowledgeRemoteProvider: boolean;
+}
+export interface UpdateWikiOptions {
+  routes: WorkflowRouteSelection[];
+  defaultRoute: WorkflowRouteSelection | null;
+}
+export interface UpdateWikiSourcePage {
+  sources: Array<WorkflowSourceVersionRef & { title: string; consumed: boolean }>;
+  total: number;
+  nextOffset: number | null;
+  unavailable: number;
+}
+
+export interface WorkflowFormCatalog {
+  kind: "health_check" | "generate_content";
+  routes: WorkflowRouteSelection[];
+  defaultRoute: WorkflowRouteSelection | null;
+  wikiPages: string[];
+  rememberedDraft: WorkflowPreparationDraft | null;
 }

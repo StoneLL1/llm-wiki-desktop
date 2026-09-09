@@ -23,6 +23,7 @@ fn fixture_catalog_entry() -> CapabilityCatalogEntry {
         target_triple: "x86_64-pc-windows-msvc".into(),
         url: "https://example.invalid/releases/browser-runtime.zip".into(),
         archive_sha256: "a".repeat(64),
+        archive_chunks: Vec::new(),
         manifest_sha256: "b".repeat(64),
         signing_key_id: "llm-wiki-capability-v1".into(),
         compressed_bytes: 123,
@@ -211,10 +212,13 @@ fn capability_inventory_is_available_without_an_active_project() {
         .unwrap();
 
     assert!(!views.is_empty());
+    assert!(views.iter().all(|view| view.capability_id != "import-core"));
     assert!(views
         .iter()
         .all(|view| view.current_project_waiting_count == 0));
-    assert!(views.iter().all(|view| view.publisher_key_id.is_none()));
+    assert!(views
+        .iter()
+        .all(|view| view.publisher_key_id.is_some() == view.target_version.is_some()));
     assert!(views
         .iter()
         .filter(|view| view.target_version.is_some())
@@ -329,12 +333,13 @@ fn registered_continuations_rebind_to_a_management_retry() {
 #[test]
 fn release_install_wiring_is_app_global_restart_safe_and_fans_out_projects() {
     let source_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let command_source = fs::read_to_string(source_root.join("commands/app_capability_commands.rs")).unwrap();
-    let installer_source = fs::read_to_string(source_root.join("services/import_v2/capability_installer.rs")).unwrap();
-    let continuation_source = fs::read_to_string(
-        source_root.join("commands/import_v2_presentation_commands.rs"),
-    )
-    .unwrap();
+    let command_source =
+        fs::read_to_string(source_root.join("commands/app_capability_commands.rs")).unwrap();
+    let installer_source =
+        fs::read_to_string(source_root.join("services/import_v2/capability_installer.rs")).unwrap();
+    let continuation_source =
+        fs::read_to_string(source_root.join("commands/import_v2_presentation_commands.rs"))
+            .unwrap();
     let ordered = [
         "install_catalog_entry(",
         "probe_version_routes(",
@@ -379,7 +384,10 @@ fn release_install_wiring_is_app_global_restart_safe_and_fans_out_projects() {
         .unwrap();
     assert_eq!(bound.len(), 2);
     assert_eq!(
-        bound.iter().map(|value| value.project_id.as_str()).collect::<Vec<_>>(),
+        bound
+            .iter()
+            .map(|value| value.project_id.as_str())
+            .collect::<Vec<_>>(),
         ["project-a", "project-b"]
     );
 

@@ -141,6 +141,7 @@ test("the strict checker can turn every owned contract green", async (context) =
     "src/hooks/useTaskLauncher.ts",
     "src/hooks/useTaskEvents.ts",
     "src/features/workflows/useWorkflowsController.ts",
+    "src/features/workflows/workflowHistory.ts",
     "src/features/workflows/WorkflowsRightPanel.tsx",
     "src/features/workflows/WorkflowTaskDetail.tsx",
   ]) {
@@ -641,6 +642,7 @@ test("a missing priority migration keeps the Batch 1 redline red", async (contex
     "src/hooks/useTaskLauncher.ts",
     "src/hooks/useTaskEvents.ts",
     "src/features/workflows/useWorkflowsController.ts",
+    "src/features/workflows/workflowHistory.ts",
     "src/features/workflows/WorkflowsRightPanel.tsx",
     "src/features/workflows/WorkflowTaskDetail.tsx",
   ]) {
@@ -688,6 +690,7 @@ test("a stub lazy notice keeps the Batch 1 redline red", async (context) => {
     "src/hooks/useTaskLauncher.ts",
     "src/hooks/useTaskEvents.ts",
     "src/features/workflows/useWorkflowsController.ts",
+    "src/features/workflows/workflowHistory.ts",
     "src/features/workflows/WorkflowsRightPanel.tsx",
     "src/features/workflows/WorkflowTaskDetail.tsx",
   ]) {

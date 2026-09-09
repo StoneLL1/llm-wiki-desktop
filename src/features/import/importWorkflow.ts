@@ -162,6 +162,7 @@ export interface ImportWorkflow {
     capabilityId: string,
     requirementRevision: string,
     asrOptions?: AsrAuthorizationOptions,
+    additionalItemIds?: string[],
   ) => Promise<BackendTask | null>;
   scanMigration: () => Promise<LegacyInventory | null>;
   planMigration: (inventory: LegacyInventory) => Promise<MigrationPreparation | null>;

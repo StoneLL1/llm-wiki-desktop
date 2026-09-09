@@ -8,7 +8,8 @@ import type {
   LogLine,
   TaskProjectPersistenceReason,
 } from "../types/task";
-import type { WorkflowPersistenceMode } from "../types/workflow";
+import { compareWorkflowRevision, workflowRunSummary } from "../services/workflowTaskSnapshot";
+import type { WorkflowRun, WorkflowRunSummary, WorkflowPersistenceMode } from "../types/workflow";
 import { isTerminalStatus } from "../types/task";
 import {
   isBackendTaskSnapshot,
@@ -17,6 +18,10 @@ import {
 } from "../services/taskSnapshotSemantics";
 
 export interface TaskState {
+  /** The one normalized Workflow summary cache; detail lives only in the selected-view cache. */
+  workflowById: Record<string, WorkflowRunSummary>;
+  workflowSessionId: string | null;
+  retiredWorkflowSessions: readonly string[];
   activeProjectId: string | null;
   activeProjectRootPath: string | null;
   /** Canonical normalized facts, partitioned by the indexes below. */
@@ -135,6 +140,9 @@ function applyBackendEvent(state: TaskState, event: BackendEvent): TaskState {
 }
 
 export const useTaskStore = create<TaskState>((set, get) => ({
+  workflowById: {},
+  workflowSessionId: null,
+  retiredWorkflowSessions: [],
   activeProjectId: null,
   activeProjectRootPath: null,
   taskById: {},
@@ -320,7 +328,53 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   selectTask: (taskId) => set({ selectedTaskId: taskId }),
 }));
 
+export function recordWorkflowFacts(
+  incoming: readonly (WorkflowRun | WorkflowRunSummary)[],
+  snapshot = true,
+  snapshotSession?: string,
+): void {
+  useTaskStore.setState((state) => {
+    let workflowById = state.workflowById;
+    let session = state.workflowSessionId;
+    let retired = state.retiredWorkflowSessions;
+    if (snapshotSession && snapshotSession !== session && !retired.includes(snapshotSession)) {
+      if (session) retired = [...retired, session].slice(-8);
+      session = snapshotSession;
+      workflowById = {};
+    }
+    for (const value of incoming) {
+      if (!value || !value.taskId || !value.projectId || !value.canonicalIdentityKey || !value.identityRevision) continue;
+      const run = workflowRunSummary(value);
+      if (run.sessionId && run.sessionId !== session) {
+        if (retired.includes(run.sessionId) || (session && !snapshot)) continue;
+        if (session) retired = [...retired, session].slice(-8);
+        session = run.sessionId;
+        workflowById = {};
+      }
+      const previous = workflowById[run.taskId];
+      if (previous && (previous.canonicalIdentityKey !== run.canonicalIdentityKey
+        || previous.identityRevision !== run.identityRevision)) continue;
+      if (previous && previous.sessionId === run.sessionId && compareWorkflowRevision(run, previous) <= 0) continue;
+      if (workflowById === state.workflowById) workflowById = { ...workflowById };
+      workflowById[run.taskId] = run;
+    }
+    if (workflowById === state.workflowById && session === state.workflowSessionId) return state;
+    // Keep active work and a bounded most-recent terminal cache. History stays paginated.
+    const terminal = Object.values(workflowById).filter((run) =>
+      ["completed", "cancelled", "failed", "interrupted"].includes(run.displayStatus));
+    if (terminal.length > 256) {
+      terminal.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+      for (const run of terminal.slice(256)) delete workflowById[run.taskId];
+    }
+    return { workflowById, workflowSessionId: session, retiredWorkflowSessions: retired };
+  });
+}
+
 export function handleTaskEvent(event: BackendEvent): void {
+  if (event.eventType === "workflow_updated") {
+    recordWorkflowFacts([event.payload as WorkflowRunSummary], false);
+    return;
+  }
   if (
     event.taskId
     && (event.eventType === "task_updated"

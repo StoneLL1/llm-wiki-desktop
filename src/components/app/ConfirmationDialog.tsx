@@ -3,6 +3,7 @@ import { GitBranch, ShieldAlert } from "lucide-react";
 import { Button } from "../ui/button";
 import { useModalDialog } from "../../hooks/useModalDialog";
 import type { PendingAction } from "../../types/backend";
+import { VersionProtectedAction } from "./VersionProtectedAction";
 
 interface ConfirmationDialogProps {
   action: PendingAction;
@@ -11,9 +12,11 @@ interface ConfirmationDialogProps {
   error?: string | null;
   onCancel: () => void;
   onConfirm: () => void;
+  versionProtected?: boolean;
 }
 
 const confirmLabelKeys: Record<PendingAction["actionType"], string> = {
+  review_scope: "workflows.scopeReview.review",
   repair_project: "confirmation.confirm.repair_project",
   delete_file: "confirmation.confirm.delete_file",
   overwrite_file: "confirmation.confirm.overwrite_file",
@@ -45,6 +48,7 @@ export function ConfirmationDialog({
   error = null,
   onCancel,
   onConfirm,
+  versionProtected = false,
 }: ConfirmationDialogProps) {
   const { t } = useTranslation();
   const dialogRef = useModalDialog({ open: true, onClose: onCancel });
@@ -109,7 +113,7 @@ export function ConfirmationDialog({
           <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--surface)] px-3 py-2 text-[12px]">
             <GitBranch size={14} aria-hidden="true" />
             <span>
-              {t(
+              {t(versionProtected ? "versions.protectedWrite" :
                 checkpointExists
                   ? "confirmation.checkpoint.available"
                   : "confirmation.checkpoint.missing",
@@ -158,14 +162,16 @@ export function ConfirmationDialog({
           <Button type="button" variant="secondary" onClick={onCancel} disabled={busy}>
             {t("confirmation.cancel")}
           </Button>
-          <Button
+          {versionProtected ? <VersionProtectedAction disabled={busy} onConfirm={onConfirm} className="btn btn--secondary">
+            {t(confirmLabelKeys[action.actionType])}
+          </VersionProtectedAction> : <Button
             type="button"
             variant={isDestructive ? "danger" : "secondary"}
             onClick={onConfirm}
             disabled={busy}
           >
             {t(confirmLabelKeys[action.actionType])}
-          </Button>
+          </Button>}
         </footer>
       </section>
     </div>

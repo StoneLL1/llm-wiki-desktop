@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Component, Path};
 
 use flate2::{write::GzEncoder, Compression};
@@ -1517,11 +1517,7 @@ impl ImportV2Service {
                 .import_paths()?
                 .item_staging(&session.session_id, &item.item_id)?,
         )?;
-        let source = verified_artifact(
-            &staging,
-            &preview.source_snapshot.relative_path,
-            &preview.source_snapshot.sha256,
-        )?;
+
         let markdown = verified_artifact(
             &staging,
             &preview.markdown.relative_path,
@@ -1672,7 +1668,17 @@ impl ImportV2Service {
             .and_then(|value| value.to_str())
             .unwrap_or("bin")
             .to_string();
-        let prepared_source = prepare_source_snapshot(&item.input.kind, &extension, source)?;
+        let source = PreparedContent::file(&staging, &preview.source_snapshot)?;
+        let prepared_source =
+            if item.input.kind == ImportInputKind::Url && source.is_text_snapshot()? {
+                prepare_source_snapshot(&item.input.kind, &extension, source.into_bytes()?)?
+            } else {
+                PreparedSourceSnapshot {
+                    bytes: source,
+                    extension,
+                    content_encoding: None,
+                }
+            };
         let imported_at = chrono::Utc::now().to_rfc3339();
         let mut plan = SourceRegistry.build_commit_plan_for_layout(
             &context.layout,
@@ -1734,8 +1740,8 @@ impl ImportV2Service {
             }
         }
         let source_root = plan.evidence_root_path.clone();
-        let mut evidence_writes: Vec<(String, Vec<u8>, String)> = Vec::new();
-        let mut asset_writes: Vec<(String, Vec<u8>, String)> = Vec::new();
+        let mut evidence_writes: Vec<(String, PreparedContent, String)> = Vec::new();
+        let mut asset_writes: Vec<(String, PreparedContent, String)> = Vec::new();
         let mut evidence_targets = std::collections::HashSet::new();
         let mut asset_targets = std::collections::HashSet::new();
         for asset in &preview.assets {
@@ -1757,13 +1763,19 @@ impl ImportV2Service {
             } else {
                 asset_relative
             };
-            let bytes = verified_artifact(&staging, &asset.relative_path, &asset.sha256)?;
             let (relative, bytes) = if source_evidence_artifact
                 && item.input.kind == crate::models::import_v2::ImportInputKind::Url
             {
-                prepare_url_source_evidence(relative, bytes)?
+                let (relative, bytes) = prepare_url_source_evidence(
+                    relative,
+                    verified_artifact(&staging, &asset.relative_path, &asset.sha256)?,
+                )?;
+                (relative, PreparedContent::Bytes(bytes))
             } else {
-                (relative.to_string(), bytes)
+                (
+                    relative.to_string(),
+                    PreparedContent::file(&staging, asset)?,
+                )
             };
             let evidence_kind = match asset.kind {
                 crate::models::import_v2::ArtifactKind::SourceEvidence => {
@@ -1810,7 +1822,7 @@ impl ImportV2Service {
         }
         evidence_writes.push((
             extracted_markdown_target,
-            committed_markdown.clone(),
+            committed_markdown.clone().into(),
             "candidate_markdown".into(),
         ));
         if committed_markdown_hash != preview.markdown.sha256 {
@@ -1823,7 +1835,7 @@ impl ImportV2Service {
             }
             evidence_writes.push((
                 import_candidate_target,
-                markdown.clone(),
+                markdown.clone().into(),
                 "import_candidate_markdown".into(),
             ));
         }
@@ -1836,7 +1848,7 @@ impl ImportV2Service {
         }
         evidence_writes.push((
             quality_target,
-            json_bytes(&preview.quality)?,
+            json_bytes(&preview.quality)?.into(),
             "quality_report".into(),
         ));
         let source_record_path = format!("{source_root}/source.json");
@@ -1863,7 +1875,7 @@ impl ImportV2Service {
             snapshot_path: plan.raw_path.clone(),
             snapshot_sha256: preview.source_snapshot.sha256.clone(),
             content_sha256: content_hash.clone(),
-            stored_sha256: format!("{:x}", Sha256::digest(&prepared_source.bytes)),
+            stored_sha256: prepared_source.bytes.sha256(),
             content_encoding: prepared_source.content_encoding.clone(),
             original_bytes: preview.source_snapshot.size_bytes,
             stored_bytes: prepared_source.bytes.len() as u64,
@@ -1871,7 +1883,7 @@ impl ImportV2Service {
         };
         evidence_writes.push((
             source_record_path.clone(),
-            json_bytes(&source_record)?,
+            json_bytes(&source_record)?.into(),
             "source_record".into(),
         ));
         let new_target_collides = if staged_package.is_some() {
@@ -1982,20 +1994,20 @@ impl ImportV2Service {
                 .ok_or_else(|| {
                     commit_error(IMPORT_V2_COMMIT_FAILED, "Source version is missing.")
                 })?;
-            version.raw_evidence = std::iter::once(artifact_record(
-                &plan.raw_path,
-                &prepared_source.bytes,
-                "source_snapshot",
-            ))
+            version.raw_evidence = std::iter::once(
+                prepared_source
+                    .bytes
+                    .record(&plan.raw_path, "source_snapshot"),
+            )
             .chain(
                 evidence_writes
                     .iter()
-                    .map(|(path, bytes, kind)| artifact_record(path, bytes, kind)),
+                    .map(|(path, bytes, kind)| bytes.record(path, kind)),
             )
             .collect();
             version.assets = asset_writes
                 .iter()
-                .map(|(path, bytes, kind)| artifact_record(path, bytes, kind))
+                .map(|(path, bytes, kind)| bytes.record(path, kind))
                 .collect();
             version.candidate = candidate_record(&candidate, committed_markdown_hash.clone());
         }
@@ -2139,7 +2151,7 @@ impl ImportV2Service {
                 let bytes = json_bytes(&package)?;
                 evidence_writes.push((
                     target.clone(),
-                    bytes.clone(),
+                    bytes.clone().into(),
                     "source_package_manifest".into(),
                 ));
                 let version = &mut plan.next_manifest.versions[version_position];
@@ -2377,9 +2389,9 @@ impl ImportV2Service {
         let mut sidecar_observer_writes = Vec::new();
         let write_result = (|| -> Result<(), BackendError> {
             if !duplicate {
-                transaction.write_new(
+                prepared_source.bytes.write_new(
+                    &mut transaction,
                     &context.resolve_project_path(&plan.raw_path)?,
-                    &prepared_source.bytes,
                 )?;
                 let baseline_bytes = final_source
                     .as_ref()
@@ -2390,10 +2402,10 @@ impl ImportV2Service {
                     baseline_bytes,
                 )?;
                 for (target, bytes, _) in &evidence_writes {
-                    transaction.write_new(&context.resolve_project_path(target)?, bytes)?;
+                    bytes.write_new(&mut transaction, &context.resolve_project_path(target)?)?;
                 }
                 for (target, bytes, _) in &asset_writes {
-                    transaction.write_new(&context.resolve_project_path(target)?, bytes)?;
+                    bytes.write_new(&mut transaction, &context.resolve_project_path(target)?)?;
                 }
             }
             if let Some(final_source) = final_source.as_ref() {
@@ -2549,8 +2561,126 @@ fn remove_committed_clipboard_input(
 
 const MAX_URL_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
 
+enum PreparedContent {
+    Bytes(Vec<u8>),
+    File {
+        file: std::fs::File,
+        sha256: String,
+        size: u64,
+    },
+}
+
+impl From<Vec<u8>> for PreparedContent {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self::Bytes(bytes)
+    }
+}
+
+impl PreparedContent {
+    fn file(root: &Path, artifact: &ImportArtifact) -> Result<Self, BackendError> {
+        let file = verified_file(root, &artifact.relative_path, &artifact.sha256)?;
+        let size = file.metadata().map_err(|_| staging_artifact_error())?.len();
+        if size != artifact.size_bytes {
+            return Err(staging_artifact_error());
+        }
+        Ok(Self::File {
+            file,
+            sha256: artifact.sha256.clone(),
+            size,
+        })
+    }
+
+    fn len(&self) -> u64 {
+        match self {
+            Self::Bytes(bytes) => bytes.len() as u64,
+            Self::File { size, .. } => *size,
+        }
+    }
+
+    fn sha256(&self) -> String {
+        match self {
+            Self::Bytes(bytes) => format!("{:x}", Sha256::digest(bytes)),
+            Self::File { sha256, .. } => sha256.clone(),
+        }
+    }
+
+    fn record(&self, path: &str, kind: &str) -> SourceArtifactRecord {
+        SourceArtifactRecord {
+            path: path.into(),
+            sha256: self.sha256(),
+            size_bytes: self.len(),
+            kind: kind.into(),
+        }
+    }
+
+    fn is_text_snapshot(&self) -> Result<bool, BackendError> {
+        let mut prefix = [0u8; 1024];
+        let count = match self {
+            Self::Bytes(bytes) => {
+                let count = bytes.len().min(prefix.len());
+                prefix[..count].copy_from_slice(&bytes[..count]);
+                count
+            }
+            Self::File { file, .. } => {
+                let mut reader = file.try_clone().map_err(|_| staging_artifact_error())?;
+                reader.rewind().map_err(|_| staging_artifact_error())?;
+                reader
+                    .read(&mut prefix)
+                    .map_err(|_| staging_artifact_error())?
+            }
+        };
+        let text = String::from_utf8_lossy(&prefix[..count]);
+        Ok(matches!(
+            text.trim_start_matches('\u{feff}')
+                .trim_start()
+                .chars()
+                .next(),
+            Some('<' | '{' | '[')
+        ))
+    }
+
+    fn into_bytes(self) -> Result<Vec<u8>, BackendError> {
+        match self {
+            Self::Bytes(bytes) => Ok(bytes),
+            Self::File {
+                mut file,
+                sha256,
+                size,
+            } => {
+                if size > MAX_URL_SNAPSHOT_BYTES as u64 {
+                    return Err(staging_artifact_error());
+                }
+                file.rewind().map_err(|_| staging_artifact_error())?;
+                let mut bytes = Vec::new();
+                file.take(MAX_URL_SNAPSHOT_BYTES as u64 + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(|_| staging_artifact_error())?;
+                if bytes.len() as u64 != size || format!("{:x}", Sha256::digest(&bytes)) != sha256 {
+                    return Err(staging_artifact_error());
+                }
+                Ok(bytes)
+            }
+        }
+    }
+
+    fn write_new(
+        &self,
+        transaction: &mut FileTransaction,
+        path: &Path,
+    ) -> Result<(), BackendError> {
+        match self {
+            Self::Bytes(bytes) => transaction.write_new(path, bytes),
+            Self::File { file, sha256, size } => {
+                let mut reader = file.try_clone().map_err(|_| staging_artifact_error())?;
+                reader.rewind().map_err(|_| staging_artifact_error())?;
+                transaction.write_new_stream(path, &mut reader, sha256, *size)
+            }
+        }
+    }
+}
+
 struct PreparedSourceSnapshot {
-    bytes: Vec<u8>,
+    bytes: PreparedContent,
     extension: String,
     content_encoding: Option<String>,
 }
@@ -2625,7 +2755,7 @@ fn prepare_source_snapshot(
 ) -> Result<PreparedSourceSnapshot, BackendError> {
     if *kind != crate::models::import_v2::ImportInputKind::Url {
         return Ok(PreparedSourceSnapshot {
-            bytes,
+            bytes: bytes.into(),
             extension: fallback_extension.into(),
             content_encoding: None,
         });
@@ -2655,7 +2785,7 @@ fn prepare_source_snapshot(
     };
     let Some(format) = format else {
         return Ok(PreparedSourceSnapshot {
-            bytes,
+            bytes: bytes.into(),
             extension: "bin".into(),
             content_encoding: None,
         });
@@ -2687,7 +2817,7 @@ fn prepare_source_snapshot(
         )
     })?;
     Ok(PreparedSourceSnapshot {
-        bytes: compressed,
+        bytes: compressed.into(),
         extension: format!("{format}.gz"),
         content_encoding: Some("gzip".into()),
     })
@@ -2707,13 +2837,16 @@ fn prepare_url_source_evidence(
         bytes,
     )?;
     if prepared.content_encoding.is_none() {
-        return Ok((relative.to_string(), prepared.bytes));
+        return Ok((relative.to_string(), prepared.bytes.into_bytes()?));
     }
     let stem = relative
         .rsplit_once('.')
         .map(|(stem, _)| stem)
         .unwrap_or(relative);
-    Ok((format!("{stem}.{}", prepared.extension), prepared.bytes))
+    Ok((
+        format!("{stem}.{}", prepared.extension),
+        prepared.bytes.into_bytes()?,
+    ))
 }
 
 fn record_batch_result(
@@ -4006,6 +4139,22 @@ fn verified_artifact(
     relative: &str,
     expected_hash: &str,
 ) -> Result<Vec<u8>, BackendError> {
+    let mut file = verified_file(root, relative, expected_hash)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|_| staging_artifact_error())?;
+    // The small materialized representation must still match the preview.
+    if format!("{:x}", Sha256::digest(&bytes)) != expected_hash {
+        return Err(staging_artifact_error());
+    }
+    Ok(bytes)
+}
+
+fn verified_file(
+    root: &Path,
+    relative: &str,
+    expected_hash: &str,
+) -> Result<std::fs::File, BackendError> {
     if relative.trim().is_empty()
         || relative.contains('\\')
         || relative.contains(':')
@@ -4043,18 +4192,17 @@ fn verified_artifact(
     if !before.is_file() || is_reparse_point(&before) {
         return Err(staging_artifact_error());
     }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .map_err(|_| staging_artifact_error())?;
+    let (hash, size) =
+        super::artifact::hash_reader(&mut file).map_err(|_| staging_artifact_error())?;
     let after = file.metadata().map_err(|_| staging_artifact_error())?;
-    if !after.is_file() || before.len() != after.len() || after.len() != bytes.len() as u64 {
+    if !after.is_file() || before.len() != after.len() || after.len() != size {
         return Err(staging_artifact_error());
     }
-    let hash = format!("{:x}", Sha256::digest(&bytes));
     if hash != expected_hash {
         return Err(staging_artifact_error());
     }
-    Ok(bytes)
+    file.rewind().map_err(|_| staging_artifact_error())?;
+    Ok(file)
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -6785,7 +6933,8 @@ source_url: https://www.xiaohongshu.com/explore/other-note
             assert_eq!(prepared.extension, expected_extension);
             assert_eq!(prepared.content_encoding.as_deref(), Some("gzip"));
             let mut decoded = String::new();
-            GzDecoder::new(prepared.bytes.as_slice())
+            let compressed = prepared.bytes.into_bytes().unwrap();
+            GzDecoder::new(compressed.as_slice())
                 .read_to_string(&mut decoded)
                 .unwrap();
             assert!(decoded.contains("keep"));
@@ -6796,6 +6945,66 @@ source_url: https://www.xiaohongshu.com/explore/other-note
                 serde_json::from_str::<serde_json::Value>(&decoded).unwrap();
             }
         }
+    }
+
+    #[test]
+    fn large_direct_media_url_streams_evidence_and_reopens_source() {
+        use std::io::Write;
+        let fixture = CommitFixture::ready_url_item();
+        let mut session = fixture
+            .service
+            .sessions
+            .load(&fixture.context, &fixture.files, &fixture.session_id)
+            .unwrap();
+        let item = session
+            .items
+            .iter_mut()
+            .find(|item| item.item_id == fixture.first_item_id)
+            .unwrap();
+        let preview = item.preview.as_mut().unwrap();
+        let path = fixture.root.join(format!(
+            ".app/import-sessions/{}/items/{}/staging/source.bin",
+            fixture.session_id, fixture.first_item_id
+        ));
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(b"ID3\x04\0\0\0\0\0\0").unwrap();
+        file.set_len(65 * 1024 * 1024).unwrap();
+        file.sync_all().unwrap();
+        let (sha, bytes) =
+            super::super::artifact::hash_reader(&mut std::fs::File::open(&path).unwrap()).unwrap();
+        preview.source_snapshot.sha256 = sha;
+        preview.source_snapshot.size_bytes = bytes;
+        fixture
+            .service
+            .sessions
+            .save(&fixture.context, &fixture.files, &session)
+            .unwrap();
+        let result = fixture.commit_all();
+        assert_eq!(result.committed_count, 1, "{result:?}");
+        let source_id = result.items[0].source_id.as_ref().unwrap();
+        let manifest: SourceManifest = fixture
+            .files
+            .read_json(&fixture.context, &format!(".app/sources/{source_id}.json"))
+            .unwrap();
+        let version = manifest
+            .versions
+            .iter()
+            .find(|v| v.version_id == manifest.current_version_id)
+            .unwrap();
+        let evidence = version
+            .raw_evidence
+            .iter()
+            .find(|a| a.kind == "source_snapshot")
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(fixture.root.join(&evidence.path))
+                .unwrap()
+                .len(),
+            bytes
+        );
+        assert!(!evidence.path.ends_with(".gz"));
+        let source = std::fs::read_to_string(fixture.root.join(&manifest.wiki_path)).unwrap();
+        assert!(source.contains("type: source"));
     }
 
     #[test]

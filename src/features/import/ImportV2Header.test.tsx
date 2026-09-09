@@ -12,7 +12,6 @@ describe("ImportV2Header", () => {
   it("keeps the page title semantic-only and places the section navigation first", () => {
     const view = render(
       <ImportV2Header
-        session={null}
         activeSection="workbench"
       />,
     );
@@ -21,7 +20,7 @@ describe("ImportV2Header", () => {
     expect(screen.queryByText("Turn sources into readable Markdown while keeping originals immutable."))
       .not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Workbench" })).toHaveAttribute("aria-current", "page");
-    expect(view.container.querySelector(".import-v2-header__stat")).toHaveAttribute("aria-live", "polite");
+    expect(view.container.querySelector(".import-v2-header__stat")).not.toBeInTheDocument();
     expect(view.container.querySelector(".import-v2-header__tools")?.firstElementChild)
       .toHaveClass("import-v2-header__nav");
   });

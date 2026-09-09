@@ -27,6 +27,7 @@ pub enum LogLevel {
 pub struct TaskEntry {
     pub task: BackendTask,
     pub cancellation: CancellationToken,
+    pub(crate) journal: Arc<std::sync::Mutex<super::task_journal::JournalCursor>>,
     pub log_lines: Vec<LogLine>,
     pub activities: Vec<TaskActivity>,
     pub persisted_path: Option<PathBuf>,

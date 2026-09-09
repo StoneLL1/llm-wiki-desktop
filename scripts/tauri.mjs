@@ -3,15 +3,16 @@ import path from "node:path";
 import process from "node:process";
 
 const arguments_ = process.argv.slice(2);
-if (arguments_[0] === "dev" && process.env.LLM_WIKI_SKIP_DEV_CAPABILITY !== "1") {
-  const { prepareSenseVoiceDevelopmentCapability } = await import("./prepare-sensevoice-dev.mjs");
-  await prepareSenseVoiceDevelopmentCapability();
+const repositoryRoot = path.join(import.meta.dirname, "..");
+const environment = { ...process.env };
+if (arguments_[0] === "dev") {
+  environment.LLM_WIKI_DEV_CAPABILITIES ??= path.join(repositoryRoot, ".dev-capabilities");
 }
 
 const cli = path.join(import.meta.dirname, "..", "node_modules", "@tauri-apps", "cli", "tauri.js");
 const child = spawn(process.execPath, [cli, ...arguments_], {
-  cwd: path.join(import.meta.dirname, ".."),
-  env: process.env,
+  cwd: repositoryRoot,
+  env: environment,
   shell: false,
   stdio: "inherit",
   windowsHide: true,

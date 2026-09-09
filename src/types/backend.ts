@@ -1,6 +1,7 @@
 export type RiskLevel = "low" | "medium" | "high" | "destructive";
 
 export type PendingActionType =
+  | "review_scope"
   | "repair_project"
   | "delete_file"
   | "overwrite_file"

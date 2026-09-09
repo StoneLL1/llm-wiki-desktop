@@ -9,6 +9,8 @@ import {
   continueQueuedWorkflows,
   discardWorkflowResult,
   getWorkflowRun,
+  getWorkflowHistoryState,
+  undoWorkflowUpdate,
   getWorkflowFileDiff,
   getWorkflowsOverview,
   listWorkflowRuns,
@@ -362,7 +364,13 @@ const parseRustWorkflowRun = (value: unknown): WorkflowRun => {
 describe("workflow API", () => {
   beforeEach(() => {
     invoke.mockReset();
-    invoke.mockResolvedValue({});
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "list_workflow_runs") return { runs: [], nextCursor: null };
+      if (command === "get_workflows_overview") return { schemaVersion: 1, projectAccess: null, rows: [] };
+      if (["continue_queued_workflows", "reorder_queued_workflow"].includes(command)) return { runs: [], nextCursor: null };
+      if (["start_workflow", "retry_workflow"].includes(command)) return { run: rustRunFixture };
+      return rustRunFixture;
+    });
   });
 
   it("uses one explicit request envelope for every frozen command", async () => {
@@ -395,6 +403,8 @@ describe("workflow API", () => {
         "list_workflow_runs",
       ],
       [getWorkflowRun, runRequest, "get_workflow_run"],
+      [getWorkflowHistoryState, runRequest, "get_workflow_history_state"],
+      [undoWorkflowUpdate, runRequest, "undo_workflow_update"],
       [
         getWorkflowFileDiff,
         { ...runRequest, pendingActionId: "action-1", fileId: "file-00000000", cursor: null, limitBytes: 65536 },
@@ -433,6 +443,17 @@ describe("workflow API", () => {
     expect(invoke).toHaveBeenCalledWith("get_workflows_overview", {
       request: { projectId: "", projectRootPath: "" },
     });
+  });
+
+  it("preserves interruption and partial recovery state without requiring a final commit", async () => {
+    const history = {
+      available: true, undone: false, recovery: true, undoInProgress: true, checkpointHash: "before", finalCommit: null,
+    };
+    invoke.mockResolvedValueOnce(history);
+    expect(await getWorkflowHistoryState(runRequest)).toEqual(history);
+    const restored = { ...history, available: false, undone: true, undoInProgress: false };
+    invoke.mockResolvedValueOnce(restored);
+    expect(await undoWorkflowUpdate(runRequest)).toEqual(restored);
   });
 
   it("accepts a Rust-shaped fixture as the discriminated workflow union", () => {

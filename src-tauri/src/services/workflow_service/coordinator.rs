@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
 
 use crate::models::task::TaskStatus;
 use crate::models::workflow::{
@@ -69,19 +70,41 @@ pub struct EnqueueWorkflow {
 
 #[derive(Default)]
 pub struct WorkflowCoordinator {
-    operation_lock: Mutex<()>,
+    queues: Mutex<HashMap<String, Weak<Mutex<()>>>>,
 }
 
 impl WorkflowCoordinator {
+    // The registry lock only obtains a queue handle; disk writes never hold it.
+    // Revisions of one root share a lane so replacing a project cannot race its old queue.
+    fn queue(&self, key: &str) -> Result<Arc<Mutex<()>>, String> {
+        let mut queues = self
+            .queues
+            .lock()
+            .map_err(|_| "Workflow queue registry is unavailable")?;
+        if let Some(queue) = queues.get(key).and_then(Weak::upgrade) {
+            return Ok(queue);
+        }
+        queues.retain(|_, queue| queue.strong_count() > 0);
+        let queue = Arc::new(Mutex::new(()));
+        queues.insert(key.to_string(), Arc::downgrade(&queue));
+        Ok(queue)
+    }
+
+    fn task_queue(&self, tasks: &TaskService, id: &str) -> Result<Arc<Mutex<()>>, String> {
+        let key = tasks
+            .workflow_owner_key(id)
+            .ok_or_else(|| format!("Workflow not found: {id}"))?;
+        self.queue(&key)
+    }
     pub fn enqueue(
         &self,
         tasks: &TaskService,
         request: EnqueueWorkflow,
     ) -> Result<WorkflowStartOutcome, String> {
-        let _operation = self
-            .operation_lock
+        let queue = self.queue(&project_identity(&request.project_root)?.canonical_identity_key)?;
+        let _operation = queue
             .lock()
-            .map_err(|_| "Workflow coordinator lock is unavailable")?;
+            .map_err(|_| "Workflow project queue is unavailable")?;
         self.enqueue_locked(tasks, request, true, None, false)
     }
 
@@ -92,10 +115,10 @@ impl WorkflowCoordinator {
         expected_identity_key: &str,
         expected_identity_revision: &str,
     ) -> Result<WorkflowStartOutcome, String> {
-        let _operation = self
-            .operation_lock
+        let queue = self.queue(expected_identity_key)?;
+        let _operation = queue
             .lock()
-            .map_err(|_| "Workflow coordinator lock is unavailable")?;
+            .map_err(|_| "Workflow project queue is unavailable")?;
         self.enqueue_locked(
             tasks,
             request,
@@ -115,10 +138,10 @@ impl WorkflowCoordinator {
         expected_identity_key: &str,
         expected_identity_revision: &str,
     ) -> Result<WorkflowStartOutcome, String> {
-        let _operation = self
-            .operation_lock
+        let queue = self.queue(expected_identity_key)?;
+        let _operation = queue
             .lock()
-            .map_err(|_| "Workflow coordinator lock is unavailable")?;
+            .map_err(|_| "Workflow project queue is unavailable")?;
         self.enqueue_locked(
             tasks,
             request,
@@ -142,6 +165,28 @@ impl WorkflowCoordinator {
         }) {
             return Err("Workflow project identity changed before task creation".into());
         }
+        if let Some(intent) = request.execution_options.update_request.as_ref() {
+            if let Some(existing) = tasks.find_workflow_run_by_execution_options(
+                &identity.canonical_identity_key,
+                &identity.identity_revision,
+                |options| {
+                    options
+                        .update_request
+                        .as_ref()
+                        .is_some_and(|old| old.request_id == intent.request_id)
+                },
+            ) {
+                if tasks
+                    .workflow_execution_options(&existing.task_id)
+                    .and_then(|o| o.update_request)
+                    .as_ref()
+                    != Some(intent)
+                {
+                    return Err("Update request ID already belongs to different choices".into());
+                }
+                return Ok(WorkflowStartOutcome::Existing { run: existing });
+            }
+        }
         validate_workflow_execution_contract(
             &request.kind,
             &request.scope,
@@ -164,10 +209,10 @@ impl WorkflowCoordinator {
             &request.route,
             &request.baseline_fingerprint,
         )?;
-        let owner_runs = self.owner_runs(
-            tasks,
+        let owner_runs = tasks.workflow_runs_for_owner(
             &identity.canonical_identity_key,
             &identity.identity_revision,
+            true,
         );
         if deduplicate {
             if let Some(existing) = owner_runs.iter().find(|run| {
@@ -199,6 +244,8 @@ impl WorkflowCoordinator {
             })
             .count() as u32;
         let state = WorkflowExecutionState {
+            revision: 0,
+            session_id: String::new(),
             schema_version: WORKFLOW_SCHEMA_VERSION,
             canonical_identity_key: identity.canonical_identity_key,
             identity_revision: identity.identity_revision,
@@ -244,10 +291,10 @@ impl WorkflowCoordinator {
         canonical_identity_key: &str,
         identity_revision: &str,
     ) -> Result<Option<WorkflowRun>, String> {
-        let _operation = self
-            .operation_lock
+        let queue = self.queue(canonical_identity_key)?;
+        let _operation = queue
             .lock()
-            .map_err(|_| "Workflow coordinator lock is unavailable")?;
+            .map_err(|_| "Workflow project queue is unavailable")?;
         self.claim_next_locked(tasks, canonical_identity_key, identity_revision)
     }
 
@@ -257,7 +304,7 @@ impl WorkflowCoordinator {
         canonical_identity_key: &str,
         identity_revision: &str,
     ) -> Result<Option<WorkflowRun>, String> {
-        let runs = self.owner_runs(tasks, canonical_identity_key, identity_revision);
+        let runs = tasks.workflow_runs_for_owner(canonical_identity_key, identity_revision, true);
         if runs.iter().any(|run| {
             matches!(
                 run.display_status,
@@ -309,10 +356,10 @@ impl WorkflowCoordinator {
         bindings: &[(String, Option<PathBuf>)],
         continue_queue: bool,
     ) -> Result<(Vec<WorkflowRun>, Option<WorkflowRun>), String> {
-        let _operation = self
-            .operation_lock
+        let queue = self.queue(canonical_identity_key)?;
+        let _operation = queue
             .lock()
-            .map_err(|_| "Workflow coordinator lock is unavailable")?;
+            .map_err(|_| "Workflow project queue is unavailable")?;
         for (task_id, task_state_root) in bindings {
             let run = tasks
                 .get_workflow_run(task_id)
@@ -355,10 +402,10 @@ impl WorkflowCoordinator {
         task_id: &str,
         result: WorkflowResult,
     ) -> Result<(WorkflowRun, Option<WorkflowRun>), String> {
-        let _operation = self
-            .operation_lock
+        let queue = self.task_queue(tasks, task_id)?;
+        let _operation = queue
             .lock()
-            .map_err(|_| "Workflow coordinator lock is unavailable")?;
+            .map_err(|_| "Workflow project queue is unavailable")?;
         let owner = tasks
             .get_workflow_run(task_id)
             .ok_or_else(|| format!("Workflow not found: {task_id}"))?;
@@ -395,10 +442,10 @@ impl WorkflowCoordinator {
         error: WorkflowErrorSummary,
         result: Option<WorkflowResult>,
     ) -> Result<(WorkflowRun, Option<WorkflowRun>), String> {
-        let _operation = self
-            .operation_lock
+        let queue = self.task_queue(tasks, task_id)?;
+        let _operation = queue
             .lock()
-            .map_err(|_| "Workflow coordinator lock is unavailable")?;
+            .map_err(|_| "Workflow project queue is unavailable")?;
         let owner = tasks
             .get_workflow_run(task_id)
             .ok_or_else(|| format!("Workflow not found: {task_id}"))?;
@@ -431,10 +478,10 @@ impl WorkflowCoordinator {
         task_id: &str,
         result: Option<WorkflowResult>,
     ) -> Result<(WorkflowRun, Option<WorkflowRun>), String> {
-        let _operation = self
-            .operation_lock
+        let queue = self.task_queue(tasks, task_id)?;
+        let _operation = queue
             .lock()
-            .map_err(|_| "Workflow coordinator lock is unavailable")?;
+            .map_err(|_| "Workflow project queue is unavailable")?;
         let owner = tasks
             .get_workflow_run(task_id)
             .ok_or_else(|| format!("Workflow not found: {task_id}"))?;
@@ -460,10 +507,10 @@ impl WorkflowCoordinator {
         tasks: &TaskService,
         task_id: &str,
     ) -> Result<(WorkflowRun, Option<WorkflowRun>), String> {
-        let _operation = self
-            .operation_lock
+        let queue = self.task_queue(tasks, task_id)?;
+        let _operation = queue
             .lock()
-            .map_err(|_| "Workflow coordinator lock is unavailable")?;
+            .map_err(|_| "Workflow project queue is unavailable")?;
         let owner = tasks
             .get_workflow_run(task_id)
             .ok_or_else(|| format!("Workflow not found: {task_id}"))?;
@@ -525,10 +572,10 @@ impl WorkflowCoordinator {
         tasks: &TaskService,
         task_id: &str,
     ) -> Result<(WorkflowRun, Option<WorkflowRun>), String> {
-        let _operation = self
-            .operation_lock
+        let queue = self.task_queue(tasks, task_id)?;
+        let _operation = queue
             .lock()
-            .map_err(|_| "Workflow coordinator lock is unavailable")?;
+            .map_err(|_| "Workflow project queue is unavailable")?;
         let held = tasks
             .get_workflow_run(task_id)
             .ok_or_else(|| format!("Workflow not found: {task_id}"))?;
@@ -556,10 +603,10 @@ impl WorkflowCoordinator {
         task_id: &str,
         failure: WorkflowDispatchFailure,
     ) -> Result<(WorkflowRun, Option<WorkflowRun>), String> {
-        let _operation = self
-            .operation_lock
+        let queue = self.task_queue(tasks, task_id)?;
+        let _operation = queue
             .lock()
-            .map_err(|_| "Workflow coordinator lock is unavailable")?;
+            .map_err(|_| "Workflow project queue is unavailable")?;
         let current = tasks
             .get_workflow_run(task_id)
             .ok_or_else(|| format!("Workflow not found: {task_id}"))?;
@@ -593,16 +640,34 @@ impl WorkflowCoordinator {
         tasks: &TaskService,
         project_root: &std::path::Path,
     ) -> Result<WorkflowTrustTransition, String> {
-        let _operation = self
-            .operation_lock
-            .lock()
-            .map_err(|_| "Workflow coordinator lock is unavailable")?;
-        let runs = tasks
-            .list_workflow_runs()
-            .into_iter()
-            .filter(|run| tasks.task_belongs_to_root(&run.task_id, project_root))
-            .collect::<Vec<_>>();
         let current_identity = super::persistence::project_identity(project_root).ok();
+        let mut keys = tasks
+            .list_tasks_for_root(project_root, None)
+            .iter()
+            .filter_map(|task| tasks.workflow_owner_key(&task.id))
+            .collect::<Vec<_>>();
+        if let Some(identity) = &current_identity {
+            keys.push(identity.canonical_identity_key.clone());
+        }
+        keys.sort();
+        keys.dedup();
+        let queues = keys
+            .iter()
+            .map(|key| self.queue(key))
+            .collect::<Result<Vec<_>, _>>()?;
+        let _operations = queues
+            .iter()
+            .map(|queue| {
+                queue
+                    .lock()
+                    .map_err(|_| "Workflow project queue is unavailable")
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let runs = tasks
+            .list_tasks_for_root(project_root, None)
+            .into_iter()
+            .filter_map(|task| tasks.get_workflow_run(&task.id))
+            .collect::<Vec<_>>();
         let project_is_readable = local_quick_project_is_readable(project_root);
         let mut transition = WorkflowTrustTransition::default();
         for run in &runs {
@@ -639,13 +704,34 @@ impl WorkflowCoordinator {
                 transition.continued_local_quick_runs.push(run);
                 continue;
             }
+            // A runner closes cancellation only after entering its short
+            // checked publication window. AppState has already closed new
+            // launch epochs and waits for their publication guards before
+            // revocation returns. Do not cancel or discard that accepted
+            // commit's resources while it drains.
+            if run.display_status == crate::models::workflow::WorkflowDisplayStatus::Running
+                && !run.cancellable
+            {
+                continue;
+            }
             let was_waiting = run.display_status
                 == crate::models::workflow::WorkflowDisplayStatus::WaitingForConfirmation;
-            transition.stopped_runs.push(run.clone());
             if let Err(error) = tasks.request_workflow_cancel(&run.task_id) {
+                // Commit admission can win after the owner snapshot above.
+                // Preserve real cancellation errors; only an observed closed
+                // running window (or a finished task) has nothing to cancel.
+                if tasks.get_workflow_run(&run.task_id).is_some_and(|current| {
+                    is_terminal(&current)
+                        || (current.display_status
+                            == crate::models::workflow::WorkflowDisplayStatus::Running
+                            && !current.cancellable)
+                }) {
+                    continue;
+                }
                 transition.errors.push(error);
                 continue;
             }
+            transition.stopped_runs.push(run.clone());
             if was_waiting {
                 if let Err(error) = tasks.finalize_workflow_cancellation(&run.task_id) {
                     transition.errors.push(error);
@@ -671,10 +757,10 @@ impl WorkflowCoordinator {
         error: WorkflowErrorSummary,
         result: Option<WorkflowResult>,
     ) -> Result<(WorkflowRun, Option<WorkflowRun>), String> {
-        let _operation = self
-            .operation_lock
+        let queue = self.task_queue(tasks, task_id)?;
+        let _operation = queue
             .lock()
-            .map_err(|_| "Workflow coordinator lock is unavailable")?;
+            .map_err(|_| "Workflow project queue is unavailable")?;
         let current = tasks
             .get_workflow_run(task_id)
             .ok_or_else(|| format!("Workflow not found: {task_id}"))?;
@@ -709,10 +795,10 @@ impl WorkflowCoordinator {
     }
 
     pub fn cancel(&self, tasks: &TaskService, task_id: &str) -> Result<WorkflowRun, String> {
-        let _operation = self
-            .operation_lock
+        let queue = self.task_queue(tasks, task_id)?;
+        let _operation = queue
             .lock()
-            .map_err(|_| "Workflow coordinator lock is unavailable")?;
+            .map_err(|_| "Workflow project queue is unavailable")?;
         let run = tasks
             .get_workflow_run(task_id)
             .ok_or_else(|| format!("Workflow not found: {task_id}"))?;
@@ -761,10 +847,10 @@ impl WorkflowCoordinator {
         task_id: &str,
         pending_approval: bool,
     ) -> Result<(WorkflowRun, Option<WorkflowRun>), String> {
-        let _operation = self
-            .operation_lock
+        let queue = self.task_queue(tasks, task_id)?;
+        let _operation = queue
             .lock()
-            .map_err(|_| "Workflow coordinator lock is unavailable")?;
+            .map_err(|_| "Workflow project queue is unavailable")?;
         let run = tasks
             .get_workflow_run(task_id)
             .ok_or_else(|| format!("Workflow not found: {task_id}"))?;
@@ -813,10 +899,10 @@ impl WorkflowCoordinator {
         task_id: &str,
         before_task_id: Option<&str>,
     ) -> Result<Vec<WorkflowRun>, String> {
-        let _operation = self
-            .operation_lock
+        let queue = self.task_queue(tasks, task_id)?;
+        let _operation = queue
             .lock()
-            .map_err(|_| "Workflow coordinator lock is unavailable")?;
+            .map_err(|_| "Workflow project queue is unavailable")?;
         let target = tasks
             .get_workflow_run(task_id)
             .ok_or_else(|| format!("Workflow not found: {task_id}"))?;
@@ -936,35 +1022,63 @@ impl WorkflowCoordinator {
             .retry
             .as_ref()
             .map_or(2, |retry| retry.attempt_number + 1);
-        let _operation = self
-            .operation_lock
+        let queue = self.task_queue(tasks, task_id)?;
+        let _operation = queue
             .lock()
-            .map_err(|_| "Workflow coordinator lock is unavailable")?;
+            .map_err(|_| "Workflow project queue is unavailable")?;
         let mut execution_options = tasks
             .workflow_execution_options(task_id)
             .ok_or_else(|| format!("Workflow execution options missing: {task_id}"))?;
         execution_options.preparation_fingerprint = None;
         let mut baseline_fingerprint = original.baseline_fingerprint.clone();
+        if let Some(intent) = execution_options.update_request.as_mut() {
+            intent.request_id = uuid::Uuid::new_v4().to_string();
+            execution_options.preparation_revision = intent.request_id.clone();
+            baseline_fingerprint = format!("update-intent:{}", intent.request_id);
+        }
         let was_persistent = tasks.workflow_persistence_dir(task_id).is_some()
             || original.persistence_transition
                 == Some(WorkflowPersistenceTransition::DowngradedToMemoryOnly);
         let is_persistent = task_state_root.is_some();
+        let mut scope = original.scope.clone();
         if completed_generate {
             let context =
                 crate::models::paths::ProjectContext::new(project_id.clone(), project_root.clone())
                     .with_resolved_layout()
                     .map_err(|error| error.message)?;
             if let WorkflowScope::GenerateContent {
-                output_path: Some(output_path),
-                ..
-            } = &original.scope
+                artifact_type,
+                page_paths,
+                output_path,
+            } = &mut scope
             {
-                execution_options.existing_target_hash = crate::services::FileStore
-                    .file_hash_if_exists(&context, output_path)
-                    .map_err(|error| error.message)?;
+                let export_type = match artifact_type {
+                    crate::models::workflow::WorkflowArtifactType::BeautifulRead => {
+                        crate::models::export::ExportType::BeautifulRead
+                    }
+                    crate::models::workflow::WorkflowArtifactType::KnowledgeCard => {
+                        crate::models::export::ExportType::KnowledgeCard
+                    }
+                    crate::models::workflow::WorkflowArtifactType::ConceptMap => {
+                        crate::models::export::ExportType::ConceptMap
+                    }
+                    crate::models::workflow::WorkflowArtifactType::ProjectReport => {
+                        crate::models::export::ExportType::ProjectReport
+                    }
+                };
+                *output_path = Some(
+                    crate::services::ExportService::default()
+                        .build_output_relative_path_for(
+                            &context,
+                            export_type,
+                            page_paths.first().map(String::as_str),
+                        )
+                        .map_err(|error| error.message)?,
+                );
+                execution_options.existing_target_hash = None;
             }
             baseline_fingerprint =
-                super::preparation::workflow_baseline_for_scope(&context, &original.scope)
+                super::preparation::workflow_baseline_for_scope(&context, &scope)
                     .map_err(|error| error.message)?
                     .fingerprint;
         }
@@ -976,7 +1090,7 @@ impl WorkflowCoordinator {
                 task_state_root,
                 title: format!("Retry {:?}", original.kind),
                 kind: original.kind,
-                scope: original.scope,
+                scope,
                 route: original.route,
                 baseline_fingerprint,
                 execution_options,
@@ -1013,16 +1127,12 @@ impl WorkflowCoordinator {
     }
 
     fn owner_runs(&self, tasks: &TaskService, key: &str, revision: &str) -> Vec<WorkflowRun> {
-        tasks
-            .list_workflow_runs()
-            .into_iter()
-            .filter(|run| run.canonical_identity_key == key && run.identity_revision == revision)
-            .collect()
+        tasks.workflow_runs_for_owner(key, revision, false)
     }
 
     fn renumber(&self, tasks: &TaskService, key: &str, revision: &str) -> Result<(), String> {
-        let mut queued = self
-            .owner_runs(tasks, key, revision)
+        let mut queued = tasks
+            .workflow_runs_for_owner(key, revision, true)
             .into_iter()
             .filter(|run| {
                 run.display_status == crate::models::workflow::WorkflowDisplayStatus::Queued
@@ -1145,4 +1255,27 @@ fn canonical_task_state_root(
         return Err("Task state root resolves outside the canonical project root".into());
     }
     Ok(candidate)
+}
+
+#[cfg(test)]
+mod queue_lock_tests {
+    use super::*;
+
+    #[test]
+    fn blocked_project_queue_does_not_block_another_project() {
+        let coordinator = WorkflowCoordinator::default();
+        let first = coordinator.queue("project-a").unwrap();
+        let held = first.lock().unwrap();
+        let same = coordinator.queue("project-a").unwrap();
+        assert!(Arc::ptr_eq(&first, &same));
+        assert!(same.try_lock().is_err());
+        let second = coordinator.queue("project-b").unwrap();
+        assert!(second.try_lock().is_ok());
+        drop(held);
+        drop(first);
+        drop(same);
+        drop(second);
+        let _third = coordinator.queue("project-c").unwrap();
+        assert_eq!(coordinator.queues.lock().unwrap().len(), 1);
+    }
 }

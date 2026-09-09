@@ -31,7 +31,7 @@ fn run_before_artifact_open(path: &Path) {
 
 pub const MIN_TEXT_COVERAGE: f64 = 0.98;
 pub const MIN_TABLE_CELL_ACCURACY: f64 = 0.95;
-const MAX_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_MARKDOWN_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Default)]
 pub struct QualityGate;
@@ -93,8 +93,7 @@ impl QualityGate {
         result: &EngineResult,
     ) -> Result<ImportPreviewArtifact, BackendError> {
         let markdown = read_artifact(staging_root, &result.markdown_path, ArtifactKind::Markdown)?;
-        let markdown_content =
-            String::from_utf8(markdown.bytes.clone()).map_err(|_| quality_error())?;
+        let markdown_content = String::from_utf8(markdown.bytes).map_err(|_| quality_error())?;
         let rendered_markdown = strip_code_contexts(&markdown_content);
         validate_markdown_content(&markdown_content, &rendered_markdown)?;
 
@@ -122,7 +121,19 @@ impl QualityGate {
                 .push(read_artifact(staging_root, metadata_path, ArtifactKind::Metadata)?.artifact);
         }
 
-        let mut warnings = result.warnings.clone();
+        // Route provenance remains in attempts/metadata. It is not a defect in
+        // the article and must not label every successful OCR/ASR Source as bad.
+        let mut warnings = result
+            .warnings
+            .iter()
+            .filter(|warning| {
+                !warning.starts_with("local_asr:")
+                    && !warning.starts_with("local_ocr:")
+                    && warning.as_str() != "WECHAT_SPECIALIZED_EXTRACTOR"
+                    && warning.as_str() != "IMPORT_IMAGE_OCR_OPTIONAL"
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         let local_images = image_destinations_from_rendered(&rendered_markdown);
         for destination in local_images {
             if is_remote(&destination) {
@@ -263,7 +274,8 @@ fn read_artifact(
         return Err(quality_error());
     }
     let before = std::fs::metadata(&canonical).map_err(|_| quality_error())?;
-    if before.len() > MAX_ARTIFACT_BYTES {
+    let retain_bytes = matches!(kind, ArtifactKind::Markdown);
+    if retain_bytes && before.len() > MAX_MARKDOWN_BYTES {
         return Err(quality_error());
     }
     let validated_handle = same_file::Handle::from_path(&canonical).map_err(|_| quality_error())?;
@@ -277,29 +289,45 @@ fn read_artifact(
     if validated_handle != opened_handle || !same_file(&before, &opened) {
         return Err(quality_error());
     }
-    let mut bytes = Vec::with_capacity(opened.len() as usize);
+    // Only the article needs to be materialized. Evidence (including multi-GB
+    // original media) is a verified file reference all the way to the writer.
+    let mut bytes = Vec::new();
     use std::io::Read;
-    file.take(MAX_ARTIFACT_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| quality_error())?;
+    let mut reader = file.take(opened.len().saturating_add(1));
+    let mut buffer = [0u8; 64 * 1024];
+    let mut size_bytes = 0u64;
+    let mut digest = Sha256::new();
+    loop {
+        let count = reader.read(&mut buffer).map_err(|_| quality_error())?;
+        if count == 0 {
+            break;
+        }
+        size_bytes += count as u64;
+        if size_bytes > opened.len() {
+            return Err(quality_error());
+        }
+        digest.update(&buffer[..count]);
+        if retain_bytes {
+            bytes.extend_from_slice(&buffer[..count]);
+        }
+    }
     let after = std::fs::metadata(&canonical).map_err(|_| quality_error())?;
     let current_handle = same_file::Handle::from_path(&canonical).map_err(|_| quality_error())?;
-    if bytes.len() as u64 > MAX_ARTIFACT_BYTES
-        || before.len() != opened.len()
-        || before.len() != bytes.len() as u64
+    if before.len() != opened.len()
+        || before.len() != size_bytes
         || before.len() != after.len()
         || !same_file(&opened, &after)
         || opened_handle != current_handle
     {
         return Err(quality_error());
     }
-    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let sha256 = format!("{:x}", digest.finalize());
     Ok(ReadArtifact {
         artifact: ImportArtifact {
             kind,
             relative_path: normalized,
             sha256,
-            size_bytes: bytes.len() as u64,
+            size_bytes,
         },
         bytes,
     })
@@ -912,6 +940,20 @@ mod tests {
     }
 
     #[test]
+    fn web_article_authentication_examples_stay_code_and_pass_validation() {
+        let (body, _) = super::super::markdown_normalizer::html_article_to_markdown(
+            "<nav>Navigation</nav><main><h1>HTTP authentication</h1><p>login required and challenge are ordinary article terms.</p><pre><code>&lt;input type=\"password\" oninput=\"example()\"&gt;</code></pre><p>Discuss <code>javascript:</code> as an example.</p></main><footer>Footer</footer>"
+        );
+        assert!(!body.contains("Navigation"));
+        assert!(!body.contains("Footer"));
+        assert!(body.contains("HTTP authentication"));
+        let fixture = quality_fixture(&body);
+        QualityGate
+            .evaluate(&fixture.root, &fixture.result)
+            .unwrap();
+    }
+
+    #[test]
     fn quality_gate_warns_but_allows_low_coverage_preview() {
         let fixture = quality_fixture_with_metrics("# 标题\n\n正文", 0.91, 0.93);
         let preview = QualityGate::default()
@@ -998,6 +1040,20 @@ mod tests {
             "6105d6cc76af400325e94d588ce511be5bfdbb73b437dc51eca43917d7a43e3d"
         );
         assert_eq!(preview.source_snapshot.size_bytes, 6);
+    }
+
+    #[test]
+    fn successful_recognition_provenance_does_not_mark_an_article_as_needing_attention() {
+        let mut fixture = quality_fixture("# 访谈\n\n这是完整的识别正文。");
+        fixture.result.warnings = vec![
+            "local_asr:verified-engine:1".into(),
+            "local_ocr:verified-engine:1".into(),
+        ];
+        let preview = QualityGate::default()
+            .evaluate(&fixture.root, &fixture.result)
+            .unwrap();
+        assert_eq!(preview.quality.level, QualityLevel::Pass);
+        assert!(preview.quality.warnings.is_empty());
     }
 
     #[test]

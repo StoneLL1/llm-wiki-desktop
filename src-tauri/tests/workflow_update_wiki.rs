@@ -2,6 +2,8 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(not(windows))]
+use std::sync::Mutex;
 use std::time::Duration;
 
 use llm_wiki_desktop_lib::errors::BackendError;
@@ -60,6 +62,96 @@ impl ProcessRunner for NoAgents {
 
 struct SuccessfulAgent {
     delete_path: Option<String>,
+}
+
+#[cfg(not(windows))]
+struct InterveningAgent {
+    project_root: PathBuf,
+    cancel: bool,
+    workspace: Arc<Mutex<Option<PathBuf>>>,
+}
+
+#[cfg(not(windows))]
+impl ProcessRunner for InterveningAgent {
+    fn find_executable(&self, command: &str) -> Option<PathBuf> {
+        SuccessfulAgent { delete_path: None }.find_executable(command)
+    }
+
+    fn run_with_timeout(
+        &self,
+        command: &str,
+        args: &[&str],
+        timeout: Duration,
+    ) -> Result<String, BackendError> {
+        SuccessfulAgent { delete_path: None }.run_with_timeout(command, args, timeout)
+    }
+
+    fn run_capture(&self, _invocation: &AgentInvocation) -> Result<(String, String), BackendError> {
+        Ok((String::new(), String::new()))
+    }
+
+    fn run_task_streaming(
+        &self,
+        invocation: &AgentInvocation,
+        tasks: &TaskService,
+        task_id: &str,
+    ) -> Result<String, BackendError> {
+        *self.workspace.lock().unwrap() = Some(invocation.cwd.clone());
+        let result =
+            SuccessfulAgent { delete_path: None }.run_task_streaming(invocation, tasks, task_id)?;
+        if self.cancel {
+            tasks.request_cancel(task_id).unwrap();
+        } else {
+            fs::write(self.project_root.join("wiki/overview.md"), "# User edits\n").unwrap();
+        }
+        Ok(result)
+    }
+}
+
+struct UpdateHarness {
+    tasks: TaskService,
+    coordinator: WorkflowCoordinator,
+    agents: AgentService,
+    llm: LlmService,
+    secrets: SecretService,
+    settings: SettingsService,
+    bookmarks: BookmarkService,
+    search: SearchService,
+    confirmations: llm_wiki_desktop_lib::models::confirmation::ConfirmationRegistry,
+}
+
+impl UpdateHarness {
+    fn new(runner: Arc<dyn ProcessRunner>) -> Self {
+        Self {
+            tasks: TaskService::default(),
+            coordinator: WorkflowCoordinator::default(),
+            agents: AgentService::with_runner(runner),
+            llm: LlmService,
+            secrets: SecretService::default(),
+            settings: SettingsService::default(),
+            bookmarks: BookmarkService::default(),
+            search: SearchService::default(),
+            confirmations: Default::default(),
+        }
+    }
+
+    fn services(&self) -> UpdateWikiExecutionServices<'_> {
+        UpdateWikiExecutionServices {
+            compile: CompileExecutionServices {
+                agent_service: &self.agents,
+                llm_service: &self.llm,
+                secret_service: &self.secrets,
+                settings_service: &self.settings,
+                task_service: &self.tasks,
+            },
+            git_service: &GitService,
+            file_store: &FileStore,
+            bookmark_service: &self.bookmarks,
+            search_service: &self.search,
+            confirmation_registry: &self.confirmations,
+            coordinator: &self.coordinator,
+        }
+    }
 }
 
 impl ProcessRunner for SuccessfulAgent {
@@ -142,6 +234,7 @@ fn project(label: &str) -> (ProjectContext, PathBuf) {
     fs::create_dir_all(root.join(".app/tasks")).unwrap();
     fs::create_dir_all(root.join(".app/compile")).unwrap();
     fs::create_dir_all(root.join("raw/extracted")).unwrap();
+    fs::create_dir_all(root.join("raw/sources")).unwrap();
     fs::create_dir_all(root.join("wiki/concepts")).unwrap();
     fs::write(root.join("purpose.md"), "# Purpose\n").unwrap();
     fs::write(root.join("schema.md"), "# Schema\n").unwrap();
@@ -149,6 +242,7 @@ fn project(label: &str) -> (ProjectContext, PathBuf) {
     fs::write(root.join("wiki/overview.md"), "# Overview\n").unwrap();
     fs::write(root.join("wiki/log.md"), "# Log\n").unwrap();
     fs::write(root.join("raw/extracted/资料.md"), "# 资料\n").unwrap();
+    fs::write(root.join("raw/sources/资料.txt"), "Original source bytes\n").unwrap();
     fs::write(
         root.join(".app/source-index.json"),
         r#"{"sources":{"raw/sources/资料.txt":["raw/extracted/资料.md"]}}"#,
@@ -374,6 +468,7 @@ async fn full_recompile_is_explicit_and_reaches_checkpoint_and_generation_for_co
 #[tokio::test]
 async fn required_checkpoint_failure_leaves_formal_wiki_unchanged() {
     let (context, root) = project("checkpoint-failure");
+    fs::write(root.join(".git"), "invalid git metadata").unwrap();
     let before = CompileService::snapshot_wiki(&context).unwrap();
     let (scope, _) = source_scope(&context);
     let tasks = TaskService::default();
@@ -868,7 +963,44 @@ async fn real_low_risk_runner_completes_all_stages_consumes_source_and_commits()
             .join("compile")
             .join(format!("{}.json", run.task_id))
             .is_file());
-        assert!(!GitService.repository_status(&context).unwrap().has_changes);
+        assert!(GitService
+            .history_snapshot(&context, &run.task_id, "after")
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            fs::read_to_string(root.join("raw/extracted/资料.md")).unwrap(),
+            "# 资料\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("raw/sources/资料.txt")).unwrap(),
+            "Original source bytes\n",
+        );
+        assert!(search
+            .scan_wiki(&context, &HashSet::new())
+            .unwrap()
+            .pages
+            .iter()
+            .any(|page| page.path == "wiki/concepts/工作流成功.md"));
+        let graph: serde_json::Value =
+            serde_json::from_slice(&fs::read(context.app_dir.join("graph-cache.json")).unwrap())
+                .unwrap();
+        assert_eq!(graph["status"], "stale");
+        let head = GitService.repository_status(&context).unwrap().head;
+        let (scope, _) = source_scope(&context);
+        let repeated = enqueue_update(
+            &context,
+            &tasks,
+            &coordinator,
+            UpdateWikiMode::ChangedSources,
+            scope,
+        );
+        run_update_wiki(&context, repeated.clone(), &services).await;
+        let repeated = tasks.get_workflow_run(&repeated.task_id).unwrap();
+        assert_eq!(repeated.display_status, WorkflowDisplayStatus::Completed);
+        assert!(repeated.stages.iter().any(|stage| {
+            stage.id == "generate_candidates" && stage.status == WorkflowStageStatus::Skipped
+        }));
+        assert_eq!(GitService.repository_status(&context).unwrap().head, head);
     }
     fs::remove_dir_all(root).ok();
 }
@@ -960,6 +1092,488 @@ async fn real_generated_deletion_enters_persisted_waiting_without_mutating_wiki(
     fs::remove_dir_all(root).ok();
 }
 
+#[cfg(not(windows))]
+#[tokio::test]
+async fn selected_v2_source_can_generate_recover_and_apply_with_an_unselected_broken_manifest() {
+    use llm_wiki_desktop_lib::services::import_v2::source_finalization::{
+        finalize_source, CandidateMetadata, FinalizationInput,
+    };
+    use llm_wiki_desktop_lib::services::import_v2::source_registry::{
+        SourceIndex, SourceManifest, SourcePointer, SourceRegistry,
+    };
+    use std::collections::BTreeMap;
+
+    let root = tempfile::tempdir().unwrap();
+    let context = ProjectContext::new("selected-v2-recovery", root.path().to_path_buf());
+    for directory in [
+        ".app/tasks",
+        ".app/compile",
+        "wiki/concepts",
+        "wiki/sources",
+    ] {
+        fs::create_dir_all(root.path().join(directory)).unwrap();
+    }
+    for (path, content) in [
+        ("purpose.md", "# Purpose\n"),
+        ("schema.md", "# Schema\n"),
+        ("wiki/index.md", "# Index\n"),
+        ("wiki/overview.md", "# Overview\n"),
+        ("wiki/log.md", "# Log\n"),
+        ("wiki/concepts/旧名称.md", "---\ntype: concept\nsources:\n  - 资料.md\n---\n# 旧名称\n\n> Sources: [资料](../sources/资料.md)\n"),
+    ] {
+        fs::write(root.path().join(path), content).unwrap();
+    }
+    let mut manifest: SourceManifest = serde_json::from_str(include_str!(
+        "../../tests/fixtures/import-v2/source-manifest-v3.json"
+    ))
+    .unwrap();
+    manifest.wiki_path = "wiki/sources/local/资料.md".into();
+    manifest.compiled_consumptions.clear();
+    let version = manifest.versions[0].clone();
+    let candidate = CandidateMetadata {
+        source_kind: manifest.source_kind.clone(),
+        title: manifest.title.clone(),
+        canonical_url: manifest.canonical_url.clone(),
+        platform: manifest.platform.clone(),
+        platform_content_id: manifest.platform_content_id.clone(),
+        author: manifest.author.clone(),
+        published_at: manifest.published_at.clone(),
+        language: manifest.language.clone(),
+    };
+    let finalized = finalize_source(FinalizationInput {
+        candidate_markdown: b"# Source\n\nSelected source content.\n",
+        candidate: &candidate,
+        source_id: &manifest.source_id,
+        version_id: &version.version_id,
+        content_hash: &version.content_hash,
+        imported_at: &version.created_at,
+        quality: &version.quality,
+        restricted: false,
+    })
+    .unwrap();
+    manifest.versions[0].human_edit_hash = Some(finalized.human_edit_hash);
+    for path in [&manifest.wiki_path, &version.baseline_path] {
+        let absolute = root.path().join(path);
+        fs::create_dir_all(absolute.parent().unwrap()).unwrap();
+        fs::write(absolute, &finalized.bytes).unwrap();
+    }
+    let selected = WorkflowSourceVersionRef {
+        source_id: manifest.source_id.clone(),
+        version_id: version.version_id.clone(),
+    };
+    let pointer = SourcePointer {
+        source_id: selected.source_id.clone(),
+        version_id: selected.version_id.clone(),
+    };
+    let broken = SourcePointer {
+        source_id: "source-broken".into(),
+        version_id: "version-broken".into(),
+    };
+    FileStore
+        .write_json_atomic(
+            &context,
+            ".app/source-index-v2.json",
+            &SourceIndex {
+                schema_version: manifest.schema_version,
+                by_content_hash: BTreeMap::from([
+                    (version.content_hash.clone(), pointer.clone()),
+                    ("f".repeat(64), broken.clone()),
+                ]),
+                by_locator: BTreeMap::from([
+                    ("file:/selected.md".into(), pointer),
+                    ("file:/broken.md".into(), broken),
+                ]),
+            },
+        )
+        .unwrap();
+    let source_manifest_path = format!(".app/sources/{}.json", manifest.source_id);
+    FileStore
+        .write_json_atomic(&context, &source_manifest_path, &manifest)
+        .unwrap();
+    FileStore
+        .write_markdown(&context, ".app/sources/source-broken.json", "{broken")
+        .unwrap();
+    assert!(
+        CompileService::known_source_refs(&context).is_err(),
+        "the fixture must reject whole-project Source resolution"
+    );
+
+    let harness = UpdateHarness::new(Arc::new(SuccessfulAgent {
+        delete_path: Some("wiki/concepts/旧名称.md".into()),
+    }));
+    let run = enqueue_update(
+        &context,
+        &harness.tasks,
+        &harness.coordinator,
+        UpdateWikiMode::ChangedSources,
+        selected,
+    );
+    run_update_wiki(&context, run.clone(), &harness.services()).await;
+    let waiting = harness.tasks.get_workflow_run(&run.task_id).unwrap();
+    assert_eq!(
+        waiting.display_status,
+        WorkflowDisplayStatus::WaitingForConfirmation,
+        "{:?}",
+        waiting.error
+    );
+    assert!(root.path().join("wiki/concepts/旧名称.md").exists());
+    assert_eq!(
+        fs::read(root.path().join(&manifest.wiki_path)).unwrap(),
+        finalized.bytes
+    );
+    harness
+        .tasks
+        .persist_task(&run.task_id, root.path())
+        .unwrap();
+
+    let restarted = UpdateHarness::new(Arc::new(NoAgents));
+    restarted.tasks.recover_tasks(root.path()).unwrap();
+    let restored = restarted.tasks.get_workflow_run(&run.task_id).unwrap();
+    assert_eq!(
+        restored.display_status,
+        WorkflowDisplayStatus::WaitingForConfirmation,
+        "{:?}",
+        restored.error
+    );
+    restore_update_wiki_confirmation(
+        &context,
+        &restored,
+        &restarted.tasks,
+        &restarted.confirmations,
+    )
+    .unwrap();
+    let (completed, _) =
+        confirm_update_wiki_review(&context, &run.task_id, &restarted.services()).unwrap();
+    assert_eq!(completed.display_status, WorkflowDisplayStatus::Completed);
+    assert!(!root.path().join("wiki/concepts/旧名称.md").exists());
+    assert!(root.path().join("wiki/concepts/工作流成功.md").exists());
+    assert_eq!(
+        fs::read_to_string(root.path().join(".app/sources/source-broken.json")).unwrap(),
+        "{broken"
+    );
+    assert_eq!(
+        fs::read(root.path().join(&manifest.wiki_path)).unwrap(),
+        finalized.bytes
+    );
+    let consumed =
+        SourceRegistry::read_manifest(&context, &FileStore, &source_manifest_path).unwrap();
+    assert!(consumed
+        .compiled_consumptions
+        .iter()
+        .any(|record| record.compile_task_id == run.task_id));
+}
+
+#[tokio::test]
+async fn changed_queued_inputs_wait_for_scope_review_and_survive_restart_without_a_candidate() {
+    use llm_wiki_desktop_lib::models::confirmation::PendingActionType;
+
+    let (context, root) = project("scope-review");
+    GitService
+        .initialize_repository(&context, "initial")
+        .unwrap();
+    let harness = UpdateHarness::new(Arc::new(NoAgents));
+    let (scope, _) = source_scope(&context);
+    let run = enqueue_update(
+        &context,
+        &harness.tasks,
+        &harness.coordinator,
+        UpdateWikiMode::ChangedSources,
+        scope,
+    );
+    fs::write(
+        root.join("raw/extracted/资料.md"),
+        "# Changed while queued\n",
+    )
+    .unwrap();
+    run_update_wiki(&context, run.clone(), &harness.services()).await;
+    let waiting = harness.tasks.get_workflow_run(&run.task_id).unwrap();
+    assert_eq!(
+        waiting.display_status,
+        WorkflowDisplayStatus::WaitingForConfirmation
+    );
+    assert_eq!(waiting.scope, run.scope);
+    let pending = waiting.pending_action.as_ref().unwrap();
+    assert_eq!(pending.action_type, PendingActionType::ReviewScope);
+    assert!(pending.candidate.is_none());
+    assert!(waiting.error.is_none());
+    assert!(!update_wiki_candidate_is_valid(&run.task_id, &root));
+    harness.tasks.persist_task(&run.task_id, &root).unwrap();
+    let restarted = TaskService::default();
+    restarted.recover_tasks(&root).unwrap();
+    let restored = restarted.get_workflow_run(&run.task_id).unwrap();
+    assert_eq!(
+        restored.display_status,
+        WorkflowDisplayStatus::WaitingForConfirmation
+    );
+    assert_eq!(restored.pending_action, waiting.pending_action);
+    restore_update_wiki_confirmation(&context, &restored, &restarted, &harness.confirmations)
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(root.join("raw/extracted/资料.md")).unwrap(),
+        "# Changed while queued\n"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn runtime_metadata_does_not_block_content_checkpoint_or_enter_its_commit() {
+    let (context, root) = project("runtime-metadata");
+    GitService
+        .initialize_repository(&context, "initial")
+        .unwrap();
+    let harness = UpdateHarness::new(Arc::new(SuccessfulAgent { delete_path: None }));
+    let (scope, _) = source_scope(&context);
+    let run = enqueue_update(
+        &context,
+        &harness.tasks,
+        &harness.coordinator,
+        UpdateWikiMode::ChangedSources,
+        scope,
+    );
+    harness.tasks.persist_task(&run.task_id, &root).unwrap();
+    harness
+        .tasks
+        .append_log(
+            &run.task_id,
+            llm_wiki_desktop_lib::tasks::task_model::LogLevel::Info,
+            "任务日志只属于运行历史".into(),
+        )
+        .unwrap();
+    fs::create_dir_all(root.join(".app/workflows")).unwrap();
+    fs::write(
+        root.join(".app/workflows/preferences.json"),
+        r#"{"schemaVersion":1,"entries":[]}"#,
+    )
+    .unwrap();
+
+    run_update_wiki(&context, run.clone(), &harness.services()).await;
+
+    let completed = harness.tasks.get_workflow_run(&run.task_id).unwrap();
+    assert_eq!(
+        completed.display_status,
+        WorkflowDisplayStatus::Completed,
+        "{:?}",
+        completed.error
+    );
+    let llm_wiki_desktop_lib::models::workflow::WorkflowResult::UpdateWiki {
+        final_commit: Some(commit),
+        ..
+    } = completed.result.unwrap()
+    else {
+        panic!("expected committed update");
+    };
+    for path in [
+        format!(".app/tasks/{}.json", run.task_id),
+        format!(".app/tasks/{}.events.jsonl", run.task_id),
+        ".app/workflows/preferences.json".into(),
+    ] {
+        assert!(GitService.changed_paths(&context).unwrap().contains(&path));
+        assert!(GitService::file_at_checkpoint(&context, &commit, &path)
+            .unwrap()
+            .is_none());
+    }
+    assert!(root.join("wiki/concepts/工作流成功.md").is_file());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn generated_conflict_can_apply_after_restart_but_rejects_edits_made_after_review() {
+    for late_edit in [false, true] {
+        let (context, root) = project("reviewed-conflict");
+        GitService
+            .initialize_repository(&context, "initial")
+            .unwrap();
+        let workspace = Arc::new(Mutex::new(None));
+        let harness = UpdateHarness::new(Arc::new(InterveningAgent {
+            project_root: root.clone(),
+            cancel: false,
+            workspace: workspace.clone(),
+        }));
+        let (scope, _) = source_scope(&context);
+        let run = enqueue_update(
+            &context,
+            &harness.tasks,
+            &harness.coordinator,
+            UpdateWikiMode::ChangedSources,
+            scope,
+        );
+        run_update_wiki(&context, run.clone(), &harness.services()).await;
+        assert!(!workspace.lock().unwrap().as_ref().unwrap().exists());
+        let waiting = harness.tasks.get_workflow_run(&run.task_id).unwrap();
+        assert_eq!(
+            waiting.display_status,
+            WorkflowDisplayStatus::WaitingForConfirmation
+        );
+        assert!(
+            update_wiki_decision_review(&run.task_id, &root)
+                .unwrap()
+                .user_edits_detected
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("wiki/overview.md")).unwrap(),
+            "# User edits\n"
+        );
+        harness.tasks.persist_task(&run.task_id, &root).unwrap();
+        let restarted = UpdateHarness::new(Arc::new(NoAgents));
+        restarted.tasks.recover_tasks(&root).unwrap();
+        let restored = restarted.tasks.get_workflow_run(&run.task_id).unwrap();
+        restore_update_wiki_confirmation(
+            &context,
+            &restored,
+            &restarted.tasks,
+            &restarted.confirmations,
+        )
+        .unwrap();
+        if late_edit {
+            fs::write(root.join("wiki/overview.md"), "# A later edit\n").unwrap();
+        }
+        let confirmed = confirm_update_wiki_review(&context, &run.task_id, &restarted.services());
+        if late_edit {
+            assert_eq!(
+                confirmed.unwrap_err().error.code,
+                "WORKFLOW_OUTPUT_BASELINE_CHANGED"
+            );
+            assert_eq!(
+                fs::read_to_string(root.join("wiki/overview.md")).unwrap(),
+                "# A later edit\n"
+            );
+            assert!(!root.join("wiki/concepts/工作流成功.md").exists());
+        } else {
+            let (completed, _) = confirmed.unwrap();
+            assert_eq!(completed.display_status, WorkflowDisplayStatus::Completed);
+            let llm_wiki_desktop_lib::models::workflow::WorkflowResult::UpdateWiki {
+                checkpoint_hash: Some(checkpoint),
+                final_commit: Some(final_commit),
+                ..
+            } = completed.result.unwrap()
+            else {
+                panic!("expected committed update");
+            };
+            assert_eq!(
+                GitService::file_at_checkpoint(&context, &checkpoint, "wiki/overview.md").unwrap(),
+                Some("# User edits\n".into()),
+            );
+            assert_eq!(
+                fs::read_to_string(root.join("wiki/overview.md")).unwrap(),
+                "# Overview\nUpdated\n"
+            );
+            assert!(root.join("wiki/concepts/工作流成功.md").is_file());
+            let runtime_path = format!(".app/tasks/{}.json", run.task_id);
+            assert_eq!(
+                GitService
+                    .history_snapshot(&context, &run.task_id, "after")
+                    .unwrap(),
+                Some(final_commit.clone())
+            );
+            assert_eq!(
+                GitService::file_at_checkpoint(&context, &final_commit, "wiki/overview.md")
+                    .unwrap(),
+                Some("# Overview\nUpdated\n".into())
+            );
+            assert!(
+                GitService::file_at_checkpoint(&context, &final_commit, &runtime_path)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(root.join("raw/extracted/资料.md")).unwrap(),
+            "# 资料\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn cancelling_generated_work_discards_unapproved_files_and_preserves_source() {
+    let (context, root) = project("cancel-generated");
+    GitService
+        .initialize_repository(&context, "initial")
+        .unwrap();
+    let workspace = Arc::new(Mutex::new(None));
+    let harness = UpdateHarness::new(Arc::new(InterveningAgent {
+        project_root: root.clone(),
+        cancel: true,
+        workspace: workspace.clone(),
+    }));
+    let (scope, _) = source_scope(&context);
+    let run = enqueue_update(
+        &context,
+        &harness.tasks,
+        &harness.coordinator,
+        UpdateWikiMode::ChangedSources,
+        scope,
+    );
+    run_update_wiki(&context, run.clone(), &harness.services()).await;
+    assert!(!workspace.lock().unwrap().as_ref().unwrap().exists());
+    assert_eq!(
+        harness
+            .tasks
+            .get_workflow_run(&run.task_id)
+            .unwrap()
+            .display_status,
+        WorkflowDisplayStatus::Cancelled,
+    );
+    assert!(!root.join("wiki/concepts/工作流成功.md").exists());
+    assert!(!update_wiki_candidate_is_valid(&run.task_id, &root));
+    assert_eq!(
+        fs::read_to_string(root.join("raw/extracted/资料.md")).unwrap(),
+        "# 资料\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("raw/sources/资料.txt")).unwrap(),
+        "Original source bytes\n",
+    );
+    assert!(!GitService.repository_status(&context).unwrap().has_changes);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn derived_index_warning_does_not_repeat_or_rollback_successful_wiki_writes() {
+    let (context, root) = project("index-warning");
+    fs::write(context.app_dir.join("bookmarks.json"), "{not json").unwrap();
+    GitService
+        .initialize_repository(&context, "initial")
+        .unwrap();
+    let harness = UpdateHarness::new(Arc::new(SuccessfulAgent { delete_path: None }));
+    let (scope, _) = source_scope(&context);
+    let run = enqueue_update(
+        &context,
+        &harness.tasks,
+        &harness.coordinator,
+        UpdateWikiMode::ChangedSources,
+        scope,
+    );
+    run_update_wiki(&context, run.clone(), &harness.services()).await;
+    let completed = harness.tasks.get_workflow_run(&run.task_id).unwrap();
+    assert_eq!(
+        completed.display_status,
+        WorkflowDisplayStatus::Completed,
+        "{:?}",
+        completed.error
+    );
+    assert!(root.join("wiki/concepts/工作流成功.md").is_file());
+    assert!(harness
+        .tasks
+        .get_logs(&run.task_id)
+        .unwrap()
+        .iter()
+        .any(|line| { line.message.contains("bookmarks could not be read") }));
+    fs::remove_file(context.app_dir.join("bookmarks.json")).unwrap();
+    assert!(harness
+        .search
+        .scan_wiki(&context, &HashSet::new())
+        .unwrap()
+        .pages
+        .iter()
+        .any(|page| { page.path == "wiki/concepts/工作流成功.md" }));
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn cjk_wikilinks_and_resource_links_survive_workflow_semantic_validation() {
     let (context, root) = project("wikilink-resource");
@@ -994,4 +1608,219 @@ fn cjk_wikilinks_and_resource_links_survive_workflow_semantic_validation() {
     assert!(manifest.files[3].content.contains("[[相关概念]]"));
     assert!(manifest.files[3].content.contains("结构图.png"));
     fs::remove_dir_all(root).ok();
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn automatic_history_and_restart_undo_preserve_external_git_and_edits() {
+    use llm_wiki_desktop_lib::services::{get_update_wiki_history_state, undo_update_wiki_history};
+    for existing_git in [false, true] {
+        let (context, root) = project("自动历史-中文");
+        if existing_git {
+            GitService
+                .initialize_repository(&context, "initial")
+                .unwrap();
+            fs::write(root.join("external.txt"), "staged external work\n").unwrap();
+            let output = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["add", "--", "external.txt"])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+        }
+        fs::write(root.join("wiki/overview.md"), "# 未提交的用户内容\r\n").unwrap();
+        let old_overview = fs::read(root.join("wiki/overview.md")).unwrap();
+        let original_head = GitService.repository_status(&context).unwrap().head;
+        let original_index = fs::read(root.join(".git/index")).ok();
+        let harness = UpdateHarness::new(Arc::new(SuccessfulAgent { delete_path: None }));
+        let (scope, _) = source_scope(&context);
+        let run = enqueue_update(
+            &context,
+            &harness.tasks,
+            &harness.coordinator,
+            UpdateWikiMode::ChangedSources,
+            scope,
+        );
+        // Wiki edits made while queued become the runtime baseline. Selected
+        // Source versions are still bound when admitted to the queue.
+        fs::write(root.join("wiki/concepts/无关页面.md"), "# 队列期间新增\n").unwrap();
+        run_update_wiki(&context, run.clone(), &harness.services()).await;
+        let completed = harness.tasks.get_workflow_run(&run.task_id).unwrap();
+        assert_eq!(
+            completed.display_status,
+            WorkflowDisplayStatus::Completed,
+            "{:?}",
+            completed.error
+        );
+        assert_eq!(
+            GitService.repository_status(&context).unwrap().head,
+            original_head
+        );
+        assert_eq!(fs::read(root.join(".git/index")).ok(), original_index);
+        let state = get_update_wiki_history_state(&context, &completed).unwrap();
+        assert!(state.available && !state.undone);
+        let receipt = root.join(format!(".app/compile/{}.json", run.task_id));
+        let generated = root.join("wiki/concepts/工作流成功.md");
+        let generated_bytes = fs::read(&generated).unwrap();
+        let receipt_bytes = fs::read(&receipt).unwrap();
+        fs::write(&generated, "# 更新后外部编辑\n").unwrap();
+        let error = undo_update_wiki_history(
+            &context,
+            &completed,
+            &FileStore,
+            &harness.bookmarks,
+            &harness.search,
+            &harness.tasks,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "WORKFLOW_UNDO_CONFLICT");
+        assert_eq!(
+            fs::read_to_string(&generated).unwrap(),
+            "# 更新后外部编辑\n"
+        );
+        assert_eq!(fs::read(&receipt).unwrap(), receipt_bytes);
+        assert_eq!(
+            fs::read_to_string(root.join("wiki/overview.md")).unwrap(),
+            "# Overview\nUpdated\n"
+        );
+        fs::write(&generated, generated_bytes).unwrap();
+        harness.tasks.persist_task(&run.task_id, &root).unwrap();
+        let restarted = TaskService::default();
+        restarted.recover_tasks(&root).unwrap();
+        let recovered = restarted.get_workflow_run(&run.task_id).unwrap();
+        let state = undo_update_wiki_history(
+            &context,
+            &recovered,
+            &FileStore,
+            &harness.bookmarks,
+            &harness.search,
+            &restarted,
+        )
+        .unwrap();
+        assert!(state.available && state.undone);
+        assert_eq!(
+            fs::read(root.join("wiki/overview.md")).unwrap(),
+            old_overview
+        );
+        assert!(!generated.exists());
+        assert!(!receipt.exists());
+        assert_eq!(
+            fs::read_to_string(root.join("wiki/concepts/无关页面.md")).unwrap(),
+            "# 队列期间新增\n"
+        );
+        assert_eq!(
+            GitService.repository_status(&context).unwrap().head,
+            original_head
+        );
+        assert_eq!(fs::read(root.join(".git/index")).ok(), original_index);
+        assert!(
+            undo_update_wiki_history(
+                &context,
+                &recovered,
+                &FileStore,
+                &harness.bookmarks,
+                &harness.search,
+                &restarted
+            )
+            .unwrap()
+            .undone
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn interrupted_publication_and_partial_undo_have_durable_recovery() {
+    use llm_wiki_desktop_lib::services::{get_update_wiki_history_state, undo_update_wiki_history};
+    let (context, root) = project("interrupted-history");
+    let harness = UpdateHarness::new(Arc::new(SuccessfulAgent { delete_path: None }));
+    let old_overview = fs::read(root.join("wiki/overview.md")).unwrap();
+    let (scope, _) = source_scope(&context);
+    let run = enqueue_update(
+        &context,
+        &harness.tasks,
+        &harness.coordinator,
+        UpdateWikiMode::ChangedSources,
+        scope,
+    );
+    run_update_wiki(&context, run.clone(), &harness.services()).await;
+    let mut interrupted = harness.tasks.get_workflow_run(&run.task_id).unwrap();
+    assert_eq!(
+        interrupted.display_status,
+        WorkflowDisplayStatus::Completed,
+        "{:?}",
+        interrupted.error
+    );
+    // Model the durable boundary after some writes but before publication.
+    let after_ref = format!("refs/llm-wiki/operations/{}/after", run.task_id);
+    assert!(std::process::Command::new("git")
+        .current_dir(&root)
+        .args(["update-ref", "-d", &after_ref])
+        .status()
+        .unwrap()
+        .success());
+    interrupted.display_status = WorkflowDisplayStatus::Interrupted;
+    interrupted.result = None;
+    fs::write(root.join("wiki/overview.md"), &old_overview).unwrap();
+    let receipt_path = format!(".app/compile/{}.json", run.task_id);
+    fs::remove_file(root.join(&receipt_path)).unwrap();
+    let state = get_update_wiki_history_state(&context, &interrupted).unwrap();
+    assert!(state.available && state.recovery && !state.undone);
+    let planned = GitService
+        .read_history_files(
+            &context,
+            state.final_commit.as_deref().unwrap(),
+            std::slice::from_ref(&receipt_path),
+        )
+        .unwrap();
+    let record: CompileConsumptionRecord =
+        serde_json::from_slice(planned[&receipt_path].as_ref().unwrap()).unwrap();
+    let mut paths = record.affected_paths;
+    paths.push(receipt_path);
+    let before = GitService
+        .read_history_files(&context, state.checkpoint_hash.as_deref().unwrap(), &paths)
+        .unwrap();
+    // Model an undo process exiting after its durable intent was recorded.
+    GitService
+        .create_history_snapshot(
+            &context,
+            &run.task_id,
+            "undo-started",
+            "restore",
+            state.final_commit.as_deref(),
+            &before,
+        )
+        .unwrap();
+    assert!(
+        get_update_wiki_history_state(&context, &interrupted)
+            .unwrap()
+            .undo_in_progress
+    );
+    assert_eq!(
+        GitService
+            .ensure_no_incomplete_history_undo(&context)
+            .unwrap_err()
+            .code,
+        "WORKFLOW_RECOVERY_REQUIRED"
+    );
+    let restored = undo_update_wiki_history(
+        &context,
+        &interrupted,
+        &FileStore,
+        &harness.bookmarks,
+        &harness.search,
+        &harness.tasks,
+    )
+    .unwrap();
+    assert!(restored.undone && !restored.undo_in_progress);
+    GitService
+        .ensure_no_incomplete_history_undo(&context)
+        .unwrap();
+    assert_eq!(
+        fs::read(root.join("wiki/overview.md")).unwrap(),
+        old_overview
+    );
+    assert!(!root.join("wiki/concepts/工作流成功.md").exists());
+    fs::remove_dir_all(root).unwrap();
 }

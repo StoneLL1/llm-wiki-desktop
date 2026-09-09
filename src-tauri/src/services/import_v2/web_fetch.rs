@@ -363,16 +363,8 @@ impl WebFetchService {
                 })?;
             let mut request = client
                 .get(target.request_url.clone())
-                .header(
-                    header::USER_AGENT,
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                )
+                .headers(page_request_headers(&host))
                 .header(header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.8")
-                .header("Sec-Fetch-Dest", "document")
-                .header("Sec-Fetch-Mode", "navigate")
-                .header("Sec-Fetch-Site", "none")
-                .header("Sec-Fetch-User", "?1")
-                .header("Upgrade-Insecure-Requests", "1")
                 .header(
                     header::ACCEPT,
                     "text/html,application/xhtml+xml,application/json;q=0.8,text/plain;q=0.5",
@@ -828,6 +820,38 @@ where
     }
 }
 
+fn page_request_headers(host: &str) -> header::HeaderMap {
+    let mut headers = header::HeaderMap::new();
+    let xiaohongshu = ["xiaohongshu.com", "xhslink.com", "xhslink.cn"]
+        .iter()
+        .any(|root| host == *root || host.ends_with(&format!(".{root}")));
+    if xiaohongshu {
+        // The browser-navigation profile returns a JavaScript login bootstrap
+        // for anonymous public notes. Identify this HTTP client truthfully.
+        headers.insert(
+            header::USER_AGENT,
+            header::HeaderValue::from_static(concat!(
+                "LLM-Wiki-Desktop/",
+                env!("CARGO_PKG_VERSION")
+            )),
+        );
+    } else {
+        // Preserve established platform compatibility: WeChat serves a
+        // challenge instead of its public article with the app user agent.
+        for (name, value) in [
+            ("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
+            ("sec-fetch-dest", "document"),
+            ("sec-fetch-mode", "navigate"),
+            ("sec-fetch-site", "none"),
+            ("sec-fetch-user", "?1"),
+            ("upgrade-insecure-requests", "1"),
+        ] {
+            headers.insert(header::HeaderName::from_static(name), header::HeaderValue::from_static(value));
+        }
+    }
+    headers
+}
+
 fn validate_fetch_target(
     target: &SessionWebTarget,
     limits: &WebFetchPolicy,
@@ -863,6 +887,35 @@ mod tests {
         atomic::{AtomicBool, Ordering},
         Arc,
     };
+
+    #[test]
+    fn xiaohongshu_and_share_redirects_use_the_app_client_without_changing_other_platforms() {
+        for host in [
+            "www.xiaohongshu.com",
+            "xiaohongshu.com",
+            "xhslink.com",
+            "www.xhslink.cn",
+        ] {
+            let headers = page_request_headers(host);
+            assert!(headers[header::USER_AGENT]
+                .to_str()
+                .unwrap()
+                .starts_with("LLM-Wiki-Desktop/"));
+            assert!(!headers.contains_key("sec-fetch-mode"));
+        }
+        for host in [
+            "mp.weixin.qq.com",
+            "xiaohongshu.com.example.org",
+            "example.org",
+        ] {
+            let headers = page_request_headers(host);
+            assert!(headers[header::USER_AGENT]
+                .to_str()
+                .unwrap()
+                .contains("Chrome/"));
+            assert_eq!(headers["sec-fetch-mode"], "navigate");
+        }
+    }
 
     #[tokio::test]
     async fn stalled_response_stream_observes_cancellation_promptly() {

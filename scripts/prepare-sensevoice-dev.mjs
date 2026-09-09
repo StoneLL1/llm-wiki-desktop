@@ -1,3 +1,5 @@
+import { writeCapabilityContract } from "./stage-prepared-capability.mjs";
+import { prepareMacosRuntime } from "./prepare-macos-runtime.mjs";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createReadStream } from "node:fs";
@@ -12,7 +14,7 @@ import { stageSenseVoiceCapability } from "./stage-sensevoice-capability.mjs";
 
 const VERSION = "1.13.4+2024.07.17";
 const NODE_VERSION = "22.17.0";
-const PREPARATION_REVISION = 5;
+const PREPARATION_REVISION = 6;
 
 function comparePaths(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
@@ -148,8 +150,8 @@ async function slimDevelopmentPack(packRoot) {
   // and bundles CUDA/TensorRT providers that are hundreds of MiB. Development
   // qualification requires the CPU path; accelerators remain release-pack
   // concerns when target-specific runtimes are intentionally present.
-  await fs.rm(path.join(packRoot, "runtime", "sherpa", "lib"), { recursive: true, force: true });
   if (process.platform === "win32") {
+    await fs.rm(path.join(packRoot, "runtime", "sherpa", "lib"), { recursive: true, force: true });
     for (const provider of ["onnxruntime_providers_cuda.dll", "onnxruntime_providers_tensorrt.dll"]) {
       await fs.rm(path.join(packRoot, "runtime", "sherpa", "bin", provider), { force: true });
     }
@@ -197,7 +199,7 @@ export async function prepareSenseVoiceDevelopmentCapability() {
     && installedManifest.targetTriples?.includes(target)
     && await hasCompleteReusablePayload(packRoot, installedManifest);
   if (!stagedPayloadReady) {
-    await fs.rm(path.join(developmentRoot, "installed"), { recursive: true, force: true });
+    await fs.rm(packRoot, { recursive: true, force: true });
   }
   await fs.rm(publicKeyPath, { force: true });
   await fs.rm(preparationStatePath, { force: true });
@@ -230,10 +232,15 @@ export async function prepareSenseVoiceDevelopmentCapability() {
     await refreshDevelopmentRunner(sourceRunner, path.join(packRoot, "runner"));
   }
   await slimDevelopmentPack(packRoot);
+  await prepareMacosRuntime(packRoot);
+  // Qualification creates a temporary inventory for the refreshed runner.
+  await fs.rm(path.join(packRoot, "manifest.json"), { force: true });
   const node = path.join(packRoot, "runtime", process.platform === "win32" ? "node.exe" : "node");
   await run(node, ["--test", path.join(packRoot, "runner", "core.node-test.mjs")], packRoot);
   await run(node, [path.join(packRoot, "runner", "qualification.mjs")], packRoot);
 
+  await fs.rm(path.join(packRoot, "CAPABILITY-CONTRACT.json"), { force: true });
+  await writeCapabilityContract({ pack: "asr-sensevoice-small", target, ...staged }, packRoot, repositoryRoot);
   const files = await inventory(packRoot);
   const executableFiles = [
     staged.entrypoint,

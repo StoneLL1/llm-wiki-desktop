@@ -554,6 +554,8 @@ fn revalidate_and_enqueue_agent_lint_repair(
                 route: Some(current_route),
                 baseline_fingerprint: binding.baseline_fingerprint.clone(),
                 execution_options: WorkflowExecutionOptions {
+                    update_request: None,
+                    update_config_revision: None,
                     preparation_revision: binding.preparation_revision.clone(),
                     operation,
                     preparation_fingerprint: Some(binding.preparation_revision.clone()),
@@ -953,6 +955,17 @@ fn selected_agent_findings(
         current_health_route,
         current_baseline_fingerprint,
     )?;
+    if let Some(execution) = &report.execution {
+        if !state
+            .lint_service
+            .verify_health_inputs(context, &execution.input_hashes, |_| Ok(()))?
+        {
+            return Err(lint_repair_error(
+                "LINT_REPAIR_REPORT_STALE",
+                "The Health report inputs changed. Run Health Check again before repair.",
+            ));
+        }
+    }
     if report.report_id != report_id
         || report.mode != HealthCheckMode::Complete
         || !report_route_matches_repair_agent(&report.route, expected_agent)
@@ -1472,14 +1485,24 @@ pub fn list_lint_history(
 }
 
 #[tauri::command]
-pub fn read_lint_history_report(
-    state: State<'_, AppState>,
+pub async fn read_lint_history_report(
+    app: tauri::AppHandle,
     request: ReadLintHistoryReportRequest,
 ) -> Result<PersistedLintReport, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state
-        .lint_service
-        .read_lint_history_report(&context, &request.id)
+    use tauri::Manager;
+    crate::commands::runtime::run_blocking(
+        app,
+        crate::services::BlockingWorkClass::HeavyIo,
+        move |app| {
+            let state = app.state::<AppState>();
+            let context =
+                state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+            state
+                .lint_service
+                .read_lint_history_report_for_view(&context, &request.id)
+        },
+    )
+    .await
 }
 
 /// Apply (or plan) a single lint fix. Safe fixes apply under a Git checkpoint;
@@ -1696,11 +1719,11 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    struct InstalledCodex;
+    struct InstalledClaude;
 
-    impl ProcessRunner for InstalledCodex {
+    impl ProcessRunner for InstalledClaude {
         fn find_executable(&self, command: &str) -> Option<PathBuf> {
-            (command == "codex").then(|| PathBuf::from("codex"))
+            (command == "claude").then(|| std::env::current_exe().unwrap())
         }
 
         fn resolve_probe_target(&self, command: &str) -> AgentProbeTarget {
@@ -1719,9 +1742,9 @@ mod tests {
             _: Duration,
         ) -> Result<String, BackendError> {
             if args == ["--version"] {
-                return Ok("codex 1.0.0".into());
+                return Ok("claude 1.0.0".into());
             }
-            Ok("--json --ephemeral --sandbox --ignore-user-config --ignore-rules --output-schema --output-last-message --skip-git-repo-check -C --cd".into())
+            Ok("--print --output-format --verbose --permission-mode --settings --bare --safe-mode --disable-slash-commands --no-session-persistence --no-chrome --prompt-suggestions --strict-mcp-config --tools --allowedTools --json-schema".into())
         }
 
         fn run_capture(&self, _: &AgentInvocation) -> Result<(String, String), BackendError> {
@@ -1809,6 +1832,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn persistent_agent_health_reaches_repair_preparation_after_lint_service_restart() {
         let temp = tempfile::tempdir().unwrap();
@@ -1828,9 +1852,13 @@ mod tests {
         )
         .unwrap();
 
+        fs::write(root.join("purpose.md"), "# Purpose\n").unwrap();
+        fs::write(root.join("schema.md"), "# Schema\n").unwrap();
+        fs::write(root.join("wiki/index.md"), "# Index\n").unwrap();
+
         let config_dir = temp.path().join("config");
         let mut state = AppState {
-            agent_service: AgentService::with_runner(Arc::new(InstalledCodex)),
+            agent_service: AgentService::with_runner(Arc::new(InstalledClaude)),
             settings_service: SettingsService::with_config_dir(config_dir),
             ..AppState::default()
         };
@@ -1843,7 +1871,7 @@ mod tests {
             .save_settings(
                 &context,
                 &Settings {
-                    agent_default: Some(AgentKind::Codex),
+                    agent_default: Some(AgentKind::Claude),
                     ..Settings::default()
                 },
             )
@@ -1870,7 +1898,7 @@ mod tests {
                     kind: WorkflowKind::HealthCheck,
                     scope: Some(scope.clone()),
                     route_selection: Some(crate::models::workflow::WorkflowRouteSelection::Agent {
-                        agent: AgentKind::Codex,
+                        agent: AgentKind::Claude,
                     }),
                 },
             )
@@ -1878,6 +1906,11 @@ mod tests {
         assert_eq!(
             preparation.project_access.persistence,
             WorkflowPersistenceMode::Persistent
+        );
+        assert!(
+            !preparation.prerequisites.iter().any(|item| item.blocking),
+            "unexpected prerequisites: {:?}",
+            preparation.prerequisites
         );
         let run = match state
             .workflow_service
@@ -1907,7 +1940,7 @@ mod tests {
             task_service: &state.task_service,
             coordinator: &state.workflow_service.coordinator,
         };
-        let completed = runtime.block_on(run_health_check_with_deep(
+        runtime.block_on(run_health_check_with_deep(
             &context,
             run.clone(),
             &execution_services,
@@ -1915,7 +1948,15 @@ mod tests {
                 Ok(r#"[{"issueType":"schema_mismatch","severity":"warning","path":"wiki/concepts/主题.md","message":"Agent finding","evidence":"Agent evidence","suggestion":"Review schema"}]"#.into())
             },
         ));
-        assert!(completed.is_some(), "the real Health runner must complete");
+        assert_eq!(
+            state
+                .task_service
+                .get_workflow_run(&run.task_id)
+                .unwrap()
+                .display_status,
+            WorkflowDisplayStatus::Completed,
+            "the Health runner must complete"
+        );
         let report = state
             .lint_service
             .read_current_health_report(&context, &run.task_id)
@@ -1943,10 +1984,6 @@ mod tests {
             })
             .map(|issue| issue.id.clone())
             .expect("real Agent Health runner must publish a repairable finding");
-        state
-            .git_service
-            .initialize_repository(&context, "Initial repair preparation")
-            .unwrap();
 
         assert!(context
             .app_dir
@@ -1969,6 +2006,12 @@ mod tests {
             .expect("persistent Health owner must survive restart");
         assert_eq!(recovered.persistence, WorkflowPersistenceMode::Persistent);
         assert_eq!(recovered.display_status, WorkflowDisplayStatus::Completed);
+        // Recovery may persist task metadata; establish the explicit clean
+        // checkpoint after reopening, before requesting write authorization.
+        state
+            .git_service
+            .initialize_repository(&context, "Initial repair preparation")
+            .unwrap();
         let preparation = prepare_agent_lint_repair_current(
             &state,
             &context,
@@ -1977,12 +2020,30 @@ mod tests {
                 project_root_path: context.root.to_string_lossy().into_owned(),
                 report_id: run.task_id.clone(),
                 selected_finding_ids: vec![finding_id.clone()],
-                agent: AgentKind::Codex,
+                agent: AgentKind::Claude,
             },
         )
         .unwrap();
         assert_eq!(preparation.selected_finding_ids.len(), 1);
         assert_eq!(preparation.authorized_paths, vec!["wiki/concepts/主题.md"]);
+        // Non-Markdown evidence is part of a new Health report too. Direct
+        // backend callers must not bypass freshness by avoiding the report UI.
+        let ignore_path = root.join(".app/lint-ignore.json");
+        fs::write(&ignore_path, r#"{"version":1,"ignored":[]}"#).unwrap();
+        let stale = selected_agent_findings(
+            &state,
+            &context,
+            &report.report_id,
+            &[finding_id.clone()],
+            AgentKind::Claude,
+            &recovered.canonical_identity_key,
+            &recovered.identity_revision,
+            &report.route,
+            &recovered.baseline_fingerprint,
+        )
+        .unwrap_err();
+        assert_eq!(stale.code, "LINT_REPAIR_REPORT_STALE");
+        fs::remove_file(ignore_path).unwrap();
         // The persisted task snapshot is app-owned storage, not an
         // authentication token. A tampered owner fingerprint must not make a
         // valid report eligible for repair preparation.
@@ -2005,13 +2066,14 @@ mod tests {
                 project_root_path: context.root.to_string_lossy().into_owned(),
                 report_id: run.task_id,
                 selected_finding_ids: vec![finding_id],
-                agent: AgentKind::Codex,
+                agent: AgentKind::Claude,
             },
         )
         .expect_err("tampered workflow owner must fail closed");
         assert_eq!(error.code, "LINT_REPAIR_HEALTH_REPORT_REQUIRED");
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn persisted_repair_replay_accepts_only_exact_route_git_and_authorized_paths() {
         let root = tempfile::tempdir().unwrap();
@@ -2022,7 +2084,7 @@ mod tests {
             crate::models::paths::ProjectContext::new("repair-replay", root.path().to_path_buf());
         let config = tempfile::tempdir().unwrap();
         let state = AppState {
-            agent_service: AgentService::with_runner(Arc::new(InstalledCodex)),
+            agent_service: AgentService::with_runner(Arc::new(InstalledClaude)),
             settings_service: SettingsService::with_config_dir(config.path().to_path_buf()),
             ..AppState::default()
         };
@@ -2031,7 +2093,7 @@ mod tests {
             .save_settings(
                 &context,
                 &Settings {
-                    agent_default: Some(AgentKind::Codex),
+                    agent_default: Some(AgentKind::Claude),
                     ..Settings::default()
                 },
             )
@@ -2042,7 +2104,7 @@ mod tests {
             .unwrap();
         let expected_git_head = git.head.unwrap();
         let identity = project_identity(&context.root).unwrap();
-        let route = current_agent_lint_routes(&state, &context, AgentKind::Codex)
+        let route = current_agent_lint_routes(&state, &context, AgentKind::Claude)
             .unwrap()
             .repair;
         let scope = WorkflowScope::HealthCheck {
@@ -2236,11 +2298,11 @@ mod tests {
                 &context,
                 &run,
                 &access,
-                AgentLintRepairReplayIntent::Continue,
+                AgentLintRepairReplayIntent::Retry,
             )
             .unwrap_err()
             .code,
-            "LINT_REPAIR_GIT_CLEAN_REQUIRED"
+            "LINT_REPAIR_PREPARATION_STALE"
         );
     }
 }

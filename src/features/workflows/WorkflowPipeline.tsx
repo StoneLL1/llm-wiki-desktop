@@ -1,32 +1,28 @@
 import { Check, Circle, Clock3, X } from "lucide-react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { WorkflowDisplayStatus, WorkflowStage } from "../../types/workflow";
+import type { WorkflowDisplayStatus, WorkflowKind, WorkflowStage } from "../../types/workflow";
 import { workflowDurationMs, workflowStageStatusClass } from "./workflowPresentation";
 
 export function WorkflowPipeline({
   stages,
+  kind,
   currentStageId = null,
   displayStatus = "running",
 }: {
   stages: WorkflowStage[];
+  kind?: WorkflowKind;
   currentStageId?: string | null;
   displayStatus?: WorkflowDisplayStatus;
 }) {
   const { t, i18n } = useTranslation();
+  const [technicalStagesOpen, setTechnicalStagesOpen] = useState(false);
   const language = i18n?.resolvedLanguage ?? i18n?.language ?? "en";
   const currentStage = stages.find((stage) => stage.id === currentStageId)
     ?? stages.find((stage) => stage.status === "running" || stage.status === "waiting" || stage.status === "failed")
     ?? null;
-  const completedStages = stages.filter((stage) => stage.status === "completed" || stage.status === "skipped").length;
-  const measurableProgress = currentStage?.progress?.total !== null && currentStage?.progress?.total !== undefined
-    ? Math.min(Math.max(currentStage.progress.current / Math.max(currentStage.progress.total, 1), 0), 1)
-    : null;
-  const overallValue = displayStatus === "completed"
-    ? stages.length
-    : measurableProgress === null
-      ? null
-      : Math.min(completedStages + measurableProgress, stages.length);
+  const overallValue = displayStatus === "completed" ? stages.length : null;
   const overallValueText = currentStage
     ? t("workflows.pipeline.overallValue", {
         current: currentStage.ordinal,
@@ -35,6 +31,59 @@ export function WorkflowPipeline({
       })
     : t("workflows.pipeline.overallIdle", { total: stages.length });
 
+  if (kind) {
+    const groupsByKind = {
+      update_wiki: [
+        { labelKey: "workflows.updatePhase.prepare", ids: ["analyze_sources", "create_checkpoint"] },
+        { labelKey: "workflows.updatePhase.generate", ids: ["plan_updates", "generate_candidates"] },
+        { labelKey: "workflows.updatePhase.review", ids: ["validate_structure", "review_risk"] },
+        { labelKey: "workflows.updatePhase.save", ids: ["apply_changes", "refresh_indexes", "record_result"] },
+      ],
+      health_check: [
+        { labelKey: "workflows.healthPhase.read", ids: ["read_markdown"] },
+        { labelKey: "workflows.healthPhase.local", ids: ["check_markdown", "check_links"] },
+        { labelKey: "workflows.healthPhase.deep", ids: ["deep_check"] },
+        { labelKey: "workflows.healthPhase.report", ids: ["merge_findings", "classify_findings", "write_report", "complete"] },
+      ],
+      generate_content: [
+        { labelKey: "workflows.exportPhase.prepare", ids: ["confirm_scope", "read_wiki", "load_template"] },
+        { labelKey: "workflows.exportPhase.generate", ids: ["generate_content", "assemble_artifact"] },
+        { labelKey: "workflows.exportPhase.save", ids: ["validate_artifact", "write_export"] },
+        { labelKey: "workflows.exportPhase.result", ids: ["generate_preview", "complete"] },
+      ],
+    };
+    const groups = groupsByKind[kind];
+    return <div className="workflow-pipeline-shell workflow-grouped-pipeline">
+      <ol className="workflow-pipeline">
+        {groups.map((group, index) => {
+          const members = stages.filter((stage) => group.ids.includes(stage.id));
+          const active = members.find((stage) => ["running", "waiting", "failed"].includes(stage.status));
+          const status = active?.status ?? (members.length > 0 && members.every((stage) => stage.status === "skipped")
+            ? "skipped"
+            : members.length > 0 && members.every((stage) => ["completed", "skipped"].includes(stage.status)) ? "completed" : "pending");
+          return <li key={group.labelKey} className={workflowStageStatusClass(status)}>
+            <span className="workflow-phase-node" aria-hidden="true">
+              {status === "completed" ? <Check size={13} /> : status === "failed" ? <X size={13} /> : index + 1}
+            </span>
+            <div className="workflow-pipeline__heading" aria-current={active ? "step" : undefined}>
+              <span>{t(group.labelKey)}</span><span>{t(`workflows.stageStatus.${status}`)}</span>
+            </div>
+            {active ? <div className="workflow-pipeline__body">
+              {active.currentItem ? <code>{active.currentItem}</code> : null}
+              {active.progress ? <span>{active.progress.total !== null
+                ? t("workflows.progress.count", { current: active.progress.current, total: active.progress.total })
+                : t("workflows.progress.current", { count: active.progress.current })}</span> : null}
+              {status === "running" ? <progress aria-label={t(group.labelKey)}
+                {...(active.progress?.total != null ? { max: Math.max(active.progress.total, 1), value: active.progress.current } : {})} /> : null}
+            </div> : null}
+          </li>;
+        })}
+      </ol>
+      <details className="workflow-execution-details" onToggle={(event) => setTechnicalStagesOpen(event.currentTarget.open)}><summary>{t("workflows.pipeline.technicalStages")}</summary>
+        {technicalStagesOpen ? <WorkflowPipeline stages={stages} currentStageId={currentStageId} displayStatus={displayStatus} /> : null}
+      </details>
+    </div>;
+  }
   return (
     <div className={`workflow-pipeline-wrap is-${displayStatus.replaceAll("_", "-")}`}>
       <div className="workflow-pipeline-overall">

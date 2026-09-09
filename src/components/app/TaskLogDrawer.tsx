@@ -235,7 +235,7 @@ function TaskLogDrawerBody({
   // Current Import V2 operations are already the one user-visible task. Only
   // legacy per-item grouped tasks belong in the folded batch section.
   const visibleSorted = useMemo(
-    () => sorted.filter((task) => !task.batchId || isImportBatchOperationTask(task)),
+    () => sorted.filter((task) => task.taskType !== "import" || !task.batchId || isImportBatchOperationTask(task)),
     [sorted],
   );
 
@@ -433,6 +433,7 @@ function TaskLogDrawerBody({
       setActiveView("workflows");
       closeDrawer();
     } catch (error) {
+      if (error instanceof Error && ["WORKFLOW_NAVIGATION_SUPERSEDED", "WORKFLOW_PROJECT_CHANGED"].includes(error.message)) return;
       pushToast("error", translateBackendError(error, t));
     }
   };

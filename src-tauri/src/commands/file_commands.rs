@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, Manager};
 
 use crate::app_state::{AppState, ProjectAuthorityMutationPermit};
+use crate::commands::runtime::run_blocking;
 use crate::errors::BackendError;
 use crate::models::confirmation::{
     ConfirmationExecution, ConfirmationStatus, ConfirmedAction, StoredPendingAction,
@@ -11,6 +12,7 @@ use crate::models::confirmation::{
 use crate::services::import_v2::source_lifecycle::{
     reject_generic_source_create, reject_generic_source_path,
 };
+use crate::services::BlockingWorkClass;
 use crate::services::{
     cancel_generate_content_confirmation, confirm_generate_content_overwrite,
     GenerateContentExecutionServices, WriteMode,
@@ -59,93 +61,121 @@ pub struct ConfirmPendingActionRequest {
 }
 
 #[tauri::command]
-pub fn read_markdown_file(
-    state: State<'_, AppState>,
+pub async fn read_markdown_file(
+    app: AppHandle,
     request: ProjectFileRequest,
 ) -> Result<String, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state
-        .file_store
-        .read_markdown(&context, &request.relative_path)
+    run_blocking(app, BlockingWorkClass::HeavyIo, move |app| {
+        let state = app.state::<AppState>();
+        let context =
+            state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+        state
+            .file_store
+            .read_markdown(&context, &request.relative_path)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn write_markdown_file(
-    state: State<'_, AppState>,
+pub async fn write_markdown_file(
+    app: AppHandle,
     request: WriteMarkdownRequest,
 ) -> Result<FileHashResponse, BackendError> {
-    state.with_current_project_write_access(
-        &request.project_id,
-        &request.project_root_path,
-        |_permit, context| {
-            reject_generic_source_path(context, &state.file_store, &request.relative_path)?;
-            reject_generic_source_create(
-                context,
-                &request.relative_path,
-                None,
-                Some(&request.contents),
-            )?;
-            state.file_store.write_markdown_checked(
-                context,
-                &request.relative_path,
-                &request.contents,
-                request.mode,
-            )?;
-            let hash = state
-                .file_store
-                .file_hash(context, &request.relative_path)?;
-            Ok(FileHashResponse {
-                relative_path: request.relative_path.clone(),
-                hash,
-            })
-        },
-    )
+    run_blocking(app, BlockingWorkClass::HeavyIo, move |app| {
+        let state = app.state::<AppState>();
+        state.with_current_project_write_access(
+            &request.project_id,
+            &request.project_root_path,
+            |_permit, context| {
+                reject_generic_source_path(context, &state.file_store, &request.relative_path)?;
+                reject_generic_source_create(
+                    context,
+                    &request.relative_path,
+                    None,
+                    Some(&request.contents),
+                )?;
+                state.file_store.write_markdown_checked(
+                    context,
+                    &request.relative_path,
+                    &request.contents,
+                    request.mode,
+                )?;
+                let hash = state
+                    .file_store
+                    .file_hash(context, &request.relative_path)?;
+                Ok(FileHashResponse {
+                    relative_path: request.relative_path.clone(),
+                    hash,
+                })
+            },
+        )
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn write_json_file(
-    state: State<'_, AppState>,
+pub async fn write_json_file(
+    app: AppHandle,
     request: WriteJsonRequest,
 ) -> Result<FileHashResponse, BackendError> {
-    state.with_current_project_write_access(
-        &request.project_id,
-        &request.project_root_path,
-        |_permit, context| {
-            state.file_store.write_json_atomic_checked(
-                context,
-                &request.relative_path,
-                &request.value,
-                request.mode,
-            )?;
-            let hash = state
-                .file_store
-                .file_hash(context, &request.relative_path)?;
-            Ok(FileHashResponse {
-                relative_path: request.relative_path.clone(),
-                hash,
-            })
-        },
-    )
+    run_blocking(app, BlockingWorkClass::HeavyIo, move |app| {
+        let state = app.state::<AppState>();
+        state.with_current_project_write_access(
+            &request.project_id,
+            &request.project_root_path,
+            |_permit, context| {
+                state.file_store.write_json_atomic_checked(
+                    context,
+                    &request.relative_path,
+                    &request.value,
+                    request.mode,
+                )?;
+                let hash = state
+                    .file_store
+                    .file_hash(context, &request.relative_path)?;
+                Ok(FileHashResponse {
+                    relative_path: request.relative_path.clone(),
+                    hash,
+                })
+            },
+        )
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn get_file_hash(
-    state: State<'_, AppState>,
+pub async fn get_file_hash(
+    app: AppHandle,
     request: ProjectFileRequest,
 ) -> Result<FileHashResponse, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    let hash = state
-        .file_store
-        .file_hash(&context, &request.relative_path)?;
-    Ok(FileHashResponse {
-        relative_path: request.relative_path,
-        hash,
+    run_blocking(app, BlockingWorkClass::HeavyIo, move |app| {
+        let state = app.state::<AppState>();
+        let context =
+            state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+        let hash = state
+            .file_store
+            .file_hash(&context, &request.relative_path)?;
+        Ok(FileHashResponse {
+            relative_path: request.relative_path,
+            hash,
+        })
     })
+    .await
 }
 
 #[tauri::command]
-pub fn confirm_pending_action(
-    state: State<'_, AppState>,
+pub async fn confirm_pending_action(
+    app: AppHandle,
+    request: ConfirmPendingActionRequest,
+) -> Result<ConfirmedAction, BackendError> {
+    run_blocking(app, BlockingWorkClass::HeavyIo, move |app| {
+        confirm_pending_action_for_state(&app.state::<AppState>(), request)
+    })
+    .await
+}
+
+pub(crate) fn confirm_pending_action_for_state(
+    state: &AppState,
     request: ConfirmPendingActionRequest,
 ) -> Result<ConfirmedAction, BackendError> {
     let pending = state.confirmation_registry.peek(&request.action_id)?;
@@ -229,6 +259,9 @@ pub fn confirm_pending_action(
     }
 
     match stored.execution {
+        Some(ConfirmationExecution::VersionHistory { .. }) => Err(BackendError::new(
+            "CONFIRMATION_COMMAND_INVALID", "Version actions must use confirm_version_action.", true, true,
+        )),
         Some(
             ConfirmationExecution::RepairProject { .. }
             | ConfirmationExecution::EnableCompatibleProject { .. }
@@ -384,7 +417,7 @@ fn execute_claimed_project_authority_action(
     match execution {
         Some(ConfirmationExecution::RepairProject {
             assessment_id,
-            project_id,
+            project_id: _,
             root_path: _,
             plan,
         }) => {
@@ -465,7 +498,7 @@ fn execute_claimed_project_authority_action(
                         true,
                     ));
                 }
-                state.refresh_native_authority_after_repair(&project_id, &context.root)?;
+                permit.refresh_native_authority_after_repair()?;
             }
             Ok(ConfirmedAction {
                 action,
@@ -476,7 +509,7 @@ fn execute_claimed_project_authority_action(
         }
         Some(ConfirmationExecution::EnableCompatibleProject {
             assessment_id,
-            project_id,
+            project_id: _,
             root_path: _,
             template,
             initialize_git,
@@ -518,7 +551,7 @@ fn execute_claimed_project_authority_action(
                     .initialize_repository(&context, "Initialize compatible knowledge base")?;
                 checkpoint_exists = status.head.is_some();
             }
-            state.grant_compatible_project_trust(&project_id, &context.root)?;
+            permit.grant_compatible_project_trust()?;
             state
                 .project_assessment_service
                 .invalidate(&assessment_id)?;
@@ -623,7 +656,7 @@ fn execute_claimed_project_authority_action(
                 return Err(assessed_project_context_mismatch());
             }
             let checkpoint_exists = assessment.git.head.is_some();
-            state.grant_compatible_project_trust(&project_id, &context.root)?;
+            permit.grant_compatible_project_trust()?;
             state
                 .project_assessment_service
                 .invalidate(&assessment_id)?;
@@ -780,7 +813,7 @@ fn revalidate_assessed_context(
     if context.root != assessed_root {
         return Err(assessed_project_context_mismatch());
     }
-    let access = state.resolve_workflow_access(&context)?;
+    let access = permit.workflow_access()?;
     if access.trust != crate::models::workflow::WorkflowProjectTrust::Trusted {
         return Err(BackendError::new(
             "WORKFLOW_PROJECT_UNTRUSTED",
@@ -846,6 +879,7 @@ mod tests {
     use crate::models::project::{AssessmentOperationStatus, ProjectHealth, ProjectTemplate};
     use crate::services::{ProjectAssessmentService, ProjectService};
     use std::fs;
+    use std::sync::{mpsc, Arc};
     use std::time::Duration;
 
     fn temp_root(label: &str) -> PathBuf {
@@ -855,6 +889,266 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    fn assess(
+        state: &AppState,
+        root: &std::path::Path,
+    ) -> crate::models::project::ProjectOpenAssessment {
+        let operation = state
+            .project_assessment_service
+            .start(root.to_string_lossy().into_owned())
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let current = state
+                .project_assessment_service
+                .get_operation(&operation.assessment_operation_id)
+                .unwrap();
+            if current.status == AssessmentOperationStatus::Completed {
+                return current.assessment.unwrap();
+            }
+            assert_ne!(
+                current.status,
+                AssessmentOperationStatus::Failed,
+                "{:?}",
+                current.error
+            );
+            assert!(std::time::Instant::now() < deadline, "assessment timed out");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn confirm_with_deadline(
+        state: Arc<AppState>,
+        execution: ConfirmationExecution,
+        action_type: PendingActionType,
+    ) -> Result<ConfirmedAction, BackendError> {
+        let id = uuid::Uuid::new_v4().to_string();
+        state
+            .confirmation_registry
+            .register_with_execution(
+                PendingAction {
+                    id: id.clone(),
+                    action_type,
+                    title: "Confirm test action".into(),
+                    message: "Confirm test action".into(),
+                    risk_level: RiskLevel::High,
+                    affected_paths: Vec::new(),
+                    preview: None,
+                    expires_at: None,
+                    checkpoint_hash: None,
+                },
+                Some(execution),
+            )
+            .unwrap();
+        let (sent, received) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = confirm_pending_action_for_state(
+                &state,
+                ConfirmPendingActionRequest {
+                    action_id: id,
+                    status: ConfirmationStatus::Confirmed,
+                },
+            );
+            let _ = sent.send(result);
+        });
+        let result = received
+            .recv_timeout(Duration::from_secs(30))
+            .expect("confirmation must finish without reentering its authority lock");
+        worker.join().unwrap();
+        result
+    }
+
+    fn native_authority_fixture() -> (
+        tempfile::TempDir,
+        Arc<AppState>,
+        crate::models::paths::ProjectContext,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("知识库");
+        for directory in ["raw/sources", "wiki", ".app/tasks", "exports", "skills"] {
+            fs::create_dir_all(root.join(directory)).unwrap();
+        }
+        fs::write(root.join("purpose.md"), "# Purpose\n").unwrap();
+        fs::write(root.join("schema.md"), "# Schema\n").unwrap();
+        fs::write(root.join("wiki/index.md"), "# Index\n").unwrap();
+        let config = temp.path().join("config");
+        let state = Arc::new(AppState {
+            project_service: ProjectService::with_config_dir(config.clone()),
+            project_assessment_service: ProjectAssessmentService::new(config),
+            ..AppState::default()
+        });
+        let context = state
+            .project_registry
+            .register_trusted_native("authority-test", &root)
+            .unwrap();
+        (temp, state, context)
+    }
+
+    #[test]
+    fn confirmed_git_initialization_and_checkpoint_finish_without_reentrant_lock() {
+        let (_temp, state, context) = native_authority_fixture();
+        let assessment = assess(&state, &context.root);
+        let initialized = confirm_with_deadline(
+            Arc::clone(&state),
+            ConfirmationExecution::InitializeAssessedGit {
+                assessment_id: assessment.assessment_id,
+                project_id: context.project_id.clone(),
+                root_path: context.root.to_string_lossy().into_owned(),
+                expected_head: None,
+                expected_paths: state.git_service.initial_commit_paths(&context).unwrap(),
+            },
+            PendingActionType::InitializeGitRepository,
+        )
+        .unwrap();
+        assert!(initialized.checkpoint_exists);
+        let initial_head = state.git_service.repository_status(&context).unwrap().head;
+        fs::write(context.root.join("wiki/用户笔记.md"), "# User note\n").unwrap();
+        let assessment = assess(&state, &context.root);
+        let confirmed = confirm_with_deadline(
+            Arc::clone(&state),
+            ConfirmationExecution::CheckpointAssessedGit {
+                assessment_id: assessment.assessment_id,
+                project_id: context.project_id.clone(),
+                root_path: context.root.to_string_lossy().into_owned(),
+                expected_head: initial_head.clone(),
+                expected_paths: state.git_service.changed_paths(&context).unwrap(),
+            },
+            PendingActionType::CreateGitCheckpoint,
+        )
+        .unwrap();
+        assert!(confirmed.checkpoint_exists);
+        let git = state.git_service.repository_status(&context).unwrap();
+        assert_ne!(git.head, initial_head);
+        assert!(!git.has_changes);
+    }
+
+    #[test]
+    fn confirmed_git_initialization_still_rejects_revoked_or_read_only_authority() {
+        for read_only in [false, true] {
+            let (_temp, state, context) = native_authority_fixture();
+            let assessment = assess(&state, &context.root);
+            let execution = ConfirmationExecution::InitializeAssessedGit {
+                assessment_id: assessment.assessment_id,
+                project_id: context.project_id.clone(),
+                root_path: context.root.to_string_lossy().into_owned(),
+                expected_head: None,
+                expected_paths: state.git_service.initial_commit_paths(&context).unwrap(),
+            };
+            if read_only {
+                state
+                    .project_service
+                    .force_read_only_for_test(&context.root);
+            } else {
+                state
+                    .project_registry
+                    .revoke_trust(&context.project_id, &context.root)
+                    .unwrap();
+            }
+            let error = confirm_with_deadline(
+                Arc::clone(&state),
+                execution,
+                PendingActionType::InitializeGitRepository,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.code,
+                if read_only {
+                    "PROJECT_WRITE_READ_ONLY"
+                } else {
+                    "WORKFLOW_PROJECT_UNTRUSTED"
+                }
+            );
+            assert!(!context.root.join(".git").exists());
+        }
+    }
+
+    #[test]
+    fn confirmed_directory_repair_refreshes_native_authority_without_reentrant_lock() {
+        let (_temp, state, context) = native_authority_fixture();
+        fs::remove_dir(context.root.join(".app/tasks")).unwrap();
+        let assessment = assess(&state, &context.root);
+        let plan = state
+            .project_service
+            .prepare_native_layout_repair_plan(
+                &context,
+                assessment.canonical_identity_key.clone(),
+                assessment.identity_revision.clone(),
+            )
+            .unwrap();
+        let confirmed = confirm_with_deadline(
+            Arc::clone(&state),
+            ConfirmationExecution::RepairProject {
+                assessment_id: assessment.assessment_id,
+                project_id: context.project_id.clone(),
+                root_path: context.root.to_string_lossy().into_owned(),
+                plan,
+            },
+            PendingActionType::RepairProject,
+        )
+        .unwrap();
+        assert!(!confirmed.checkpoint_exists);
+        assert!(context.root.join(".app/tasks").is_dir());
+        assert_eq!(
+            state.resolve_workflow_read_access(&context).unwrap().trust,
+            crate::models::workflow::WorkflowProjectTrust::Trusted
+        );
+    }
+
+    #[test]
+    fn compatible_enablement_and_trust_confirmations_share_the_existing_permit() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("笔记 vault");
+        fs::create_dir_all(root.join(".obsidian")).unwrap();
+        fs::write(root.join("note.md"), "# Preserve this note\n").unwrap();
+        let config = temp.path().join("config");
+        let state = Arc::new(AppState {
+            project_service: ProjectService::with_config_dir(config.clone()),
+            project_assessment_service: ProjectAssessmentService::new(config),
+            ..AppState::default()
+        });
+        state
+            .project_registry
+            .register("compatible", &root)
+            .unwrap();
+        let assessment = assess(&state, &root);
+        confirm_with_deadline(
+            Arc::clone(&state),
+            ConfirmationExecution::EnableCompatibleProject {
+                assessment_id: assessment.assessment_id,
+                project_id: "compatible".into(),
+                root_path: root.to_string_lossy().into_owned(),
+                template: ProjectTemplate::General,
+                initialize_git: false,
+            },
+            PendingActionType::EnableCompatibleProject,
+        )
+        .unwrap();
+        state.revoke_project_trust("compatible", &root).unwrap();
+        let assessment = assess(&state, &root);
+        confirm_with_deadline(
+            Arc::clone(&state),
+            ConfirmationExecution::TrustCompatibleProject {
+                assessment_id: assessment.assessment_id,
+                project_id: "compatible".into(),
+                root_path: root.to_string_lossy().into_owned(),
+            },
+            PendingActionType::TrustCompatibleProject,
+        )
+        .unwrap();
+        let context = state
+            .resolve_project_context("compatible", root.to_string_lossy().as_ref())
+            .unwrap();
+        assert_eq!(
+            state.resolve_workflow_read_access(&context).unwrap().trust,
+            crate::models::workflow::WorkflowProjectTrust::Trusted
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("note.md")).unwrap(),
+            "# Preserve this note\n"
+        );
+        assert!(!root.join(".git").exists());
     }
 
     #[test]

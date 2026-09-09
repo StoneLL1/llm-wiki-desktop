@@ -989,6 +989,24 @@ describe("useImportWorkflow", () => {
     });
   });
 
+  it("refreshes supported inputs after background capability preparation when Import becomes visible", async () => {
+    const { result, rerender } = renderHook(({ view }: { view: AppView }) => useImportWorkflow(projectA, view, launcher()), {
+      initialProps: { view: "import" as AppView },
+    });
+    await waitFor(() => expect(result.current.bootstrapState).toBe("ready"));
+    rerender({ view: "wiki" });
+    const calls = api.getReadiness.mock.calls.length;
+    api.getReadiness.mockResolvedValue({ ...readiness, backendVersion: "ocr-ready" });
+    act(() => useTaskStore.getState().upsertTask({
+      ...task("shared-ocr", projectA.projectId, "succeeded"),
+      projectId: null, taskType: "capability_install",
+    }));
+    expect(api.getReadiness).toHaveBeenCalledTimes(calls);
+    rerender({ view: "import" });
+    await waitFor(() => expect(result.current.readiness?.backendVersion).toBe("ocr-ready"));
+    expect(api.getReadiness).toHaveBeenCalledTimes(calls + 1);
+  });
+
   it("ignores late project A readiness and session responses after switching to project B", async () => {
     let resolveA!: (value: ImportFrontendReadiness) => void;
     const readinessA = new Promise<ImportFrontendReadiness>((resolve) => { resolveA = resolve; });

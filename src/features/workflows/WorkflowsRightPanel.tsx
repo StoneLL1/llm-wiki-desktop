@@ -164,7 +164,6 @@ export function WorkflowsRightPanel() {
   const preparation = useWorkflowStore((state) => state.preparation);
   const surface = useWorkflowStore((state) => state.surface);
   const operations = useWorkflowStore((state) => state.operations);
-  const setSurface = useWorkflowStore((state) => state.setSurface);
   const contextSummary = overview?.contextSummary ?? null;
   const selectedRun = selectedTaskId
     ? runs.find((candidate) => candidate.taskId === selectedTaskId) ?? null
@@ -193,6 +192,7 @@ export function WorkflowsRightPanel() {
         taskId,
       );
     } catch (error) {
+      if (error instanceof Error && error.message === "WORKFLOW_NAVIGATION_SUPERSEDED") return;
       const currentProject = useProjectStore.getState().currentProject;
       const currentAuthority = useProjectStore.getState().authority;
       const currentAuthorityIdentity = currentAuthority?.projectId === project.projectId
@@ -217,34 +217,19 @@ export function WorkflowsRightPanel() {
   return (
     <aside id="right-context-panel" aria-label={t("workflows.context.title")} className="right-panel">
       <RightPanelHeader title={t("workflows.context.title")} />
-      <div className="app-pane-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-3">
+      <div className="workflow-context-body app-pane-scrollbar min-h-0 flex-1 overflow-y-auto">
         {surface === "preparation" && preparation ? (
           <>
             <section className="workflow-context-section">
               <div className="workflow-context-kicker"><Layers3 aria-hidden="true" size={13} />{t("workflows.context.preparation")}</div>
               <h3>{t(workflowKindKey(preparation.kind))}</h3>
               <dl className="workflow-context-facts">
-                <div><dt>{t("workflows.context.scope")}</dt><dd>{t(`workflows.scope.${preparation.scope.kind}`)}</dd></div>
-                <div><dt>{t("workflows.preparation.structuredOptions")}</dt><dd>{t(scopeDetailKey(preparation.scope))}</dd></div>
-                <div><dt>{t("workflows.preparation.count")}</dt><dd>{number.format(preparation.baseline.itemCount)}</dd></div>
                 <div><dt>{t("workflows.context.route")}</dt><dd>{t(workflowRouteKey(preparation.route))}</dd></div>
-                <div><dt>{t("workflows.context.git")}</dt><dd>{t(`workflows.git.${preparation.gitPolicy}`)}</dd></div>
+                <div><dt>{t("workflows.context.git")}</dt><dd>{t(preparation.kind === "update_wiki" ? "workflows.git.automaticUpdateHistory" : `workflows.git.${preparation.gitPolicy}`)}</dd></div>
                 <div><dt>{t("workflows.context.output")}</dt><dd>{t(preparation.output.labelKey)}</dd></div>
               </dl>
-              {preparation.output.location ? <CopyablePath path={preparation.output.location} /> : null}
             </section>
-            <section className="workflow-context-section">
-              <h3><AlertTriangle aria-hidden="true" size={13} />{t("workflows.context.prerequisites")}</h3>
-              {preparation.prerequisites.length === 0 ? (
-                <p>{t("workflows.context.prerequisitesReady")}</p>
-              ) : (
-                <ul className="workflow-context-list">
-                  {preparation.prerequisites.map((item) => (
-                    <li className={item.blocking ? "is-blocking" : ""} key={item.code}>{t(item.messageKey)}</li>
-                  ))}
-                </ul>
-              )}
-            </section>
+
           </>
         ) : surface === "detail" && selectedRun ? (
           <>
@@ -252,21 +237,26 @@ export function WorkflowsRightPanel() {
               <div className="workflow-context-kicker"><Layers3 aria-hidden="true" size={13} />{t("workflows.context.selection")}</div>
               <h3>{t(workflowKindKey(selectedRun.kind))}</h3>
               <code className="workflow-context-task-id">{selectedRun.taskId.slice(0, 8)}</code>
+              <StatusLabel status={selectedRun.displayStatus} />
+              <details className="workflow-context-details">
+                <summary>{t("workflows.preparation.executionDetails")}</summary>
               <dl className="workflow-context-facts">
                 <div>
                   <dt>{t("workflows.context.currentStage")}</dt>
                   <dd aria-live="polite">{currentStage ? t(currentStage.labelKey) : t("workflows.recovery.noStage")}</dd>
                 </div>
                 <div><dt>{t("workflows.context.stageState")}</dt><dd>{currentStage ? <StageStatusLabel status={currentStage.status} /> : EMPTY_VALUE}</dd></div>
-                <div><dt>{t("workflows.context.taskState")}</dt><dd><StatusLabel status={selectedRun.displayStatus} /></dd></div>
                 <div><dt>{t("workflows.context.scope")}</dt><dd>{t(`workflows.scope.${selectedRun.scope.kind}`)} · {t(scopeDetailKey(selectedRun.scope))}</dd></div>
                 <div><dt>{t("workflows.context.route")}</dt><dd>{t(workflowRouteKey(selectedRun.route))}</dd></div>
                 <div><dt>{t("workflows.context.git")}</dt><dd>{t(`workflows.gitState.${overview?.projectAccess?.gitState ?? "unknown"}`)}</dd></div>
                 <div><dt>{t("workflows.context.checkpoint")}</dt><dd className="font-mono">{selectedRun.pendingAction?.checkpointHash ?? (selectedRun.result?.kind === "update_wiki" ? selectedRun.result.checkpointHash : null) ?? t("workflows.attention.noCheckpoint")}</dd></div>
                 {selectedRun.result?.kind === "update_wiki" && selectedRun.result.finalCommit ? <div><dt>{t("workflows.result.finalCommit")}</dt><dd className="font-mono">{selectedRun.result.finalCommit}</dd></div> : null}
               </dl>
+              </details>
             </section>
-            <section className="workflow-context-section">
+            {selectedAffectedPaths.length || selectedOutputPaths.length ? (
+            <details className="workflow-context-section workflow-context-details">
+              <summary>{t("workflows.context.paths")}</summary>
               <h3>{t("workflows.context.outputLocation")}</h3>
               {selectedOutputPaths.length === 0 ? <p>{EMPTY_VALUE}</p> : selectedOutputPaths.map((path) => <CopyablePath key={path} path={path} />)}
               {selectedAffectedPaths.length ? (
@@ -277,14 +267,14 @@ export function WorkflowsRightPanel() {
                     : <p>{t("workflows.context.sameAsOutput")}</p>}
                 </>
               ) : null}
-            </section>
+            </details>
+            ) : null}
             <section className="workflow-context-section">
               <h3>{t("workflows.context.actions")}</h3>
               <div className="workflow-actions">
                 <button className="btn btn--secondary btn--sm" disabled={workflowOperationPending(operations, `task:${selectedRun.taskId}:open`)} onClick={() => void openRun(selectedRun.taskId)} type="button">
                   <RefreshCw aria-hidden="true" size={13} />{t("workflows.context.refreshDetails")}
                 </button>
-                <button className="btn btn--secondary btn--sm" onClick={() => setSurface("overview")} type="button">{t("workflows.action.back")}</button>
               </div>
             </section>
           </>
@@ -313,7 +303,7 @@ export function WorkflowsRightPanel() {
               <h3>{project.name}</h3>
               <CopyablePath path={project.rootPath} />
               <dl className="workflow-context-facts">
-                <div><dt>{t("workflows.context.pendingSources")}</dt><dd>{contextSummary ? number.format(contextSummary.pendingSourceCount) : t("workflows.context.summaryUnavailable")}</dd></div>
+                <div><dt>{t("workflows.context.pendingSources")}</dt><dd>{contextSummary?.pendingSourceCount != null ? number.format(contextSummary.pendingSourceCount) : t("workflows.context.summaryUnavailable")}</dd></div>
                 <div><dt>{t("workflows.context.lastHealth")}</dt><dd>{contextSummary?.lastHealth ? t("workflows.context.healthSummary", { errors: number.format(contextSummary.lastHealth.errorCount), warnings: number.format(contextSummary.lastHealth.warningCount), info: number.format(contextSummary.lastHealth.infoCount) }) : contextSummary ? EMPTY_VALUE : t("workflows.context.summaryUnavailable")}</dd></div>
                 <div><dt>{t("workflows.context.recentArtifact")}</dt><dd>{contextSummary?.recentArtifact ? t(workflowArtifactTypeKey(contextSummary.recentArtifact.artifactType)) : contextSummary ? EMPTY_VALUE : t("workflows.context.summaryUnavailable")}</dd></div>
                 <div><dt>{t("workflows.context.queued")}</dt><dd>{contextSummary ? number.format(contextSummary.queueCount) : t("workflows.context.summaryUnavailable")}</dd></div>
@@ -330,6 +320,7 @@ export function WorkflowsRightPanel() {
             </section>
           </>
         )}
+
       </div>
     </aside>
   );

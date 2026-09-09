@@ -4,12 +4,15 @@ const getWorkflowRunMock = vi.hoisted(() => vi.fn());
 
 vi.mock("./workflowApi", () => ({ getWorkflowRun: getWorkflowRunMock }));
 
+import { useExportStore } from "../stores/exportStore";
+import type { ExportRecord } from "../types/export";
 import { useWikiStore } from "../features/wiki/wikiStore";
 import { useProjectStore, defaultProject } from "../stores/projectStore";
 import { useNavigationStore } from "../stores/navigationStore";
 import { useWorkflowStore } from "../stores/workflowStore";
+import { useTaskStore } from "../stores/taskStore";
 import type { WorkflowRun } from "../types/workflow";
-import { hydrateAndSelectWorkflowRun, openWorkflowResult } from "./workflowNavigation";
+import { cancelWorkflowNavigation, hydrateAndSelectWorkflowRun, openWorkflowResult } from "./workflowNavigation";
 
 const project = { projectId: "project-a", rootPath: "D:/知识库" };
 
@@ -53,6 +56,8 @@ function completedUpdate(): WorkflowRun {
 
 beforeEach(() => {
   getWorkflowRunMock.mockReset();
+  useTaskStore.setState({ workflowById: {}, workflowSessionId: null, retiredWorkflowSessions: [] });
+  useNavigationStore.setState({ activeView: "workflows" });
   useWikiStore.getState().reset();
   useWorkflowStore.getState().reset();
   useProjectStore.setState({
@@ -81,6 +86,44 @@ beforeEach(() => {
 });
 
 describe("workflow navigation", () => {
+  it("abandons pending preparation before opening a task", async () => {
+    useWorkflowStore.getState().beginPreparation("update_wiki");
+    getWorkflowRunMock.mockResolvedValueOnce(completedUpdate());
+    await hydrateAndSelectWorkflowRun(project, "run-a");
+    expect(useWorkflowStore.getState().preparingKind).toBeNull();
+    expect(useWorkflowStore.getState().surface).toBe("detail");
+    expect(useWorkflowStore.getState().selectedTaskId).toBe("run-a");
+  });
+
+  it("previews the exact Workflow ExportRecord even when a newer unrelated artifact exists", async () => {
+    const record: ExportRecord = { id: "record-a", exportType: "project_report", title: "项目报告", sourcePath: undefined,
+      outputPath: "exports/中文报告.html", createdAt: "2026-09-07T00:00:00Z", route: "byok", status: "succeeded", bookmarked: false, taskId: "run-a" };
+    const loadPreview = vi.fn(async (_request, id) => { useExportStore.setState({ previewId: id, previewHtml: "<h1>报告</h1>" }); });
+    useExportStore.setState({ error: null, records: [{ ...record, id: "newest", taskId: "other-task", outputPath: "exports/other.html" }, record],
+      loadExports: vi.fn().mockResolvedValue(undefined), loadPreview });
+    const run: WorkflowRun = { ...completedUpdate(), kind: "generate_content",
+      scope: { kind: "generate_content", artifactType: "project_report", pagePaths: [], outputPath: record.outputPath },
+      result: { kind: "generate_content", artifactType: "project_report", recordId: record.id, outputPaths: [record.outputPath], artifactCount: 1, validationPassed: true } };
+    await openWorkflowResult(project, run);
+    expect(loadPreview).toHaveBeenCalledExactlyOnceWith({ projectId: project.projectId, projectRootPath: project.rootPath, outputPath: record.outputPath }, record.id, expect.any(Function));
+    expect(useExportStore.getState().previewId).toBe(record.id);
+    expect(useNavigationStore.getState().activeView).toBe("exports");
+  });
+
+  it.each(["missing", "foreign-task", "preview-failed"])("keeps the Workflow result visible when its export is %s", async (failure) => {
+    const record: ExportRecord = { id: "record-a", exportType: "project_report", title: "项目报告", sourcePath: undefined,
+      outputPath: "exports/中文报告.html", createdAt: "2026-09-07T00:00:00Z", route: "byok", status: "succeeded", bookmarked: false, taskId: failure === "foreign-task" ? "other-task" : "run-a" };
+    const loadPreview = vi.fn(async () => { useExportStore.setState({ error: "PREVIEW_FAILED", previewId: null, previewHtml: null }); });
+    useExportStore.setState({ error: null, records: failure === "missing" ? [] : [record], previewId: "older", previewHtml: "<h1>Old artifact</h1>",
+      loadExports: vi.fn().mockResolvedValue(undefined), loadPreview });
+    const run: WorkflowRun = { ...completedUpdate(), kind: "generate_content",
+      scope: { kind: "generate_content", artifactType: "project_report", pagePaths: [], outputPath: record.outputPath },
+      result: { kind: "generate_content", artifactType: "project_report", recordId: record.id, outputPaths: [record.outputPath], artifactCount: 1, validationPassed: true } };
+    await expect(openWorkflowResult(project, run)).rejects.toThrow(failure === "preview-failed" ? "PREVIEW_FAILED" : "WORKFLOW_EXPORT_RESULT_UNAVAILABLE");
+    expect(useNavigationStore.getState().activeView).toBe("workflows");
+    if (failure !== "preview-failed") expect(loadPreview).not.toHaveBeenCalled();
+  });
+
   it("does not inject a notification run after the user switches projects", async () => {
     let resolveRun!: (run: WorkflowRun) => void;
     getWorkflowRunMock.mockReturnValue(new Promise<WorkflowRun>((resolve) => { resolveRun = resolve; }));
@@ -122,6 +165,70 @@ describe("workflow navigation", () => {
     await expect(opening).rejects.toThrow("WORKFLOW_PROJECT_CHANGED");
     expect(useWorkflowStore.getState().runs).toEqual([]);
     expect(useWorkflowStore.getState().selectedTaskId).toBeNull();
+  });
+
+  it("keeps the newer same-project selection when the older detail arrives last", async () => {
+    let releaseA!: (run: WorkflowRun) => void;
+    getWorkflowRunMock.mockImplementation(({ taskId }) => taskId === "run-a"
+      ? new Promise<WorkflowRun>((resolve) => { releaseA = resolve; })
+      : Promise.resolve({ ...completedUpdate(), taskId }));
+    const openingA = hydrateAndSelectWorkflowRun(project, "run-a");
+    await hydrateAndSelectWorkflowRun(project, "run-b");
+    releaseA(completedUpdate());
+
+    await expect(openingA).rejects.toThrow("WORKFLOW_NAVIGATION_SUPERSEDED");
+    expect(useWorkflowStore.getState().selectedTaskId).toBe("run-b");
+  });
+
+  it("abandons selection as soon as preparation begins, before its response changes the surface", async () => {
+    let release!: (run: WorkflowRun) => void;
+    getWorkflowRunMock.mockReturnValue(new Promise<WorkflowRun>((resolve) => { release = resolve; }));
+    const opening = hydrateAndSelectWorkflowRun(project, "run-a");
+    cancelWorkflowNavigation();
+    release(completedUpdate());
+
+    await expect(opening).rejects.toThrow("WORKFLOW_NAVIGATION_SUPERSEDED");
+    expect(useWorkflowStore.getState()).toMatchObject({ surface: "overview", selectedTaskId: null });
+  });
+
+  it("abandons late selection when preparation is opened during hydration", async () => {
+    let release!: (run: WorkflowRun) => void;
+    getWorkflowRunMock.mockReturnValue(new Promise<WorkflowRun>((resolve) => { release = resolve; }));
+    const opening = hydrateAndSelectWorkflowRun(project, "run-a");
+    const preparation = { id: "new-preparation" } as never;
+    useWorkflowStore.getState().setPreparation(preparation);
+    release(completedUpdate());
+
+    await expect(opening).rejects.toThrow("WORKFLOW_NAVIGATION_SUPERSEDED");
+    expect(useWorkflowStore.getState()).toMatchObject({ surface: "preparation", preparation, selectedTaskId: null });
+  });
+
+  it("remembers a surface change even when the user returns before the detail arrives", async () => {
+    let release!: (run: WorkflowRun) => void;
+    getWorkflowRunMock.mockReturnValue(new Promise<WorkflowRun>((resolve) => { release = resolve; }));
+    const opening = hydrateAndSelectWorkflowRun(project, "run-a");
+    useWorkflowStore.getState().setSurface("history");
+    useWorkflowStore.getState().setSurface("overview");
+    release(completedUpdate());
+
+    await expect(opening).rejects.toThrow("WORKFLOW_NAVIGATION_SUPERSEDED");
+    expect(useWorkflowStore.getState().selectedTaskId).toBeNull();
+  });
+
+  it("does not commit a late result or reopen Wiki after the user leaves Workflows", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    useWikiStore.setState({ scan: vi.fn(async (_id, _root, commitGuard) => {
+      await gate;
+      if (commitGuard?.()) useWikiStore.setState({ tree: { pages: [] } as never });
+    }) });
+    const opening = openWorkflowResult(project, completedUpdate());
+    useNavigationStore.getState().setActiveView("chat");
+    release();
+
+    await expect(opening).rejects.toThrow("WORKFLOW_NAVIGATION_SUPERSEDED");
+    expect(useWikiStore.getState().tree).toBeNull();
+    expect(useNavigationStore.getState().activeView).toBe("chat");
   });
 
   it("opens an existing affected Wiki page instead of a deleted first path", async () => {

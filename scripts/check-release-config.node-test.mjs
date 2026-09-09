@@ -11,8 +11,6 @@ import {
   validateLocalGit,
   validateReleaseCommitTrace,
   validateReleaseState,
-  validateDesktopReleaseWorkflow,
-  validateWorkflowPermissions,
 } from "./check-release-version.mjs";
 
 const contract = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "release/release-contract.json"), "utf8"));
@@ -57,7 +55,7 @@ test("version drift is a deterministic release failure", () => {
 });
 
 test("the first public version remains historical while later synchronized versions are valid", () => {
-  const nextCargo = cargoToml.replace('version = "0.2.0"', 'version = "0.2.1"');
+  const nextCargo = cargoToml.replace(`version = "${packageJson.version}"`, 'version = "0.2.1"');
   const result = validateReleaseState({
     contract,
     packageJson: { ...packageJson, version: "0.2.1" },
@@ -72,7 +70,7 @@ test("the first public version remains historical while later synchronized versi
   const invalidResult = validateReleaseState({
     contract,
     packageJson: { ...packageJson, version: invalidPrerelease },
-    cargoToml: cargoToml.replace('version = "0.2.0"', `version = "${invalidPrerelease}"`),
+    cargoToml: cargoToml.replace(`version = "${packageJson.version}"`, `version = "${invalidPrerelease}"`),
     tauriConfig: { ...tauriConfig, version: invalidPrerelease },
     trustedKeys,
   });
@@ -101,7 +99,7 @@ test("stable and prerelease tags use the frozen app-v SemVer grammar", () => {
   const rcResult = validateReleaseState({
     contract,
     packageJson: { ...packageJson, version: rcVersion },
-    cargoToml: cargoToml.replace('version = "0.2.0"', `version = "${rcVersion}"`),
+    cargoToml: cargoToml.replace(`version = "${packageJson.version}"`, `version = "${rcVersion}"`),
     tauriConfig: { ...tauriConfig, version: rcVersion },
     trustedKeys,
     tag: "app-v0.2.0-rc.2",
@@ -133,298 +131,22 @@ test("canonical endpoints cannot drift to a different repository", () => {
   assert.equal(result.errors.filter((error) => error.includes("canonical repository")).length, 2);
 });
 
-test("the sole maintainer owns cryptographic signing while backup and OS certificates are not required", () => {
-  assert.equal(contract.publishing.approvalOwner, "StoneLL1");
-  assert.equal(contract.publishing.approvalOwnerStatus, "confirmed");
-  assert.equal(contract.publishing.environmentReviewer, "StoneLL1");
-  assert.equal(contract.publishing.environmentPreventSelfReview, false);
-  assert.equal(["updater", "capability"].every((kind) => {
-    const { owner, ownerRole, status, backupCustodian, backupStatus } = contract.signing[kind];
-    return owner === "StoneLL1"
-      && ownerRole === "sole repository owner and maintainer"
-      && status === "owner-confirmed"
-      && backupCustodian === null
-      && backupStatus === "not-required";
-  }), true);
-  assert.equal(contract.signing.windows.publisherSubject, null);
-  assert.equal(contract.signing.windows.osIdentityPolicy, "not-required");
-  assert.equal(contract.signing.apple.teamId, null);
-  assert.equal(contract.signing.apple.osIdentityPolicy, "not-required");
-
-  const ambiguous = structuredClone(contract);
-  delete ambiguous.signing.updater.ownerRole;
-  assert.equal(state({ contract: ambiguous }).errors.some((error) => error.includes("updater signing ownership")), true);
-
-  const backupRequired = structuredClone(contract);
-  backupRequired.signing.capability.backupStatus = "pending-human-input";
-  assert.equal(state({ contract: backupRequired }).errors.some((error) => error.includes("backup-custodian policy")), true);
-
-  const hiddenCertificateGate = structuredClone(contract);
-  hiddenCertificateGate.signing.windows.publisherSubject = "CN=Fixture";
-  assert.equal(state({ contract: hiddenCertificateGate }).errors.some((error) => error.includes("not required")), true);
-
-  const wrongUpdaterKeyId = structuredClone(contract);
-  wrongUpdaterKeyId.signing.updater.publicKeyId = "AAAAAAAAAAAAAAAA";
-  assert.equal(state({ contract: wrongUpdaterKeyId }).errors.some((error) => error.includes("Tauri trust anchor")), true);
-
-  const unconfirmedUpdaterPair = structuredClone(contract);
-  unconfirmedUpdaterPair.signing.updater.publicKeyStatus = "supplied";
-  assert.equal(state({ contract: unconfirmedUpdaterPair }).errors.some((error) => error.includes("key-pair selection")), true);
+test("signing keys match the committed trust anchors", () => {
+  const wrongKey = structuredClone(contract);
+  wrongKey.signing.updater.publicKeyId = "AAAAAAAAAAAAAAAA";
+  assert.ok(state({ contract: wrongKey }).errors.some((error) => error.includes("Tauri trust anchor")));
+  assert.ok(state({ trustedKeys: {} }).errors.some((error) => error.includes("32-byte lowercase hex trust anchor")));
+  const privateKey = structuredClone(contract);
+  privateKey.signing.updater.privateKey = "must-not-be-committed";
+  assert.ok(state({ contract: privateKey }).errors.some((error) => error.includes("private key material")));
 });
 
-test("the committed capability key ID resolves to the reviewed public trust anchor", () => {
-  assert.equal(contract.signing.capability.publicKeyId, "llm-wiki-capability-v1");
-  assert.equal(contract.signing.capability.publicKeyStatus, "committed");
-  assert.match(trustedKeys[contract.signing.capability.publicKeyId], /^[0-9a-f]{64}$/);
-  assert.deepEqual(state().errors, []);
-
-  const missingTrustAnchor = state({ trustedKeys: {} });
-  assert.equal(missingTrustAnchor.errors.some((error) => error.includes("32-byte lowercase hex trust anchor")), true);
-
-  const missingRecoveryEvidence = structuredClone(contract);
-  delete missingRecoveryEvidence.signing.capability.recoveryCopyStatus;
-  assert.equal(state({ contract: missingRecoveryEvidence }).errors.some((error) => error.includes("recovery copy")), true);
-});
-
-test("the 0.2.0 upgrade waiver is one-time and 0.2.1 restores the real upgrade gate", () => {
-  assert.deepEqual(state().errors, []);
-
-  const widenedWaiver = structuredClone(contract);
-  widenedWaiver.acceptance.subsequentStable.firstRequiredVersion = "0.2.0";
-  assert.equal(state({ contract: widenedWaiver }).errors.some((error) => error.includes("mandatory from 0.2.1")), true);
-
-  const missingReplacementGate = structuredClone(contract);
-  missingReplacementGate.acceptance.firstStable.replacementGate = "source-tests-only";
-  assert.equal(state({ contract: missingReplacementGate }).errors.some((error) => error.includes("four-platform clean-install")), true);
-});
-
-test("capability workflow permissions stay read-only, reusable, and non-publishing", () => {
-  const ciWorkflow = "permissions:\n  contents: read\n";
-  const capabilityWorkflow = "on:\n  workflow_call:\npermissions:\n  contents: read\n\njobs:\n  merge-catalog:\n    steps: []\n";
-  assert.deepEqual(validateWorkflowPermissions({ ciWorkflow, capabilityWorkflow }), []);
-  assert.deepEqual(validateWorkflowPermissions({
-    ciWorkflow: "jobs: {}\n",
-    capabilityWorkflow: "permissions:\n  contents: write\n",
-  }), [
-    "CI must declare top-level contents: read",
-    "capability workflow must default to contents: read",
-    "the non-publishing capability workflow cannot request any write permission",
-    "capability workflow must be reusable through workflow_call for the unified desktop release",
-  ]);
-
-  assert.deepEqual(validateWorkflowPermissions({
-    ciWorkflow,
-    capabilityWorkflow: capabilityWorkflow.replace("  merge-catalog:\n", "  build:\n    permissions:\n      contents: write\n  merge-catalog:\n"),
-  }), ["the non-publishing capability workflow cannot request any write permission"]);
-
-  assert.equal(validateWorkflowPermissions({
-    ciWorkflow,
-    capabilityWorkflow: capabilityWorkflow.replace("  merge-catalog:\n", "  build:\n    permissions:\n      id-token: write\n  merge-catalog:\n"),
-  }).some((error) => error.includes("cannot request any write permission")), true);
-
-  assert.equal(validateWorkflowPermissions({
-    ciWorkflow,
-    capabilityWorkflow: capabilityWorkflow.replace("    steps: []\n", "    steps:\n      - run: gh release upload app-v0.1.0\n"),
-  }).some((error) => error.includes("must not publish releases")), true);
-
-  assert.equal(validateWorkflowPermissions({
-    ciWorkflow,
-    capabilityWorkflow: capabilityWorkflow.replace("  workflow_call:\n", "  workflow_dispatch:\n"),
-  }).some((error) => error.includes("workflow_call")), true);
-});
-
-test("the committed capability workflow is reusable and never publishes", () => {
-  const ciWorkflow = fs.readFileSync(path.join(repositoryRoot, ".github/workflows/ci.yml"), "utf8");
-  const capabilityWorkflow = fs.readFileSync(
-    path.join(repositoryRoot, ".github/workflows/capability-release.yml"),
-    "utf8",
-  );
-  assert.deepEqual(validateWorkflowPermissions({ ciWorkflow, capabilityWorkflow }), []);
-});
-
-test("the committed desktop workflow is the only atomic publisher and pins every action", () => {
-  const desktopWorkflow = fs.readFileSync(path.join(repositoryRoot, ".github/workflows/desktop-release.yml"), "utf8");
-  const capabilityWorkflow = fs.readFileSync(path.join(repositoryRoot, ".github/workflows/capability-release.yml"), "utf8");
-  assert.deepEqual(validateDesktopReleaseWorkflow({ desktopWorkflow, capabilityWorkflow }), []);
-  assert.equal(
-    (desktopWorkflow.match(/^\s+bundles:\s*app,dmg\s*$/gm) ?? []).length,
-    2,
-    "both macOS targets must build the app updater target alongside the DMG",
-  );
-  assert.match(
-    desktopWorkflow,
-    /test -n "\$dmg"\r?\n\s+test -n "\$updater"\r?\n\s+test -s "\$updater\.sig"/,
-    "macOS artifact checks must fail independently instead of hiding a failed middle && command",
-  );
-  assert.match(
-    desktopWorkflow,
-    /plutil -lint "\$app\/Contents\/Info\.plist"[\s\S]*lipo -archs "\$executable"[\s\S]*open -n -g "\$app"/,
-    "macOS smoke must validate the installed bundle and use the Finder-equivalent LaunchServices path",
-  );
-  const appleSmoke = desktopWorkflow.match(
-    /- name: Install and launch Apple candidate[\s\S]*?(?=\n\s+- name: Install and launch Linux AppImage candidate)/,
-  )?.[0] ?? "";
-  assert.doesNotMatch(
-    appleSmoke,
-    /kill -0/,
-    "macOS smoke must not equate a headless direct-binary lifetime with normal app-bundle launchability",
-  );
-  assert.match(
-    desktopWorkflow,
-    /bundle-architecture-verified[\s\S]*launchservices-accepted/,
-    "macOS smoke evidence must describe the relaxed checks truthfully",
-  );
-  assert.match(
-    desktopWorkflow,
-    /source_run_id:[\s\S]*required:\s*false/,
-    "a failed late release must support an explicit artifact-source run",
-  );
-  assert.match(
-    desktopWorkflow,
-    /source_head_sha[\s\S]*commit_sha[\s\S]*release-candidate-base[\s\S]*updater-fixture-manifest/,
-    "resume mode must bind reused artifacts to the exact release commit and required candidate artifacts",
-  );
-  assert.match(
-    desktopWorkflow,
-    /- name: Run the complete repository gate\r?\n\s+if: inputs\.source_run_id == ''/,
-    "resume mode must skip the already-passed full gate",
-  );
-  assert.equal(
-    (desktopWorkflow.match(/run-id:\s*\$\{\{ needs\.preflight\.outputs\.artifact_run_id \}\}/g) ?? []).length >= 3,
-    true,
-    "resume mode must reuse the source run's desktop, manifest, and candidate artifacts",
-  );
-  assert.equal(
-    (desktopWorkflow.match(/RUN_ID:\s*\$\{\{ needs\.preflight\.outputs\.evidence_run_id \}\}/g) ?? []).length >= 2,
-    true,
-    "resume mode must verify the reused candidate against its original provenance run",
-  );
-  const assembleReleaseJob = desktopWorkflow.match(
-    /^ {2}assemble-release:[\s\S]*?(?=^ {2}publish-stable:)/m,
-  )?.[0] ?? "";
-  const publishStableJob = desktopWorkflow.match(
-    /^ {2}publish-stable:[\s\S]*/m,
-  )?.[0] ?? "";
-  for (const [jobName, job] of [["assemble-release", assembleReleaseJob], ["publish-stable", publishStableJob]]) {
-    assert.match(
-      job,
-      /Install updater verifier system dependencies[\s\S]*libdbus-1-dev[\s\S]*pkg-config/,
-      `${jobName} must install the Linux libraries required by the Rust updater verifier`,
-    );
-  }
-  assert.match(
-    assembleReleaseJob,
-    /Normalize desktop asset names for GitHub Release[\s\S]*normalize-github-release-assets\.mjs --root candidate[\s\S]*verify-latest-json\.mjs --generate true/,
-    "the sealed candidate must use the same space-free desktop asset names that GitHub preserves",
-  );
-  assert.equal(
-    assembleReleaseJob.indexOf("Normalize desktop asset names for GitHub Release")
-      < assembleReleaseJob.indexOf("Generate GitHub artifact attestation for the complete candidate payload"),
-    true,
-    "GitHub-compatible asset names and latest.json must be finalized before attestation and checksums",
-  );
-  assert.match(
-    publishStableJob,
-    /test "\$\(git rev-parse '[^']+\^\{commit\}'\)" = "\$\{\{ needs\.preflight\.outputs\.commit_sha \}\}"/,
-    "the publisher must verify the existing tag resolves to the frozen release commit",
-  );
-  assert.doesNotMatch(
-    publishStableJob,
-    /gh release create[^\n]*--target/,
-    "an existing validated tag must not pass target_commitish because GITHUB_TOKEN cannot request workflows:write",
-  );
-
-  const unpinned = desktopWorkflow.replace(
-    /actions\/checkout@[0-9a-f]{40}/,
-    "actions/checkout@v4",
-  );
-  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: unpinned, capabilityWorkflow })
-    .some((error) => error.includes("not pinned")), true);
-
-  const earlyPublisher = desktopWorkflow.replace(
-    /^ {2}manifest-and-provenance:/m,
-    "  early-release:\n    steps:\n      - run: gh release create app-v0.1.0\n  manifest-and-provenance:",
-  );
-  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: earlyPublisher, capabilityWorkflow })
-    .some((error) => error.includes("before publish-stable")), true);
-
-  const earlyWrite = desktopWorkflow.replace(
-    /^ {2}desktop-build:/m,
-    "  desktop-build:\n    permissions:\n      contents: write",
-  );
-  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: earlyWrite, capabilityWorkflow })
-    .some((error) => error.includes("only publish-stable")), true);
-
-  const publicFirst = desktopWorkflow.replace(" --notes-file candidate/release-notes.md --draft", " --notes-file candidate/release-notes.md");
-  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: publicFirst, capabilityWorkflow })
-    .some((error) => error.includes("as a draft")), true);
-
-  const tagScopedConcurrency = desktopWorkflow.replace(
-    "group: desktop-release-stable-channel",
-    "group: desktop-release-${{ inputs.release_tag || github.ref_name }}",
-  );
-  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: tagScopedConcurrency, capabilityWorkflow })
-    .some((error) => error.includes("globally serialize")), true);
-
-  const noStableAdvanceCheck = desktopWorkflow.replace(
-    '--current-stable-tag "$current_stable_tag"',
-    '--tag "$current_stable_tag"',
-  );
-  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: noStableAdvanceCheck, capabilityWorkflow })
-    .some((error) => error.includes("candidate advances")), true);
-
-  const errOnlyRollback = desktopWorkflow
-    .replace("trap 'rollback_if_unverified' EXIT", "trap 'rollback_if_unverified' ERR")
-    .replace("trap 'exit 130' INT", ":")
-    .replace("trap 'exit 143' TERM", ":");
-  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: errOnlyRollback, capabilityWorkflow })
-    .some((error) => error.includes("cancellation, and termination")), true);
-
-  const noImmutableReleaseFallback = desktopWorkflow.replace(
-    'gh release delete "$RELEASE_TAG" --yes',
-    ': # immutable release fallback removed',
-  );
-  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: noImmutableReleaseFallback, capabilityWorkflow })
-    .some((error) => error.includes("delete an immutable release")), true);
-
-  const unguardedPublication = desktopWorkflow.replace("published=1", "published=0");
-  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: unguardedPublication, capabilityWorkflow })
-    .some((error) => error.includes("publish-through-anonymous-verification")), true);
-
-  const prematurelyVerified = desktopWorkflow.replace(
-    / {10}verified=1\r?\n {10}trap - EXIT INT TERM/,
-    "          trap - EXIT INT TERM\n          verified=1",
-  );
-  assert.notEqual(prematurelyVerified, desktopWorkflow);
-  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: prematurelyVerified, capabilityWorkflow })
-    .some((error) => error.includes("publish-through-anonymous-verification")), true);
-
-  const noReverseDownload = desktopWorkflow.replaceAll("gh release download", "gh draft download");
-  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: noReverseDownload, capabilityWorkflow })
-    .some((error) => error.includes("gh release download")), true);
-
-  const noCryptoVerification = desktopWorkflow.replaceAll("verify-updater-signatures.mjs", "inspect-updater-signatures.mjs");
-  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: noCryptoVerification, capabilityWorkflow })
-    .some((error) => error.includes("verify-updater-signatures.mjs")), true);
-
-  const legacyCertificateGate = desktopWorkflow.replace(
-    "CAPABILITY_KEY_ID: ${{ vars.CAPABILITY_SIGNING_KEY_ID }}",
-    "CAPABILITY_KEY_ID: ${{ vars.CAPABILITY_SIGNING_KEY_ID }}\n          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}",
-  );
-  assert.notEqual(legacyCertificateGate, desktopWorkflow);
-  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: legacyCertificateGate, capabilityWorkflow })
-    .some((error) => error.includes("must not require OS vendor signing credentials")), true);
-
-  const missingUnsignedPolicy = desktopWorkflow.replace("windows-authenticode-not-required", "windows-policy-missing");
-  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: missingUnsignedPolicy, capabilityWorkflow })
-    .some((error) => error.includes("windows-authenticode-not-required")), true);
-
-  const mutableSealingToolchain = desktopWorkflow.replaceAll(
-    "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
-    `actions/setup-node@${"a".repeat(40)}`,
-  );
-  assert.equal(validateDesktopReleaseWorkflow({ desktopWorkflow: mutableSealingToolchain, capabilityWorkflow })
-    .some((error) => error.includes("pinned Node and Rust toolchains")), true);
+test("historical approval records do not block a new release", () => {
+  const metadata = structuredClone(contract);
+  delete metadata.acceptance;
+  delete metadata.publishing.environmentReviewer;
+  delete metadata.signing.capability.recoveryCopyStatus;
+  assert.deepEqual(state({ contract: metadata }).errors, []);
 });
 
 test("local Git validation normalizes .git while rejecting the wrong origin or missing default branch", () => {

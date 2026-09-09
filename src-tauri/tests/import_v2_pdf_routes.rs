@@ -42,9 +42,9 @@ fn mixed_pdf_routes_text_layout_ocr_then_agent_per_page() {
     .unwrap();
     assert_eq!(plans.len(), 4);
     assert_eq!(plans[0].route, PdfPageRoute::TextLayer);
-    assert_eq!(plans[1].route, PdfPageRoute::DocumentLayout);
+    assert_eq!(plans[1].route, PdfPageRoute::TextLayer);
     assert_eq!(plans[2].route, PdfPageRoute::SelectiveOcr);
-    assert_eq!(plans[3].route, PdfPageRoute::SelectiveOcr);
+    assert_eq!(plans[3].route, PdfPageRoute::TextLayer);
     assert!(plans.iter().all(|plan| !plan.reason.is_empty()));
 }
 
@@ -148,7 +148,7 @@ fn passive_inspection_counts_every_page_and_never_executes_actions() {
     let report = inspect_pdf(&safe, None).unwrap();
     assert_eq!(report.page_count, 1);
     assert_eq!(report.text_characters_per_page.len(), 1);
-    assert_eq!(report.image_only_pages, vec![0]);
+    assert!(report.image_only_pages.is_empty());
 
     let active = temp.path().join("active.pdf");
     save_one_page_pdf(&active, true);
@@ -238,16 +238,84 @@ fn selective_pdf_ocr_stages_only_planned_scan_pages_in_original_order() {
     let staging = tempfile::tempdir().unwrap();
     let prepared = prepare_selective_ocr(&pdf, staging.path(), &plan).unwrap();
     assert_eq!(prepared.temporary_input_paths.len(), 1);
-    assert!(prepared.temporary_input_paths[0].ends_with("page-002.png"));
+    assert!(prepared.temporary_input_paths[0].ends_with("page-002.pdf"));
     assert!(staging
         .path()
         .join(&prepared.temporary_input_paths[0])
         .is_file());
+    let rendered_page =
+        Document::load(staging.path().join(&prepared.temporary_input_paths[0])).unwrap();
+    assert_eq!(rendered_page.get_pages().len(), 1);
+    assert!(!rendered_page
+        .get_page_content(*rendered_page.get_pages().values().next().unwrap())
+        .unwrap()
+        .is_empty());
     let first = prepared.markdown.find("## Page 1").unwrap();
     let second = prepared.markdown.find("## Page 2").unwrap();
     assert!(first < second);
     assert!(prepared.markdown.contains("<!-- OCR_PAGE_002 -->"));
     assert!(!prepared.markdown.contains("<!-- OCR_PAGE_001 -->"));
+}
+
+#[test]
+fn short_text_with_uri_link_is_readable_and_scan_page_number_still_needs_ocr() {
+    use lopdf::Stream;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("短文 with link.pdf");
+    let mut doc = Document::load(batch3_pdf("mixed-text-scan.pdf")).unwrap();
+    let pages = doc.get_pages();
+    let font = doc.add_object(
+        dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" },
+    );
+    let text = doc.add_object(Stream::new(
+        dictionary! {},
+        b"BT /FShort 12 Tf 50 700 Td (A short readable page with a normal hyperlink.) Tj ET"
+            .to_vec(),
+    ));
+    let link = doc.add_object(dictionary! { "Type" => "Annot", "Subtype" => "Link", "Rect" => vec![0.into(),0.into(),100.into(),20.into()], "A" => dictionary!{ "S" => "URI", "URI" => Object::string_literal("https://example.org/article") } });
+    let page = doc
+        .get_object_mut(pages[&1])
+        .unwrap()
+        .as_dict_mut()
+        .unwrap();
+    page.set("Contents", text);
+    page.set(
+        "Resources",
+        dictionary! { "Font" => dictionary! { "FShort" => font } },
+    );
+    page.set("Annots", vec![Object::Reference(link)]);
+    // Retain the scanned page's painting operators, including any nested Form,
+    // and add a page number that must not masquerade as the page's body.
+    let mut content = doc.get_page_content(pages[&2]).unwrap();
+    content.extend_from_slice(b"\nBT /FNumber 12 Tf 50 30 Td (2) Tj ET");
+    let stream = doc.add_object(Stream::new(dictionary! {}, content));
+    let mut resources = doc
+        .get_page_resources(pages[&2])
+        .unwrap()
+        .0
+        .unwrap()
+        .clone();
+    resources.set("Font", dictionary! { "FNumber" => font });
+    // Exercise inherited resources and Form XObjects by wrapping the scan.
+    let form = doc.add_object(Stream::new(dictionary! { "Type" => "XObject", "Subtype" => "Form", "BBox" => vec![0.into(),0.into(),612.into(),792.into()], "Resources" => resources }, doc.get_page_content(pages[&2]).unwrap()));
+    let mut wrapped = b"q /ScanForm Do Q\nBT /FNumber 12 Tf 50 30 Td (2) Tj ET".to_vec();
+    let wrapped_stream = doc.add_object(Stream::new(dictionary! {}, std::mem::take(&mut wrapped)));
+    let page = doc
+        .get_object_mut(pages[&2])
+        .unwrap()
+        .as_dict_mut()
+        .unwrap();
+    page.set("Contents", wrapped_stream);
+    page.set("Resources", dictionary! { "Font" => dictionary! { "FNumber" => font }, "XObject" => dictionary! { "ScanForm" => form } });
+    let _ = stream;
+    doc.save(&path).unwrap();
+    let report = inspect_pdf(&path, None).unwrap();
+    assert!(report.text_characters_per_page[0] < 100);
+    assert!(report.text_characters_per_page[0] > 0);
+    assert_eq!(report.image_only_pages, vec![1]);
+    let plan = plan_pdf_pages(&report, PdfRouteCapabilities::default()).unwrap();
+    assert_eq!(plan[0].route, PdfPageRoute::TextLayer);
+    assert_eq!(plan[1].route, PdfPageRoute::WaitingCapability);
 }
 
 #[test]

@@ -1,4 +1,4 @@
-import { Eye, FileCode2, Globe2, LoaderCircle, ShieldCheck } from "lucide-react";
+import { Eye, FileCode2, Globe2, LoaderCircle } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import ReactMarkdown from "react-markdown";
@@ -86,8 +86,6 @@ export function ImportRightPanel({
       <div className="app-pane-scrollbar min-h-0 flex-1 overflow-y-auto">
         {!selectedItem ? (
           <div className="import-v2-inspector-empty" role="status">
-            <span className="import-v2-inspector-empty__icon" aria-hidden="true"><Eye size={17} /></span>
-            <strong>{t("importV2.inspector.emptyTitle")}</strong>
             <p>{t("importV2.inspector.empty")}</p>
           </div>
         ) : (
@@ -146,7 +144,7 @@ function SelectedSource({
         </div>
         <ImportItemStatus item={item} presentation={presentation} />
         {presentation.userIssue ? (
-          <div role="status" className="mt-3 rounded-[var(--radius-md)] border border-[var(--warning)] bg-[var(--warning-soft)] px-3 py-2 text-[11.5px]">
+          <div role="status" className="mt-3 text-[12px] text-[var(--warning-text)]">
             <strong>{t(presentation.userIssue.title)}</strong>
             <p className="m-0 mt-1 text-[var(--text-secondary)]">
               {t(presentation.userIssue.dataSafety)}
@@ -164,7 +162,7 @@ function SelectedSource({
         ) : null}
       </section>
 
-      <section className="border-b border-[var(--border-subtle)] px-4 py-3">
+      {item.preview ? <section className="border-b border-[var(--border-subtle)] px-4 py-3">
         <InspectorHeading>{t("importV2.inspector.quickPreview")}</InspectorHeading>
         {previewState === "loading" ? (
           <p role="status" className="flex items-center gap-2 text-[11px] text-[var(--text-muted)]">
@@ -206,12 +204,12 @@ function SelectedSource({
             {t(previewState === "error" ? "importV2.inspector.previewUnavailable" : "importV2.inspector.previewPending")}
           </p>
         )}
-      </section>
+      </section> : null}
 
-      <section className="border-b border-[var(--border-subtle)] px-4 py-3">
+      {content?.target ? <section className="border-b border-[var(--border-subtle)] px-4 py-3">
         <InspectorHeading>{t("importV2.inspector.target")}</InspectorHeading>
         <p className="m-0 text-[11.5px] text-[var(--text-primary)]">
-          {t(`importV2.preview.disposition.${content?.target?.disposition ?? "new_source"}`)}
+          {t(`importV2.preview.disposition.${content.target.disposition}`)}
         </p>
         {content?.target?.wikiPath ? (
           <p className="m-0 mt-1 break-all text-[10.5px] text-[var(--text-muted)]">
@@ -223,20 +221,17 @@ function SelectedSource({
             {t("importV2.preview.existingSourceVersion")}
           </p>
         ) : null}
-      </section>
+      </section> : null}
 
-      <ImportQualitySummary quality={item.preview?.quality ?? null} />
+      {item.preview?.quality ? <ImportQualitySummary quality={item.preview.quality} /> : null}
 
-      <section className="border-b border-[var(--border-subtle)] px-4 py-3">
-        <InspectorHeading>{t("importV2.inspector.rawSource")}</InspectorHeading>
-        <p className="m-0 flex items-center gap-2 text-[11px] text-[var(--text-secondary)]">
-          <ShieldCheck size={13} aria-hidden="true" />
-          {t("importV2.inspector.rawSafe")}
-        </p>
-        <p className="m-0 mt-1 break-all text-[10.5px] text-[var(--text-muted)]">
+      {item.preview ? <details className="import-v2-inspector-technical">
+        <summary>{t("importV2.inspector.rawSource")}</summary>
+        <p className="text-[12px] text-[var(--text-muted)]">{t("importV2.inspector.rawSafe")}</p>
+        <p className="m-0 mt-1 break-all text-[12px] text-[var(--text-muted)]">
           {content?.rawLabel ?? item.input.displayName}
         </p>
-      </section>
+      </details> : null}
 
       <details className="import-v2-inspector-technical">
         <summary>{t("importV2.inspector.technicalDetails")}</summary>

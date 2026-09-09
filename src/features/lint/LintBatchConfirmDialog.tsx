@@ -52,7 +52,7 @@ export function LintBatchConfirmDialog({
           <Button type="button" variant="secondary" onClick={onCancel}>
             {t("lint.batch.cancel")}
           </Button>
-          <Button type="button" variant="primary" onClick={onConfirm}>
+          <Button type="button" variant="primary" className="lint-primary" onClick={onConfirm}>
             {t("lint.batch.confirm")}
           </Button>
         </footer>

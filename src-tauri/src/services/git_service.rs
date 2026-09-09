@@ -1,6 +1,8 @@
 #[derive(Default)]
 pub struct GitService;
 
+mod history;
+
 #[cfg(test)]
 use std::cell::Cell;
 use std::cell::RefCell;
@@ -58,6 +60,35 @@ fn git_task_cancelled() -> bool {
 }
 
 impl GitService {
+    pub fn require_local_history(&self, context: &ProjectContext) -> Result<(), BackendError> {
+        let root = validate_existing_project_root(&context.root).map_err(git_path_unsafe)?;
+        if !validate_git_marker(&root)? {
+            return Err(BackendError::new("GIT_REPOSITORY_MISSING", "Enable local version protection before changing these files.", true, true));
+        }
+        let output = run_git_process(context, &["config", "--local", "--get", "llmWiki.historyEnabled"], Duration::from_secs(5), 4096, git_task_cancelled)
+            .map_err(|error| git_process_error(error, &["config", "--get"]))?;
+        if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true" { return Ok(()); }
+        if !output.status.success() && output.status.code() != Some(1) {
+            return Err(git_command_error(&output.stderr, &["config", "--get"]));
+        }
+        Err(BackendError::new("VERSION_NOT_ENABLED", "Enable local version protection before changing these files.", true, true))
+    }
+
+    pub fn local_history_status(&self, context: &ProjectContext) -> Result<crate::models::version_history::VersionHistoryStatus, BackendError> {
+        let git = self.repository_status(context)?;
+        let git_version = run_git(context, &["--version"])?;
+        let enabled = git.is_repository && run_git(context, &["config", "--local", "--get", "llmWiki.historyEnabled"]).is_ok_and(|value| value.trim() == "true");
+        Ok(crate::models::version_history::VersionHistoryStatus { enabled, git, git_version: git_version.trim().into() })
+    }
+
+    /// The caller holds confirmed project write authority. Empty private object
+    /// storage is sufficient; existing HEAD/index remain entirely untouched.
+    pub fn enable_local_history(&self, context: &ProjectContext) -> Result<(), BackendError> {
+        self.create_history_snapshot(context, &uuid::Uuid::new_v4().to_string(), "baseline", "Enable local version protection", None, &std::collections::BTreeMap::new())?;
+        run_git(context, &["config", "--local", "llmWiki.historyEnabled", "true"])?;
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn reset_process_attempts_for_test() {
         TEST_GIT_PROCESS_ATTEMPTS.with(|count| count.set(0));
@@ -157,6 +188,7 @@ impl GitService {
             }
             let _ = commit_with_message(context, initial_message, true)?;
         }
+        run_git(context, &["config", "--local", "llmWiki.historyEnabled", "true"])?;
         self.repository_status(context)
     }
 
@@ -242,7 +274,7 @@ impl GitService {
     }
 
     pub fn changed_paths(&self, context: &ProjectContext) -> Result<Vec<String>, BackendError> {
-        if !self.repository_status(context)?.is_repository {
+        if !owns_project_repository(context)? {
             return Err(BackendError::new(
                 "GIT_REPOSITORY_MISSING",
                 "Git repository is required before enumerating changes.",
@@ -261,12 +293,17 @@ impl GitService {
         context: &ProjectContext,
         relative_path: &str,
     ) -> Result<bool, BackendError> {
-        if !self.repository_status(context)?.is_repository {
+        if !owns_project_repository(context)? {
             return Ok(false);
         }
         Ok(run_git(
             context,
-            &["ls-files", "--error-unmatch", "--", relative_path],
+            &[
+                "ls-files",
+                "--error-unmatch",
+                "--",
+                &literal_pathspec(relative_path),
+            ],
         )
         .is_ok())
     }
@@ -303,10 +340,7 @@ impl GitService {
             return false;
         }
         let context = ProjectContext::new("workflow-recovery", project_root.to_path_buf());
-        if !GitService
-            .repository_status(&context)
-            .is_ok_and(|status| status.is_repository)
-        {
+        if !owns_project_repository(&context).unwrap_or(false) {
             return false;
         }
         let commit = format!("{checkpoint_hash}^{{commit}}");
@@ -429,6 +463,7 @@ impl GitService {
             run_git(context, &["add", "--all"])?;
             let _ = commit_with_message(context, initial_message, true)?;
         }
+        run_git(context, &["config", "--local", "llmWiki.historyEnabled", "true"])?;
         self.repository_status(context)
     }
 
@@ -516,9 +551,17 @@ impl GitService {
 
         let affected_paths = status_paths(context)?;
         if affected_paths.is_empty() {
+            let head = self.repository_status(context)?.head.ok_or_else(|| {
+                BackendError::new(
+                    "GIT_HEAD_MISSING",
+                    "Git HEAD is unavailable for the required checkpoint.",
+                    true,
+                    true,
+                )
+            })?;
             return Ok(GitCheckpoint {
                 created: false,
-                commit_hash: self.repository_status(context)?.head,
+                commit_hash: Some(head),
                 message: message.to_string(),
                 purpose,
                 affected_paths,
@@ -646,8 +689,12 @@ impl GitService {
         if paths.is_empty() {
             return Ok(());
         }
+        let literal_paths = paths
+            .iter()
+            .map(|path| literal_pathspec(path))
+            .collect::<Vec<_>>();
         let mut args = vec!["reset", "-q", "HEAD", "--"];
-        args.extend(paths.iter().map(String::as_str));
+        args.extend(literal_paths.iter().map(String::as_str));
         run_git(context, &args).map(|_| ())
     }
 
@@ -658,6 +705,9 @@ impl GitService {
         message: &str,
         paths: &[String],
     ) -> Result<GitCheckpoint, BackendError> {
+        for path in paths {
+            validate_checkpoint_path(context, path)?;
+        }
         if !self.repository_status(context)?.is_repository {
             return Err(BackendError::new(
                 "GIT_REPOSITORY_MISSING",
@@ -666,21 +716,49 @@ impl GitService {
                 true,
             ));
         }
+        // Ignored, untracked bytes are absent from both status and HEAD.
+        // Never claim that a checkpoint protects them, or force-add possibly
+        // private material against the user's ignore policy.
+        let ignored = ignored_paths(context)?
+            .into_iter()
+            .filter(|path| paths.contains(path))
+            .collect::<Vec<_>>();
+        if !ignored.is_empty() {
+            return Err(BackendError::new(
+                "GIT_CHECKPOINT_PATH_IGNORED",
+                "The requested checkpoint includes ignored files that Git cannot recover.",
+                true,
+                true,
+            )
+            .with_details(serde_json::json!({ "paths": ignored })));
+        }
         let affected_paths: Vec<String> = status_paths(context)?
             .into_iter()
             .filter(|changed| paths.iter().any(|path| path == changed))
             .collect();
         if affected_paths.is_empty() {
+            let head = self.repository_status(context)?.head.ok_or_else(|| {
+                BackendError::new(
+                    "GIT_HEAD_MISSING",
+                    "Git HEAD is unavailable for the required checkpoint.",
+                    true,
+                    true,
+                )
+            })?;
             return Ok(GitCheckpoint {
                 created: false,
-                commit_hash: self.repository_status(context)?.head,
+                commit_hash: Some(head),
                 message: message.to_string(),
                 purpose,
                 affected_paths,
             });
         }
+        let literal_paths = affected_paths
+            .iter()
+            .map(|path| literal_pathspec(path))
+            .collect::<Vec<_>>();
         let mut args = vec!["add", "--"];
-        args.extend(affected_paths.iter().map(String::as_str));
+        args.extend(literal_paths.iter().map(String::as_str));
         run_git(context, &args)?;
         let commit_hash = commit_paths_with_message(context, message, &affected_paths)?;
         Ok(GitCheckpoint {
@@ -707,7 +785,13 @@ impl GitService {
             run_git(context, &["diff", "--no-ext-diff", "--no-textconv", "--"]).unwrap_or_default();
         let untracked: Vec<String> = affected_paths
             .iter()
-            .filter(|path| run_git(context, &["ls-files", "--error-unmatch", path]).is_err())
+            .filter(|path| {
+                run_git(
+                    context,
+                    &["ls-files", "--error-unmatch", "--", &literal_pathspec(path)],
+                )
+                .is_err()
+            })
             .cloned()
             .collect();
 
@@ -738,7 +822,7 @@ impl GitService {
         &self,
         context: &ProjectContext,
     ) -> Result<Vec<GitChangedFile>, BackendError> {
-        if !self.repository_status(context)?.is_repository {
+        if !owns_project_repository(context)? {
             return Err(BackendError::new(
                 "GIT_REPOSITORY_MISSING",
                 "Git repository is required before enumerating changes.",
@@ -761,7 +845,7 @@ impl GitService {
         context: &ProjectContext,
         preserved_ignored_paths: &[String],
     ) -> Result<Vec<GitChangedFile>, BackendError> {
-        if !self.repository_status(context)?.is_repository {
+        if !owns_project_repository(context)? {
             return Err(BackendError::new(
                 "GIT_REPOSITORY_MISSING",
                 "Git repository is required before enumerating changes.",
@@ -890,7 +974,7 @@ impl GitService {
                         "--staged",
                         "--worktree",
                         "--",
-                        path.as_str(),
+                        &literal_pathspec(path),
                     ],
                 )?;
             } else if context.root.join(path).exists() {
@@ -968,10 +1052,18 @@ impl GitService {
 
         let restore_result = (|| {
             for path in paths {
-                let tracked =
-                    !run_git(context, &["ls-tree", "--name-only", checkpoint, "--", path])?
-                        .trim()
-                        .is_empty();
+                let tracked = !run_git(
+                    context,
+                    &[
+                        "ls-tree",
+                        "--name-only",
+                        checkpoint,
+                        "--",
+                        &literal_pathspec(path),
+                    ],
+                )?
+                .trim()
+                .is_empty();
                 if tracked {
                     run_git(
                         context,
@@ -981,7 +1073,7 @@ impl GitService {
                             "--staged",
                             "--worktree",
                             "--",
-                            path,
+                            &literal_pathspec(path),
                         ],
                     )?;
                 } else if context.root.join(path).exists() {
@@ -1060,7 +1152,14 @@ impl GitService {
         for path in &repair_paths {
             let diff = run_git(
                 context,
-                &["diff", "--name-only", checkpoint, &current, "--", path],
+                &[
+                    "diff",
+                    "--name-only",
+                    checkpoint,
+                    &current,
+                    "--",
+                    &literal_pathspec(path),
+                ],
             )?;
             if !diff.trim().is_empty() {
                 return Ok(false);
@@ -1282,6 +1381,18 @@ fn git_command_error(stderr: &[u8], args: &[&str]) -> BackendError {
     .with_details(serde_json::json!({ "args": args }))
 }
 
+/// Validate repository ownership without scanning the worktree or resolving HEAD.
+fn owns_project_repository(context: &ProjectContext) -> Result<bool, BackendError> {
+    let root = validate_existing_project_root(&context.root).map_err(git_path_unsafe)?;
+    if !validate_git_marker(&root)? {
+        return Ok(false);
+    }
+    let top = run_git(context, &["rev-parse", "--show-toplevel"])?;
+    Ok(Path::new(top.trim())
+        .canonicalize()
+        .is_ok_and(|path| path == root))
+}
+
 fn run_git(context: &ProjectContext, args: &[&str]) -> Result<String, BackendError> {
     run_git_bytes(context, args).map(|stdout| String::from_utf8_lossy(&stdout).to_string())
 }
@@ -1290,7 +1401,25 @@ fn run_git_bytes(context: &ProjectContext, args: &[&str]) -> Result<Vec<u8>, Bac
     let output = run_git_process(
         context,
         args,
-        DEFAULT_GIT_TIMEOUT,
+        if matches!(
+            args.first().copied(),
+            Some(
+                "--version"
+                    | "rev-parse"
+                    | "status"
+                    | "diff"
+                    | "ls-files"
+                    | "ls-tree"
+                    | "cat-file"
+                    | "show"
+                    | "log"
+                    | "for-each-ref"
+            )
+        ) {
+            Duration::from_secs(10)
+        } else {
+            DEFAULT_GIT_TIMEOUT
+        },
         MAX_GIT_OUTPUT_BYTES,
         || false,
     )
@@ -1573,7 +1702,11 @@ fn commit_paths_with_message(
         message,
         "--",
     ];
-    args.extend(paths.iter().map(String::as_str));
+    let literal_paths = paths
+        .iter()
+        .map(|path| literal_pathspec(path))
+        .collect::<Vec<_>>();
+    args.extend(literal_paths.iter().map(String::as_str));
     run_git(context, &args)?;
     run_git(context, &["rev-parse", "--short", "HEAD"]).map(|value| value.trim().to_string())
 }
@@ -1747,6 +1880,55 @@ fn remove_project_path(context: &ProjectContext, path: &str) -> Result<(), Backe
         binding.remove_file(&target)
     }
     .map_err(|err| BackendError::new("GIT_ROLLBACK_FAILED", err.to_string(), true, false))
+}
+
+/// `--` ends option parsing but still interprets wildcard and magic pathspecs.
+/// Business callers supply literal project-relative paths, including Unicode.
+fn literal_pathspec(path: &str) -> String {
+    format!(":(literal){path}")
+}
+
+fn validate_checkpoint_path(context: &ProjectContext, path: &str) -> Result<(), BackendError> {
+    let unsafe_path = || {
+        BackendError::new(
+            "GIT_CHECKPOINT_PATH_UNSAFE",
+            "A checkpoint path must name a safe project-relative file.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({ "path": path }))
+    };
+    if validate_relative_git_path(path).is_err()
+        || path.contains(['\0', '\\'])
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part.eq_ignore_ascii_case(".git"))
+        || (path.as_bytes().get(1) == Some(&b':') && path.as_bytes()[0].is_ascii_alphabetic())
+    {
+        return Err(unsafe_path());
+    }
+    let target = context.root.join(path);
+    match fs::symlink_metadata(&target) {
+        // The scoped status filter accepts exact files, never directory trees.
+        Ok(metadata) if metadata.is_dir() => return Err(unsafe_path()),
+        Ok(_) => {
+            validate_existing_project_file(&context.root, &target).map_err(|_| unsafe_path())?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut parent = target.parent().ok_or_else(unsafe_path)?;
+            while !parent.exists() {
+                parent = parent.parent().ok_or_else(unsafe_path)?;
+            }
+            if parent == context.root {
+                validate_existing_project_root(parent).map_err(|_| unsafe_path())?;
+            } else {
+                validate_existing_project_directory(&context.root, parent)
+                    .map_err(|_| unsafe_path())?;
+            }
+        }
+        Err(_) => return Err(unsafe_path()),
+    }
+    Ok(())
 }
 
 fn validate_relative_git_path(path: &str) -> Result<(), BackendError> {
@@ -2756,6 +2938,297 @@ mod tests {
         );
 
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn literal_scoped_checkpoints_and_rollbacks_preserve_matching_user_edits() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let context = ProjectContext::new("literal-scope", root.to_path_buf());
+        fs::create_dir_all(root.join("wiki/中文")).unwrap();
+        #[allow(unused_mut)]
+        let mut cases = vec![("wiki/中文/[ab].md", "wiki/中文/a.md")];
+        // These characters are legal filenames on Unix, but not Windows.
+        #[cfg(unix)]
+        cases.extend([
+            ("wiki/中文/*.md", "wiki/中文/unrelated.md"),
+            (":(glob)*.md", "unrelated.md"),
+        ]);
+        for (selected, unrelated) in &cases {
+            fs::write(root.join(selected), "baseline\n").unwrap();
+            fs::write(root.join(unrelated), "baseline\n").unwrap();
+        }
+        GitService
+            .initialize_repository(&context, "Initial")
+            .unwrap();
+        for (selected, unrelated) in cases {
+            let baseline = GitService
+                .repository_status(&context)
+                .unwrap()
+                .head
+                .unwrap();
+            fs::write(root.join(selected), "repair\n").unwrap();
+            fs::write(root.join(unrelated), "user staged\n").unwrap();
+            run_git(
+                &context,
+                &["add", "--", &super::literal_pathspec(unrelated)],
+            )
+            .unwrap();
+            fs::write(root.join(unrelated), "user worktree\n").unwrap();
+            let staged_before = run_git(
+                &context,
+                &["diff", "--no-ext-diff", "--no-textconv", "--cached", "--"],
+            )
+            .unwrap();
+            let checkpoint = GitService
+                .create_scoped_checkpoint(
+                    &context,
+                    CheckpointPurpose::FinalResult,
+                    "Scoped repair",
+                    &[selected.into()],
+                )
+                .unwrap();
+            let final_commit = checkpoint.commit_hash.unwrap();
+            assert_eq!(checkpoint.affected_paths, vec![selected]);
+            assert_eq!(
+                run_git(
+                    &context,
+                    &["diff", "--no-ext-diff", "--no-textconv", "--cached", "--"]
+                )
+                .unwrap(),
+                staged_before
+            );
+            assert!(GitService.is_path_tracked(&context, selected).unwrap());
+
+            GitService
+                .rollback_paths_to_checkpoint(
+                    &context,
+                    &final_commit,
+                    &baseline,
+                    "Undo repair",
+                    &[selected.into()],
+                )
+                .unwrap();
+            assert_eq!(
+                fs::read_to_string(root.join(selected))
+                    .unwrap()
+                    .replace("\r\n", "\n"),
+                "baseline\n"
+            );
+            assert_eq!(
+                fs::read_to_string(root.join(unrelated)).unwrap(),
+                "user worktree\n"
+            );
+            assert_eq!(
+                run_git(
+                    &context,
+                    &["diff", "--no-ext-diff", "--no-textconv", "--cached", "--"]
+                )
+                .unwrap(),
+                staged_before
+            );
+            assert!(GitService
+                .is_exact_compensating_rollback(
+                    &context,
+                    &final_commit,
+                    &baseline,
+                    &[selected.into()],
+                )
+                .unwrap());
+
+            fs::write(root.join(selected), "another repair\n").unwrap();
+            run_git(&context, &["add", "--", &super::literal_pathspec(selected)]).unwrap();
+            GitService
+                .unstage_paths(&context, &[selected.into()])
+                .unwrap();
+            assert_eq!(
+                run_git(
+                    &context,
+                    &["diff", "--no-ext-diff", "--no-textconv", "--cached", "--"]
+                )
+                .unwrap(),
+                staged_before
+            );
+            GitService
+                .rollback_paths_to_head_preserving_ignored(&context, &[selected.into()], &[])
+                .unwrap();
+            assert_eq!(
+                fs::read_to_string(root.join(selected))
+                    .unwrap()
+                    .replace("\r\n", "\n"),
+                "baseline\n"
+            );
+            assert_eq!(
+                fs::read_to_string(root.join(unrelated)).unwrap(),
+                "user worktree\n"
+            );
+            assert_eq!(
+                run_git(
+                    &context,
+                    &["diff", "--no-ext-diff", "--no-textconv", "--cached", "--"]
+                )
+                .unwrap(),
+                staged_before
+            );
+            // Restore this case's unrelated fixture before the next baseline.
+            GitService
+                .rollback_paths_to_head_preserving_ignored(&context, &[unrelated.into()], &[])
+                .unwrap();
+        }
+        fs::remove_file(root.join("wiki/中文/[ab].md")).unwrap();
+        run_git(
+            &context,
+            &["rm", "--", &super::literal_pathspec("wiki/中文/[ab].md")],
+        )
+        .unwrap();
+        assert!(!GitService
+            .is_path_tracked(&context, "wiki/中文/[ab].md")
+            .unwrap());
+        assert!(GitService
+            .is_path_tracked(&context, "wiki/中文/a.md")
+            .unwrap());
+    }
+
+    #[test]
+    fn ignored_checkpoint_inputs_fail_before_staging_or_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let context = ProjectContext::new("ignored-scope", root.to_path_buf());
+        fs::create_dir_all(root.join("raw/中文")).unwrap();
+        fs::create_dir_all(root.join("wiki")).unwrap();
+        fs::write(root.join("raw/tracked.md"), "tracked baseline\n").unwrap();
+        fs::write(root.join("notes.md"), "notes baseline\n").unwrap();
+        GitService
+            .initialize_repository(&context, "Initial")
+            .unwrap();
+        fs::write(root.join(".gitignore"), "raw/中文/\nraw/tracked.md\n").unwrap();
+        GitService
+            .create_checkpoint(&context, CheckpointPurpose::HighRiskOperation, "Ignore raw")
+            .unwrap();
+        fs::write(root.join("raw/中文/[ab].pdf"), b"private original").unwrap();
+        fs::write(root.join("wiki/new.md"), "new wiki\n").unwrap();
+        fs::write(root.join("notes.md"), "staged user edit\n").unwrap();
+        run_git(&context, &["add", "--", "notes.md"]).unwrap();
+        let head_before = GitService.repository_status(&context).unwrap().head;
+        let index_before = fs::read(root.join(".git/index")).unwrap();
+        let error = GitService
+            .create_scoped_checkpoint(
+                &context,
+                CheckpointPurpose::HighRiskOperation,
+                "Before deleting",
+                &["wiki/new.md".into(), "raw/中文/[ab].pdf".into()],
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "GIT_CHECKPOINT_PATH_IGNORED");
+        assert_eq!(
+            error.details.unwrap()["paths"],
+            serde_json::json!(["raw/中文/[ab].pdf"])
+        );
+        assert_eq!(
+            GitService.repository_status(&context).unwrap().head,
+            head_before
+        );
+        assert_eq!(fs::read(root.join(".git/index")).unwrap(), index_before);
+        assert_eq!(
+            fs::read(root.join("raw/中文/[ab].pdf")).unwrap(),
+            b"private original"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("wiki/new.md")).unwrap(),
+            "new wiki\n"
+        );
+        assert!(!GitService.is_path_tracked(&context, "wiki/new.md").unwrap());
+
+        // Ignore rules do not remove protection from already tracked files,
+        // and unrelated ignored material must not block ordinary checkpoints.
+        fs::write(root.join("raw/tracked.md"), "tracked update\n").unwrap();
+        assert!(
+            GitService
+                .create_scoped_checkpoint(
+                    &context,
+                    CheckpointPurpose::HighRiskOperation,
+                    "Tracked raw and wiki",
+                    &["raw/tracked.md".into(), "wiki/new.md".into()],
+                )
+                .unwrap()
+                .created
+        );
+    }
+
+    #[test]
+    fn empty_unborn_checkpoints_require_a_recoverable_head() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let context = ProjectContext::new("unborn-scope", root.to_path_buf());
+        run_git(&context, &["init"]).unwrap();
+        let missing = vec!["wiki/new.md".into()];
+        for scoped in [true, false] {
+            let result = if scoped {
+                GitService.create_scoped_checkpoint(
+                    &context,
+                    CheckpointPurpose::HighRiskOperation,
+                    "Before write",
+                    &missing,
+                )
+            } else {
+                GitService.create_checkpoint(
+                    &context,
+                    CheckpointPurpose::HighRiskOperation,
+                    "Before write",
+                )
+            };
+            assert_eq!(result.unwrap_err().code, "GIT_HEAD_MISSING");
+            assert!(GitService
+                .repository_status(&context)
+                .unwrap()
+                .head
+                .is_none());
+            assert!(!root.join(".git/index").exists());
+            assert!(!root.join("wiki").exists());
+        }
+        fs::create_dir(root.join("wiki")).unwrap();
+        fs::write(root.join("wiki/new.md"), "first content\n").unwrap();
+        let checkpoint = GitService
+            .create_scoped_checkpoint(
+                &context,
+                CheckpointPurpose::HighRiskOperation,
+                "First content",
+                &missing,
+            )
+            .unwrap();
+        assert!(checkpoint.created);
+        assert!(checkpoint.commit_hash.is_some());
+    }
+
+    #[test]
+    fn unsafe_checkpoint_paths_fail_before_git_is_invoked() {
+        let directory = tempfile::tempdir().unwrap();
+        let context = ProjectContext::new("unsafe-scope", directory.path().to_path_buf());
+        fs::create_dir(directory.path().join("wiki")).unwrap();
+        for path in [
+            "wiki",
+            "../outside.md",
+            "/outside.md",
+            "C:/outside.md",
+            "C:\\outside.md",
+            ".",
+            ".git/config",
+            "wiki/../page.md",
+            "wiki/\0.md",
+        ] {
+            GitService::reset_process_attempts_for_test();
+            let error = GitService
+                .create_scoped_checkpoint(
+                    &context,
+                    CheckpointPurpose::HighRiskOperation,
+                    "Unsafe",
+                    &[path.into()],
+                )
+                .unwrap_err();
+            assert_eq!(error.code, "GIT_CHECKPOINT_PATH_UNSAFE", "{path}");
+            assert_eq!(GitService::process_attempts_for_test(), 0);
+            assert!(!directory.path().join(".git").exists());
+        }
     }
 
     #[test]

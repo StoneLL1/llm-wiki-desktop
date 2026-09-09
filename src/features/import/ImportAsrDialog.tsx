@@ -9,9 +9,6 @@ import {
   type NormalizedBackendError,
 } from "../../lib/backendError";
 import {
-  cancelTaskRequest,
-  selectProjectTaskById,
-  selectTaskIdsForProject,
   useTaskStore,
 } from "../../stores/taskStore";
 import type { ImportAsrProfile } from "../../types/importV2";
@@ -100,22 +97,19 @@ export function ImportAsrDialog({
     () => plan?.profiles.find((entry) => entry.profile === profile) ?? null,
     [plan, profile],
   );
-  const activeProjectId = useTaskStore((state) => state.activeProjectId);
-  const projectTaskIds = useTaskStore((state) => selectTaskIdsForProject(state, activeProjectId));
+  const taskFacts = useTaskStore((state) => state.taskById);
+  const visibleTasks = useTaskStore((state) => state.tasks);
   const capabilityTasks = useMemo(() => {
-    const state = useTaskStore.getState();
-    return projectTaskIds
-      .map((taskId) => selectProjectTaskById(state, activeProjectId, taskId))
-      .filter((task): task is BackendTask => task !== null)
-      .filter((task) => {
-        const operation = task.operation;
-        return operation?.kind === "capability_install"
-          && operation.sessionId === sessionId
-          && operation.itemId === itemId
-          && operation.capabilityId === selected?.capabilityId
-          && operation.requirementRevision === plan?.requirementRevision;
-      });
-  }, [activeProjectId, itemId, plan?.requirementRevision, projectTaskIds, selected?.capabilityId, sessionId]);
+    const byId = new Map<string, BackendTask>();
+    for (const task of [...Object.values(taskFacts), ...visibleTasks]) {
+      const operation = task.operation;
+      if ((operation?.kind === "app_capability_install" && operation.capabilityId === selected?.capabilityId)
+        || (operation?.kind === "capability_install" && operation.sessionId === sessionId
+          && operation.itemId === itemId && operation.capabilityId === selected?.capabilityId
+          && operation.requirementRevision === plan?.requirementRevision)) byId.set(task.id, task);
+    }
+    return [...byId.values()];
+  }, [taskFacts, visibleTasks, itemId, plan?.requirementRevision, selected?.capabilityId, sessionId]);
   const task = capabilityTasks.find((candidate) => candidate.id === startedTaskId)
     ?? [...capabilityTasks].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]
     ?? null;
@@ -225,20 +219,23 @@ export function ImportAsrDialog({
           </label>
 
           <dl className="mt-4 grid grid-cols-[132px_minmax(0,1fr)] gap-x-4 gap-y-1.5 rounded-[var(--radius-md)] border border-[var(--border-subtle)] px-3 py-2">
-            <dt className="text-[var(--text-muted)]">{t("importV2.asr.download")}</dt>
-            <dd className="m-0">{formatBytes(selected?.downloadBytes ?? null, i18n.language, unknown)}</dd>
+            <dt className="text-[var(--text-muted)]">{t("importV2.capability.newDownload")}</dt>
+            <dd className="m-0">{formatBytes(selected?.available ? 0 : selected?.downloadBytes ?? null, i18n.language, unknown)}</dd>
+            <dt className="text-[var(--text-muted)]">{t("importV2.asr.mediaDuration")}</dt>
+            <dd className="m-0">{formatDuration(plan?.mediaDurationSeconds ?? null, i18n.language, unknown)}</dd>
+          </dl>
+
+          <details className="mt-3">
+            <summary className="cursor-pointer text-[11px] text-[var(--text-muted)]">{t("importV2.preview.technicalDetails")}</summary>
+          <dl className="mt-2 grid grid-cols-[132px_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-[11px]">
             <dt className="text-[var(--text-muted)]">{t("importV2.asr.disk")}</dt>
             <dd className="m-0">{formatBytes(selected?.installedBytes ?? null, i18n.language, unknown)}</dd>
             <dt className="text-[var(--text-muted)]">{t("importV2.asr.device")}</dt>
-            <dd className="m-0 flex items-center gap-1.5"><Cpu size={13} aria-hidden="true" />{selected?.device.toUpperCase() ?? unknown}</dd>
-            <dt className="text-[var(--text-muted)]">{t("importV2.asr.estimate")}</dt>
-            <dd className="m-0">{formatDuration(selected?.estimatedSeconds ?? null, i18n.language, unknown)}</dd>
+            <dd className="m-0 flex items-center gap-1.5"><Cpu size={13} aria-hidden="true" />{selected?.device === "auto" ? t("importV2.asr.deviceAutomatic") : selected?.device.toUpperCase() ?? unknown}</dd>
             <dt className="text-[var(--text-muted)]">{t("importV2.asr.availableMemory")}</dt>
             <dd className="m-0">{formatBytes(plan?.availableMemoryBytes ?? null, i18n.language, unknown)}</dd>
             <dt className="text-[var(--text-muted)]">{t("importV2.asr.availableDisk")}</dt>
             <dd className="m-0">{formatBytes(plan?.availableDiskBytes ?? null, i18n.language, unknown)}</dd>
-            <dt className="text-[var(--text-muted)]">{t("importV2.asr.mediaDuration")}</dt>
-            <dd className="m-0">{formatDuration(plan?.mediaDurationSeconds ?? null, i18n.language, unknown)}</dd>
             <dt className="text-[var(--text-muted)]">{t("importV2.asr.installLocation")}</dt>
             <dd className="m-0 break-all font-mono text-[11px]">{plan?.installLocation ?? unknown}</dd>
           </dl>
@@ -265,6 +262,7 @@ export function ImportAsrDialog({
               </ol>
             </section>
           ) : null}
+          </details>
 
           <p className="mt-3 flex items-start gap-2 rounded-[var(--radius-md)] border border-[var(--border-subtle)] px-3 py-2 text-[11px] text-[var(--text-secondary)]">
             <ShieldCheck size={14} className="mt-0.5 shrink-0 text-[var(--success-text)]" aria-hidden="true" />
@@ -292,7 +290,7 @@ export function ImportAsrDialog({
         </div>
 
         <footer className="flex items-center justify-end gap-2 border-t border-[var(--border)] px-4 py-3">
-          {taskBusy && task ? <button type="button" className="btn btn--sm" onClick={() => void cancelTaskRequest(task.id)}>{t("importV2.capability.cancelDownload")}</button> : <button type="button" className="btn btn--sm" onClick={onCancel}>{t("importV2.asr.cancel")}</button>}
+          <button type="button" className="btn btn--sm" onClick={onCancel}>{t(taskBusy ? "importV2.capability.close" : "importV2.asr.cancel")}</button>
           <button type="button" className="btn btn--sm btn--primary" onClick={() => void submit()} disabled={blocked || loading || !selected || !canChoose(selected)}>
             {blocked ? <LoaderCircle size={13} className="mr-1 inline animate-spin" aria-label={t("importV2.common.loading")} /> : null}
             {t(ctaKey)}

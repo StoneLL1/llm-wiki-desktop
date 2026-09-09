@@ -1,11 +1,11 @@
 import { History, PanelRightOpen } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import {
-  useWorkflowsController,
-  type WorkflowProjectPrerequisiteAction,
-  type WorkflowProjectPrerequisiteContext,
+import type {
+  WorkflowsController,
+  WorkflowProjectPrerequisiteAction,
+  WorkflowProjectPrerequisiteContext,
 } from "../../features/workflows/useWorkflowsController";
 import { ProjectAuthorityDialog, type ProjectAuthorityAction } from "../../features/project/ProjectAuthorityDialog";
 import { NoProjectSettingsDialog } from "../../features/project/NoProjectSettingsDialog";
@@ -20,6 +20,9 @@ import { useTaskStore } from "../../stores/taskStore";
 import { useWorkflowStore } from "../../stores/workflowStore";
 import type { ProjectSummary } from "../../types/project";
 import { WorkspaceRouter } from "./WorkspaceRouter";
+import { ViewErrorBoundary } from "./ViewErrorBoundary";
+
+const WorkflowsControllerRuntime = lazy(() => import("../../features/workflows/WorkflowsControllerRuntime"));
 
 function ProjectWorkspaceController() {
   const { t } = useTranslation();
@@ -102,11 +105,17 @@ function ProjectWorkspaceController() {
     taskLauncher,
   );
   const providerWorkflow = useProviderWorkflow(currentProject, capabilities);
-  const workflowsController = useWorkflowsController(
-    currentProject,
-    activeView === "workflows",
-    { onProjectPrerequisite },
-  );
+  const [workflowRuntimeStarted, setWorkflowRuntimeStarted] = useState(false);
+  const [workflowRuntime, setWorkflowRuntime] = useState<{ projectKey: string; controller: WorkflowsController } | null>(null);
+  const onWorkflowControllerReady = useCallback((projectKey: string, controller: WorkflowsController) => {
+    setWorkflowRuntime((current) => current?.projectKey === projectKey && current.controller === controller
+      ? current : { projectKey, controller });
+  }, []);
+  const workflowsController = workflowRuntime?.projectKey === `${currentProject.projectId}\0${currentProject.rootPath}`
+    ? workflowRuntime.controller : null;
+  useEffect(() => {
+    if (activeView === "workflows") setWorkflowRuntimeStarted(true);
+  }, [activeView]);
   const settingsWasOpenRef = useRef(settingsOpen);
 
   useEffect(() => {
@@ -219,7 +228,7 @@ function ProjectWorkspaceController() {
       clearWorkflowLaunchIntent();
       return;
     }
-    if (activeView !== "workflows") return;
+    if (activeView !== "workflows" || !workflowsController) return;
     clearWorkflowLaunchIntent();
     void workflowsController.prepare(
       workflowLaunchIntent.kind,
@@ -237,6 +246,7 @@ function ProjectWorkspaceController() {
   ]);
 
   useEffect(() => {
+    if (!workflowsController) return;
     const wasOpen = settingsWasOpenRef.current;
     settingsWasOpenRef.current = settingsOpen;
     if (!wasOpen || settingsOpen || !workflowSettingsReturnIntent) return;
@@ -366,6 +376,16 @@ function ProjectWorkspaceController() {
       ) : null}
 
       <div className={workspaceClass}>
+        {workflowRuntimeStarted || activeView === "workflows" ? (
+          <div hidden={activeView !== "workflows"}>
+          <ViewErrorBoundary>
+            <Suspense fallback={null}>
+              <WorkflowsControllerRuntime project={currentProject} enabled={activeView === "workflows"}
+                onProjectPrerequisite={onProjectPrerequisite} onReady={onWorkflowControllerReady} />
+            </Suspense>
+          </ViewErrorBoundary>
+          </div>
+        ) : null}
         {activeView === "import" && importSuccessNotice?.projectId === currentProject.projectId ? (
           <div className="import-handoff-notice" role="status">
             <span>{t("noProject.importCreated", { name: importSuccessNotice.name })}</span>

@@ -71,6 +71,8 @@ describe("ImportCapabilityDialog", () => {
 
     expect(screen.getByText("Interactive web reader")).toBeVisible();
     expect(screen.getByText("Read dynamic web sources")).toBeVisible();
+    fireEvent.click(screen.getAllByText("Technical details")[0]);
+    screen.getByText("x86_64-pc-windows-msvc").closest("details")!.open = true;
     expect(screen.getByText("x86_64-pc-windows-msvc")).toBeVisible();
     expect(screen.getByText("llm-wiki-capability-v1")).toBeVisible();
     expect(screen.getByText("github.com")).toBeVisible();
@@ -78,13 +80,13 @@ describe("ImportCapabilityDialog", () => {
     expect(screen.getByText(/verifies the pinned version, SHA-256 digest, publisher signature/i)).toBeVisible();
   });
 
-  it("requires explicit fact acknowledgement before registering the import install", async () => {
+  it("registers preparation and continuation with one explicit action", async () => {
     const onInstall = vi.fn().mockResolvedValue(undefined);
     render(<ImportCapabilityDialog open requirement={requirement} onInstall={onInstall} onCancel={vi.fn()} />);
 
-    const install = screen.getByRole("button", { name: "Install" });
-    expect(install).toBeDisabled();
-    fireEvent.click(screen.getByRole("checkbox", { name: /reviewed version 1\.4\.0/i }));
+    const install = screen.getByRole("button", { name: "Prepare and continue" });
+    expect(install).toBeEnabled();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
     fireEvent.click(install);
     await waitFor(() => expect(onInstall).toHaveBeenCalledWith("browser-runtime"));
   });
@@ -102,6 +104,21 @@ describe("ImportCapabilityDialog", () => {
 
     expect(screen.queryByRole("button", { name: "Install" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Close" })).toBeVisible();
+  });
+
+  it("continues with a compatible installed version when a newer release cannot be installed", async () => {
+    const onInstall = vi.fn().mockResolvedValue(null);
+    useAppCapabilityStore.setState({ capabilities: [{ ...globalCapability,
+      installAllowed: false,
+      installation: { state: "healthy", healthyVersion: "1.3.0" },
+      displayState: "installed",
+    }] });
+    render(<ImportCapabilityDialog open requirement={{ ...requirement, available: true, installable: false }} onInstall={onInstall} onCancel={vi.fn()} />);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    const button = screen.getByRole("button", { name: "Prepare and continue" });
+    expect(button).toBeEnabled();
+    fireEvent.click(button);
+    await waitFor(() => expect(onInstall).toHaveBeenCalledWith("browser-runtime"));
   });
 
   it("reports resumed and review-required continuations from the typed task result", () => {

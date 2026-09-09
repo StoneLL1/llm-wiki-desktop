@@ -36,8 +36,6 @@ function rpcFailure(code, message) {
   process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message, data: { code } } })}\n`);
   process.exit(0);
 }
-if (/环境异常|访问过于频繁|请完成验证|去验证|安全验证|captcha|challenge/i.test(pageText)) rpcFailure("IMPORT_WEB_CHALLENGE_DETECTED", "The site returned a challenge page.");
-if (/登录后|signflow|login required/i.test(pageText)) rpcFailure("IMPORT_WEB_LOGIN_REQUIRED", "The site requires login.");
 
 let title = "";
 let byline = "";
@@ -60,7 +58,16 @@ if (host === "mp.weixin.qq.com") {
     contentRoot = new JSDOM(article.content, { url: sourceUrl }).window.document.body;
   }
 }
-if (!title || !contentRoot || (contentRoot.textContent || "").trim().length < 20) rpcFailure("IMPORT_WEB_STRUCTURE_CHANGED", "The page did not contain a complete supported content root.");
+// Article content is authoritative. Authentication vocabulary in an article
+// is ordinary prose; classify a wall only when no readable article exists.
+const wallRoot = document.querySelector('[id*="captcha"],[class*="captcha"],#challenge-form,.SignFlow,.login-wall');
+const articleRoot = document.querySelector('article,#js_content,.Post-RichText,.RichContent-inner,[itemprop="articleBody"]');
+const articleReadable = (articleRoot?.textContent || "").trim().length >= 20;
+if (!articleReadable && (wallRoot || !contentRoot || pageText.trim().length < 300)) {
+  if (/环境异常|访问过于频繁|请完成验证|去验证|安全验证|captcha|challenge/i.test(pageText)) rpcFailure("IMPORT_WEB_CHALLENGE_DETECTED", "The site returned a challenge page.");
+  if (/登录后|signflow|login required/i.test(pageText)) rpcFailure("IMPORT_WEB_LOGIN_REQUIRED", "The site requires login.");
+}
+if (!title || !contentRoot || !(contentRoot.textContent || "").trim()) rpcFailure("IMPORT_WEB_STRUCTURE_CHANGED", "The page did not contain readable article content.");
 
 const clean = createDOMPurify(dom.window).sanitize(contentRoot.innerHTML, {
   FORBID_TAGS: ["script", "style", "iframe", "object", "embed", "form", "template"],
@@ -82,4 +89,4 @@ const markdown = new TurndownService({ codeBlockStyle: "fenced", headingStyle: "
 await fs.writeFile(path.join(stagingRoot, "candidate.md"), `# ${title}\n\n${markdown}\n`);
 await fs.writeFile(path.join(stagingRoot, "source.html"), persistedHtml);
 await fs.writeFile(path.join(stagingRoot, "metadata.json"), JSON.stringify({ title, byline, publicUrl: sourceUrl }));
-process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { sourceSnapshotPath: "source.html", markdownPath: "candidate.md", assetPaths: [], metadataPath: "metadata.json", title, textCoverage: 1, warnings: [] }, error: null })}\n`);
+process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { sourceSnapshotPath: "source.html", markdownPath: "candidate.md", assetPaths: [], metadataPath: "metadata.json", title, textCoverage: null, warnings: [] }, error: null })}\n`);

@@ -40,7 +40,8 @@ const MAX_STDOUT_LINES: usize = 256;
 const MAX_REMOTE_ASSETS: usize = 128;
 const MAX_STDERR_BYTES: u64 = 1024 * 1024;
 const PROCESS_OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
-const CAPABILITY_HEALTH_TIMEOUT: Duration = Duration::from_secs(15);
+// Cold native/Python module loading can exceed 15 seconds on first launch.
+const CAPABILITY_HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_HEALTH_RESPONSE_BYTES: u64 = 64 * 1024;
 
 pub struct PackProcessEngine {
@@ -101,7 +102,8 @@ pub(crate) fn probe_capability_pack(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .env_clear();
+        .env_clear()
+        .env("PYTHONDONTWRITEBYTECODE", "1");
     for key in ["SystemRoot", "WINDIR"] {
         if let Some(value) = std::env::var_os(key) {
             command.env(key, value);
@@ -374,7 +376,8 @@ impl ImportEngine for PackProcessEngine {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .env_clear();
+            .env_clear()
+            .env("PYTHONDONTWRITEBYTECODE", "1");
         for key in ["SystemRoot", "WINDIR"] {
             if let Some(value) = std::env::var_os(key) {
                 command.env(key, value);
@@ -680,8 +683,7 @@ fn prepare_web_request(
     let token = cancellation.clone();
     let item_id = request.item_id.clone();
     let fetched = std::thread::spawn(move || {
-        let runtime = tokio::runtime::Runtime::new()
-            .map_err(|_| engine_error("The web runtime could not be started."))?;
+        let runtime = shared_web_runtime()?;
         runtime.block_on(async move {
             let _permit = limiter
                 .acquire(&target.public.host, sensitive)
@@ -1147,8 +1149,7 @@ fn localize_remote_assets(
         let worker_stop = progress_stop.clone();
         let (progress_sender, progress_receiver) = mpsc::channel::<WebFetchProgress>();
         let worker = std::thread::spawn(move || {
-            let runtime = tokio::runtime::Runtime::new()
-                .map_err(|_| engine_error("The asset runtime could not be started."))?;
+            let runtime = shared_web_runtime()?;
             runtime.block_on(async move {
                 let _permit = limiter
                     .acquire(&target.public.host, false)
@@ -1359,7 +1360,7 @@ fn localize_remote_assets(
         if content == WebFetchContent::Image {
             successful_images += 1;
         }
-        if let Some(transcript) = transcript {
+        if let Some(transcript) = transcript.filter(|_| !transcription_ready) {
             append_platform_transcript(&mut markdown, &transcript, &asset);
             update_transcript_metadata(&root, result, &asset)?;
             transcription_ready = true;
@@ -2280,4 +2281,21 @@ mod tests {
         }
         assert!(joined.load(std::sync::atomic::Ordering::SeqCst));
     }
+}
+
+// One runtime for all bounded platform fetch workers, instead of creating a
+// scheduler and thread pool for every page/image/subtitle in an article.
+fn shared_web_runtime() -> Result<&'static tokio::runtime::Runtime, BackendError> {
+    static RUNTIME: std::sync::OnceLock<Result<tokio::runtime::Runtime, String>> =
+        std::sync::OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map_err(|error| engine_error(&format!("The web runtime could not be started: {error}")))
 }

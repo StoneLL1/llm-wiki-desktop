@@ -1,10 +1,12 @@
 use serde::Deserialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager};
 
 use crate::app_state::AppState;
+use crate::commands::runtime::run_blocking;
 use crate::errors::BackendError;
 use crate::models::git::{CheckpointPurpose, GitCheckpoint, GitDiff, GitRepositoryStatus};
 use crate::models::project::AssessmentId;
+use crate::services::BlockingWorkClass;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -88,108 +90,116 @@ fn project_facts_identity_error() -> BackendError {
 }
 
 #[tauri::command]
-pub fn initialize_git_repository(
-    state: State<'_, AppState>,
+pub async fn initialize_git_repository(
+    app: AppHandle,
     request: AssessedGitRequest,
 ) -> Result<crate::models::confirmation::PendingAction, BackendError> {
-    let context = revalidate_assessed_git_request(&state, &request)?;
-    let status = state.git_service.repository_status(&context)?;
-    if status.head.is_some() {
-        return Err(BackendError::new(
-            "GIT_REPOSITORY_EXISTS",
-            "The project already has local Git history.",
-            true,
-            true,
-        ));
-    }
-    let expected_paths = state.git_service.initial_commit_paths(&context)?;
-    let mut affected_paths = vec![".git".to_string()];
-    affected_paths.extend(expected_paths.iter().cloned());
-    affected_paths.sort();
-    affected_paths.dedup();
-    let action = crate::models::confirmation::PendingAction {
-        id: uuid::Uuid::new_v4().to_string(),
-        action_type: crate::models::confirmation::PendingActionType::InitializeGitRepository,
-        title: "Initialize local Git history".into(),
-        message: "Create a local Git repository and initial commit. No remote will be added."
-            .into(),
-        risk_level: crate::models::confirmation::RiskLevel::High,
-        affected_paths,
-        preview: None,
-        expires_at: None,
-        checkpoint_hash: None,
-    };
-    state.confirmation_registry.register_with_execution(
-        action.clone(),
-        Some(
-            crate::models::confirmation::ConfirmationExecution::InitializeAssessedGit {
-                assessment_id: request.assessment_id,
-                project_id: request.project_id,
-                root_path: request.project_root_path,
-                expected_head: status.head,
-                expected_paths,
-            },
-        ),
-    )?;
-    Ok(action)
+    run_blocking(app, BlockingWorkClass::HeavyIo, move |app| {
+        let state = app.state::<AppState>();
+        let context = revalidate_assessed_git_request(&state, &request)?;
+        let status = state.git_service.repository_status(&context)?;
+        if status.head.is_some() {
+            return Err(BackendError::new(
+                "GIT_REPOSITORY_EXISTS",
+                "The project already has local Git history.",
+                true,
+                true,
+            ));
+        }
+        let expected_paths = state.git_service.initial_commit_paths(&context)?;
+        let mut affected_paths = vec![".git".to_string()];
+        affected_paths.extend(expected_paths.iter().cloned());
+        affected_paths.sort();
+        affected_paths.dedup();
+        let action = crate::models::confirmation::PendingAction {
+            id: uuid::Uuid::new_v4().to_string(),
+            action_type: crate::models::confirmation::PendingActionType::InitializeGitRepository,
+            title: "Initialize local Git history".into(),
+            message: "Create a local Git repository and initial commit. No remote will be added."
+                .into(),
+            risk_level: crate::models::confirmation::RiskLevel::High,
+            affected_paths,
+            preview: None,
+            expires_at: None,
+            checkpoint_hash: None,
+        };
+        state.confirmation_registry.register_with_execution(
+            action.clone(),
+            Some(
+                crate::models::confirmation::ConfirmationExecution::InitializeAssessedGit {
+                    assessment_id: request.assessment_id,
+                    project_id: request.project_id,
+                    root_path: request.project_root_path,
+                    expected_head: status.head,
+                    expected_paths,
+                },
+            ),
+        )?;
+        Ok(action)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn request_assessed_git_checkpoint(
-    state: State<'_, AppState>,
+pub async fn request_assessed_git_checkpoint(
+    app: AppHandle,
     request: AssessedGitRequest,
 ) -> Result<crate::models::confirmation::PendingAction, BackendError> {
-    let context = revalidate_assessed_git_request(&state, &request)?;
-    let status = state.git_service.repository_status(&context)?;
-    if !status.is_repository {
-        return Err(BackendError::new(
-            "GIT_REPOSITORY_MISSING",
-            "Initialize local Git history before creating a checkpoint.",
-            true,
-            true,
-        ));
-    }
-    if status.head.is_none() {
-        return Err(BackendError::new(
-            "GIT_HEAD_MISSING",
-            "Complete local Git initialization before creating a checkpoint.",
-            true,
-            true,
-        ));
-    }
-    let affected_paths = state.git_service.changed_paths(&context)?;
-    if affected_paths.is_empty() {
-        return Err(BackendError::new(
-            "GIT_WORKTREE_CLEAN",
-            "There are no project changes to checkpoint.",
-            true,
-            true,
-        ));
-    }
-    let action = crate::models::confirmation::PendingAction {
-        id: uuid::Uuid::new_v4().to_string(),
-        action_type: crate::models::confirmation::PendingActionType::CreateGitCheckpoint,
-        title: "Checkpoint current project changes".into(),
-        message: "Commit all current project changes as an explicit local checkpoint.".into(),
-        risk_level: crate::models::confirmation::RiskLevel::High,
-        affected_paths: affected_paths.clone(),
-        preview: None,
-        expires_at: None,
-        checkpoint_hash: None,
-    };
-    state.confirmation_registry.register_with_execution(
-        action.clone(),
-        Some(
-            crate::models::confirmation::ConfirmationExecution::CheckpointAssessedGit {
-                assessment_id: request.assessment_id,
-                project_id: request.project_id,
-                root_path: request.project_root_path,
-                expected_head: status.head,
-                expected_paths: affected_paths.clone(),
-            },
-        ),
-    )?;
-    Ok(action)
+    run_blocking(app, BlockingWorkClass::HeavyIo, move |app| {
+        let state = app.state::<AppState>();
+        let context = revalidate_assessed_git_request(&state, &request)?;
+        let status = state.git_service.repository_status(&context)?;
+        if !status.is_repository {
+            return Err(BackendError::new(
+                "GIT_REPOSITORY_MISSING",
+                "Initialize local Git history before creating a checkpoint.",
+                true,
+                true,
+            ));
+        }
+        if status.head.is_none() {
+            return Err(BackendError::new(
+                "GIT_HEAD_MISSING",
+                "Complete local Git initialization before creating a checkpoint.",
+                true,
+                true,
+            ));
+        }
+        let affected_paths = state.git_service.changed_paths(&context)?;
+        if affected_paths.is_empty() {
+            return Err(BackendError::new(
+                "GIT_WORKTREE_CLEAN",
+                "There are no project changes to checkpoint.",
+                true,
+                true,
+            ));
+        }
+        let action = crate::models::confirmation::PendingAction {
+            id: uuid::Uuid::new_v4().to_string(),
+            action_type: crate::models::confirmation::PendingActionType::CreateGitCheckpoint,
+            title: "Checkpoint current project changes".into(),
+            message: "Commit all current project changes as an explicit local checkpoint.".into(),
+            risk_level: crate::models::confirmation::RiskLevel::High,
+            affected_paths: affected_paths.clone(),
+            preview: None,
+            expires_at: None,
+            checkpoint_hash: None,
+        };
+        state.confirmation_registry.register_with_execution(
+            action.clone(),
+            Some(
+                crate::models::confirmation::ConfirmationExecution::CheckpointAssessedGit {
+                    assessment_id: request.assessment_id,
+                    project_id: request.project_id,
+                    root_path: request.project_root_path,
+                    expected_head: status.head,
+                    expected_paths: affected_paths.clone(),
+                },
+            ),
+        )?;
+        Ok(action)
+    })
+    .await
 }
 
 fn revalidate_assessed_git_request(
@@ -237,26 +247,35 @@ fn assessed_git_context_mismatch() -> BackendError {
 }
 
 #[tauri::command]
-pub fn create_git_checkpoint(
-    state: State<'_, AppState>,
+pub async fn create_git_checkpoint(
+    app: AppHandle,
     request: CreateCheckpointRequest,
 ) -> Result<GitCheckpoint, BackendError> {
-    state.with_current_project_write_access(
-        &request.project_id,
-        &request.project_root_path,
-        |_permit, context| {
-            state
-                .git_service
-                .create_checkpoint(context, request.purpose, &request.message)
-        },
-    )
+    run_blocking(app, BlockingWorkClass::HeavyIo, move |app| {
+        let state = app.state::<AppState>();
+        state.with_current_project_write_access(
+            &request.project_id,
+            &request.project_root_path,
+            |_permit, context| {
+                state
+                    .git_service
+                    .create_checkpoint(context, request.purpose, &request.message)
+            },
+        )
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn git_diff_markdown(
-    state: State<'_, AppState>,
+pub async fn git_diff_markdown(
+    app: AppHandle,
     request: GitProjectRequest,
 ) -> Result<GitDiff, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
-    state.git_service.diff_markdown(&context)
+    run_blocking(app, BlockingWorkClass::HeavyIo, move |app| {
+        let state = app.state::<AppState>();
+        let context =
+            state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+        state.git_service.diff_markdown(&context)
+    })
+    .await
 }

@@ -73,7 +73,6 @@ describe("Workflows Batch 0 deterministic scale fixtures", () => {
         preparation={makePreparationWithOptions()}
         onBack={vi.fn()}
         onPrerequisite={vi.fn()}
-        onReprepare={vi.fn()}
         onStart={vi.fn()}
       />,
     );

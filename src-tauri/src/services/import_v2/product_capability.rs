@@ -494,8 +494,11 @@ fn validate_catalog_release_identity(
     );
     if file_name != expected_name
         || file_name.contains(['?', '#'])
-        || !release_tag.starts_with("app-v")
-        || expected_release_tag.is_some_and(|expected| release_tag != expected)
+        || catalog_release_version(release_tag).is_none()
+        || expected_release_tag.is_some_and(|expected| {
+            !expected.starts_with("app-v")
+                || catalog_release_version(release_tag) != catalog_release_version(expected)
+        })
     {
         return Err(format!(
             "catalog capability {} release URL does not match its exact identity",
@@ -503,6 +506,26 @@ fn validate_catalog_release_identity(
         ));
     }
     Ok(())
+}
+
+// Asset releases use a separate channel, but must retain the complete desktop
+// version (including rc number). Old app-v catalog URLs remain installable.
+fn catalog_release_version(tag: &str) -> Option<&str> {
+    let version = tag
+        .strip_prefix("app-v")
+        .or_else(|| tag.strip_prefix("capabilities-v"))?;
+    let parsed = semver::Version::parse(version).ok()?;
+    let valid_prerelease = parsed.pre.is_empty()
+        || parsed
+            .pre
+            .as_str()
+            .strip_prefix("rc.")
+            .is_some_and(|number| {
+                !number.is_empty()
+                    && !number.starts_with('0')
+                    && number.bytes().all(|byte| byte.is_ascii_digit())
+            });
+    (parsed.build.is_empty() && valid_prerelease).then_some(version)
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -519,7 +542,11 @@ fn same_set<'a>(left: &[String], right: impl Iterator<Item = &'a str>) -> bool {
 
 fn nonempty_subset<'a>(left: &[String], right: impl Iterator<Item = &'a str>) -> bool {
     let superset = right.collect::<HashSet<_>>();
-    !left.is_empty() && left.iter().map(String::as_str).all(|value| superset.contains(value))
+    !left.is_empty()
+        && left
+            .iter()
+            .map(String::as_str)
+            .all(|value| superset.contains(value))
 }
 
 fn all_unique<'a>(values: impl Iterator<Item = &'a str>) -> bool {
@@ -553,10 +580,8 @@ fn require_coverage(
 mod tests {
     use super::*;
 
-    #[test]
-    fn catalog_validation_accepts_release_signing_key_binding() {
-        let manifest = ProductCapabilityManifest::embedded().unwrap();
-        let catalog = r#"{
+    fn release_catalog() -> String {
+        r#"{
           "schemaVersion": 1,
           "entries": [{
             "capabilityId": "browser-runtime",
@@ -571,12 +596,69 @@ mod tests {
             "modelBytes": null,
             "license": "Apache-2.0 AND MIT AND BSD-2-Clause AND BSD-3-Clause AND ISC AND MIT-0 AND LicenseRef-Bundled-Third-Party-Notices"
           }]
-        }"#;
+        }"#.to_string()
+    }
 
+    #[test]
+    fn catalog_validation_accepts_release_signing_key_binding() {
+        let manifest = ProductCapabilityManifest::embedded().unwrap();
         assert_eq!(
-            manifest.validate_catalog_for_tag(catalog, false, Some("app-v0.2.0")),
+            manifest.validate_catalog_for_tag(&release_catalog(), false, Some("app-v0.2.0")),
             Ok(1)
         );
+    }
+
+    #[test]
+    fn catalog_asset_channels_retain_exact_desktop_versions() {
+        let manifest = ProductCapabilityManifest::embedded().unwrap();
+        for version in ["0.2.1", "0.2.1-rc.2"] {
+            let expected = format!("app-v{version}");
+            for prefix in ["app-v", "capabilities-v"] {
+                let catalog =
+                    release_catalog().replace("app-v0.2.0", &format!("{prefix}{version}"));
+                assert_eq!(
+                    manifest.validate_catalog_for_tag(&catalog, false, Some(&expected)),
+                    Ok(1)
+                );
+                assert_eq!(manifest.validate_catalog(&catalog, false), Ok(1));
+                for other in [
+                    "app-v0.2.0",
+                    "app-v0.2.1-rc.1",
+                    "app-v0.2.1-rc.3",
+                    "capabilities-v0.2.1",
+                ] {
+                    assert!(
+                        manifest
+                            .validate_catalog_for_tag(&catalog, false, Some(other))
+                            .is_err(),
+                        "{other}"
+                    );
+                }
+            }
+        }
+        let stable = release_catalog().replace("app-v0.2.0", "capabilities-v0.2.1");
+        assert!(manifest
+            .validate_catalog_for_tag(&stable, false, Some("app-v0.2.1-rc.2"))
+            .is_err());
+    }
+
+    #[test]
+    fn catalog_asset_channels_reject_invalid_or_mutable_tags() {
+        let manifest = ProductCapabilityManifest::embedded().unwrap();
+        for tag in [
+            "capabilities-v01.2.1",
+            "capabilities-v0.2.1-rc.0",
+            "capabilities-v0.2.1-rc.01",
+            "capabilities-v0.2.1-beta.1",
+            "capabilities-v0.2.1+build",
+            "capabilities-vlatest",
+            "capabilities-vapp-v0.2.1",
+            "other-v0.2.1",
+            "app-vlatest",
+        ] {
+            let catalog = release_catalog().replace("app-v0.2.0", tag);
+            assert!(manifest.validate_catalog(&catalog, false).is_err(), "{tag}");
+        }
     }
 
     #[test]

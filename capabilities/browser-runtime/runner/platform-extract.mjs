@@ -903,7 +903,7 @@ export function extractPlatformPayload(platform, html, baseUrl) {
   return null;
 }
 
-export function classifyPlatformPage(platform, pageText) {
+export function classifyPlatformPage(platform, pageText, pageUrl = "") {
   const text = String(pageText || "").toLowerCase();
   if (/captcha|challenge|滑块验证|请通过验证|请完成验证|安全验证|访问过于频繁/i.test(text)) {
     return "IMPORT_WEB_CAPTCHA_REQUIRED";
@@ -917,6 +917,14 @@ export function classifyPlatformPage(platform, pageText) {
   if (platform === "xiaohongshu"
     && /note has been deleted|note not found|笔记已删除|该笔记已被删除|内容不存在|当前内容无法展示/i.test(text)) {
     return "IMPORT_WEB_CONTENT_REMOVED";
+  }
+  if (platform === "xiaohongshu") {
+    if (/当前笔记暂时无法浏览|你访问的页面不见了/u.test(text)) return "IMPORT_WEB_LINK_UNAVAILABLE";
+    try {
+      const pathname = new URL(pageUrl).pathname.replace(/\/$/u, "");
+      if (pathname === "/404") return "IMPORT_WEB_LINK_UNAVAILABLE";
+      if (["/website-login", "/website-login/error"].includes(pathname)) return "IMPORT_WEB_LOGIN_REQUIRED";
+    } catch { /* Text-only callers have no navigation evidence. */ }
   }
   return null;
 }
@@ -963,7 +971,10 @@ export function renderPlatformMarkdown(
   }
   if (imageLinks.length && payload.contentType !== "video") {
     lines.push("", "## 图片", "");
-    imageLinks.forEach((link, index) => lines.push(`${index + 1}. ![第 ${index + 1} 张](${link})`));
+    imageLinks.forEach((link, index) => {
+      lines.push(`${index + 1}. ![第 ${index + 1} 张](${link})`);
+      if (platform === "xiaohongshu") lines.push("", `<!-- OCR_IMAGE_${String(index + 1).padStart(3, "0")} -->`, "");
+    });
   } else if (imageLinks.length) {
     lines.push("", "## 封面", "", `![视频封面](${imageLinks[0]})`);
   } else if (mediaSaveMode === "extract_only" && payload.images?.length && payload.contentType !== "video") {
@@ -1003,7 +1014,10 @@ export function platformHasVideoEvidence(payload, mediaUrl, asrMediaUrl) {
 }
 
 export function xiaohongshuImageOcrRequired(payload, localOcrAuthorized) {
-  return payload?.contentType === "image_post" && !localOcrAuthorized;
+  const caption = String(payload?.description || "").split(/\s+/u)
+    .filter(word => !word.startsWith("#")).join("");
+  const letters = Array.from(caption).filter(character => /[\p{L}\p{N}]/u.test(character)).length;
+  return payload?.contentType === "image_post" && !localOcrAuthorized && letters < 80;
 }
 
 export function xiaohongshuImageEvidenceReady(payload, localizedImageCount) {

@@ -4,6 +4,7 @@ import {
   Clock,
   Cpu,
   Globe,
+  History,
   RefreshCw,
   Settings as SettingsIcon,
   Shield,
@@ -19,6 +20,7 @@ import type { SettingsSectionKey } from "../../stores/navigationStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { observeProjectResources } from "../../stores/projectScope";
 import { AiSettings } from "./AiSettings";
+import { VersionHistorySettings } from "./VersionHistorySettings";
 import { AppearanceSettings } from "./AppearanceSettings";
 import { BackgroundTaskSettings } from "./BackgroundTaskSettings";
 import { LanguageSettings } from "./LanguageSettings";
@@ -63,6 +65,7 @@ const NAV_GROUPS: SettingsNavGroup[] = [
     labelKey: "settings.nav.group.app",
     items: [
       { key: "general", labelKey: "settings.nav.general", icon: SettingsIcon },
+      { key: "versions", labelKey: "versions.title", icon: History },
       { key: "appearance", labelKey: "settings.nav.appearance", icon: Sun },
       { key: "language", labelKey: "settings.nav.language", icon: Globe },
     ],
@@ -242,6 +245,8 @@ export function SettingsView({
               </div>
             </section>
           ) : null}
+
+          {activeSection === "versions" ? <VersionHistorySettings key={`${project.projectId}\0${project.rootPath}`} project={project} /> : null}
 
           {activeSection === "appearance" ? (
             <AppearanceSettings

@@ -50,7 +50,7 @@ interface ProjectWorkspaceRouterProps {
   activeView: AppView;
   capabilities: AiCapabilitiesWorkflow;
   importWorkflow: ImportWorkflow;
-  workflowsController: WorkflowsController;
+  workflowsController: WorkflowsController | null;
   onOpenTask: (taskId: string) => void;
   noProject?: false;
 }
@@ -91,7 +91,7 @@ export function WorkspaceRouter(props: WorkspaceRouterProps) {
       case "import":
         return <ImportView workflow={importWorkflow} capabilities={capabilities} />;
       case "workflows":
-        return <WorkflowsView controller={workflowsController} onOpenTask={onOpenTask} />;
+        return workflowsController ? <WorkflowsView controller={workflowsController} onOpenTask={onOpenTask} /> : <ViewFallback />;
     }
   };
 

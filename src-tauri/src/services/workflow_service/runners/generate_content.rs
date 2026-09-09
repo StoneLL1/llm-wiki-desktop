@@ -128,11 +128,37 @@ pub async fn run_generate_content_authorized<F>(
 where
     F: FnOnce() -> Result<WorkflowExternalLaunchPermit, BackendError>,
 {
-    let task_id = run.task_id.clone();
-    run_generate_content_with_generator(context, run, services, move |prompt, route| async move {
-        let publication = authorize_external_launch()?.begin()?;
-        execute_prepared_route(context, services, &task_id, &route, prompt, publication).await
+    let permit = WorkflowExternalLaunchPermit::prevalidated(&run);
+    run_generate_content_with_authority(context, run, services, authorize_external_launch, || {
+        Ok(permit)
     })
+    .await
+}
+
+/// Production dispatch revalidates authority at both external launch and final
+/// publication. The second short lease also covers the record and task result.
+pub async fn run_generate_content_with_authority<F, A>(
+    context: &ProjectContext,
+    run: WorkflowRun,
+    services: &GenerateContentExecutionServices<'_>,
+    authorize_external_launch: F,
+    authorize_commit: A,
+) -> Option<WorkflowRun>
+where
+    F: FnOnce() -> Result<WorkflowExternalLaunchPermit, BackendError>,
+    A: FnOnce() -> Result<WorkflowExternalLaunchPermit, BackendError>,
+{
+    let task_id = run.task_id.clone();
+    run_generate_content_with_generator_and_authority(
+        context,
+        run,
+        services,
+        move |prompt, route| async move {
+            let publication = authorize_external_launch()?.begin()?;
+            execute_prepared_route(context, services, &task_id, &route, prompt, publication).await
+        },
+        authorize_commit,
+    )
     .await
 }
 
@@ -146,21 +172,42 @@ where
     F: FnOnce(String, WorkflowRoute) -> Fut,
     Fut: Future<Output = Result<String, BackendError>>,
 {
-    match execute_generate_content(context, &run, services, generate).await {
+    let permit = WorkflowExternalLaunchPermit::prevalidated(&run);
+    run_generate_content_with_generator_and_authority(context, run, services, generate, || {
+        Ok(permit)
+    })
+    .await
+}
+
+pub async fn run_generate_content_with_generator_and_authority<F, Fut, A>(
+    context: &ProjectContext,
+    run: WorkflowRun,
+    services: &GenerateContentExecutionServices<'_>,
+    generate: F,
+    authorize_commit: A,
+) -> Option<WorkflowRun>
+where
+    F: FnOnce(String, WorkflowRoute) -> Fut,
+    Fut: Future<Output = Result<String, BackendError>>,
+    A: FnOnce() -> Result<WorkflowExternalLaunchPermit, BackendError>,
+{
+    match execute_generate_content(context, &run, services, generate, authorize_commit).await {
         Ok(next) => next,
         Err(error) => finish_error(&run, services, error),
     }
 }
 
-async fn execute_generate_content<F, Fut>(
+async fn execute_generate_content<F, Fut, A>(
     context: &ProjectContext,
     run: &WorkflowRun,
     services: &GenerateContentExecutionServices<'_>,
     generate: F,
+    authorize_commit: A,
 ) -> Result<Option<WorkflowRun>, BackendError>
 where
     F: FnOnce(String, WorkflowRoute) -> Fut,
     Fut: Future<Output = Result<String, BackendError>>,
+    A: FnOnce() -> Result<WorkflowExternalLaunchPermit, BackendError>,
 {
     let task_id = run.task_id.as_str();
     let sink = WorkflowStageSink::new(services.task_service, services.coordinator, task_id);
@@ -176,7 +223,24 @@ where
         .validate_workflow_output_path(context, &output_path)?;
     let baseline = workflow_baseline_for_scope(context, &run.scope)?;
     if baseline.fingerprint != run.baseline_fingerprint {
-        return Err(baseline_changed());
+        sink.wait(
+            CONFIRM_SCOPE,
+            WorkflowPendingAction {
+                id: uuid::Uuid::new_v4().to_string(),
+                action_type: PendingActionType::ReviewScope,
+                risk_level: RiskLevel::Low,
+                affected_paths: page_paths
+                    .iter()
+                    .cloned()
+                    .chain([output_path.clone()])
+                    .collect(),
+                candidate: None,
+                expires_at: None,
+                checkpoint_hash: None,
+            },
+        )
+        .map_err(task_error)?;
+        return Ok(None);
     }
     let execution_options = services
         .task_service
@@ -331,6 +395,7 @@ where
     sink.complete(VALIDATE_ARTIFACT).map_err(task_error)?;
 
     sink.start(WRITE_EXPORT).map_err(task_error)?;
+    let _publication = authorize_commit()?.begin()?;
     ensure_not_cancelled(services.task_service, task_id)?;
     let current_target_hash = FileStore.file_hash_if_exists(context, &output_path)?;
     if let Some(expected_hash) = initial_target_hash {
@@ -402,12 +467,6 @@ where
         .task_service
         .set_task_cancellable(task_id, false)
         .map_err(task_error)?;
-    services.export_service.write_html_checked(
-        context,
-        &output_path,
-        &candidate.html,
-        WriteMode::CreateNew,
-    )?;
     let title = artifact_title(context, services.search_service, export_type, &page_paths)?;
     let record = ExportService::new_validated_record(
         export_type,
@@ -419,10 +478,9 @@ where
         candidate.preview.clone(),
     );
     let record_id = record.id.clone();
-    if let Err(error) = services.export_service.append_record(context, record) {
-        discard_new_artifact_if_unchanged(context, &output_path, &candidate.preview.content_hash);
-        return Err(error);
-    }
+    services
+        .export_service
+        .save_new_artifact(context, &candidate, record)?;
     let completion = (|| {
         sink.progress(WRITE_EXPORT, Some(output_path.clone()), 1, Some(1))
             .map_err(task_error)?;
@@ -1787,3 +1845,7 @@ mod tests {
         assert!(root.is_dir());
     }
 }
+
+#[cfg(test)]
+#[path = "generate_content_real_acceptance.rs"]
+mod real_acceptance;

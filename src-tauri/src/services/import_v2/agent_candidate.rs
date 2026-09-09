@@ -1400,14 +1400,14 @@ fn validate_workspace_identity(
     session_id: &str,
     item_id: &str,
 ) -> Result<(), BackendError> {
-    let agent_root = context.resolve_project_path(
-        &context
-            .layout
-            .import_paths()?
-            .item_staging_child(session_id, item_id, &["agent"])?,
-    )?
-    .canonicalize()
-    .map_err(io_error)?;
+    let agent_root = context
+        .resolve_project_path(&context.layout.import_paths()?.item_staging_child(
+            session_id,
+            item_id,
+            &["agent"],
+        )?)?
+        .canonicalize()
+        .map_err(io_error)?;
     if !workspace.starts_with(&agent_root) || workspace == agent_root {
         return Err(candidate_error("Workspace belongs to another item."));
     }

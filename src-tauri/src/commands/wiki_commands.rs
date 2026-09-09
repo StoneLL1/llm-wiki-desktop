@@ -7,7 +7,6 @@ use crate::errors::BackendError;
 use crate::models::confirmation::{
     ActionPreview, ConfirmationExecution, PendingAction, PendingActionType, RiskLevel,
 };
-use crate::models::git::CheckpointPurpose;
 use crate::models::wiki::{
     CreateWikiPageRequest, DeleteWikiPageRequest, ReadWikiAssetRequest, ReadWikiPageRequest,
     RenameWikiPageRequest, RenameWikiPageResponse, SaveWikiPageRequest, SaveWikiPageResponse,
@@ -151,6 +150,21 @@ fn wiki_asset_content_type(path: &std::path::Path) -> String {
 }
 
 #[tauri::command]
+pub async fn resolve_wiki_conflict(
+    app: AppHandle,
+    request: SaveWikiPageRequest,
+) -> Result<SaveWikiPageResponse, BackendError> {
+    crate::commands::runtime::run_blocking(app, crate::services::BlockingWorkClass::HeavyIo, move |app| {
+        let state = app.state::<AppState>();
+        state.with_current_project_write_access(&request.project_id, &request.project_root_path, |permit, context| {
+            reject_generic_source_path(context, &state.file_store, &request.relative_path)?;
+            let expected = request.expected_hash.as_deref().ok_or_else(|| BackendError::new("FILE_HASH_REQUIRED", "Review the current file before resolving a conflict.", true, true))?;
+            state.search_service.resolve_conflict_authorized(permit, &request.relative_path, &request.contents, expected)
+        })
+    }).await
+}
+
+#[tauri::command]
 pub fn save_wiki_page(
     state: State<'_, AppState>,
     request: SaveWikiPageRequest,
@@ -228,21 +242,18 @@ pub fn create_wiki_page(
 /// 必须创建 Git 检查点"); the checkpoint is created here before the service
 /// performs the move so the old page and all reference files are recoverable.
 #[tauri::command]
-pub fn rename_wiki_page(
-    state: State<'_, AppState>,
+pub async fn rename_wiki_page(
+    app: AppHandle,
     request: RenameWikiPageRequest,
 ) -> Result<RenameWikiPageResponse, BackendError> {
+    crate::commands::runtime::run_blocking(app, crate::services::BlockingWorkClass::HeavyIo, move |app| {
+    let state = app.state::<AppState>();
     state.with_current_project_write_access(
         &request.project_id,
         &request.project_root_path,
         |permit, context| {
             reject_generic_source_path(context, &state.file_store, &request.relative_path)?;
             reject_generic_source_create(context, &request.new_relative_path, None, None)?;
-            state.git_service.create_checkpoint(
-                context,
-                CheckpointPurpose::HighRiskOperation,
-                "Before renaming wiki page",
-            )?;
             state.search_service.rename_page_authorized(
                 permit,
                 &request.relative_path,
@@ -250,6 +261,7 @@ pub fn rename_wiki_page(
             )
         },
     )
+    }).await
 }
 
 /// Request deletion of a wiki page. Does not delete immediately: registers a

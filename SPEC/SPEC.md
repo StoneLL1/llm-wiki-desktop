@@ -425,8 +425,12 @@ OCR 和 ASR 属于导入阶段的按需能力；有可靠正文或字幕时不�
 ### 8.1 自动检查点策略
 
 - 危险操作前创建检查点：删除、覆盖、批量替换、Agent 自动修复、重大重新编译。
-- 成功操作后提交最终结果。
-- 普通小改动可合并为一次提交，避免历史过碎。
+- 成功操作后记录最终结果；新格式使用私有 refs 和临时 index，不移动用户 HEAD 或暂存区。
+- 普通手动保存继续使用内容哈希防覆盖，不逐次创建版本。
+
+版本入口集中在“设置 → 版本与恢复”。已有知识库首次需要保护时，用户同意启用后继续原操作；不因打开项目而自动启用。启用事实与运行时 Git/权限状态分别校验。
+
+2026-09-09 首阶段已接入确定性 Lint、普通页面删除/重命名、冲突覆盖、聊天回答覆盖和 Source 删除找回；手动版本只覆盖预览中的可编辑 Wiki Markdown。正文通过 Git 对象保存，清单与摘要位于 layout 的 `app_state_root/version-history`。恢复校验实际文件哈希，先保存恢复前内容，再产生关联恢复记录；后续外部编辑有冲突时不覆盖。未迁移的工作流沿用原领域历史和限制，参见[实施记录](../docs/maintainers/local-version-history-2026-09-09.md)。
 
 ### 8.2 人工编辑保护
 
@@ -444,8 +448,8 @@ Wiki 页面是普通 Markdown，用户可能在应用内、Obsidian 或外部编
 
 - `raw/sources/` 默认不可变。
 - 来源更新通过新 raw 版本、Diff 或三方合并更新同一 Source。
-- 永久删除进入专用二次确认页，展示 Source、raw、资源、字幕 / 转录、基线、全部版本、释放空间和引用页面。
-- 删除前自动创建 Git 检查点；派生 Wiki 页面不自动删除，由 Lint 标记缺失引用。
+- 删除进入专用确认页，展示 Source、raw、资源、字幕 / 转录、基线、全部版本、材料大小和引用页面。Git 仍保存恢复字节，不把材料大小宣传为实际释放空间。
+- 删除前保存精确文件版本；派生 Wiki 页面不自动删除，由 Lint 标记缺失引用。找回通过 Source 事务合并当前注册索引，保留其他 Source，不回退整个共享索引。暂不支持可恢复删除的旧版 manifest 在删除前拒绝。
 
 ### 8.4 工作流修改确认
 
@@ -738,18 +742,18 @@ npm install @milkdown/core @milkdown/react @milkdown/plugin-math
 
 ### 16.9 Capability 与应用更新的当前实现
 
-- source checkout 中的 `capabilities/install-catalog.json` 只是明确的 development fallback；release build 必须从 `capabilities/product-manifest.json` 派生全部 `published definition × 4 targets` 的 exact signed catalog 与 trusted key，验证 binary embed、hash/signature/provenance 后才可打包。当前清单为 11 × 4 = 44 项，但任何门禁都不得硬编码该数量。空 catalog 的 source build 不得被描述为可安装 capability release。
+- source checkout 中的 `capabilities/install-catalog.json` 只是明确的 development fallback；release build 必须从 `capabilities/product-manifest.json` 派生全部 `published definition × supported targets` 的 exact signed catalog 与 trusted key，验证 binary embed、hash/signature/provenance 后才可打包。目标数量由产品清单中各能力声明的支持平台派生，不硬编码数量或假定每项能力都覆盖四个平台。空 catalog 的 source build 不得被描述为可安装 capability release。
 - capability 下载使用 release-scoped partial identity、Range resume 或明确安全重下、启动 reaper、最终全量 hash/signature、事务安装、health rollback，并把成功安装绑定回原 Import session/item 的继续动作。主动取消与 crash pause 是不同终态。
 - 2026-08-30 决策修订后，固定官方 catalog / trusted key 发布且通过完整性、target、manifest、protocol 与 route-set 校验的 capability runner 按受信任应用组件执行；首版不以四平台 OS 级 runner sandbox 作为 Batch 6 或发布门，也不得宣称已 sandbox。Batch 5R 已移除历史 `APP_CAPABILITY_CONFINEMENT_UNAVAILABLE` stop gate，并恢复官方包安装及全部声明 route 的原子激活；任意 URL、本地 archive、第三方 catalog / signing root 与用户 PATH runtime 仍不开放。
 - 应用更新是 project-independent 的全局 controller/store。后端只使用编译时固定 HTTPS endpoint 和 committed public key，限制 manifest 大小，生成有 TTL 与 identity 的 ephemeral offer；前端不能传 endpoint、artifact URL 或 signature。
 - 下载可取消/重试并发布进度；安装前重新验证 exact artifact。确认临界区重新采集未保存编辑与 Import commit 等 presentation facts并锁定编辑器，后端 barrier 原子复查其拥有的等待确认、关键任务与 Workflow apply facts；任一 blocker 都 fail closed。安装 handoff/失败 receipt 持久化在 app-global state，不写用户项目。
 
-### 16.10 Release 状态与公开发布门
+### 16.10 Release 状态与公开发布流程
 
-- `.github/workflows/desktop-release.yml` 是唯一 stable publisher：同一 tag/commit/run 组合 capability catalog、四 target desktop artifact、强制 updater signature、明确的 OS vendor identity policy evidence、完整 `latest.json`、checksums、SBOM、provenance/attestation、packaged smoke 与 draft reverse verification；只有 protected final publisher 可获得 `contents: write`。
-- 本地 fixture、源码测试或 `cargo check` 不能替代真实安装、旧版升级、卸载、恢复、匿名 endpoint 与平台证据。初始发布明确不要求 Windows Authenticode 与 Apple Developer ID/notarization；Windows SmartScreen/unknown-publisher 和 macOS Gatekeeper manual override 必须在限制说明与真实平台验收中如实记录，checksums/attestation 不得被描述成 OS publisher identity。Batch 8 完成清单派生的源码/制品合同后仍是 Public beta No-Go；Batch 9 必须对同一 sealed candidate 完成真实 packaged matrix，权威 Pending 矩阵见 `docs/release/batch-6-acceptance-evidence.md` 与 `docs/release/2026-08-30-batch-8-capability-evidence.md`。
-- production updater/capability private key、密码、PAT 不进入 workspace、日志或 artifact metadata；缺 capability trust key、matching protected secret、updater signing secret、protected reviewer 或公开 endpoint 任一项即停止发布，不得临时生成 production key 或禁用验证。`StoneLL1` 是唯一 owner/approver；backup custodian 不作为门槛，但单维护者 key-loss continuity risk 必须保持显式。
-- 首个 stable `0.1.0` 因不存在 prior production release，仅对“旧生产版→候选版升级”单项做一次性 owner-approved 豁免，并以 Windows x64、macOS arm64、macOS x64、Ubuntu 24.04 x64 四平台干净安装/启动重启/卸载/项目字节保持验收替代；updater/capability 签名、packaged smoke、OS warning、protected approval 均不豁免。自 `0.1.1` 起恢复真实 prior-production-to-candidate 四平台升级硬门禁。
+- `.github/workflows/desktop-release.yml` 是唯一 stable publisher，组合同 tag/commit 的 capability catalog、四 target desktop artifact、updater signature、`latest.json`、checksums、SBOM/attestation 与 packaged smoke。CI 负责源码测试，发布不重复完整测试。
+- final publisher 合并制品校验、草稿上传和公开操作，比较远端附件名称、大小与 GitHub SHA-256 digest，不再全量反向下载；失败保留 draft 供重试，公开后网络探测只告警，不自动删除 Release。
+- production 私钥、密码和 PAT 不进入 workspace、日志或 artifact metadata；签名必须匹配现有客户端信任的公钥。release environment 保留 `master` / `app-v*` 限制与 secrets，单维护者的 tag push 或手动 dispatch 表示发布决定，不重复逐阶段自我审批。
+- stable `0.2.0` 已公开。历史首次发布豁免与审批记录保留为历史说明，不用字符串门禁锁定今后的版本；真实安装、升级和恢复验证按发布改动范围执行并如实记录，源码测试和 hosted smoke 不冒充真实机器验收。当前操作以 `docs/release/release-runbook.md` 为准。
 
 ## 17. 参考方向
 

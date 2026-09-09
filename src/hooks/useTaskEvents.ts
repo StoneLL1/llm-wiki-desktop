@@ -128,18 +128,13 @@ export function useTaskEvents(): void {
           void ensureProjectFacts(scope, ["git"]).catch(() => undefined);
         }
       });
-      if (event.eventType !== "workflow_updated") void notifyTaskEvent(event);
+      void notifyTaskEvent(event);
     });
 
     for (const channel of TASK_EVENT_CHANNELS) {
       listen<BackendEvent>(channel, (evt) => {
         if (cancelled) return;
         const event = evt.payload as BackendEvent;
-        const activeProject = useProjectStore.getState().currentProject;
-        if (
-          event.eventType === "workflow_updated"
-          && isTaskEventForProject(event, activeProject.projectId)
-        ) void notifyTaskEvent(event);
         dispatchTaskEvent(event);
       })
         .then((unlisten) => {

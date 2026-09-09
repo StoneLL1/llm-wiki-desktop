@@ -5,6 +5,13 @@ use crate::models::compile::CompileRoutePreference;
 use crate::models::import_v2::QualityReport;
 use crate::models::llm::LlmProviderKind;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SourcePointer {
+    pub source_id: String,
+    pub version_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceBinding {

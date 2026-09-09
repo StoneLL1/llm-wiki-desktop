@@ -1,6 +1,8 @@
+import { recordWorkflowFacts } from "../stores/taskStore";
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
+  UpdateWikiOptions, UpdateWikiSourcePage, UpdateWikiRequest,
   ConfirmWorkflowActionRequest,
   ListWorkflowRunsRequest,
   PrepareWorkflowRequest,
@@ -22,7 +24,10 @@ import type { AgentLintRepairRollbackResult } from "../types/lint";
 export function getWorkflowsOverview(
   request: WorkflowProjectRequest,
 ): Promise<WorkflowsOverview> {
-  return invoke<WorkflowsOverview>("get_workflows_overview", { request });
+  return invoke<WorkflowsOverview>("get_workflows_overview", { request }).then((overview) => {
+    recordWorkflowFacts([...(overview.recentRuns ?? []), ...(overview.activeRuns ?? [])], true, overview.sessionId);
+    return overview;
+  });
 }
 
 export function prepareWorkflow(
@@ -34,19 +39,19 @@ export function prepareWorkflow(
 export function startWorkflow(
   request: StartWorkflowRequest,
 ): Promise<WorkflowStartOutcome> {
-  return invoke<WorkflowStartOutcome>("start_workflow", { request });
+  return invoke<WorkflowStartOutcome>("start_workflow", { request }).then((outcome) => { recordWorkflowFacts([outcome.run]); return outcome; });
 }
 
 export function listWorkflowRuns(
   request: ListWorkflowRunsRequest,
 ): Promise<WorkflowRunHistoryPage> {
-  return invoke<WorkflowRunHistoryPage>("list_workflow_runs", { request });
+  return invoke<WorkflowRunHistoryPage>("list_workflow_runs", { request }).then((page) => { recordWorkflowFacts(page.runs); return page; });
 }
 
 export function getWorkflowRun(
   request: WorkflowRunRequest,
 ): Promise<WorkflowRun> {
-  return invoke<WorkflowRun>("get_workflow_run", { request });
+  return invoke<WorkflowRun>("get_workflow_run", { request }).then((run) => { recordWorkflowFacts([run]); return run; });
 }
 
 export function getWorkflowFileDiff(
@@ -55,46 +60,63 @@ export function getWorkflowFileDiff(
   return invoke<WorkflowFileDiffPage>("get_workflow_file_diff", { request });
 }
 
+export interface WorkflowUpdateHistoryState {
+  available: boolean;
+  undone: boolean;
+  recovery: boolean;
+  undoInProgress: boolean;
+  checkpointHash: string | null;
+  finalCommit: string | null;
+}
+
+export function getWorkflowHistoryState(request: WorkflowRunRequest): Promise<WorkflowUpdateHistoryState> {
+  return invoke<WorkflowUpdateHistoryState>("get_workflow_history_state", { request });
+}
+
+export function undoWorkflowUpdate(request: WorkflowRunRequest): Promise<WorkflowUpdateHistoryState> {
+  return invoke<WorkflowUpdateHistoryState>("undo_workflow_update", { request });
+}
+
 export function cancelWorkflowRun(
   request: WorkflowRunRequest,
 ): Promise<WorkflowRun> {
-  return invoke<WorkflowRun>("cancel_workflow_run", { request });
+  return invoke<WorkflowRun>("cancel_workflow_run", { request }).then((run) => { recordWorkflowFacts([run]); return run; });
 }
 
 export function undoCancelQueuedWorkflow(
   request: WorkflowRunRequest,
 ): Promise<WorkflowRun> {
-  return invoke<WorkflowRun>("undo_cancel_queued_workflow", { request });
+  return invoke<WorkflowRun>("undo_cancel_queued_workflow", { request }).then((run) => { recordWorkflowFacts([run]); return run; });
 }
 
 export function reorderQueuedWorkflow(
   request: ReorderQueuedWorkflowRequest,
 ): Promise<WorkflowRunPage> {
-  return invoke<WorkflowRunPage>("reorder_queued_workflow", { request });
+  return invoke<WorkflowRunPage>("reorder_queued_workflow", { request }).then((page) => { recordWorkflowFacts(page.runs); return page; });
 }
 
 export function continueQueuedWorkflows(
   request: WorkflowProjectRequest,
 ): Promise<WorkflowRunPage> {
-  return invoke<WorkflowRunPage>("continue_queued_workflows", { request });
+  return invoke<WorkflowRunPage>("continue_queued_workflows", { request }).then((page) => { recordWorkflowFacts(page.runs); return page; });
 }
 
 export function retryWorkflow(
   request: WorkflowRunRequest,
 ): Promise<WorkflowStartOutcome> {
-  return invoke<WorkflowStartOutcome>("retry_workflow", { request });
+  return invoke<WorkflowStartOutcome>("retry_workflow", { request }).then((outcome) => { recordWorkflowFacts([outcome.run]); return outcome; });
 }
 
 export function confirmWorkflowAction(
   request: ConfirmWorkflowActionRequest,
 ): Promise<WorkflowRun> {
-  return invoke<WorkflowRun>("confirm_workflow_action", { request });
+  return invoke<WorkflowRun>("confirm_workflow_action", { request }).then((run) => { recordWorkflowFacts([run]); return run; });
 }
 
 export function discardWorkflowResult(
   request: WorkflowRunRequest,
 ): Promise<WorkflowRun> {
-  return invoke<WorkflowRun>("discard_workflow_result", { request });
+  return invoke<WorkflowRun>("discard_workflow_result", { request }).then((run) => { recordWorkflowFacts([run]); return run; });
 }
 
 export function rollbackAgentLintRepair(
@@ -106,4 +128,18 @@ export function rollbackAgentLintRepair(
   },
 ): Promise<AgentLintRepairRollbackResult> {
   return invoke<AgentLintRepairRollbackResult>("rollback_agent_lint_repair", { request });
+}
+
+export function getUpdateWikiOptions(request: WorkflowProjectRequest): Promise<UpdateWikiOptions> {
+  return invoke("get_update_wiki_options", { request });
+}
+export function listUpdateWikiSources(request: WorkflowProjectRequest & { query: string; offset: number }): Promise<UpdateWikiSourcePage> {
+  return invoke("list_update_wiki_sources", { request });
+}
+export function startUpdateWiki(request: WorkflowProjectRequest & { intent: UpdateWikiRequest }): Promise<WorkflowStartOutcome> {
+  return invoke<WorkflowStartOutcome>("start_update_wiki", { request }).then((outcome) => { recordWorkflowFacts([outcome.run]); return outcome; });
+}
+
+export function getWorkflowFormCatalog(request: WorkflowProjectRequest & { kind: "health_check" | "generate_content" }): Promise<import("../types/workflow").WorkflowFormCatalog> {
+  return invoke("get_workflow_form_catalog", { request });
 }

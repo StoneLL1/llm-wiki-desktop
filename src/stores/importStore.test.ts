@@ -78,6 +78,16 @@ beforeEach(() => {
 });
 
 describe("Import V2 session store", () => {
+  it("clears stale inspector actions after its Source is committed", () => {
+    useImportStore.getState().attachSession(projectA, session([item("ready", "preview_ready")]));
+    useImportStore.getState().selectItem("ready");
+    useImportStore.getState().setCompletion(projectA, {
+      sessionId: "session-a", batchId: "batch", newSources: [], updatedSources: [], warnings: [], failures: [],
+      duplicateSkips: [{ itemId: "ready", sourceId: "source", versionId: "v1", contentHash: "hash" }],
+    });
+    expect(useImportStore.getState().selectedItemId).toBeNull();
+  });
+
   it("attaches a recovered session for the current project", () => {
     const first = session([item("one")]);
     useImportStore.getState().attachSession(projectA, first);

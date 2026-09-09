@@ -1,7 +1,7 @@
 # LLM Wiki Desktop 技术栈与架构边界
 
 > Import V2 的产品与跨层技术不变量见 [`../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md`](../docs/superpowers/specs/2026-07-24-import-source-media-flow-design.md)。本文描述技术边界；任何实现建议不得恢复“导入后自动编译”、URL 不写 Source 或 OCR / ASR 后移到编译阶段的旧行为。
-> 全量门禁先运行只读 `check:import-source-media`，验证证据 ID、可执行测试声明、被测试实际消费的真实夹具、禁止项和设置专属迁移入口，再运行前后端测试、构建与静态检查。
+> 日常检查使用 `check:quick`，完整源码检查使用 `check`；发布配置与历史 Import/Source 验收证据分开运行，分别为 `check:release-config` 与 `check:acceptance`。
 > Workflows 的产品行为与跨层契约见 [`../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md`](../docs/superpowers/specs/2026-07-30-workflows-panel-redesign.md)。Agent CLI、BYOK 和本地规则继续作为后端执行能力，但不得再把配置型 Agent 页面作为目标信息架构。
 > 无项目工作台、新建知识库、typed 项目打开评估、受限 / 信任 / 只读、兼容启用、修复和深度扫描的跨层合同见 [`../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md`](../docs/superpowers/specs/2026-07-30-first-run-project-open-workbench-design.md)。该管线已迁入持续挂载的 `AppShell`；普通资料目录只允许“新建知识库并导入”，不会原地初始化、重排或隐式初始化 Git。
 
@@ -57,9 +57,9 @@ React shell/layout
   -> local files / Git / Agent / LLM / OS credential store
 ```
 
-当前前端工作台调用链是 `AppShell -> WorkspaceController -> WorkspaceRouter`。`AppShell` 持有桌面 shell、右侧上下文面板，以及全局 `ProjectConfirmationController`、`TaskLogDrawer`、`Toaster`；`WorkspaceController` 组合 `useAiCapabilities`、`useTaskLauncher`、`useImportWorkflow`、`useProviderWorkflow`、`useAgentWorkflow` 五条领域 workflow；`WorkspaceRouter` 只分发活动视图。这里的 `useAgentWorkflow` 与 Agent view 是 2026-07-30 的实现基线，后续目标是由项目级 Workflows 编排替代主界面职责，而不是删除底层 Agent 能力。
+当前前端工作台调用链是 `AppShell -> WorkspaceController -> WorkspaceRouter`。`AppShell` 持有桌面 shell、右侧上下文面板，以及全局 `ProjectConfirmationController`、`TaskLogDrawer`、`Toaster`；`WorkspaceController` 组合能力查询、任务启动、Import、Provider 和 `useWorkflowsController` 等聚焦流程；`WorkspaceRouter` 只分发活动视图。项目级 Workflows 已接替旧 Agent 页面和通用运行入口；底层 Agent 执行与配置能力继续保留。
 
-Dashboard 保持首屏同步加载，Wiki、Chat、Graph、Lint、Exports、Import、Agent 等 feature view 使用 `React.lazy` 按需加载，并统一经过 `Suspense` 和 `ViewErrorBoundary`。这是当前实现事实，不是目标导航命名，也不是对 React Router 的推荐；Agent 主视图迁移后应以 Workflows 对用户呈现。
+Dashboard 保持首屏同步加载，Wiki、Chat、Graph、Lint、Exports、Import、Workflows 等 feature view 使用 `React.lazy` 按需加载，并统一经过 `Suspense` 和 `ViewErrorBoundary`。Workflow 准备/启动、历史、结果打开和通知详情也按需载入；隐藏表单不准备，折叠日志与未选择详情不读取正文。
 
 截至 Batch 6，`App.tsx` 始终挂载 `AppShell`，无项目态由 `NoProjectWorkspace` 承接；后端以 typed assessment 将 format、health、filesystem access、trust 与 Git 能力分开建模。打开评估保持零写入，普通资料目录不原地初始化，Git 只在明确的新建/确认写入流程中创建。
 
@@ -106,7 +106,7 @@ Zustand 用于管理前端应用状态。当前已拆分的主要 store 包括�
 
 - `projectStore`：当前项目、最近项目、no-project / assessing / open 状态、typed assessment、独立的 trust / filesystemAccess / health、能力 readiness 与深度扫描快照。`restricted` 只是后端 capabilities 的 UI 摘要；信任判定和持久化不得由 Zustand 决定。
 - `navigationStore`：当前视图、选中文章、右侧面板状态。
-- `taskStore`：统一接收后台任务、进度和日志事件；所有列表、抽屉、选择、确认与历史通过当前项目 selector 暴露，不能形成跨项目任务界面。
+- `taskStore`：统一接收后台任务、进度和日志事件，`workflowById` 持有规范摘要；`workflowStore` 只保存项目查询、草稿、选择和最多 16 条详情。所有列表、抽屉、选择、确认与历史通过当前项目 selector 暴露，不能形成跨项目任务界面。
 - `importStore`：导入预览、来源目录和确认状态。
 - `settingsStore`：语言、主题等 UI 设置，以及后端返回的最近创建父目录等非敏感全局偏好；目标启动规则固定，不由前端选项分支。
 - `chatStore`：当前会话、消息流、引用来源。
@@ -126,7 +126,7 @@ IPC 层负责把前端意图转成后端服务调用。
 - Import commands：文件 / 文本 / URL 预览、URL 抓取与校验、来源目录、删除 / 替换请求、确认导入和提取文本预览。
 - Wiki commands：扫描、读取、保存、创建、重命名、删除请求和书签切换。
 - Search commands：legacy command 名 `search_wiki` 提供 layout-readable Source/Wiki Markdown 的本地关键词 / 过滤搜索，不调用模型。
-- Git commands：状态、仓库初始化、检查点和 Markdown diff；当前未注册通用提交或恢复 command。
+- Git commands：状态、仓库初始化、检查点和 Markdown diff；版本历史通过专用 typed IPC 查询、预览、确认恢复，不暴露任意 Git reset/commit。
 - Agent commands：检测 CLI、读取 Agent 配置和设置默认 Agent；任务取消与日志归 `Task commands`，当前 Agent command 不直接启动任务。
 - LLM commands：Provider 列表 / 保存、密钥保存 / 删除 / 状态、Ollama 可达性和 Provider 测试；当前未注册通用 BYOK 执行 command。
 - Chat commands：会话创建 / 列表 / 加载 / 重命名 / 删除、发送消息、保存回答和便捷写入的确认 / 回滚。
@@ -135,6 +135,7 @@ IPC 层负责把前端意图转成后端服务调用。
 - Graph commands：获取 / 构建图谱，以及保存前端计算的布局。
 - Lint commands：本地 / 深度检查、报告与历史、single / batch fix 和 ignore 管理。
 - Export commands：启动 / 重新生成、列表、书签、预览，以及在浏览器或文件夹中打开导出。
+- Workflow commands：`get_workflows_overview`、`prepare_workflow`、`start_workflow`；独立 `list_workflow_runs` / `get_workflow_run` / `get_workflow_file_diff`；`cancel_workflow_run`、`undo_cancel_queued_workflow`、`reorder_queued_workflow`、`retry_workflow`、`confirm_workflow_action`、`discard_workflow_result`。三条内置旅程复用这些现有命令，不为导出另建 controller 或启动协议。
 - Settings commands：读取 / 保存项目设置、Provider 密钥状态、Chat 便捷写入授权，以及 project-independent 的全局更新偏好与安装 receipt。
 - Update commands：读取全局状态、检查固定 endpoint、下载 / 取消、安装、重启与忽略 offer；输入 DTO 只携带 opaque offer id、用户 consent 和 presentation facts，不能携带 endpoint、artifact URL、signature 或 channel。
 - Task commands：创建、列表、详情、取消、日志、清理完成项和活动项目绑定。
@@ -283,6 +284,8 @@ OCR 和 ASR 属于导入层的显式用户授权能力。图片视觉理解不�
 
 新建原生知识库自动初始化本地 Git。评估或打开外部知识库绝不自动初始化、`git add`、提交或 stash；只有用户在兼容启用确认页选择后才初始化。用户拒绝 Git 时，阅读、搜索和 Chat 可继续，但所有需要 checkpoint 的写入能力禁用。已有 dirty worktree 不自动处理，只有用户明确授权时才把当前全部变更作为检查点。
 
+新格式版本保护也可在已有知识库的首次修改确认中显式启用。`VersionHistoryService` 复用 GitService 私有快照，按操作保存 durable intent、前后哈希和恢复关联。列表首屏 50 条、最多 100 条，读取轻量摘要；正文和 Diff 按选中文件读取。单次捕获上限 64 MiB / 10,000 路径，文本预览上限 256 KiB，超限在受保护写入前拒绝。设置查询及冲突处理/重命名 IPC 在 HeavyIo worker 执行。旧消费者不因该门面存在而放宽 HEAD/clean 限制；Git 随包交付仍待平台验收。
+
 ## 13. AgentService
 
 负责本地 Agent CLI 集成：
@@ -428,10 +431,11 @@ Agent 深度 Lint：
 - 调用 `skills/html-*`。
 - 读取 HTML 模板。
 - 生成单篇美化阅读页。
-- 生成知识卡片。
+- 生成知识卡片和概念图。
 - 生成项目级 HTML 报告。
 - 输出到 `ProjectContext.layout` 解析的导出根；原生项目默认是 `exports/html/`。
-- 为 UI 提供 iframe 预览路径。
+- 复用 HTML/资源验证、checked write 与 `ExportRecord`。默认发布新制品；显式覆盖须 checkpoint 与候选确认。Workflow 和 Wiki 单篇快速导出共享新建保存及 pending receipt，避免内容已落盘而 history 未保存时丢失可验证记录。
+- 为 UI 提供确切记录的 iframe 预览路径。Workflow 按 `recordId` 及可用的 `taskId` 关联结果，预览成功后才进入 Exports；Wiki 单篇快速导出仍留在文章内，不进入 Workflow history。
 
 边界：
 
@@ -467,7 +471,7 @@ Agent 深度 Lint：
 
 应用重启后，耗时下载、OCR 和 ASR 恢复为暂停状态，由用户明确继续；已完成分片可复用。用户主动取消时清理临时数据，后续重试从头开始。
 
-Workflows 迁移必须在 `TaskService` 或其后端编排模块中落实以下契约，不能由 React 本地状态模拟：
+Workflows 由 `TaskService` 与后端编排模块实现以下契约，React 呈现任务事实：
 
 - 每个工作流任务都带当前进程使用的 runtime `project_id`、后端 opaque `canonical_identity_key + identity_revision`、稳定 `workflow_kind`、输入范围、基线和输入指纹；持久归属与跨重开去重不得依赖 runtime `project_id`。
 - 同一项目的工作流串行执行；不同项目可以独立运行，但前端只能在对应项目内展示和操作。
@@ -476,6 +480,9 @@ Workflows 迁移必须在 `TaskService` 或其后端编排模块中落实以下�
 - 重试创建带 `attempt_of` 关联的新任务，不覆盖原任务。
 - 用户可见状态覆盖已排队、运行中、等待确认、已完成、失败、已取消、已中断；异常退出不得把运行中任务恢复成仍在运行。
 - 项目 app state 可写时，任务、等待确认与排队状态持久化到 `ProjectLayout.taskStateRoot`（原生映射为 `.app/tasks/`）；排队任务重开后等待用户明确继续，运行中任务映射为已中断并报告可复用阶段。restricted/read-only 允许的只读任务使用 typed 但 non-persistent 的内存/临时状态；其中 trusted read-only Complete Check 也不得尝试创建项目 `.app/`。
+- schema v2 的 `revision` 为十进制字符串，兼容旧数字/缺省值；进程 `sessionId` 隔离重启前事件。TaskService owner 索引提供有界 overview 与分页 history，概览不准备、不扫描 Markdown、不探测 Agent/Git 或读取凭据；普通进度以 100ms 合并，语义边界立即发布。
+- 已持久化的 Health 报告与确切 Export 制品可附回中断任务，但不自动重启 AI 或宣称整条旅程成功。有效待确认继续保留，无效候选转中断；续队、范围复核和确认重新核验当前身份/信任与输入。Generate Content 与 Update/Complete Health 共用 `review_scope` 重新准备入口。
+- 新制品发布临界区通过 TaskService 的同一变更锁关闭取消，已接纳取消不得再发布；summary 的 `cancellable` 同步反映这一事实。
 - 系统通知只用于等待确认、完成和失败。
 
 ## 21. SettingsService
@@ -573,7 +580,7 @@ Agent 生成内容时，应根据用户语言偏好输出对应语言。
 
 应用更新使用 pinned `tauri-plugin-updater` v2.9.0 vendor patch：除 upstream API 外，当前 patch 强制 transport-level manifest size limit，并在 Windows 检查 `ShellExecuteW` launch result。升级 vendor 时必须证明两个边界等价并保留 root integration contracts。
 
-发布技术合同由 `.github/workflows/desktop-release.yml` 和 `release/release-contract.json` 固定：精确 Node/Rust、`npm ci`、Cargo `--locked`、actions SHA pin、同 tag/commit/run 的 4×5 capability catalog 与四 target desktop artifacts、强制 updater signature 与明确的 OS vendor identity policy evidence、checksums、SBOM、provenance/attestation、packaged smoke、draft reverse verification，以及 protected final publisher。初始发布不要求 Windows Authenticode 或 Apple Developer ID/notarization，相关平台警告必须如实披露；只有最终 job 可请求 `contents: write`，publish-through-anonymous-verification 使用 guarded `EXIT/INT/TERM` rollback，硬 runner/GitHub control-plane loss仍需 release owner incident response。
+发布流程由 `.github/workflows/desktop-release.yml` 编排，操作说明见 `docs/release/release-runbook.md`：CI 负责源码测试，发布负责同 tag/commit 的 capability catalog、四 target desktop artifacts、updater/capability 签名、checksums、SBOM/attestation 和 packaged smoke。最终 publisher 在一个 job 校验本地制品与 GitHub 上传摘要后公开 draft；网络探测异常只告警，不自动删除 Release。两个 release environment 保留 tag/branch 限制与 secrets，不再要求唯一维护者逐阶段自我审批；只有最终 stable job 请求 `contents: write`。初始发布不要求 Windows Authenticode 或 Apple Developer ID/notarization，相关平台警告必须如实披露。
 
 本地 fixture、jsdom、`cargo check` 或 unsigned artifact 不代表真实签名安装、升级、公证或匿名 endpoint。当前 Batch 6 Public beta No-Go 与外部 Pending 见 `docs/release/batch-6-acceptance-evidence.md`。
 

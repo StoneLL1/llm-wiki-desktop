@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { LoaderCircle } from "lucide-react";
 
+import { VersionProtectedAction } from "../../components/app/VersionProtectedAction";
 import { useModalDialog } from "../../hooks/useModalDialog";
 import type { DeleteSourcePreview, MoveSourcePreview } from "../../types/source";
 import { useSourceStore } from "./sourceStore";
@@ -160,15 +161,14 @@ function DeleteDialog({
           >
             {t("confirmation.cancel")}
           </button>
-          <button
-            type="button"
+          <VersionProtectedAction
             disabled={busy}
-            onClick={onConfirm}
+            onConfirm={onConfirm}
             className="inline-flex h-[30px] items-center gap-1.5 rounded-[var(--radius-md)] bg-[var(--danger)] px-3 text-[12px] font-semibold text-[var(--text-inverse)] disabled:opacity-40"
           >
             {busy ? <LoaderCircle size={13} className="animate-spin" /> : null}
             {t("source.delete.confirm")}
-          </button>
+          </VersionProtectedAction>
         </footer>
       </div>
     </div>

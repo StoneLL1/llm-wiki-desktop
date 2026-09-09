@@ -40,6 +40,7 @@ Raw Sources
 - `.app/` 保存应用状态、任务、缓存、聊天记录、设置等 JSON 数据。
 - `exports/html/` 保存 HTML、知识卡片和项目报告输出。
 - Git 用于检查点、恢复和冲突保护，普通用户不需要理解 Git。
+- 本地操作历史集中在“设置 → 版本与恢复”；状态栏不常驻显示分支、HEAD 或 Git dirty。首次保护说明嵌入操作确认，启用后继续原意图；操作详情按需查看文件变化并确认恢复。旧工作流历史暂保留在对应任务详情。
 
 首次价值在 `Sources` 这一层完成：用户确认导入后能立即打开一篇可读 Source。Wiki 编译、Graph 和 Chat 是后续能力，不是首次成功的前置条件。
 
@@ -182,7 +183,7 @@ project-root/
 
 - 完整功能启用的写入范围是 `.app/` 和 `.app/compat/{purpose.md,schema.md}`；根目录同名文件始终按用户内容处理，不覆盖，也不新增 `.app/project.json`。
 - 无 Git 的兼容目录在信任页默认勾选“初始化本地 Git”。用户拒绝时，阅读、搜索和已显式授权的 Chat 仍可用，但高风险自动写入保持禁用。
-- 已有脏 Git 不自动提交或 stash；需要高风险写入时，要求用户自行处理，或明确确认把当前全部变更作为检查点。
+- 已有脏 Git 不自动提交或 stash。Update Wiki 自动维护独立 Git 引用和临时索引，不要求手动提交；其他仍要求普通检查点的高风险写入沿用各自的显式处理流程。
 - 自动修复只可先准备安全派生状态与修复计划。确认页必须列出判断、写入路径、Git 条件、可恢复性和失败回退；只有确认后才写盘。
 - 大小写或 Unicode 规范化冲突只报告，不自动重命名文件或改写链接。
 - 普通资料目录绝不在原地初始化、移动或整理；“用这些资料新建知识库”只在新项目中归档副本并保留原件。
@@ -281,7 +282,7 @@ OCR 和 ASR 在导入阶段按正文缺口启用，并且必须由用户主动�
 7. 生成或更新布局定义的 Wiki 页面、索引、概览和活动日志；新建原生知识库分别映射到 Wiki 页面根、`wiki/index.md`、`wiki/overview.md` 与 `wiki/log.md`。
 8. 写入前重新检查人工编辑和基线变化。
 9. 低风险、无冲突修改在检查点后自动应用；删除、覆盖、广泛重写或冲突修改进入非模态“等待确认”状态，并提供影响摘要和按需 Diff。
-10. 成功后提交 Git 结果并刷新 UI、搜索和图谱缓存。
+10. 成功后发布应用独立的 Git 历史引用并刷新 UI、搜索和图谱缓存，不改变当前分支或暂存区；任务详情提供撤销，中断发布提供恢复更新前内容。
 11. 编译器不得写入或删除任何 layout-defined Source root（原生映射为 `wiki/sources/`）。
 
 ### 8.3 冲突处理
@@ -560,7 +561,7 @@ API Key 必须存系统钥匙串或凭据管理器，不能明文写入项目文
 6. 安装/重启需要显式 consent；确认临界区重新采集未保存编辑与 Import commit 等 UI presentation facts，并在 handoff 期间锁定编辑器；后端 barrier 原子复查其拥有的等待确认、关键任务和 Workflow apply facts。任一 blocker 出现时保持当前版本运行并给出下一步。
 7. 安装 handoff 前写 app-global receipt；Shell/installer 启动失败返回 error 并保留旧版本，成功 handoff 后由重启恢复 reconciliation 解释最终状态。更新不得写用户项目。
 
-真实发布流程仍是 draft → 四平台 signed packaged smoke/upgrade/recovery → protected approval → stable → anonymous exact-tag reverse verification。当前 Batch 6 为 Public beta No-Go，证据见 `docs/release/batch-6-acceptance-evidence.md`。
+发布按维护者推送 tag → 签名构建 → 四平台安装/启动 smoke → 校验本地制品和远端上传摘要 → 公开 draft 执行；发布后 updater manifest 网络探测只告警，不自动删除版本。当前流程见 `docs/release/release-runbook.md`，历史 Batch 验收文档不作为重复审批门禁。
 
 ## 16. 后台任务与通知
 

@@ -12,6 +12,31 @@ use crate::models::task::TaskStatus;
 
 pub const WORKFLOW_SCHEMA_VERSION: u32 = 2;
 
+fn legacy_task_revision() -> String {
+    "0".into()
+}
+
+mod decimal_revision {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &u64, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Revision {
+            Decimal(String),
+            Legacy(u64),
+        }
+        match Revision::deserialize(deserializer)? {
+            Revision::Decimal(value) => value.parse().map_err(serde::de::Error::custom),
+            Revision::Legacy(value) => Ok(value),
+        }
+    }
+}
+
 fn workflow_schema_version() -> u32 {
     WORKFLOW_SCHEMA_VERSION
 }
@@ -285,12 +310,44 @@ pub enum WorkflowScope {
     },
 }
 
+/// User intent survives queueing; input snapshots belong to the running task.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum UpdateWikiSelection {
+    Automatic,
+    Selected {
+        source_versions: Vec<WorkflowSourceVersionRef>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateWikiRequest {
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_of_task_id: Option<String>,
+    pub mode: UpdateWikiMode,
+    pub selection: UpdateWikiSelection,
+    pub route_selection: Option<WorkflowRouteSelection>,
+    #[serde(default)]
+    pub acknowledge_remote_provider: bool,
+}
+
 /// Bounded, non-secret execution facts that may be reused for a linked retry.
 /// Free-form prompts, credentials, source text, model output, raw arguments,
 /// and temporary paths have no representation in this persisted type.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkflowExecutionOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_request: Option<UpdateWikiRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_config_revision: Option<String>,
     pub preparation_revision: String,
     #[serde(default)]
     pub operation: WorkflowOperation,
@@ -308,6 +365,34 @@ impl WorkflowExecutionOptions {
     pub fn validate(&self) -> Result<(), String> {
         validate_revision("preparationRevision", &self.preparation_revision)?;
         self.operation.validate()?;
+        match (&self.update_request, &self.update_config_revision) {
+            (Some(intent), Some(revision)) => {
+                validate_revision("updateConfigRevision", revision)?;
+                if uuid::Uuid::parse_str(&intent.request_id).is_err() {
+                    return Err("Update request requires a UUID".into());
+                }
+                if let UpdateWikiSelection::Selected { source_versions } = &intent.selection {
+                    let mut ids = std::collections::HashSet::new();
+                    if source_versions.is_empty()
+                        || source_versions.iter().any(|s| {
+                            s.source_id.is_empty()
+                                || s.version_id.is_empty()
+                                || !ids.insert(&s.source_id)
+                        })
+                    {
+                        return Err(
+                            "Update requires a nonempty unambiguous source selection".into()
+                        );
+                    }
+                }
+            }
+            (None, None) => {}
+            _ => {
+                return Err(
+                    "Update request and configuration revision must be stored together".into(),
+                )
+            }
+        }
         if let Some(fingerprint) = self.preparation_fingerprint.as_deref() {
             validate_revision("preparationFingerprint", fingerprint)?;
         }
@@ -333,6 +418,16 @@ pub(crate) fn validate_workflow_execution_contract(
     execution_options: &WorkflowExecutionOptions,
 ) -> Result<(), String> {
     execution_options.validate()?;
+    if let Some(intent) = &execution_options.update_request {
+        if kind != &WorkflowKind::UpdateWiki
+            || !matches!(scope, WorkflowScope::UpdateWiki { mode, .. } if mode == &intent.mode)
+            || !matches!(execution_options.operation, WorkflowOperation::BuiltIn)
+        {
+            return Err(
+                "Update intent must belong to the matching built-in Update Wiki operation".into(),
+            );
+        }
+    }
     if !matches!(
         execution_options.operation,
         WorkflowOperation::AgentLintRepair { .. }
@@ -494,6 +589,8 @@ pub enum WorkflowProjectTrust {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowFilesystemAccess {
+    /// Display-only state before real access observation; never permits writes.
+    Unknown,
     Writable,
     ReadOnly,
 }
@@ -522,6 +619,8 @@ pub enum WorkflowPersistenceTransition {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowGitState {
+    /// Display-only state before a Git observation.
+    Unknown,
     Clean,
     Dirty,
     Unavailable,
@@ -609,6 +708,8 @@ pub struct WorkflowPreparation {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowHealthCoverageSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deep_status: Option<crate::models::lint::HealthDeepStatus>,
     pub mode: HealthCheckMode,
     pub scanned_pages: u64,
     pub deep_covered_pages: Option<u64>,
@@ -705,6 +806,10 @@ pub struct WorkflowRetryLink {
 pub struct WorkflowRun {
     #[serde(default = "workflow_schema_version")]
     pub schema_version: u32,
+    #[serde(default = "legacy_task_revision")]
+    pub revision: String,
+    #[serde(default)]
+    pub session_id: String,
     pub task_id: String,
     pub project_id: String,
     pub canonical_identity_key: String,
@@ -802,7 +907,7 @@ pub struct WorkflowQueueContextItem {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowContextSummary {
-    pub pending_source_count: usize,
+    pub pending_source_count: Option<usize>,
     pub last_health: Option<WorkflowHealthContextSummary>,
     pub recent_artifact: Option<WorkflowArtifactContextSummary>,
     pub queue_count: usize,
@@ -814,6 +919,10 @@ pub struct WorkflowContextSummary {
 pub struct WorkflowsOverview {
     #[serde(default = "workflow_schema_version")]
     pub schema_version: u32,
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub active_runs: Vec<WorkflowRunSummary>,
     pub project_access: Option<WorkflowProjectAccessSummary>,
     pub rows: Vec<WorkflowOverviewRow>,
     #[serde(default)]
@@ -931,6 +1040,10 @@ impl From<&WorkflowResult> for WorkflowRunOutcomeSummary {
 pub struct WorkflowRunSummary {
     #[serde(default = "workflow_schema_version")]
     pub schema_version: u32,
+    #[serde(default = "legacy_task_revision")]
+    pub revision: String,
+    #[serde(default)]
+    pub session_id: String,
     pub task_id: String,
     pub project_id: String,
     pub canonical_identity_key: String,
@@ -938,6 +1051,19 @@ pub struct WorkflowRunSummary {
     pub kind: WorkflowKind,
     pub operation: WorkflowOperation,
     pub display_status: WorkflowDisplayStatus,
+    #[serde(default)]
+    pub queue_position: Option<u32>,
+    #[serde(default)]
+    pub continuation_required: bool,
+    #[serde(default)]
+    pub current_stage_id: Option<String>,
+    #[serde(default)]
+    pub current_stage: Option<WorkflowStage>,
+    /// Complete bounded stage facts survive coalesced summary events.
+    #[serde(default)]
+    pub stages: Vec<WorkflowStage>,
+    #[serde(default)]
+    pub cancellable: bool,
     pub retry: Option<WorkflowRetryLink>,
     #[serde(default)]
     pub outcome: Option<WorkflowRunOutcomeSummary>,
@@ -946,10 +1072,26 @@ pub struct WorkflowRunSummary {
     pub completed_at: Option<String>,
 }
 
+fn stage_summary(stage: &WorkflowStage) -> WorkflowStage {
+    WorkflowStage {
+        id: stage.id.clone(),
+        ordinal: stage.ordinal,
+        status: stage.status.clone(),
+        label_key: stage.label_key.clone(),
+        started_at: stage.started_at.clone(),
+        completed_at: stage.completed_at.clone(),
+        current_item: stage.current_item.clone(),
+        progress: stage.progress.clone(),
+        decision: None,
+    }
+}
+
 impl From<&WorkflowRun> for WorkflowRunSummary {
     fn from(run: &WorkflowRun) -> Self {
         Self {
             schema_version: run.schema_version,
+            revision: run.revision.clone(),
+            session_id: run.session_id.clone(),
             task_id: run.task_id.clone(),
             project_id: run.project_id.clone(),
             canonical_identity_key: run.canonical_identity_key.clone(),
@@ -957,6 +1099,16 @@ impl From<&WorkflowRun> for WorkflowRunSummary {
             kind: run.kind.clone(),
             operation: run.operation.clone(),
             display_status: run.display_status.clone(),
+            queue_position: run.queue_position,
+            continuation_required: run.continuation_required,
+            current_stage_id: run.current_stage_id.clone(),
+            current_stage: run
+                .stages
+                .iter()
+                .find(|stage| Some(&stage.id) == run.current_stage_id.as_ref())
+                .map(stage_summary),
+            stages: run.stages.iter().map(stage_summary).collect(),
+            cancellable: run.cancellable,
             retry: run.retry.clone(),
             outcome: run.result.as_ref().map(WorkflowRunOutcomeSummary::from),
             started_at: run.started_at.clone(),
@@ -974,6 +1126,10 @@ impl From<&WorkflowRun> for WorkflowRunSummary {
 pub struct WorkflowExecutionState {
     #[serde(default = "legacy_workflow_schema_version")]
     pub schema_version: u32,
+    #[serde(default, with = "decimal_revision")]
+    pub revision: u64,
+    #[serde(skip)]
+    pub session_id: String,
     pub canonical_identity_key: String,
     pub identity_revision: String,
     pub kind: WorkflowKind,
@@ -1007,9 +1163,53 @@ pub struct WorkflowExecutionState {
 }
 
 impl WorkflowExecutionState {
+    pub(crate) fn advance_revision(&mut self) -> Result<(), String> {
+        self.revision = self
+            .revision
+            .checked_add(1)
+            .ok_or("Workflow revision exhausted")?;
+        Ok(())
+    }
+
+    /// Project only bounded list facts; never clone scopes, candidates, or full results.
+    pub fn to_summary(
+        &self,
+        task: &crate::models::task::BackendTask,
+    ) -> Option<WorkflowRunSummary> {
+        Some(WorkflowRunSummary {
+            schema_version: self.schema_version,
+            revision: self.revision.to_string(),
+            session_id: self.session_id.clone(),
+            task_id: task.id.clone(),
+            project_id: task.project_id.clone()?,
+            canonical_identity_key: self.canonical_identity_key.clone(),
+            identity_revision: self.identity_revision.clone(),
+            kind: self.kind.clone(),
+            operation: self.execution_options.operation.clone(),
+            display_status: WorkflowDisplayStatus::from(&task.status),
+            queue_position: self.queue_position,
+            continuation_required: self.continuation_required,
+            current_stage_id: self.current_stage_id.clone(),
+            current_stage: self
+                .stages
+                .iter()
+                .find(|stage| Some(&stage.id) == self.current_stage_id.as_ref())
+                .map(stage_summary),
+            stages: self.stages.iter().map(stage_summary).collect(),
+            cancellable: task.cancellable,
+            retry: self.retry.clone(),
+            outcome: self.result.as_ref().map(WorkflowRunOutcomeSummary::from),
+            started_at: task.started_at.clone(),
+            updated_at: task.updated_at.clone(),
+            completed_at: task.completed_at.clone(),
+        })
+    }
+
     pub fn to_run(&self, task: &crate::models::task::BackendTask) -> Option<WorkflowRun> {
         Some(WorkflowRun {
             schema_version: self.schema_version,
+            revision: self.revision.to_string(),
+            session_id: self.session_id.clone(),
             task_id: task.id.clone(),
             project_id: task.project_id.clone()?,
             canonical_identity_key: self.canonical_identity_key.clone(),

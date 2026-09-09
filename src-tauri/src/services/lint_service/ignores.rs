@@ -6,33 +6,36 @@ use crate::utils::time_utils::now_rfc3339;
 
 use super::LintService;
 
-const LINT_IGNORE_PATH: &str = ".app/lint-ignore.json";
-
 fn valid_ignore_path(path: &str) -> bool {
-    path.starts_with("wiki/")
-        && path.ends_with(".md")
-        && !path.contains("..")
+    path.to_ascii_lowercase().ends_with(".md")
+        && !path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+        && !path.as_bytes().get(1).is_some_and(|byte| *byte == b':')
         && !path.contains(char::from(92))
 }
 
 impl LintService {
-    /// Read `.app/lint-ignore.json`. A missing file is the first-run default
+    /// Read the layout's ignore file. A missing file is the first-run default
     /// (empty). A corrupt file is surfaced explicitly because silently
     /// disabling every ignore can make a clean-looking report misleading.
     pub(super) fn load_ignores(
         &self,
         context: &ProjectContext,
     ) -> Result<LintIgnoreFile, BackendError> {
+        let Some(ignore_path) = context.layout.lint_ignore_path.as_deref() else {
+            return Ok(LintIgnoreFile::default());
+        };
         match self
             .file_store
-            .read_json::<LintIgnoreFile>(context, LINT_IGNORE_PATH)
+            .read_json::<LintIgnoreFile>(context, ignore_path)
         {
             Ok(file) => Ok(file),
             Err(err) if err.code == "FILE_READ_FAILED" => {
-                if context.root.join(LINT_IGNORE_PATH).exists() {
+                if context.root.join(ignore_path).exists() {
                     Err(BackendError::new(
                         "LINT_IGNORE_READ_FAILED",
-                        format!("Could not read {LINT_IGNORE_PATH}: {}", err.message),
+                        format!("Could not read {ignore_path}: {}", err.message),
                         true,
                         true,
                     ))
@@ -42,21 +45,29 @@ impl LintService {
             }
             Err(err) => Err(BackendError::new(
                 "LINT_IGNORE_READ_FAILED",
-                format!("Could not read {LINT_IGNORE_PATH}: {}", err.message),
+                format!("Could not read {ignore_path}: {}", err.message),
                 true,
                 true,
             )),
         }
     }
 
-    /// Persist the ignore list. `write_atomic` creates `.app/` if absent.
+    /// Persist the ignore list under the layout's app-state root.
     fn save_ignores(
         &self,
         context: &ProjectContext,
         file: &LintIgnoreFile,
     ) -> Result<(), BackendError> {
+        let ignore_path = context.layout.lint_ignore_path.as_deref().ok_or_else(|| {
+            BackendError::new(
+                "LINT_IGNORE_UNAVAILABLE",
+                "This layout has no writable ignore configuration.",
+                true,
+                true,
+            )
+        })?;
         self.file_store
-            .write_json_atomic(context, LINT_IGNORE_PATH, file)
+            .write_json_atomic(context, ignore_path, file)
     }
 
     /// Record an ignored `(path, rule)`. Dedupes by key (re-adding refreshes
@@ -67,10 +78,8 @@ impl LintService {
         path: &str,
         rule: LintIssueType,
     ) -> Result<LintIgnoreFile, BackendError> {
-        // The ignore path is only ever a string key matched against scanned
-        // issue paths (always `wiki/...`), so it has no file sink. Reject `..`
-        // anyway at the boundary so crafted UI input can't persist traversal
-        // strings into a project file.
+        // This is a report-matching key, never a file write target. Accept
+        // readable Source and compatible roots as well as native Wiki paths.
         if !valid_ignore_path(path) {
             return Err(BackendError::new(
                 "LINT_IGNORE_PATH_OUT_OF_SCOPE",
@@ -116,7 +125,7 @@ impl LintService {
         if !valid_ignore_path(path) {
             return Err(BackendError::new(
                 "LINT_IGNORE_PATH_OUT_OF_SCOPE",
-                "Ignored paths must be wiki-relative Markdown paths.",
+                "Ignored paths must be project-relative Markdown paths.",
                 true,
                 true,
             )
@@ -194,11 +203,72 @@ mod tests {
         write_file(&context, "wiki/index.md", "# Index\n");
         write_file(&context, "wiki/log.md", "# Log\n");
         let service = LintService::default();
-        let err = service
-            .add_ignore(&context, "../etc/evil.md", LintIssueType::DeadLink)
-            .expect_err("traversal path must be rejected");
-        assert_eq!(err.code, "LINT_IGNORE_PATH_OUT_OF_SCOPE");
+        for path in [
+            "../etc/evil.md",
+            "wiki/../evil.md",
+            "/absolute.md",
+            "C:/evil.md",
+            "wiki\\evil.md",
+        ] {
+            let err = service
+                .add_ignore(&context, path, LintIssueType::DeadLink)
+                .expect_err("only project-relative keys are accepted");
+            assert_eq!(err.code, "LINT_IGNORE_PATH_OUT_OF_SCOPE");
+        }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ignore_source_and_compatible_findings_uses_layout_state_path() {
+        for path in ["raw/extracted/来源.md", "资料/版本1..版本2.md"] {
+            let (mut context, root) = tmp_context("ignore-source-compatible");
+            if path.starts_with("资料/") {
+                context
+                    .layout
+                    .markdown_roots
+                    .push(crate::models::layout::ProjectMarkdownRoot {
+                        path: "资料".into(),
+                        role: crate::models::layout::ProjectMarkdownRootRole::Source,
+                        exclude: None,
+                    });
+                context.layout.lint_ignore_path = Some(".app/compat/lint-ignore.json".into());
+            }
+            write_file(&context, path, "# 来源\n\nReadable source");
+            let lint = LintService::default();
+            let search = SearchService::default();
+            assert!(lint
+                .run_local_lint(&context, &search)
+                .unwrap()
+                .issues
+                .iter()
+                .any(|issue| issue.path == path
+                    && issue.issue_type == LintIssueType::MissingFrontmatter));
+            lint.add_ignore(&context, path, LintIssueType::MissingFrontmatter)
+                .unwrap();
+            assert!(root
+                .join(context.layout.lint_ignore_path.as_ref().unwrap())
+                .is_file());
+            assert!(!lint
+                .run_local_lint(&context, &search)
+                .unwrap()
+                .issues
+                .iter()
+                .any(|issue| issue.path == path
+                    && issue.issue_type == LintIssueType::MissingFrontmatter));
+            lint.remove_ignore(&context, path, LintIssueType::MissingFrontmatter)
+                .unwrap();
+            assert!(lint
+                .run_local_lint(&context, &search)
+                .unwrap()
+                .issues
+                .iter()
+                .any(|issue| issue.path == path
+                    && issue.issue_type == LintIssueType::MissingFrontmatter));
+            if path.starts_with("资料/") {
+                assert!(!root.join(".app/lint-ignore.json").exists());
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

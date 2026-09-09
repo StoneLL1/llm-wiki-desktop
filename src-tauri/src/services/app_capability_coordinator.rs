@@ -323,6 +323,11 @@ impl AppCapabilityCoordinator {
         let catalog_state = catalog_availability();
         let mut views = Vec::with_capacity(manifest.definitions.len());
         for definition in manifest.definitions {
+            // Built-in parsers belong to the application's supported-source
+            // summary, not the install/update inventory of optional packs.
+            if definition.distribution_tier == "built_in" {
+                continue;
+            }
             let entry = catalog_entry(&definition.capability_id, &target);
             let (install_allowed, install_blocked_reason_code) =
                 capability_install_policy(entry.is_some());
