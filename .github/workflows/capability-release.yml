@@ -171,7 +171,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           if ($env:RELEASE_TAG -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' -or $env:SIGNING_KEY_ID -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') { throw 'invalid release coordinate' }
-          if ($env:RELEASE_TAG -notcmatch '^app-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$') { throw 'invalid desktop release tag' }
+          if ($env:RELEASE_TAG -cnotmatch '^app-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$') { throw 'invalid desktop release tag' }
           $capabilityTag = $env:RELEASE_TAG -creplace '^app-v', 'capabilities-v'
           $tool = if ($IsWindows) { 'src-tauri/target/release/capability_release.exe' } else { 'src-tauri/target/release/capability_release' }
           $dist = Join-Path $env:GITHUB_WORKSPACE 'capability-dist'
