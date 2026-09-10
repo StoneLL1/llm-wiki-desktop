@@ -7,6 +7,7 @@ const repository = "StoneLL1/llm-wiki-desktop";
 const repairFiles = new Set([
   ".github/workflows/capability-release.yml", ".github/workflows/desktop-release.yml",
   "scripts/recover-capability-plan.mjs", "scripts/recover-capability-plan.node-test.mjs",
+  "scripts/check-release-version.mjs", "scripts/check-release-config.node-test.mjs",
   "scripts/prepare-macos-runtime.mjs", "scripts/prepare-macos-runtime.node-test.mjs",
 ]);
 

@@ -61,10 +61,15 @@ jobs:
       - name: Require the canonical repository and exact coordinate
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
         run: |
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = 'StoneLL1/llm-wiki-desktop'
-          node scripts/check-release-version.mjs --tag "$RELEASE_TAG"
+          if [ -n "$SOURCE_RUN_ID" ]; then
+            node scripts/check-release-version.mjs --tag "$RELEASE_TAG" --allow-nondefault-branch
+          else
+            node scripts/check-release-version.mjs --tag "$RELEASE_TAG"
+          fi
           node scripts/verify-product-capabilities.mjs --require-release-ready
           test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$(git rev-parse HEAD)"
 

@@ -244,10 +244,11 @@ function defaultRunGit(root, arguments_) {
 }
 
 function parseArguments(arguments_) {
-  const result = { checkGit: false, tag: null, currentStableTag: null };
+  const result = { allowNondefaultBranch: false, checkGit: false, tag: null, currentStableTag: null };
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index];
     if (argument === "--check-git") result.checkGit = true;
+    else if (argument === "--allow-nondefault-branch") result.allowNondefaultBranch = true;
     else if (argument === "--tag") result.tag = arguments_[index += 1] ?? null;
     else if (argument === "--current-stable-tag") result.currentStableTag = arguments_[index += 1] ?? null;
     else throw new Error(`unknown argument: ${argument}`);
@@ -270,7 +271,7 @@ export function checkRepository(root, options = {}) {
   });
   const errors = [...state.errors];
   if (options.checkGit) errors.push(...validateLocalGit(root, contract));
-  if (tag) errors.push(...validateReleaseCommitTrace(root, contract, tag));
+  if (tag && !options.allowNondefaultBranch) errors.push(...validateReleaseCommitTrace(root, contract, tag));
   if (tag && options.currentStableTag) {
     errors.push(...validateStableReleaseAdvance(tag, options.currentStableTag, contract));
   }

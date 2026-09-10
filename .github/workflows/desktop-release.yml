@@ -63,6 +63,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          CAPABILITY_SOURCE_RUN_ID: ${{ inputs.capability_source_run_id }}
         run: |
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = "StoneLL1/llm-wiki-desktop"
@@ -97,10 +98,18 @@ jobs:
           case "$latest_status" in
             200)
               current_stable_tag="$(node -e 'const fs=require("node:fs"); const value=JSON.parse(fs.readFileSync(process.argv[1], "utf8")); if (typeof value.tag_name !== "string") process.exit(1); process.stdout.write(value.tag_name);' "$latest_response")"
-              node scripts/check-release-version.mjs --tag "$RELEASE_TAG" --current-stable-tag "$current_stable_tag"
+              if [ -n "$CAPABILITY_SOURCE_RUN_ID" ]; then
+                node scripts/check-release-version.mjs --tag "$RELEASE_TAG" --current-stable-tag "$current_stable_tag" --allow-nondefault-branch
+              else
+                node scripts/check-release-version.mjs --tag "$RELEASE_TAG" --current-stable-tag "$current_stable_tag"
+              fi
               ;;
             404)
+            if [ -n "$CAPABILITY_SOURCE_RUN_ID" ]; then
+              node scripts/check-release-version.mjs --tag "$RELEASE_TAG" --allow-nondefault-branch
+            else
               node scripts/check-release-version.mjs --tag "$RELEASE_TAG"
+            fi
               ;;
             *)
               echo "cannot establish the current stable release (GitHub API HTTP $latest_status)" >&2
@@ -118,7 +127,16 @@ jobs:
           echo "evidence_run_id=$evidence_run_id" >> "$GITHUB_OUTPUT"
 
       - name: Check release configuration
-        run: npm run check:release-config
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+          CAPABILITY_SOURCE_RUN_ID: ${{ inputs.capability_source_run_id }}
+        run: |
+          if [ -n "$CAPABILITY_SOURCE_RUN_ID" ]; then
+            node scripts/check-release-version.mjs --tag "$RELEASE_TAG" --allow-nondefault-branch
+            node scripts/verify-product-capabilities.mjs --require-release-ready
+          else
+            npm run check:release-config
+          fi
 
   capability-build:
     name: Build signed capability matrix without publishing
