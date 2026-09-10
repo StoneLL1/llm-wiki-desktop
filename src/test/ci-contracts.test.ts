@@ -37,8 +37,7 @@ describe("CI validation contract", () => {
   // Workflow syntax is checked with actionlint. Do not duplicate the YAML
   // step order or the check runner's script arrays as string snapshots here.
 
-  it("keeps build tooling compatible while capability distribution uses the formal matrix", () => {
-    const capabilityWorkflow = readRootFile(".github/workflows/capability-release.yml");
+  it("keeps desktop build tooling pinned while capability runtimes ship their own sources", () => {
     const desktopWorkflow = readRootFile(".github/workflows/desktop-release.yml");
     const releaseSources = JSON.parse(
       readRootFile("capabilities/release-sources.json"),
@@ -51,11 +50,7 @@ describe("CI validation contract", () => {
     };
 
     expect(desktopWorkflow).toContain("NODE_VERSION: 22.23.1");
-    expect(capabilityWorkflow.match(/node-version: 22\.23\.1/g)).toHaveLength(3);
-    expect(capabilityWorkflow).not.toContain("--node-version 22.17.0");
-    expect(capabilityWorkflow).not.toMatch(
-      /& \$(?:browserNode|liteNode|mediaNode|node) --test --(?:experimental-)?test-isolation=none/,
-    );
+    expect(desktopWorkflow).toContain("RUST_VERSION: 1.92.0");
     expect(releaseSources.node.version).toBe("22.17.0");
     expect(releaseSources.node.source).toBe("https://nodejs.org/dist/v22.17.0/");
     expect(releaseSources.node.distributions).toMatchObject({
@@ -78,25 +73,13 @@ describe("CI validation contract", () => {
     });
   });
 
-  it("keeps capability release inputs out of executable scripts and closes the formal matrix", () => {
-    const workflow = readRootFile(".github/workflows/capability-release.yml");
+  it("keeps release workflow inputs out of executable run blocks", () => {
+    const workflow = readRootFile(".github/workflows/desktop-release.yml");
     const runBlocks = workflowRunBlocks(workflow);
 
     expect(runBlocks.every((block) => !block.includes("${{ inputs."))).toBe(true);
-    expect(workflow).toContain("environment: capability-release");
-    expect(workflow).toContain("verify-product-capabilities.mjs --print-matrix");
-    expect(workflow).toContain("verify-product-capabilities.mjs --require-release-ready");
-    expect(workflow).toContain("capability-release-plan.mjs");
-    expect(workflow).toContain("prepare-release-capability.mjs");
-    expect(workflow).toContain("qualify-release-corpus.mjs");
-    expect(workflow).toContain("matrix.targetTriple");
-    expect(workflow).toContain("merge-catalog --input capability-dist");
-    expect(workflow).toContain("name: capability-install-catalog");
-    expect(workflow).not.toContain("Capability publication remains quarantined");
+    expect(workflow).toContain("environment: desktop-release");
     expect(workflow).not.toMatch(/gh release (?:create|upload)/i);
-    expect(workflow).toMatch(/^ {2}workflow_call:\s*$/m);
-    expect(workflow).not.toContain("--clobber");
-    expect(workflow).not.toMatch(/uses:\s+[^\s#]+@(v\d+|stable)\b/);
   });
 
   it("keeps every Import icon-only dialog button named and titled", () => {

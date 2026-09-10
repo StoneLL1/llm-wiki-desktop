@@ -55,25 +55,11 @@ test("release expectations are manifest-derived rather than fixed five-pack coun
   const catalogVerifier = await fs.readFile(path.join(repositoryRoot, "scripts", "verify-capability-catalog.mjs"), "utf8");
   const embeddedVerifier = await fs.readFile(path.join(repositoryRoot, "scripts", "verify-embedded-capability-catalog.mjs"), "utf8");
   const releaseVerifier = await fs.readFile(path.join(repositoryRoot, "scripts", "verify-release-assets.mjs"), "utf8");
-  const capabilityWorkflow = await fs.readFile(path.join(repositoryRoot, ".github", "workflows", "capability-release.yml"), "utf8");
 
   for (const source of [catalogVerifier, embeddedVerifier, releaseVerifier]) {
     assert.equal(source.includes("entries.length !== 20"), false);
     assert.equal(source.includes("archives.length !== 20"), false);
   }
-  assert.equal(capabilityWorkflow.includes("verify-product-capabilities.mjs --print-matrix"), true);
-  assert.equal(capabilityWorkflow.includes("verify-product-capabilities.mjs --require-release-ready"), true);
-  assert.equal(capabilityWorkflow.includes("capability-release-plan.mjs"), true);
-  assert.equal(capabilityWorkflow.includes("expectedEntryCount"), true);
-  assert.equal(capabilityWorkflow.includes("prepare-release-capability.mjs"), true);
-  assert.equal(capabilityWorkflow.includes("capability_release assemble"), false);
-  assert.match(capabilityWorkflow, /& \$tool @arguments/);
-  assert.equal(capabilityWorkflow.includes("qualify-staged-capability.mjs"), true);
-  assert.equal(capabilityWorkflow.includes("qualify-release-corpus.mjs"), true);
-  assert.equal(capabilityWorkflow.includes("merge-catalog --input capability-dist"), true);
-  assert.equal(capabilityWorkflow.includes("name: capability-install-catalog"), true);
-  assert.equal(capabilityWorkflow.includes("Capability publication remains quarantined"), false);
-  assert.equal(capabilityWorkflow.includes("entries.length !== 20"), false);
 });
 
 test("an undeclared fixture extension cannot widen release evidence", async () => {
@@ -107,7 +93,7 @@ test("the checked-in all-format fixture remains inside the product format surfac
   assert.deepEqual(errors, []);
 });
 
-test("distributable identity is bound to exact workflow provenance", async () => {
+test("distributable identity stays opt-in and is not fabricated by the desktop pipeline", async () => {
   const buildScript = await fs.readFile(path.join(repositoryRoot, "src-tauri", "build.rs"), "utf8");
   const desktopWorkflow = await fs.readFile(path.join(repositoryRoot, ".github", "workflows", "desktop-release.yml"), "utf8");
   for (const name of [
@@ -116,8 +102,8 @@ test("distributable identity is bound to exact workflow provenance", async () =>
     "LLM_WIKI_DISTRIBUTION_RUN_ID",
   ]) {
     assert.equal(buildScript.includes(name), true, `${name} is not checked by build.rs`);
-    assert.equal(desktopWorkflow.includes(name), true, `${name} is not injected by desktop-release.yml`);
+    assert.equal(desktopWorkflow.includes(name), false, `${name} must not be injected while capability distribution is suspended`);
   }
-  assert.equal(desktopWorkflow.includes("LLM_WIKI_CAPABILITY_CATALOG_MODE=distributable"), true);
+  assert.equal(desktopWorkflow.includes("LLM_WIKI_CAPABILITY_CATALOG_MODE"), false);
   assert.equal(buildScript.includes("catalog-provenance.json"), true);
 });

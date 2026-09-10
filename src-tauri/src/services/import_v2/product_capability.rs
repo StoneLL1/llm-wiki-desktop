@@ -131,6 +131,14 @@ struct ProductInstallCatalog {
     entries: Vec<ProductCatalogEntry>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProductArchiveChunk {
+    offset: u64,
+    bytes: u64,
+    sha256: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ProductCatalogEntry {
@@ -139,6 +147,10 @@ struct ProductCatalogEntry {
     target_triple: String,
     url: String,
     archive_sha256: String,
+    // Mirrors the runtime installer's optional chunked-download manifest so
+    // staged catalogs carrying `archiveChunks` stay parseable at build time.
+    #[serde(default, rename = "archiveChunks")]
+    _archive_chunks: Vec<ProductArchiveChunk>,
     manifest_sha256: String,
     #[serde(rename = "signingKeyId")]
     _signing_key_id: String,
@@ -604,6 +616,24 @@ mod tests {
         let manifest = ProductCapabilityManifest::embedded().unwrap();
         assert_eq!(
             manifest.validate_catalog_for_tag(&release_catalog(), false, Some("app-v0.2.0")),
+            Ok(1)
+        );
+    }
+
+    #[test]
+    fn catalog_validation_accepts_chunked_archive_entries() {
+        let manifest = ProductCapabilityManifest::embedded().unwrap();
+        let catalog = release_catalog().replace(
+            "\"compressedBytes\": 1,",
+            concat!(
+                "\"archiveChunks\": [{\"offset\": 0, \"bytes\": 1, ",
+                "\"sha256\": \"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"}], ",
+                "\"compressedBytes\": 1,"
+            ),
+        );
+        assert!(catalog.contains("archiveChunks"));
+        assert_eq!(
+            manifest.validate_catalog_for_tag(&catalog, false, Some("app-v0.2.0")),
             Ok(1)
         );
     }

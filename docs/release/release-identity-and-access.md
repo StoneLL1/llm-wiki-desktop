@@ -85,11 +85,10 @@ Current updater custody record: existing updater key pair selected; primary owne
 ## Workflow permissions and approvals
 
 - Ordinary CI declares `contents: read` and has no publishing permission.
-- Capability build/sign jobs inherit `contents: read`.
-- The reusable capability workflow has `contents: read`, accepts the unified release tag, and uploads only same-run workflow artifacts. It cannot create or upload to a GitHub Release.
-- `.github/workflows/desktop-release.yml` owns the atomic capability + four-platform desktop transaction. Only its final `publish-stable` job receives `contents: write`, and that job is protected by the `desktop-release` environment.
-- The sealed candidate remains a workflow artifact through build, manifest, packaged-smoke, attestation, and full asset rehearsal. The protected publisher creates one draft only after those gates, uploads the complete bundle, then publishes and performs anonymous post-publish verification.
-- Both `capability-release` and `desktop-release` allow deployments only from `master` or tags matching `app-v*`. There is no required reviewer; the maintainer initiates publication through a tag or dispatch.
+- Capability distribution is suspended: no release workflow builds or uploads capability packs, and no workflow holds the retired capability signing key. The `capability-release` Environment remains configured but unused.
+- `.github/workflows/desktop-release.yml` owns the atomic four-platform desktop transaction (`preflight`, `desktop-build`, `publish`). Only its final `publish` job receives `contents: write`, and that job is protected by the `desktop-release` environment.
+- The per-platform candidates remain workflow artifacts through build, per-platform updater-signature verification, `latest.json` assembly, and digest comparison. The protected publisher creates one draft only after those gates, uploads the complete bundle, then publishes and performs anonymous post-publish verification.
+- `desktop-release` allows deployments only from `master` or tags matching `app-v*`. There is no required reviewer; the maintainer initiates publication through a tag or dispatch.
 
 No remote release workflow rehearsal is claimed for Batch 5 or Batch 6. The 2026-08-25 configuration pass closed public access, `master` protection, required reviewers, and Environment deployment policy. On 2026-08-26, names-only audits confirmed both updater secrets, the capability private-key secret, and `CAPABILITY_SIGNING_KEY_ID=llm-wiki-capability-v1`; no tag or Release exists. The public capability trust anchor and first-release acceptance contract are prepared on a review branch. Reviewed merge, same-SHA CI, sealed release assets, and the deferred four-platform clean-install matrix remain release blockers, not local test failures. The complete Batch 6 decision and platform matrix are in [`batch-6-acceptance-evidence.md`](batch-6-acceptance-evidence.md).
 
