@@ -52,6 +52,20 @@ test("new release uploads all assets and verifies digests before publishing", as
   assert.ok(f.calls.some((args) => args.includes("--paginate")));
 });
 
+test("a GitHub CLI 404 reported in the error message creates the draft", async (context) => {
+  const f = await fixture(context);
+  let firstLookup = true;
+  const gh = (args) => {
+    if (firstLookup && args[0] === "api" && args[1].includes("/tags/")) {
+      firstLookup = false;
+      throw new Error("gh: Not Found (HTTP 404)");
+    }
+    return f.gh(args);
+  };
+  await publishDesktopRelease({ root: f.root, tag: "app-v0.2.1", gh });
+  assert.ok(f.calls.some((args) => args[1] === "create"));
+});
+
 test("retry keeps matching draft uploads and replaces an incomplete upload", async (context) => {
   const f = await fixture(context);
   f.setAssets(f.uploads.map((asset, index) => ({ ...asset, state: index === 1 ? "starter" : "uploaded" })));

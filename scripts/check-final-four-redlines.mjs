@@ -227,7 +227,7 @@ export function releaseWorkflowReady(workflow) {
     && /node scripts\/verify-embedded-capability-catalog\.mjs/.test(build)
     && /node scripts\/verify-updater-signatures\.mjs/.test(build)
     && /Start-Process[^\n]+-Wait/.test(build) && /\$running\.HasExited/.test(build)
-    && /hdiutil attach/.test(build) && /lipo -verify_arch/.test(build)
+    && /hdiutil attach/.test(build) && /lipo [^\n]+ -verify_arch/.test(build)
     && /xvfb-run[^\n]+--appimage-extract-and-run/.test(build) && /kill -0/.test(build)
     && /capability_release merge-catalog/.test(engines) && /assert\.deepEqual/.test(engines)
     && /node scripts\/publish-desktop-release\.mjs[^\n]+--channel capabilities/.test(engines)

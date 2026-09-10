@@ -53,7 +53,8 @@ export async function publishDesktopRelease({ root, tag, notesFile = path.resolv
   try {
     release = JSON.parse(gh(["api", `${endpoint}/tags/${tag}`]));
   } catch (error) {
-    if (!/HTTP 404/.test(String(error.stderr ?? ""))) throw error;
+    const failure = [error.message, error.stderr, error.stdout].filter(Boolean).join("\n");
+    if (!/HTTP 404/.test(failure)) throw error;
     gh(["release", "create", tag, "--repo", RELEASE_REPOSITORY, "--verify-tag", "--draft",
       "--title", capability ? `Optional capability packs ${appTag.slice(4)}` : `LLM Wiki Desktop ${tag.slice(4)}`,
       "--notes-file", path.resolve(notesFile), ...(capability ? ["--prerelease"] : [])]);
