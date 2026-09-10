@@ -37,12 +37,12 @@ macOS 将应用拖入 Applications；Windows 运行安装程序；Linux 为 AppI
 
 macOS 版本尚未经过 Apple 公证，Windows 安装程序尚无 Authenticode 身份签名，首次启动可能出现系统提示。具体操作见[安装说明](docs/release/known-limitations.md)。应用更新和可选能力包均验证签名。
 
-release 中的其他文件用于自动更新及校验。**v0.2.1 暂不分发可选引擎包**：全新安装时，依赖这些引擎的 OCR、音视频转写、浏览器提取和旧版 Office 转换不可用。本地 Wiki 浏览、编辑、搜索、图谱及已配置的 AI 工作流仍可使用。
+桌面 release 提供安装程序、自动更新文件和校验和。OCR、音视频转写、浏览器提取与旧版 Office 转换引擎放在独立的[能力包 release](https://github.com/StoneLL1/llm-wiki-desktop/releases/tag/capabilities-v0.2.1) 中，可在应用内按需安装，无需手动下载全部能力包。
 
 ## 开始使用
 
 1. **新建或打开知识库。** 在新的文件夹中创建项目，或打开已有的兼容 Markdown 库；现有库保留原有结构。
-2. **导入第一份资料。** 从文本或 Markdown 文档开始，查看生成的 Source。本版本暂不支持需要可选引擎的格式。
+2. **导入第一份资料。** 添加文档或链接，查看生成的 Source。格式需要可选引擎时，在应用内按需安装。
 3. **选择 AI。** 在设置中配置模型服务、本地 Ollama 或已安装的 Agent CLI。阅读、编辑、图谱和关键词搜索无需 AI。
 4. **整理与使用。** 在 Workflows 中运行「更新 Wiki」，查看整理结果，再通过图谱、Chat 或 HTML 导出使用这些知识。
 
@@ -84,7 +84,7 @@ npm run check         # 完整验证
 npm run tauri -- build --config '{"bundle":{"createUpdaterArtifacts":false}}'
 ```
 
-`npm run dev` 仅启动前端服务器；完整桌面应用使用 `npm run tauri -- dev`。本地构建使用开发能力配置，签名的分发目录由 release 工作流生成。上述本地构建命令关闭更新包签名，正式版本由 CI 签名发布。
+`npm run dev` 仅启动前端服务器；完整桌面应用使用 `npm run tauri -- dev`。本地构建使用开发能力配置，正式构建嵌入完整且经过验证的引擎安装目录。上述本地构建命令关闭更新包签名，正式版本由 CI 签名发布。
 
 [贡献指南](CONTRIBUTING.md) · [架构说明](SPEC/TECH_STACK.md) · [维护排错](docs/maintainers/troubleshooting.md) · [发布流程](docs/release/release-runbook.md) · [版本记录](CHANGELOG.md) · [安全反馈](SECURITY.md)
 
