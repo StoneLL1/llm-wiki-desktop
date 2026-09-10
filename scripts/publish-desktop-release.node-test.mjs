@@ -26,7 +26,7 @@ async function fixture(context) {
       return JSON.stringify(pages);
     }
     if (args[0] === "release" && args[1] === "view") {
-      if (!exists) throw Object.assign(new Error("not found"), { stderr: "HTTP 404" });
+      if (!exists) throw new Error("release not found");
       return JSON.stringify({ databaseId: 7, isDraft: draft, tagName: createdTag ?? "app-v0.2.1" });
     }
     if (args[1] === "create") { exists = true; createdTag = args[2]; return ""; }

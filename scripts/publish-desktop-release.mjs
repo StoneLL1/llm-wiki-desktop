@@ -57,7 +57,7 @@ export async function publishDesktopRelease({ root, tag, notesFile = path.resolv
       return { id: value.databaseId, draft: value.isDraft };
     } catch (error) {
       const failure = [error.message, error.stderr, error.stdout].filter(Boolean).join("\n");
-      if (/HTTP 404/.test(failure)) return null;
+      if (/HTTP 404|release not found/i.test(failure)) return null;
       throw error;
     }
   };
