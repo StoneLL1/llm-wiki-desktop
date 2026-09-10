@@ -13,7 +13,7 @@ approval steps for every release.
 3. Watch the Desktop release workflow. `preflight` validates the tag, repository, exact commit, and version progression against `releases/latest`; `desktop-build` builds and updater-signs the four targets and verifies each signature; `publish` assembles `latest.json`, checks the public bundle, and publishes in one final job. It does not repeat the source test suite already owned by CI.
 4. Check the release page and the updater manifest probe. Test clean installation and upgrades on the platforms affected by the change; record limitations and failures. Hosted checks do not prove a complete real-machine upgrade or recovery journey.
 
-`master` still requires `Validate (ubuntu-latest)`, `Validate (windows-latest)`, and `Validate (macos-latest)`. Linux runs the full suite; Windows/macOS run native tests except four exhaustive recovery/format/scale sweeps already covered on Linux. It does not require a branch to be updated after every unrelated master commit. PRs and conversation resolution remain required; force-push and branch deletion remain disabled.
+`master` still requires `Validate (ubuntu-latest)`, `Validate (windows-latest)`, and `Validate (macos-latest)`. Linux runs the full suite; Windows/macOS run native tests except four exhaustive recovery/format/scale sweeps already covered on Linux. It does not require a branch to be updated after every unrelated master commit. PRs and conversation resolution remain required; force-push and branch deletion remain disabled. CI retries the failed Linux job once automatically when a GitHub-hosted runner shutdown signal kills it and every other platform passed; real test failures are never retried automatically.
 
 ## Signing and publication
 

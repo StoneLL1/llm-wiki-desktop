@@ -69,3 +69,32 @@ jobs:
       - name: Test platform capability runners
         if: runner.os != 'Linux'
         run: npm run test:capability-tools
+
+  auto-rerun:
+    # GitHub-hosted Linux runners occasionally receive a shutdown signal
+    # mid-job (the step dies with exit 143 while other platforms pass).
+    # Retry once when only the Linux job failed, so an infrastructure kill
+    # does not block the PR. Real failures on any platform are never
+    # retried automatically and stay visible as red checks.
+    name: Auto-rerun on Linux runner shutdown
+    needs: validation
+    if: failure() && github.run_attempt < 2
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Re-run failed jobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          FAILED_JOBS=$(gh api "repos/$GH_REPO/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}/jobs" \
+            --paginate --jq '.jobs[] | select(.conclusion == "failure") | .name')
+          echo "Failed jobs: $FAILED_JOBS"
+          if [ "$FAILED_JOBS" != "Validate (ubuntu-latest)" ]; then
+            echo "Not a Linux-only failure; no automatic rerun."
+            exit 0
+          fi
+          gh api --method POST "repos/$GH_REPO/actions/runs/${{ github.run_id }}/rerun-failed-jobs" \
+            -f enable_debug_logging=false > /dev/null
+          echo "Automatic rerun requested."
