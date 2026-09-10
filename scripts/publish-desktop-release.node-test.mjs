@@ -15,20 +15,20 @@ async function fixture(context) {
   let exists = true;
   let draft = true;
   let assets = [];
+  let createdTag = null;
   let pageSize = 100;
   const calls = [];
   const gh = (args) => {
     calls.push(args);
-    if (args[0] === "api" && args[1].includes("/tags/")) {
-      if (!exists) throw Object.assign(new Error("not found"), { stderr: "HTTP 404" });
-      return JSON.stringify({ id: 7, draft });
-    }
-    if (args[0] === "api") {
+    if (args[0] === "api" && args[1].includes("/assets")) {
       const pages = [];
       for (let index = 0; index < assets.length; index += pageSize) pages.push(assets.slice(index, index + pageSize));
       return JSON.stringify(pages);
     }
-    if (args[1] === "create") { exists = true; return ""; }
+    if (args[0] === "api" && args[1].endsWith("?per_page=100")) {
+      return JSON.stringify(exists ? [[{ id: 7, draft, tag_name: createdTag ?? "app-v0.2.1" }]] : [[]]);
+    }
+    if (args[1] === "create") { exists = true; createdTag = args[2]; return ""; }
     if (args[1] === "upload") {
       const upload = uploads.find((asset) => asset.file === args[3]);
       assets = [...assets.filter((asset) => asset.name !== upload.name), { ...upload, state: "uploaded" }];
@@ -52,17 +52,10 @@ test("new release uploads all assets and verifies digests before publishing", as
   assert.ok(f.calls.some((args) => args.includes("--paginate")));
 });
 
-test("a GitHub CLI 404 reported in the error message creates the draft", async (context) => {
+test("a missing draft is created and then resolved from the release list", async (context) => {
   const f = await fixture(context);
-  let firstLookup = true;
-  const gh = (args) => {
-    if (firstLookup && args[0] === "api" && args[1].includes("/tags/")) {
-      firstLookup = false;
-      throw new Error("gh: Not Found (HTTP 404)");
-    }
-    return f.gh(args);
-  };
-  await publishDesktopRelease({ root: f.root, tag: "app-v0.2.1", gh });
+  f.setExists(false);
+  await publishDesktopRelease({ root: f.root, tag: "app-v0.2.1", gh: f.gh });
   assert.ok(f.calls.some((args) => args[1] === "create"));
 });
 
