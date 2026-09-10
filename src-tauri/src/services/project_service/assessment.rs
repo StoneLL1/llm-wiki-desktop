@@ -1533,11 +1533,14 @@ mod tests {
         )
         .unwrap();
         let id = assessment.assessment_id.clone();
+        // A freshly booted CI runner can have an Instant epoch younger than
+        // ASSESSMENT_TTL; checked_sub keeps this entry expired either way.
+        let now = Instant::now();
         service.inner.assessments.lock().unwrap().insert(
             id.clone(),
             AssessmentEntry {
-                created_at: Instant::now() - ASSESSMENT_TTL,
-                expires_at: Instant::now() - Duration::from_millis(1),
+                created_at: now.checked_sub(ASSESSMENT_TTL).unwrap_or(now),
+                expires_at: now.checked_sub(Duration::from_millis(1)).unwrap_or(now),
                 assessment,
             },
         );
