@@ -190,20 +190,18 @@ test("the strict checker can turn every owned contract green", async (context) =
   await write(".github/workflows/desktop-release.yml", [
     "jobs:",
     "  preflight:",
-    "  capability-build:",
     "  desktop-build:",
-    "  manifest-and-provenance:",
-    "    steps: [latest.json]",
-    "  packaged-smoke:",
-    "  publish-stable:",
-    "    needs: [capability-build, desktop-build, manifest-and-provenance, packaged-smoke]",
+    "  publish:",
+    "    needs: [preflight, desktop-build]",
     "    environment: desktop-release",
     "    permissions:",
     "      contents: write",
+    "    steps: [latest.json]",
   ].join("\n"));
   await write(".github/workflows/capability-release.yml", "on:\n  workflow_call:\npermissions:\n  contents: read\n");
-  await write("scripts/verify-release-assets.mjs", "export const verifyReleaseAssets = true;\n");
+  await write("scripts/verify-updater-signatures.mjs", "export const verifyUpdaterSignatures = true;\n");
   await write("scripts/verify-latest-json.mjs", "export const verifyLatestJson = true;\n");
+  await write("scripts/publish-desktop-release.mjs", "export const publishDesktopRelease = true;\n");
 
   assert.deepEqual(
     evaluateFinalFourRedlines(root).map(({ state }) => state),
@@ -254,22 +252,20 @@ test("strict structural contracts reject representative near misses", async (con
   await write(".github/workflows/desktop-release.yml", [
     "jobs:",
     "  preflight:",
-    "  capability-build:",
     "  desktop-build:",
-    "  manifest-and-provenance:",
-    "    steps: [latest.json]",
-    "  packaged-smoke:",
-    "  publish-stable:",
-    "    needs: [capability-build, desktop-build, manifest-and-provenance, packaged-smoke]",
+    "  publish:",
+    "    needs: [preflight, desktop-build]",
     "    environment: desktop-release",
     "    permissions:",
     "      contents: write",
+    "    steps: [latest.json]",
     "  second-writer:",
     "    permissions:",
     "      contents: write",
   ].join("\n"));
-  await write("scripts/verify-release-assets.mjs", "export {};\n");
+  await write("scripts/verify-updater-signatures.mjs", "export {};\n");
   await write("scripts/verify-latest-json.mjs", "export {};\n");
+  await write("scripts/publish-desktop-release.mjs", "export {};\n");
 
   const states = new Map(evaluateFinalFourRedlines(root).map(({ id, state }) => [id, state]));
   assert.equal(states.get("capability-release-catalog"), "red");

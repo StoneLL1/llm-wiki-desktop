@@ -404,19 +404,20 @@ export function evaluateFinalFourRedlines(root) {
     && invalidServiceAuthorityContracts.length === 0
     && readText(root, "src-tauri/src/app_state.rs").includes("ProjectWritePermit");
 
-  const publishStable = /^ {2}publish-stable:\s*$([\s\S]*?)(?=^ {2}[A-Za-z0-9_-]+:\s*$|(?![\s\S]))/m.exec(releaseWorkflow)?.[1] ?? "";
-  const requiredReleaseJobs = ["preflight", "capability-build", "desktop-build", "manifest-and-provenance", "packaged-smoke", "publish-stable"];
+  const publishJob = /^ {2}publish:\s*$([\s\S]*?)(?=^ {2}[A-Za-z0-9_-]+:\s*$|(?![\s\S]))/m.exec(releaseWorkflow)?.[1] ?? "";
+  const requiredReleaseJobs = ["preflight", "desktop-build", "publish"];
   const atomicReleaseReady = releaseWorkflow.length > 0
     && requiredReleaseJobs.every((job) => new RegExp(`^ {2}${job}:`, "m").test(releaseWorkflow))
-    && ["capability-build", "desktop-build", "manifest-and-provenance", "packaged-smoke"]
-      .every((job) => publishStable.includes(job))
+    && ["preflight", "desktop-build"]
+      .every((job) => publishJob.includes(job))
     && /latest\.json/i.test(releaseWorkflow)
-    && /^ {4}environment:\s+desktop-release\s*$/m.test(publishStable)
-    && /^ {6}contents:\s+write\s*$/m.test(publishStable)
+    && /^ {4}environment:\s+desktop-release\s*$/m.test(publishJob)
+    && /^ {6}contents:\s+write\s*$/m.test(publishJob)
     && (releaseWorkflow.match(/contents:\s+write/gi) ?? []).length === 1
-    && !/gh release (?:create|upload)/i.test(capabilityWorkflow)
-    && readText(root, "scripts/verify-release-assets.mjs").length > 0
-    && readText(root, "scripts/verify-latest-json.mjs").length > 0;
+    && !/gh release (?:create|upload)/i.test(releaseWorkflow)
+    && readText(root, "scripts/verify-updater-signatures.mjs").length > 0
+    && readText(root, "scripts/verify-latest-json.mjs").length > 0
+    && readText(root, "scripts/publish-desktop-release.mjs").length > 0;
 
   return [
     result("capability-release-catalog", catalogReady, "3A", "release mode requires the product-manifest-derived exact signed capability matrix"),
@@ -425,7 +426,7 @@ export function evaluateFinalFourRedlines(root) {
     result("structured-backend-error-presentation", backendErrorReady, "1", "shared normalization must cover serialized, circular, and object-shaped failures without [object Object]"),
     result("provider-secret-origin-binding", providerBindingReady, "2A", "provider credentials must bind to canonical origin and redirects must not carry secrets"),
     result("mutation-write-authority-inventory", mutationInventoryReady, "2B", "every mutation path must be inventoried and carry an unforgeable project authority capability"),
-    result("atomic-stable-release-workflow", atomicReleaseReady, "5", "only one final publisher may release complete desktop, capability, and manifest artifacts"),
+    result("atomic-stable-release-workflow", atomicReleaseReady, "5", "only one final publisher may release complete desktop installers plus the verified updater manifest"),
   ];
 }
 
