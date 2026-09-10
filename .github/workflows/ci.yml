@@ -96,5 +96,5 @@ jobs:
             exit 0
           fi
           gh api --method POST "repos/$GH_REPO/actions/runs/${{ github.run_id }}/rerun-failed-jobs" \
-            -f enable_debug_logging=false > /dev/null
+            -F enable_debug_logging=false > /dev/null
           echo "Automatic rerun requested."
