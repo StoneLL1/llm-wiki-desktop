@@ -182,6 +182,63 @@ const result = (id, passed, ownerBatch, detail) => ({
   detail,
 });
 
+// Check executable release steps and publication dependencies, not prose or
+// step titles. Runtime archive/signature verification remains in the invoked tools.
+export function releaseWorkflowReady(workflow) {
+  const jobs = new Map([...workflow.matchAll(/^ {2}([A-Za-z0-9_-]+):[ \t]*\n([\s\S]*?)(?=^ {2}[A-Za-z0-9_-]+:[ \t]*(?:\n|$)|(?![\s\S]))/gm)]
+    .map((match) => [match[1], match[2]]));
+  const job = (name) => jobs.get(name) ?? "";
+  const runs = (name) => {
+    const lines = job(name).split("\n");
+    const blocks = [];
+    for (let index = 0; index < lines.length; index++) {
+      const match = /^(\s*)(?:- )?run:\s*(.*)$/.exec(lines[index]);
+      if (!match) continue;
+      if (!["|", ">", "|-", ">-"].includes(match[2])) blocks.push(match[2]);
+      else for (++index; index < lines.length; index++) {
+        const line = lines[index];
+        if (line.trim() && line.match(/^\s*/)[0].length <= match[1].length) { index--; break; }
+        if (!/^\s*#/.test(line)) blocks.push(line);
+      }
+    }
+    return blocks.join("\n");
+  };
+  const required = ["preflight", "source-check", "desktop-build", "publish-capabilities", "publish"];
+  const dependencies = /^ {4}needs:\s*\[([^\]]+)\]/m.exec(job("publish"))?.[1]
+    .split(",").map((name) => name.trim()) ?? [];
+  const writers = [...jobs].filter(([, value]) => /^ {6}contents:\s+write\s*$/m.test(value)).map(([name]) => name).sort();
+  const preflight = runs("preflight");
+  const build = runs("desktop-build");
+  const engines = runs("publish-capabilities");
+  const publish = runs("publish");
+  return required.every((name) => jobs.has(name))
+    && required.filter((name) => name !== "publish").every((name) => dependencies.includes(name))
+    && JSON.stringify(writers) === JSON.stringify(["publish", "publish-capabilities"])
+    && !/^ {2,4}contents:\s+write\s*$/m.test(workflow)
+    && /^ {4}environment:\s+desktop-release\s*$/m.test(job("publish"))
+    && /^ {4}environment:\s+desktop-release\s*$/m.test(job("desktop-build"))
+    && /^ {4}environment:\s+capability-release\s*$/m.test(job("publish-capabilities"))
+    && !["preflight", "source-check", "desktop-build", "publish-capabilities"].some((name) => /continue-on-error:\s*true/.test(job(name)))
+    && /node scripts\/reuse-capability-release\.mjs/.test(preflight)
+    && /node scripts\/verify-capability-catalog\.mjs/.test(preflight)
+    && /npm run check(?:\s|$)/.test(runs("source-check"))
+    && ["windows-x86_64", "darwin-aarch64", "darwin-x86_64", "linux-x86_64"].every((platform) => job("desktop-build").includes(`platform: ${platform}`))
+    && /LLM_WIKI_CAPABILITY_CATALOG_MODE=distributable/.test(build)
+    && /node scripts\/verify-embedded-capability-catalog\.mjs/.test(build)
+    && /node scripts\/verify-updater-signatures\.mjs/.test(build)
+    && /Start-Process[^\n]+-Wait/.test(build) && /\$running\.HasExited/.test(build)
+    && /hdiutil attach/.test(build) && /lipo -verify_arch/.test(build)
+    && /xvfb-run[^\n]+--appimage-extract-and-run/.test(build) && /kill -0/.test(build)
+    && /capability_release merge-catalog/.test(engines) && /assert\.deepEqual/.test(engines)
+    && /node scripts\/publish-desktop-release\.mjs[^\n]+--channel capabilities/.test(engines)
+    && /node scripts\/verify-latest-json\.mjs/.test(publish)
+    && /node scripts\/generate-release-checksums\.mjs/.test(publish)
+    && /git rev-parse 'FETCH_HEAD\^\{commit\}'/.test(publish)
+    && /node scripts\/publish-desktop-release\.mjs/.test(publish)
+    && !/--channel capabilities/.test(publish)
+    && !/gh release (?:create|upload)/i.test(workflow);
+}
+
 export function evaluateFinalFourRedlines(root) {
   const catalog = readJson(root, "capabilities/install-catalog.json", { entries: [] });
   const trustedKeys = readJson(root, "capabilities/trusted-keys.json", {});
@@ -404,17 +461,7 @@ export function evaluateFinalFourRedlines(root) {
     && invalidServiceAuthorityContracts.length === 0
     && readText(root, "src-tauri/src/app_state.rs").includes("ProjectWritePermit");
 
-  const publishJob = /^ {2}publish:\s*$([\s\S]*?)(?=^ {2}[A-Za-z0-9_-]+:\s*$|(?![\s\S]))/m.exec(releaseWorkflow)?.[1] ?? "";
-  const requiredReleaseJobs = ["preflight", "desktop-build", "publish"];
-  const atomicReleaseReady = releaseWorkflow.length > 0
-    && requiredReleaseJobs.every((job) => new RegExp(`^ {2}${job}:`, "m").test(releaseWorkflow))
-    && ["preflight", "desktop-build"]
-      .every((job) => publishJob.includes(job))
-    && /latest\.json/i.test(releaseWorkflow)
-    && /^ {4}environment:\s+desktop-release\s*$/m.test(publishJob)
-    && /^ {6}contents:\s+write\s*$/m.test(publishJob)
-    && (releaseWorkflow.match(/contents:\s+write/gi) ?? []).length === 1
-    && !/gh release (?:create|upload)/i.test(releaseWorkflow)
+  const atomicReleaseReady = releaseWorkflowReady(releaseWorkflow)
     && readText(root, "scripts/verify-updater-signatures.mjs").length > 0
     && readText(root, "scripts/verify-latest-json.mjs").length > 0
     && readText(root, "scripts/publish-desktop-release.mjs").length > 0;
@@ -426,7 +473,7 @@ export function evaluateFinalFourRedlines(root) {
     result("structured-backend-error-presentation", backendErrorReady, "1", "shared normalization must cover serialized, circular, and object-shaped failures without [object Object]"),
     result("provider-secret-origin-binding", providerBindingReady, "2A", "provider credentials must bind to canonical origin and redirects must not carry secrets"),
     result("mutation-write-authority-inventory", mutationInventoryReady, "2B", "every mutation path must be inventoried and carry an unforgeable project authority capability"),
-    result("atomic-stable-release-workflow", atomicReleaseReady, "5", "only one final publisher may release complete desktop installers plus the verified updater manifest"),
+    result("atomic-stable-release-workflow", atomicReleaseReady, "5", "desktop publication requires source checks, complete engines, signed installers, and platform launch checks; engine downloads use a separate publisher"),
   ];
 }
 

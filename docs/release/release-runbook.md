@@ -1,55 +1,63 @@
 # Desktop release runbook
 
-Stable application releases use `app-vX.Y.Z` tags and display `vX.Y.Z` to users.
-Optional engine packs are not distributed with releases; the app treats an empty
-capability catalog as a normal state and core knowledge-base features do not
-require the packs. Historical acceptance records remain evidence, not repeated
-approval steps for every release.
+Stable application releases use `app-vX.Y.Z` tags and display `vX.Y.Z` to users. Desktop downloads and optional engine archives have separate release pages. Official installers embed a complete verified engine catalog so users can install OCR, transcription, browser extraction, and document-conversion engines from within the app. Historical acceptance records remain evidence, not repeated approval steps.
 
-## Normal release
+## Prepare a release
 
-1. Update the package, Cargo and Tauri versions together, plus release notes and known limitations. Run `npm run check` for the change and `npm run check:release-config` for the release configuration.
-2. Merge the PR with the three required CI checks green. Create an `app-vX.Y.Z` tag on the intended master commit and push it. The tag push is the maintainer's publication decision; release environments do not ask the same maintainer to approve each stage again.
-3. Watch the Desktop release workflow. `preflight` validates the tag, repository, exact commit, and version progression against `releases/latest`; `desktop-build` builds and updater-signs the four targets and verifies each signature; `publish` assembles `latest.json`, checks the public bundle, and publishes in one final job. It does not repeat the source test suite already owned by CI.
-4. Check the release page and the updater manifest probe. Test clean installation and upgrades on the platforms affected by the change; record limitations and failures. Hosted checks do not prove a complete real-machine upgrade or recovery journey.
+1. Update package, Cargo, and Tauri versions together, plus release notes and known limitations. Run `npm run check` and `npm run check:release-config`.
+2. Select a completed canonical Desktop release run containing all qualified engine archives and its merged catalog. Set the repository variable `CAPABILITY_SOURCE_RUN_ID`, or pass `capability_source_run_id` when dispatching the workflow; the explicit input takes precedence. The source selected for this v0.2.1 release is `34439099432`.
+3. Merge the PR after the three required CI checks pass. Create the stable tag on the intended master commit. A tag push uses the repository source-run variable; a manual dispatch accepts `release_tag` and the optional source-run override. The tag or dispatch is the maintainer's publication decision.
+4. Watch all required jobs. Check the desktop and capability release pages and the post-publication manifest probe. Record any platform limitations; hosted checks do not prove a complete interactive upgrade or recovery journey.
 
-`master` still requires `Validate (ubuntu-latest)`, `Validate (windows-latest)`, and `Validate (macos-latest)`. Linux runs the full suite; Windows/macOS run native tests except four exhaustive recovery/format/scale sweeps already covered on Linux. It does not require a branch to be updated after every unrelated master commit. PRs and conversation resolution remain required; force-push and branch deletion remain disabled. CI retries the failed Linux job once automatically when a GitHub-hosted runner shutdown signal kills it and every other platform passed; real test failures are never retried automatically.
+`master` requires `Validate (ubuntu-latest)`, `Validate (windows-latest)`, and `Validate (macos-latest)`. Linux runs the full suite; Windows/macOS run native tests except four exhaustive recovery/format/scale sweeps already covered on Linux. PRs and conversation resolution remain required. CI retries a failed Linux job once when a hosted-runner shutdown kills it and the other platforms pass; ordinary test failures remain failures.
+
+## Required release checks
+
+- `preflight` validates the repository, tag, commit, and version progression. It verifies the source run, successful qualification jobs, unexpired artifacts, artifact identities, and unchanged engine inputs for the complete manifest-derived matrix (43 entries for v0.2.1). It validates the source catalog and trust keys, preserves its original provenance, and records the current desktop integration identity.
+- `source-check` runs the full `npm run check` on macOS for the exact release commit, including real macOS runtime checks.
+- `desktop-build` embeds the non-empty verified catalog, builds the four desktop targets, verifies updater signatures, and performs installation and launch smoke checks on each target.
+- `publish-capabilities` re-verifies the signed engine archives and their exact merged catalog, then publishes them in `capabilities-vX.Y.Z` as a prerelease with `latest=false`.
+- `publish` waits for source checks, all desktop builds and smoke checks, and capability publication. It assembles `latest.json`, checks the public desktop downloads, verifies the release tag still points at the built commit, and publishes the desktop release.
+
+## Engine reuse limits
+
+Reuse is conditional, not a substitute for rebuilding changed engines. Engine sources, dependencies, packaging inputs, or qualification changes require newly built and qualified archives. The current reuse path requires a source run for the exact application tag with all required artifacts still available. It does not implement unrestricted reuse across versions or restoration from a permanent release channel.
+
+If the selected run is missing required artifacts or they have expired, stop and obtain a suitable new build run. Restoration from published engine assets would need a separately implemented and verified path; changing the source ID does not bypass input or provenance checks. Logs and source/release provenance stay in Actions artifacts with their configured retention periods.
 
 ## Signing and publication
 
-- `desktop-release` holds `TAURI_SIGNING_PRIVATE_KEY` and its password (which may be empty for an unencrypted key). It is the only release environment in use; the retired `capability-release` environment is kept only as history.
-- The environment allows only `master` and `app-v*` tags. It has no required reviewer or wait timer. Private signing keys remain environment secrets.
-- Updater signatures remain mandatory. Windows Authenticode and Apple Developer ID/notarization are not required; platform warnings are disclosed in the release notes.
-- Build jobs have read-only repository permissions. Only `publish` receives `contents: write`, and it is protected by the `desktop-release` environment.
-- Each build job verifies its own updater artifact with the standalone Cargo verifier before uploading its fragment. The final job regenerates and validates `latest.json` from the four descriptors, verifies the tag still points at the built commit, then publishes. The signature verifier is a small standalone Cargo package, not a rebuild of the app.
-- The publisher creates or resumes a draft, uploads missing/changed draft assets, compares all remote asset names, sizes and GitHub SHA-256 digests, then publishes. It uses existing tags (`--verify-tag`).
-- A public release is never overwritten or automatically deleted. The post-publication manifest probe retries CDN access and reports a warning if it still fails; it does not roll back a valid release because of a network failure.
+- `desktop-release` supplies `TAURI_SIGNING_PRIVATE_KEY` and its password, which may be empty for an unencrypted key. Updater signatures remain mandatory. Windows Authenticode and Apple Developer ID/notarization are not required; platform warnings are disclosed in installation notes.
+- The independent `publish-capabilities` job uses the `capability-release` environment. It verifies already signed archives with committed public keys and does not need to read or regenerate the capability signing secret.
+- Build and verification jobs have read-only repository access. Only the two publisher jobs receive `contents: write`, each in its corresponding release environment. Release jobs run from `master` or `app-v*` tags; no repeated reviewer approval is required.
+- Both publishers create or resume drafts, upload missing or changed draft assets, and compare remote names, sizes, and GitHub SHA-256 digests before publication. Existing tags are verified.
+- Public releases are not overwritten or automatically deleted. The post-publication manifest probe retries CDN access and reports a warning if access still fails; a network failure does not delete a valid release.
 
 ## Public download layout
 
-The verified per-platform candidates remain in Actions artifacts. The public
-release lists exactly the desktop downloads:
+The main release has exactly eight assets:
 
-- Four installers (Windows setup EXE, two macOS DMGs, Linux AppImage), the two
-  macOS `.app.tar.gz` updater archives, one companion `.sig` per platform, and
-  `latest.json` — eleven files. `CHECKSUMS.sha256` is added after verification.
-- Updater signatures are embedded in `latest.json`; no other artifacts are
-  published.
+- Four installers: Windows setup EXE, two macOS DMGs, and Linux AppImage.
+- Two macOS `.app.tar.gz` archives for automatic updates.
+- `latest.json`, containing the updater signatures.
+- `CHECKSUMS.sha256` for the seven other desktop assets.
+
+The separate [v0.2.1 capability release](https://github.com/StoneLL1/llm-wiki-desktop/releases/tag/capabilities-v0.2.1) contains optional engine archives, the install catalog, public trust keys, catalog provenance, and checksums. It never takes over the stable `latest` channel. Users normally install engines through the app. Build logs, qualification reports, and standalone updater signature files remain in Actions artifacts.
 
 ## Retry a failed run
 
-Use GitHub's **Re-run failed jobs** first. Successful matrix jobs and their artifacts can be retained, and a partial GitHub draft upload is resumable. Keep the tag on its original commit.
+Use GitHub's **Re-run failed jobs** first. Successful jobs and their artifacts can be retained, and partial draft uploads are resumable. Keep the tag on its original commit.
 
-To rebuild or complete a publication for an existing tag, dispatch Desktop release with `release_tag` set to that stable tag pointing at the current release commit. The run repeats the full pipeline against the same commit; the publisher resumes the existing draft or verifies the already-published assets instead of duplicating them.
+To start a new run for an unpublished tag, dispatch Desktop release with `release_tag` and a valid engine source run. The required checks run again; matching draft uploads can be retained. If the release is already public, the stable-version progression check rejects the same version even though the publisher itself can recognize identical public assets. Ship a higher version for a published code fix; do not move a published tag.
 
-A failure leaves the draft and workflow artifacts for diagnosis. An unexpected old draft attachment is reported by name; inspect it before removing it. If the release is already public, ship a higher version for a code fix. Do not move a published tag.
+An unexpected draft attachment is reported by name. Inspect it before removing it. A failed desktop publication may leave the independent capability prerelease available; it does not become the desktop updater's latest release.
 
-## Optional checks
+## Focused maintenance checks
 
-- `npm run check:release-config:local`: checks local origin/default-branch setup when debugging release coordinates.
-- `npm run check:acceptance`: audits historical product evidence and redline declarations when working on those acceptance records.
-- `npm run test:updater-signature`: runs the real verifier's valid-signature, tampered-bytes and wrong-key tests.
-- `actionlint`: validates GitHub Actions syntax without requiring exact job names or shell text.
-- Cargo audit runs weekly and on demand. Advisory failures remain visible without blocking every PR.
+- `npm run check:release-config:local` checks local origin/default-branch setup.
+- `npm run check:acceptance` audits historical product evidence and redline declarations.
+- `npm run test:updater-signature` checks valid signatures, tampered bytes, and wrong keys.
+- `actionlint` validates GitHub Actions syntax.
+- Cargo audit runs weekly and on demand; advisory failures remain visible without blocking every PR.
 
-For key loss or rotation, use [release-identity-and-access](release-identity-and-access.md#updater-signing-key-operations). Keep the existing client trust anchor unless an explicit migration is implemented.
+For key loss or rotation, see [release identity and access](release-identity-and-access.md#updater-signing-key-operations). Keep the client trust anchor unless an explicit migration is implemented.

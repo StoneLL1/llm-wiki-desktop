@@ -8,6 +8,7 @@ import {
   evaluateFinalFourRedlines,
   expectedRedlineStates,
   repositoryRoot,
+  releaseWorkflowReady,
 } from "./check-final-four-redlines.mjs";
 import { PRODUCT_MANIFEST } from "./verify-product-capabilities.mjs";
 
@@ -187,17 +188,8 @@ test("the strict checker can turn every owned contract green", async (context) =
     "#[tauri::command]",
     "pub fn save() { state.with_current_project_write_access(project_id, root, |permit, _context| service.save_authorized(&permit)); }",
   ].join("\n"));
-  await write(".github/workflows/desktop-release.yml", [
-    "jobs:",
-    "  preflight:",
-    "  desktop-build:",
-    "  publish:",
-    "    needs: [preflight, desktop-build]",
-    "    environment: desktop-release",
-    "    permissions:",
-    "      contents: write",
-    "    steps: [latest.json]",
-  ].join("\n"));
+  await write(".github/workflows/desktop-release.yml",
+    await fs.readFile(path.join(repositoryRoot, ".github/workflows/desktop-release.yml"), "utf8"));
   await write(".github/workflows/capability-release.yml", "on:\n  workflow_call:\npermissions:\n  contents: read\n");
   await write("scripts/verify-updater-signatures.mjs", "export const verifyUpdaterSignatures = true;\n");
   await write("scripts/verify-latest-json.mjs", "export const verifyLatestJson = true;\n");
@@ -696,4 +688,35 @@ test("a stub lazy notice keeps the Batch 1 redline red", async (context) => {
   const backendState = evaluateFinalFourRedlines(root)
     .find(({ id }) => id === "structured-backend-error-presentation")?.state;
   assert.equal(backendState, "red");
+});
+
+
+test("stable release gate rejects missing functional checks and publication bypasses", async () => {
+  const workflow = await fs.readFile(path.join(repositoryRoot, ".github/workflows/desktop-release.yml"), "utf8");
+  assert.equal(releaseWorkflowReady(workflow), true);
+  const mutations = [
+    ["source verification dependency", "needs: [preflight, source-check, desktop-build, publish-capabilities]", "needs: [preflight, desktop-build, publish-capabilities]"],
+    ["engine publication dependency", "needs: [preflight, source-check, desktop-build, publish-capabilities]", "needs: [preflight, source-check, desktop-build]"],
+    ["full source check", "run: npm run check", "run: npm run check:quick"],
+    ["source input verification", "node scripts/reuse-capability-release.mjs", "echo source-check-disabled"],
+    ["nonempty release catalog", "LLM_WIKI_CAPABILITY_CATALOG_MODE=distributable", "LLM_WIKI_CAPABILITY_CATALOG_MODE=development"],
+    ["embedded catalog verification", "node scripts/verify-embedded-capability-catalog.mjs", "echo binary-check-disabled"],
+    ["updater signature verification", "node scripts/verify-updater-signatures.mjs", "echo signature-check-disabled"],
+    ["Windows startup check", "$running.HasExited", "$running.Id"],
+    ["macOS installer check", "hdiutil attach", "echo attach-disabled"],
+    ["Linux startup check", "--appimage-extract-and-run", "--appimage-version"],
+    ["archive signature check", "capability_release merge-catalog", "capability_release help"],
+    ["capability catalog equality", "assert.deepEqual", "console.log"],
+    ["separate engine channel", "--channel capabilities", "--channel desktop"],
+    ["blocking source checks", "  source-check:\n", "  source-check:\n    continue-on-error: true\n"],
+    ["protected desktop signing/publication", "environment: desktop-release", "environment: unprotected"],
+    ["protected engine publication", "environment: capability-release", "environment: unprotected"],
+  ];
+  for (const [label, original, replacement] of mutations) {
+    assert.ok(workflow.includes(original), `fixture includes ${label}`);
+    assert.equal(releaseWorkflowReady(workflow.replaceAll(original, replacement)), false, label);
+  }
+  assert.equal(releaseWorkflowReady(workflow + "\n  extra-publisher:\n    permissions:\n      contents: write\n"), false);
+  const titlesOnly = workflow.replaceAll(/^(\s*)(- )?run:/gm, "$1$2name:");
+  assert.equal(releaseWorkflowReady(titlesOnly), false, "step names cannot replace executable checks");
 });

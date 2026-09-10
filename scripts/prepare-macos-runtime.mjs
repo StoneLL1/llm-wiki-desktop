@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -21,8 +22,23 @@ export async function prepareMacosRuntime(root) {
     if (!magic.has(header.buffer.toString("hex"))) continue;
     try { await run("codesign", ["--verify", "--strict", file]); }
     catch {
-      await run("codesign", ["--force", "--sign", "-", "--timestamp=none", file]);
-      await run("codesign", ["--verify", "--strict", file]);
+      // Payloads materialize framework symlinks as ordinary files. codesign
+      // infers a bundle from the surrounding Resources/Versions directories,
+      // then rejects that flattened layout as ambiguous. Inspect the actual
+      // Mach-O outside its bundle so valid upstream signatures remain intact.
+      const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "llm-wiki-macos-sign-"));
+      try {
+        const standalone = path.join(temporary, "runtime");
+        await fs.copyFile(file, standalone);
+        try { await run("codesign", ["--verify", "--strict", standalone]); }
+        catch {
+          await run("codesign", ["--force", "--sign", "-", "--timestamp=none", standalone]);
+          await run("codesign", ["--verify", "--strict", standalone]);
+          await fs.copyFile(standalone, file);
+        }
+      } finally {
+        await fs.rm(temporary, { recursive: true, force: true });
+      }
     }
   }
 }

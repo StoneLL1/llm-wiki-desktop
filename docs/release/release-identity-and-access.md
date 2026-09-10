@@ -84,11 +84,15 @@ Current updater custody record: existing updater key pair selected; primary owne
 
 ## Workflow permissions and approvals
 
-- Ordinary CI declares `contents: read` and has no publishing permission.
-- Capability distribution is suspended: no release workflow builds or uploads capability packs, and no workflow holds the retired capability signing key. The `capability-release` Environment remains configured but unused.
-- `.github/workflows/desktop-release.yml` owns the atomic four-platform desktop transaction (`preflight`, `desktop-build`, `publish`). Only its final `publish` job receives `contents: write`, and that job is protected by the `desktop-release` environment.
-- The per-platform candidates remain workflow artifacts through build, per-platform updater-signature verification, `latest.json` assembly, and digest comparison. The protected publisher creates one draft only after those gates, uploads the complete bundle, then publishes and performs anonymous post-publish verification.
-- `desktop-release` allows deployments only from `master` or tags matching `app-v*`. There is no required reviewer; the maintainer initiates publication through a tag or dispatch.
+- Ordinary CI uses read-only repository access for validation. Its narrowly scoped retry job has `actions: write` to retry a hosted-runner shutdown once.
+- `.github/workflows/desktop-release.yml` owns the current release process: source-run and catalog preflight, exact-commit full source checks on macOS, four-platform builds with updater signatures and installation/launch smoke checks, separate capability publication, and final desktop publication.
+- Engine reuse requires a completed canonical source run for the exact application tag, successful qualification jobs, unchanged engine inputs, and unexpired, provenance-bound artifacts. The source comes from `capability_source_run_id` or the repository variable `CAPABILITY_SOURCE_RUN_ID`; v0.2.1 uses `34439099432`. Changed engine inputs require rebuilding. Long-term restoration from a permanent release channel and unrestricted cross-version reuse are not implemented.
+- The protected `publish-capabilities` job uses `capability-release` and `contents: write` to publish already signed, re-verified engine archives to `capabilities-vX.Y.Z`. It does not expose the capability private key. The channel is a prerelease with `latest=false`.
+- The final `publish` job uses `desktop-release` and `contents: write`. It waits for source checks, all four desktop builds and smoke checks, and successful capability publication. The desktop release has eight public assets: four installers, two macOS updater archives, `latest.json`, and checksums. The verified non-empty capability catalog is embedded in each official application.
+- Updater signing keys are exposed only to the protected desktop build jobs. The updater and capability trust anchors remain separate. Original engine provenance and current integration provenance are retained in Actions artifacts; remote upload names, sizes, and digests are checked before draft publication.
+- Release environments retain `master`/`app-v*` deployment restrictions without a required reviewer. The maintainer initiates publication through a tag or dispatch. See the [current runbook](release-runbook.md) for retries and source-artifact expiry handling.
+
+### Historical Batch 5/6 status
 
 No remote release workflow rehearsal is claimed for Batch 5 or Batch 6. The 2026-08-25 configuration pass closed public access, `master` protection, required reviewers, and Environment deployment policy. On 2026-08-26, names-only audits confirmed both updater secrets, the capability private-key secret, and `CAPABILITY_SIGNING_KEY_ID=llm-wiki-capability-v1`; no tag or Release exists. The public capability trust anchor and first-release acceptance contract are prepared on a review branch. Reviewed merge, same-SHA CI, sealed release assets, and the deferred four-platform clean-install matrix remain release blockers, not local test failures. The complete Batch 6 decision and platform matrix are in [`batch-6-acceptance-evidence.md`](batch-6-acceptance-evidence.md).
 

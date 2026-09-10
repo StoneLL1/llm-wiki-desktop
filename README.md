@@ -42,12 +42,12 @@ On macOS, drag the app into Applications. On Windows, run the setup file. On Lin
 
 The macOS app is not Apple-notarized and the Windows installer does not carry an Authenticode identity, so the OS may show a first-launch warning. See [installation notes](docs/release/known-limitations.md) for details. App updates and optional capability packs are signature-verified.
 
-The release also contains automatic-update files and `CHECKSUMS.sha256`. **v0.2.1 does not distribute optional engine packs.** OCR, audio/video transcription, browser extraction, and legacy Office conversion that require these engines are unavailable in a fresh installation. Local wiki browsing, editing, search, graph, and configured AI workflows remain available.
+The desktop release contains the installers, automatic-update files, and `CHECKSUMS.sha256`. Optional OCR, audio/video transcription, browser extraction, and legacy Office engines are available from the separate [capability release](https://github.com/StoneLL1/llm-wiki-desktop/releases/tag/capabilities-v0.2.1). Install the engines you need from within the app; you do not need to download every pack.
 
 ## Get started
 
 1. **Create or open a knowledge base.** Start in a new folder, or open a compatible Markdown vault. Existing vaults keep their layout.
-2. **Import a source.** Start with a text or Markdown document and review the readable Source. Formats requiring optional engines are unavailable in this release.
+2. **Import a source.** Add a document or link and review the readable Source. Install an optional import engine from within the app when the format requires it.
 3. **Choose your AI.** Configure a provider in Settings, connect local Ollama, or select an installed Agent CLI. Reading, editing, graph navigation, and keyword search work without AI.
 4. **Build your wiki.** Run **Update Wiki** from Workflows, inspect the result, and explore the connected pages. Use Chat for questions and HTML export for sharing.
 
@@ -91,7 +91,7 @@ npm run check         # Frontend, tooling, capability runners, and Rust checks
 npm run tauri -- build --config '{"bundle":{"createUpdaterArtifacts":false}}'
 ```
 
-`npm run dev` starts only the frontend server; use `npm run tauri -- dev` for the desktop app. v0.2.1 builds use an empty optional-engine catalog. The local build command disables updater artifact signing; official releases are signed in CI.
+`npm run dev` starts only the frontend server; use `npm run tauri -- dev` for the desktop app. Local builds use the development capability configuration; official builds embed the complete verified install catalog. The local build command disables updater artifact signing; official releases are signed in CI.
 
 | Resource | Purpose |
 | :-- | :-- |
