@@ -7,6 +7,10 @@ on:
         description: Desktop app-v tag; capability URLs use the matching capabilities-v tag
         required: true
         type: string
+      source_run_id:
+        description: Failed desktop release run with reusable qualified capability artifacts
+        required: false
+        type: string
       signing_key_id:
         description: Public key ID already committed to capabilities/trusted-keys.json
         required: true
@@ -17,6 +21,10 @@ on:
         description: Desktop app-v tag; capability URLs use the matching capabilities-v tag
         required: true
         type: string
+      source_run_id:
+        description: Failed desktop release run with reusable qualified capability artifacts
+        required: false
+        type: string
       signing_key_id:
         description: Public key ID already committed to capabilities/trusted-keys.json
         required: true
@@ -24,6 +32,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: capability-release-${{ inputs.release_tag }}
@@ -61,9 +70,13 @@ jobs:
 
       - name: Materialize the exact formal staging and qualification plan
         id: matrix
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
         run: |
           set -euo pipefail
-          plan="$(node scripts/capability-release-plan.mjs)"
+          node scripts/capability-release-plan.mjs > capability-plan.json
+          plan="$(node scripts/recover-capability-plan.mjs capability-plan.json "$SOURCE_RUN_ID")"
           count="$(node -e 'const value=JSON.parse(process.argv[1]);process.stdout.write(String(value.expectedEntryCount))' "$plan")"
           test "$count" -gt 0
           echo "matrix=$(node -e 'const value=JSON.parse(process.argv[1]);process.stdout.write(JSON.stringify({include:value.include}))' "$plan")" >> "$GITHUB_OUTPUT"
@@ -79,6 +92,7 @@ jobs:
             capabilities/release-recipes.json
             capabilities/release-sources.json
             capabilities/qualification-corpus.json
+            capability-recovery.json
           if-no-files-found: error
           overwrite: true
           retention-days: 30
@@ -97,15 +111,28 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with: { ref: "${{ inputs.release_tag }}" }
 
+      - name: Recover the previously qualified signed archive
+        if: matrix.reuseArtifactId != ''
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ matrix.reuseArtifactId }}
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+          path: capability-dist
+          merge-multiple: true
+
       - name: Setup Node.js
+        if: matrix.reuseArtifactId == ''
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: 22.23.1, cache: npm }
 
       - name: Setup uv
+        if: matrix.reuseArtifactId == ''
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with: { version: "0.10.8", enable-cache: false }
 
       - name: Setup Rust
+        if: matrix.reuseArtifactId == ''
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -113,6 +140,7 @@ jobs:
           rustup default 1.92.0
 
       - name: Cache Rust dependencies
+        if: matrix.reuseArtifactId == ''
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: src-tauri -> target
@@ -120,7 +148,7 @@ jobs:
           cache-on-failure: true
 
       - name: Install Linux build and browser runtime prerequisites
-        if: runner.os == 'Linux'
+        if: matrix.reuseArtifactId == '' && runner.os == 'Linux'
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -146,9 +174,11 @@ jobs:
           npm exec --prefix capabilities/browser-runtime -- playwright install-deps chromium
 
       - name: Build release assembler without signing credentials
+        if: matrix.reuseArtifactId == ''
         run: cargo build --locked --release --no-default-features --manifest-path src-tauri/Cargo.toml --bin capability_release
 
       - name: Fetch locked sources and prepare the deterministic payload
+        if: matrix.reuseArtifactId == ''
         id: payload
         shell: pwsh
         run: |
@@ -162,6 +192,7 @@ jobs:
           "modelBytes=$($result.modelBytes ?? 0)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Assemble and sign exactly one target archive
+        if: matrix.reuseArtifactId == ''
         shell: pwsh
         env:
           LLM_WIKI_CAPABILITY_SIGNING_KEY_PKCS8_HEX: ${{ secrets.LLM_WIKI_CAPABILITY_SIGNING_KEY_PKCS8_HEX }}
@@ -184,6 +215,7 @@ jobs:
           if (@(Get-ChildItem -LiteralPath $dist -Filter '*.zip' -File).Count -ne 1 -or @(Get-ChildItem -LiteralPath $dist -Filter '*.catalog.json' -File).Count -ne 1) { throw 'one matrix entry must produce exactly one archive and fragment' }
 
       - name: Re-extract the signed archive and run formal qualification
+        if: matrix.reuseArtifactId == ''
         shell: pwsh
         env:
           LLM_WIKI_X_PRODUCTION_SAMPLE_URL: ${{ vars.X_PRODUCTION_SAMPLE_URL }}
