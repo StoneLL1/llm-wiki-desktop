@@ -129,7 +129,7 @@ jobs:
           cache: npm
 
       - name: Setup pinned Rust target
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59f46e9ac8772 # v1
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: ${{ env.RUST_VERSION }}
           targets: ${{ matrix.target }}
@@ -244,9 +244,9 @@ jobs:
           mkdir -p public
           cp candidate/latest.json public/
           for platform in windows-x86_64 darwin-aarch64 darwin-x86_64 linux-x86_64; do
-            find "candidate/desktop/$platform" -maxdepth 1 -type f ! -name 'release-entry.json' -exec cp {} public/ \;
+            find "candidate/desktop/$platform" -maxdepth 1 -type f ! -name 'release-entry.json' ! -name '*.sig' -exec cp {} public/ \;
           done
-          test "$(find public -maxdepth 1 -type f | wc -l | tr -d ' ')" = 11
+          test "$(find public -maxdepth 1 -type f | wc -l | tr -d ' ')" = 7
           node scripts/generate-release-checksums.mjs --root public --output public/CHECKSUMS.sha256
 
       - name: Publish verified assets
