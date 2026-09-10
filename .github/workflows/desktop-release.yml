@@ -157,6 +157,8 @@ jobs:
           cache-on-failure: true
       - run: npm ci
       - run: npm run check
+        env:
+          LLM_WIKI_CHECK_SERIAL: '1'
 
   desktop-build:
     name: Build updater-signed ${{ matrix.platform }}
