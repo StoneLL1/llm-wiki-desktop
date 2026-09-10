@@ -49,19 +49,25 @@ export async function publishDesktopRelease({ root, tag, notesFile = path.resolv
     || (capability && !tag.startsWith("capabilities-v"))) throw new Error("a stable tag for the selected channel is required");
   const uploads = await releaseUploads(root);
   const endpoint = `repos/${RELEASE_REPOSITORY}/releases`;
-  const releasesForTag = () => JSON.parse(
-    gh(["api", `${endpoint}?per_page=100`, "--paginate", "--slurp"]),
-  ).flat().filter((candidate) => candidate.tag_name === tag);
-  let matches = releasesForTag();
-  if (matches.length > 1) throw new Error(`duplicate releases exist for tag: ${tag}`);
-  let release = matches[0];
+  const releaseForTag = () => {
+    try {
+      const value = JSON.parse(gh([
+        "release", "view", tag, "--repo", RELEASE_REPOSITORY, "--json", "databaseId,isDraft",
+      ]));
+      return { id: value.databaseId, draft: value.isDraft };
+    } catch (error) {
+      const failure = [error.message, error.stderr, error.stdout].filter(Boolean).join("\n");
+      if (/HTTP 404/.test(failure)) return null;
+      throw error;
+    }
+  };
+  let release = releaseForTag();
   if (!release) {
     gh(["release", "create", tag, "--repo", RELEASE_REPOSITORY, "--verify-tag", "--draft",
       "--title", capability ? `Optional capability packs ${appTag.slice(4)}` : `LLM Wiki Desktop ${tag.slice(4)}`,
       "--notes-file", path.resolve(notesFile), ...(capability ? ["--prerelease"] : [])]);
-    matches = releasesForTag();
-    if (matches.length !== 1) throw new Error(`could not resolve the draft created for tag: ${tag}`);
-    release = matches[0];
+    release = releaseForTag();
+    if (!release) throw new Error(`could not resolve the draft created for tag: ${tag}`);
   }
   const remoteAssets = () => JSON.parse(gh(["api", `${endpoint}/${release.id}/assets?per_page=100`, "--paginate", "--slurp"])).flat();
   if (!release.draft) {

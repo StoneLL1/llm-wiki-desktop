@@ -25,8 +25,9 @@ async function fixture(context) {
       for (let index = 0; index < assets.length; index += pageSize) pages.push(assets.slice(index, index + pageSize));
       return JSON.stringify(pages);
     }
-    if (args[0] === "api" && args[1].endsWith("?per_page=100")) {
-      return JSON.stringify(exists ? [[{ id: 7, draft, tag_name: createdTag ?? "app-v0.2.1" }]] : [[]]);
+    if (args[0] === "release" && args[1] === "view") {
+      if (!exists) throw Object.assign(new Error("not found"), { stderr: "HTTP 404" });
+      return JSON.stringify({ databaseId: 7, isDraft: draft, tagName: createdTag ?? "app-v0.2.1" });
     }
     if (args[1] === "create") { exists = true; createdTag = args[2]; return ""; }
     if (args[1] === "upload") {
@@ -70,7 +71,7 @@ test("a public release cannot be overwritten or deleted", async (context) => {
   const f = await fixture(context);
   f.setDraft(false);
   await assert.rejects(publishDesktopRelease({ root: f.root, tag: "app-v0.2.1", gh: f.gh }), /already public/);
-  assert.ok(f.calls.every((args) => args[0] === "api"));
+  assert.ok(f.calls.every((args) => !["create", "upload", "edit", "delete"].includes(args[1])));
 });
 
 test("all pages of an already matching public release succeed without writes", async (context) => {
@@ -79,7 +80,7 @@ test("all pages of an already matching public release succeed without writes", a
   f.setPageSize(1);
   f.setAssets(f.uploads.map((asset) => ({ ...asset, state: "uploaded" })));
   await publishDesktopRelease({ root: f.root, tag: "app-v0.2.1", gh: f.gh });
-  assert.ok(f.calls.every((args) => args[0] === "api"));
+  assert.ok(f.calls.every((args) => !["create", "upload", "edit", "delete"].includes(args[1])));
 });
 
 test("unexpected assets leave the draft unpublished, without deleting anything", async (context) => {
