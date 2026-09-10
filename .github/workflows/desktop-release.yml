@@ -63,7 +63,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
-          CAPABILITY_SOURCE_RUN_ID: ${{ inputs.capability_source_run_id }}
+          CAPABILITY_SOURCE_RUN_ID: ${{ inputs.capability_source_run_id || vars.CAPABILITY_SOURCE_RUN_ID }}
         run: |
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = "StoneLL1/llm-wiki-desktop"
@@ -129,7 +129,7 @@ jobs:
       - name: Check release configuration
         env:
           RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
-          CAPABILITY_SOURCE_RUN_ID: ${{ inputs.capability_source_run_id }}
+          CAPABILITY_SOURCE_RUN_ID: ${{ inputs.capability_source_run_id || vars.CAPABILITY_SOURCE_RUN_ID }}
         run: |
           if [ -n "$CAPABILITY_SOURCE_RUN_ID" ]; then
             node scripts/check-release-version.mjs --tag "$RELEASE_TAG" --allow-nondefault-branch
@@ -146,7 +146,7 @@ jobs:
     with:
       release_tag: ${{ needs.preflight.outputs.release_tag }}
       signing_key_id: ${{ vars.CAPABILITY_SIGNING_KEY_ID }}
-      source_run_id: ${{ inputs.capability_source_run_id }}
+      source_run_id: ${{ inputs.capability_source_run_id || vars.CAPABILITY_SOURCE_RUN_ID }}
     secrets: inherit
 
   desktop-build:
