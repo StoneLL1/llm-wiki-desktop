@@ -1997,7 +1997,7 @@ fn hash_media_file(path: &Path) -> Result<String, BackendError> {
 
 fn hash_media_reader(file: &mut std::fs::File) -> Result<String, BackendError> {
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 1024 * 1024];
+    let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
         let read = file
             .read(&mut buffer)

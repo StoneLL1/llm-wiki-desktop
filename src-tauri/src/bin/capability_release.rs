@@ -1552,7 +1552,19 @@ printf '{"jsonrpc":"2.0","id":"%s","result":{"healthy":true,"protocolVersion":"2
         )
         .unwrap();
         let output = fixture.root.join("安装验证");
-        let installed = verify_install(&result.fragment_path, &fixture.output, &output).unwrap();
+        // Exercise the CLI caller on less than Windows' 1 MiB main-thread stack.
+        // This catches large synchronous frames as well as oversized async futures.
+        let catalog_path = result.fragment_path.clone();
+        let archives = fixture.output.clone();
+        let install_output = output.clone();
+        let installed = std::thread::Builder::new()
+            .name("verify-install-small-stack".into())
+            .stack_size(512 * 1024)
+            .spawn(move || verify_install(&catalog_path, &archives, &install_output))
+            .unwrap()
+            .join()
+            .unwrap()
+            .unwrap();
         assert_eq!(installed.len(), 1);
         assert_eq!(
             fs::read(installed[0].payload.join("models/model.bin")).unwrap(),

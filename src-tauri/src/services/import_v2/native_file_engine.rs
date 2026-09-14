@@ -1602,7 +1602,7 @@ where
             .map_err(|_| invalid("The media staging file could not be created."))?;
         let mut full = Sha256::new();
         let mut prefix = Vec::with_capacity(8192);
-        let mut buffer = [0_u8; 1024 * 1024];
+        let mut buffer = vec![0_u8; 1024 * 1024];
         let mut copied = 0_u64;
         use std::io::{Read, Write};
         loop {
@@ -1693,7 +1693,7 @@ fn staged_media_copy_matches(
     }
     let mut full = Sha256::new();
     let mut prefix = Vec::with_capacity(8192);
-    let mut buffer = [0_u8; 1024 * 1024];
+    let mut buffer = vec![0_u8; 1024 * 1024];
     let mut read_total = 0_u64;
     use std::io::Read;
     loop {

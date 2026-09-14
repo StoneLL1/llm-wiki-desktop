@@ -420,7 +420,7 @@ where
     let mut file = File::open(path).map_err(io_error)?;
     let mut full = Sha256::new();
     let mut prefix = Vec::with_capacity(PREFIX_BYTES as usize);
-    let mut buffer = [0_u8; 1024 * 1024];
+    let mut buffer = vec![0_u8; 1024 * 1024];
     let mut read_total = 0_u64;
     loop {
         if is_cancelled() {

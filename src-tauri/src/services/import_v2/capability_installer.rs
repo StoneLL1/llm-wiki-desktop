@@ -3251,4 +3251,24 @@ mod tests {
         assert!(!paths.archive.exists());
         assert!(!paths.metadata.exists());
     }
+    #[test]
+    fn installation_future_does_not_embed_large_transfer_buffers() {
+        let fixture = SignedFixture::new(b"runtime", "test-key");
+        let blocking = BlockingWorkCoordinator::default();
+        let token = CancellationToken::default();
+        let future = install_catalog_entry_from_source(
+            &blocking,
+            &fixture.root,
+            &fixture.entry,
+            Some(&fixture.archive),
+            "size-check",
+            &token,
+            |_, _, _| {},
+        );
+        let bytes = std::mem::size_of_val(&future);
+        assert!(
+            bytes < 64 * 1024,
+            "installation future embeds {bytes} bytes before it is polled"
+        );
+    }
 }

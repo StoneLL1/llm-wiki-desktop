@@ -195,7 +195,7 @@ pub fn clear_remote_media_partial(project_root: &Path, staging: &Path) -> Result
 
 fn hash_reader(mut reader: std::fs::File) -> Result<String, BackendError> {
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 1024 * 1024];
+    let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
         let read = reader.read(&mut buffer).map_err(|_| partial_io_error())?;
         if read == 0 {

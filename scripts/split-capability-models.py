@@ -52,13 +52,25 @@ def split_entry(entry, archive, output, base_url, model_base_url):
         infos = source.infolist()
         if any(not safe_path(item.filename) or (item.external_attr >> 16) & 0o170000 == 0o120000 for item in infos):
             raise ValueError('source archive contains unsafe paths or symlinks')
-        if len({item.filename.casefold() for item in infos}) != len(infos):
-            raise ValueError('source archive has duplicate paths')
+        # Linux payloads may contain distinct Foo.py/foo.py files. Use the
+        # target's filesystem rules, not the host running this archive rewrite.
+        case_sensitive = entry['targetTriple'] == 'x86_64-unknown-linux-gnu'
+        seen = {}
+        for item in infos:
+            name = item.filename.rstrip('/')
+            key = name if case_sensitive else name.casefold()
+            if key in seen:
+                raise ValueError(f'source archive has duplicate paths: {seen[key]} / {item.filename}')
+            seen[key] = item.filename
         manifest = json.loads(source.read('manifest.json'))
         inventory = {item['path']: item for item in manifest['files']}
         if manifest['packId'] != entry['capabilityId'] or manifest['version'] != entry['version']:
             raise ValueError('manifest identity does not match catalog')
         model_names = {item.filename for item in infos if not item.is_dir() and item.filename.startswith('models/')}
+        # Model objects are shared across platforms; their catalog paths must
+        # remain unambiguous even when the program targets Linux.
+        if len({name.casefold() for name in model_names}) != len(model_names):
+            raise ValueError('model files have case-insensitive duplicate paths')
         if len(model_names) > 1024:
             raise ValueError('model file count exceeds 1024')
         for name in model_names:
