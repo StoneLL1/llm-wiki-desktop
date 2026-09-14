@@ -10,8 +10,9 @@
 
 - `base_url`：程序 ZIP 将被实际托管的 HTTPS 目录，必填。
 - `model_base_url`：模型文件的 HTTPS 根目录，可选，默认与程序相同。不同程序版本、平台可以共用同一个模型存储目录。程序内容改变时分配新的资源版本，避免旧安装目录与新字节冲突。
+- `publish_github`：默认关闭。开启后在 GitHub runner 上直接发布资源，避免维护者先下载完整资源再上传。此时 `base_url` 必须是本仓库 `https://github.com/OWNER/REPO/releases/download/capabilities-TAG/` 地址，例如 `capabilities-2026-09-14`；模型也转换成同一 Release 的扁平附件，`model_base_url` 不作为最终下载地址。
 
-程序目录应使用新的资源目录名，避免用新字节覆盖旧 catalog 引用的同名文件。模型目录按内容摘要组织，可以长期复用。地址应由维护者提供并维护。填写 URL 不会创建存储空间，也不会使资源自动公开。
+程序目录应使用新的资源目录名，避免用新字节覆盖旧 catalog 引用的同名文件。模型目录按内容摘要组织，可以长期复用。地址应由维护者提供并维护。仅填写 URL 不会使资源自动公开；GitHub 自动发布需明确开启 `publish_github`。
 
 工作流从 [product-manifest.json](product-manifest.json) 推导每个已发布能力支持的平台，结合 [release-recipes.json](release-recipes.json)、[release-sources.json](release-sources.json) 与 [qualification-corpus.json](qualification-corpus.json) 构建资源。不能用“能力数 × 平台数”的固定乘积代替实际矩阵；部分能力只支持平台子集。
 
@@ -25,7 +26,9 @@
 
 浏览器资源必须通过实际 Chromium 启动及本地行为检查。X/微信的在线样本检查仅在仓库配置对应 `X_PRODUCTION_SAMPLE_URL` / `WECHAT_PRODUCTION_SAMPLE_URL` 时运行；未配置会明确报告在线访问未验证，不会因缺少外部网页样本阻止程序构建。
 
-单项构建产物为 `resource-<capabilityId>-<targetTriple>`。最终 `capability-resources` 产物包含完整程序 ZIP、共享的 `models/` 目录和 `install-catalog.json`。工作流只构建并保存产物，不创建 Release、不上传到外部存储、不修改仓库 catalog。
+单项构建产物为 `resource-<capabilityId>-<targetTriple>`。最终 `capability-resources` 产物包含完整程序 ZIP、共享的 `models/` 目录和 `install-catalog.json`。默认只保存这些产物，供 HTTPS 托管或离线分发；工作流不会修改仓库 catalog。
+
+开启 `publish_github` 后，合并 job 还会转换扁平附件、创建独立资源 tag 和草稿，并逐项上传校验。上传中断时重跑失败 job 会复用已上传的同字节附件；草稿中的不完整或变化附件可替换，已公开附件则必须全部匹配，绝不覆盖。上传完整后公开为 prerelease，始终 `latest=false`，不影响 App 更新。随后匿名下载 catalog 中的全部程序和独立模型，逐个校验完整大小和 SHA-256；通过后输出小体积 `public-capability-catalog` 产物。将这里的 catalog 提交到仓库即可准备 App，无需下载全部资源，也不需要绑定 Actions run。
 
 维护者也可以使用同一套命令在相应平台运行。拆分已完成 qualification 的旧完整 ZIP 时，调用方式为：
 
@@ -62,7 +65,7 @@ node scripts/stage-capability-downloads.mjs \
   --base-url "https://github.com/OWNER/REPO/releases/download/RESOURCE_TAG/"
 ```
 
-上传输出目录的所有文件，并提交其中生成的 catalog。该工具核对本地原始文件摘要，把在线模型地址改为不重名的扁平附件地址，同时提供保留目录结构的 `models.zip`。离线用户下载所需程序 ZIP，把 `models.zip` 解压到旁边，即可选择程序 ZIP 安装。此转换不创建 Release，也不代表国内网络一定可达；有实际国内存储时可直接托管原构建目录。
+手动托管时上传输出目录的所有文件，并提交其中生成的 catalog；工作流启用 `publish_github` 会自动执行转换与发布。该工具核对本地原始文件摘要，把在线模型地址改为不重名的扁平附件地址，同时提供保留目录结构、可重复生成的 `models.zip`。离线用户下载所需程序 ZIP，把 `models.zip` 解压到旁边，即可选择程序 ZIP 安装。任何附件达到 2 GiB 会明确拒绝，需改用目录托管。转换本身不创建 Release，也不代表国内网络一定可达；有实际国内存储时可直接托管原构建目录。
 
 实际下载检查不携带登录 token，会从 catalog 地址读取文件并验证大小和 SHA-256。模型存在多个候选 URL 时，至少一个候选需返回正确文件。仅有 Actions artifact、未公开的 Release 或对象存储管理后台记录，不能证明用户可以下载。
 

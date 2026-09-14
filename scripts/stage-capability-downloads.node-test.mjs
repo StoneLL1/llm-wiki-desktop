@@ -99,6 +99,17 @@ test("existing output is never overwritten or removed", async (t) => {
   assert.equal(fs.readFileSync(path.join(f.output, "keep.txt"), "utf8"), "user data");
 });
 
+test("restaging the same downloaded artifacts preserves every byte despite filesystem timestamps", async (t) => {
+  const f = fixture(t);
+  await stageCapabilityDownloads(f);
+  fs.utimesSync(f.modelSource, new Date("2026-01-02T00:00:00Z"), new Date("2026-01-02T00:00:00Z"));
+  const retry = f.output + "-retry";
+  await stageCapabilityDownloads({ ...f, output: retry });
+  for (const file of fs.readdirSync(f.output)) {
+    assert.equal(hash(fs.readFileSync(path.join(f.output, file))), hash(fs.readFileSync(path.join(retry, file))), file);
+  }
+});
+
 test("model SHA mismatch is rejected before creating the output", async (t) => {
   const f = fixture(t);
   fs.writeFileSync(f.modelSource, Buffer.alloc(f.modelBytes.length));

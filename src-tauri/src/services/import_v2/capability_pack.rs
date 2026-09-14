@@ -550,7 +550,10 @@ pub(super) fn hash_file(path: &Path) -> Result<String, BackendError> {
     let mut file =
         fs::File::open(path).map_err(|_| invalid("A capability runtime file cannot be read."))?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 1024 * 1024];
+    // This also hashes the small installation receipt manifest on the caller
+    // thread. A 1 MiB stack array exhausts the Windows main-thread stack before
+    // the first read; keep the streaming buffer on the heap for every caller.
+    let mut buffer = vec![0_u8; 64 * 1024];
     loop {
         let read = file
             .read(&mut buffer)
@@ -597,6 +600,24 @@ fn unavailable(message: &str) -> BackendError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_file_hash_streams_on_a_small_caller_stack() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("模型.bin");
+        let bytes = vec![0x5a; 2 * 1024 * 1024 + 37];
+        let expected = format!("{:x}", Sha256::digest(&bytes));
+        fs::write(&path, &bytes).unwrap();
+        let actual = std::thread::Builder::new()
+            .name("capability-hash-small-stack".into())
+            .stack_size(128 * 1024)
+            .spawn(move || hash_file(&path))
+            .unwrap()
+            .join()
+            .unwrap()
+            .unwrap();
+        assert_eq!(actual, expected);
+    }
 
     #[test]
     fn runtime_inventory_walks_deep_directories_without_recursion() {

@@ -48,3 +48,16 @@
 `pack_engine::terminate_tree` 曾调用外部 `kill -TERM -<pid>`。在 [procps 4.0.4 实现](https://gitlab.com/procps-ng/procps/-/raw/v4.0.4/src/kill.c) 中，未终止选项解析的负数可按首位处理；以 1 开头的 PID 因而可能变成向所有可发信号进程发送 TERM。这同时影响运行时取消路径，不只是 CI。
 
 已改为直接调用 `libc::kill`，保持 TERM → 100ms → KILL 时序；两个 connector 测试也建立独立进程组。新增测试确认目标后代退出、管道结束且独立哨兵仍存活，4 项定向测试通过。删除基于错误基础设施假设的自动重试 job，三平台源码检查名称和要求保持不变。完整检查和 GitHub CI 的最终结果以新版发布验收为准。
+
+## 原生资源验收发现的发布缺陷
+
+PR #73 合并前，三平台源码 CI 和最终本地完整检查（15 分 45.6 秒）均通过。随后在 [43 项原生资源验收](https://github.com/StoneLL1/llm-wiki-desktop/actions/runs/34827616817) 中发现普通源码测试未覆盖的问题：
+
+- Linux Python 资源被拆包脚本统一的大小写折叠检查拒绝。锁定 Python 发行包实际包含 25 组合法大小写不同路径，例如 `share/terminfo/2/2621A` / `2621a`、`share/terminfo/E/Eterm` / `e/eterm`。拆包按目标平台处理程序路径；共享模型仍保持跨平台路径无歧义，真正重复路径与不安全路径仍拒绝。
+- Windows 的实际安装/重启验收在清单哈希阶段发生栈溢出。共享 `capability_pack::hash_file` 曾把 1 MiB 读取缓冲放在栈上，恰好达到 Windows 主线程默认栈量级；这是运行时代码风险，不能靠放宽验收或扩大验收工具栈掩盖。修复使用堆上的小块读取缓冲，并以小栈线程回归验证。
+
+- Windows 外部 Node 测试入口把 Rust 输出的扩展路径前缀当作 glob，已在 CLI 输出边界转换驱动器/UNC 表示，内部安装安全路径保持不变。
+- 清空子进程环境也移除了 Windows Python 所需的用户目录，Docling 导入时无法解析 home。健康探测和实际调用现共用最小 OS/用户目录/缓存/临时目录环境，真实 Python 回归覆盖 HOME/USERPROFILE、中文空格临时路径及凭据隔离。
+- 资源工作流可选直接在 GitHub runner 发布独立资源，复用现有可恢复发布器，公开后完整核验程序和模型下载 SHA；离线模型 ZIP 使用固定元数据，以便同一构建的发布步骤安全续跑。
+
+修复后的完整资源验收、公开下载与 App 发布结果将在完成后补充。

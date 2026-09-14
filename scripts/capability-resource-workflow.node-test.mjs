@@ -54,6 +54,34 @@ test("artifact merge retains the splitter directory and verifies the full produc
   assert.equal(final.with.path, "capability-dist/");
 });
 
+test("optional runner publication stages flat assets, resumes drafts and verifies anonymous full downloads", () => {
+  const input = workflow.on.workflow_dispatch.inputs.publish_github;
+  assert.equal(input.type, "boolean");
+  assert.equal(input.default, false);
+  assert.equal(workflow.permissions.contents, "read");
+  const merge = workflow.jobs["merge-catalog"];
+  assert.equal(merge.permissions.contents, "write");
+  const steps = merge.steps;
+  const stage = steps.findIndex((step) => step.run?.includes("stage-capability-downloads.mjs"));
+  const publish = steps.findIndex((step) => step.run?.includes("publish-desktop-release.mjs"));
+  const verify = steps.findIndex((step) => step.run?.includes("verify-published-capability-assets.mjs"));
+  assert.ok(stage >= 0 && stage < publish && publish < verify);
+  for (const index of [stage, publish, verify]) assert.equal(steps[index].if, "inputs.publish_github");
+  assert.match(steps[stage].run, /--input capability-dist --output github-capability-dist/u);
+  assert.match(steps[publish].run, /--channel capabilities/u);
+  assert.match(steps[publish].run, /--tag "\$RESOURCE_TAG" --repository "\$RESOURCE_REPOSITORY" --target "\$RESOURCE_COMMIT"/u);
+  assert.match(steps[verify].run, /--catalog github-capability-dist\/install-catalog.json/u);
+  assert.doesNotMatch(steps[verify].run, /availability-only/u);
+  assert.equal(steps[verify].env?.GH_TOKEN, undefined);
+  const catalog = steps.find((step) => step.with?.name === "public-capability-catalog");
+  assert.ok(steps.indexOf(catalog) > verify);
+  assert.equal(catalog.if, "inputs.publish_github");
+  assert.match(catalog.with.path, /github-capability-dist\/install-catalog.json/u);
+  const preflight = runText("release-preflight");
+  assert.match(preflight, /capabilityReleaseLocation\(process.env.BASE_URL, process.env.GITHUB_REPOSITORY\)/u);
+  assert.match(preflight, /process.env.PUBLISH_GITHUB === "true"/u);
+});
+
 test("two native artifacts merge distinct fragments and one shared offline model object", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "wiki-resource-workflow-中文-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

@@ -81,10 +81,14 @@ export async function stageCapabilityDownloads({ input, output, baseUrl }) {
     if (models.size) {
       const archive = path.join(destination, "models.zip");
       execFileSync(process.platform === "win32" ? "python" : "python3", ["-c", `
-import json,sys,zipfile
+import json,shutil,sys,zipfile
 with zipfile.ZipFile(sys.argv[1], 'x', compression=zipfile.ZIP_STORED) as archive:
     for item in json.load(sys.stdin):
-        archive.write(item['source'], item['entry'])
+        info = zipfile.ZipInfo(item['entry'], date_time=(1980,1,1,0,0,0))
+        info.create_system = 3
+        info.external_attr = 0o100644 << 16
+        with open(item['source'], 'rb') as source, archive.open(info, 'w') as target:
+            shutil.copyfileobj(source, target, length=1024*1024)
 `, archive], { input: JSON.stringify([...models].map(([entry, model]) => ({ entry, source: path.join(destination, model.name) }))), stdio: ["pipe", "pipe", "pipe"] });
       if (fs.statSync(archive).size >= GITHUB_ASSET_LIMIT) throw new Error("shared models.zip exceeds GitHub's 2 GiB attachment limit");
       assets.set("models.zip", { digest: await sha256(archive) });
