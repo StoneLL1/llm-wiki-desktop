@@ -24,9 +24,13 @@ test("resource jobs use the complete native platform plan without desktop tags o
   const preflight = runText("release-preflight");
   assert.match(preflight, /catalogUrlErrors/u);
   const build = runText("build-capability");
-  const stages = ["prepare-release-capability.mjs", "& $tool @arguments", "qualify-staged-capability.mjs", "qualify-release-corpus.mjs", "split-capability-models.py"];
+  const stages = ["prepare-release-capability.mjs", "& $tool @arguments", "split-capability-models.py", "verify-install --catalog", "qualify-staged-capability.mjs", "qualify-release-corpus.mjs"];
   for (let i = 1; i < stages.length; i++) assert.ok(build.indexOf(stages[i - 1]) < build.indexOf(stages[i]));
   assert.doesNotMatch(build, /--key-id|LLM_WIKI_CAPABILITY_SIGNING_KEY|--expected-tag/u);
+  assert.match(build, /verify-install --catalog \$fragment --archives resource-dist --output \$installRoot/u);
+  assert.match(build, /\$qualified = \$verified\.installed\[0\]\.payload/u);
+  assert.match(build, /\$verified\.restarted/u);
+  assert.doesNotMatch(build, /unzip -q \$archive|tar -xf \$archive/u);
   assert.match(build, /PLAYWRIGHT_BROWSERS_PATH/u);
   assert.match(build, /runner\/browser\.smoke\.mjs/u);
   assert.match(build, /if \(\$env:LLM_WIKI_X_PRODUCTION_SAMPLE_URL\)/u);

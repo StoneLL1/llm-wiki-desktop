@@ -4,10 +4,19 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
-use llm_wiki_desktop_lib::services::import_v2::capability_installer::CapabilityCatalogEntry;
+use llm_wiki_desktop_lib::services::import_v2::capability_installer::{
+    install_catalog_entry_from_source, CapabilityCatalogEntry,
+};
 use llm_wiki_desktop_lib::services::import_v2::capability_pack::{
     CapabilityPackFile, CapabilityPackManifest,
 };
+use llm_wiki_desktop_lib::services::import_v2::capability_runtime::{
+    target_triple, ImportCapabilityRuntime,
+};
+use llm_wiki_desktop_lib::services::import_v2::product_capability::ProductCapabilityManifest;
+use llm_wiki_desktop_lib::services::import_v2::ImportV2Service;
+use llm_wiki_desktop_lib::services::{BlockingWorkCoordinator, SecretService};
+use llm_wiki_desktop_lib::tasks::task_model::CancellationToken;
 use ring::signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey, ED25519};
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -109,6 +118,23 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
             println!("catalog={}", output.display());
             Ok(())
         }
+        "verify-install" => {
+            let values = parse_options(tail, &[])?;
+            reject_unknown_options(&values, &["catalog", "archives", "output"])?;
+            let installed = verify_install(
+                &required_path(&values, "catalog")?,
+                &required_path(&values, "archives")?,
+                &required_path(&values, "output")?,
+            )?;
+            println!(
+                "{}",
+                serde_json::to_string(
+                    &serde_json::json!({ "installed": installed, "restarted": true })
+                )
+                .map_err(|error| error.to_string())?
+            );
+            Ok(())
+        }
         "public-key" => {
             let private_key = env::var(PRIVATE_KEY_ENV).map_err(|_| {
                 format!("{PRIVATE_KEY_ENV} is required and must contain hex PKCS#8 bytes")
@@ -126,10 +152,134 @@ fn usage(reason: &str) -> String {
     format!(
         "{reason}. Use `assemble --template FILE --payload DIR --target TRIPLE --entrypoint PATH \
          [--entrypoint-arg VALUE] --output DIR --base-url HTTPS_URL [--trusted-keys FILE \
-         --key-id ID] [--model-bytes N]` or `merge-catalog --input DIR --output FILE`. \
+         --key-id ID] [--model-bytes N]` or `merge-catalog --input DIR --output FILE` or `verify-install --catalog FILE --archives DIR --output NEW_DIR`. \
          The signing key is read only from {PRIVATE_KEY_ENV}. Use `public-key` to derive only the \
          raw public key hex for trusted-keys.json."
     )
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VerifiedInstallation {
+    capability_id: String,
+    version: String,
+    payload: PathBuf,
+}
+
+/// Qualify the files we will distribute using the application's actual offline
+/// installer and runtime. A new directory prevents existing caches hiding gaps.
+fn verify_install(
+    catalog_path: &Path,
+    archives: &Path,
+    output: &Path,
+) -> Result<Vec<VerifiedInstallation>, String> {
+    let catalog: CatalogFragment =
+        serde_json::from_slice(&fs::read(catalog_path).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    if catalog.schema_version != 1 || catalog.entries.is_empty() {
+        return Err("verify-install requires a non-empty schema v1 catalog".into());
+    }
+    let product = ProductCapabilityManifest::embedded()?;
+    let native_target = target_triple();
+    let mut identities = HashSet::new();
+    for entry in &catalog.entries {
+        validate_catalog_entry(entry)?;
+        if entry.target_triple != native_target {
+            return Err(format!(
+                "verify-install must run on {} for {}",
+                entry.target_triple, entry.capability_id
+            ));
+        }
+        if !identities.insert(entry.capability_id.clone())
+            || product.definition(&entry.capability_id).is_none()
+        {
+            return Err("verify-install requires one version per known capability".into());
+        }
+    }
+    fs::create_dir(output)
+        .map_err(|error| format!("verify-install output must be a new directory: {error}"))?;
+    let output = output.canonicalize().map_err(|error| error.to_string())?;
+    let archives = archives.canonicalize().map_err(|error| error.to_string())?;
+    let executor = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
+    executor.block_on(async {
+        let blocking = BlockingWorkCoordinator::default();
+        let cancellation = CancellationToken::default();
+        let runtime = ImportCapabilityRuntime::default();
+        let service = ImportV2Service::with_secret_service(SecretService::memory());
+        let mut installed = Vec::new();
+        for entry in &catalog.entries {
+            let archive = archives.join(format!(
+                "{}-{}-{}.zip",
+                entry.capability_id, entry.version, entry.target_triple
+            ));
+            let mut outcome = install_catalog_entry_from_source(
+                &blocking,
+                &output,
+                entry,
+                Some(&archive),
+                "release-qualification",
+                &cancellation,
+                |_, _, _| {},
+            )
+            .await
+            .map_err(|error| {
+                format!(
+                    "{} install failed: {}: {}",
+                    entry.capability_id, error.code, error.message
+                )
+            })?;
+            let probed = runtime
+                .probe_version_routes(&output, &entry.capability_id, &entry.version, &cancellation)
+                .map_err(|error| {
+                    format!(
+                        "{} health failed: {}: {}",
+                        entry.capability_id, error.code, error.message
+                    )
+                })?;
+            runtime
+                .activate_probed_version_atomically(probed, &entry.capability_id, &service, || {
+                    outcome.activate(&output)
+                })
+                .map_err(|error| {
+                    format!(
+                        "{} activation failed: {}: {}",
+                        entry.capability_id, error.code, error.message
+                    )
+                })?;
+            installed.push(VerifiedInstallation {
+                capability_id: entry.capability_id.clone(),
+                version: entry.version.clone(),
+                payload: output.join(&entry.capability_id).join(&entry.version),
+            });
+        }
+        drop(runtime);
+        drop(service);
+        let restarted = ImportCapabilityRuntime::default();
+        let service = ImportV2Service::with_secret_service(SecretService::memory());
+        restarted
+            .load_startup(&output, None, &service)
+            .map_err(|error| error.message)?;
+        let statuses = restarted.statuses();
+        for entry in &catalog.entries {
+            let definition = product
+                .definition(&entry.capability_id)
+                .ok_or("capability disappeared from product manifest")?;
+            for route in &definition.routes {
+                if !statuses.iter().any(|status| {
+                    status.capability_id == entry.capability_id
+                        && status.route == *route
+                        && status.available
+                        && status.healthy_version.as_deref() == Some(entry.version.as_str())
+                }) {
+                    return Err(format!(
+                        "{} route {route} is unavailable after restart",
+                        entry.capability_id
+                    ));
+                }
+            }
+        }
+        Ok(installed)
+    })
 }
 
 fn parse_assemble(arguments: &[String]) -> Result<AssembleOptions, String> {
@@ -1322,5 +1472,104 @@ mod tests {
         assert_eq!(validate_release_file_count(49_999).unwrap(), 50_000);
         let error = validate_release_file_count(50_000).unwrap_err();
         assert!(error.contains("50001 files; limit 50000"));
+    }
+    #[test]
+    #[cfg(unix)]
+    fn verify_install_materializes_offline_models_probes_and_survives_restart() {
+        let fixture = Fixture::new();
+        let product = ProductCapabilityManifest::embedded().unwrap();
+        let definition = product.definition("media-metadata").unwrap();
+        fs::write(
+            &fixture.template,
+            serde_json::to_vec(&serde_json::json!({
+                "packId": "media-metadata", "version": "1.2.3+resources.1",
+                "protocolVersion": "2", "licenseExpression": definition.license_policy.expression,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(fixture.payload.join("bin/runner"), br#"#!/bin/sh
+IFS= read -r request || :
+root=${0%/*}; root=${root%/*}
+[ -s "$root/models/model.bin" ] || exit 7
+id=${request#*'"id":"'}; id=${id%%'"'*}
+route=${request#*'"route":"'}; route=${route%%'"'*}
+printf '{"jsonrpc":"2.0","id":"%s","result":{"healthy":true,"protocolVersion":"2","capabilityId":"media-metadata","route":"%s"},"error":null}\n' "$id" "$route"
+"#).unwrap();
+        fs::create_dir(fixture.payload.join("models")).unwrap();
+        let model = b"independent fixture model";
+        fs::write(fixture.payload.join("models/model.bin"), model).unwrap();
+        let mut options = fixture.options();
+        options.target = target_triple();
+        options.entrypoint_args = Vec::new();
+        options.key_id.clear();
+        options.model_bytes = Some(model.len() as u64);
+        let mut result = assemble(&options).unwrap();
+        let source = File::open(&result.archive_path).unwrap();
+        let mut source = ZipArchive::new(source).unwrap();
+        let split = fixture.output.join("split.zip");
+        let mut writer = ZipWriter::new(File::create(&split).unwrap());
+        let mut installed_bytes = 0;
+        for index in 0..source.len() {
+            let mut member = source.by_index(index).unwrap();
+            if member.name() == "models/model.bin" {
+                continue;
+            }
+            let options =
+                SimpleFileOptions::default().unix_permissions(member.unix_mode().unwrap_or(0o644));
+            writer.start_file(member.name(), options).unwrap();
+            installed_bytes += std::io::copy(&mut member, &mut writer).unwrap();
+        }
+        writer.finish().unwrap();
+        drop(source);
+        fs::rename(split, &result.archive_path).unwrap();
+        let model_hash = encode_hex(&Sha256::digest(model));
+        let offline_model = fixture
+            .output
+            .join("models")
+            .join(&model_hash)
+            .join("model.bin");
+        fs::create_dir_all(offline_model.parent().unwrap()).unwrap();
+        fs::write(&offline_model, model).unwrap();
+        result.entry.model_files = vec![
+            llm_wiki_desktop_lib::services::import_v2::capability_models::ModelFile {
+                path: "models/model.bin".into(),
+                sha256: model_hash,
+                bytes: model.len() as u64,
+                urls: vec!["https://cdn.llmwiki.cn/must-not-be-requested.bin".into()],
+            },
+        ];
+        result.entry.archive_sha256 = sha256_file(&result.archive_path).unwrap();
+        result.entry.compressed_bytes = fs::metadata(&result.archive_path).unwrap().len();
+        result.entry.installed_bytes = installed_bytes;
+        fs::write(
+            &result.fragment_path,
+            serde_json::to_vec(&CatalogFragment {
+                schema_version: 1,
+                entries: vec![result.entry],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let output = fixture.root.join("安装验证");
+        let installed = verify_install(&result.fragment_path, &fixture.output, &output).unwrap();
+        assert_eq!(installed.len(), 1);
+        assert_eq!(
+            fs::read(installed[0].payload.join("models/model.bin")).unwrap(),
+            model
+        );
+        assert!(
+            verify_install(&result.fragment_path, &fixture.output, &output)
+                .unwrap_err()
+                .contains("new directory")
+        );
+        fs::remove_file(offline_model).unwrap();
+        assert!(verify_install(
+            &result.fragment_path,
+            &fixture.output,
+            &fixture.root.join("missing-model")
+        )
+        .unwrap_err()
+        .contains("missing model"));
     }
 }
