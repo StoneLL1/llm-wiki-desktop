@@ -1,32 +1,37 @@
-# LLM Wiki Desktop v0.2.1
+# LLM Wiki Desktop v0.2.2
 
-A more focused workflow for collecting sources, maintaining your wiki, and protecting local changes.
+能力包安装与发布可靠性修复。所有可选程序继续按需下载，不增加 App 安装包体积。
+
+## 更新内容
+
+- 简化能力包安装与启用：归档校验、安全解压、准备模型、一次自检后启用；日常使用避免重复扫描整个程序和模型。
+- 程序和模型分开分发与缓存，支持本地 ZIP 和配套模型目录离线安装；取消或失败保留此前可用版本。
+- 能力资源采用独立版本和下载目录，修复旧版资源缺失与同版本不同内容的安装冲突。
+- 统一正式版与 RC 发布流程，支持恢复草稿、补传文件，并保留安装启动和 updater 签名检查。
 
 ## Highlights
 
-- **Clearer imports:** streamlined preparation, queue status, and completion summaries; improved supported Xiaohongshu page extraction and browser/media runner behavior.
-- **Simpler Workflows:** Update Wiki, Health Check, and content generation have focused controls, responsive navigation, and a system file picker for output paths.
-- **Local version history:** version protection and recovery are available across supported wiki, Source, chat-save, and lint operations, with Git preflight checks and visible recovery settings.
-- **Better health checks:** unified scans, clearer issue details, and a dedicated management panel for repairs.
-- **Cleaner downloads:** this release lists only the desktop installers and automatic-update files. Optional OCR, transcription, browser extraction, and document-conversion engines remain available through a separate capability release and install on demand from within the app.
+- On-demand capability programs with separately cached models and complete offline directory installation.
+- One installation check and runtime self-test, followed by automatic activation; existing working versions survive cancellation or failure.
+- Independent resource versions and resumable desktop publication. Optional programs are not bundled into the App.
 
 ## Download and install
 
 | Platform | Installer |
 | --- | --- |
-| macOS · Apple Silicon | [DMG](https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v0.2.1/darwin-aarch64-LLM.Wiki.Desktop_0.2.1_aarch64.dmg) |
-| macOS · Intel | [DMG](https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v0.2.1/darwin-x86_64-LLM.Wiki.Desktop_0.2.1_x64.dmg) |
-| Windows · x64 | [Setup EXE](https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v0.2.1/windows-x86_64-LLM.Wiki.Desktop_0.2.1_x64-setup.exe) |
-| Linux · x64 | [AppImage](https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v0.2.1/linux-x86_64-LLM.Wiki.Desktop_0.2.1_amd64.AppImage) |
+| macOS · Apple Silicon | [DMG](https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v0.2.2/darwin-aarch64-LLM.Wiki.Desktop_0.2.2_aarch64.dmg) |
+| macOS · Intel | [DMG](https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v0.2.2/darwin-x86_64-LLM.Wiki.Desktop_0.2.2_x64.dmg) |
+| Windows · x64 | [Setup EXE](https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v0.2.2/windows-x86_64-LLM.Wiki.Desktop_0.2.2_x64-setup.exe) |
+| Linux · x64 | [AppImage](https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v0.2.2/linux-x86_64-LLM.Wiki.Desktop_0.2.2_amd64.AppImage) |
 
-The `.app.tar.gz` files and `latest.json` support automatic updates. `CHECKSUMS.sha256` covers the public desktop downloads. Optional engine archives are published in the separate [capability release](https://github.com/StoneLL1/llm-wiki-desktop/releases/tag/capabilities-v0.2.1). The app includes the complete verified install catalog; install only the engines you need.
+The `.app.tar.gz` files and `latest.json` support automatic updates. `CHECKSUMS.sha256` covers the public desktop downloads. Optional engines install on demand from the download locations embedded in this version. Offline installation requires both the program ZIP and its companion model files. Network access depends on the actual resource host; a GitHub download is not a guarantee of domestic network availability.
 
-## Updating from v0.2.0
+## Updating from v0.2.1
 
-Use **Check for updates**, or quit the old app and install v0.2.1 over it. Keep your knowledge-base folder in place. The application identity and update-signing key are unchanged.
+Use **Check for updates**, or quit the old app and install v0.2.2 over it. Keep your knowledge-base folder in place. The application identity and update-signing key are unchanged.
 
-macOS binaries are not Apple-notarized, and Windows installers do not carry an Authenticode identity. First-launch OS warnings may appear. See [installation notes and limitations](https://github.com/StoneLL1/llm-wiki-desktop/blob/app-v0.2.1/docs/release/known-limitations.md).
+macOS binaries are not Apple-notarized, and Windows installers do not carry an Authenticode identity. First-launch OS warnings may appear. See [installation notes and limitations](https://github.com/StoneLL1/llm-wiki-desktop/blob/app-v0.2.2/docs/release/known-limitations.md).
 
-Full source checks, engine archive verification, updater-signature verification, and installation and launch checks on all four supported targets are required before desktop publication. Hosted checks do not constitute a completed interactive upgrade and rollback test on every supported operating system.
+Source CI, resource download verification, updater-signature verification, and installation and launch checks on all four supported targets precede desktop publication. Hosted checks do not constitute a completed interactive upgrade and rollback test on every supported operating system.
 
-[Full changelog](https://github.com/StoneLL1/llm-wiki-desktop/compare/app-v0.2.0...app-v0.2.1) · [Quick start](https://github.com/StoneLL1/llm-wiki-desktop#get-started)
+[Full changelog](https://github.com/StoneLL1/llm-wiki-desktop/compare/app-v0.2.1...app-v0.2.2) · [Quick start](https://github.com/StoneLL1/llm-wiki-desktop#get-started)

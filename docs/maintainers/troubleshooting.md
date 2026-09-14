@@ -455,3 +455,56 @@ of its hard bugs were ordering bugs.
    owns.
 6. **When a rule has an exception per platform, encode the exception
    at the rule, not at each call site.**
+
+## Capability installation and restricted networks
+
+The current resource contract is [ADR 0003](../architecture/decisions/0003-on-demand-capability-resources.md).
+Optional programs are downloaded on demand; none is added to the desktop bundle.
+The embedded catalog pins archive SHA-256, independent of its HTTPS hosting
+provider or desktop release tag. `signingKeyId` and `manifestSha256` are optional
+legacy metadata. The App's own updater signature is unchanged.
+
+`node scripts/verify-published-capability-assets.mjs --catalog <catalog.json>`
+anonymously downloads actual bytes and checks size/SHA, including independent
+models (at least one working candidate URL). It does not assume GitHub API asset
+metadata proves a working download. Run this full check when resources are uploaded or changed. Desktop releases use `--availability-only` before building: a bounded prefix GET checks availability, size and ZIP/HTML content without downloading every large model again. This is not a full-file integrity check. A catalog with missing public resources must
+be fixed before desktop publication. Repository catalog changes cannot repair
+an already shipped v0.2.1 binary; its pinned missing files need their original
+bytes restored, or users need a new desktop build.
+
+The downloader uses one resumable stream, with a fresh request when a server
+refuses Range. Permanent HTTP errors keep their status. Old `archiveChunks`
+remain readable and do not select a second download implementation. Installation
+checks SHA once, safely extracts, prepares model data, runs one runtime self-test,
+and publishes all routes atomically. Startup/use do not rehash installed payloads;
+the App-managed installation receipt binds the small manifest. Old signed packages
+remain readable. Uncommitted installs roll back on restart; a failed update keeps
+the prior working version.
+
+To prepare resources, `capability_release assemble` no longer requires signing
+arguments. Existing qualified complete archives can be converted with:
+
+```sh
+python3 scripts/split-capability-models.py --catalog INPUT_CATALOG \
+  --archives INPUT_ARCHIVES --output NEW_OUTPUT_DIRECTORY \
+  --base-url ACTUAL_HTTPS_PROGRAM_DIRECTORY \
+  --model-base-url ACTUAL_HTTPS_MODEL_DIRECTORY
+```
+
+The output contains program ZIPs, `install-catalog.json`, and shared
+`models/<sha256>/<filename>` files. Publish the complete directory to actual
+maintained HTTPS storage, verify it, then commit the catalog for desktop builds.
+Keep existing resource versions available for older Apps. No desktop build needs
+to rebuild unchanged engines or carry their binaries inside the App bundle.
+
+For offline installation select the program ZIP using **Install from file /
+从文件安装**, retaining the models folder beside it. The selected file is read-only;
+missing model files produce an explicit error without network fallback. Once
+installed, the original offline bundle is no longer needed. Shared models are
+checked on first import/download and reused across program versions. Unsupported
+hardlinks fall back to file copies. Current local model import accepts the official
+model declared in the catalog, not arbitrary model architectures or scripts.
+
+There is currently no deployed mainland-China mirror in the repository catalog.
+Code supports independent sources and offline delivery; a real maintained host
+is still necessary for users to download online without overseas connectivity.

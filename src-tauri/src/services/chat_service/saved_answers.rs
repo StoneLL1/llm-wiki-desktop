@@ -119,7 +119,10 @@ impl ChatService {
             // identity-and-hash CAS against external edits.
             self.file_store
                 .preflight_markdown_overwrite_hash(context, &resolved, expected)?;
-            (WriteMode::OverwriteIfHashMatches(expected.to_string()), None)
+            (
+                WriteMode::OverwriteIfHashMatches(expected.to_string()),
+                None,
+            )
         };
 
         // The checkpoint can take time; revalidate the semantic write root
@@ -128,13 +131,25 @@ impl ChatService {
         context.resolve_wiki_write_path(&resolved)?;
         let mut operation_id = None;
         let checkpoint = if exists {
-            let expected = std::collections::BTreeMap::from([(resolved.clone(), expected_hash.map(str::to_string))]);
-            let outputs = std::collections::BTreeMap::from([(resolved.clone(), Some(markdown.as_bytes().to_vec()))]);
-            let record = crate::services::VersionHistoryService.apply_wiki_files(context, crate::models::version_history::VersionOperationKind::ChatEdit, &expected, &outputs)?;
+            let expected = std::collections::BTreeMap::from([(
+                resolved.clone(),
+                expected_hash.map(str::to_string),
+            )]);
+            let outputs = std::collections::BTreeMap::from([(
+                resolved.clone(),
+                Some(markdown.as_bytes().to_vec()),
+            )]);
+            let record = crate::services::VersionHistoryService.apply_wiki_files(
+                context,
+                crate::models::version_history::VersionOperationKind::ChatEdit,
+                &expected,
+                &outputs,
+            )?;
             operation_id = Some(record.summary.operation_id);
             Some(record.before)
         } else {
-            self.file_store.write_markdown_checked(context, &resolved, markdown, mode)?;
+            self.file_store
+                .write_markdown_checked(context, &resolved, markdown, mode)?;
             checkpoint
         };
         invalidate_graph_cache(context);

@@ -37,7 +37,7 @@ const packRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 function inventoryDeclaration(manifest, file) {
   const matches = (manifest.files || []).filter((item) => item?.path === file);
   if (matches.length !== 1) throw new Error("IMPORT_ASR_ENGINE_INTEGRITY_FAILED");
-  return { file, sha256: matches[0].sha256 };
+  return { file, sha256: matches[0].sha256, bytes: matches[0].bytes };
 }
 
 async function releaseRuntime(manifest) {
@@ -178,6 +178,7 @@ try {
     await Promise.all([
       verifyArtifact(packRoot, runtimeDeclaration, binaryName),
       verifyArtifact(packRoot, runtimeDeclaration.ffmpeg, ffmpegRelativePath()),
+      verifyArtifact(packRoot, runtimeDeclaration.model, "models/ggml-small.bin"),
     ]);
     process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { healthy: true, protocolVersion: "2", capabilityId: "asr-whisper", route }, error: null })}\n`);
     completed = true;

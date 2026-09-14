@@ -28,10 +28,10 @@ pub struct ScanProjectRequest {
 }
 
 #[tauri::command]
-pub fn get_app_summary(_state: State<'_, AppState>) -> AppSummary {
+pub fn get_app_summary(app: AppHandle) -> AppSummary {
     AppSummary {
         name: "LLM Wiki Desktop".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: app.package_info().version.to_string(),
     }
 }
 

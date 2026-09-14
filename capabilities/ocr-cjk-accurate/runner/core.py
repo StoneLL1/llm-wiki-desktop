@@ -164,7 +164,9 @@ def verify_signed_file(pack_root_value: Path, manifest: Any, relative_path: str)
     if candidate.is_symlink() or not candidate.is_file() or status.st_size != byte_count:
         _fail("IMPORT_OCR_ENGINE_INTEGRITY_FAILED")
     resolved = candidate.resolve(strict=True)
-    if not is_contained(pack_root, resolved) or sha256_file(resolved) != digest:
+    # The application checks downloaded/imported data once during installation.
+    # Each OCR call only checks local availability before loading the models.
+    if not is_contained(pack_root, resolved):
         _fail("IMPORT_OCR_ENGINE_INTEGRITY_FAILED")
 
     upstream = MODEL_DECLARATIONS.get(relative_path)

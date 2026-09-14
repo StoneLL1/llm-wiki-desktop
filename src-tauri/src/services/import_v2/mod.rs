@@ -7,6 +7,7 @@ mod artifact;
 pub(crate) mod bilibili;
 pub mod capability_embed;
 pub mod capability_installer;
+pub mod capability_models;
 pub mod capability_pack;
 pub mod capability_payload;
 pub mod capability_runtime;

@@ -18,12 +18,19 @@ impl SearchService {
         expected_hash: &str,
     ) -> Result<SaveWikiPageResponse, BackendError> {
         let context = permit.context();
-        self.file_store.preflight_markdown_overwrite_hash(context, path, expected_hash)?;
+        self.file_store
+            .preflight_markdown_overwrite_hash(context, path, expected_hash)?;
         let record = crate::services::VersionHistoryService.apply_wiki_files(
             context,
             crate::models::version_history::VersionOperationKind::PageChange,
-            &std::collections::BTreeMap::from([(path.to_string(), Some(expected_hash.to_string()))]),
-            &std::collections::BTreeMap::from([(path.to_string(), Some(contents.as_bytes().to_vec()))]),
+            &std::collections::BTreeMap::from([(
+                path.to_string(),
+                Some(expected_hash.to_string()),
+            )]),
+            &std::collections::BTreeMap::from([(
+                path.to_string(),
+                Some(contents.as_bytes().to_vec()),
+            )]),
         )?;
         Ok(SaveWikiPageResponse {
             relative_path: path.to_string(),
@@ -244,13 +251,18 @@ impl SearchService {
                 continue;
             }
             let project_relative = context.to_project_relative(file_absolute)?;
-            if Some(project_relative.as_str()) == context.layout.activity_log_path.as_deref() { continue; }
+            if Some(project_relative.as_str()) == context.layout.activity_log_path.as_deref() {
+                continue;
+            }
             let writable_path = context.resolve_wiki_write_path(&project_relative)?;
             let body = std::fs::read_to_string(&writable_path)
                 .map_err(|err| file_read_error(err, &writable_path))?;
             let (rewritten, n) = rewrite_wikilinks(&body, &old_stem, &new_stem);
             if n > 0 {
-                expected.insert(project_relative.clone(), Some(self.file_store.content_hash(body.as_bytes())));
+                expected.insert(
+                    project_relative.clone(),
+                    Some(self.file_store.content_hash(body.as_bytes())),
+                );
                 outputs.insert(project_relative.clone(), Some(rewritten.into_bytes()));
                 updated_references.push(project_relative);
             }
@@ -272,8 +284,16 @@ impl SearchService {
         expected.insert(relative_path.to_string(), Some(source_hash));
         expected.insert(new_relative_path.to_string(), None);
         outputs.insert(relative_path.to_string(), None);
-        outputs.insert(new_relative_path.to_string(), Some(final_contents.into_bytes()));
-        let operation = crate::services::VersionHistoryService.apply_wiki_files(context, crate::models::version_history::VersionOperationKind::PageChange, &expected, &outputs)?;
+        outputs.insert(
+            new_relative_path.to_string(),
+            Some(final_contents.into_bytes()),
+        );
+        let operation = crate::services::VersionHistoryService.apply_wiki_files(
+            context,
+            crate::models::version_history::VersionOperationKind::PageChange,
+            &expected,
+            &outputs,
+        )?;
 
         let hash = self.file_store.file_hash(context, new_relative_path)?;
         let graph_cache_invalidated = self.invalidate_graph_cache(context);
@@ -367,7 +387,6 @@ impl SearchService {
         target_path: &str,
         target_hash: &str,
     ) -> Result<bool, BackendError> {
-
         let absolute = context.resolve_wiki_write_path(target_path)?;
         if !absolute.exists() || !absolute.is_file() {
             return Err(BackendError::new(
@@ -407,7 +426,10 @@ impl SearchService {
         let record = crate::services::VersionHistoryService.apply_wiki_files(
             context,
             crate::models::version_history::VersionOperationKind::PageChange,
-            &std::collections::BTreeMap::from([(target_path.to_string(), Some(target_hash.to_string()))]),
+            &std::collections::BTreeMap::from([(
+                target_path.to_string(),
+                Some(target_hash.to_string()),
+            )]),
             &std::collections::BTreeMap::from([(target_path.to_string(), None)]),
         )?;
         self.invalidate_graph_cache(context);
@@ -704,7 +726,9 @@ mod tests {
     fn rename_page_moves_file_and_rewrites_references_including_self() {
         let (context, root) = tmp_context("rename");
         seed_sample_vault(&context);
-        crate::services::GitService.enable_local_history(&context).unwrap();
+        crate::services::GitService
+            .enable_local_history(&context)
+            .unwrap();
         // agent-memory.md links [[react-pattern]]; rename react-pattern so
         // agent-memory.md must be rewritten.
         let service = SearchService::default();
@@ -754,7 +778,9 @@ mod tests {
     fn rename_page_rejects_outside_wiki_and_existing_destination_and_cjk() {
         let (context, root) = tmp_context("rename-cjk");
         seed_sample_vault(&context);
-        crate::services::GitService.enable_local_history(&context).unwrap();
+        crate::services::GitService
+            .enable_local_history(&context)
+            .unwrap();
         let service = SearchService::default();
 
         // Destination outside wiki/ rejected.

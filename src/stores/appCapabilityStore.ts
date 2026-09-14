@@ -22,6 +22,7 @@ interface AppCapabilityStore {
   error: NormalizedBackendError | null;
   actionError: NormalizedBackendError | null;
   actionErrorCapabilityId: string | null;
+  actionErrorArchivePath: string | null;
   actionErrorOperation: "install" | "continue" | "cancel" | null;
   managementOpen: boolean;
   dialogCapabilityId: string | null;
@@ -38,7 +39,7 @@ interface AppCapabilityStore {
   setSearch: (search: string) => void;
   setCategoryFilter: (filter: AppCapabilityCategoryFilter) => void;
   setStatusFilter: (filter: AppCapabilityStatusFilter) => void;
-  confirmInstall: (capabilityId: string) => Promise<BackendTask | null>;
+  confirmInstall: (capabilityId: string, archivePath?: string) => Promise<BackendTask | null>;
   continueInstall: (capabilityId: string) => Promise<BackendTask | null>;
   cancelInstall: (capabilityId: string) => Promise<BackendTask | null>;
   resetForTests: () => void;
@@ -152,6 +153,7 @@ export const useAppCapabilityStore = create<AppCapabilityStore>((set, get) => ({
   error: null,
   actionError: null,
   actionErrorCapabilityId: null,
+  actionErrorArchivePath: null,
   actionErrorOperation: null,
   managementOpen: false,
   dialogCapabilityId: null,
@@ -208,19 +210,42 @@ export const useAppCapabilityStore = create<AppCapabilityStore>((set, get) => ({
   setCategoryFilter: (categoryFilter) => set({ categoryFilter }),
   setStatusFilter: (statusFilter) => set({ statusFilter }),
 
-  confirmInstall: (capabilityId) => {
+  confirmInstall: (capabilityId, archivePath) => {
     const existing = mutationPromises.get(`install:${capabilityId}`);
     if (existing) return existing;
     const capability = get().capabilities.find((candidate) => candidate.capabilityId === capabilityId);
     if (!capability?.installAllowed || !capability.targetVersion || !capability.acknowledgementVersion) {
       return Promise.resolve(null);
     }
+    const previousTask = selectTaskById(useTaskStore.getState(), capability.operation.taskId)
+      ?? [...Object.values(useTaskStore.getState().taskById), ...useTaskStore.getState().tasks]
+        .filter((task) => task.operation?.kind === "app_capability_install" && task.operation.capabilityId === capabilityId)
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+    // A retry retains its local source, including failures before a task was created.
+    const retryArchivePath = get().actionErrorCapabilityId === capabilityId && get().actionErrorOperation === "install"
+      ? get().actionErrorArchivePath ?? undefined
+      : previousTask?.status === "failed" && previousTask.operation?.kind === "app_capability_install"
+        && previousTask.operation.version === capability.targetVersion
+        ? previousTask.operation.archivePath : undefined;
+    let selectedArchivePath = archivePath ?? retryArchivePath;
     requestEpoch += 1;
-    set({ actionError: null, actionErrorCapabilityId: null, actionErrorOperation: null });
-    const mutation = api.installAppCapability({
-      capabilityId,
-      expectedVersion: capability.targetVersion,
-      acknowledgementVersion: capability.acknowledgementVersion,
+    set({ actionError: null, actionErrorCapabilityId: null, actionErrorArchivePath: null, actionErrorOperation: null });
+    const expectedVersion = capability.targetVersion;
+    const acknowledgementVersion = capability.acknowledgementVersion;
+    const mutation = Promise.resolve().then(async () => {
+      if (!selectedArchivePath && capability.operation.state === "failed" && capability.operation.taskId) {
+        // The persisted task may not yet be in the frontend cache after app startup.
+        const { task } = await requireTaskRequestFor(capability);
+        if (task.operation?.kind === "app_capability_install" && task.operation.version === expectedVersion) {
+          selectedArchivePath = task.operation.archivePath;
+        }
+      }
+      return api.installAppCapability({
+        capabilityId,
+        expectedVersion,
+        acknowledgementVersion,
+        ...(selectedArchivePath ? { archivePath: selectedArchivePath } : {}),
+      });
     }).then(async (task) => {
       useTaskStore.getState().upsertTask(task);
       if (get().dialogCapabilityId === capabilityId) {
@@ -229,7 +254,7 @@ export const useAppCapabilityStore = create<AppCapabilityStore>((set, get) => ({
       await get().refresh();
       return task;
     }).catch((error) => {
-      set({ actionError: capabilityError(error), actionErrorCapabilityId: capabilityId, actionErrorOperation: "install" });
+      set({ actionError: capabilityError(error), actionErrorCapabilityId: capabilityId, actionErrorArchivePath: selectedArchivePath ?? null, actionErrorOperation: "install" });
       throw error;
     }).finally(() => {
       mutationPromises.delete(`install:${capabilityId}`);
@@ -242,7 +267,7 @@ export const useAppCapabilityStore = create<AppCapabilityStore>((set, get) => ({
     const existing = mutationPromises.get(`continue:${capabilityId}`);
     if (existing) return existing;
     const capability = get().capabilities.find((candidate) => candidate.capabilityId === capabilityId);
-    set({ actionError: null, actionErrorCapabilityId: null, actionErrorOperation: null });
+    set({ actionError: null, actionErrorCapabilityId: null, actionErrorArchivePath: null, actionErrorOperation: null });
     const mutation = requireTaskRequestFor(capability).then((target) => api.resumeAppCapabilityInstall(target.request)).then(async (task) => {
       useTaskStore.getState().upsertTask(task);
       await get().refresh();
@@ -261,7 +286,7 @@ export const useAppCapabilityStore = create<AppCapabilityStore>((set, get) => ({
     const existing = mutationPromises.get(`cancel:${capabilityId}`);
     if (existing) return existing;
     const capability = get().capabilities.find((candidate) => candidate.capabilityId === capabilityId);
-    set({ actionError: null, actionErrorCapabilityId: null, actionErrorOperation: null });
+    set({ actionError: null, actionErrorCapabilityId: null, actionErrorArchivePath: null, actionErrorOperation: null });
     const mutation = requireTaskRequestFor(capability).then((target) => api.cancelAppCapabilityInstall(target.request)).then(async (task) => {
       useTaskStore.getState().upsertTask(task);
       await get().refresh();
@@ -289,6 +314,7 @@ export const useAppCapabilityStore = create<AppCapabilityStore>((set, get) => ({
       error: null,
       actionError: null,
       actionErrorCapabilityId: null,
+      actionErrorArchivePath: null,
       actionErrorOperation: null,
       managementOpen: false,
       dialogCapabilityId: null,

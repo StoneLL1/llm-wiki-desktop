@@ -65,6 +65,7 @@ export interface InstallAppCapabilityV1Request {
   capabilityId: string;
   expectedVersion: string;
   acknowledgementVersion: string;
+  archivePath?: string;
 }
 
 export interface AppCapabilityTaskControlRequest {

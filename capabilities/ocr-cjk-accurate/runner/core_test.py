@@ -79,7 +79,7 @@ class OcrCoreTests(unittest.TestCase):
         with self.assertRaisesRegex(OcrPolicyError, "IMPORT_OCR_OUTPUT_INVALID"):
             normalize_blocks([[[0, 0], [1, 0], [1, 1], [0, 1]]], ["text"], [1.1], 10, 10)
 
-    def test_signed_inventory_is_required(self):
+    def test_installed_inventory_checks_size_without_rehashing(self):
         root = Path(__file__).resolve().parent
         file_path = root / "core.py"
         manifest = {"files": [{
@@ -89,6 +89,8 @@ class OcrCoreTests(unittest.TestCase):
         }]}
         self.assertEqual(verify_signed_file(root, manifest, "core.py"), file_path.resolve())
         manifest["files"][0]["sha256"] = "0" * 64
+        self.assertEqual(verify_signed_file(root, manifest, "core.py"), file_path.resolve())
+        manifest["files"][0]["bytes"] += 1
         with self.assertRaisesRegex(OcrPolicyError, "IMPORT_OCR_ENGINE_INTEGRITY_FAILED"):
             verify_signed_file(root, manifest, "core.py")
 

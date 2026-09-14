@@ -79,7 +79,6 @@ export function validateReleaseState({
   packageJson,
   cargoToml,
   tauriConfig,
-  trustedKeys = null,
   tag = null,
   repository = null,
 }) {
@@ -123,10 +122,6 @@ export function validateReleaseState({
   if (contract.endpoints.stableUpdaterManifest !== expectedUpdater) {
     errors.push("stable updater endpoint does not use the canonical repository");
   }
-  const expectedCapabilityBase = `https://github.com/${contract.repository.slug}/releases/download/<exact-tag>/`;
-  if (contract.endpoints.capabilityAssetBaseTemplate !== expectedCapabilityBase) {
-    errors.push("capability asset base does not use the canonical repository and exact tag");
-  }
   if (contract.publishing.latestManifestChannel !== "stable-only") {
     errors.push("latest.json generation must remain stable-only");
   }
@@ -145,17 +140,14 @@ export function validateReleaseState({
     || !updaterPublicKeyDocument.includes(`minisign public key: ${updaterPublicKeyId}\n`)) {
     errors.push("updater public key and key ID must match the committed Tauri trust anchor");
   }
-  const capabilityPublicKeyId = contract.signing?.capability?.publicKeyId;
-  if (!/^[0-9a-f]{64}$/.test(trustedKeys?.[capabilityPublicKeyId] ?? "")) {
-    errors.push("the committed capability key ID must resolve to one 32-byte lowercase hex trust anchor");
-  }
   if (contract.application.identifier !== contract.signing.apple.bundleIdentifier) {
     errors.push("Apple bundle identifier must match the frozen Tauri identifier");
   }
   if (tag) {
     try {
       const parsedTag = parseReleaseTag(tag, contract);
-      if (parsedTag.version !== version) {
+      if (parsedTag.version !== version
+        && !(parsedTag.channel === "prerelease" && parsedTag.baseVersion === version)) {
         errors.push(`tag version ${parsedTag.version} does not match configured version ${version}`);
       }
       if (parsedTag.channel === "stable" && SEMVER_PATTERN.exec(parsedTag.version)?.[4]) {
@@ -244,12 +236,13 @@ function defaultRunGit(root, arguments_) {
 }
 
 function parseArguments(arguments_) {
-  const result = { checkGit: false, tag: null, currentStableTag: null };
+  const result = { checkGit: false, tag: null, currentStableTag: null, githubOutput: null };
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index];
     if (argument === "--check-git") result.checkGit = true;
     else if (argument === "--tag") result.tag = arguments_[index += 1] ?? null;
     else if (argument === "--current-stable-tag") result.currentStableTag = arguments_[index += 1] ?? null;
+    else if (argument === "--github-output") result.githubOutput = arguments_[index += 1] ?? null;
     else throw new Error(`unknown argument: ${argument}`);
   }
   return result;
@@ -270,11 +263,26 @@ export function checkRepository(root, options = {}) {
   });
   const errors = [...state.errors];
   if (options.checkGit) errors.push(...validateLocalGit(root, contract));
-  if (tag) errors.push(...validateReleaseCommitTrace(root, contract, tag));
+  if (tag && options.checkGit) errors.push(...validateReleaseCommitTrace(root, contract, tag));
   if (tag && options.currentStableTag) {
     errors.push(...validateStableReleaseAdvance(tag, options.currentStableTag, contract));
   }
   return { ...state, errors, tag };
+}
+
+export function releaseCoordinate(root, tag, runGit = defaultRunGit) {
+  const contract = readJson(root, "release/release-contract.json");
+  const parsed = parseReleaseTag(tag, contract);
+  const commit = runGit(root, ["rev-parse", "HEAD"]);
+  if (runGit(root, ["rev-parse", `${tag}^{commit}`]) !== commit) {
+    throw new Error("checkout does not match the requested release tag");
+  }
+  return {
+    release_tag: tag, version: parsed.version, channel: parsed.channel,
+    commit_sha: commit,
+    // Stable across publisher reruns, unlike the time the workflow happened to start.
+    published_at: runGit(root, ["show", "-s", "--format=%cI", "HEAD"]),
+  };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -290,6 +298,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     for (const error of result.errors) process.stderr.write(`[release-config] ${error}\n`);
     process.exitCode = 1;
   } else {
+    if (options.githubOutput) {
+      const coordinate = releaseCoordinate(repositoryRoot, result.tag);
+      fs.appendFileSync(options.githubOutput, Object.entries(coordinate).map(([key, value]) => `${key}=${value}\n`).join(""));
+    }
     process.stdout.write(`[release-config] ${result.version}${result.tag ? ` / ${result.tag}` : ""} matches the release version and signing configuration\n`);
   }
 }

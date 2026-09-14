@@ -63,29 +63,69 @@ impl GitService {
     pub fn require_local_history(&self, context: &ProjectContext) -> Result<(), BackendError> {
         let root = validate_existing_project_root(&context.root).map_err(git_path_unsafe)?;
         if !validate_git_marker(&root)? {
-            return Err(BackendError::new("GIT_REPOSITORY_MISSING", "Enable local version protection before changing these files.", true, true));
+            return Err(BackendError::new(
+                "GIT_REPOSITORY_MISSING",
+                "Enable local version protection before changing these files.",
+                true,
+                true,
+            ));
         }
-        let output = run_git_process(context, &["config", "--local", "--get", "llmWiki.historyEnabled"], Duration::from_secs(5), 4096, git_task_cancelled)
-            .map_err(|error| git_process_error(error, &["config", "--get"]))?;
-        if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true" { return Ok(()); }
+        let output = run_git_process(
+            context,
+            &["config", "--local", "--get", "llmWiki.historyEnabled"],
+            Duration::from_secs(5),
+            4096,
+            git_task_cancelled,
+        )
+        .map_err(|error| git_process_error(error, &["config", "--get"]))?;
+        if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true" {
+            return Ok(());
+        }
         if !output.status.success() && output.status.code() != Some(1) {
             return Err(git_command_error(&output.stderr, &["config", "--get"]));
         }
-        Err(BackendError::new("VERSION_NOT_ENABLED", "Enable local version protection before changing these files.", true, true))
+        Err(BackendError::new(
+            "VERSION_NOT_ENABLED",
+            "Enable local version protection before changing these files.",
+            true,
+            true,
+        ))
     }
 
-    pub fn local_history_status(&self, context: &ProjectContext) -> Result<crate::models::version_history::VersionHistoryStatus, BackendError> {
+    pub fn local_history_status(
+        &self,
+        context: &ProjectContext,
+    ) -> Result<crate::models::version_history::VersionHistoryStatus, BackendError> {
         let git = self.repository_status(context)?;
         let git_version = run_git(context, &["--version"])?;
-        let enabled = git.is_repository && run_git(context, &["config", "--local", "--get", "llmWiki.historyEnabled"]).is_ok_and(|value| value.trim() == "true");
-        Ok(crate::models::version_history::VersionHistoryStatus { enabled, git, git_version: git_version.trim().into() })
+        let enabled = git.is_repository
+            && run_git(
+                context,
+                &["config", "--local", "--get", "llmWiki.historyEnabled"],
+            )
+            .is_ok_and(|value| value.trim() == "true");
+        Ok(crate::models::version_history::VersionHistoryStatus {
+            enabled,
+            git,
+            git_version: git_version.trim().into(),
+        })
     }
 
     /// The caller holds confirmed project write authority. Empty private object
     /// storage is sufficient; existing HEAD/index remain entirely untouched.
     pub fn enable_local_history(&self, context: &ProjectContext) -> Result<(), BackendError> {
-        self.create_history_snapshot(context, &uuid::Uuid::new_v4().to_string(), "baseline", "Enable local version protection", None, &std::collections::BTreeMap::new())?;
-        run_git(context, &["config", "--local", "llmWiki.historyEnabled", "true"])?;
+        self.create_history_snapshot(
+            context,
+            &uuid::Uuid::new_v4().to_string(),
+            "baseline",
+            "Enable local version protection",
+            None,
+            &std::collections::BTreeMap::new(),
+        )?;
+        run_git(
+            context,
+            &["config", "--local", "llmWiki.historyEnabled", "true"],
+        )?;
         Ok(())
     }
 
@@ -188,7 +228,10 @@ impl GitService {
             }
             let _ = commit_with_message(context, initial_message, true)?;
         }
-        run_git(context, &["config", "--local", "llmWiki.historyEnabled", "true"])?;
+        run_git(
+            context,
+            &["config", "--local", "llmWiki.historyEnabled", "true"],
+        )?;
         self.repository_status(context)
     }
 
@@ -463,7 +506,10 @@ impl GitService {
             run_git(context, &["add", "--all"])?;
             let _ = commit_with_message(context, initial_message, true)?;
         }
-        run_git(context, &["config", "--local", "llmWiki.historyEnabled", "true"])?;
+        run_git(
+            context,
+            &["config", "--local", "llmWiki.historyEnabled", "true"],
+        )?;
         self.repository_status(context)
     }
 

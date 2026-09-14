@@ -32,9 +32,9 @@ export function validateCapabilityReuse({ entries, run, jobs, artifacts, changed
   if (!/^app-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-rc\.[1-9]\d*)?$/u.test(tag)) throw new Error("invalid desktop release tag");
   if (!Number.isSafeInteger(run.id) || run.id !== Number(sourceRunId)
     || run.repository?.full_name !== repository || run.head_repository?.full_name !== repository
-    || run.path !== ".github/workflows/desktop-release.yml" || run.head_branch !== tag
+    || run.path !== ".github/workflows/desktop-release.yml"
     || run.status !== "completed" || !["failure", "success"].includes(run.conclusion)
-    || !/^[a-f0-9]{40}$/u.test(run.head_sha)) throw new Error("reuse requires the completed canonical desktop release run for the exact tag");
+    || !/^[a-f0-9]{40}$/u.test(run.head_sha)) throw new Error("reuse requires the completed canonical completed capability source run");
   if (changedFiles.length) throw new Error(`payload, dependency, or qualification inputs changed; rebuild capabilities: ${changedFiles.join(", ")}`);
   const successfulJob = (name) => {
     const matches = jobs.filter((job) => job.name === jobPrefix + name);
@@ -126,7 +126,7 @@ async function main() {
     const trustedKeys = read("trusted-keys.json");
     const localKeys = JSON.parse(fs.readFileSync(path.join(root, "capabilities/trusted-keys.json"), "utf8"));
     if (JSON.stringify(trustedKeys) !== JSON.stringify(localKeys)) throw new Error("source catalog trusted keys differ from checkout");
-    const verification = verifyCapabilityCatalog({ catalog, trustedKeys, provenance, mode: "release", expectedTag: result.tag, expectedCommit: result.sourceCommit, expectedRunId: String(result.sourceRunId) });
+    const verification = verifyCapabilityCatalog({ catalog, trustedKeys, provenance, mode: "release", expectedTag: provenance.releaseTag, expectedCommit: result.sourceCommit, expectedRunId: String(result.sourceRunId) });
     if (verification.errors.length) throw new Error(verification.errors.join("; "));
     result.catalogProvenance = provenance;
     result.checkedInputFiles = comparison.checkedInputFiles;

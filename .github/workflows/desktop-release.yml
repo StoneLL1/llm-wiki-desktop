@@ -4,24 +4,18 @@ on:
   push:
     tags:
       - "app-v*.*.*"
-      - "!app-v*.*.*-rc.*"
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing stable app-v tag pointing at the current release commit
+        description: Existing app-vX.Y.Z or app-vX.Y.Z-rc.N tag to build
         required: true
-        type: string
-      capability_source_run_id:
-        description: Run containing unchanged, qualified and signed engine archives
-        required: false
         type: string
 
 permissions:
   contents: read
-  actions: read
 
 concurrency:
-  group: desktop-release-stable-channel
+  group: desktop-release-channel
   cancel-in-progress: false
 
 env:
@@ -37,14 +31,13 @@ jobs:
       version: ${{ steps.coordinate.outputs.version }}
       commit_sha: ${{ steps.coordinate.outputs.commit_sha }}
       published_at: ${{ steps.coordinate.outputs.published_at }}
-      capability_source_run_id: ${{ steps.capabilities.outputs.source_run_id }}
+      channel: ${{ steps.coordinate.outputs.channel }}
     timeout-minutes: 15
     steps:
-      - name: Checkout the exact release tag with full history
+      - name: Checkout the requested release tag
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ inputs.release_tag || github.ref_name }}
-          fetch-depth: 0
 
       - name: Setup pinned Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -52,113 +45,16 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
 
-      - name: Validate canonical repository, stable tag, exact commit, and version progression
+      - name: Validate local release configuration and freeze build identity
         id: coordinate
         env:
-          GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: node scripts/check-release-version.mjs --tag "$RELEASE_TAG" --github-output "$GITHUB_OUTPUT"
+
+      - name: Check the complete catalog and public download availability before building
         run: |
-          set -euo pipefail
-          test "$GITHUB_REPOSITORY" = "StoneLL1/llm-wiki-desktop"
-          [[ "$RELEASE_TAG" =~ ^app-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          commit_sha="$(git rev-parse "$RELEASE_TAG^{commit}")"
-          test "$(git rev-parse HEAD)" = "$commit_sha"
-          if [ "$GITHUB_EVENT_NAME" = 'push' ]; then
-            test "$commit_sha" = "$GITHUB_SHA"
-          fi
-          latest_response="$(mktemp)"
-          trap 'rm -f "$latest_response"' EXIT
-          latest_status="$(curl --silent --show-error --location --output "$latest_response" --write-out '%{http_code}' \
-            --header "Authorization: Bearer $GH_TOKEN" \
-            --header "Accept: application/vnd.github+json" \
-            --header "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/latest")"
-          case "$latest_status" in
-            200)
-              current_stable_tag="$(node -e 'const fs=require("node:fs"); const value=JSON.parse(fs.readFileSync(process.argv[1], "utf8")); if (typeof value.tag_name !== "string") process.exit(1); process.stdout.write(value.tag_name);' "$latest_response")"
-              node scripts/check-release-version.mjs --tag "$RELEASE_TAG" --current-stable-tag "$current_stable_tag"
-              ;;
-            404)
-              node scripts/check-release-version.mjs --tag "$RELEASE_TAG"
-              ;;
-            *)
-              echo "cannot establish the current stable release (GitHub API HTTP $latest_status)" >&2
-              exit 1
-              ;;
-          esac
-          rm -f "$latest_response"
-          trap - EXIT
-          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-          echo "version=${RELEASE_TAG#app-v}" >> "$GITHUB_OUTPUT"
-          echo "commit_sha=$commit_sha" >> "$GITHUB_OUTPUT"
-          echo "published_at=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" >> "$GITHUB_OUTPUT"
-
-      - name: Check release configuration
-        run: npm run check:release-config
-
-      - name: Validate reusable engines and stage the complete install catalog
-        id: capabilities
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SOURCE_RUN_ID: ${{ inputs.capability_source_run_id || vars.CAPABILITY_SOURCE_RUN_ID }}
-          RELEASE_TAG: ${{ steps.coordinate.outputs.release_tag }}
-          COMMIT_SHA: ${{ steps.coordinate.outputs.commit_sha }}
-        run: |
-          set -euo pipefail
-          node scripts/reuse-capability-release.mjs --source-run-id "$SOURCE_RUN_ID" --tag "$RELEASE_TAG" --output capability-source.json
-          gh run download "$SOURCE_RUN_ID" --name capability-install-catalog --dir release-input/capabilities
-          source_commit="$(node -p 'JSON.parse(require("fs").readFileSync("capability-source.json")).sourceCommit')"
-          node scripts/verify-capability-catalog.mjs \
-            --catalog release-input/capabilities/install-catalog.json \
-            --trusted-keys release-input/capabilities/trusted-keys.json \
-            --mode release --tag "$RELEASE_TAG" \
-            --provenance release-input/capabilities/catalog-provenance.json \
-            --expected-commit "$source_commit" --expected-run-id "$SOURCE_RUN_ID"
-          cmp capabilities/trusted-keys.json release-input/capabilities/trusted-keys.json
-          cp release-input/capabilities/catalog-provenance.json release-input/capabilities/source-provenance.json
-          cp capability-source.json release-input/capabilities/
-          node scripts/verify-capability-catalog.mjs \
-            --catalog release-input/capabilities/install-catalog.json \
-            --trusted-keys release-input/capabilities/trusted-keys.json \
-            --mode release --tag "$RELEASE_TAG" \
-            --emit-provenance release-input/capabilities/catalog-provenance.json \
-            --commit-sha "$COMMIT_SHA" --run-id "$GITHUB_RUN_ID"
-          echo "source_run_id=$SOURCE_RUN_ID" >> "$GITHUB_OUTPUT"
-
-      - name: Preserve catalog and original engine provenance
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: release-capability-catalog
-          path: release-input/capabilities/*
-          retention-days: 30
-
-  source-check:
-    name: Full source verification for the release commit
-    needs: preflight
-    runs-on: macos-15
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          ref: ${{ needs.preflight.outputs.commit_sha }}
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: '3.12'
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          workspaces: src-tauri -> target
-          cache-on-failure: true
-      - run: npm ci
-      - run: npm run check
-        env:
-          LLM_WIKI_CHECK_SERIAL: '1'
+          node scripts/verify-capability-catalog.mjs --catalog capabilities/install-catalog.json --trusted-keys capabilities/trusted-keys.json --mode release
+          node scripts/verify-published-capability-assets.mjs --catalog capabilities/install-catalog.json --availability-only
 
   desktop-build:
     name: Build updater-signed ${{ matrix.platform }}
@@ -222,39 +118,24 @@ jobs:
       - name: Install exact locked dependencies
         run: npm ci
 
-      - name: Download verified engine catalog
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: release-capability-catalog
-          path: release-input/capabilities
-
-      - name: Require complete release catalog for compilation
+      - name: Select the committed catalog for distributable builds
         shell: pwsh
-        env:
-          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
-          COMMIT_SHA: ${{ needs.preflight.outputs.commit_sha }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
-          node scripts/verify-capability-catalog.mjs --catalog release-input/capabilities/install-catalog.json --trusted-keys release-input/capabilities/trusted-keys.json --mode release --tag $env:RELEASE_TAG --provenance release-input/capabilities/catalog-provenance.json --expected-commit $env:COMMIT_SHA --expected-run-id $env:GITHUB_RUN_ID
           "LLM_WIKI_CAPABILITY_CATALOG_MODE=distributable" >> $env:GITHUB_ENV
-          "LLM_WIKI_CAPABILITY_STAGING_DIR=$((Resolve-Path release-input/capabilities).Path)" >> $env:GITHUB_ENV
-          "LLM_WIKI_DISTRIBUTION_TAG=$env:RELEASE_TAG" >> $env:GITHUB_ENV
-          "LLM_WIKI_DISTRIBUTION_COMMIT=$env:COMMIT_SHA" >> $env:GITHUB_ENV
-          "LLM_WIKI_DISTRIBUTION_RUN_ID=$env:GITHUB_RUN_ID" >> $env:GITHUB_ENV
-
-      - name: Check updater signing key
-        shell: bash
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-        run: test -n "$TAURI_SIGNING_PRIVATE_KEY"
+          "LLM_WIKI_CAPABILITY_STAGING_DIR=$((Resolve-Path capabilities).Path)" >> $env:GITHUB_ENV
 
       - name: Build installer and updater-signed artifact
         shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run tauri -- build --target '${{ matrix.target }}' --bundles '${{ matrix.bundles }}' -- --locked
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          test -n "$TAURI_SIGNING_PRIVATE_KEY"
+          node -e 'require("node:fs").writeFileSync("release-version.json", JSON.stringify({ version: process.env.VERSION }))'
+          npm run tauri -- build --target '${{ matrix.target }}' --bundles '${{ matrix.bundles }}' --config "$PWD/release-version.json" -- --locked
 
       - name: Stage and verify desktop release assets
         shell: bash
@@ -265,17 +146,11 @@ jobs:
           PLATFORM: ${{ matrix.platform }}
         run: |
           set -euo pipefail
-          node --input-type=module -e '
-            import fs from "node:fs";
-            import { OS_IDENTITY_EVIDENCE } from "./scripts/release-assets-contract.mjs";
-            fs.writeFileSync(`${process.env.RUNNER_TEMP}/signing-evidence.json`, JSON.stringify(OS_IDENTITY_EVIDENCE[process.env.PLATFORM]));
-          '
           node scripts/stage-desktop-release.mjs \
             --source "src-tauri/target/${{ matrix.target }}/release/bundle" \
             --output "desktop-dist/${{ matrix.platform }}" \
             --platform "$PLATFORM" --tag "$RELEASE_TAG" \
-            --version "$VERSION" --commit "$COMMIT_SHA" \
-            --signingEvidence "$RUNNER_TEMP/signing-evidence.json"
+            --version "$VERSION" --commit "$COMMIT_SHA"
           node scripts/verify-updater-signatures.mjs \
             --descriptor "desktop-dist/${{ matrix.platform }}/release-entry.json" \
             --updaterConfig src-tauri/tauri.conf.json
@@ -286,7 +161,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           $binaryName = if ($IsWindows) { 'llm-wiki-desktop.exe' } else { 'llm-wiki-desktop' }
-          node scripts/verify-embedded-capability-catalog.mjs --binary "src-tauri/target/${{ matrix.target }}/release/$binaryName" --catalog release-input/capabilities/install-catalog.json --mode release
+          node scripts/verify-embedded-capability-catalog.mjs --binary "src-tauri/target/${{ matrix.target }}/release/$binaryName" --catalog capabilities/install-catalog.json --mode release
 
       - name: Install and launch Windows installer
         if: runner.os == 'Windows'
@@ -355,106 +230,14 @@ jobs:
           overwrite: true
           retention-days: 14
 
-  publish-capabilities:
-    name: Verify and publish existing engines separately
-    needs: preflight
-    runs-on: ubuntu-24.04
-    environment: capability-release
-    permissions:
-      contents: write
-      actions: read
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          ref: ${{ needs.preflight.outputs.commit_sha }}
-          fetch-depth: 0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          workspaces: src-tauri -> target
-          shared-key: capability-assembler
-          cache-on-failure: true
-      - name: Prepare signed archive verifier
-        run: |
-          set -euo pipefail
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
-          sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev pkg-config
-          cargo build --locked --release --no-default-features --manifest-path src-tauri/Cargo.toml --bin capability_release
-          available_kib="$(df -Pk . | awk 'NR==2 {print $4}')"
-          test "$available_kib" -ge 18874368 || { echo 'At least 18 GiB free space is required for verified engine downloads.' >&2; df -h .; exit 1; }
-      - name: Download unchanged qualified engines
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          pattern: '*-capabilities-*'
-          run-id: ${{ needs.preflight.outputs.capability_source_run_id }}
-          github-token: ${{ github.token }}
-          path: capability-dist
-          merge-multiple: true
-      - name: Download verified catalog and provenance
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: release-capability-catalog
-          path: release-input/capabilities
-      - name: Verify archive signatures and exact catalog contents
-        env:
-          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
-        run: |
-          set -euo pipefail
-          src-tauri/target/release/capability_release merge-catalog --input capability-dist --output merged-catalog.json --trusted-keys capabilities/trusted-keys.json --expected-tag "$RELEASE_TAG"
-          node --input-type=module -e '
-            import fs from "node:fs";
-            import assert from "node:assert/strict";
-            const read = file => JSON.parse(fs.readFileSync(file));
-            assert.deepEqual(read("merged-catalog.json"), read("release-input/capabilities/install-catalog.json"));
-          '
-          mkdir -p public-capabilities
-          node --input-type=module -e '
-            import fs from "node:fs";
-            import path from "node:path";
-            const catalog = JSON.parse(fs.readFileSync("merged-catalog.json"));
-            for (const entry of catalog.entries) {
-              const name = path.posix.basename(new URL(entry.url).pathname);
-              fs.linkSync(path.join("capability-dist", name), path.join("public-capabilities", name));
-            }
-          '
-          for name in install-catalog.json trusted-keys.json; do
-            cp "release-input/capabilities/$name" public-capabilities/
-          done
-          cp release-input/capabilities/source-provenance.json public-capabilities/catalog-provenance.json
-          node scripts/generate-release-checksums.mjs --root public-capabilities --output public-capabilities/CHECKSUMS.sha256
-      - name: Publish immutable optional engine channel
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
-        run: |
-          set -euo pipefail
-          capability_tag="capabilities-v${RELEASE_TAG#app-v}"
-          source_commit="$(node -p 'JSON.parse(require("fs").readFileSync("release-input/capabilities/source-provenance.json")).commitSha')"
-          existing="$(git ls-remote origin "refs/tags/$capability_tag" | cut -f1)"
-          if [ -n "$existing" ]; then
-            test "$existing" = "$source_commit"
-          else
-            git fetch --no-tags origin "$source_commit"
-            git tag "$capability_tag" "$source_commit"
-            git push origin "refs/tags/$capability_tag"
-          fi
-          node scripts/publish-desktop-release.mjs --root public-capabilities --tag "$capability_tag" --channel capabilities --notes docs/release/capability-notes.md
-
   publish:
     name: Assemble and publish release
-    needs: [preflight, source-check, desktop-build, publish-capabilities]
+    needs: [preflight, desktop-build]
     runs-on: ubuntu-24.04
     environment: desktop-release
     permissions:
       contents: write
-    timeout-minutes: 20
+    timeout-minutes: 60
     steps:
       - name: Checkout exact release commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -480,23 +263,15 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with: { name: desktop-linux-x86_64, path: candidate/desktop/linux-x86_64 }
 
-      - name: Generate latest.json and assemble public downloads
+      - name: Assemble the declared installers and update files
         env:
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
           VERSION: ${{ needs.preflight.outputs.version }}
           PUBLISHED_AT: ${{ needs.preflight.outputs.published_at }}
         run: |
-          set -euo pipefail
-          node scripts/verify-latest-json.mjs --generate true --root candidate \
-            --manifest candidate/latest.json --tag "$RELEASE_TAG" --version "$VERSION" \
+          node scripts/stage-desktop-release.mjs --candidate candidate --output public \
+            --tag "$RELEASE_TAG" --version "$VERSION" \
             --notes docs/release/release-notes.md --pubDate "$PUBLISHED_AT"
-          mkdir -p public
-          cp candidate/latest.json public/
-          for platform in windows-x86_64 darwin-aarch64 darwin-x86_64 linux-x86_64; do
-            find "candidate/desktop/$platform" -maxdepth 1 -type f ! -name 'release-entry.json' ! -name '*.sig' -exec cp {} public/ \;
-          done
-          test "$(find public -maxdepth 1 -type f | wc -l | tr -d ' ')" = 7
-          node scripts/generate-release-checksums.mjs --root public --output public/CHECKSUMS.sha256
 
       - name: Publish verified assets
         env:
@@ -510,6 +285,7 @@ jobs:
           node scripts/publish-desktop-release.mjs --root public --tag "$RELEASE_TAG" --notes docs/release/release-notes.md
 
       - name: Check public updater manifest
+        if: needs.preflight.outputs.channel == 'stable'
         # GitHub CDN propagation must not fail a fully published release.
         continue-on-error: true
         env:
@@ -517,4 +293,4 @@ jobs:
         run: |
           curl --fail --location --retry 5 --retry-all-errors --retry-delay 5 --max-time 30 \
             "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/$RELEASE_TAG/latest.json" -o published-latest.json
-          cmp candidate/latest.json published-latest.json
+          cmp public/latest.json published-latest.json

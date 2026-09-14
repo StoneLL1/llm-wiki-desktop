@@ -27,6 +27,7 @@ pub struct CapabilityPackManifest {
     pub version: String,
     pub protocol_version: String,
     pub target_triples: Vec<String>,
+    #[serde(default)]
     pub archive_sha256: String,
     pub license_expression: String,
     pub entrypoint: String,
@@ -34,9 +35,13 @@ pub struct CapabilityPackManifest {
     pub entrypoint_args: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub executable_files: Vec<String>,
+    #[serde(default)]
     pub compressed_bytes: u64,
+    #[serde(default)]
     pub installed_bytes: u64,
+    #[serde(default)]
     pub signing_key_id: String,
+    #[serde(default)]
     pub signature: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<CapabilityPackFile>,
@@ -68,6 +73,7 @@ pub struct CapabilityPackManager {
     install_root: PathBuf,
     trusted_keys: HashMap<String, Vec<u8>>,
     health: RwLock<HashMap<(String, String), PackHealth>>,
+    verify_files: bool,
 }
 
 impl CapabilityPackManager {
@@ -76,6 +82,16 @@ impl CapabilityPackManager {
             install_root,
             trusted_keys,
             health: RwLock::new(HashMap::new()),
+            verify_files: true,
+        }
+    }
+
+    /// Managed installations were checked before extraction. Reloading them
+    /// only reads the manifest and entrypoint; full verification is a diagnostic.
+    pub fn for_installed(install_root: PathBuf, trusted_keys: HashMap<String, Vec<u8>>) -> Self {
+        Self {
+            verify_files: false,
+            ..Self::new(install_root, trusted_keys)
         }
     }
 
@@ -172,7 +188,7 @@ impl CapabilityPackManager {
         manifest: CapabilityPackManifest,
         requirement: &CapabilityRequirement,
     ) -> Result<ResolvedCapabilityPack, BackendError> {
-        if !matches!(manifest.schema_version, 1 | 2)
+        if !matches!(manifest.schema_version, 1 | 2 | 3)
             || manifest.protocol_version != requirement.protocol_version
             || !manifest
                 .target_triples
@@ -196,15 +212,31 @@ impl CapabilityPackManager {
             return Err(invalid("The capability entrypoint arguments are invalid."));
         }
         validate_executable_files(&manifest)?;
-        let key = self
-            .trusted_keys
-            .get(&manifest.signing_key_id)
-            .ok_or_else(|| invalid("The capability manifest is not signed by a trusted key."))?;
-        let signature = decode_hex(&manifest.signature)?;
-        let payload = manifest.signing_payload()?;
-        UnparsedPublicKey::new(&ED25519, key)
-            .verify(&payload, &signature)
-            .map_err(|_| invalid("The capability manifest signature is invalid."))?;
+        // Installation already authenticated the complete archive against the
+        // App catalog. Keep a small receipt, not a second signature hierarchy.
+        let installed = read_installation_receipt(&root)?;
+        if let Some(receipt) = &installed {
+            if hash_file(&root.join("manifest.json"))? != receipt.manifest_sha256 {
+                return Err(invalid(
+                    "The installed capability manifest changed; reinstall it.",
+                ));
+            }
+        } else {
+            // Compatibility for packs installed before receipts were introduced,
+            // and explicitly configured development packs.
+            let key = self
+                .trusted_keys
+                .get(&manifest.signing_key_id)
+                .ok_or_else(|| {
+                    invalid("The capability has not been installed by the application.")
+                })?;
+            UnparsedPublicKey::new(&ED25519, key)
+                .verify(
+                    &manifest.signing_payload()?,
+                    &decode_hex(&manifest.signature)?,
+                )
+                .map_err(|_| invalid("The legacy capability manifest signature is invalid."))?;
+        }
         let relative = Path::new(&manifest.entrypoint);
         if relative.is_absolute()
             || relative
@@ -228,7 +260,7 @@ impl CapabilityPackManager {
                 "The capability entrypoint escapes its immutable install directory.",
             ));
         }
-        if manifest.schema_version == 1 {
+        if self.verify_files && installed.is_none() && manifest.schema_version == 1 {
             let archive = root.join("pack.archive");
             let archive_or_entrypoint = if archive.is_file() {
                 archive
@@ -248,30 +280,88 @@ impl CapabilityPackManager {
                     "The capability archive hash does not match its signed manifest.",
                 ));
             }
-        } else if !manifest.archive_sha256.is_empty()
-            || manifest.compressed_bytes != 0
-            || manifest.installed_bytes != 0
-            || manifest.files.is_empty()
+        } else if installed.is_none()
+            && manifest.schema_version == 2
+            && (!manifest.archive_sha256.is_empty()
+                || manifest.compressed_bytes != 0
+                || manifest.installed_bytes != 0
+                || manifest.files.is_empty())
         {
             return Err(invalid(
                 "Schema v2 capability manifests must delegate archive measurements to the signed application catalog and include a complete file inventory.",
             ));
         }
-        let entrypoint_sha256 = hash_file(&entrypoint)?;
+        // The signed inventory already pins this digest; the full pass below
+        // verifies the bytes. Do not read a large native executable twice.
+        let entrypoint_sha256 = if manifest.files.is_empty() {
+            if self.verify_files {
+                hash_file(&entrypoint)?
+            } else {
+                String::new()
+            }
+        } else {
+            manifest
+                .files
+                .iter()
+                .find(|file| file.path == manifest.entrypoint)
+                .ok_or_else(|| {
+                    invalid("The capability entrypoint is missing from its signed inventory.")
+                })?
+                .sha256
+                .clone()
+        };
         let pack = ResolvedCapabilityPack {
             manifest,
             root: canonical_root,
             entrypoint,
             entrypoint_sha256,
         };
-        verify_runtime_integrity(&pack)?;
+        if self.verify_files {
+            verify_runtime_integrity(&pack)?;
+        }
         Ok(pack)
     }
 }
 
-/// Revalidates every installed runtime file immediately before a capability is launched.
-/// Resolution verifies the signature; this function closes the mutation window between
-/// resolution and process creation without needing the signing key again.
+pub(super) const INSTALLATION_RECEIPT: &str = ".installation.json";
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct InstallationReceipt {
+    pub archive_sha256: String,
+    pub manifest_sha256: String,
+}
+
+pub(super) fn read_installation_receipt(
+    root: &Path,
+) -> Result<Option<InstallationReceipt>, BackendError> {
+    let path = root.join(INSTALLATION_RECEIPT);
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Ok(metadata)
+            if metadata.is_file()
+                && !metadata.file_type().is_symlink()
+                && metadata.len() < 1024 =>
+        {
+            let receipt: InstallationReceipt = serde_json::from_slice(
+                &fs::read(path)
+                    .map_err(|_| invalid("The capability installation receipt cannot be read."))?,
+            )
+            .map_err(|_| invalid("The capability installation receipt is invalid."))?;
+            if [&receipt.archive_sha256, &receipt.manifest_sha256]
+                .iter()
+                .any(|hash| hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            {
+                return Err(invalid("The capability installation receipt is invalid."));
+            }
+            Ok(Some(receipt))
+        }
+        _ => Err(invalid("The capability installation receipt is invalid.")),
+    }
+}
+
+/// Explicit full-file verification for build qualification and diagnostics.
+/// Managed startup and normal execution do not perform this expensive scan.
 pub fn verify_runtime_integrity(pack: &ResolvedCapabilityPack) -> Result<(), BackendError> {
     let canonical_root = fs::canonicalize(&pack.root)
         .map_err(|_| invalid("The capability install directory cannot be resolved."))?;
@@ -338,6 +428,7 @@ fn validate_inventory_shape(files: &[CapabilityPackFile]) -> Result<(), BackendE
                 .any(|part| !matches!(part, Component::Normal(_)))
             || file.path == "manifest.json"
             || file.path == "pack.archive"
+            || file.path == INSTALLATION_RECEIPT
             || file.sha256.len() != 64
             || !file.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
         {
@@ -357,7 +448,12 @@ fn validate_executable_files(manifest: &CapabilityPackManifest) -> Result<(), Ba
     let mut previous: Option<&str> = None;
     for path in &manifest.executable_files {
         if previous.is_some_and(|prior| prior >= path.as_str())
-            || !manifest.files.iter().any(|file| file.path == *path)
+            || Path::new(path).is_absolute()
+            || path.contains('\\')
+            || Path::new(path)
+                .components()
+                .any(|part| !matches!(part, Component::Normal(_)))
+            || (!manifest.files.is_empty() && !manifest.files.iter().any(|file| file.path == *path))
         {
             return Err(invalid(
                 "The signed capability executable inventory is invalid.",
@@ -413,7 +509,10 @@ fn collect_runtime_files(root: &Path) -> Result<Vec<(String, PathBuf)>, BackendE
                     invalid("A capability runtime file escapes its install directory.")
                 })?;
                 let portable = portable_relative_path(relative)?;
-                if portable != "manifest.json" && portable != "pack.archive" {
+                if portable != "manifest.json"
+                    && portable != "pack.archive"
+                    && portable != INSTALLATION_RECEIPT
+                {
                     output.push((portable, path));
                 }
             } else {
@@ -442,6 +541,11 @@ fn portable_relative_path(path: &Path) -> Result<String, BackendError> {
     Ok(parts.join("/"))
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static HASHED_RUNTIME_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 pub(super) fn hash_file(path: &Path) -> Result<String, BackendError> {
     let mut file =
         fs::File::open(path).map_err(|_| invalid("A capability runtime file cannot be read."))?;
@@ -454,6 +558,8 @@ pub(super) fn hash_file(path: &Path) -> Result<String, BackendError> {
         if read == 0 {
             break;
         }
+        #[cfg(test)]
+        HASHED_RUNTIME_BYTES.with(|total| total.set(total.get() + read as u64));
         hasher.update(&buffer[..read]);
     }
     Ok(format!("{:x}", hasher.finalize()))

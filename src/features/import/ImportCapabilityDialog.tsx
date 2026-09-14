@@ -1,10 +1,10 @@
-import { Check, Download, LoaderCircle, Package, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { Check, Download, FolderOpen, LoaderCircle, Package, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ActionableErrorNotice } from "../../components/app/ActionableErrorNotice";
 import { useModalDialog } from "../../hooks/useModalDialog";
-import { normalizeBackendError, type NormalizedBackendError } from "../../lib/backendError";
+import { backendErrorCode, normalizeBackendError, type NormalizedBackendError } from "../../lib/backendError";
 import { type AppCapabilityDialogIntent, useAppCapabilityStore } from "../../stores/appCapabilityStore";
 import { cancelTaskRequest, selectTaskById, useTaskStore } from "../../stores/taskStore";
 import type { AppCapabilityView } from "../../types/appCapability";
@@ -47,7 +47,14 @@ function isBusy(task: BackendTask | null): boolean {
 
 export function ImportCapabilityDialog(props: ImportCapabilityDialogProps) {
   const { t } = useTranslation();
-  const dialogRef = useModalDialog({ open: props.open, onClose: props.onCancel });
+  const session = useRef(0);
+  const pending = useRef(false);
+  const retryFromFile = useRef(false);
+  function closeDialog() {
+    session.current += 1;
+    props.onCancel();
+  }
+  const dialogRef = useModalDialog({ open: props.open, onClose: closeDialog });
   const management = props.origin === "management";
   const requirement = management ? null : props.requirement;
   const capabilityId = management
@@ -93,11 +100,15 @@ export function ImportCapabilityDialog(props: ImportCapabilityDialogProps) {
   const canConfirm = mutationIntent && (installable || (!management && installed)) && (!management || acknowledged) && !busy && !paused;
 
   useEffect(() => {
+    session.current += 1;
+    pending.current = false;
+    retryFromFile.current = false;
     setAcknowledged(false);
     setStarting(false);
     setStartedTaskId(null);
     setInstallError(null);
-  }, [props.open, capabilityId, management ? props.intent : requirement?.requirementRevision]);
+    return () => { session.current += 1; };
+  }, [props.open, capabilityId, capability?.targetVersion, capability?.acknowledgementVersion, management ? props.intent : requirement?.requirementRevision]);
 
   if (!props.open || !capabilityId || (!management && !requirement)) return null;
 
@@ -116,23 +127,43 @@ export function ImportCapabilityDialog(props: ImportCapabilityDialogProps) {
   const name = capability ? t(capability.nameKey) : capabilityDisplayName(capabilityId, t);
   const waitingCount = management ? capability?.currentProjectWaitingCount ?? 0 : Math.max(1, capability?.currentProjectWaitingCount ?? 0);
 
-  async function install() {
-    if (!canConfirm) return;
+  async function install(fromFile = false) {
+    if (!canConfirm || pending.current) return;
+    pending.current = true;
+    retryFromFile.current = fromFile;
+    const activeSession = session.current;
     setStarting(true);
     setInstallError(null);
     try {
+      let archivePath: string | undefined;
+      if (fromFile && management) {
+        const { open } = await import("@tauri-apps/plugin-dialog");
+        if (activeSession !== session.current) return;
+        const selection = await open({
+          directory: false,
+          multiple: false,
+          title: t("importV2.capabilityManagement.action.installFromFile"),
+          filters: [{ name: "ZIP", extensions: ["zip"] }],
+        });
+        if (activeSession !== session.current || typeof selection !== "string" || !selection) return;
+        archivePath = selection;
+      }
       const started = management
-        ? await confirmManagementInstall(capabilityId!)
+        ? await confirmManagementInstall(capabilityId!, archivePath)
         : await props.onInstall(capabilityId!);
-      if (started) setStartedTaskId(started.id);
+      if (started && activeSession === session.current) setStartedTaskId(started.id);
     } catch (error) {
+      if (activeSession !== session.current) return;
       setInstallError(normalizeBackendError(error, {
         defaultSummaryKey: "backendError.summary.importCapabilityUnavailable",
-        actionKindOverride: "retry",
+        actionKindOverride: ["APP_CAPABILITY_ARCHIVE_UNAVAILABLE", "APP_CAPABILITY_INSTALL_IN_PROGRESS"].includes(backendErrorCode(error) ?? "") ? null : "retry",
         defaultRecoverable: true,
       }));
     } finally {
-      setStarting(false);
+      if (activeSession === session.current) {
+        pending.current = false;
+        setStarting(false);
+      }
     }
   }
 
@@ -193,7 +224,7 @@ export function ImportCapabilityDialog(props: ImportCapabilityDialogProps) {
       await continuePaused();
       return;
     }
-    await install();
+    await install(retryFromFile.current);
   }
 
   return (
@@ -202,7 +233,7 @@ export function ImportCapabilityDialog(props: ImportCapabilityDialogProps) {
         <header>
           <Package size={17} className="text-[var(--accent)]" aria-hidden="true" />
           <div className="min-w-0 flex-1"><h2 id="import-capability-title">{management ? t("importV2.capabilityManagement.confirmTitle") : t("importV2.capability.title")}</h2><p>{name}</p></div>
-          <button type="button" className="icon-button" aria-label={t("importV2.capability.cancel")} title={t("importV2.capability.cancel")} onClick={props.onCancel}><X size={16} aria-hidden="true" /></button>
+          <button type="button" className="icon-button" aria-label={t("importV2.capability.cancel")} title={t("importV2.capability.cancel")} onClick={closeDialog}><X size={16} aria-hidden="true" /></button>
         </header>
         <div className="import-capability-dialog__body">
           <dl className="import-capability-dialog__facts">
@@ -246,12 +277,14 @@ export function ImportCapabilityDialog(props: ImportCapabilityDialogProps) {
           </div> : null}
 
           {management && mutationIntent && !paused ? <label className="import-capability-dialog__ack"><input type="checkbox" checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} disabled={busy || !installable} /><span>{t("importV2.capabilityManagement.acknowledgement", { version: version ?? "—", license })}</span></label> : null}
+          {management && mutationIntent && !paused ? <p className="import-capability-dialog__safety">{t("importV2.capabilityManagement.offlineHint", { name, version: version ?? "—", target })}</p> : null}
           {installError ?? actionError ?? taskError ? <ActionableErrorNotice className="mt-3" error={(installError ?? actionError ?? taskError)!} onAction={async (kind) => { if (kind === "retry") await retryVisibleError(); }} /> : null}
 
         </div>
         <footer>
-          {busy && management ? <button type="button" className="btn btn--sm" onClick={() => void cancelActive()}>{t("importV2.capabilityManagement.action.cancel")}</button> : <button type="button" className="btn btn--sm" onClick={props.onCancel}>{t("importV2.capability.close")}</button>}
+          {isBusy(task) && management ? <button type="button" className="btn btn--sm" onClick={() => void cancelActive()}>{t("importV2.capabilityManagement.action.cancel")}</button> : <button type="button" className="btn btn--sm" onClick={closeDialog}>{t("importV2.capability.close")}</button>}
           {paused ? <button type="button" className="btn btn--sm btn--primary" onClick={() => void continuePaused()} disabled={starting}>{starting ? <LoaderCircle size={13} className="animate-spin" aria-hidden="true" /> : null}{t("importV2.capabilityManagement.action.continue")}</button> : null}
+          {management && mutationIntent && !paused ? <button type="button" className="btn btn--sm" onClick={() => void install(true)} disabled={!canConfirm}><FolderOpen size={13} aria-hidden="true" />{t("importV2.capabilityManagement.action.installFromFile")}</button> : null}
           {mutationIntent && !paused ? <button type="button" className="btn btn--sm btn--primary" onClick={() => void install()} disabled={!canConfirm}><Download size={13} aria-hidden="true" />{starting ? <LoaderCircle size={13} className="animate-spin" aria-hidden="true" /> : null}{t(management && props.intent === "update" ? "importV2.capabilityManagement.action.update" : management && props.intent === "retry" ? "importV2.capabilityManagement.action.retry" : management ? "importV2.capabilityManagement.action.install" : "importV2.capability.prepareAndContinue")}</button> : null}
         </footer>
       </section>

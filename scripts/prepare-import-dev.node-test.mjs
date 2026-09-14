@@ -18,7 +18,7 @@ test("development catalog validates before replacing an existing prepared catalo
   const fetchCatalog = (entries) => async () => ({ ok: true, text: async () => JSON.stringify({ schemaVersion: 1, entries }) });
   const destination = await prepareImportDevelopment({ root, fetchImpl: fetchCatalog([entry]) });
   const saved = await fs.readFile(path.join(destination, "install-catalog.json"), "utf8");
-  for (const entries of [[], [{ ...entry, signingKeyId: "unknown-publisher" }]]) {
+  for (const entries of [[], [{ ...entry, archiveSha256: "invalid-checksum" }]]) {
     await assert.rejects(prepareImportDevelopment({ root, fetchImpl: fetchCatalog(entries) }), /Invalid capability catalog/);
     assert.equal(await fs.readFile(path.join(destination, "install-catalog.json"), "utf8"), saved);
   }

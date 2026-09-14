@@ -7,6 +7,7 @@ import process from "node:process";
 import test from "node:test";
 
 import {
+  verifySignedFile,
   assertProviderWasUsed,
   buildChunkedFfmpegArguments,
   buildEmbeddedSubtitleArguments,
@@ -257,4 +258,17 @@ test("tries the platform accelerator first and falls back to CPU", async () => {
     /IMPORT_ASR_ACCELERATOR_UNAVAILABLE/,
   );
   assert.doesNotThrow(() => assertProviderWasUsed("cuda", "Available providers: CUDAExecutionProvider, CPUExecutionProvider"));
+});
+
+
+test("installed models are checked for availability without repeating download hashes", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "sensevoice-模型-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, "models"));
+  const model = path.join(root, "models", "model.int8.onnx");
+  await fs.writeFile(model, "model-data");
+  const manifest = { files: [{ path: "models/model.int8.onnx", bytes: 10, sha256: "a".repeat(64) }] };
+  assert.equal(await verifySignedFile(root, manifest, "models/model.int8.onnx"), await fs.realpath(model));
+  await fs.writeFile(model, "short");
+  await assert.rejects(verifySignedFile(root, manifest, "models/model.int8.onnx"), /INTEGRITY_FAILED/u);
 });

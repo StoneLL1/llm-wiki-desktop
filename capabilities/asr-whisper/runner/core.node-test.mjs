@@ -134,7 +134,7 @@ test("classifies enforced process timeout without exposing child diagnostics", (
   assert.equal(classifyExecutionError({ code: 2, stderr: "secret-bearing diagnostics" }), "IMPORT_ASR_ENGINE_FAILED");
 });
 
-test("artifact verification accepts an exact digest and rejects mismatch or traversal", async (t) => {
+test("installed artifact checks reject truncation and traversal without rehashing", async (t) => {
   const value = await fixture();
   t.after(value.cleanup);
   const binary = path.join(value.root, "whisper-cli");
@@ -144,7 +144,8 @@ test("artifact verification accepts an exact digest and rejects mismatch or trav
   // verifyArtifact returns the realpath-resolved absolute path; compare
   // against the canonicalized fixture so the assertion holds on macOS.
   assert.equal(await verifyArtifact(value.root, { file: "whisper-cli", sha256: digest }, "whisper-cli"), await fs.realpath(binary));
-  await assert.rejects(verifyArtifact(value.root, { file: "whisper-cli", sha256: "f".repeat(64) }, "whisper-cli"), /IMPORT_ASR_ENGINE_INTEGRITY_FAILED/);
+  assert.equal(await verifyArtifact(value.root, { file: "whisper-cli", sha256: "f".repeat(64), bytes: bytes.length }, "whisper-cli"), await fs.realpath(binary));
+  await assert.rejects(verifyArtifact(value.root, { file: "whisper-cli", sha256: digest, bytes: bytes.length + 1 }, "whisper-cli"), /IMPORT_ASR_ENGINE_INTEGRITY_FAILED/);
   await assert.rejects(verifyArtifact(value.root, { file: "../whisper-cli", sha256: digest }, "whisper-cli"), /IMPORT_ASR_ENGINE_UNAVAILABLE/);
   await assert.rejects(verifyArtifact(value.root, null, "whisper-cli"), /IMPORT_ASR_ENGINE_UNAVAILABLE/);
 });

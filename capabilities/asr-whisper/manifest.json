@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "packId": "asr-whisper",
-  "version": "1.8.3",
+  "version": "1.8.3+resources.1",
   "protocolVersion": "2",
   "targetTriples": [],
   "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",

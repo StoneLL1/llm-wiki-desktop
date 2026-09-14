@@ -93,19 +93,12 @@ test("the checked-in all-format fixture remains inside the product format surfac
   assert.deepEqual(errors, []);
 });
 
-test("distributable identity is bound to verified workflow provenance", async () => {
+test("desktop builds embed the committed resource catalog independently of release provenance", async () => {
   const buildScript = await fs.readFile(path.join(repositoryRoot, "src-tauri", "build.rs"), "utf8");
-  const desktopWorkflow = await fs.readFile(path.join(repositoryRoot, ".github", "workflows", "desktop-release.yml"), "utf8");
-  for (const name of [
-    "LLM_WIKI_DISTRIBUTION_TAG",
-    "LLM_WIKI_DISTRIBUTION_COMMIT",
-    "LLM_WIKI_DISTRIBUTION_RUN_ID",
-  ]) {
-    assert.equal(buildScript.includes(name), true, `${name} is not checked by build.rs`);
-    assert.equal(desktopWorkflow.includes(name), true, `${name} is not injected by desktop-release.yml`);
-  }
-  assert.equal(desktopWorkflow.includes("LLM_WIKI_CAPABILITY_CATALOG_MODE=distributable"), true);
-  assert.equal(desktopWorkflow.includes("verify-embedded-capability-catalog.mjs"), true);
-  assert.equal(desktopWorkflow.includes("--expected-commit $env:COMMIT_SHA --expected-run-id $env:GITHUB_RUN_ID"), true);
-  assert.equal(buildScript.includes("catalog-provenance.json"), true);
+  const workflow = await fs.readFile(path.join(repositoryRoot, ".github", "workflows", "desktop-release.yml"), "utf8");
+  assert.equal(workflow.includes("LLM_WIKI_CAPABILITY_CATALOG_MODE=distributable"), true);
+  assert.equal(workflow.includes("verify-embedded-capability-catalog.mjs"), true);
+  assert.equal(workflow.includes("verify-published-capability-assets.mjs"), true);
+  assert.equal(buildScript.includes("LLM_WIKI_DISTRIBUTION_TAG"), false);
+  assert.equal(workflow.includes("reuse-capability-release.mjs"), false);
 });

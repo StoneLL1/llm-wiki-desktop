@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { i18next } from "../../i18n";
@@ -7,6 +7,9 @@ import { useTaskStore } from "../../stores/taskStore";
 import type { AppCapabilityView } from "../../types/appCapability";
 import type { ImportCapabilityRequirement } from "../../types/importV2Presentation";
 import { ImportCapabilityDialog } from "./ImportCapabilityDialog";
+
+const openArchive = vi.hoisted(() => vi.fn());
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: openArchive }));
 
 const requirement: ImportCapabilityRequirement = {
   requirement: {
@@ -59,6 +62,8 @@ const globalCapability: AppCapabilityView = {
 };
 
 beforeEach(async () => {
+  vi.restoreAllMocks();
+  openArchive.mockReset();
   await i18next.changeLanguage("en");
   useAppCapabilityStore.getState().resetForTests();
   useAppCapabilityStore.setState({ capabilities: [globalCapability], initialized: true });
@@ -66,7 +71,55 @@ beforeEach(async () => {
 });
 
 describe("ImportCapabilityDialog", () => {
-  it("shows exact signed-package facts and continuation behavior", () => {
+  it("installs a selected ZIP only after acknowledgement, without an import continuation", async () => {
+    const confirm = vi.spyOn(useAppCapabilityStore.getState(), "confirmInstall").mockResolvedValue(null);
+    openArchive.mockResolvedValue("/资料/能力包.zip");
+    render(<ImportCapabilityDialog origin="management" open capability={globalCapability} intent="install" onCancel={vi.fn()} />);
+    const fromFile = screen.getByRole("button", { name: "Install from file" });
+    expect(fromFile).toBeDisabled();
+    expect(screen.getByText(/Unable to download/)).toHaveTextContent("1.4.0 (x86_64-pc-windows-msvc)");
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(fromFile);
+    await waitFor(() => expect(confirm).toHaveBeenCalledWith("browser-runtime", "/资料/能力包.zip"));
+    expect(openArchive).toHaveBeenCalledWith(expect.objectContaining({ multiple: false, filters: [{ name: "ZIP", extensions: ["zip"] }] }));
+  });
+
+  it("does not install or download when the file picker is cancelled", async () => {
+    const confirm = vi.spyOn(useAppCapabilityStore.getState(), "confirmInstall").mockResolvedValue(null);
+    openArchive.mockResolvedValue(null);
+    render(<ImportCapabilityDialog origin="management" open capability={globalCapability} intent="install" onCancel={vi.fn()} />);
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: "Install from file" }));
+    await waitFor(() => expect(openArchive).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Install from file" })).toBeEnabled());
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("reopens the file picker when retrying a selection failure, without starting a download", async () => {
+    const confirm = vi.spyOn(useAppCapabilityStore.getState(), "confirmInstall").mockResolvedValue(null);
+    openArchive.mockRejectedValueOnce(new Error("picker unavailable")).mockResolvedValueOnce(null);
+    render(<ImportCapabilityDialog origin="management" open capability={globalCapability} intent="install" onCancel={vi.fn()} />);
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: "Install from file" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(openArchive).toHaveBeenCalledTimes(2));
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("discards a late file selection after the dialog closes", async () => {
+    const confirm = vi.spyOn(useAppCapabilityStore.getState(), "confirmInstall").mockResolvedValue(null);
+    let select!: (path: string) => void;
+    openArchive.mockImplementation(() => new Promise<string>((resolve) => { select = resolve; }));
+    const { unmount } = render(<ImportCapabilityDialog origin="management" open capability={globalCapability} intent="install" onCancel={vi.fn()} />);
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: "Install from file" }));
+    await waitFor(() => expect(openArchive).toHaveBeenCalledOnce());
+    unmount();
+    await act(async () => { select("/tmp/late.zip"); });
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("shows resource facts and continuation behavior", () => {
     render(<ImportCapabilityDialog open requirement={requirement} onInstall={vi.fn()} onCancel={vi.fn()} />);
 
     expect(screen.getByText("Interactive web reader")).toBeVisible();
@@ -77,7 +130,7 @@ describe("ImportCapabilityDialog", () => {
     expect(screen.getByText("llm-wiki-capability-v1")).toBeVisible();
     expect(screen.getByText("github.com")).toBeVisible();
     expect(screen.getByText(/Including this import, 2 waiting item/)).toBeVisible();
-    expect(screen.getByText(/verifies the pinned version, SHA-256 digest, publisher signature/i)).toBeVisible();
+    expect(screen.getByText(/checks the files and tests that the program starts/i)).toBeVisible();
   });
 
   it("registers preparation and continuation with one explicit action", async () => {

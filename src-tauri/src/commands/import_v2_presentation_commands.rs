@@ -1270,6 +1270,7 @@ pub fn install_import_capability_v2(
         capability_id: entry.capability_id.clone(),
         expected_version: entry.version.clone(),
         acknowledgement_version: app_capability_acknowledgement_version(&entry),
+        archive_path: None,
     };
     let mut installed_task = None;
     for continuation in continuations {

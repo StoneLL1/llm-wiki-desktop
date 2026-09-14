@@ -100,7 +100,12 @@ impl GitService {
                     .and_then(|total| total.checked_add(128))
                     .ok_or_else(|| history_error("History objects are too large to read."))?;
                 if output_limit > byte_limit.saturating_add(paths.len().saturating_mul(128)) {
-                    return Err(BackendError::new("VERSION_SIZE_LIMIT", "Selected recovery files exceed the supported read budget.", true, true));
+                    return Err(BackendError::new(
+                        "VERSION_SIZE_LIMIT",
+                        "Selected recovery files exceed the supported read budget.",
+                        true,
+                        true,
+                    ));
                 }
                 present.push(path.clone());
                 query.extend_from_slice(hash.as_bytes());

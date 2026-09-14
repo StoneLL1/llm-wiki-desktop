@@ -84,13 +84,12 @@ Current updater custody record: existing updater key pair selected; primary owne
 
 ## Workflow permissions and approvals
 
-- Ordinary CI uses read-only repository access for validation. Its narrowly scoped retry job has `actions: write` to retry a hosted-runner shutdown once.
-- `.github/workflows/desktop-release.yml` owns the current release process: source-run and catalog preflight, exact-commit full source checks on macOS, four-platform builds with updater signatures and installation/launch smoke checks, separate capability publication, and final desktop publication.
-- Engine reuse requires a completed canonical source run for the exact application tag, successful qualification jobs, unchanged engine inputs, and unexpired, provenance-bound artifacts. The source comes from `capability_source_run_id` or the repository variable `CAPABILITY_SOURCE_RUN_ID`; v0.2.1 uses `34439099432`. Changed engine inputs require rebuilding. Long-term restoration from a permanent release channel and unrestricted cross-version reuse are not implemented.
-- The protected `publish-capabilities` job uses `capability-release` and `contents: write` to publish already signed, re-verified engine archives to `capabilities-vX.Y.Z`. It does not expose the capability private key. The channel is a prerelease with `latest=false`.
-- The final `publish` job uses `desktop-release` and `contents: write`. It waits for source checks, all four desktop builds and smoke checks, and successful capability publication. The desktop release has eight public assets: four installers, two macOS updater archives, `latest.json`, and checksums. The verified non-empty capability catalog is embedded in each official application.
-- Updater signing keys are exposed only to the protected desktop build jobs. The updater and capability trust anchors remain separate. Original engine provenance and current integration provenance are retained in Actions artifacts; remote upload names, sizes, and digests are checked before draft publication.
-- Release environments retain `master`/`app-v*` deployment restrictions without a required reviewer. The maintainer initiates publication through a tag or dispatch. See the [current runbook](release-runbook.md) for retries and source-artifact expiry handling.
+- Ordinary CI validates source independently of publication. The release workflow does not rerun the full suite or require historical acceptance paperwork.
+- `.github/workflows/desktop-release.yml` handles stable and RC tags through one preflight, four native builds, and one resumable publisher. Preflight validates the committed resource catalog and bounded anonymous availability checks before expensive builds. Native installation/startup and updater signatures remain checked.
+- Capability resources build independently from their own locked sources. No same-App-version capability tag, historical Actions run or provenance artifact is required. See [resource distribution](../../capabilities/RELEASE.md).
+- Only the desktop publish job has `contents: write`. Updater private keys remain available only to desktop build jobs through the existing `desktop-release` environment. Runtime capability signatures are legacy compatibility metadata.
+- Draft publication verifies required upload bytes, downloads only files whose GitHub digest is unavailable, and preserves unrelated attachments. Stable and RC retries use the same publisher; public assets cannot be overwritten. Older stable releases and RCs cannot take over the current stable update feed.
+- Release environments retain their existing branch/tag deployment scope without a required reviewer. The maintainer initiates publication through a tag or dispatch. No remote permission settings changed during the 2026-09-14 simplification. See the [current runbook](release-runbook.md).
 
 ### Historical Batch 5/6 status
 

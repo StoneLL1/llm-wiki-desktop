@@ -106,6 +106,7 @@ impl AppCapabilityCoordinator {
         entry: &CapabilityCatalogEntry,
         expected_version: &str,
         acknowledgement_version: &str,
+        archive_path: Option<String>,
     ) -> Result<(BackendTask, bool), BackendError> {
         if entry.version != expected_version {
             return Err(coordinator_error(
@@ -135,6 +136,20 @@ impl AppCapabilityCoordinator {
         let mut state = self.state.lock().map_err(|_| coordinator_locked())?;
         if let Some(existing_id) = state.in_flight.get(&key).cloned() {
             if let Some(existing) = tasks.get_task(&existing_id).filter(is_joinable_task) {
+                if let Some(requested) = archive_path.as_ref() {
+                    let existing_path = match existing.operation.as_ref() {
+                        Some(TaskOperation::AppCapabilityInstall { archive_path, .. }) => {
+                            archive_path.as_ref()
+                        }
+                        _ => None,
+                    };
+                    if existing_path != Some(requested) {
+                        return Err(coordinator_error(
+                            "APP_CAPABILITY_INSTALL_IN_PROGRESS",
+                            "An installation is already active. Cancel it before choosing another archive.",
+                        ));
+                    }
+                }
                 return Ok((existing, false));
             }
             state.in_flight.remove(&key);
@@ -147,6 +162,7 @@ impl AppCapabilityCoordinator {
                 entry.version.clone(),
                 entry.target_triple.clone(),
                 key.archive_identity.clone(),
+                archive_path,
             )
             .map_err(|message| coordinator_error("APP_CAPABILITY_TASK_CREATE_FAILED", &message))?;
         state.in_flight.insert(key, task.id.clone());
@@ -457,7 +473,10 @@ impl AppCapabilityCoordinator {
                 formats: definition.formats.extensions,
                 platform_content_types: definition.formats.platform_content_types,
                 target_triple: target.clone(),
-                publisher_key_id: entry.as_ref().map(|entry| entry.signing_key_id.clone()),
+                publisher_key_id: entry
+                    .as_ref()
+                    .map(|entry| entry.signing_key_id.clone())
+                    .filter(|id| !id.is_empty()),
                 source_domain: entry.as_ref().and_then(|entry| {
                     url::Url::parse(&entry.url)
                         .ok()
@@ -483,8 +502,16 @@ impl AppCapabilityCoordinator {
                         .flatten(),
                 },
                 display_state,
-                compressed_bytes: entry.as_ref().map(|entry| entry.compressed_bytes),
-                installed_bytes: entry.as_ref().map(|entry| entry.installed_bytes),
+                compressed_bytes: entry.as_ref().map(|entry| {
+                    entry.compressed_bytes.saturating_add(
+                        entry.model_files.iter().map(|file| file.bytes).sum::<u64>(),
+                    )
+                }),
+                installed_bytes: entry.as_ref().map(|entry| {
+                    entry.installed_bytes.saturating_add(
+                        entry.model_files.iter().map(|file| file.bytes).sum::<u64>(),
+                    )
+                }),
                 model_bytes: entry.as_ref().and_then(|entry| entry.model_bytes),
                 license_expression: definition.license_policy.expression,
                 third_party_notices: definition.license_policy.third_party_notices,
@@ -576,6 +603,7 @@ fn task_install_key(task: &BackendTask) -> Option<InstallKey> {
             version,
             target_triple,
             archive_identity,
+            ..
         } => Some(InstallKey {
             capability_id: capability_id.clone(),
             version: version.clone(),

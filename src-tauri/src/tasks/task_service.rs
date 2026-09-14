@@ -1133,6 +1133,7 @@ impl TaskService {
         version: String,
         target_triple: String,
         archive_identity: String,
+        archive_path: Option<String>,
     ) -> Result<BackendTask, String> {
         let persistence_dir = app_task_root.join("tasks");
         self.create_task_internal(
@@ -1147,6 +1148,7 @@ impl TaskService {
                 version,
                 target_triple,
                 archive_identity,
+                archive_path,
             }),
             true,
             None,
