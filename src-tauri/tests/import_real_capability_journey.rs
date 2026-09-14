@@ -67,7 +67,6 @@ async fn real_preparation_recognition_preview_save_and_reopen() {
         let probed = runtime
             .probe_version_routes(&installed, &capability, &entry.version, &token)
             .unwrap();
-        outcome.mark_probed(&installed).unwrap();
         runtime
             .activate_probed_version_atomically(probed, &capability, &service, || {
                 outcome.activate(&installed)

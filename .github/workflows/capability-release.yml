@@ -1,0 +1,287 @@
+name: Capability resources
+
+# Build resources independently; uploading these artifacts to public storage is
+# a separate maintainer action. No desktop release tag or signing secret needed.
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: Public HTTPS directory that will host these program ZIPs
+        required: true
+        type: string
+      model_base_url:
+        description: Public HTTPS root for models/ (defaults to base_url)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: capability-resources-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-preflight:
+    name: Validate the manifest-derived formal release matrix
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout resource source commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.23.1
+
+      - name: Validate resource locations and product definitions
+        env:
+          BASE_URL: ${{ inputs.base_url }}
+          MODEL_BASE_URL: ${{ inputs.model_base_url || inputs.base_url }}
+        run: |
+          node --input-type=module -e '
+            import { catalogUrlErrors } from "./scripts/verify-capability-catalog.mjs";
+            for (const value of [process.env.BASE_URL, process.env.MODEL_BASE_URL]) {
+              const errors = catalogUrlErrors({ url: value });
+              if (errors.length) throw new Error(errors.join("; "));
+            }
+          '
+          node scripts/verify-product-capabilities.mjs --require-release-ready
+
+      - name: Materialize the exact formal staging and qualification plan
+        id: matrix
+        run: |
+          set -euo pipefail
+          plan="$(node scripts/capability-release-plan.mjs)"
+          count="$(node -e 'const value=JSON.parse(process.argv[1]);process.stdout.write(String(value.expectedEntryCount))' "$plan")"
+          test "$count" -gt 0
+          echo "matrix=$(node -e 'const value=JSON.parse(process.argv[1]);process.stdout.write(JSON.stringify({include:value.include}))' "$plan")" >> "$GITHUB_OUTPUT"
+          node scripts/verify-product-capabilities.mjs --print-matrix
+
+      - name: Upload the immutable release-plan evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: capability-release-plan
+          path: |
+            capabilities/product-manifest.json
+            capabilities/release-recipes.json
+            capabilities/release-sources.json
+            capabilities/qualification-corpus.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+
+  build-capability:
+    name: Build and qualify ${{ matrix.capabilityId }} (${{ matrix.targetTriple }})
+    needs: release-preflight
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.release-preflight.outputs.matrix) }}
+    timeout-minutes: 120
+    steps:
+      - name: Checkout the exact release commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with: { ref: "${{ github.sha }}" }
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with: { node-version: 22.23.1, cache: npm }
+
+      - name: Setup Python for model splitting
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with: { python-version: "3.12" }
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with: { version: "0.10.8", enable-cache: false }
+
+      - name: Setup Rust
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          rustup toolchain install 1.92.0 --profile minimal --no-self-update
+          rustup default 1.92.0
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: capability-assembler
+          cache-on-failure: true
+
+      - name: Install Linux build and browser runtime prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            curl \
+            file \
+            libdbus-1-dev \
+            libssl-dev \
+            nasm \
+            patchelf \
+            pkg-config \
+            wget
+          npm ci --ignore-scripts --prefix capabilities/browser-runtime
+          npm exec --prefix capabilities/browser-runtime -- playwright install-deps chromium
+
+      - name: Build release assembler without signing credentials
+        run: cargo build --locked --release --no-default-features --manifest-path src-tauri/Cargo.toml --bin capability_release
+
+      - name: Fetch locked sources and prepare the deterministic payload
+        id: payload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $payload = Join-Path $env:RUNNER_TEMP 'capability-payload'
+          $result = node scripts/prepare-release-capability.mjs --pack '${{ matrix.capabilityId }}' --target '${{ matrix.targetTriple }}' --output $payload | ConvertFrom-Json
+          "root=$payload" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "entrypoint=$($result.entrypoint)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "entrypointArgs=$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($result.entrypointArgs | ConvertTo-Json -Compress))))" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "modelBytes=$($result.modelBytes ?? 0)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Assemble one program and model archive for qualification
+        shell: pwsh
+        env:
+          BASE_URL: ${{ inputs.base_url }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $tool = if ($IsWindows) { 'src-tauri/target/release/capability_release.exe' } else { 'src-tauri/target/release/capability_release' }
+          $dist = Join-Path $env:GITHUB_WORKSPACE 'capability-dist'
+          $argsJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${{ steps.payload.outputs.entrypointArgs }}')) | ConvertFrom-Json
+          $arguments = @('assemble', '--template', 'capabilities/${{ matrix.capabilityId }}/manifest.json', '--payload', '${{ steps.payload.outputs.root }}', '--target', '${{ matrix.targetTriple }}', '--entrypoint', '${{ steps.payload.outputs.entrypoint }}')
+          foreach ($value in @($argsJson)) { $arguments += @('--entrypoint-arg', [string]$value) }
+          $arguments += @('--output', $dist, '--base-url', $env:BASE_URL)
+          if ([uint64]'${{ steps.payload.outputs.modelBytes }}' -gt 0) { $arguments += @('--model-bytes', '${{ steps.payload.outputs.modelBytes }}') }
+          & $tool @arguments
+          if (@(Get-ChildItem -LiteralPath $dist -Filter '*.zip' -File).Count -ne 1 -or @(Get-ChildItem -LiteralPath $dist -Filter '*.catalog.json' -File).Count -ne 1) { throw 'one matrix entry must produce exactly one archive and fragment' }
+
+      - name: Separate reusable models from the assembled program
+        shell: pwsh
+        env:
+          BASE_URL: ${{ inputs.base_url }}
+          MODEL_BASE_URL: ${{ inputs.model_base_url || inputs.base_url }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $fragment = Get-ChildItem capability-dist -Filter '*.catalog.json' -File | Select-Object -ExpandProperty FullName
+          python scripts/split-capability-models.py --catalog $fragment --archives capability-dist --output resource-dist --base-url $env:BASE_URL --model-base-url $env:MODEL_BASE_URL
+          Move-Item resource-dist/install-catalog.json 'resource-dist/${{ matrix.capabilityId }}-${{ matrix.targetTriple }}.catalog.json'
+
+      - name: Install the final resources, restart and run formal qualification
+        shell: pwsh
+        env:
+          LLM_WIKI_X_PRODUCTION_SAMPLE_URL: ${{ vars.X_PRODUCTION_SAMPLE_URL }}
+          LLM_WIKI_WECHAT_PRODUCTION_SAMPLE_URL: ${{ vars.WECHAT_PRODUCTION_SAMPLE_URL }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $tool = if ($IsWindows) { 'src-tauri/target/release/capability_release.exe' } else { 'src-tauri/target/release/capability_release' }
+          $fragment = Get-ChildItem resource-dist -Filter '*.catalog.json' -File | Select-Object -ExpandProperty FullName
+          $installRoot = Join-Path $env:RUNNER_TEMP 'resource-installation'
+          $verified = & $tool verify-install --catalog $fragment --archives resource-dist --output $installRoot | ConvertFrom-Json
+          if (-not $verified.restarted -or @($verified.installed).Count -ne 1) { throw 'final resource installation and restart were not verified' }
+          $qualified = $verified.installed[0].payload
+          node scripts/qualify-staged-capability.mjs --payload $qualified
+          $evidence = Join-Path $env:GITHUB_WORKSPACE 'resource-dist/${{ matrix.capabilityId }}-${{ matrix.targetTriple }}.qualification.json'
+          node scripts/qualify-release-corpus.mjs --payload $qualified --evidence $evidence
+          $runner = Join-Path $qualified '${{ steps.payload.outputs.entrypoint }}'
+          switch ('${{ matrix.capabilityId }}') {
+            'browser-runtime' {
+              & $runner --test (Join-Path $qualified 'runner/platform-extract.node-test.mjs') (Join-Path $qualified 'runner/snapshot-policy.node-test.mjs') (Join-Path $qualified 'runner/linux-deps.node-test.mjs')
+              & $runner (Join-Path $qualified 'runner/policy.smoke.mjs')
+              $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $qualified 'runtime/ms-playwright'
+              & $runner (Join-Path $qualified 'runner/browser.smoke.mjs')
+              if ($env:LLM_WIKI_X_PRODUCTION_SAMPLE_URL) { & $runner (Join-Path $qualified 'runner/x-route.qualification.mjs') }
+              else { Write-Host 'X live sample not configured; native browser and fixture checks passed, live access unverified.' }
+              if ($env:LLM_WIKI_WECHAT_PRODUCTION_SAMPLE_URL) { & $runner (Join-Path $qualified 'runner/wechat-route.qualification.mjs') }
+              else { Write-Host 'WeChat live sample not configured; live access unverified.' }
+            }
+            'browser-runtime-lite' { & $runner --test (Join-Path $qualified 'runner/index.node-test.mjs') }
+            'media-metadata' { & $runner --test (Join-Path $qualified 'runner/core.node-test.mjs') }
+            'asr-sensevoice-small' { & $runner (Join-Path $qualified 'runner/qualification.mjs') }
+            'asr-whisper' { & $runner --test (Join-Path $qualified 'runner/core.node-test.mjs') }
+            'ocr-basic' { & $runner (Join-Path $qualified 'runner/qualification.py') }
+            'ocr-cjk-accurate' { & $runner (Join-Path $qualified 'runner/qualification.py') }
+            'office-legacy' { & $runner (Join-Path $qualified 'runner/office_legacy_pack_test.py') }
+          }
+
+      - name: Upload program ZIP, independent models and catalog fragment
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: resource-${{ matrix.capabilityId }}-${{ matrix.targetTriple }}
+          path: resource-dist/
+          compression-level: 0
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
+
+  merge-catalog:
+    name: Merge and verify the manifest-derived install catalog
+    needs: [release-preflight, build-capability]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout the exact release commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with: { ref: "${{ github.sha }}" }
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with: { node-version: 22.23.1 }
+
+      - name: Install assembler dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Setup Rust
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.92.0 --profile minimal --no-self-update
+          rustup default 1.92.0
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: capability-assembler
+          cache-on-failure: true
+
+      - name: Build catalog merger
+        run: cargo build --locked --release --no-default-features --manifest-path src-tauri/Cargo.toml --bin capability_release
+
+      - name: Download qualified resource artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: 'resource-*'
+          path: capability-dist
+          merge-multiple: true
+
+      - name: Verify program archives and the complete product matrix
+        run: |
+          set -euo pipefail
+          src-tauri/target/release/capability_release merge-catalog --input capability-dist --output capability-dist/install-catalog.json
+          node scripts/verify-capability-catalog.mjs --catalog capability-dist/install-catalog.json --trusted-keys capabilities/trusted-keys.json --mode release
+
+      - name: Upload the complete directory for HTTPS hosting or offline delivery
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: capability-resources
+          path: capability-dist/
+          compression-level: 0
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30

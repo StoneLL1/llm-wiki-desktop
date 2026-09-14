@@ -280,6 +280,23 @@ describe("BackendError presentation", () => {
       summaryKey: "backendError.summary.appCapabilityNetwork",
       actionKind: "retry",
     });
+    const rejectedDownload = normalizeBackendError({
+      ...backendError("APP_CAPABILITY_DOWNLOAD_REJECTED"),
+      details: { httpStatus: 403 },
+    });
+    expect(rejectedDownload).toMatchObject({
+      summaryKey: "backendError.summary.appCapabilityNetwork",
+      actionKind: "retry",
+    });
+    expect(rejectedDownload.technicalDetails).toContain('"httpStatus": 403');
+    expect(normalizeBackendError(backendError("APP_CAPABILITY_ARCHIVE_UNAVAILABLE"))).toMatchObject({
+      summaryKey: "backendError.summary.appCapabilityArchive",
+      actionKind: null,
+    });
+    expect(normalizeBackendError(backendError("APP_CAPABILITY_INSTALL_IN_PROGRESS"))).toMatchObject({
+      summaryKey: "backendError.summary.appCapabilityInProgress",
+      actionKind: null,
+    });
     expect(normalizeBackendError(backendError("APP_CAPABILITY_TASK_REVISION_STALE"))).toMatchObject({
       summaryKey: "backendError.summary.appCapabilityStale",
       actionKind: "retry",
@@ -288,6 +305,22 @@ describe("BackendError presentation", () => {
       summaryKey: "backendError.summary.appCapability",
       actionKind: "retry",
     });
+  });
+
+  it.each([
+    ["en", "Install from file", "Cancel that task"],
+    ["zh-CN", "从文件安装", "先取消该任务"],
+  ])("shows an offline recovery route and an honest task conflict in %s", async (language, offlineLabel, cancelLabel) => {
+    await i18next.changeLanguage(language);
+    const failure = (code: string) => ({ code, message: "raw installer detail", recoverable: true, userActionRequired: true });
+    const { rerender } = render(<ActionableErrorNotice error={failure("APP_CAPABILITY_DOWNLOAD_REJECTED")} onAction={vi.fn()} />);
+    expect(screen.getByRole("alert")).toHaveTextContent(offlineLabel);
+    rerender(<ActionableErrorNotice error={failure("APP_CAPABILITY_ARCHIVE_UNAVAILABLE")} onAction={vi.fn()} />);
+    expect(screen.getByRole("alert")).toHaveTextContent(offlineLabel);
+    expect(screen.queryByRole("button", { name: /^(Retry|重试)$/ })).not.toBeInTheDocument();
+    rerender(<ActionableErrorNotice error={failure("APP_CAPABILITY_INSTALL_IN_PROGRESS")} onAction={vi.fn()} />);
+    expect(screen.getByRole("alert")).toHaveTextContent(cancelLabel);
+    expect(screen.queryByRole("button", { name: /^(Retry|重试)$/ })).not.toBeInTheDocument();
   });
 
   it("retry failure twice restores the action instead of staying busy", async () => {

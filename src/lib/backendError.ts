@@ -77,6 +77,8 @@ const EXACT_ACTIONS: Record<string, BackendErrorActionKind> = {
   APP_CAPABILITY_NOT_PUBLISHED_FOR_TARGET: null,
   APP_CAPABILITY_UNSUPPORTED_BY_APP: null,
   APP_CAPABILITY_INSTALL_CANCELLED: null,
+  APP_CAPABILITY_ARCHIVE_UNAVAILABLE: null,
+  APP_CAPABILITY_INSTALL_IN_PROGRESS: null,
 };
 
 const EXACT_SUMMARIES: Record<string, string> = {
@@ -102,6 +104,9 @@ const EXACT_SUMMARIES: Record<string, string> = {
   APP_CAPABILITY_HEALTH_CHECK_FAILED: "backendError.summary.appCapabilityHealth",
   APP_CAPABILITY_ROLLBACK_FAILED: "backendError.summary.appCapabilityRollback",
   APP_CAPABILITY_NETWORK_UNAVAILABLE: "backendError.summary.appCapabilityNetwork",
+  APP_CAPABILITY_DOWNLOAD_REJECTED: "backendError.summary.appCapabilityNetwork",
+  APP_CAPABILITY_ARCHIVE_UNAVAILABLE: "backendError.summary.appCapabilityArchive",
+  APP_CAPABILITY_INSTALL_IN_PROGRESS: "backendError.summary.appCapabilityInProgress",
   APP_CAPABILITY_TASK_REVISION_STALE: "backendError.summary.appCapabilityStale",
   APP_CAPABILITY_VERSION_STALE: "backendError.summary.appCapabilityStale",
   APP_CAPABILITY_ACKNOWLEDGEMENT_STALE: "backendError.summary.appCapabilityStale",

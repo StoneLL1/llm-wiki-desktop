@@ -18,8 +18,7 @@
     "firstStable": "app-v0.2.0"
   },
   "endpoints": {
-    "stableUpdaterManifest": "https://github.com/StoneLL1/llm-wiki-desktop/releases/latest/download/latest.json",
-    "capabilityAssetBaseTemplate": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/<exact-tag>/"
+    "stableUpdaterManifest": "https://github.com/StoneLL1/llm-wiki-desktop/releases/latest/download/latest.json"
   },
   "publishing": {
     "latestManifestChannel": "stable-only",
@@ -71,7 +70,7 @@
       "publicKeyStatus": "committed",
       "owner": "StoneLL1",
       "ownerRole": "sole repository owner and maintainer",
-      "status": "owner-confirmed",
+      "status": "legacy-optional",
       "backupCustodian": null,
       "backupStatus": "not-required",
       "recoveryCopyStatus": "owner-dpapi-encrypted-copy-confirmed"

@@ -67,38 +67,14 @@ test("release mode requires the complete unique product-manifest matrix", () => 
   assert.equal(verify({ catalog: releaseCatalog(wrongPack) }).errors.length > 0, true);
 });
 
-test("catalog urls must pin one exact immutable canonical tag", () => {
-  const wrongTag = fullMatrix().with(
-    0,
-    releaseEntry(CAPABILITY_PACKS[0], CAPABILITY_TARGETS[0], {
-      url: "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v9.9.9/browser-runtime-1.2.3.zip",
-    }),
-  );
-  assert.equal(verify({ catalog: releaseCatalog(wrongTag) }).errors.length > 0, true);
-
-  const mutableLatest = fullMatrix().with(
-    1,
-    releaseEntry(CAPABILITY_PACKS[0], CAPABILITY_TARGETS[1], {
-      url: "https://github.com/StoneLL1/llm-wiki-desktop/releases/latest/download/browser-runtime-1.2.3.zip",
-    }),
-  );
-  assert.equal(verify({ catalog: releaseCatalog(mutableLatest) }).errors.length > 0, true);
-
-  const forbiddenUrls = [
-    "",
-    "http://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v0.1.0/pack.zip",
-    "https://localhost/releases/download/app-v0.1.0/pack.zip",
-    "https://example.com/releases/download/app-v0.1.0/pack.zip",
-    "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v0.1.0/pack.zip?token=1",
-    "https://user:token@github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v0.1.0/pack.zip",
-    "https://github.com/example/fork/releases/download/app-v0.1.0/pack.zip",
-    "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v0.1.0/other-pack-name.zip",
-  ];
-  for (const url of forbiddenUrls) {
-    const catalog = releaseCatalog(
-      fullMatrix().with(2, releaseEntry(CAPABILITY_PACKS[0], CAPABILITY_TARGETS[2], { url })),
-    );
-    assert.equal(verify({ catalog }).errors.length > 0, true);
+test("catalog accepts independent HTTPS storage and rejects unusable public URLs", () => {
+  for (const url of ["https://cdn.llmwiki.cn/engines/browser.zip", "https://github.com/another/project/releases/download/v2/browser.zip"]) {
+    const entries = fullMatrix(); entries[0].url = url;
+    assert.deepEqual(verify({ catalog: releaseCatalog(entries) }).errors, []);
+  }
+  for (const url of ["", "http://cdn.llmwiki.cn/a.zip", "https://localhost/a.zip", "https://example.com/a.zip", "https://user:token@cdn.llmwiki.cn/a.zip", "https://cdn.llmwiki.cn/a.zip?token=secret"]) {
+    const entries = fullMatrix(); entries[0].url = url;
+    assert.ok(verify({ catalog: releaseCatalog(entries) }).errors.length > 0, url);
   }
 });
 
@@ -120,50 +96,9 @@ test("catalog accepts SemVer build metadata in an exact asset name", () => {
   );
 });
 
-test("capability release URLs retain the desktop version and app-v provenance", () => {
-  for (const version of ["0.2.1", "0.2.1-rc.2"]) {
-    const expectedTag = "app-v" + version;
-    const provenance = {
-      schemaVersion: 1,
-      releaseTag: expectedTag,
-      commitSha: "a".repeat(40),
-      workflowRunId: "1234567890",
-    };
-    for (const prefix of ["app-v", "capabilities-v"]) {
-      const catalog = releaseCatalog(fullMatrix().map((entry) => ({
-        ...entry, url: entry.url.replace("app-v0.1.0", prefix + version),
-      })));
-      assert.deepEqual(verify({ catalog, expectedTag, provenance,
-        expectedCommit: provenance.commitSha, expectedRunId: provenance.workflowRunId }).errors, []);
-      assert.ok(verify({ catalog, expectedTag: "app-v0.2.2" }).errors.length > 0);
-      assert.ok(verify({ catalog, expectedTag, provenance: {
-        ...provenance, releaseTag: "capabilities-v" + version,
-      } }).errors.length > 0);
-      assert.ok(verify({ catalog, expectedTag, provenance,
-        expectedCommit: "b".repeat(40) }).errors.length > 0);
-      assert.ok(verify({ catalog, expectedTag, provenance,
-        expectedRunId: "9876543210" }).errors.length > 0);
-    }
-  }
-});
-
-test("capability URL channels cannot weaken tag grammar or cross prerelease versions", () => {
-  for (const tag of ["capabilities-v0.2.1-rc.1", "capabilities-v0.2.1-rc.3",
-    "capabilities-v0.2.1", "capabilities-v0.2.2-rc.2"]) {
-    const catalog = releaseCatalog(fullMatrix().map((entry) => ({
-      ...entry, url: entry.url.replace("app-v0.1.0", tag),
-    })));
-    assert.ok(verify({ catalog, expectedTag: "app-v0.2.1-rc.2" }).errors.length > 0, tag);
-  }
-  for (const tag of ["capabilities-v01.2.1", "capabilities-v0.2.1-rc.0",
-    "capabilities-v0.2.1-rc.01", "capabilities-v0.2.1-beta.1", "capabilities-v0.2.1+build",
-    "capabilities-vlatest", "capabilities-vapp-v0.2.1", "other-v0.2.1"]) {
-    const catalog = releaseCatalog(fullMatrix().map((entry) => ({
-      ...entry, url: entry.url.replace("app-v0.1.0", tag),
-    })));
-    assert.ok(verify({ catalog, expectedTag: null, mode: "source" }).errors.length > 0, tag);
-  }
-  assert.ok(verify({ expectedTag: "" }).errors.length > 0);
+test("resource versions are independent of the desktop release batch", () => {
+  assert.deepEqual(verify({ expectedTag: "app-v9.0.0" }).errors, []);
+  assert.deepEqual(verify({ expectedTag: null }).errors, []);
 });
 
 test("entry measurements and identities must be complete", () => {
@@ -179,7 +114,6 @@ test("entry measurements and identities must be complete", () => {
     { targetTriple: "x86_64-pc-windows-gnu" },
     { capabilityId: "bad pack id!" },
     { modelBytes: 0 },
-    { signingKeyId: "retired-key" },
   ];
   for (const overrides of invalidEntries) {
     const catalog = releaseCatalog(
@@ -234,13 +168,18 @@ test("source mode keeps the development fallback explicit", () => {
     trustedKeys,
     mode: "release",
   });
-  assert.equal(releaseWithoutTag.errors.length > 0, true);
+  assert.deepEqual(releaseWithoutTag.errors, []);
 });
 
-test("release mode requires committed trusted keys", () => {
-  assert.equal(verify({ trustedKeys: {} }).errors.length > 0, true);
-  assert.equal(verify({ trustedKeys: { release: "0".repeat(64) } }).errors.length > 0, true);
-  assert.equal(verify({ trustedKeys: null }).errors.length > 0, true);
+test("archive-hash catalogs need no custom signature metadata", () => {
+  const entries = fullMatrix().map((original) => {
+    const entry = { ...original };
+    delete entry.signingKeyId;
+    delete entry.manifestSha256;
+    return entry;
+  });
+  assert.deepEqual(verify({ catalog: releaseCatalog(entries), trustedKeys: {} }).errors, []);
+  assert.ok(verify({ trustedKeys: { release: "0".repeat(64) } }).errors.length > 0);
 });
 
 test("provenance binds the catalog artifact to one run, tag, and commit", () => {
@@ -307,4 +246,20 @@ test("the repository source catalog stays a valid development fallback", async (
       .errors.length > 0,
     true,
   );
+});
+
+test("independent model resources require safe paths and pinned identities", () => {
+  const entries = fullMatrix();
+  const index = entries.findIndex((entry) => entry.modelBytes != null);
+  entries[index].modelFiles = [{ path: "models/中文/model.bin", bytes: 640, sha256: "d".repeat(64), urls: ["https://cdn.llmwiki.cn/models/a.bin"] }];
+  assert.deepEqual(verify({ catalog: releaseCatalog(entries) }).errors, []);
+  const duplicate = structuredClone(entries);
+  duplicate[index].modelFiles.push({ ...duplicate[index].modelFiles[0], path: "models/中文/MODEL.bin" });
+  duplicate[index].modelBytes *= 2;
+  assert.ok(verify({ catalog: releaseCatalog(duplicate) }).errors.some((error) => error.includes("unique data")));
+  for (const override of [{ path: "models/../runner" }, { path: "models/a:b" }, { path: "models/script.py" }, { bytes: 8 * 1024 ** 3 + 1 }, { urls: Array(9).fill("https://cdn.llmwiki.cn/model.bin") }, { bytes: 639 }, { sha256: "bad" }, { urls: [] }]) {
+    const bad = structuredClone(entries);
+    Object.assign(bad[index].modelFiles[0], override);
+    assert.ok(verify({ catalog: releaseCatalog(bad) }).errors.length > 0);
+  }
 });

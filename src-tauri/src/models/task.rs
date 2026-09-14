@@ -134,6 +134,8 @@ pub enum TaskOperation {
         version: String,
         target_triple: String,
         archive_identity: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        archive_path: Option<String>,
     },
     ImportCommit {
         session_id: String,

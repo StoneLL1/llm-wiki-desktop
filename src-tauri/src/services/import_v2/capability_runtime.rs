@@ -152,8 +152,11 @@ impl ImportCapabilityRuntime {
         keys: HashMap<String, Vec<u8>>,
         replace_existing: bool,
     ) {
-        let manager = CapabilityPackManager::new(install_root.to_path_buf(), keys);
+        let manager = CapabilityPackManager::for_installed(install_root.to_path_buf(), keys);
         let mut statuses = Vec::new();
+        // One verified snapshot per pack for this startup pass. Routes share
+        // the same files; failures are also shared, and nothing survives reload.
+        let mut resolved_packs = HashMap::new();
         for spec in PACK_SPECS {
             let requirement = CapabilityRequirement {
                 capability_id: spec.id.into(),
@@ -162,10 +165,9 @@ impl ImportCapabilityRuntime {
                 target_triple: target_triple(),
                 accepted_license_expressions: spec.licenses.iter().map(|v| (*v).into()).collect(),
             };
-            let result = manager.resolve(&requirement).and_then(|pack| {
+            let resolved = resolved_packs.entry(spec.id).or_insert_with(|| {
+                let pack = manager.resolve(&requirement)?;
                 validate_signed_product_contract(&pack)?;
-                let healthy_version = pack.manifest.version.clone();
-                let browser_pack = (spec.id == "browser-runtime").then(|| pack.clone());
                 if spec.id == "office-oxide"
                     && !CapabilitySnapshot::from_installation(
                         false,
@@ -183,6 +185,11 @@ impl ImportCapabilityRuntime {
                         false,
                     ));
                 }
+                Ok::<_, BackendError>(pack)
+            });
+            let result = resolved.clone().and_then(|pack| {
+                let healthy_version = pack.manifest.version.clone();
+                let browser_pack = (spec.id == "browser-runtime").then(|| pack.clone());
                 let route = spec.route.into();
                 let extensions = spec.extensions.iter().map(|v| (*v).into()).collect();
                 let timeout = Duration::from_secs(spec.timeout_seconds);
@@ -221,9 +228,8 @@ impl ImportCapabilityRuntime {
         self.statuses.read().map(|v| v.clone()).unwrap_or_default()
     }
 
-    /// Probe every route declared by the authoritative product manifest for
-    /// this exact installed version. No route is published until all probes
-    /// have returned a protocol-valid health response.
+    /// Start the runtime once before activation. Full route qualification belongs
+    /// to resource builds; installation checks that the program runs on this host.
     pub fn probe_version_routes(
         &self,
         install_root: &Path,
@@ -247,11 +253,13 @@ impl ImportCapabilityRuntime {
                 .map(|value| (*value).into())
                 .collect(),
         };
-        let manager =
-            CapabilityPackManager::new(install_root.to_path_buf(), embedded_trusted_keys());
+        let manager = CapabilityPackManager::for_installed(
+            install_root.to_path_buf(),
+            embedded_trusted_keys(),
+        );
         let pack = manager.resolve_version(&requirement, version)?;
         validate_signed_product_contract(&pack)?;
-        probe_declared_routes(&route_specs, cancellation, |route| {
+        probe_declared_routes(&pack, &route_specs, cancellation, |route| {
             super::pack_engine::probe_capability_pack(&pack, capability_id, route, cancellation)
         })?;
         Ok(ProbedCapabilityVersion {
@@ -365,6 +373,11 @@ struct SignedRuntimePermissions {
 }
 
 fn validate_signed_product_contract(pack: &ResolvedCapabilityPack) -> Result<(), BackendError> {
+    if super::capability_pack::read_installation_receipt(&pack.root)?.is_some() {
+        // The App catalog authenticated this program at installation. Build-time
+        // qualification covers routes; startup needs only protocol compatibility.
+        return Ok(());
+    }
     let product =
         ProductCapabilityManifest::embedded().map_err(|_| capability_route_contract_error())?;
     let definition = product
@@ -407,6 +420,7 @@ fn validate_signed_product_contract(pack: &ResolvedCapabilityPack) -> Result<(),
 }
 
 fn probe_declared_routes<F>(
+    pack: &ResolvedCapabilityPack,
     route_specs: &[CapabilityRouteSpec],
     cancellation: &CancellationToken,
     mut probe: F,
@@ -414,7 +428,16 @@ fn probe_declared_routes<F>(
 where
     F: FnMut(&str) -> Result<(), BackendError>,
 {
-    for route_spec in route_specs {
+    if cancellation.is_cancelled() {
+        return Err(BackendError::new(
+            crate::errors::IMPORT_V2_CANCELLED,
+            "Capability health checks were cancelled.",
+            true,
+            false,
+        ));
+    }
+    super::pack_engine::validate_entrypoint_unchanged(pack)?;
+    for route_spec in route_specs.iter().take(1) {
         if cancellation.is_cancelled() {
             return Err(BackendError::new(
                 crate::errors::IMPORT_V2_CANCELLED,
@@ -846,9 +869,11 @@ mod tests {
     fn a_failed_route_probe_stops_the_multi_route_release_before_publication() {
         let specs = route_specs_for("browser-runtime").unwrap();
         let mut observed = Vec::new();
-        let error = probe_declared_routes(&specs, &CancellationToken::new(), |route| {
+        let root = tempfile::tempdir().unwrap();
+        let pack = signed_test_pack(root.path(), "browser-runtime");
+        let error = probe_declared_routes(&pack, &specs, &CancellationToken::new(), |route| {
             observed.push(route.to_owned());
-            if route == "web.wechat.article" {
+            if route == "web.generic.browser" {
                 Err(BackendError::new(
                     "IMPORT_V2_CAPABILITY_HEALTH_CHECK_FAILED",
                     "fixture route failed",
@@ -862,7 +887,7 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.code, "IMPORT_V2_CAPABILITY_HEALTH_CHECK_FAILED");
-        assert_eq!(observed, ["web.generic.browser", "web.wechat.article"]);
+        assert_eq!(observed, ["web.generic.browser"]);
     }
 
     #[test]
@@ -928,31 +953,34 @@ mod tests {
         std::fs::remove_dir_all(production_root).ok();
     }
 
-    #[test]
-    fn compatible_signed_pack_keeps_its_dependency_versions_across_desktop_updates() {
-        let root =
-            std::env::temp_dir().join(format!("cap-runtime-signed-{}", uuid::Uuid::new_v4()));
-        let pack_root = root.join("document-standard/1.2.0");
+    fn test_keys() -> HashMap<String, Vec<u8>> {
+        let key = Ed25519KeyPair::from_seed_unchecked(&[9; 32]).unwrap();
+        HashMap::from([("release-test".into(), key.public_key().as_ref().to_vec())])
+    }
+
+    fn signed_test_pack(root: &Path, capability_id: &str) -> ResolvedCapabilityPack {
+        let pack_root = root.join(capability_id).join("1.2.0");
         std::fs::create_dir_all(&pack_root).unwrap();
         std::fs::write(pack_root.join("runner.bin"), b"verified runtime").unwrap();
+        let product: serde_json::Value =
+            serde_json::from_str(super::super::product_capability::PRODUCT_MANIFEST_JSON).unwrap();
+        let definition = product["definitions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|definition| definition["capabilityId"] == capability_id)
+            .unwrap();
         let contract = serde_json::to_vec_pretty(&serde_json::json!({
             "schemaVersion": 1,
-            "capabilityId": "document-standard",
+            "capabilityId": capability_id,
             "targetTriple": target_triple(),
             "protocolVersion": "2",
             "entrypoint": "runner.bin",
             "entrypointArgs": [],
-            "routes": ["pack.markitdown"],
-            "formats": {
-                "extensions": ["doc", "docx", "xls", "xlsx", "ppt", "pptx", "pdf"],
-                "platformContentTypes": []
-            },
-            "runtime": {
-                "network": false,
-                "subprocess": true,
-                "filesystem": ["application_capability_root", "item_staging_input", "item_staging_output"]
-            },
-            "licenseExpression": "MIT AND PSF-2.0 AND MPL-2.0 AND LicenseRef-Bundled-Third-Party-Notices",
+            "routes": definition["routes"],
+            "formats": definition["formats"],
+            "runtime": definition["runtime"],
+            "licenseExpression": definition["licensePolicy"]["expression"],
             "sourceLocks": {
                 "compatibleOlderRuntime": { "version": "1.0.0-previous-desktop", "license": "MIT" }
             }
@@ -962,13 +990,15 @@ mod tests {
         let key = Ed25519KeyPair::from_seed_unchecked(&[9; 32]).unwrap();
         let mut manifest = CapabilityPackManifest {
             schema_version: 2,
-            pack_id: "document-standard".into(),
+            pack_id: capability_id.into(),
             version: "1.2.0".into(),
             protocol_version: "2".into(),
             target_triples: vec![target_triple()],
             archive_sha256: String::new(),
-            license_expression:
-                "MIT AND PSF-2.0 AND MPL-2.0 AND LicenseRef-Bundled-Third-Party-Notices".into(),
+            license_expression: definition["licensePolicy"]["expression"]
+                .as_str()
+                .unwrap()
+                .into(),
             entrypoint: "runner.bin".into(),
             entrypoint_args: Vec::new(),
             executable_files: Vec::new(),
@@ -1001,14 +1031,27 @@ mod tests {
         )
         .unwrap();
 
+        CapabilityPackManager::new(root.to_owned(), test_keys())
+            .resolve_version(
+                &CapabilityRequirement {
+                    capability_id: capability_id.into(),
+                    minimum_version: None,
+                    protocol_version: "2".into(),
+                    target_triple: target_triple(),
+                    accepted_license_expressions: vec![manifest.license_expression],
+                },
+                "1.2.0",
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn compatible_signed_pack_keeps_its_dependency_versions_across_desktop_updates() {
+        let root = tempfile::tempdir().unwrap();
+        signed_test_pack(root.path(), "document-standard");
         let service = ImportV2Service::default();
         let runtime = ImportCapabilityRuntime::default();
-        runtime.load_installed_with_keys(
-            &root,
-            &service,
-            HashMap::from([("release-test".into(), key.public_key().as_ref().to_vec())]),
-            false,
-        );
+        runtime.load_installed_with_keys(root.path(), &service, test_keys(), false);
         let status = runtime
             .statuses()
             .into_iter()
@@ -1020,6 +1063,92 @@ mod tests {
             .unwrap()
             .iter()
             .any(|route| route == "pack.markitdown"));
-        std::fs::remove_dir_all(root).ok();
+    }
+
+    fn measured_hash_bytes(work: impl FnOnce()) -> u64 {
+        use super::super::capability_pack::HASHED_RUNTIME_BYTES;
+        let before = HASHED_RUNTIME_BYTES.with(|count| count.get());
+        work();
+        HASHED_RUNTIME_BYTES.with(|count| count.get()) - before
+    }
+
+    #[test]
+    fn startup_does_not_rehash_payloads_and_detects_missing_entrypoints() {
+        let root = tempfile::tempdir().unwrap();
+        let pack = signed_test_pack(root.path(), "browser-runtime");
+        let service = ImportV2Service::default();
+        let runtime = ImportCapabilityRuntime::default();
+        let bytes = measured_hash_bytes(|| {
+            runtime.load_installed_with_keys(root.path(), &service, test_keys(), false)
+        });
+        assert_eq!(
+            bytes, 0,
+            "startup should not reread installed program or model bytes"
+        );
+        let statuses: Vec<_> = runtime
+            .statuses()
+            .into_iter()
+            .filter(|status| status.capability_id == "browser-runtime")
+            .collect();
+        assert_eq!(
+            statuses.len(),
+            route_specs_for("browser-runtime").unwrap().len()
+        );
+        assert!(statuses.iter().all(|status| status.available));
+        std::fs::remove_file(&pack.entrypoint).unwrap();
+        runtime.load_installed_with_keys(root.path(), &service, test_keys(), true);
+        assert!(runtime
+            .statuses()
+            .iter()
+            .filter(|status| status.capability_id == "browser-runtime")
+            .all(|status| !status.available));
+    }
+
+    #[test]
+    fn multi_route_health_starts_the_runtime_once_without_rehashing_payloads() {
+        let root = tempfile::tempdir().unwrap();
+        let pack = signed_test_pack(root.path(), "browser-runtime");
+        let routes = route_specs_for("browser-runtime").unwrap();
+        let mut called = Vec::new();
+        let bytes = measured_hash_bytes(|| {
+            probe_declared_routes(&pack, &routes, &CancellationToken::new(), |route| {
+                called.push(route.to_owned());
+                Ok(())
+            })
+            .unwrap()
+        });
+        assert_eq!(
+            called,
+            routes
+                .iter()
+                .take(1)
+                .map(|spec| spec.route.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(bytes, 0);
+    }
+
+    #[test]
+    fn missing_entrypoint_and_cancelled_preparation_never_become_activatable() {
+        let root = tempfile::tempdir().unwrap();
+        let pack = signed_test_pack(root.path(), "browser-runtime");
+        let routes = route_specs_for("browser-runtime").unwrap();
+        std::fs::remove_file(&pack.entrypoint).unwrap();
+        assert!(
+            probe_declared_routes(&pack, &routes, &CancellationToken::new(), |_| {
+                panic!("missing runtime must not be started")
+            })
+            .is_err()
+        );
+        let token = CancellationToken::new();
+        token.cancel();
+        let bytes = measured_hash_bytes(|| {
+            let error = probe_declared_routes(&pack, &routes, &token, |_| {
+                panic!("cancelled probe must not run")
+            })
+            .unwrap_err();
+            assert_eq!(error.code, crate::errors::IMPORT_V2_CANCELLED);
+        });
+        assert_eq!(bytes, 0);
     }
 }

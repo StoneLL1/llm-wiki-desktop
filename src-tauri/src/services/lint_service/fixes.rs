@@ -10,10 +10,10 @@ use crate::models::lint::{
     LintIssue, LintIssueType,
 };
 use crate::models::paths::ProjectContext;
+use crate::models::version_history::VersionOperationKind;
 use crate::models::wiki::WikiPageType;
 use crate::services::file_store::FileStore;
 use crate::services::{GitService, VersionHistoryService, WriteMode};
-use crate::models::version_history::VersionOperationKind;
 use crate::utils::markdown_utils::{
     extract_title, parse_frontmatter, split_frontmatter, Frontmatter,
 };
@@ -638,22 +638,56 @@ impl LintService {
         shared_operation: Option<&str>,
         _message: &str,
     ) -> Result<Option<String>, BackendError> {
-        if let Some(id) = shared_operation { return Ok(Some(id.to_string())); }
-        let content_paths = paths.iter().filter(|path| Some(path.as_str()) != context.layout.activity_log_path.as_deref() && Some(path.as_str()) != context.layout.graph_cache_path.as_deref() && validate_fix_path(context, path).is_ok()).cloned().collect::<Vec<_>>();
-        let record = VersionHistoryService.begin(context, VersionOperationKind::LintFix, &content_paths, None)?;
+        if let Some(id) = shared_operation {
+            return Ok(Some(id.to_string()));
+        }
+        let content_paths = paths
+            .iter()
+            .filter(|path| {
+                Some(path.as_str()) != context.layout.activity_log_path.as_deref()
+                    && Some(path.as_str()) != context.layout.graph_cache_path.as_deref()
+                    && validate_fix_path(context, path).is_ok()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let record = VersionHistoryService.begin(
+            context,
+            VersionOperationKind::LintFix,
+            &content_paths,
+            None,
+        )?;
         Ok(Some(record.summary.operation_id))
     }
 
-    fn plan_version_write(context: &ProjectContext, operation_id: Option<&str>, path: &str, contents: &str) -> Result<(), BackendError> {
+    fn plan_version_write(
+        context: &ProjectContext,
+        operation_id: Option<&str>,
+        path: &str,
+        contents: &str,
+    ) -> Result<(), BackendError> {
         if let Some(id) = operation_id {
             let mut record = VersionHistoryService.load(context, id)?;
-            VersionHistoryService.plan_write(context, &mut record, path, Some(contents.as_bytes()))?;
+            VersionHistoryService.plan_write(
+                context,
+                &mut record,
+                path,
+                Some(contents.as_bytes()),
+            )?;
         }
         Ok(())
     }
 
-    fn operation_checkpoint(context: &ProjectContext, operation_id: Option<&str>) -> Result<Option<String>, BackendError> {
-        operation_id.map(|id| VersionHistoryService.load(context, id).map(|record| record.before)).transpose()
+    fn operation_checkpoint(
+        context: &ProjectContext,
+        operation_id: Option<&str>,
+    ) -> Result<Option<String>, BackendError> {
+        operation_id
+            .map(|id| {
+                VersionHistoryService
+                    .load(context, id)
+                    .map(|record| record.before)
+            })
+            .transpose()
     }
 
     fn verify_local_fixes(
@@ -712,7 +746,9 @@ impl LintService {
         _expected_after: &HashMap<String, Option<String>>,
         error: BackendError,
     ) -> BackendError {
-        let Some(id) = operation_id else { return error; };
+        let Some(id) = operation_id else {
+            return error;
+        };
         match VersionHistoryService.rollback_failed(context, id) {
             Ok(preserved) => BackendError::new(
                 "LINT_FIX_ROLLED_BACK",
@@ -732,7 +768,9 @@ impl LintService {
         _message: &str,
         operation_id: Option<&str>,
     ) -> Result<Option<String>, BackendError> {
-        let Some(id) = operation_id else { return Ok(None); };
+        let Some(id) = operation_id else {
+            return Ok(None);
+        };
         let mut record = VersionHistoryService.load(context, id)?;
         VersionHistoryService.finish(context, &mut record)?;
         Ok(record.after)
@@ -841,7 +879,13 @@ impl LintService {
         let shared_operation: Option<String> = if safe_ready.is_empty() {
             None
         } else {
-            self.resolve_operation(context, git_service, &safe_checkpoint_paths, None, "Before batch lint fixes")?
+            self.resolve_operation(
+                context,
+                git_service,
+                &safe_checkpoint_paths,
+                None,
+                "Before batch lint fixes",
+            )?
         };
 
         for issue in &safe_ready {
@@ -880,7 +924,10 @@ impl LintService {
                     applied.push(LintFixOutcome {
                         kind: LintFixOutcomeKind::Applied,
                         affected_paths,
-                        checkpoint: Self::operation_checkpoint(context, shared_operation.as_deref())?,
+                        checkpoint: Self::operation_checkpoint(
+                            context,
+                            shared_operation.as_deref(),
+                        )?,
                         operation_id: shared_operation.clone(),
                         final_commit: None,
                         pending_action: None,

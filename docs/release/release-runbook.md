@@ -1,63 +1,45 @@
-# Desktop release runbook
+# 桌面发布流程
 
-Stable application releases use `app-vX.Y.Z` tags and display `vX.Y.Z` to users. Desktop downloads and optional engine archives have separate release pages. Official installers embed a complete verified engine catalog so users can install OCR, transcription, browser extraction, and document-conversion engines from within the app. Historical acceptance records remain evidence, not repeated approval steps.
+稳定版 `app-vX.Y.Z` 与 RC `app-vX.Y.Z-rc.N` 共用 [Desktop release](../../.github/workflows/desktop-release.yml)。只有三个阶段：预检 → 四平台构建与安装启动检查 → 汇总并发布。能力资源通过独立 [Capability resources](../../.github/workflows/capability-release.yml) 构建，不与 App 发版绑定。
 
-## Prepare a release
+## 准备与触发
 
-1. Update package, Cargo, and Tauri versions together, plus release notes and known limitations. Run `npm run check` and `npm run check:release-config`.
-2. Select a completed canonical Desktop release run containing all qualified engine archives and its merged catalog. Set the repository variable `CAPABILITY_SOURCE_RUN_ID`, or pass `capability_source_run_id` when dispatching the workflow; the explicit input takes precedence. The source selected for this v0.2.1 release is `34439099432`.
-3. Merge the PR after the three required CI checks pass. Create the stable tag on the intended master commit. A tag push uses the repository source-run variable; a manual dispatch accepts `release_tag` and the optional source-run override. The tag or dispatch is the maintainer's publication decision.
-4. Watch all required jobs. Check the desktop and capability release pages and the post-publication manifest probe. Record any platform limitations; hosted checks do not prove a complete interactive upgrade or recovery journey.
+1. 更新 package、Cargo、Tauri 的版本和发布说明，通过源码 CI。RC 可以使用相同基础版本的源码，构建时自动覆盖 App 版本为完整 RC 版本；稳定版必须与源码版本一致。
+2. 提交完整 `capabilities/install-catalog.json`，资源实际托管在其中声明的 HTTPS 地址。资源首次上传或内容修改后，运行完整检查：
 
-`master` requires `Validate (ubuntu-latest)`, `Validate (windows-latest)`, and `Validate (macos-latest)`. Linux runs the full suite; Windows/macOS run native tests except four exhaustive recovery/format/scale sweeps already covered on Linux. PRs and conversation resolution remain required. CI retries a failed Linux job once when a hosted-runner shutdown kills it and the other platforms pass; ordinary test failures remain failures.
+   ```sh
+   node scripts/verify-published-capability-assets.mjs --catalog capabilities/install-catalog.json
+   ```
 
-## Required release checks
+3. 将 tag 指向准备好的提交，推送 tag；或在 Actions 的 Desktop release 中从 `master` 手动运行，填写已有 `release_tag`。不需要历史构建 run ID、能力包签名密钥、相同版本的能力包 Release 或手动审批记录。
 
-- `preflight` validates the repository, tag, commit, and version progression. It verifies the source run, successful qualification jobs, unexpired artifacts, artifact identities, and unchanged engine inputs for the complete manifest-derived matrix (43 entries for v0.2.1). It validates the source catalog and trust keys, preserves its original provenance, and records the current desktop integration identity.
-- `source-check` runs the full `npm run check` on macOS for the exact release commit, including real macOS runtime checks.
-- `desktop-build` embeds the non-empty verified catalog, builds the four desktop targets, verifies updater signatures, and performs installation and launch smoke checks on each target.
-- `publish-capabilities` re-verifies the signed engine archives and their exact merged catalog, then publishes them in `capabilities-vX.Y.Z` as a prerelease with `latest=false`.
-- `publish` waits for source checks, all desktop builds and smoke checks, and capability publication. It assembles `latest.json`, checks the public desktop downloads, verifies the release tag still points at the built commit, and publishes the desktop release.
+源码完整测试由 CI 负责，发布流程不再重复执行 `npm run check`，也不轮询其他 workflow 的状态。维护者应在源码 CI 通过后打 tag。此调整不改变既有分支保护或三平台 CI 检查名称。
 
-## Engine reuse limits
+## 三个阶段
 
-Reuse is conditional, not a substitute for rebuilding changed engines. Engine sources, dependencies, packaging inputs, or qualification changes require newly built and qualified archives. The current reuse path requires a source run for the exact application tag with all required artifacts still available. It does not implement unrestricted reuse across versions or restoration from a permanent release channel.
+- **预检**：检查版本、App 身份、updater 公钥与请求 tag 的实际提交；检查能力目录完整性，并匿名请求资源前 4 KiB，发现缺失文件、错误长度或 HTML 登录页。这里是可达性检查，不是整包哈希验收；无需在每次 App 发版时重新下载所有大模型。下载源不可达会在构建前明确失败。
+- **构建**：Windows x64、macOS arm64/x64、Linux x64 使用同一份提交中的 catalog。设置 `LLM_WIKI_CAPABILITY_CATALOG_MODE=distributable`，以提交内 `capabilities/` 作为 staging 输入；Rust 构建与成品嵌入检查保证实际使用该目录。构建安装包后验证 updater 签名，并保留原生安装/启动检查。
+- **发布**：读取四个平台的产物声明，汇总需要公开的文件和校验和。稳定版生成 `latest.json`；RC 附带 `.sig`，不生成稳定更新清单。最后检查远程 tag 仍对应构建提交，创建或恢复草稿，上传缺失或变更文件，再公开发布。
 
-If the selected run is missing required artifacts or they have expired, stop and obtain a suitable new build run. Restoration from published engine assets would need a separately implemented and verified path; changing the source ID does not bypass input or provenance checks. Logs and source/release provenance stay in Actions artifacts with their configured retention periods.
+普通 App 构建不传递重复的 catalog artifact，不生成“OS 签名不要求”的临时证明文件，也不依赖固定附件总数。程序平台、实际文件、updater 签名和清单一致性检查仍保留。
 
-## Signing and publication
+## 重试与已发布版本
 
-- `desktop-release` supplies `TAURI_SIGNING_PRIVATE_KEY` and its password, which may be empty for an unencrypted key. Updater signatures remain mandatory. Windows Authenticode and Apple Developer ID/notarization are not required; platform warnings are disclosed in installation notes.
-- The independent `publish-capabilities` job uses the `capability-release` environment. It verifies already signed archives with committed public keys and does not need to read or regenerate the capability signing secret.
-- Build and verification jobs have read-only repository access. Only the two publisher jobs receive `contents: write`, each in its corresponding release environment. Release jobs run from `master` or `app-v*` tags; no repeated reviewer approval is required.
-- Both publishers create or resume drafts, upload missing or changed draft assets, and compare remote names, sizes, and GitHub SHA-256 digests before publication. Existing tags are verified.
-- Public releases are not overwritten or automatically deleted. The post-publication manifest probe retries CDN access and reports a warning if access still fails; a network failure does not delete a valid release.
+优先使用 **Re-run failed jobs**。这样可以沿用成功的原生构建及其 artifact，继续未完成的草稿上传，不必移动 tag 或重新构建所有平台。
 
-## Public download layout
+- 草稿已有的相同文件跳过；不完整或不同文件重新上传。
+- 草稿中的其他附件保留，不因多一份说明或报告而阻止发布。
+- GitHub 提供 SHA-256 时直接比较；缺少摘要元数据时仅下载该文件核对实际字节，不把“没有元数据”当作损坏。
+- 已公开且字节相同的发布重试直接成功，不写任何资产；已有公开文件与新构建不同则明确拒绝覆盖。完整重建可能产生不同安装包字节，不能据此重写已公开版本；代码修复使用新版本。
+- 仅在最后发布稳定版时查询当前 latest。较新稳定版可以接管更新入口；较旧稳定版可以发布，但 `latest=false`。RC 永远不接管稳定更新入口。
+- 权限、认证或网络错误不会被伪装成“Release 不存在”。失败保留草稿，供重试。
 
-The main release has exactly eight assets:
+发布后的 CDN 清单探测仅用于提示传播问题，失败不会撤销或删除已发布版本。
 
-- Four installers: Windows setup EXE, two macOS DMGs, and Linux AppImage.
-- Two macOS `.app.tar.gz` archives for automatic updates.
-- `latest.json`, containing the updater signatures.
-- `CHECKSUMS.sha256` for the seven other desktop assets.
+## 权限、签名与网络
 
-The separate [v0.2.1 capability release](https://github.com/StoneLL1/llm-wiki-desktop/releases/tag/capabilities-v0.2.1) contains optional engine archives, the install catalog, public trust keys, catalog provenance, and checksums. It never takes over the stable `latest` channel. Users normally install engines through the app. Build logs, qualification reports, and standalone updater signature files remain in Actions artifacts.
+只有发布 job 有 `contents: write`；构建从 `desktop-release` 环境读取 updater 签名密钥。App/updater 的签名保持原合同，Windows Authenticode 和 Apple Developer ID/notarization 仍非必需。环境没有人工 reviewer；已有分支/tag 范围约束不变。
 
-## Retry a failed run
+国内用户能否下载取决于实际托管位置，可使用国内 HTTPS 静态存储或完整离线资源目录；见 [能力资源分发](../../capabilities/RELEASE.md)。空目录或不存在的下载地址不能靠放宽发布检查变成可用功能。当前源码 catalog 仍为空，占位目录必须在真实发布前替换。
 
-Use GitHub's **Re-run failed jobs** first. Successful jobs and their artifacts can be retained, and partial draft uploads are resumable. Keep the tag on its original commit.
-
-To start a new run for an unpublished tag, dispatch Desktop release with `release_tag` and a valid engine source run. The required checks run again; matching draft uploads can be retained. If the release is already public, the stable-version progression check rejects the same version even though the publisher itself can recognize identical public assets. Ship a higher version for a published code fix; do not move a published tag.
-
-An unexpected draft attachment is reported by name. Inspect it before removing it. A failed desktop publication may leave the independent capability prerelease available; it does not become the desktop updater's latest release.
-
-## Focused maintenance checks
-
-- `npm run check:release-config:local` checks local origin/default-branch setup.
-- `npm run check:acceptance` audits historical product evidence and redline declarations.
-- `npm run test:updater-signature` checks valid signatures, tampered bytes, and wrong keys.
-- `actionlint` validates GitHub Actions syntax.
-- Cargo audit runs weekly and on demand; advisory failures remain visible without blocking every PR.
-
-For key loss or rotation, see [release identity and access](release-identity-and-access.md#updater-signing-key-operations). Keep the client trust anchor unless an explicit migration is implemented.
+本地维护验证使用 `npm run check`、`npm run check:release-config`；已有 `actionlint` 时可检查 Actions 语法。历史验收清单与审查报告是证据，不是每次发版要重新填写的审批步骤。密钥轮换见 [发布身份与访问](release-identity-and-access.md#updater-signing-key-operations)。

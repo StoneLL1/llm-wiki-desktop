@@ -5,12 +5,16 @@ import { fileURLToPath } from "node:url";
 
 import {
   COMMIT_PATTERN,
+  DESKTOP_TAG_PATTERN,
   githubReleaseAssetName,
   osIdentityEvidenceErrors,
   parseNamedArguments,
   RELEASE_PLATFORMS,
-  STABLE_TAG_PATTERN,
+  OS_IDENTITY_EVIDENCE,
+  safeAssetName,
 } from "./release-assets-contract.mjs";
+import { generateLatestJson } from "./verify-latest-json.mjs";
+import { writeChecksums } from "./generate-release-checksums.mjs";
 
 const BUNDLE_PATTERNS = {
   "windows-x86_64": { installer: /-setup\.exe$/i, updater: /-setup\.exe$/i },
@@ -50,9 +54,11 @@ function collectBundleArtifacts(root) {
 export function stageDesktopRelease({ source, output, platform, releaseTag, version, commitSha, signingEvidence }) {
   const patterns = BUNDLE_PATTERNS[platform];
   if (!patterns) throw new Error(`unsupported desktop platform: ${platform}`);
-  if (!STABLE_TAG_PATTERN.test(releaseTag ?? "")) throw new Error("release tag must be a stable app-v tag");
+  if (!DESKTOP_TAG_PATTERN.test(releaseTag ?? "") || releaseTag !== `app-v${version}`) throw new Error("release tag and desktop version must agree");
   if (!COMMIT_PATTERN.test(commitSha ?? "")) throw new Error("commit SHA must be 40 lowercase hex characters");
-  const evidence = JSON.parse(fs.readFileSync(path.resolve(signingEvidence), "utf8"));
+  const evidence = signingEvidence
+    ? JSON.parse(fs.readFileSync(path.resolve(signingEvidence), "utf8"))
+    : OS_IDENTITY_EVIDENCE[platform];
   const evidenceErrors = osIdentityEvidenceErrors(evidence, platform);
   if (evidenceErrors.length > 0) throw new Error(evidenceErrors.join("; "));
   const files = collectBundleArtifacts(source);
@@ -89,22 +95,70 @@ export function stageDesktopRelease({ source, output, platform, releaseTag, vers
   return descriptor;
 }
 
+export function assembleDesktopDownloads({ candidate, output, releaseTag, version, notes, pubDate }) {
+  if (!DESKTOP_TAG_PATTERN.test(releaseTag ?? "") || releaseTag !== `app-v${version}`) {
+    throw new Error("release tag and desktop version must agree");
+  }
+  const prerelease = version.includes("-rc.");
+  const descriptors = [];
+  const files = new Map();
+  let commit;
+  for (const platform of Object.keys(RELEASE_PLATFORMS)) {
+    const directory = path.resolve(candidate, "desktop", platform);
+    const descriptor = JSON.parse(fs.readFileSync(path.join(directory, "release-entry.json"), "utf8"));
+    if (descriptor.platform !== platform || descriptor.releaseTag !== releaseTag || descriptor.version !== version
+      || !COMMIT_PATTERN.test(descriptor.commitSha) || (commit && descriptor.commitSha !== commit)) {
+      throw new Error(`${platform} build does not match the selected release`);
+    }
+    commit = descriptor.commitSha;
+    descriptors.push(descriptor);
+    const names = [descriptor.installer?.file, descriptor.updater?.file];
+    if (prerelease) names.push(descriptor.updater?.signatureFile);
+    for (const name of new Set(names)) {
+      if (!safeAssetName(name) || files.has(name)) throw new Error(`invalid or duplicate desktop asset: ${name}`);
+      const file = path.join(directory, name);
+      const stat = fs.lstatSync(file);
+      if (!stat.isFile() || stat.size === 0) throw new Error(`empty or non-regular desktop asset: ${name}`);
+      files.set(name, file);
+    }
+  }
+  const latest = prerelease ? null : generateLatestJson({ descriptors, tag: releaseTag, version, notes, pubDate });
+  // Validate the complete candidate before writing its public download directory.
+  if (fs.existsSync(output) && fs.readdirSync(output).length) throw new Error("public output directory must be empty");
+  fs.mkdirSync(output, { recursive: true });
+  for (const [name, file] of files) fs.copyFileSync(file, path.join(output, name));
+  if (latest) fs.writeFileSync(path.join(output, "latest.json"), `${JSON.stringify(latest, null, 2)}\n`);
+  writeChecksums(output, path.join(output, "CHECKSUMS.sha256"));
+  return { channel: prerelease ? "prerelease" : "stable", platformCount: descriptors.length };
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const options = parseNamedArguments(process.argv.slice(2));
-    for (const required of ["source", "output", "platform", "tag", "version", "commit", "signingEvidence"]) {
-      if (!options[required]) throw new Error(`--${required} is required`);
+    if (options.candidate) {
+      for (const required of ["output", "tag", "version", "notes", "pubDate"]) {
+        if (!options[required]) throw new Error(`--${required} is required`);
+      }
+      const result = assembleDesktopDownloads({
+        candidate: options.candidate, output: options.output, releaseTag: options.tag,
+        version: options.version, notes: fs.readFileSync(options.notes, "utf8").trim(), pubDate: options.pubDate,
+      });
+      process.stdout.write(`[desktop-release] assembled ${result.platformCount} ${result.channel} platforms\n`);
+    } else {
+      for (const required of ["source", "output", "platform", "tag", "version", "commit"]) {
+        if (!options[required]) throw new Error(`--${required} is required`);
+      }
+      const descriptor = stageDesktopRelease({
+        source: options.source,
+        output: options.output,
+        platform: options.platform,
+        releaseTag: options.tag,
+        version: options.version,
+        commitSha: options.commit,
+        signingEvidence: options.signingEvidence,
+      });
+      process.stdout.write(`[desktop-release] staged ${descriptor.platform}\n`);
     }
-    const descriptor = stageDesktopRelease({
-      source: options.source,
-      output: options.output,
-      platform: options.platform,
-      releaseTag: options.tag,
-      version: options.version,
-      commitSha: options.commit,
-      signingEvidence: options.signingEvidence,
-    });
-    process.stdout.write(`[desktop-release] staged ${descriptor.platform}\n`);
   } catch (error) {
     process.stderr.write(`[desktop-release] ${error.message}\n`);
     process.exitCode = 1;

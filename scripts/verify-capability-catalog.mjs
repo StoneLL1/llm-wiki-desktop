@@ -22,15 +22,6 @@ const CAPABILITY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const SEMVER_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const RELEASE_TAG_PATTERN = /^app-v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-rc\.[1-9]\d*)?$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
-const CANONICAL_ASSET_URL_PATTERN = /^https:\/\/github\.com\/StoneLL1\/llm-wiki-desktop\/releases\/download\/([A-Za-z0-9._-]+)\/([A-Za-z0-9][A-Za-z0-9._+-]*\.zip)$/;
-const FORBIDDEN_URL_DIAGNOSTICS = [
-  [/\/releases\/latest\//, "mutable latest release URL"],
-  [/(?:^|\/)localhost(?::|\/)/, "localhost URL"],
-  [/^https?:\/\/127\./, "loopback URL"],
-  [/^https?:\/\/example\.(?:com|org|net)(?::|\/)/, "example URL"],
-  [/^https?:\/\/[^/]*\.(?:test|invalid|placeholder)(?::|\/)/, "placeholder URL"],
-];
-
 const isObject = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 
 const trustedKeyErrors = (trustedKeys, { requireCommittedKey }) => {
@@ -54,43 +45,22 @@ const trustedKeyErrors = (trustedKeys, { requireCommittedKey }) => {
   return errors;
 };
 
-const catalogUrlErrors = (entry, label, expectedTag) => {
-  const url = entry.url;
-  if (typeof url !== "string" || url.length === 0) {
-    return [label + " url must be a non-empty string"];
-  }
-  for (const [pattern, reason] of FORBIDDEN_URL_DIAGNOSTICS) {
-    if (pattern.test(url)) {
-      return [label + " url uses a " + reason];
+export const catalogUrlErrors = (entry, label = "entry") => {
+  try {
+    const url = new URL(entry.url);
+    if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash
+      || !url.hostname || url.hostname === "localhost" || url.hostname === "[::1]"
+      || /^127\./u.test(url.hostname) || /(?:^|\.)(?:test|invalid|localhost)$/u.test(url.hostname)
+      || /^example\.(?:com|org|net)$/u.test(url.hostname)) {
+      return [label + " url must be a public HTTPS URL without credentials, query or fragment"];
     }
+    return [];
+  } catch {
+    return [label + " url must be a public HTTPS URL"];
   }
-  const match = CANONICAL_ASSET_URL_PATTERN.exec(url);
-  if (!match) {
-    return [label + " url must be an exact StoneLL1 immutable release download URL"];
-  }
-  const errors = [];
-  const tag = match[1];
-  // Capability assets may live in their own release while retaining the exact
-  // desktop version and its app-v provenance. Keep old desktop URLs readable.
-  const desktopTag = tag.replace(/^capabilities-v/, "app-v");
-  const fileName = match[2];
-  if (!RELEASE_TAG_PATTERN.test(desktopTag)) {
-    errors.push(label + " url tag must use the app-v or capabilities-v release grammar");
-  }
-  if (expectedTag && desktopTag !== expectedTag) {
-    errors.push(label + " url tag must match the desktop release version " + expectedTag);
-  }
-  const expectedFileName = typeof entry.capabilityId === "string" && typeof entry.version === "string"
-    && typeof entry.targetTriple === "string"
-    ? entry.capabilityId + "-" + entry.version + "-" + entry.targetTriple + ".zip"
-    : null;
-  if (expectedFileName && fileName !== expectedFileName) {
-    errors.push(label + " url asset name must be " + expectedFileName);
-  }
-  return errors;
 };
 
-const entryErrors = (entry, index, expectedTag, trustedKeys) => {
+const entryErrors = (entry, index, expectedTag) => {
   const errors = [];
   const label = "entries[" + index + "]";
   if (!isObject(entry)) {
@@ -108,16 +78,12 @@ const entryErrors = (entry, index, expectedTag, trustedKeys) => {
   if (typeof entry.license !== "string" || entry.license.trim().length === 0) {
     errors.push(label + " license must be a non-empty expression");
   }
-  if (typeof entry.signingKeyId !== "string"
-    || !isObject(trustedKeys)
-    || !Object.hasOwn(trustedKeys, entry.signingKeyId)) {
-    errors.push(label + " signingKeyId must name a committed trusted key");
-  }
+  // Archive identity is pinned in the catalog embedded in the trusted app.
+  // Legacy signature metadata is optional and is no longer an install gate.
   for (const field of ["archiveSha256", "manifestSha256"]) {
-    if (typeof entry[field] !== "string" || !SHA256_PATTERN.test(entry[field])) {
-      errors.push(label + " " + field + " must be 64 lowercase hex characters");
-    } else if (/^0+$/.test(entry[field])) {
-      errors.push(label + " " + field + " is all zeros");
+    if (field === "manifestSha256" && (entry[field] == null || entry[field] === "")) continue;
+    if (typeof entry[field] !== "string" || !SHA256_PATTERN.test(entry[field]) || /^0+$/.test(entry[field])) {
+      errors.push(label + " " + field + " must be a non-zero SHA-256 in lowercase hex");
     }
   }
   for (const field of ["compressedBytes", "installedBytes"]) {
@@ -144,6 +110,29 @@ const entryErrors = (entry, index, expectedTag, trustedKeys) => {
   if (!requiresModelBytes && entry.modelBytes != null
     && (!Number.isSafeInteger(entry.modelBytes) || entry.modelBytes <= 0)) {
     errors.push(label + " modelBytes must be a positive integer when present");
+  }
+  if (entry.modelFiles != null) {
+    if (!Array.isArray(entry.modelFiles)) errors.push(label + " modelFiles must be an array");
+    else {
+      const paths = new Set();
+      if (entry.modelFiles.length > 1024) errors.push(label + " modelFiles exceeds 1024 files");
+      for (const file of entry.modelFiles) {
+        if (!isObject(file)) { errors.push(label + " modelFiles entry must be an object"); continue; }
+        if (typeof file.path !== "string" || !file.path.startsWith("models/") || file.path.includes("\\")
+          || file.path.includes(":") || file.path.split("/").some((part) => !part || part === "." || part === "..")
+          || !/\.(?:onnx|bin|txt|json|safetensors|md)$/u.test(file.path)
+          || paths.has(file.path.toLowerCase())) errors.push(label + " model file path must be unique data under models/");
+        if (typeof file.path === "string") paths.add(file.path.toLowerCase());
+        if (!SHA256_PATTERN.test(file.sha256 ?? "") || /^0+$/.test(file.sha256)
+          || !Number.isSafeInteger(file.bytes) || file.bytes <= 0 || file.bytes > 8 * 1024 ** 3) errors.push(label + " model file needs SHA-256 and positive bytes");
+        if (!Array.isArray(file.urls) || !file.urls.length || file.urls.length > 8) errors.push(label + " model file needs download URLs");
+        else for (const url of file.urls) errors.push(...catalogUrlErrors({ url }, label + " model file"));
+      }
+      if (entry.modelFiles.reduce((sum, file) => sum + (file?.bytes ?? 0), 0) > 16 * 1024 ** 3) errors.push(label + " models exceed 16 GiB");
+      if (entry.modelFiles.length && entry.modelFiles.reduce((sum, file) => sum + (file?.bytes ?? 0), 0) !== entry.modelBytes) {
+        errors.push(label + " modelBytes must equal the independent model file sizes");
+      }
+    }
   }
   errors.push(...catalogUrlErrors(entry, label, expectedTag));
   return errors;
@@ -189,9 +178,7 @@ export function verifyCapabilityCatalog({
   }
   const releaseMode = mode === "release";
   const errors = [];
-  if (releaseMode && typeof expectedTag !== "string") {
-    errors.push("release mode requires the exact release tag");
-  } else if (expectedTag !== null && !RELEASE_TAG_PATTERN.test(expectedTag)) {
+  if (expectedTag !== null && !RELEASE_TAG_PATTERN.test(expectedTag)) {
     errors.push("expected release tag must match the frozen app-v grammar");
   }
   if (!isObject(catalog)) {
@@ -199,7 +186,7 @@ export function verifyCapabilityCatalog({
       errors: [
         ...errors,
         "install catalog must be a JSON object",
-        ...trustedKeyErrors(trustedKeys, { requireCommittedKey: releaseMode }),
+        ...trustedKeyErrors(trustedKeys, { requireCommittedKey: false }),
       ],
     };
   }
@@ -211,7 +198,7 @@ export function verifyCapabilityCatalog({
     errors.push("install catalog entries must be an array");
   } else {
     entries.forEach((entry, index) => {
-      errors.push(...entryErrors(entry, index, expectedTag, trustedKeys));
+      errors.push(...entryErrors(entry, index, expectedTag));
     });
     if (releaseMode) {
       const expectedMatrix = expectedReleaseMatrix(PRODUCT_MANIFEST);
@@ -242,7 +229,7 @@ export function verifyCapabilityCatalog({
       }
     }
   }
-  errors.push(...trustedKeyErrors(trustedKeys, { requireCommittedKey: releaseMode }));
+  errors.push(...trustedKeyErrors(trustedKeys, { requireCommittedKey: false }));
   if (provenance) {
     errors.push(...provenanceErrors(provenance, { expectedTag, expectedCommit, expectedRunId }));
   }

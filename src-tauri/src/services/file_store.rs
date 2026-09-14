@@ -236,14 +236,21 @@ impl FileStore {
         let path = context.resolve_project_path(relative_path)?;
         let binding = BoundProjectMutationRoot::bind_read(&context.root, &path)
             .map_err(|err| io_error("FILE_READ_FAILED", err, &path))?;
-        let file = binding.open_regular_pinned(&path)
+        let file = binding
+            .open_regular_pinned(&path)
             .map_err(|err| io_error("FILE_READ_FAILED", err, &path))?;
         let mut bytes = Vec::new();
-        file.take(limit.saturating_add(1)).read_to_end(&mut bytes)
+        file.take(limit.saturating_add(1))
+            .read_to_end(&mut bytes)
             .map_err(|err| io_error("FILE_READ_FAILED", err, &path))?;
         observe_file_read(&path, bytes.len());
         if bytes.len() as u64 > limit {
-            return Err(BackendError::new("VERSION_SIZE_LIMIT", "The recovery version exceeds its supported size budget.", true, true));
+            return Err(BackendError::new(
+                "VERSION_SIZE_LIMIT",
+                "The recovery version exceeds its supported size budget.",
+                true,
+                true,
+            ));
         }
         Ok(bytes)
     }

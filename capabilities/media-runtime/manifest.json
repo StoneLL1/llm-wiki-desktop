@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "packId": "media-runtime",
-  "version": "8.1.2",
+  "version": "8.1.2+resources.1",
   "protocolVersion": "2",
   "targetTriples": ["x86_64-pc-windows-msvc", "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"],
   "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",

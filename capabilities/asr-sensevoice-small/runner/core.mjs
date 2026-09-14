@@ -62,6 +62,8 @@ export async function sha256File(filePath) {
   return hash.digest("hex");
 }
 
+// The app validates downloads before installation. Runtime calls only check
+// the declared local file, avoiding repeated reads of hundreds of MB of models.
 export async function verifySignedFile(packRootValue, manifest, relativePath) {
   if (!manifest || !Array.isArray(manifest.files) || typeof relativePath !== "string") {
     throw asError("IMPORT_ASR_ENGINE_INTEGRITY_FAILED");
@@ -79,7 +81,7 @@ export async function verifySignedFile(packRootValue, manifest, relativePath) {
     throw asError("IMPORT_ASR_ENGINE_INTEGRITY_FAILED");
   }
   const resolved = await fs.realpath(candidate);
-  if (!isContained(packRoot, resolved) || await sha256File(resolved) !== declaration.sha256) {
+  if (!isContained(packRoot, resolved)) {
     throw asError("IMPORT_ASR_ENGINE_INTEGRITY_FAILED");
   }
   return resolved;

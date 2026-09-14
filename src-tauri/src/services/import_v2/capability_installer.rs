@@ -144,12 +144,16 @@ pub struct CapabilityCatalogEntry {
     pub archive_sha256: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub archive_chunks: Vec<super::capability_payload::ArchiveChunk>,
+    #[serde(default)]
     pub manifest_sha256: String,
+    #[serde(default)]
     pub signing_key_id: String,
     pub compressed_bytes: u64,
     pub installed_bytes: u64,
     #[serde(default)]
     pub model_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_files: Vec<super::capability_models::ModelFile>,
     pub license: String,
 }
 
@@ -202,21 +206,6 @@ fn select_catalog_entry(
 /// A cheap preparation estimate. Installation revalidates every reused byte.
 /// Corrupt or concurrently evicted cache entries can increase the actual download.
 pub fn remaining_download_bytes(root: &Path, entry: &CapabilityCatalogEntry) -> u64 {
-    if !entry.archive_chunks.is_empty() {
-        let cached: u64 = entry
-            .archive_chunks
-            .iter()
-            .filter(|chunk| {
-                let path = root.join(".payload-cache").join(&chunk.sha256);
-                BoundProjectMutationRoot::bind(root, &path)
-                    .and_then(|binding| binding.open_regular(&path))
-                    .and_then(|file| file.metadata())
-                    .is_ok_and(|m| m.len() == chunk.bytes)
-            })
-            .map(|chunk| chunk.bytes)
-            .sum();
-        return entry.compressed_bytes.saturating_sub(cached);
-    }
     let Ok(paths) = partial_paths(root, entry) else {
         return entry.compressed_bytes;
     };
@@ -229,13 +218,51 @@ pub fn remaining_download_bytes(root: &Path, entry: &CapabilityCatalogEntry) -> 
                 .is_ok_and(|file| file.is_file() && file.len() >= metadata.downloaded_bytes)
         })
         .map_or(0, |metadata| metadata.downloaded_bytes);
-    entry.compressed_bytes.saturating_sub(cached)
+    entry
+        .compressed_bytes
+        .saturating_sub(cached)
+        .saturating_add(
+            entry
+                .model_files
+                .iter()
+                .filter(|file| {
+                    !std::fs::symlink_metadata(
+                        root.join(".models").join(file.sha256.to_lowercase()),
+                    )
+                    .is_ok_and(|metadata| metadata.is_file() && metadata.len() == file.bytes)
+                })
+                .map(|file| file.bytes)
+                .sum::<u64>(),
+        )
 }
 
 pub async fn install_catalog_entry(
     blocking_work: &BlockingWorkCoordinator,
     install_root: &Path,
     entry: &CapabilityCatalogEntry,
+    owner_task_id: &str,
+    token: &CancellationToken,
+    progress: impl FnMut(CapabilityInstallPhase, u64, u64),
+) -> Result<CapabilityInstallOutcome, BackendError> {
+    install_catalog_entry_from_source(
+        blocking_work,
+        install_root,
+        entry,
+        None,
+        owner_task_id,
+        token,
+        progress,
+    )
+    .await
+}
+
+/// A local archive is only a transport for the exact embedded official release.
+/// It passes the same archive, signature, inventory and activation checks.
+pub async fn install_catalog_entry_from_source(
+    blocking_work: &BlockingWorkCoordinator,
+    install_root: &Path,
+    entry: &CapabilityCatalogEntry,
+    archive_path: Option<&Path>,
     owner_task_id: &str,
     token: &CancellationToken,
     mut progress: impl FnMut(CapabilityInstallPhase, u64, u64),
@@ -289,15 +316,20 @@ pub async fn install_catalog_entry(
             pending_activation: None,
         });
     }
-    if !super::capability_payload::download_chunks(
-        &install_root,
-        entry,
-        &paths.archive,
-        token,
-        &mut progress,
-    )
-    .await?
-    {
+    if let Some(source) = archive_path {
+        copy_official_archive(
+            blocking_work,
+            source,
+            entry,
+            &paths,
+            owner_task_id,
+            token,
+            &mut progress,
+        )
+        .await?;
+    } else {
+        // One streaming transport, including catalogs carrying legacy chunk
+        // metadata. Fresh installs do not require hundreds of Range requests.
         download_archive(
             blocking_work,
             entry,
@@ -330,21 +362,40 @@ pub async fn install_catalog_entry(
         entry.compressed_bytes,
         entry.compressed_bytes,
     );
+    let cleanup = InstallCleanup {
+        install_root: install_root.clone(),
+        staging_root: staging_root.clone(),
+    };
+    let extract_paths = paths.clone();
+    let extract_root = staging_root.clone();
+    let extract_entry = entry.clone();
+    let extract_token = token.clone();
+    blocking_work
+        .run_cancellable(BlockingWorkClass::HeavyIo, token.clone(), move || {
+            extract_and_verify(
+                &extract_paths.archive,
+                &extract_root,
+                &extract_entry,
+                &extract_token,
+            )
+        })
+        .await?;
+    let staged_version = staging_root.join(&entry.capability_id).join(&entry.version);
+    super::capability_models::materialize_models(
+        blocking_work,
+        &install_root,
+        &staged_version,
+        &entry.model_files,
+        archive_path.and_then(Path::parent),
+        token,
+        |done, total| progress(CapabilityInstallPhase::Downloading, done, total),
+    )
+    .await?;
     let install_entry = entry.clone();
     let install_owner = owner_task_id.to_owned();
     let install_token = token.clone();
     blocking_work
         .run_cancellable(BlockingWorkClass::HeavyIo, token.clone(), move || {
-            let cleanup = InstallCleanup {
-                install_root: install_root.clone(),
-                staging_root: staging_root.clone(),
-            };
-            extract_and_verify(
-                &paths.archive,
-                &staging_root,
-                &install_entry,
-                &install_token,
-            )?;
             if install_token.is_cancelled() {
                 if !install_token.is_pause_requested() {
                     remove_partial(&paths);
@@ -445,16 +496,10 @@ pub struct CapabilityInstallOutcome {
 }
 
 impl CapabilityInstallOutcome {
-    pub fn mark_probed(&self, install_root: &Path) -> Result<(), BackendError> {
-        if let Some(path) = self.pending_activation.as_ref() {
-            update_pending_activation_phase(install_root, path, PendingActivationPhase::Probed)?;
-        }
-        Ok(())
-    }
-
     pub fn activate(&mut self, install_root: &Path) -> Result<(), BackendError> {
         if let Some(path) = self.pending_activation.as_ref() {
-            update_pending_activation_phase(install_root, path, PendingActivationPhase::Activated)?;
+            // Marker removal is the durable commit. Every still-pending phase
+            // already has the same restart behavior: roll back this new version.
             remove_pending_activation(install_root, path)?;
         }
         self.pending_activation = None;
@@ -528,6 +573,170 @@ pub enum CapabilityInstallPhase {
     Installing,
 }
 
+async fn copy_official_archive(
+    blocking_work: &BlockingWorkCoordinator,
+    source: &Path,
+    entry: &CapabilityCatalogEntry,
+    paths: &PartialPaths,
+    owner_task_id: &str,
+    token: &CancellationToken,
+    progress: &mut impl FnMut(CapabilityInstallPhase, u64, u64),
+) -> Result<(), BackendError> {
+    use tokio::io::AsyncReadExt;
+    if !source.is_absolute() {
+        return Err(local_archive_error(
+            "Select an absolute path to the official ZIP archive.",
+        ));
+    }
+    let paths_for_open = paths.clone();
+    let source = source.to_path_buf();
+    let entry_for_open = entry.clone();
+    let owner = owner_task_id.to_owned();
+    let check_token = token.clone();
+    let opened = blocking_work
+        .run_cancellable(BlockingWorkClass::HeavyIo, token.clone(), move || {
+            let root = paths_for_open
+                .archive
+                .parent()
+                .and_then(Path::parent)
+                .ok_or_else(|| install_error("Capability download path is invalid."))?;
+            let (binding, _) =
+                BoundProjectMutationRoot::ensure_and_bind(root, &paths_for_open.archive).map_err(
+                    |_| install_error("Capability download directory cannot be created safely."),
+                )?;
+            let (metadata, _) = load_verified_partial(
+                &binding,
+                &paths_for_open,
+                &entry_for_open,
+                &owner,
+                &check_token,
+            )?;
+            if metadata.downloaded_bytes == entry_for_open.compressed_bytes
+                && metadata
+                    .prefix_sha256
+                    .eq_ignore_ascii_case(&entry_for_open.archive_sha256)
+            {
+                return Ok(None);
+            }
+            // User-selected downloads may live behind a directory/file symlink.
+            // Resolve the read-only source, then require an ordinary file; trust
+            // still comes exclusively from the catalog digest and signature.
+            let source = source.canonicalize().map_err(|_| {
+                local_archive_error(
+                    "The selected archive is unavailable. Select the official ZIP file again.",
+                )
+            })?;
+            // Inspect before opening so a selected pipe/device cannot block the worker.
+            if !std::fs::symlink_metadata(&source).is_ok_and(|m| m.is_file()) {
+                return Err(local_archive_error(
+                    "The selected archive is unavailable. Select the official ZIP file again.",
+                ));
+            }
+            let source_parent = source
+                .parent()
+                .ok_or_else(|| local_archive_error("The selected archive path is invalid."))?;
+            let source_binding = BoundProjectMutationRoot::bind_read(source_parent, &source)
+                .map_err(|_| local_archive_error("The selected archive cannot be opened."))?;
+            let input = source_binding
+                .open_regular(&source)
+                .map_err(|_| local_archive_error("The selected archive cannot be opened."))?;
+            if input
+                .metadata()
+                .map_err(|_| local_archive_error("The selected archive cannot be read."))?
+                .len()
+                != entry_for_open.compressed_bytes
+            {
+                return Err(archive_mismatch());
+            }
+            // Open the source first; never remove or change the user's original ZIP.
+            remove_partial(&paths_for_open);
+            let output = binding
+                .open_regular_mutate_or_create(&paths_for_open.archive, true)
+                .map_err(|_| install_error("Capability download file cannot be created."))?;
+            Ok(Some((input, output)))
+        })
+        .await?;
+    let Some((input, output)) = opened else {
+        progress(
+            CapabilityInstallPhase::Verifying,
+            entry.compressed_bytes,
+            entry.compressed_bytes,
+        );
+        return Ok(());
+    };
+    let mut input = tokio::fs::File::from_std(input);
+    let mut output = tokio::fs::File::from_std(output);
+    let mut hash = Sha256::new();
+    let mut copied = 0u64;
+    let mut buffer = vec![0u8; IO_BUFFER_BYTES];
+    let mut last_progress = Instant::now();
+    progress(CapabilityInstallPhase::Verifying, 0, entry.compressed_bytes);
+    let result = async {
+        loop {
+            if token.is_cancelled() {
+                return Err(stopped(token));
+            }
+            let count = input
+                .read(&mut buffer)
+                .await
+                .map_err(|_| local_archive_error("The selected archive could not be read."))?;
+            if count == 0 {
+                break;
+            }
+            copied += count as u64;
+            if copied > entry.compressed_bytes {
+                return Err(archive_mismatch());
+            }
+            hash.update(&buffer[..count]);
+            output
+                .write_all(&buffer[..count])
+                .await
+                .map_err(|_| install_error("Capability download could not be saved."))?;
+            if last_progress.elapsed() >= Duration::from_millis(200)
+                || copied == entry.compressed_bytes
+            {
+                progress(
+                    CapabilityInstallPhase::Verifying,
+                    copied,
+                    entry.compressed_bytes,
+                );
+                last_progress = Instant::now();
+            }
+        }
+        if copied != entry.compressed_bytes
+            || !format!("{:x}", hash.finalize()).eq_ignore_ascii_case(&entry.archive_sha256)
+        {
+            return Err(archive_mismatch());
+        }
+        output
+            .flush()
+            .await
+            .map_err(|_| install_error("Capability download could not be finalized."))?;
+        output
+            .sync_all()
+            .await
+            .map_err(|_| install_error("Capability download could not be finalized."))?;
+        let mut metadata = PartialDownloadMetadata::new(entry, owner_task_id, copied);
+        metadata.prefix_sha256 = entry.archive_sha256.to_ascii_lowercase();
+        write_partial_metadata_background(blocking_work, &paths.metadata, &metadata, token).await
+    }
+    .await;
+    drop(output);
+    if result.is_err() {
+        remove_partial_background(blocking_work, paths).await?;
+    }
+    result
+}
+
+fn local_archive_error(message: &str) -> BackendError {
+    BackendError::new("APP_CAPABILITY_ARCHIVE_UNAVAILABLE", message, true, true)
+}
+
+fn archive_mismatch() -> BackendError {
+    BackendError::new("APP_CAPABILITY_INTEGRITY_FAILED",
+        "The selected ZIP does not match this capability, version and platform. Select the matching official release archive.", true, true)
+}
+
 async fn download_archive(
     blocking_work: &BlockingWorkCoordinator,
     entry: &CapabilityCatalogEntry,
@@ -596,6 +805,7 @@ async fn download_archive_inner(
                 attempt.follow()
             }
         }))
+        .user_agent(concat!("LLM-Wiki-Desktop/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|_| install_error("Capability downloader is unavailable."))?;
     let download_root = paths
@@ -631,21 +841,10 @@ async fn download_archive_inner(
         })
         .await?;
     if metadata.downloaded_bytes == entry.compressed_bytes {
-        let archive_for_hash = paths.archive.clone();
-        let binding_for_hash = download_binding
-            .try_clone()
-            .map_err(|_| install_error("Capability partial cannot be pinned."))?;
-        let token_for_hash = token.clone();
-        let actual_sha256 = blocking_work
-            .run_cancellable(BlockingWorkClass::HeavyIo, token.clone(), move || {
-                hash_bound_file_cancellable(
-                    &binding_for_hash,
-                    &archive_for_hash,
-                    Some(&token_for_hash),
-                )
-            })
-            .await?;
-        if actual_sha256.eq_ignore_ascii_case(&entry.archive_sha256) {
+        if metadata
+            .prefix_sha256
+            .eq_ignore_ascii_case(&entry.archive_sha256)
+        {
             progress(
                 CapabilityInstallPhase::Downloading,
                 entry.compressed_bytes,
@@ -679,6 +878,15 @@ async fn download_archive_inner(
         return Err(network_error(format!("Capability server returned HTTP {}", response.status()))
             .with_details(serde_json::json!({ "httpStatus": response.status().as_u16(), "retryAfterSeconds": retry_after })));
     }
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(BackendError::new(
+            "APP_CAPABILITY_DOWNLOAD_REJECTED",
+            "Capability download returned HTTP 404.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({"httpStatus": 404})));
+    }
     let mut response_url = response.url().as_str().to_owned();
     let mut response_etag = response_header(&response, reqwest::header::ETAG);
     let mut response_last_modified = response_header(&response, reqwest::header::LAST_MODIFIED);
@@ -694,7 +902,7 @@ async fn download_archive_inner(
     if restart {
         metadata = PartialDownloadMetadata::new(entry, owner_task_id, 0);
         hasher = Sha256::new();
-        if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+        if response.status() != reqwest::StatusCode::OK {
             response = send_cancellable(
                 client.get(&entry.url),
                 token,
@@ -713,7 +921,13 @@ async fn download_archive_inner(
         resumed
     };
     if !accepted_status {
-        return Err(install_error("Capability download response is invalid."));
+        return Err(BackendError::new(
+            "APP_CAPABILITY_DOWNLOAD_REJECTED",
+            format!("Capability server returned HTTP {}", response.status()),
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({"httpStatus": response.status().as_u16()})));
     }
     let binding_for_open = download_binding
         .try_clone()
@@ -762,15 +976,14 @@ async fn download_archive_inner(
                 metadata.downloaded_bytes = downloaded;
                 metadata.prefix_sha256 = format!("{:x}", hasher.clone().finalize());
                 metadata.updated_at_unix_seconds = unix_seconds();
-                file.sync_data().await.map_err(|error| {
-                    install_error(&format!(
-                        "Capability download could not be checkpointed: {error}"
-                    ))
-                })?;
+                file.sync_data()
+                    .await
+                    .map_err(|_| install_error("Capability download could not be checkpointed."))?;
                 write_partial_metadata_background(blocking_work, &paths.metadata, &metadata, token)
                     .await?;
                 return Err(network_error(format!(
-                    "Capability download interrupted: {error}"
+                    "Capability download interrupted: {}",
+                    error.without_url()
                 )));
             }
         };
@@ -816,18 +1029,10 @@ async fn download_archive_inner(
         .await
         .map_err(|_| install_error("Capability download could not be checkpointed."))?;
     write_partial_metadata_background(blocking_work, &paths.metadata, &metadata, token).await?;
-    let archive_for_hash = paths.archive.clone();
-    let binding_for_hash = download_binding
-        .try_clone()
-        .map_err(|_| install_error("Capability archive cannot be pinned."))?;
-    let token_for_hash = token.clone();
-    let actual_sha256 = blocking_work
-        .run_cancellable(BlockingWorkClass::HeavyIo, token.clone(), move || {
-            hash_bound_file_cancellable(&binding_for_hash, &archive_for_hash, Some(&token_for_hash))
-        })
-        .await?;
     if downloaded != entry.compressed_bytes
-        || !actual_sha256.eq_ignore_ascii_case(&entry.archive_sha256)
+        || !metadata
+            .prefix_sha256
+            .eq_ignore_ascii_case(&entry.archive_sha256)
     {
         remove_partial_background(blocking_work, paths).await?;
         return Err(install_error("Capability archive integrity check failed."));
@@ -877,7 +1082,7 @@ async fn send_cancellable(
     loop {
         tokio::select! {
             response = &mut send => {
-                return response.map_err(|error| network_error(format!("{failure_message} {error}")));
+                return response.map_err(|error| network_error(format!("{failure_message} {}", error.without_url())));
             }
             _ = tokio::time::sleep(Duration::from_millis(100)) => {
                 if token.is_cancelled() {
@@ -931,25 +1136,6 @@ fn write_pending_activation(
     binding
         .write_atomic_create_new(path, &bytes)
         .map_err(|_| install_error("Capability activation journal could not be created."))
-}
-
-fn update_pending_activation_phase(
-    install_root: &Path,
-    path: &Path,
-    phase: PendingActivationPhase,
-) -> Result<(), BackendError> {
-    let binding = BoundProjectMutationRoot::bind(install_root, path)
-        .map_err(|_| install_error("Capability activation journal path is unsafe."))?;
-    let mut pending = read_bounded_regular(&binding, path)
-        .and_then(|bytes| serde_json::from_slice::<PendingActivation>(&bytes).ok())
-        .filter(|pending| pending.schema_version == 1)
-        .ok_or_else(|| install_error("Capability activation journal is invalid."))?;
-    pending.phase = phase;
-    let bytes = serde_json::to_vec(&pending)
-        .map_err(|_| install_error("Capability activation journal is invalid."))?;
-    binding
-        .write_atomic_replace(path, &bytes)
-        .map_err(|_| install_error("Capability activation journal could not be updated."))
 }
 
 fn recover_pending_activation_for_release(
@@ -1454,6 +1640,7 @@ fn extract_and_verify(
         entry,
         trusted_keys(),
         Some(token),
+        false,
     )
 }
 
@@ -1463,7 +1650,7 @@ fn extract_and_verify_with_keys(
     entry: &CapabilityCatalogEntry,
     keys: HashMap<String, Vec<u8>>,
 ) -> Result<(), BackendError> {
-    extract_and_verify_with_keys_cancellable(archive_path, staging_root, entry, keys, None)
+    extract_and_verify_with_keys_cancellable(archive_path, staging_root, entry, keys, None, true)
 }
 
 fn extract_and_verify_with_keys_cancellable(
@@ -1472,6 +1659,7 @@ fn extract_and_verify_with_keys_cancellable(
     entry: &CapabilityCatalogEntry,
     keys: HashMap<String, Vec<u8>>,
     token: Option<&CancellationToken>,
+    verify_archive: bool,
 ) -> Result<(), BackendError> {
     let install_root = staging_root
         .parent()
@@ -1485,13 +1673,15 @@ fn extract_and_verify_with_keys_cancellable(
     let mut archive_file = archive_binding
         .open_regular(archive_path)
         .map_err(|_| install_error("Capability archive is unavailable."))?;
-    let actual_archive_sha256 = hash_reader_cancellable(&mut archive_file, token)?;
-    if !actual_archive_sha256.eq_ignore_ascii_case(&entry.archive_sha256) {
-        return Err(install_error("Capability archive integrity check failed."));
+    if verify_archive {
+        let actual_archive_sha256 = hash_reader_cancellable(&mut archive_file, token)?;
+        if !actual_archive_sha256.eq_ignore_ascii_case(&entry.archive_sha256) {
+            return Err(install_error("Capability archive integrity check failed."));
+        }
+        archive_file
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| install_error("Capability archive cannot be rewound."))?;
     }
-    archive_file
-        .seek(SeekFrom::Start(0))
-        .map_err(|_| install_error("Capability archive cannot be rewound."))?;
     let mut archive = zip::ZipArchive::new(archive_file)
         .map_err(|_| install_error("Capability archive is invalid."))?;
     if !valid_archive_file_count(archive.len()) {
@@ -1509,6 +1699,11 @@ fn extract_and_verify_with_keys_cancellable(
             .enclosed_name()
             .ok_or_else(|| install_error("Capability archive contains an unsafe path."))?
             .to_path_buf();
+        if relative == Path::new(super::capability_pack::INSTALLATION_RECEIPT) {
+            return Err(install_error(
+                "Capability archive contains reserved installation metadata.",
+            ));
+        }
         if relative.components().count() > MAX_ARCHIVE_DEPTH {
             return Err(install_error(
                 "Capability archive path depth exceeds its limit.",
@@ -1583,6 +1778,29 @@ fn extract_and_verify_with_keys_cancellable(
             "Capability installed size does not match the catalog.",
         ));
     }
+    let manifest_sha256 = hash_file(&target.join("manifest.json"))?;
+    if !entry.manifest_sha256.is_empty() && manifest_sha256 != entry.manifest_sha256 {
+        return Err(install_error(
+            "Installed capability manifest does not match the catalog entry.",
+        ));
+    }
+    let receipt = super::capability_pack::InstallationReceipt {
+        archive_sha256: entry.archive_sha256.clone(),
+        manifest_sha256,
+    };
+    let receipt_path = target.join(super::capability_pack::INSTALLATION_RECEIPT);
+    let binding = BoundProjectMutationRoot::bind(staging_root, &receipt_path)
+        .map_err(|_| install_error("Capability installation receipt path is unsafe."))?;
+    let mut file = binding
+        .create_regular_new(&receipt_path)
+        .map_err(|_| install_error("Capability installation receipt cannot be saved."))?;
+    std::io::Write::write_all(
+        &mut file,
+        &serde_json::to_vec(&receipt)
+            .map_err(|_| install_error("Capability installation receipt is invalid."))?,
+    )
+    .and_then(|()| file.sync_all())
+    .map_err(|_| install_error("Capability installation receipt cannot be saved."))?;
     let pack = verify_installed_root_with_keys(staging_root, entry, keys)?;
     restore_executable_permissions(&pack)?;
     // A filesystem without hard links keeps the verified independent files.
@@ -1625,7 +1843,7 @@ fn verify_installed_root_with_keys(
     entry: &CapabilityCatalogEntry,
     keys: HashMap<String, Vec<u8>>,
 ) -> Result<super::capability_pack::ResolvedCapabilityPack, BackendError> {
-    let manager = CapabilityPackManager::new(install_root.to_path_buf(), keys);
+    let manager = CapabilityPackManager::for_installed(install_root.to_path_buf(), keys);
     let requirement = CapabilityRequirement {
         capability_id: entry.capability_id.clone(),
         minimum_version: Some(entry.version.clone()),
@@ -1635,15 +1853,24 @@ fn verify_installed_root_with_keys(
     };
     let pack = manager.resolve_version(&requirement, &entry.version)?;
     let manifest_path = pack.root.join("manifest.json");
-    if !hash_file(&manifest_path)?.eq_ignore_ascii_case(&entry.manifest_sha256) {
+    if !entry.manifest_sha256.is_empty()
+        && !hash_file(&manifest_path)?.eq_ignore_ascii_case(&entry.manifest_sha256)
+    {
         return Err(install_error(
             "Installed capability manifest does not match the catalog entry.",
         ));
     }
-    if pack.manifest.signing_key_id != entry.signing_key_id {
+    if !entry.signing_key_id.is_empty() && pack.manifest.signing_key_id != entry.signing_key_id {
         return Err(install_error(
             "Installed capability signer does not match the catalog entry.",
         ));
+    }
+    if let Some(receipt) = super::capability_pack::read_installation_receipt(&pack.root)? {
+        if receipt.archive_sha256 != entry.archive_sha256 {
+            return Err(install_error(
+                "Installed capability archive does not match the catalog entry.",
+            ));
+        }
     }
     let legacy_measurements_match = pack.manifest.schema_version != 1
         || (pack.manifest.archive_sha256 == entry.archive_sha256
@@ -1807,13 +2034,14 @@ fn valid_catalog_entry(entry: &CapabilityCatalogEntry) -> bool {
             .chars()
             .all(|value| value.is_ascii_hexdigit())
         && !entry.archive_sha256.chars().all(|value| value == '0')
-        && entry.manifest_sha256.len() == 64
-        && entry
-            .manifest_sha256
-            .chars()
-            .all(|value| value.is_ascii_hexdigit())
-        && !entry.manifest_sha256.chars().all(|value| value == '0')
-        && !entry.signing_key_id.trim().is_empty()
+        && (entry.manifest_sha256.is_empty()
+            || (entry.manifest_sha256.len() == 64
+                && entry
+                    .manifest_sha256
+                    .bytes()
+                    .all(|value| value.is_ascii_hexdigit())
+                && entry.manifest_sha256.bytes().any(|value| value != b'0')))
+        && super::capability_models::valid_model_files(&entry.model_files)
         && entry.compressed_bytes > 0
         && entry.compressed_bytes <= MAX_ARCHIVE_BYTES
         && entry.installed_bytes > 0
@@ -2032,6 +2260,7 @@ mod tests {
                 compressed_bytes: std::fs::metadata(&archive).unwrap().len(),
                 installed_bytes: (manifest_bytes.len() + runtime.len()) as u64,
                 model_bytes: None,
+                model_files: Vec::new(),
                 archive_chunks: Vec::new(),
                 license: "MIT".into(),
             };
@@ -2052,6 +2281,80 @@ mod tests {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.root).ok();
         }
+    }
+
+    #[tokio::test]
+    async fn unsigned_program_and_separate_model_install_offline_and_survive_restart() {
+        use std::io::Write;
+        let mut fixture = SignedFixture::new(b"program", "unused-legacy-key");
+        let model = b"model data fixture";
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 3, "packId": "fixture", "version": "1.0.0",
+            "protocolVersion": "2", "targetTriples": [fixture.entry.target_triple],
+            "licenseExpression": "MIT", "entrypoint": "runner.bin"
+        }))
+        .unwrap();
+        let mut archive = zip::ZipWriter::new(std::fs::File::create(&fixture.archive).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        archive.start_file("manifest.json", options).unwrap();
+        archive.write_all(&manifest).unwrap();
+        archive.start_file("runner.bin", options).unwrap();
+        archive.write_all(b"program").unwrap();
+        archive.finish().unwrap();
+        fixture.entry.archive_sha256 = hash_file(&fixture.archive).unwrap();
+        fixture.entry.compressed_bytes = std::fs::metadata(&fixture.archive).unwrap().len();
+        fixture.entry.installed_bytes = manifest.len() as u64 + 7;
+        fixture.entry.manifest_sha256.clear();
+        fixture.entry.signing_key_id.clear();
+        fixture.entry.model_files = vec![super::super::capability_models::ModelFile {
+            path: "models/中文模型.onnx".into(),
+            sha256: format!("{:x}", Sha256::digest(model)),
+            bytes: model.len() as u64,
+            urls: vec!["https://offline.invalid/model".into()],
+        }];
+        fixture.entry.model_bytes = Some(model.len() as u64);
+        std::fs::create_dir_all(fixture.root.join("models")).unwrap();
+        std::fs::write(fixture.root.join("models/中文模型.onnx"), model).unwrap();
+        let work = BlockingWorkCoordinator::default();
+        let mut outcome = install_catalog_entry_from_source(
+            &work,
+            &fixture.install_root(),
+            &fixture.entry,
+            Some(&fixture.archive),
+            "offline-split",
+            &CancellationToken::new(),
+            |_, _, _| {},
+        )
+        .await
+        .unwrap();
+        outcome.activate(&fixture.install_root()).unwrap();
+        drop(outcome);
+        recover_install_root(&fixture.install_root()).unwrap();
+        let installed = verify_installed_root_with_keys(
+            &fixture.install_root(),
+            &fixture.entry,
+            HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(installed.root.join("models/中文模型.onnx")).unwrap(),
+            model
+        );
+        assert!(installed.manifest.signature.is_empty());
+        // Removing the offline source cannot break a committed installation.
+        std::fs::remove_file(&fixture.archive).unwrap();
+        std::fs::remove_dir_all(fixture.root.join("models")).unwrap();
+        install_catalog_entry_from_source(
+            &work,
+            &fixture.install_root(),
+            &fixture.entry,
+            Some(&fixture.archive),
+            "reuse",
+            &CancellationToken::new(),
+            |_, _, _| {},
+        )
+        .await
+        .unwrap();
     }
 
     #[test]
@@ -2108,6 +2411,7 @@ mod tests {
             compressed_bytes: 1,
             installed_bytes: 1,
             model_bytes: None,
+            model_files: Vec::new(),
             archive_chunks: Vec::new(),
             license: "Apache-2.0".into(),
         };
@@ -2140,6 +2444,7 @@ mod tests {
             compressed_bytes: 1,
             installed_bytes: 1,
             model_bytes: None,
+            model_files: Vec::new(),
             archive_chunks: Vec::new(),
             license: "Apache-2.0".into(),
         };
@@ -2426,6 +2731,62 @@ mod tests {
     }
 
     #[test]
+    fn activation_commits_by_clearing_one_pending_marker() {
+        let fixture = SignedFixture::new(b"runtime", "release-a");
+        let install_root = fixture.install_root();
+        let version_root = install_root.join("fixture/1.0.0");
+        std::fs::create_dir_all(&version_root).unwrap();
+        let identity = release_identity(&fixture.entry);
+        let pending_path = pending_activation_path(&install_root, &identity);
+        write_pending_activation(
+            &install_root,
+            &pending_path,
+            &PendingActivation {
+                schema_version: 1,
+                identity: identity.clone(),
+                capability_id: "fixture".into(),
+                version: "1.0.0".into(),
+                owner_task_id: "task-created".into(),
+                phase: PendingActivationPhase::Prepared,
+            },
+        )
+        .unwrap();
+        let release_lock = acquire_release_lock(&install_root, &identity, "task-created").unwrap();
+        let mut outcome = CapabilityInstallOutcome {
+            created_by_this_call: true,
+            release_lock,
+            pending_activation: Some(pending_path.clone()),
+        };
+        outcome.activate(&install_root).unwrap();
+        assert!(outcome.pending_activation.is_none());
+        assert!(!pending_path.exists());
+        drop(outcome);
+        let recovery = recover_install_root(&install_root).unwrap();
+        assert_eq!(recovery.rolled_back_pending, 0);
+        assert!(version_root.exists(), "committed version survives restart");
+    }
+
+    #[test]
+    fn failed_activation_commit_keeps_the_pending_rollback_owner() {
+        let fixture = SignedFixture::new(b"runtime", "release-a");
+        let install_root = fixture.install_root();
+        std::fs::create_dir_all(&install_root).unwrap();
+        let identity = release_identity(&fixture.entry);
+        let pending_path = pending_activation_path(&install_root, &identity);
+        // A directory cannot be cleared as the expected regular journal file.
+        std::fs::create_dir(&pending_path).unwrap();
+        let release_lock = acquire_release_lock(&install_root, &identity, "task-created").unwrap();
+        let mut outcome = CapabilityInstallOutcome {
+            created_by_this_call: true,
+            release_lock,
+            pending_activation: Some(pending_path.clone()),
+        };
+        assert!(outcome.activate(&install_root).is_err());
+        assert_eq!(outcome.pending_activation.as_ref(), Some(&pending_path));
+        assert!(pending_path.exists());
+    }
+
+    #[test]
     fn startup_recovery_rolls_back_a_version_left_pending_before_health() {
         let fixture = SignedFixture::new(b"runtime", "release-a");
         let install_root = fixture.install_root();
@@ -2561,6 +2922,141 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.message.contains("depth"));
+    }
+
+    #[tokio::test]
+    async fn official_local_zip_installs_offline_and_reuses_completed_copy() {
+        let fixture = SignedFixture::new(b"offline-runtime", "release-a");
+        std::fs::create_dir_all(fixture.install_root()).unwrap();
+        let source = fixture.root.join("离线 包 🧩.ZIP");
+        std::fs::copy(&fixture.archive, &source).unwrap();
+        let mut entry = fixture.entry.clone();
+        // Old release catalogs contain chunks, but do not require a second transport.
+        entry.archive_chunks = super::super::capability_payload::archive_chunks(&source).unwrap();
+        let paths = partial_paths(&fixture.install_root(), &entry).unwrap();
+        let work = BlockingWorkCoordinator::default();
+        let token = CancellationToken::new();
+        copy_official_archive(
+            &work,
+            &source,
+            &entry,
+            &paths,
+            "offline",
+            &token,
+            &mut |_, _, _| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(remaining_download_bytes(&fixture.install_root(), &entry), 0);
+        assert_eq!(
+            std::fs::read(&source).unwrap(),
+            std::fs::read(&paths.archive).unwrap()
+        );
+        std::fs::remove_file(&source).unwrap();
+        // Resume does not require the original removable drive or any network.
+        copy_official_archive(
+            &work,
+            &source,
+            &entry,
+            &paths,
+            "resumed",
+            &token,
+            &mut |_, _, _| {},
+        )
+        .await
+        .unwrap();
+        let staging = fixture.install_root().join(".installing-offline");
+        extract_and_verify_with_keys(&paths.archive, &staging, &entry, fixture.keys.clone())
+            .unwrap();
+        assert_eq!(
+            std::fs::read(staging.join("fixture/1.0.0/runner.bin")).unwrap(),
+            b"offline-runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrong_local_zip_is_rejected_without_changing_original_or_leaving_partial() {
+        let fixture = SignedFixture::new(b"offline-runtime", "release-a");
+        std::fs::create_dir_all(fixture.install_root()).unwrap();
+        let mut bad = std::fs::read(&fixture.archive).unwrap();
+        bad[0] ^= 1;
+        let source = fixture.root.join("wrong.zip");
+        std::fs::write(&source, &bad).unwrap();
+        let paths = partial_paths(&fixture.install_root(), &fixture.entry).unwrap();
+        let error = copy_official_archive(
+            &BlockingWorkCoordinator::default(),
+            &source,
+            &fixture.entry,
+            &paths,
+            "offline",
+            &CancellationToken::new(),
+            &mut |_, _, _| {},
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "APP_CAPABILITY_INTEGRITY_FAILED");
+        assert!(!paths.archive.exists());
+        assert!(!paths.metadata.exists());
+        assert_eq!(std::fs::read(source).unwrap(), bad);
+    }
+
+    #[tokio::test]
+    async fn refused_range_restarts_as_a_full_get_and_http_errors_keep_the_status() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt as _};
+        for status in [403, 416, 404] {
+            let fixture = SignedFixture::new(b"range-fallback", "release-a");
+            let bytes = std::fs::read(&fixture.archive).unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut entry = fixture.entry.clone();
+            entry.url = format!("http://{}/pack.zip", listener.local_addr().unwrap());
+            let split = bytes.len() / 2;
+            let paths = PartialPaths {
+                archive: fixture.install_root().join(".downloads/fixture.partial"),
+                metadata: fixture
+                    .install_root()
+                    .join(".downloads/fixture.partial.json"),
+            };
+            std::fs::create_dir_all(paths.archive.parent().unwrap()).unwrap();
+            std::fs::write(&paths.archive, &bytes[..split]).unwrap();
+            let mut metadata = PartialDownloadMetadata::new(&entry, "first", split as u64);
+            metadata.prefix_sha256 = format!("{:x}", Sha256::digest(&bytes[..split]));
+            write_partial_metadata(&paths.metadata, &metadata).unwrap();
+            let response_bytes = bytes.clone();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 8192];
+                let read = stream.read(&mut request).await.unwrap();
+                assert!(String::from_utf8_lossy(&request[..read]).contains("range: bytes="));
+                stream.write_all(format!("HTTP/1.1 {status} Refused\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+                drop(stream);
+                if status != 404 {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let read = stream.read(&mut request).await.unwrap();
+                    assert!(!String::from_utf8_lossy(&request[..read]).contains("range:"));
+                    stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", response_bytes.len()).as_bytes()).await.unwrap();
+                    stream.write_all(&response_bytes).await.unwrap();
+                }
+            });
+            let result = download_archive(
+                &BlockingWorkCoordinator::default(),
+                &entry,
+                &paths,
+                "resume",
+                &CancellationToken::new(),
+                &mut |_, _, _| {},
+            )
+            .await;
+            server.await.unwrap();
+            if status == 404 {
+                let error = result.unwrap_err();
+                assert_eq!(error.code, "APP_CAPABILITY_DOWNLOAD_REJECTED");
+                assert_eq!(error.details.unwrap()["httpStatus"], 404);
+                assert_eq!(std::fs::read(&paths.archive).unwrap(), bytes[..split]);
+            } else {
+                result.unwrap();
+                assert_eq!(std::fs::read(&paths.archive).unwrap(), bytes);
+            }
+        }
     }
 
     #[tokio::test]

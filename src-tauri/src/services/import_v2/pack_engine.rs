@@ -10,9 +10,7 @@ use std::time::{Duration, Instant};
 
 use crate::errors::{BackendError, IMPORT_V2_CANCELLED, IMPORT_V2_ENGINE_UNAVAILABLE};
 use crate::models::import_v2::{ImportInput, ImportInputKind, MediaSaveMode};
-use crate::services::import_v2::capability_pack::{
-    hash_file, verify_runtime_integrity, ResolvedCapabilityPack,
-};
+use crate::services::import_v2::capability_pack::ResolvedCapabilityPack;
 use crate::services::import_v2::domain_limiter::DomainLimiter;
 use crate::services::import_v2::engine::{
     validate_engine_result, EngineDescriptor, EngineProgress, EngineProgressReporter,
@@ -80,13 +78,15 @@ impl PackProcessEngine {
     }
 }
 
-pub(crate) fn probe_capability_pack(
+// Installation has already checked the downloaded archive. The self-test binds
+// the executable path and starts the program without rehashing its payload.
+pub(super) fn probe_capability_pack(
     pack: &ResolvedCapabilityPack,
     capability_id: &str,
     route: &str,
     cancellation: &CancellationToken,
 ) -> Result<(), BackendError> {
-    validate_entrypoint_unchanged(pack)?;
+    validate_entrypoint_path(pack)?;
     let entrypoint_args = resolve_pack_entrypoint_args(pack)
         .map_err(|_| health_error("The capability entrypoint arguments are invalid."))?;
     let invocation_root = TemporaryMediaWorkspace::create_unique(
@@ -101,7 +101,7 @@ pub(crate) fn probe_capability_pack(
         .current_dir(invocation_root.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .env_clear()
         .env("PYTHONDONTWRITEBYTECODE", "1");
     for key in ["SystemRoot", "WINDIR"] {
@@ -113,12 +113,37 @@ pub(crate) fn probe_capability_pack(
         .env("TEMP", invocation_root.path())
         .env("TMP", invocation_root.path());
     configure_isolated_process(&mut command);
-    let mut child = command
-        .spawn()
-        .map_err(|_| health_error("The capability health process could not be started."))?;
+    let mut child = command.spawn().map_err(|error| {
+        health_error(&format!(
+            "The capability health process could not be started: {error}"
+        ))
+    })?;
     let lifetime = ProcessLifetimeGuard::attach_capability(&mut child)
         .map_err(|_| health_error("The capability health process could not be isolated."))?;
     let mut child = ProcessGuard(child, None, None, Some(lifetime));
+    let stderr = child
+        .0
+        .stderr
+        .take()
+        .ok_or_else(|| health_error("The capability health stderr is unavailable."))?;
+    let (diagnostic_sender, diagnostic_receiver) = mpsc::channel();
+    child.2 = Some(std::thread::spawn(move || {
+        // Bound retained output, but drain the pipe so verbose native loaders
+        // cannot block before returning their health response.
+        let mut stderr = stderr;
+        let mut diagnostic = Vec::new();
+        let _ = (&mut stderr)
+            .take(MAX_HEALTH_RESPONSE_BYTES)
+            .read_to_end(&mut diagnostic);
+        let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+        let _ = diagnostic_sender.send(diagnostic);
+    }));
+    let failure = |message: &str| {
+        let diagnostic = diagnostic_receiver
+            .recv_timeout(Duration::from_millis(250))
+            .unwrap_or_default();
+        health_error_with_diagnostic(message, &diagnostic)
+    };
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": request_id,
@@ -163,7 +188,7 @@ pub(crate) fn probe_capability_pack(
         }
         if started.elapsed() >= CAPABILITY_HEALTH_TIMEOUT {
             terminate_tree(&mut child.0);
-            return Err(health_error("The capability health process timed out."));
+            return Err(failure("The capability health process timed out."));
         }
         match receiver.recv_timeout(Duration::from_millis(100)) {
             Ok(Ok(bytes)) => break bytes,
@@ -181,10 +206,10 @@ pub(crate) fn probe_capability_pack(
         }
     };
     if bytes.is_empty() || bytes.len() as u64 > MAX_HEALTH_RESPONSE_BYTES {
-        return Err(health_error("The capability health response is invalid."));
+        return Err(failure("The capability health response is invalid."));
     }
     let response: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|_| health_error("The capability health response is invalid."))?;
+        .map_err(|_| failure("The capability health response is invalid."))?;
     let healthy = response.get("jsonrpc").and_then(|value| value.as_str()) == Some("2.0")
         && response.get("id").and_then(|value| value.as_str()) == Some(request_id.as_str())
         && response
@@ -205,13 +230,13 @@ pub(crate) fn probe_capability_pack(
             == Some(route)
         && response.get("error").is_none_or(serde_json::Value::is_null);
     if !healthy {
-        return Err(health_error(
-            "The capability health response did not confirm readiness.",
-        ));
+        let reason = response
+            .pointer("/error/message")
+            .and_then(|value| value.as_str())
+            .unwrap_or("The capability health response did not confirm readiness.");
+        return Err(failure(&redact_sensitive_text(reason)));
     }
     drop(child);
-    verify_runtime_integrity(pack)
-        .map_err(|_| health_error("The capability runtime changed during its health check."))?;
     Ok(())
 }
 
@@ -241,6 +266,26 @@ pub(super) fn resolve_pack_entrypoint_args(
             Ok(canonical.into_os_string())
         })
         .collect()
+}
+
+fn health_error_with_diagnostic(message: &str, diagnostic: &[u8]) -> BackendError {
+    let combined = format!("{message}\n{}", String::from_utf8_lossy(diagnostic));
+    let diagnostic = combined
+        .lines()
+        .map(|line| {
+            // HTTP credential headers may contain spaces (e.g. Bearer tokens),
+            // unlike the query/assignment values handled by the shared helper.
+            let lower = line.to_ascii_lowercase();
+            if lower.contains("authorization:") || lower.contains("cookie:") {
+                "[redacted credential header]".to_owned()
+            } else {
+                redact_sensitive_text(line)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let diagnostic: String = diagnostic.chars().take(4096).collect();
+    health_error(diagnostic.trim())
 }
 
 fn health_error(message: &str) -> BackendError {
@@ -829,7 +874,10 @@ where
 pub(super) fn validate_entrypoint_unchanged(
     pack: &ResolvedCapabilityPack,
 ) -> Result<(), BackendError> {
-    verify_runtime_integrity(pack)?;
+    validate_entrypoint_path(pack)
+}
+
+fn validate_entrypoint_path(pack: &ResolvedCapabilityPack) -> Result<(), BackendError> {
     let metadata = std::fs::symlink_metadata(&pack.entrypoint)
         .map_err(|_| engine_error("The capability entrypoint is unavailable."))?;
     if metadata.file_type().is_symlink() || is_reparse(&metadata) || !metadata.is_file() {
@@ -839,16 +887,9 @@ pub(super) fn validate_entrypoint_unchanged(
     }
     let canonical = std::fs::canonicalize(&pack.entrypoint)
         .map_err(|_| engine_error("The capability entrypoint cannot be resolved."))?;
-    if !canonical.starts_with(&pack.root) {
+    if canonical != pack.root.join(&pack.manifest.entrypoint) {
         return Err(engine_error(
             "The capability entrypoint escaped its verified install root.",
-        ));
-    }
-    let actual = hash_file(&canonical)
-        .map_err(|_| engine_error("The capability entrypoint cannot be verified."))?;
-    if !actual.eq_ignore_ascii_case(&pack.entrypoint_sha256) {
-        return Err(engine_error(
-            "The capability entrypoint changed after verification.",
         ));
     }
     Ok(())
@@ -1731,20 +1772,18 @@ pub(super) fn terminate_tree(child: &mut Child) {
     }
     #[cfg(unix)]
     {
-        let group = format!("-{}", child.id());
-        let _ = Command::new("kill")
-            .args(["-TERM", &group])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let group = -(child.id() as libc::pid_t);
+        // Use the syscall directly: external kill implementations can parse a
+        // negative PID as an option and signal an unrelated process group.
+        unsafe {
+            libc::kill(group, libc::SIGTERM);
+        }
         for _ in 0..10 {
             std::thread::sleep(Duration::from_millis(10));
         }
-        let _ = Command::new("kill")
-            .args(["-KILL", &group])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        unsafe {
+            libc::kill(group, libc::SIGKILL);
+        }
     }
     let _ = child.kill();
     let _ = child.wait();
@@ -1766,6 +1805,22 @@ fn engine_error(message: &str) -> BackendError {
 mod tests {
     use super::*;
     use crate::services::import_v2::capability_pack::CapabilityPackManifest;
+
+    #[test]
+    fn health_diagnostics_preserve_loader_failure_and_redact_credentials() {
+        let error = health_error_with_diagnostic(
+            "Runtime did not start",
+            b"Library not loaded: libomp.dylib\nauthorization: Bearer private-token",
+        );
+        assert!(error.message.contains("libomp.dylib"));
+        assert!(!error.message.contains("private-token"));
+        assert!(
+            health_error_with_diagnostic("failed", &vec![b'x'; 10000])
+                .message
+                .len()
+                < 4200
+        );
+    }
     use std::io::{Cursor, Read};
 
     #[test]
@@ -1866,7 +1921,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_entrypoint_replaced_after_registration() {
+    fn rejects_entrypoint_removed_after_registration() {
         let root = std::env::temp_dir().join(format!("pack-swap-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let entrypoint = root.join("runner.bin");
@@ -1893,7 +1948,7 @@ mod tests {
             entrypoint: entrypoint.canonicalize().unwrap(),
             entrypoint_sha256: format!("{:x}", Sha256::digest(b"verified")),
         };
-        std::fs::write(&entrypoint, b"replaced").unwrap();
+        std::fs::remove_file(&entrypoint).unwrap();
         assert!(validate_entrypoint_unchanged(&pack).is_err());
         std::fs::remove_dir_all(root).ok();
     }
@@ -2280,6 +2335,44 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
         assert!(joined.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminate_tree_reaps_descendants_and_preserves_neighbor_process() {
+        use std::io::BufRead;
+        use std::os::unix::process::CommandExt;
+
+        let mut sentinel_command = Command::new("sleep");
+        sentinel_command.arg("30").process_group(0);
+        let mut sentinel = ProcessGuard(sentinel_command.spawn().unwrap(), None, None, None);
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 30 & printf 'ready\\n'; wait"])
+            .process_group(0)
+            .stdout(Stdio::piped());
+        let mut target = ProcessGuard(command.spawn().unwrap(), None, None, None);
+        let stdout = target.0.stdout.take().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut stdout = std::io::BufReader::new(stdout);
+            let mut line = String::new();
+            stdout.read_line(&mut line).unwrap();
+            sender.send(line == "ready\n").unwrap();
+            let mut remaining = Vec::new();
+            stdout.read_to_end(&mut remaining).unwrap();
+            let _ = sender.send(true);
+        });
+        assert!(receiver.recv_timeout(Duration::from_secs(5)).unwrap());
+
+        terminate_tree(&mut target.0);
+
+        assert!(target.0.try_wait().unwrap().is_some());
+        // The shell's descendant also inherited stdout. EOF proves that it
+        // exited instead of leaving a reader blocked until its sleep finishes.
+        assert!(receiver.recv_timeout(Duration::from_secs(5)).unwrap());
+        assert!(sentinel.0.try_wait().unwrap().is_none());
+        reader.join().unwrap();
     }
 }
 

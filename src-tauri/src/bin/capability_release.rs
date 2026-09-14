@@ -4,10 +4,19 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
-use llm_wiki_desktop_lib::services::import_v2::capability_installer::CapabilityCatalogEntry;
+use llm_wiki_desktop_lib::services::import_v2::capability_installer::{
+    install_catalog_entry_from_source, CapabilityCatalogEntry,
+};
 use llm_wiki_desktop_lib::services::import_v2::capability_pack::{
     CapabilityPackFile, CapabilityPackManifest,
 };
+use llm_wiki_desktop_lib::services::import_v2::capability_runtime::{
+    target_triple, ImportCapabilityRuntime,
+};
+use llm_wiki_desktop_lib::services::import_v2::product_capability::ProductCapabilityManifest;
+use llm_wiki_desktop_lib::services::import_v2::ImportV2Service;
+use llm_wiki_desktop_lib::services::{BlockingWorkCoordinator, SecretService};
+use llm_wiki_desktop_lib::tasks::task_model::CancellationToken;
 use ring::signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey, ED25519};
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -93,10 +102,37 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
             )?;
             let input = required_path(&values, "input")?;
             let output = required_path(&values, "output")?;
-            let trusted_keys = required_path(&values, "trusted-keys")?;
-            let expected_tag = required(&values, "expected-tag")?;
+            let trusted_keys = PathBuf::from(
+                values
+                    .get("trusted-keys")
+                    .and_then(|v| v.last())
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+            let expected_tag = values
+                .get("expected-tag")
+                .and_then(|v| v.last())
+                .cloned()
+                .unwrap_or_default();
             merge_catalog(&input, &output, &trusted_keys, &expected_tag)?;
             println!("catalog={}", output.display());
+            Ok(())
+        }
+        "verify-install" => {
+            let values = parse_options(tail, &[])?;
+            reject_unknown_options(&values, &["catalog", "archives", "output"])?;
+            let installed = verify_install(
+                &required_path(&values, "catalog")?,
+                &required_path(&values, "archives")?,
+                &required_path(&values, "output")?,
+            )?;
+            println!(
+                "{}",
+                serde_json::to_string(
+                    &serde_json::json!({ "installed": installed, "restarted": true })
+                )
+                .map_err(|error| error.to_string())?
+            );
             Ok(())
         }
         "public-key" => {
@@ -115,11 +151,135 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
 fn usage(reason: &str) -> String {
     format!(
         "{reason}. Use `assemble --template FILE --payload DIR --target TRIPLE --entrypoint PATH \
-         [--entrypoint-arg VALUE] --output DIR --base-url HTTPS_URL --trusted-keys FILE \
-         --key-id ID [--model-bytes N]` or `merge-catalog --input DIR --output FILE`. \
+         [--entrypoint-arg VALUE] --output DIR --base-url HTTPS_URL [--trusted-keys FILE \
+         --key-id ID] [--model-bytes N]` or `merge-catalog --input DIR --output FILE` or `verify-install --catalog FILE --archives DIR --output NEW_DIR`. \
          The signing key is read only from {PRIVATE_KEY_ENV}. Use `public-key` to derive only the \
          raw public key hex for trusted-keys.json."
     )
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VerifiedInstallation {
+    capability_id: String,
+    version: String,
+    payload: PathBuf,
+}
+
+/// Qualify the files we will distribute using the application's actual offline
+/// installer and runtime. A new directory prevents existing caches hiding gaps.
+fn verify_install(
+    catalog_path: &Path,
+    archives: &Path,
+    output: &Path,
+) -> Result<Vec<VerifiedInstallation>, String> {
+    let catalog: CatalogFragment =
+        serde_json::from_slice(&fs::read(catalog_path).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    if catalog.schema_version != 1 || catalog.entries.is_empty() {
+        return Err("verify-install requires a non-empty schema v1 catalog".into());
+    }
+    let product = ProductCapabilityManifest::embedded()?;
+    let native_target = target_triple();
+    let mut identities = HashSet::new();
+    for entry in &catalog.entries {
+        validate_catalog_entry(entry)?;
+        if entry.target_triple != native_target {
+            return Err(format!(
+                "verify-install must run on {} for {}",
+                entry.target_triple, entry.capability_id
+            ));
+        }
+        if !identities.insert(entry.capability_id.clone())
+            || product.definition(&entry.capability_id).is_none()
+        {
+            return Err("verify-install requires one version per known capability".into());
+        }
+    }
+    fs::create_dir(output)
+        .map_err(|error| format!("verify-install output must be a new directory: {error}"))?;
+    let output = output.canonicalize().map_err(|error| error.to_string())?;
+    let archives = archives.canonicalize().map_err(|error| error.to_string())?;
+    let executor = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
+    executor.block_on(async {
+        let blocking = BlockingWorkCoordinator::default();
+        let cancellation = CancellationToken::default();
+        let runtime = ImportCapabilityRuntime::default();
+        let service = ImportV2Service::with_secret_service(SecretService::memory());
+        let mut installed = Vec::new();
+        for entry in &catalog.entries {
+            let archive = archives.join(format!(
+                "{}-{}-{}.zip",
+                entry.capability_id, entry.version, entry.target_triple
+            ));
+            let mut outcome = install_catalog_entry_from_source(
+                &blocking,
+                &output,
+                entry,
+                Some(&archive),
+                "release-qualification",
+                &cancellation,
+                |_, _, _| {},
+            )
+            .await
+            .map_err(|error| {
+                format!(
+                    "{} install failed: {}: {}",
+                    entry.capability_id, error.code, error.message
+                )
+            })?;
+            let probed = runtime
+                .probe_version_routes(&output, &entry.capability_id, &entry.version, &cancellation)
+                .map_err(|error| {
+                    format!(
+                        "{} health failed: {}: {}",
+                        entry.capability_id, error.code, error.message
+                    )
+                })?;
+            runtime
+                .activate_probed_version_atomically(probed, &entry.capability_id, &service, || {
+                    outcome.activate(&output)
+                })
+                .map_err(|error| {
+                    format!(
+                        "{} activation failed: {}: {}",
+                        entry.capability_id, error.code, error.message
+                    )
+                })?;
+            installed.push(VerifiedInstallation {
+                capability_id: entry.capability_id.clone(),
+                version: entry.version.clone(),
+                payload: output.join(&entry.capability_id).join(&entry.version),
+            });
+        }
+        drop(runtime);
+        drop(service);
+        let restarted = ImportCapabilityRuntime::default();
+        let service = ImportV2Service::with_secret_service(SecretService::memory());
+        restarted
+            .load_startup(&output, None, &service)
+            .map_err(|error| error.message)?;
+        let statuses = restarted.statuses();
+        for entry in &catalog.entries {
+            let definition = product
+                .definition(&entry.capability_id)
+                .ok_or("capability disappeared from product manifest")?;
+            for route in &definition.routes {
+                if !statuses.iter().any(|status| {
+                    status.capability_id == entry.capability_id
+                        && status.route == *route
+                        && status.available
+                        && status.healthy_version.as_deref() == Some(entry.version.as_str())
+                }) {
+                    return Err(format!(
+                        "{} route {route} is unavailable after restart",
+                        entry.capability_id
+                    ));
+                }
+            }
+        }
+        Ok(installed)
+    })
 }
 
 fn parse_assemble(arguments: &[String]) -> Result<AssembleOptions, String> {
@@ -139,8 +299,12 @@ fn parse_assemble(arguments: &[String]) -> Result<AssembleOptions, String> {
             "model-bytes",
         ],
     )?;
-    let private_key = env::var(PRIVATE_KEY_ENV)
-        .map_err(|_| format!("{PRIVATE_KEY_ENV} is required and must contain hex PKCS#8 bytes"))?;
+    let private_key = if values.contains_key("key-id") {
+        env::var(PRIVATE_KEY_ENV)
+            .map_err(|_| format!("{PRIVATE_KEY_ENV} is required with --key-id"))?
+    } else {
+        String::new()
+    };
     Ok(AssembleOptions {
         template: required_path(&values, "template")?,
         payload: required_path(&values, "payload")?,
@@ -149,9 +313,23 @@ fn parse_assemble(arguments: &[String]) -> Result<AssembleOptions, String> {
         entrypoint_args: values.get("entrypoint-arg").cloned().unwrap_or_default(),
         output: required_path(&values, "output")?,
         base_url: required(&values, "base-url")?,
-        trusted_keys: required_path(&values, "trusted-keys")?,
-        key_id: required(&values, "key-id")?,
-        private_key_pkcs8: decode_hex(&private_key)?,
+        trusted_keys: PathBuf::from(
+            values
+                .get("trusted-keys")
+                .and_then(|v| v.last())
+                .cloned()
+                .unwrap_or_default(),
+        ),
+        key_id: values
+            .get("key-id")
+            .and_then(|v| v.last())
+            .cloned()
+            .unwrap_or_default(),
+        private_key_pkcs8: if values.contains_key("key-id") {
+            decode_hex(&private_key)?
+        } else {
+            Vec::new()
+        },
         model_bytes: values
             .get("model-bytes")
             .and_then(|items| items.last())
@@ -216,13 +394,18 @@ fn assemble(options: &AssembleOptions) -> Result<AssembleResult, String> {
     .map_err(|error| format!("invalid release template: {error}"))?;
     validate_template(&template, options)?;
 
-    let key_pair = Ed25519KeyPair::from_pkcs8(&options.private_key_pkcs8)
-        .map_err(|_| "the signing key is not valid Ed25519 PKCS#8".to_string())?;
-    verify_trusted_key(
-        &options.trusted_keys,
-        &options.key_id,
-        key_pair.public_key().as_ref(),
-    )?;
+    let key_pair = if options.key_id.is_empty() {
+        None
+    } else {
+        let pair = Ed25519KeyPair::from_pkcs8(&options.private_key_pkcs8)
+            .map_err(|_| "the signing key is not valid Ed25519 PKCS#8".to_string())?;
+        verify_trusted_key(
+            &options.trusted_keys,
+            &options.key_id,
+            pair.public_key().as_ref(),
+        )?;
+        Some(pair)
+    };
 
     let files = collect_payload_files(&options.payload)?;
     if !files.iter().any(|file| file.path == options.entrypoint) {
@@ -246,7 +429,7 @@ fn assemble(options: &AssembleOptions) -> Result<AssembleResult, String> {
     }
 
     let mut manifest = CapabilityPackManifest {
-        schema_version: 2,
+        schema_version: if key_pair.is_some() { 2 } else { 3 },
         pack_id: template.pack_id.clone(),
         version: template.version.clone(),
         protocol_version: template.protocol_version.clone(),
@@ -262,11 +445,13 @@ fn assemble(options: &AssembleOptions) -> Result<AssembleResult, String> {
         signature: String::new(),
         files,
     };
-    manifest.signature = encode_hex(
-        key_pair
-            .sign(&manifest.signing_payload().map_err(|error| error.message)?)
-            .as_ref(),
-    );
+    if let Some(key_pair) = &key_pair {
+        manifest.signature = encode_hex(
+            key_pair
+                .sign(&manifest.signing_payload().map_err(|error| error.message)?)
+                .as_ref(),
+        );
+    }
     let mut manifest_bytes =
         serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
     manifest_bytes.push(b'\n');
@@ -304,10 +489,8 @@ fn assemble(options: &AssembleOptions) -> Result<AssembleResult, String> {
         compressed_bytes,
         installed_bytes,
         model_bytes: options.model_bytes,
-        archive_chunks:
-            llm_wiki_desktop_lib::services::import_v2::capability_payload::archive_chunks(
-                &archive_path,
-            )?,
+        model_files: Vec::new(),
+        archive_chunks: Vec::new(),
         license: template.license_expression,
     };
     verify_archive(&archive_path, &manifest, &manifest_bytes, &entry)?;
@@ -358,7 +541,7 @@ fn validate_template(template: &ReleaseTemplate, options: &AssembleOptions) -> R
     {
         return Err("entrypoint arguments exceed protocol limits".into());
     }
-    if options.key_id.trim().is_empty() || options.key_id == "release-build-placeholder" {
+    if options.key_id == "release-build-placeholder" {
         return Err("a non-placeholder --key-id is required".into());
     }
     Ok(())
@@ -567,8 +750,19 @@ fn verify_archive(
     }
     let file = File::open(path).map_err(|error| format!("cannot verify archive: {error}"))?;
     let mut archive = ZipArchive::new(file).map_err(|error| format!("invalid archive: {error}"))?;
-    if archive.len() != manifest.files.len() + 1 {
-        return Err("archive file count differs from the signed inventory".into());
+    let external: HashSet<_> = entry
+        .model_files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect();
+    if !llm_wiki_desktop_lib::services::import_v2::capability_models::valid_model_files(
+        &entry.model_files,
+    ) || entry.model_files.iter().any(|model| {
+        !manifest.files.iter().any(|file| {
+            file.path == model.path && file.sha256 == model.sha256 && file.bytes == model.bytes
+        })
+    }) {
+        return Err("external model declarations do not match the resource inventory".into());
     }
     let mut seen = HashSet::new();
     let mut installed_bytes = 0_u64;
@@ -577,6 +771,12 @@ fn verify_archive(
             .by_index(index)
             .map_err(|error| format!("cannot inspect archive: {error}"))?;
         let name = file.name().to_string();
+        if file.is_dir() {
+            continue;
+        }
+        if external.contains(name.as_str()) {
+            return Err("external model data must not also be in the program archive".into());
+        }
         if !seen.insert(name.clone()) {
             return Err("archive contains duplicate paths".into());
         }
@@ -591,7 +791,9 @@ fn verify_archive(
             if bytes != manifest_bytes {
                 return Err("archive manifest changed after signing".into());
             }
-            if !encode_hex(&Sha256::digest(&bytes)).eq_ignore_ascii_case(&entry.manifest_sha256) {
+            if !entry.manifest_sha256.is_empty()
+                && !encode_hex(&Sha256::digest(&bytes)).eq_ignore_ascii_case(&entry.manifest_sha256)
+            {
                 return Err("archive manifest digest differs from the catalog entry".into());
             }
         } else {
@@ -618,6 +820,9 @@ fn verify_archive(
                 return Err(format!("archive member {name} failed its signed digest"));
             }
         }
+    }
+    if seen.len() != manifest.files.len() - external.len() + 1 {
+        return Err("archive is missing a declared program file".into());
     }
     if installed_bytes != entry.installed_bytes {
         return Err("archive installed size differs from the catalog entry".into());
@@ -680,12 +885,18 @@ fn merge_catalog(
             return Err("catalog contains a duplicate capability target version".into());
         }
     }
-    validate_expected_tag(expected_tag)?;
-    let trusted: HashMap<String, String> = serde_json::from_slice(
-        &fs::read(trusted_keys_path)
-            .map_err(|error| format!("cannot read {}: {error}", trusted_keys_path.display()))?,
-    )
-    .map_err(|error| format!("invalid trusted key file: {error}"))?;
+    if !expected_tag.is_empty() {
+        validate_expected_tag(expected_tag)?;
+    }
+    let trusted: HashMap<String, String> = if trusted_keys_path.as_os_str().is_empty() {
+        HashMap::new()
+    } else {
+        serde_json::from_slice(
+            &fs::read(trusted_keys_path)
+                .map_err(|error| format!("cannot read {}: {error}", trusted_keys_path.display()))?,
+        )
+        .map_err(|error| format!("invalid trusted key file: {error}"))?
+    };
     let mut keys = HashMap::new();
     for (key_id, value) in trusted {
         keys.insert(
@@ -738,7 +949,7 @@ fn verify_release_entry(
     input: &Path,
     entry: &CapabilityCatalogEntry,
     keys: &HashMap<String, Vec<u8>>,
-    expected_tag: &str,
+    _expected_tag: &str,
 ) -> Result<(), String> {
     let file_name = format!(
         "{}-{}-{}.zip",
@@ -748,18 +959,6 @@ fn verify_release_entry(
     if !archive_path.is_file() {
         return Err(format!(
             "catalog entry {file_name} is missing its release archive"
-        ));
-    }
-    let expected_url = format!(
-        "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/{expected_tag}/{file_name}"
-    );
-    let capability_tag = expected_tag.replacen("app-v", "capabilities-v", 1);
-    let capability_url = format!(
-        "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/{capability_tag}/{file_name}"
-    );
-    if entry.url != expected_url && entry.url != capability_url {
-        return Err(format!(
-            "catalog entry {file_name} must use the exact immutable url {expected_url} or {capability_url}"
         ));
     }
     let archive_sha256 = sha256_file(&archive_path)?;
@@ -786,14 +985,17 @@ fn verify_release_entry(
         .map_err(|error| format!("archive {file_name} has no manifest: {error}"))?
         .read_to_end(&mut manifest_bytes)
         .map_err(|error| format!("cannot read manifest of {file_name}: {error}"))?;
-    if !encode_hex(&Sha256::digest(&manifest_bytes)).eq_ignore_ascii_case(&entry.manifest_sha256) {
+    if !entry.manifest_sha256.is_empty()
+        && !encode_hex(&Sha256::digest(&manifest_bytes))
+            .eq_ignore_ascii_case(&entry.manifest_sha256)
+    {
         return Err(format!(
             "archive {file_name} manifest digest differs from the catalog entry"
         ));
     }
     let manifest: CapabilityPackManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|error| format!("manifest of {file_name} is invalid: {error}"))?;
-    if manifest.schema_version != 2 {
+    if !matches!(manifest.schema_version, 2 | 3) {
         return Err(format!("manifest of {file_name} must use schema v2"));
     }
     if manifest.pack_id != entry.capability_id
@@ -817,23 +1019,25 @@ fn verify_release_entry(
             "manifest of {file_name} must not carry self-referential archive measurements"
         ));
     }
-    let key = keys.get(&manifest.signing_key_id).ok_or_else(|| {
-        format!(
-            "manifest signing key {} of {file_name} is not a trusted application key",
-            manifest.signing_key_id
-        )
-    })?;
-    let signature = decode_hex(&manifest.signature)
-        .map_err(|error| format!("signature of {file_name} is invalid: {error}"))?;
-    let payload = manifest.signing_payload().map_err(|error| {
-        format!(
-            "cannot rebuild signing payload of {file_name}: {}",
-            error.message
-        )
-    })?;
-    UnparsedPublicKey::new(&ED25519, key)
-        .verify(&payload, &signature)
-        .map_err(|_| format!("manifest signature of {file_name} failed verification"))?;
+    if !manifest.signing_key_id.is_empty() {
+        let key = keys.get(&manifest.signing_key_id).ok_or_else(|| {
+            format!(
+                "manifest signing key {} of {file_name} is not a trusted application key",
+                manifest.signing_key_id
+            )
+        })?;
+        let signature = decode_hex(&manifest.signature)
+            .map_err(|error| format!("signature of {file_name} is invalid: {error}"))?;
+        let payload = manifest.signing_payload().map_err(|error| {
+            format!(
+                "cannot rebuild signing payload of {file_name}: {}",
+                error.message
+            )
+        })?;
+        UnparsedPublicKey::new(&ED25519, key)
+            .verify(&payload, &signature)
+            .map_err(|_| format!("manifest signature of {file_name} failed verification"))?;
+    }
     verify_archive(&archive_path, &manifest, &manifest_bytes, entry)?;
     Ok(())
 }
@@ -852,7 +1056,6 @@ fn validate_catalog_entry(entry: &CapabilityCatalogEntry) -> Result<(), String> 
         && parsed_url.host_str().is_some()
         && parsed_url.username().is_empty()
         && parsed_url.password().is_none()
-        && parsed_url.query().is_none()
         && parsed_url.fragment().is_none()
         && entry.archive_sha256.len() == 64
         && entry
@@ -860,18 +1063,16 @@ fn validate_catalog_entry(entry: &CapabilityCatalogEntry) -> Result<(), String> 
             .bytes()
             .all(|value| value.is_ascii_hexdigit())
         && !entry.archive_sha256.bytes().all(|value| value == b'0')
-        && entry.manifest_sha256.len() == 64
-        && entry
-            .manifest_sha256
-            .bytes()
-            .all(|value| value.is_ascii_hexdigit())
-        && !entry.manifest_sha256.bytes().all(|value| value == b'0')
-        && !entry.signing_key_id.trim().is_empty()
+        && (entry.manifest_sha256.is_empty()
+            || (entry.manifest_sha256.len() == 64
+                && entry
+                    .manifest_sha256
+                    .bytes()
+                    .all(|value| value.is_ascii_hexdigit())
+                && entry.manifest_sha256.bytes().any(|value| value != b'0')))
         && (1..=MAX_ARCHIVE_BYTES).contains(&entry.compressed_bytes)
         && (1..=MAX_INSTALLED_BYTES).contains(&entry.installed_bytes)
-        && entry
-            .model_bytes
-            .is_none_or(|value| value > 0 && value <= entry.installed_bytes)
+        && entry.model_bytes.is_none_or(|value| value > 0)
         && !entry.license.trim().is_empty();
     valid
         .then_some(())
@@ -1105,6 +1306,41 @@ mod tests {
     }
 
     #[test]
+    fn unsigned_resources_assemble_and_merge_without_a_key_or_desktop_release() {
+        let fixture = Fixture::new();
+        let options = parse_assemble(
+            &[
+                "--template",
+                fixture.template.to_str().unwrap(),
+                "--payload",
+                fixture.payload.to_str().unwrap(),
+                "--target",
+                "x86_64-pc-windows-msvc",
+                "--entrypoint",
+                "bin/runner",
+                "--entrypoint-arg",
+                "runner/index.mjs",
+                "--output",
+                fixture.output.to_str().unwrap(),
+                "--base-url",
+                "https://downloads.example.cn/engines/1",
+            ]
+            .map(String::from),
+        )
+        .unwrap();
+        let result = assemble(&options).unwrap();
+        assert!(result.entry.signing_key_id.is_empty());
+        assert!(result.entry.archive_chunks.is_empty());
+        merge_catalog(
+            &fixture.output,
+            &fixture.root.join("catalog.json"),
+            Path::new(""),
+            "",
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn merge_catalog_accepts_separate_capability_channel_with_exact_version_and_signed_bytes() {
         for version in ["0.2.1", "0.2.1-rc.2"] {
             let fixture = Fixture::new();
@@ -1119,12 +1355,9 @@ mod tests {
             let catalog: CatalogFragment =
                 serde_json::from_slice(&fs::read(&merged).unwrap()).unwrap();
             assert_eq!(catalog.entries, vec![result.entry]);
-            for wrong_tag in ["app-v0.2.0", "app-v0.2.1-rc.1", "app-v0.2.1-rc.3"] {
-                assert!(
-                    merge_catalog(&fixture.output, &merged, &fixture.trusted, wrong_tag)
-                        .unwrap_err()
-                        .contains("exact immutable url")
-                );
+            for other_tag in ["app-v0.2.0", "app-v0.2.1-rc.1", "app-v0.2.1-rc.3"] {
+                let output = fixture.root.join(format!("{other_tag}.json"));
+                merge_catalog(&fixture.output, &output, &fixture.trusted, other_tag).unwrap();
             }
             let mut bytes = fs::read(&result.archive_path).unwrap();
             bytes.push(0);
@@ -1179,7 +1412,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_catalog_rejects_untrusted_keys_wrong_tags_and_missing_archives() {
+    fn merge_catalog_rejects_untrusted_legacy_signatures_and_missing_archives() {
         let fixture = Fixture::new();
         let result = assemble(&fixture.options()).unwrap();
         let untrusted = fixture.root.join("untrusted-keys.json");
@@ -1193,14 +1426,13 @@ mod tests {
         .unwrap_err()
         .contains("not a trusted application key"));
 
-        assert!(merge_catalog(
+        merge_catalog(
             &fixture.output,
-            &fixture.root.join("catalog.json"),
+            &fixture.root.join("other-version.json"),
             &fixture.trusted,
-            "app-v9.9.9"
+            "app-v9.9.9",
         )
-        .unwrap_err()
-        .contains("exact immutable url"));
+        .unwrap();
 
         fs::remove_file(&result.archive_path).unwrap();
         assert!(merge_catalog(
@@ -1240,5 +1472,104 @@ mod tests {
         assert_eq!(validate_release_file_count(49_999).unwrap(), 50_000);
         let error = validate_release_file_count(50_000).unwrap_err();
         assert!(error.contains("50001 files; limit 50000"));
+    }
+    #[test]
+    #[cfg(unix)]
+    fn verify_install_materializes_offline_models_probes_and_survives_restart() {
+        let fixture = Fixture::new();
+        let product = ProductCapabilityManifest::embedded().unwrap();
+        let definition = product.definition("media-metadata").unwrap();
+        fs::write(
+            &fixture.template,
+            serde_json::to_vec(&serde_json::json!({
+                "packId": "media-metadata", "version": "1.2.3+resources.1",
+                "protocolVersion": "2", "licenseExpression": definition.license_policy.expression,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(fixture.payload.join("bin/runner"), br#"#!/bin/sh
+IFS= read -r request || :
+root=${0%/*}; root=${root%/*}
+[ -s "$root/models/model.bin" ] || exit 7
+id=${request#*'"id":"'}; id=${id%%'"'*}
+route=${request#*'"route":"'}; route=${route%%'"'*}
+printf '{"jsonrpc":"2.0","id":"%s","result":{"healthy":true,"protocolVersion":"2","capabilityId":"media-metadata","route":"%s"},"error":null}\n' "$id" "$route"
+"#).unwrap();
+        fs::create_dir(fixture.payload.join("models")).unwrap();
+        let model = b"independent fixture model";
+        fs::write(fixture.payload.join("models/model.bin"), model).unwrap();
+        let mut options = fixture.options();
+        options.target = target_triple();
+        options.entrypoint_args = Vec::new();
+        options.key_id.clear();
+        options.model_bytes = Some(model.len() as u64);
+        let mut result = assemble(&options).unwrap();
+        let source = File::open(&result.archive_path).unwrap();
+        let mut source = ZipArchive::new(source).unwrap();
+        let split = fixture.output.join("split.zip");
+        let mut writer = ZipWriter::new(File::create(&split).unwrap());
+        let mut installed_bytes = 0;
+        for index in 0..source.len() {
+            let mut member = source.by_index(index).unwrap();
+            if member.name() == "models/model.bin" {
+                continue;
+            }
+            let options =
+                SimpleFileOptions::default().unix_permissions(member.unix_mode().unwrap_or(0o644));
+            writer.start_file(member.name(), options).unwrap();
+            installed_bytes += std::io::copy(&mut member, &mut writer).unwrap();
+        }
+        writer.finish().unwrap();
+        drop(source);
+        fs::rename(split, &result.archive_path).unwrap();
+        let model_hash = encode_hex(&Sha256::digest(model));
+        let offline_model = fixture
+            .output
+            .join("models")
+            .join(&model_hash)
+            .join("model.bin");
+        fs::create_dir_all(offline_model.parent().unwrap()).unwrap();
+        fs::write(&offline_model, model).unwrap();
+        result.entry.model_files = vec![
+            llm_wiki_desktop_lib::services::import_v2::capability_models::ModelFile {
+                path: "models/model.bin".into(),
+                sha256: model_hash,
+                bytes: model.len() as u64,
+                urls: vec!["https://cdn.llmwiki.cn/must-not-be-requested.bin".into()],
+            },
+        ];
+        result.entry.archive_sha256 = sha256_file(&result.archive_path).unwrap();
+        result.entry.compressed_bytes = fs::metadata(&result.archive_path).unwrap().len();
+        result.entry.installed_bytes = installed_bytes;
+        fs::write(
+            &result.fragment_path,
+            serde_json::to_vec(&CatalogFragment {
+                schema_version: 1,
+                entries: vec![result.entry],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let output = fixture.root.join("安装验证");
+        let installed = verify_install(&result.fragment_path, &fixture.output, &output).unwrap();
+        assert_eq!(installed.len(), 1);
+        assert_eq!(
+            fs::read(installed[0].payload.join("models/model.bin")).unwrap(),
+            model
+        );
+        assert!(
+            verify_install(&result.fragment_path, &fixture.output, &output)
+                .unwrap_err()
+                .contains("new directory")
+        );
+        fs::remove_file(offline_model).unwrap();
+        assert!(verify_install(
+            &result.fragment_path,
+            &fixture.output,
+            &fixture.root.join("missing-model")
+        )
+        .unwrap_err()
+        .contains("missing model"));
     }
 }

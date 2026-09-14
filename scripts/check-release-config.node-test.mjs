@@ -123,19 +123,24 @@ test("stable publication advances monotonically across the global latest channel
   );
 });
 
+test("an RC can use its matching base source version but cannot override another release", () => {
+  assert.deepEqual(state({ tag: `app-v${packageJson.version}-rc.1` }).errors, []);
+  assert.ok(state({ tag: "app-v999.0.0-rc.1" }).errors.some((error) => error.includes("does not match configured version")));
+});
+
 test("canonical endpoints cannot drift to a different repository", () => {
   const changed = structuredClone(contract);
   changed.endpoints.stableUpdaterManifest = "https://github.com/example/fork/releases/latest/download/latest.json";
   changed.endpoints.capabilityAssetBaseTemplate = "https://github.com/example/fork/releases/download/<exact-tag>/";
   const result = validateReleaseState({ contract: changed, packageJson, cargoToml, tauriConfig, trustedKeys });
-  assert.equal(result.errors.filter((error) => error.includes("canonical repository")).length, 2);
+  assert.equal(result.errors.filter((error) => error.includes("canonical repository")).length, 1);
 });
 
 test("signing keys match the committed trust anchors", () => {
   const wrongKey = structuredClone(contract);
   wrongKey.signing.updater.publicKeyId = "AAAAAAAAAAAAAAAA";
   assert.ok(state({ contract: wrongKey }).errors.some((error) => error.includes("Tauri trust anchor")));
-  assert.ok(state({ trustedKeys: {} }).errors.some((error) => error.includes("32-byte lowercase hex trust anchor")));
+  assert.deepEqual(state({ trustedKeys: {} }).errors, []);
   const privateKey = structuredClone(contract);
   privateKey.signing.updater.privateKey = "must-not-be-committed";
   assert.ok(state({ contract: privateKey }).errors.some((error) => error.includes("private key material")));

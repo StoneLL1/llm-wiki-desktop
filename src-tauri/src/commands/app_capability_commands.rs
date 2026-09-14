@@ -11,8 +11,8 @@ use crate::models::task::{
     BackendTask, TaskOperation, TaskResult, TaskResultReference, TaskStatus,
 };
 use crate::services::import_v2::capability_installer::{
-    catalog_entry, discard_catalog_partial, install_catalog_entry, CapabilityCatalogEntry,
-    CapabilityInstallPhase,
+    catalog_entry, discard_catalog_partial, install_catalog_entry_from_source,
+    CapabilityCatalogEntry, CapabilityInstallPhase,
 };
 use crate::services::import_v2::capability_runtime::target_triple;
 use crate::services::BlockingWorkClass;
@@ -121,6 +121,7 @@ fn begin_app_capability_install_inner(
         &entry,
         &request.expected_version,
         &request.acknowledgement_version,
+        request.archive_path,
     )?;
     if let Some(continuation_id) = continuation_id {
         state
@@ -271,6 +272,7 @@ fn entry_for_task(task: &BackendTask) -> Result<CapabilityCatalogEntry, BackendE
         version,
         target_triple,
         archive_identity,
+        ..
     }) = task.operation.as_ref()
     else {
         return Err(capability_error(
@@ -320,10 +322,17 @@ fn spawn_install_worker(app: AppHandle, task: BackendTask, entry: CapabilityCata
             );
             return;
         };
-        let outcome = install_catalog_entry(
+        let archive_path = match task.operation.as_ref() {
+            Some(TaskOperation::AppCapabilityInstall { archive_path, .. }) => {
+                archive_path.as_deref().map(std::path::Path::new)
+            }
+            _ => None,
+        };
+        let outcome = install_catalog_entry_from_source(
             &state.blocking_work,
             &install_root,
             &entry,
+            archive_path,
             &task_id,
             &token,
             |phase, current, total| {
@@ -413,9 +422,6 @@ fn spawn_install_worker(app: AppHandle, task: BackendTask, entry: CapabilityCata
                             false,
                         ),
                     ));
-                }
-                if let Err(error) = outcome.mark_probed(&health_root) {
-                    return Err(outcome.rollback_with_receipt(&health_root, &health_entry, error));
                 }
                 let activation = state
                     .import_capability_runtime

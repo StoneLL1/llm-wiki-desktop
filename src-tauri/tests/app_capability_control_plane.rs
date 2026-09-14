@@ -29,6 +29,7 @@ fn fixture_catalog_entry() -> CapabilityCatalogEntry {
         compressed_bytes: 123,
         installed_bytes: 456,
         model_bytes: None,
+        model_files: Vec::new(),
         license: "MIT".into(),
     }
 }
@@ -46,6 +47,7 @@ fn create_fixture_app_task(
             entry.version.clone(),
             entry.target_triple.clone(),
             "fixture-archive-identity".into(),
+            None,
         )
         .unwrap()
 }
@@ -154,6 +156,7 @@ fn coordinator_creates_one_install_task_for_a_reviewed_official_release() {
             &entry,
             &entry.version,
             &app_capability_acknowledgement_version(&entry),
+            None,
         )
         .unwrap();
 
@@ -168,10 +171,42 @@ fn coordinator_creates_one_install_task_for_a_reviewed_official_release() {
             &entry,
             &entry.version,
             &app_capability_acknowledgement_version(&entry),
+            None,
         )
         .unwrap();
     assert!(!created_again);
     assert_eq!(joined.id, tasks.list_app_tasks(None)[0].id);
+    assert_eq!(tasks.list_app_tasks(None).len(), 1);
+}
+
+#[test]
+fn offline_install_source_survives_restart_and_cannot_be_changed_while_active() {
+    let root = tempdir().unwrap();
+    let tasks = TaskService::default();
+    let coordinator = AppCapabilityCoordinator::default();
+    coordinator.initialize(root.path(), &tasks).unwrap();
+    let entry = fixture_catalog_entry();
+    let source = "C:/离线 包/official.zip".to_owned();
+    let ack = app_capability_acknowledgement_version(&entry);
+    let (task, _) = coordinator
+        .join_or_create_install(&tasks, &entry, &entry.version, &ack, Some(source.clone()))
+        .unwrap();
+    let restored_tasks = TaskService::default();
+    let restored = AppCapabilityCoordinator::default();
+    restored.initialize(root.path(), &restored_tasks).unwrap();
+    let task = restored_tasks.get_task(&task.id).unwrap();
+    let operation = serde_json::to_value(task.operation.unwrap()).unwrap();
+    assert_eq!(operation["archivePath"], source);
+    let error = coordinator
+        .join_or_create_install(
+            &tasks,
+            &entry,
+            &entry.version,
+            &ack,
+            Some("C:/different.zip".into()),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "APP_CAPABILITY_INSTALL_IN_PROGRESS");
     assert_eq!(tasks.list_app_tasks(None).len(), 1);
 }
 
@@ -341,7 +376,7 @@ fn release_install_wiring_is_app_global_restart_safe_and_fans_out_projects() {
         fs::read_to_string(source_root.join("commands/import_v2_presentation_commands.rs"))
             .unwrap();
     let ordered = [
-        "install_catalog_entry(",
+        "install_catalog_entry_from_source(",
         "probe_version_routes(",
         "activate_probed_version_atomically(",
         "continuations_for_task(",
@@ -376,6 +411,7 @@ fn release_install_wiring_is_app_global_restart_safe_and_fans_out_projects() {
             &entry,
             &entry.version,
             &app_capability_acknowledgement_version(&entry),
+            None,
         )
         .unwrap();
     assert!(created);

@@ -151,12 +151,15 @@ struct ProductCatalogEntry {
     // staged catalogs carrying `archiveChunks` stay parseable at build time.
     #[serde(default, rename = "archiveChunks")]
     _archive_chunks: Vec<ProductArchiveChunk>,
+    #[serde(default)]
     manifest_sha256: String,
-    #[serde(rename = "signingKeyId")]
+    #[serde(default, rename = "signingKeyId")]
     _signing_key_id: String,
     compressed_bytes: u64,
     installed_bytes: u64,
     model_bytes: Option<u64>,
+    #[serde(default, rename = "modelFiles")]
+    _model_files: Vec<serde_json::Value>,
     license: String,
 }
 
@@ -461,7 +464,7 @@ pub(crate) fn capability_id_for_recovery_action(
 fn validate_catalog_release_identity(
     entry: &ProductCatalogEntry,
     definition: &ProductCapabilityDefinition,
-    expected_release_tag: Option<&str>,
+    _expected_release_tag: Option<&str>,
 ) -> Result<(), String> {
     semver::Version::parse(&entry.version).map_err(|_| {
         format!(
@@ -483,61 +486,26 @@ fn validate_catalog_release_identity(
             entry.capability_id
         ));
     }
-    if !valid_sha256(&entry.archive_sha256) || !valid_sha256(&entry.manifest_sha256) {
+    if !valid_sha256(&entry.archive_sha256)
+        || (!entry.manifest_sha256.is_empty() && !valid_sha256(&entry.manifest_sha256))
+    {
         return Err(format!(
             "catalog capability {} must provide non-zero lowercase SHA-256 identities",
             entry.capability_id
         ));
     }
-    let prefix = "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/";
-    let (release_tag, file_name) = entry
-        .url
-        .strip_prefix(prefix)
-        .and_then(|value| value.split_once('/'))
-        .ok_or_else(|| {
-            format!(
-                "catalog capability {} must use the canonical immutable release URL",
-                entry.capability_id
-            )
-        })?;
-    let expected_name = format!(
-        "{}-{}-{}.zip",
-        entry.capability_id, entry.version, entry.target_triple
-    );
-    if file_name != expected_name
-        || file_name.contains(['?', '#'])
-        || catalog_release_version(release_tag).is_none()
-        || expected_release_tag.is_some_and(|expected| {
-            !expected.starts_with("app-v")
-                || catalog_release_version(release_tag) != catalog_release_version(expected)
-        })
+    let url = url::Url::parse(&entry.url).map_err(|_| "capability download URL is invalid")?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
     {
-        return Err(format!(
-            "catalog capability {} release URL does not match its exact identity",
-            entry.capability_id
-        ));
+        return Err(
+            "capability downloads require an HTTPS URL without embedded credentials".into(),
+        );
     }
     Ok(())
-}
-
-// Asset releases use a separate channel, but must retain the complete desktop
-// version (including rc number). Old app-v catalog URLs remain installable.
-fn catalog_release_version(tag: &str) -> Option<&str> {
-    let version = tag
-        .strip_prefix("app-v")
-        .or_else(|| tag.strip_prefix("capabilities-v"))?;
-    let parsed = semver::Version::parse(version).ok()?;
-    let valid_prerelease = parsed.pre.is_empty()
-        || parsed
-            .pre
-            .as_str()
-            .strip_prefix("rc.")
-            .is_some_and(|number| {
-                !number.is_empty()
-                    && !number.starts_with('0')
-                    && number.bytes().all(|byte| byte.is_ascii_digit())
-            });
-    (parsed.build.is_empty() && valid_prerelease).then_some(version)
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -639,55 +607,33 @@ mod tests {
     }
 
     #[test]
-    fn catalog_asset_channels_retain_exact_desktop_versions() {
+    fn catalog_resources_are_independent_of_desktop_tags_and_github() {
         let manifest = ProductCapabilityManifest::embedded().unwrap();
-        for version in ["0.2.1", "0.2.1-rc.2"] {
-            let expected = format!("app-v{version}");
-            for prefix in ["app-v", "capabilities-v"] {
-                let catalog =
-                    release_catalog().replace("app-v0.2.0", &format!("{prefix}{version}"));
-                assert_eq!(
-                    manifest.validate_catalog_for_tag(&catalog, false, Some(&expected)),
-                    Ok(1)
-                );
-                assert_eq!(manifest.validate_catalog(&catalog, false), Ok(1));
-                for other in [
-                    "app-v0.2.0",
-                    "app-v0.2.1-rc.1",
-                    "app-v0.2.1-rc.3",
-                    "capabilities-v0.2.1",
-                ] {
-                    assert!(
-                        manifest
-                            .validate_catalog_for_tag(&catalog, false, Some(other))
-                            .is_err(),
-                        "{other}"
-                    );
-                }
-            }
-        }
-        let stable = release_catalog().replace("app-v0.2.0", "capabilities-v0.2.1");
-        assert!(manifest
-            .validate_catalog_for_tag(&stable, false, Some("app-v0.2.1-rc.2"))
-            .is_err());
+        let mut catalog: serde_json::Value = serde_json::from_str(&release_catalog()).unwrap();
+        let entry = &mut catalog["entries"][0];
+        entry["url"] = serde_json::json!("https://downloads.example.cn/programs/browser-1.zip");
+        entry.as_object_mut().unwrap().remove("signingKeyId");
+        entry.as_object_mut().unwrap().remove("manifestSha256");
+        let catalog = catalog.to_string();
+        assert_eq!(
+            manifest.validate_catalog_for_tag(&catalog, false, Some("app-v9.9.9")),
+            Ok(1)
+        );
     }
 
     #[test]
-    fn catalog_asset_channels_reject_invalid_or_mutable_tags() {
+    fn catalog_rejects_insecure_or_credential_bearing_download_urls() {
         let manifest = ProductCapabilityManifest::embedded().unwrap();
-        for tag in [
-            "capabilities-v01.2.1",
-            "capabilities-v0.2.1-rc.0",
-            "capabilities-v0.2.1-rc.01",
-            "capabilities-v0.2.1-beta.1",
-            "capabilities-v0.2.1+build",
-            "capabilities-vlatest",
-            "capabilities-vapp-v0.2.1",
-            "other-v0.2.1",
-            "app-vlatest",
+        for url in [
+            "http://example.cn/program.zip",
+            "file:///tmp/program.zip",
+            "https://user:secret@example.cn/program.zip",
         ] {
-            let catalog = release_catalog().replace("app-v0.2.0", tag);
-            assert!(manifest.validate_catalog(&catalog, false).is_err(), "{tag}");
+            let mut catalog: serde_json::Value = serde_json::from_str(&release_catalog()).unwrap();
+            catalog["entries"][0]["url"] = serde_json::json!(url);
+            assert!(manifest
+                .validate_catalog(&catalog.to_string(), false)
+                .is_err());
         }
     }
 

@@ -23,9 +23,6 @@ pub fn stage_embed_inputs(
     if mode_label == DISTRIBUTABLE_MODE && entry_count == 0 {
         return Err("release builds cannot embed an empty capability catalog".into());
     }
-    if mode_label == DISTRIBUTABLE_MODE && key_count == 0 {
-        return Err("release builds require at least one trusted capability key".into());
-    }
     let destination = out_dir.join("capabilities");
     fs::create_dir_all(&destination)
         .map_err(|error| format!("cannot create {}: {error}", destination.display()))?;
@@ -264,20 +261,20 @@ mod tests {
     }
 
     #[test]
-    fn release_mode_requires_at_least_one_trusted_key() {
+    fn release_mode_accepts_archive_hash_catalog_without_trusted_keys() {
         let root = TempRoot::new("release-no-keys");
         let staging = root.staging_dir();
         root.write(&staging.join("install-catalog.json"), &release_catalog());
         root.write(&staging.join("trusted-keys.json"), &serde_json::json!({}));
 
-        let error = stage_embed_inputs(
+        stage_embed_inputs(
             &root.source_root(),
             Some(&staging),
             &root.out_dir(),
             "release",
         )
-        .unwrap_err();
-        assert!(error.contains("trusted capability key"));
+        .unwrap();
+        assert_eq!(root.record()["trustedKeyCount"], 0);
     }
 
     #[test]

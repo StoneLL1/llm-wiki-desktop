@@ -28,11 +28,10 @@ test("reuse records the complete 43-entry source matrix and catalog identity", (
   assert.equal(result.include[0].reuseArtifactId, "300");
 });
 
-test("reuse rejects wrong repository, source tag, job SHA, job status and missing merge", () => {
+test("reuse rejects wrong repository, job SHA, job status and missing merge", () => {
   for (const mutate of [
     (value) => { value.run.repository.full_name = "someone/fork"; },
     (value) => { value.run.head_repository.full_name = "someone/fork"; },
-    (value) => { value.run.head_branch = "app-v0.2.0"; },
     (value) => { value.jobs[0].head_sha = "c".repeat(40); },
     (value) => { value.jobs[0].conclusion = "failure"; },
     (value) => { value.jobs[0].run_id = 321; },
@@ -89,4 +88,10 @@ test("content comparison allows app-only commits and unrelated ancestry, but cat
   git("restore", "capabilities/pack/runner.mjs");
   write("capabilities/new-model.bin", "untracked input");
   assert.deepEqual(compareCapabilityInputs(root, source).changedFiles, ["capabilities/new-model.bin"]);
+});
+
+test("qualified engines can be reused by a later desktop release", () => {
+  const value = fixture();
+  value.tag = "app-v9.0.0";
+  assert.equal(validateCapabilityReuse(value).tag, "app-v9.0.0");
 });

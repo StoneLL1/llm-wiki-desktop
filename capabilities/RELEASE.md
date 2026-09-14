@@ -1,89 +1,85 @@
-# Capability pack release
+# 能力资源构建与分发
 
-Capability source folders are declarations and runner source, not installable release artifacts. An installable pack is accepted only when all of these anchors agree:
+当前合同是 [ADR 0003：按需下载程序，独立管理模型](../docs/architecture/decisions/0003-on-demand-capability-resources.md)。所有可选外部程序按需安装，不随桌面 App 打包。程序和模型可以放在维护者提供的 HTTPS 静态存储、国内对象存储/CDN 或 GitHub Release；资源版本与桌面版本、GitHub tag、Actions run 无关。
 
-1. The application-embedded `install-catalog.json` names the exact HTTPS URL, ZIP SHA-256, manifest SHA-256, compressed size, installed size, capability/version/target, and license.
-2. A schema v2 `manifest.json` is signed with an Ed25519 key already embedded in `trusted-keys.json`.
-3. The signed manifest contains the exact sorted file inventory, entrypoint, entrypoint arguments, and the files whose executable permission may be restored.
-4. The installer verifies the catalog digest before extraction, rejects traversal/symlinks/special files and expansion beyond declared bounds, verifies the signed runtime inventory, and only then restores signed executable permissions.
+`capabilities/` 中的源码、依赖声明与模板不是可安装资源。用户安装的是应用内置 `install-catalog.json` 指定的程序 ZIP，以及可选的独立模型文件。
 
-Schema v2 deliberately leaves `archiveSha256` empty and both size fields zero inside the manifest. Putting the ZIP digest inside a manifest contained by that ZIP is self-referential and cannot produce a normal cryptographic artifact. ZIP measurements belong to the application catalog; extracted-runtime measurements belong to the signed file inventory.
+## 构建资源
 
-Capability packs are maintainer-signed trusted application code. `network: false`
-means the reviewed runner uses fixed local inputs and does not initiate
-network access; it is not a claim that every supported desktop OS supplies an
-equivalent hostile-code network/filesystem sandbox. Archive, inventory,
-staging-containment, and runner-policy checks remain mandatory.
+使用独立的 [Capability resources 工作流](../.github/workflows/capability-release.yml)，通过 `workflow_dispatch` 指定：
 
-## Release key provisioning
+- `base_url`：程序 ZIP 将被实际托管的 HTTPS 目录，必填。
+- `model_base_url`：模型文件的 HTTPS 根目录，可选，默认与程序相同。不同程序版本、平台可以共用同一个模型存储目录。程序内容改变时分配新的资源版本，避免旧安装目录与新字节冲突。
 
-Generate the Ed25519 key offline. Never commit the private key, put it in a workflow argument, log it, or save it in an application project.
+程序目录应使用新的资源目录名，避免用新字节覆盖旧 catalog 引用的同名文件。模型目录按内容摘要组织，可以长期复用。地址应由维护者提供并维护。填写 URL 不会创建存储空间，也不会使资源自动公开。
 
-```powershell
-openssl genpkey -algorithm Ed25519 -out capability-release.pem
-openssl pkcs8 -topk8 -nocrypt -in capability-release.pem -outform DER -out capability-release.pk8
-$env:LLM_WIKI_CAPABILITY_SIGNING_KEY_PKCS8_HEX = ([Convert]::ToHexString([IO.File]::ReadAllBytes('capability-release.pk8'))).ToLowerInvariant()
-cargo run --manifest-path src-tauri/Cargo.toml --bin capability_release -- public-key
+工作流从 [product-manifest.json](product-manifest.json) 推导每个已发布能力支持的平台，结合 [release-recipes.json](release-recipes.json)、[release-sources.json](release-sources.json) 与 [qualification-corpus.json](qualification-corpus.json) 构建资源。不能用“能力数 × 平台数”的固定乘积代替实际矩阵；部分能力只支持平台子集。
+
+每个平台在对应原生 runner 上执行：
+
+1. `prepare-release-capability.mjs` 下载并检查锁定的依赖，准备程序、runner、许可与构建证据。
+2. `capability_release assemble` 生成程序归档及 catalog 片段；新资源无需能力包签名密钥。
+3. `split-capability-models.py` 把模型从 ZIP 移出，重新计算程序归档大小和 SHA-256，并写入 `modelFiles`。
+4. `capability_release verify-install` 用 App 的真实本地安装器将最终 ZIP 和独立模型安装到新目录，执行路线自检、启用和重启加载检查。
+5. 在最终安装目录运行完整路线与格式 qualification，验收用户将收到的文件。
+
+浏览器资源必须通过实际 Chromium 启动及本地行为检查。X/微信的在线样本检查仅在仓库配置对应 `X_PRODUCTION_SAMPLE_URL` / `WECHAT_PRODUCTION_SAMPLE_URL` 时运行；未配置会明确报告在线访问未验证，不会因缺少外部网页样本阻止程序构建。
+
+单项构建产物为 `resource-<capabilityId>-<targetTriple>`。最终 `capability-resources` 产物包含完整程序 ZIP、共享的 `models/` 目录和 `install-catalog.json`。工作流只构建并保存产物，不创建 Release、不上传到外部存储、不修改仓库 catalog。
+
+维护者也可以使用同一套命令在相应平台运行。拆分已完成 qualification 的旧完整 ZIP 时，调用方式为：
+
+```sh
+python3 scripts/split-capability-models.py \
+  --catalog INPUT/install-catalog.json \
+  --archives INPUT \
+  --output OUTPUT \
+  --base-url "$RESOURCE_BASE_URL" \
+  --model-base-url "$MODEL_BASE_URL"
 ```
 
-Add only the resulting 32-byte public key hex under a stable key ID in `trusted-keys.json`. Configure the same PKCS#8 hex as the protected GitHub Actions secret `LLM_WIKI_CAPABILITY_SIGNING_KEY_PKCS8_HEX`. The release builder refuses a private key that does not match the committed public key.
+`OUTPUT` 必须是新目录。两个环境变量需填写实际托管地址；没有单独模型地址时，省略 `--model-base-url`。拆分会检查原 ZIP 摘要，保持引擎既有 `models/` 路径，并重新生成归档摘要，不能继续使用旧 catalog 的 ZIP 哈希。
 
-## Manifest-derived release matrix
+## 托管资源并发布 App
 
-`capabilities/product-manifest.json` is the only pack/route/format/target authority. `scripts/capability-release-plan.mjs` joins it with `release-recipes.json`, `release-sources.json`, and `qualification-corpus.json`; release preflight fails unless every published definition has implemented staging and qualification, locked source ownership, a real fixture for every declared extension, and exactly one entry for each supported target. The current matrix is 11 published packs × 4 targets = 44 archives, but workflows and verifiers must derive that count rather than hard-code it.
+1. 将产物中的程序 ZIP 与 `models/` 按 catalog URL 所声明的目录结构上传至实际托管位置。完整离线分发则保留相同目录结构。
+2. 将完整、经过检查的 `install-catalog.json` 更新到仓库 [install-catalog.json](install-catalog.json)。保留 [trusted-keys.json](trusted-keys.json) 以读取历史已签名包；新安装不依赖其中必须存在密钥。
+3. 运行 catalog 校验与实际下载检查：
 
-Every staged payload contains `CAPABILITY-CONTRACT.json`. The release assembler signs it through the ordinary schema-v2 inventory. At startup and before atomic activation, Rust compares that signed contract with the embedded product definition and rejects missing or drifted routes, formats, platform content types, target, protocol, entrypoint/arguments, license, or runtime policy.
+```sh
+node scripts/verify-capability-catalog.mjs \
+  --catalog capabilities/install-catalog.json \
+  --trusted-keys capabilities/trusted-keys.json --mode release
+node scripts/verify-published-capability-assets.mjs \
+  --catalog capabilities/install-catalog.json
+```
 
-## Node/browser packs
+GitHub Release 的附件没有子目录。选择 GitHub 托管时，先用 `stage-capability-downloads.mjs` 把构建目录转换为真实附件布局：
 
-The reusable `Capability release` workflow builds `browser-runtime`, `browser-runtime-lite`, and `media-metadata` for Windows x64, macOS arm64, macOS x64, and Linux x64. It:
+```sh
+node scripts/stage-capability-downloads.mjs \
+  --input capability-resources --output public-capability-resources \
+  --base-url "https://github.com/OWNER/REPO/releases/download/RESOURCE_TAG/"
+```
 
-- downloads the official pinned Node distribution and verifies its committed SHA-256;
-- installs locked npm dependencies and the Playwright-pinned Chromium;
-- runs browser policy, platform extraction, and real Chromium launch smoke tests on each target;
-- stages Node, signed SBOM/NOTICE/license evidence, runners, dependencies, and Chromium without relying on a system Node installation;
-- compiles the Rust release tool with locked dependencies before the signing secret enters the environment, so dependency build scripts cannot read the private key;
-- signs schema v2 manifests, verifies the finished ZIP member-by-member, and merges catalog fragments while re-verifying every archive digest, manifest digest, Ed25519 signature, trusted key, and exact immutable tag URL.
+上传输出目录的所有文件，并提交其中生成的 catalog。该工具核对本地原始文件摘要，把在线模型地址改为不重名的扁平附件地址，同时提供保留目录结构的 `models.zip`。离线用户下载所需程序 ZIP，把 `models.zip` 解压到旁边，即可选择程序 ZIP 安装。此转换不创建 Release，也不代表国内网络一定可达；有实际国内存储时可直接托管原构建目录。
 
-The workflow never creates or uploads a GitHub release. It is callable through `workflow_call` from the unified desktop release orchestration, and publication happens only in that final pipeline after desktop installers, the updater manifest, and packaged smoke evidence are complete.
+实际下载检查不携带登录 token，会从 catalog 地址读取文件并验证大小和 SHA-256。模型存在多个候选 URL 时，至少一个候选需返回正确文件。仅有 Actions artifact、未公开的 Release 或对象存储管理后台记录，不能证明用户可以下载。
 
-- The workflow emits a `capability-install-catalog` application-integration artifact with the exact `capabilities/install-catalog.json`, `capabilities/trusted-keys.json`, and `capabilities/catalog-provenance.json` paths. `catalog-provenance.json` records the immutable release tag, commit SHA, and workflow run that produced the catalog, so a desktop build can reject catalog artifacts from another run, tag, or commit.
+4. 稳定版与 RC 共用 Desktop release 工作流。预检校验完整 catalog 并请求公开资源前 4 KiB，检查实际可达性与声明大小，避免每次 App 发版重新下载全部模型。构建使用同一提交的 `capabilities/` 作为 `LLM_WIKI_CAPABILITY_STAGING_DIR`，设置 `LLM_WIKI_CAPABILITY_CATALOG_MODE=distributable`，并检查成品二进制包含相同 catalog 字节。完整 SHA 验收仍用于本节的资源首次上传/变更，用户安装时也仍检查 SHA。详见 [桌面发布流程](../docs/release/release-runbook.md)。
 
-Desktop release builds consume that artifact through an auditable staging input instead of overwriting source files: the release job downloads the artifact from the same workflow run, verifies the catalog contract and provenance with `scripts/verify-capability-catalog.mjs`, stages it, and builds with `LLM_WIKI_CAPABILITY_CATALOG_MODE=release` plus `LLM_WIKI_CAPABILITY_STAGING_DIR`. The Rust build script fails closed on an empty release catalog or a missing trusted key, copies the exact staged bytes into the binary, and writes an embed record that in-tree tests cross-check. After the build, `scripts/verify-embedded-capability-catalog.mjs` reverse-verifies that the finished binary embeds the exact staged catalog bytes.
+桌面发布不重建能力程序，不要求历史资源构建 run、同版本资源 tag、catalog provenance 或能力包签名 secret。App 本身及 updater 的签名流程不变。资源 URL/摘要变更必须更新内置 catalog 并重新构建 App；单独上传资源不会更新已经发布的客户端。
 
-Development builds keep the explicit source fallback (`LLM_WIKI_CAPABILITY_CATALOG_MODE=source` or unset) and may embed the empty placeholder catalog. The source-tree `capabilities/install-catalog.json` and `capabilities/trusted-keys.json` remain the reviewed fallback: after a release catalog is generated and reviewed, those files must still be committed together and the application rebuilt so source builds embed the new trust inputs. Publishing artifacts without rebuilding the application does not make them trusted or discoverable.
+开发构建可以使用空 source catalog；稳定版和 RC 都不允许空或缺项 catalog。当前仓库 catalog 是否具备发布条件，应以上面的 `--mode release` 检查结果为准。
 
-On Linux, Node and Chromium application bytes are bundled, but desktop shared libraries are intentionally supplied by the host OS. `BUILD-PROVENANCE.json` contains the exact shared-library support contract. The release workflow qualifies on Ubuntu 24.04 after Playwright installs that dependency baseline; the runtime reports launch failures as missing-host-dependency errors rather than claiming a fully static Linux bundle.
+## 用户安装与使用
 
-## Document, OCR, media, and ASR packs
+新安装流程是：下载或选择本地 ZIP → 流式验证归档 SHA-256 → 安全解压 → 准备独立模型 → 一次运行时自检 → 自动注册已知路线。安装器仍拒绝越界路径、链接、特殊文件和超出大小限制的归档；失败或取消保留此前可用版本。
 
-The protected workflow also builds document-standard, office-legacy, both OCR profiles, media-runtime, SenseVoice, and Whisper on all four desktop targets. document-layout ships three targets: PyTorch has published no x86_64 macOS wheels since 2.2.2, so `pdf.layout` is unavailable on Intel macOS and document-standard remains installable there. Each capability publishes exactly its product-manifest `supportedTargets` subset, and the release catalog records that per-capability matrix. Source folders and placeholder manifests remain fail-closed; the desktop binary cannot install a capability until the protected workflow succeeds, qualification uses the staged runtime, and the same-run catalog/trust/provenance inputs are embedded in the desktop build.
+程序归档由可信 App 内置 catalog 的 SHA-256 确认，不再强制第二套 Ed25519 签名。安装器保存 `.installation.json`，记录归档和 manifest 摘要。日常使用读取 manifest、检查协议/平台/入口和必要文件，不重复扫描整个程序或模型计算哈希。未带安装记录的旧包仍可通过历史签名路径读取；旧完整 ZIP 也继续支持。
 
-SenseVoice release jobs:
+独立模型由 catalog 的 `modelFiles` 声明 `path`、`bytes`、`sha256` 和候选 `urls`。首次下载或离线导入校验摘要，之后直接使用已安装数据；程序运行时不自动联网补模型。模型路径保持在程序目录的 `models/` 下，底层可共享缓存文件。当前是清单固定的官方模型，不是任意模型架构或可执行插件导入。
 
-- verify the exact sherpa-onnx 1.13.4 target runtime, SenseVoiceSmall int8 model, Node 22.17 runtime, and FFmpeg 8.1.2 archive/source build;
-- stage an LGPLv3-or-later shared FFmpeg build with GPL/nonfree and runtime networking disabled;
-- decode and transcribe both the official Chinese WAV and an AAC-in-M4A derivative through the staged JSON-RPC runner;
-- prefer CUDA on Windows/Linux or CoreML on macOS, detect sherpa's silent CPU fallback, and report the provider that actually ran;
-- require CPU to complete in the same task whenever an accelerator is absent or fails.
+离线用户选择程序 ZIP，将模型放在 ZIP 同目录的 `models/<sha256>/<filename>`；兼容原始的 `models/` 相对路径。不要只分发拆分后的 ZIP 而遗漏模型。离线安装缺少模型时会报告缺少文件，不会偷偷切换到在线下载。
 
-The macOS FFmpeg payload is built from the pinned source archive on the pinned
-macOS 15 runner family. Its compiler, make, Xcode, SDK, OS release, configure
-recipe, and source digest are recorded in signed build provenance. Apple-hosted
-runner images and SDKs can be serviced in place, so these source-built payloads
-are not claimed to be bit-for-bit identical across runner-image revisions.
-
-RapidOCR release jobs:
-
-- verify a relocatable CPython 3.12.13 runtime for Windows x64, macOS arm64/x64, and Linux x64;
-- install RapidOCR 3.8.1, ONNX Runtime, OpenCV, Pillow HEIF, PDFium, and all transitive dependencies from the committed hash lock using prebuilt wheels only;
-- bundle the exact PP-OCRv5 mobile detector, recognizer, orientation classifier, and dictionary;
-- run the official `ch_en_num.jpg` fixture plus the repository HEIC/HEIF and scanned-PDF fixtures through the staged offline JSON-RPC runner and require Chinese text, coordinates, confidence, and evidence labeling;
-- emit the dependency lock, source provenance, notices, and SPDX SBOM into the signed payload. Cloud OCR and runtime model downloads are forbidden.
-
-Primary implementation references:
-
-- [sherpa-onnx Rust crate installation](https://k2-fsa.github.io/sherpa/onnx/rust-api/install.html)
-- [sherpa-onnx SenseVoice model and API](https://k2-fsa.github.io/sherpa/onnx/sense-voice/index.html)
-- [Playwright browser installation](https://playwright.dev/docs/browsers)
-- [Node.js distribution index](https://nodejs.org/dist/)
+国内可达性需要实际维护的国内源，或提供完整离线产物。取消 GitHub 限制不会自动修复 v0.2.1 二进制里已经写入的失效地址。Linux 程序依赖的宿主系统动态库也仍需满足各资源构建记录的运行条件；“按需包”不表示所有平台都是完全静态程序。

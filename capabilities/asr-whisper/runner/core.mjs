@@ -124,6 +124,7 @@ export function classifyAudioProbeError(error) {
     : "IMPORT_ASR_ENGINE_FAILED";
 }
 
+// Integrity is established at installation; each invocation checks availability.
 export async function verifyArtifact(packRoot, declaration, expectedFile) {
   if (!declaration || typeof declaration.file !== "string" || declaration.file !== expectedFile ||
       typeof declaration.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(declaration.sha256) || /^0+$/.test(declaration.sha256)) {
@@ -133,10 +134,10 @@ export async function verifyArtifact(packRoot, declaration, expectedFile) {
   const candidate = path.resolve(root, declaration.file);
   if (!isContained(root, candidate)) throw asError("IMPORT_ASR_ENGINE_INTEGRITY_FAILED");
   const status = await fs.lstat(candidate).catch(() => null);
-  if (!status?.isFile() || status.isSymbolicLink()) throw asError("IMPORT_ASR_ENGINE_UNAVAILABLE");
+  if (!status?.isFile() || status.isSymbolicLink() || status.size <= 0) throw asError("IMPORT_ASR_ENGINE_UNAVAILABLE");
+  if (declaration.bytes != null && status.size !== declaration.bytes) throw asError("IMPORT_ASR_ENGINE_INTEGRITY_FAILED");
   const resolved = await fs.realpath(candidate);
   if (!isContained(root, resolved)) throw asError("IMPORT_ASR_ENGINE_INTEGRITY_FAILED");
-  if (await sha256File(resolved) !== declaration.sha256) throw asError("IMPORT_ASR_ENGINE_INTEGRITY_FAILED");
   return resolved;
 }
 

@@ -1,5 +1,8 @@
 # Import、来源库与媒体处理全流程设计
 
+> 2026-09-12 能力资源分发与安装合同由 [ADR 0003](../../architecture/decisions/0003-on-demand-capability-resources.md) 更新：所有可选程序按需下载；模型独立；可信内置 catalog + 安装时一次 SHA；不要求自定义包签名或与桌面 Release 批次绑定；用户安装只做一次运行时自检，日常调用不全量重哈希。以下历史签名/逐路线安装检查描述以此更新为准。
+
+
 > 状态：已确认，作为实现依据
 > 确认日期：2026-07-24
 > 适用范围：Import V2、逻辑 evidence / Source / app-state roots（新建原生知识库分别映射为 `raw/`、`wiki/sources/`、`.app/`）、本地文件与媒体、网页与平台内容、OCR、ASR、登录态、能力包、Source 阅读与 AI 整理
@@ -262,9 +265,9 @@ quality: ...
 
 “能力管理”不是当前 Import 队列的状态摘要，而是应用级的官方能力目录。它读取应用安装事实，不依赖当前会话里是否恰好有 `waiting_capability` 条目；切换项目、页签或最小化窗口不得取消正在进行的下载与安装。
 
-首版只展示产品清单中声明、由官方签名 catalog 发布的能力包，不提供任意 URL、本地压缩包、第三方市场或卸载入口。用户动作统一写作“下载并安装”，因为下载完成的压缩包不能绕过验签与健康检查单独保留为可用能力。
+能力管理只展示产品清单中声明、由应用内固定 catalog 发布的官方能力包，不提供任意 URL、第三方市场或卸载入口。在线动作写作“下载并安装”；无法访问 GitHub 的用户可“从文件安装”匹配当前能力、版本和系统的官方原 ZIP。离线文件只替代运输方式，不能携带新的 catalog 或信任密钥；两种方式共用 archive hash、签名、清单、健康检查和原子激活。
 
-这些官方能力包属于应用发布链维护的受信任应用组件。首版以固定 catalog / trusted key、hash / signature / manifest / target / route-set 校验、事务安装、健康检查、取消与旧版本回滚保证功能正确性；不以 Windows / macOS / Linux 的 OS 级 runner 沙箱作为安装、Batch 6 或发布前置，也不得在产品文案中宣称 runner 已被沙箱化。任意 URL、本地包、第三方 catalog、用户 PATH runtime 或自定义签名源不继承此信任决策。
+这些官方能力包属于应用发布链维护的受信任应用组件。首版以固定 catalog / trusted key、hash / signature / manifest / target / route-set 校验、事务安装、健康检查、取消与旧版本回滚保证功能正确性；不以 Windows / macOS / Linux 的 OS 级 runner 沙箱作为安装、Batch 6 或发布前置，也不得在产品文案中宣称 runner 已被沙箱化。任意 URL、未被内嵌 catalog 固定的本地包、第三方 catalog、用户 PATH runtime 或自定义签名源不继承此信任决策。
 
 页面沿用紧凑工具界面，不使用能力卡片墙。结构为：
 
@@ -313,7 +316,7 @@ quality: ...
 - 应用级安装位置说明；不写入项目目录，不修改 `raw/`、`wiki/`、`.app/` 或 Git。
 - “下载后仍会校验 SHA-256、签名、清单和健康状态；失败不会激活”的安全说明。
 
-主按钮为“下载并安装”。对话框确认只表达这一次、这个固定版本与许可证快照的授权；版本、许可证或包体 identity 变化后必须重新确认。React 只提交 `capabilityId + expectedVersion + acknowledgementVersion`，不得接收或拼装下载 URL、SHA-256、签名、解压路径或执行命令。
+主按钮为“下载并安装”。对话框确认只表达这一次、这个固定版本与许可证快照的授权；版本、许可证或包体 identity 变化后必须重新确认。React 提交 `capabilityId + expectedVersion + acknowledgementVersion`；用户从原生文件选择器选择离线 ZIP 时可附带 `archivePath`。后端持久化运输来源，暂停、重启和失败重试不得静默切换到网络。React 不得拼装下载 URL、SHA-256、签名、解压路径或执行命令。
 
 #### 6.3.2 应用级能力合同与 Import 续接
 

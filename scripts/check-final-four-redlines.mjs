@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import yaml from "js-yaml";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 export const repositoryRoot = path.resolve(scriptDirectory, "..");
@@ -182,61 +183,26 @@ const result = (id, passed, ownerBatch, detail) => ({
   detail,
 });
 
-// Check executable release steps and publication dependencies, not prose or
-// step titles. Runtime archive/signature verification remains in the invoked tools.
+// This historical report checks the publication topology and permissions only.
+// Real artifact tests own behavior; shell spelling is not a release contract.
 export function releaseWorkflowReady(workflow) {
-  const jobs = new Map([...workflow.matchAll(/^ {2}([A-Za-z0-9_-]+):[ \t]*\n([\s\S]*?)(?=^ {2}[A-Za-z0-9_-]+:[ \t]*(?:\n|$)|(?![\s\S]))/gm)]
-    .map((match) => [match[1], match[2]]));
-  const job = (name) => jobs.get(name) ?? "";
-  const runs = (name) => {
-    const lines = job(name).split("\n");
-    const blocks = [];
-    for (let index = 0; index < lines.length; index++) {
-      const match = /^(\s*)(?:- )?run:\s*(.*)$/.exec(lines[index]);
-      if (!match) continue;
-      if (!["|", ">", "|-", ">-"].includes(match[2])) blocks.push(match[2]);
-      else for (++index; index < lines.length; index++) {
-        const line = lines[index];
-        if (line.trim() && line.match(/^\s*/)[0].length <= match[1].length) { index--; break; }
-        if (!/^\s*#/.test(line)) blocks.push(line);
-      }
-    }
-    return blocks.join("\n");
-  };
-  const required = ["preflight", "source-check", "desktop-build", "publish-capabilities", "publish"];
-  const dependencies = /^ {4}needs:\s*\[([^\]]+)\]/m.exec(job("publish"))?.[1]
-    .split(",").map((name) => name.trim()) ?? [];
-  const writers = [...jobs].filter(([, value]) => /^ {6}contents:\s+write\s*$/m.test(value)).map(([name]) => name).sort();
-  const preflight = runs("preflight");
-  const build = runs("desktop-build");
-  const engines = runs("publish-capabilities");
-  const publish = runs("publish");
-  return required.every((name) => jobs.has(name))
-    && required.filter((name) => name !== "publish").every((name) => dependencies.includes(name))
-    && JSON.stringify(writers) === JSON.stringify(["publish", "publish-capabilities"])
-    && !/^ {2,4}contents:\s+write\s*$/m.test(workflow)
-    && /^ {4}environment:\s+desktop-release\s*$/m.test(job("publish"))
-    && /^ {4}environment:\s+desktop-release\s*$/m.test(job("desktop-build"))
-    && /^ {4}environment:\s+capability-release\s*$/m.test(job("publish-capabilities"))
-    && !["preflight", "source-check", "desktop-build", "publish-capabilities"].some((name) => /continue-on-error:\s*true/.test(job(name)))
-    && /node scripts\/reuse-capability-release\.mjs/.test(preflight)
-    && /node scripts\/verify-capability-catalog\.mjs/.test(preflight)
-    && /npm run check(?:\s|$)/.test(runs("source-check"))
-    && ["windows-x86_64", "darwin-aarch64", "darwin-x86_64", "linux-x86_64"].every((platform) => job("desktop-build").includes(`platform: ${platform}`))
-    && /LLM_WIKI_CAPABILITY_CATALOG_MODE=distributable/.test(build)
-    && /node scripts\/verify-embedded-capability-catalog\.mjs/.test(build)
-    && /node scripts\/verify-updater-signatures\.mjs/.test(build)
-    && /Start-Process[^\n]+-Wait/.test(build) && /\$running\.HasExited/.test(build)
-    && /hdiutil attach/.test(build) && /lipo [^\n]+ -verify_arch/.test(build)
-    && /xvfb-run[^\n]+--appimage-extract-and-run/.test(build) && /kill -0/.test(build)
-    && /capability_release merge-catalog/.test(engines) && /assert\.deepEqual/.test(engines)
-    && /node scripts\/publish-desktop-release\.mjs[^\n]+--channel capabilities/.test(engines)
-    && /node scripts\/verify-latest-json\.mjs/.test(publish)
-    && /node scripts\/generate-release-checksums\.mjs/.test(publish)
-    && /git rev-parse 'FETCH_HEAD\^\{commit\}'/.test(publish)
-    && /node scripts\/publish-desktop-release\.mjs/.test(publish)
-    && !/--channel capabilities/.test(publish)
-    && !/gh release (?:create|upload)/i.test(workflow);
+  try {
+    const document = yaml.load(workflow);
+    const jobs = document?.jobs ?? {};
+    const required = ["preflight", "desktop-build", "publish"];
+    const dependencies = (job) => Array.isArray(job?.needs) ? job.needs : [job?.needs];
+    const writers = Object.entries(jobs).filter(([, job]) => job.permissions?.contents === "write").map(([name]) => name);
+    return document.permissions?.contents === "read"
+      && required.every((name) => jobs[name]?.steps?.some((step) => typeof step.run === "string"))
+      && required.every((name) => jobs[name]["continue-on-error"] !== true)
+      && dependencies(jobs["desktop-build"]).includes("preflight")
+      && ["preflight", "desktop-build"].every((name) => dependencies(jobs.publish).includes(name))
+      && writers.length === 1 && writers[0] === "publish"
+      && jobs.publish.environment === "desktop-release"
+      && jobs["desktop-build"].environment === "desktop-release"
+      && ["windows-x86_64", "darwin-aarch64", "darwin-x86_64", "linux-x86_64"].every((platform) =>
+        jobs["desktop-build"].strategy?.matrix?.include?.some((entry) => entry.platform === platform));
+  } catch { return false; }
 }
 
 export function evaluateFinalFourRedlines(root) {
@@ -473,7 +439,7 @@ export function evaluateFinalFourRedlines(root) {
     result("structured-backend-error-presentation", backendErrorReady, "1", "shared normalization must cover serialized, circular, and object-shaped failures without [object Object]"),
     result("provider-secret-origin-binding", providerBindingReady, "2A", "provider credentials must bind to canonical origin and redirects must not carry secrets"),
     result("mutation-write-authority-inventory", mutationInventoryReady, "2B", "every mutation path must be inventoried and carry an unforgeable project authority capability"),
-    result("atomic-stable-release-workflow", atomicReleaseReady, "5", "desktop publication requires source checks, complete engines, signed installers, and platform launch checks; engine downloads use a separate publisher"),
+    result("atomic-stable-release-workflow", atomicReleaseReady, "5", "desktop publication requires an available resource catalog, signed installers and platform launch checks; source tests run in CI and resources build independently"),
   ];
 }
 

@@ -168,7 +168,10 @@ fn document_layout_pack_is_pinned_cross_platform_and_offline_at_runtime() {
     )
     .unwrap();
     assert_eq!(manifest["packId"], "document-layout");
-    assert_eq!(manifest["version"], "2.48.0");
+    assert!(semver::Version::parse(manifest["version"].as_str().unwrap()).is_ok());
+    let dependencies =
+        std::fs::read_to_string(root.join("capabilities/document-layout/requirements.in")).unwrap();
+    assert!(dependencies.lines().any(|line| line == "docling==2.48.0"));
     assert_eq!(
         manifest["licenseExpression"],
         "MIT AND Apache-2.0 AND CDLA-Permissive-2.0 AND PSF-2.0 AND MPL-2.0 AND LicenseRef-Bundled-Third-Party-Notices"

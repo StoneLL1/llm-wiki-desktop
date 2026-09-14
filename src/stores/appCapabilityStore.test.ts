@@ -143,6 +143,27 @@ describe("appCapabilityStore", () => {
     expect(useTaskStore.getState().taskById[task.id]).toMatchObject({ projectId: null });
   });
 
+  it("keeps the selected local archive when retrying an IPC failure", async () => {
+    useAppCapabilityStore.setState({ capabilities: [capability()], initialized: true });
+    api.install.mockRejectedValueOnce(new Error("unavailable")).mockResolvedValueOnce(globalTask());
+    api.list.mockResolvedValue([capability()]);
+    await expect(useAppCapabilityStore.getState().confirmInstall("browser-runtime", "/资料/pack.zip")).rejects.toThrow("unavailable");
+    await useAppCapabilityStore.getState().confirmInstall("browser-runtime");
+    expect(api.install).toHaveBeenNthCalledWith(2, expect.objectContaining({ archivePath: "/资料/pack.zip" }));
+  });
+
+  it("keeps the persisted local source when retrying a failed task after reload", async () => {
+    const task = globalTask();
+    task.status = "failed";
+    if (task.operation?.kind === "app_capability_install") task.operation.archivePath = "C:\\资料\\pack.zip";
+    appTasks.list.mockResolvedValue([task]);
+    useAppCapabilityStore.setState({ capabilities: [capability({ operation: { state: "failed", taskId: task.id } })], initialized: true });
+    api.install.mockResolvedValue(globalTask());
+    api.list.mockResolvedValue([capability()]);
+    await useAppCapabilityStore.getState().confirmInstall("browser-runtime");
+    expect(api.install).toHaveBeenCalledWith(expect.objectContaining({ archivePath: "C:\\资料\\pack.zip" }));
+  });
+
   it("derives only truthful actions and orthogonal filters", () => {
     const unpublished = capability({
       installAllowed: false,

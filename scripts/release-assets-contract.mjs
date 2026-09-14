@@ -49,6 +49,7 @@ export const OS_IDENTITY_EVIDENCE = Object.freeze({
 });
 
 export const STABLE_TAG_PATTERN = /^app-v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+export const DESKTOP_TAG_PATTERN = /^app-v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-rc\.[1-9]\d*)?$/;
 export const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 
 export function isPlainObject(value) {

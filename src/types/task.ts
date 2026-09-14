@@ -66,6 +66,7 @@ export type TaskOperation = {
   version: string;
   targetTriple: string;
   archiveIdentity: string;
+  archivePath?: string;
 } | {
   kind: "import_commit";
   sessionId: string;
