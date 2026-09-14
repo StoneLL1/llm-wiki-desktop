@@ -166,6 +166,31 @@ struct VerifiedInstallation {
     payload: PathBuf,
 }
 
+// Keep canonical paths for all installer/security operations. Only the reported
+// path is handed to external CLIs: Node's test-file globbing rejects \\?\ paths.
+fn external_tool_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    if let Some(value) = path.to_str() {
+        return windows_tool_path(value).into();
+    }
+    path.to_path_buf()
+}
+
+#[cfg(any(windows, test))]
+fn windows_tool_path(value: &str) -> String {
+    if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{unc}");
+    }
+    if let Some(disk) = value.strip_prefix(r"\\?\") {
+        let bytes = disk.as_bytes();
+        if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1..3] == *b":\\" {
+            return disk.into();
+        }
+    }
+    // Do not reinterpret device/volume namespaces, relative paths or Unix paths.
+    value.into()
+}
+
 /// Qualify the files we will distribute using the application's actual offline
 /// installer and runtime. A new directory prevents existing caches hiding gaps.
 fn verify_install(
@@ -249,7 +274,9 @@ fn verify_install(
             installed.push(VerifiedInstallation {
                 capability_id: entry.capability_id.clone(),
                 version: entry.version.clone(),
-                payload: output.join(&entry.capability_id).join(&entry.version),
+                payload: external_tool_path(
+                    &output.join(&entry.capability_id).join(&entry.version),
+                ),
             });
         }
         drop(runtime);
@@ -1566,6 +1593,7 @@ printf '{"jsonrpc":"2.0","id":"%s","result":{"healthy":true,"protocolVersion":"2
             .unwrap()
             .unwrap();
         assert_eq!(installed.len(), 1);
+        assert!(!installed[0].payload.to_string_lossy().starts_with(r"\\?\"));
         assert_eq!(
             fs::read(installed[0].payload.join("models/model.bin")).unwrap(),
             model
@@ -1583,5 +1611,25 @@ printf '{"jsonrpc":"2.0","id":"%s","result":{"healthy":true,"protocolVersion":"2
         )
         .unwrap_err()
         .contains("missing model"));
+    }
+    #[test]
+    fn external_tool_paths_preserve_windows_drive_and_unc_semantics() {
+        for (input, expected) in [
+            (
+                r"\\?\D:\a\_temp\中文 空间\pack\1.0.0+resources.1",
+                r"D:\a\_temp\中文 空间\pack\1.0.0+resources.1",
+            ),
+            (
+                r"\\?\UNC\server\share\资源\pack",
+                r"\\server\share\资源\pack",
+            ),
+            (r"D:\a\plain", r"D:\a\plain"),
+            (r"\\server\share\plain", r"\\server\share\plain"),
+            (r"\\?\Volume{1234}\pack", r"\\?\Volume{1234}\pack"),
+            (r"\\.\PhysicalDrive0", r"\\.\PhysicalDrive0"),
+            ("/tmp/中文 space/pack", "/tmp/中文 space/pack"),
+        ] {
+            assert_eq!(windows_tool_path(input), expected);
+        }
     }
 }
