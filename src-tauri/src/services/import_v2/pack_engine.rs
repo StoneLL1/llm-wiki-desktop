@@ -1772,20 +1772,18 @@ pub(super) fn terminate_tree(child: &mut Child) {
     }
     #[cfg(unix)]
     {
-        let group = format!("-{}", child.id());
-        let _ = Command::new("kill")
-            .args(["-TERM", &group])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let group = -(child.id() as libc::pid_t);
+        // Use the syscall directly: external kill implementations can parse a
+        // negative PID as an option and signal an unrelated process group.
+        unsafe {
+            libc::kill(group, libc::SIGTERM);
+        }
         for _ in 0..10 {
             std::thread::sleep(Duration::from_millis(10));
         }
-        let _ = Command::new("kill")
-            .args(["-KILL", &group])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        unsafe {
+            libc::kill(group, libc::SIGKILL);
+        }
     }
     let _ = child.kill();
     let _ = child.wait();
@@ -2337,6 +2335,44 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
         assert!(joined.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminate_tree_reaps_descendants_and_preserves_neighbor_process() {
+        use std::io::BufRead;
+        use std::os::unix::process::CommandExt;
+
+        let mut sentinel_command = Command::new("sleep");
+        sentinel_command.arg("30").process_group(0);
+        let mut sentinel = ProcessGuard(sentinel_command.spawn().unwrap(), None, None, None);
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 30 & printf 'ready\\n'; wait"])
+            .process_group(0)
+            .stdout(Stdio::piped());
+        let mut target = ProcessGuard(command.spawn().unwrap(), None, None, None);
+        let stdout = target.0.stdout.take().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut stdout = std::io::BufReader::new(stdout);
+            let mut line = String::new();
+            stdout.read_line(&mut line).unwrap();
+            sender.send(line == "ready\n").unwrap();
+            let mut remaining = Vec::new();
+            stdout.read_to_end(&mut remaining).unwrap();
+            let _ = sender.send(true);
+        });
+        assert!(receiver.recv_timeout(Duration::from_secs(5)).unwrap());
+
+        terminate_tree(&mut target.0);
+
+        assert!(target.0.try_wait().unwrap().is_some());
+        // The shell's descendant also inherited stdout. EOF proves that it
+        // exited instead of leaving a reader blocked until its sleep finishes.
+        assert!(receiver.recv_timeout(Duration::from_secs(5)).unwrap());
+        assert!(sentinel.0.try_wait().unwrap().is_none());
+        reader.join().unwrap();
     }
 }
 

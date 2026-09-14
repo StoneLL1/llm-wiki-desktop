@@ -897,6 +897,11 @@ mod binding_tests {
             command.args(["-c", "sleep 30"]);
             command
         };
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
         let mut process = command.stdout(Stdio::piped()).spawn().unwrap();
         let mut stdout = process.stdout.take().unwrap();
         let child = Arc::new(Mutex::new(ManagedChild {
@@ -968,6 +973,11 @@ mod binding_tests {
             command.args(["-c", "sleep 30"]);
             command
         };
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
         let mut process = command.stdout(Stdio::piped()).spawn().unwrap();
         let mut stdout = process.stdout.take().unwrap();
         let child = Arc::new(Mutex::new(ManagedChild {

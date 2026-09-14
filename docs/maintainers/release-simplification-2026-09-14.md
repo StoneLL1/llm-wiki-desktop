@@ -40,3 +40,11 @@
 - `capabilities/install-catalog.json` 当前仍为空。真实发布前需要上传能力资源并提交完整真实地址；不能通过取消检查来让不存在的资源可用。
 
 操作方式与重试说明见 [发布流程](../release/release-runbook.md)。
+
+## v0.2.2 发布验收补充：Linux runner 关闭的代码根因
+
+实际推送候选版本后，[首次 Linux 检查](https://github.com/StoneLL1/llm-wiki-desktop/actions/runs/34823703946/job/103910844200) 与[补充提交的 Linux 检查](https://github.com/StoneLL1/llm-wiki-desktop/actions/runs/34824442390/job/103913422656) 都在 connector 子进程停止测试边界收到 SIGTERM。不能将这种固定位置的失败简单视为 runner 随机故障。
+
+`pack_engine::terminate_tree` 曾调用外部 `kill -TERM -<pid>`。在 [procps 4.0.4 实现](https://gitlab.com/procps-ng/procps/-/raw/v4.0.4/src/kill.c) 中，未终止选项解析的负数可按首位处理；以 1 开头的 PID 因而可能变成向所有可发信号进程发送 TERM。这同时影响运行时取消路径，不只是 CI。
+
+已改为直接调用 `libc::kill`，保持 TERM → 100ms → KILL 时序；两个 connector 测试也建立独立进程组。新增测试确认目标后代退出、管道结束且独立哨兵仍存活，4 项定向测试通过。删除基于错误基础设施假设的自动重试 job，三平台源码检查名称和要求保持不变。完整检查和 GitHub CI 的最终结果以新版发布验收为准。
