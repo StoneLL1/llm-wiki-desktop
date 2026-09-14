@@ -42,6 +42,33 @@ const PROCESS_OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 const CAPABILITY_HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_HEALTH_RESPONSE_BYTES: u64 = 64 * 1024;
 
+fn configure_capability_environment(command: &mut Command, temporary_root: &Path) {
+    command.env_clear();
+    // Native loaders and platform cache helpers need these OS paths. Provider
+    // credentials and arbitrary application environment variables stay scrubbed.
+    for key in [
+        "SystemRoot",
+        "WINDIR",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "XDG_CACHE_HOME",
+    ] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    // Python on Windows resolves Path.home() through USERPROFILE, not HOME.
+    // Use the normal user home so libraries can locate their persistent caches.
+    if let Some(home) = dirs::home_dir() {
+        command.env("HOME", &home).env("USERPROFILE", &home);
+    }
+    command
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .env("TEMP", temporary_root)
+        .env("TMP", temporary_root)
+        .env("TMPDIR", temporary_root);
+}
+
 pub struct PackProcessEngine {
     pack: ResolvedCapabilityPack,
     descriptor: EngineDescriptor,
@@ -101,17 +128,8 @@ pub(super) fn probe_capability_pack(
         .current_dir(invocation_root.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env_clear()
-        .env("PYTHONDONTWRITEBYTECODE", "1");
-    for key in ["SystemRoot", "WINDIR"] {
-        if let Some(value) = std::env::var_os(key) {
-            command.env(key, value);
-        }
-    }
-    command
-        .env("TEMP", invocation_root.path())
-        .env("TMP", invocation_root.path());
+        .stderr(Stdio::piped());
+    configure_capability_environment(&mut command, invocation_root.path());
     configure_isolated_process(&mut command);
     let mut child = command.spawn().map_err(|error| {
         health_error(&format!(
@@ -420,15 +438,8 @@ impl ImportEngine for PackProcessEngine {
             .current_dir(&staging_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .env_clear()
-            .env("PYTHONDONTWRITEBYTECODE", "1");
-        for key in ["SystemRoot", "WINDIR"] {
-            if let Some(value) = std::env::var_os(key) {
-                command.env(key, value);
-            }
-        }
-        command.env("TEMP", runtime_temp).env("TMP", runtime_temp);
+            .stderr(Stdio::piped());
+        configure_capability_environment(&mut command, runtime_temp);
         if let Some(profile) = authenticated_profile {
             command.env("LLM_WIKI_CONNECTOR_PROFILE", profile);
         }
@@ -1805,6 +1816,106 @@ fn engine_error(message: &str) -> BackendError {
 mod tests {
     use super::*;
     use crate::services::import_v2::capability_pack::CapabilityPackManifest;
+
+    #[test]
+    fn capability_environment_preserves_os_paths_without_inheriting_credentials() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut command = Command::new("unused");
+        command.env("OPENAI_API_KEY", "must-not-inherit");
+        command.env("PYTHONPATH", "must-not-inherit");
+        configure_capability_environment(&mut command, temporary.path());
+        let environment: BTreeMap<_, _> = command
+            .get_envs()
+            .map(|(key, value)| (key.to_owned(), value.unwrap().to_owned()))
+            .collect();
+        let home = dirs::home_dir().expect("test user has a home directory");
+        assert_eq!(
+            environment.get(&OsString::from("HOME")),
+            Some(&home.clone().into_os_string())
+        );
+        assert_eq!(
+            environment.get(&OsString::from("USERPROFILE")),
+            Some(&home.into_os_string())
+        );
+        assert!(!environment.contains_key(&OsString::from("OPENAI_API_KEY")));
+        assert!(!environment.contains_key(&OsString::from("PYTHONPATH")));
+        for key in [
+            "SystemRoot",
+            "WINDIR",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "XDG_CACHE_HOME",
+        ] {
+            assert_eq!(
+                environment.get(&OsString::from(key)),
+                std::env::var_os(key).as_ref()
+            );
+        }
+        for key in ["TEMP", "TMP", "TMPDIR"] {
+            assert_eq!(
+                environment.get(&OsString::from(key)),
+                Some(&temporary.path().as_os_str().to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn capability_environment_supports_real_python_home_and_temporary_paths() {
+        // Resolve Python before clearing PATH, just as production starts the
+        // absolute interpreter path from the installed capability manifest.
+        let python = ["python3", "python"]
+            .into_iter()
+            .find_map(|program| {
+                let output = Command::new(program)
+                    .args(["-c", "import sys; print(sys.executable)"])
+                    .output()
+                    .ok()?;
+                output
+                    .status
+                    .success()
+                    .then(|| String::from_utf8(output.stdout).unwrap().trim().to_owned())
+            })
+            .expect("Python is required for capability runtime regression tests");
+        let temporary = tempfile::tempdir().unwrap();
+        let runtime_temp = temporary.path().join("能力缓存 空间");
+        std::fs::create_dir(&runtime_temp).unwrap();
+        let mut command = Command::new(python);
+        command.env("OPENAI_API_KEY", "must-not-inherit");
+        configure_capability_environment(&mut command, &runtime_temp);
+        let output = command
+            .args([
+                "-c",
+                r#"
+import json, ntpath, os, pathlib, tempfile
+home = pathlib.Path.home()
+assert 'OPENAI_API_KEY' not in os.environ
+assert 'PYTHONPATH' not in os.environ
+print(json.dumps({
+    'home': str(home),
+    'windowsHome': ntpath.expanduser('~'),
+    'doclingCache': str(home / '.cache' / 'docling'),
+    'temporary': tempfile.gettempdir(),
+}))
+"#,
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(result["home"], home.to_string_lossy().as_ref());
+        // ntpath exercises Windows' USERPROFILE-based home lookup on every OS.
+        assert_eq!(result["windowsHome"], home.to_string_lossy().as_ref());
+        assert_eq!(
+            result["doclingCache"],
+            home.join(".cache").join("docling").to_string_lossy().as_ref()
+        );
+        assert_eq!(result["temporary"], runtime_temp.to_string_lossy().as_ref());
+    }
 
     #[test]
     fn health_diagnostics_preserve_loader_failure_and_redact_credentials() {

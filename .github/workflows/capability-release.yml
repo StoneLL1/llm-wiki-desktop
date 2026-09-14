@@ -1,7 +1,7 @@
 name: Capability resources
 
-# Build resources independently; uploading these artifacts to public storage is
-# a separate maintainer action. No desktop release tag or signing secret needed.
+# Build resources independently, optionally publishing them on GitHub directly
+# from the runner. No desktop release tag or signing secret is needed.
 on:
   workflow_dispatch:
     inputs:
@@ -13,6 +13,11 @@ on:
         description: Public HTTPS root for models/ (defaults to base_url)
         required: false
         type: string
+      publish_github:
+        description: Publish verified resources to this repository's GitHub Release at base_url
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -27,6 +32,8 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
+      repository: ${{ steps.locations.outputs.repository }}
+      tag: ${{ steps.locations.outputs.tag }}
     timeout-minutes: 30
     steps:
       - name: Checkout resource source commit
@@ -40,15 +47,23 @@ jobs:
           node-version: 22.23.1
 
       - name: Validate resource locations and product definitions
+        id: locations
         env:
           BASE_URL: ${{ inputs.base_url }}
           MODEL_BASE_URL: ${{ inputs.model_base_url || inputs.base_url }}
+          PUBLISH_GITHUB: ${{ inputs.publish_github }}
         run: |
           node --input-type=module -e '
+            import fs from "node:fs";
             import { catalogUrlErrors } from "./scripts/verify-capability-catalog.mjs";
+            import { capabilityReleaseLocation } from "./scripts/publish-desktop-release.mjs";
             for (const value of [process.env.BASE_URL, process.env.MODEL_BASE_URL]) {
               const errors = catalogUrlErrors({ url: value });
               if (errors.length) throw new Error(errors.join("; "));
+            }
+            if (process.env.PUBLISH_GITHUB === "true") {
+              const { repository, tag } = capabilityReleaseLocation(process.env.BASE_URL, process.env.GITHUB_REPOSITORY);
+              fs.appendFileSync(process.env.GITHUB_OUTPUT, `repository=${repository}\ntag=${tag}\n`);
             }
           '
           node scripts/verify-product-capabilities.mjs --require-release-ready
@@ -232,7 +247,9 @@ jobs:
     name: Merge and verify the manifest-derived install catalog
     needs: [release-preflight, build-capability]
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    permissions:
+      contents: write
+    timeout-minutes: 120
     steps:
       - name: Checkout the exact release commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -282,6 +299,46 @@ jobs:
           name: capability-resources
           path: capability-dist/
           compression-level: 0
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+
+      - name: Stage flat GitHub attachments and the offline model bundle
+        if: inputs.publish_github
+        env:
+          BASE_URL: ${{ inputs.base_url }}
+        run: node scripts/stage-capability-downloads.mjs --input capability-dist --output github-capability-dist --base-url "$BASE_URL"
+
+      - name: Create or resume the resource draft and publish verified uploads
+        if: inputs.publish_github
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESOURCE_REPOSITORY: ${{ needs.release-preflight.outputs.repository }}
+          RESOURCE_TAG: ${{ needs.release-preflight.outputs.tag }}
+          RESOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/capability-release-notes.md" <<'NOTES'
+          Optional programs and shared models for LLM Wiki Desktop.
+
+          Programs are downloaded on demand. For offline installation, download the program ZIP for your platform and extract models.zip beside it. Keep the resulting models/ directory next to the program ZIP.
+
+          install-catalog.json contains the resource URLs and SHA-256 digests. CHECKSUMS.sha256 covers all attachments. GitHub hosting does not guarantee accessibility from every network.
+          NOTES
+          node scripts/publish-desktop-release.mjs --root github-capability-dist --channel capabilities --tag "$RESOURCE_TAG" --repository "$RESOURCE_REPOSITORY" --target "$RESOURCE_COMMIT" --notes "$RUNNER_TEMP/capability-release-notes.md"
+
+      - name: Verify anonymous downloads and full SHA-256 after publication
+        if: inputs.publish_github
+        run: node scripts/verify-published-capability-assets.mjs --catalog github-capability-dist/install-catalog.json
+
+      - name: Upload the publicly verified catalog for the next App build
+        if: inputs.publish_github
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: public-capability-catalog
+          path: |
+            github-capability-dist/install-catalog.json
+            github-capability-dist/CHECKSUMS.sha256
           if-no-files-found: error
           overwrite: true
           retention-days: 30

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { publishDesktopRelease, releaseUploads, uploadedAssetErrors } from "./publish-desktop-release.mjs";
+import { capabilityReleaseLocation, publishDesktopRelease, releaseUploads, uploadedAssetErrors } from "./publish-desktop-release.mjs";
 
 const mutations = (calls) => calls.filter((args) => ["create", "upload", "edit", "delete"].includes(args[1]));
 const latestQueries = (calls) => calls.filter((args) => args[1] === "view" && args[2] === "--repo");
@@ -238,4 +238,53 @@ test("legacy capability channel remains a prerelease without taking latest", asy
   assert.ok(f.calls.at(-1).includes("--latest=false"));
   assert.equal(latestQueries(f.calls).length, 0);
   await assert.rejects(publish(f, { channel: "capabilities" }), /selected channel/);
+});
+
+test("independent dated resource releases create their own tag and resume uploads without taking latest", async (context) => {
+  const f = await fixture(context);
+  f.state.exists = false;
+  f.state.interruptUpload = f.uploads[1].name;
+  const options = { tag: "capabilities-2026-09-14", channel: "capabilities", repository: "owner/resources", target: "a".repeat(40) };
+  await assert.rejects(publish(f, options), /connection reset/u);
+  await publish(f, options);
+  assert.equal(f.calls.filter((args) => args[1] === "create").length, 1);
+  assert.equal(f.calls.filter((args) => args[1] === "upload" && args[3] === f.uploads[0].file).length, 1);
+  const create = f.calls.find((args) => args[1] === "create");
+  assert.equal(create[create.indexOf("--target") + 1], options.target);
+  assert.ok(!create.includes("--verify-tag"));
+  assert.ok(create.includes("--draft") && create.includes("--prerelease"));
+  for (const args of f.calls) {
+    if (args[0] === "api") assert.match(args[1], /^repos\/owner\/resources\/releases\//u);
+    else assert.equal(args[args.indexOf("--repo") + 1], options.repository);
+  }
+  assert.ok(f.calls.at(-1).includes("--prerelease=true") && f.calls.at(-1).includes("--latest=false"));
+  assert.deepEqual(latestQueries(f.calls), []);
+  f.calls.length = 0;
+  await publish(f, options);
+  assert.deepEqual(mutations(f.calls), [], "public matching resources are a read-only retry");
+  f.state.assets[0].digest = "sha256:changed";
+  f.calls.length = 0;
+  await assert.rejects(publish(f, options), /already public/u);
+  assert.deepEqual(mutations(f.calls), [], "public resources are never overwritten");
+});
+
+test("resource hosting coordinates are derived from the exact repository download URL", () => {
+  assert.deepEqual(capabilityReleaseLocation("https://github.com/owner/resources/releases/download/capabilities-2026-09-14/", "owner/resources"), {
+    repository: "owner/resources", tag: "capabilities-2026-09-14",
+  });
+  for (const value of [
+    "https://github.com/elsewhere/resources/releases/download/capabilities-2026-09-14/",
+    "https://github.com/owner/resources/releases/download/app-v0.2.2/",
+    "https://github.com/owner/resources/releases/download/capabilities-2026-09-14/?token=secret",
+    "https://github.com/owner/resources/releases/download/capabilities-2026-09-14/models/",
+    "https://cdn.llmwiki.cn/capabilities-2026-09-14/",
+  ]) assert.throws(() => capabilityReleaseLocation(value, "owner/resources"), /GitHub resource publishing/u);
+});
+
+test("resource target creation does not weaken the desktop tag contract", async (context) => {
+  const f = await fixture(context);
+  await assert.rejects(publish(f, { target: "a".repeat(40) }), /only supported for resource releases/u);
+  await assert.rejects(publish(f, { tag: "capabilities-2026-09-14", channel: "capabilities", target: "main" }), /full commit SHA/u);
+  await assert.rejects(publish(f, { tag: "capabilities-2026-09-14" }), /selected channel/u);
+  assert.deepEqual(f.calls, []);
 });
