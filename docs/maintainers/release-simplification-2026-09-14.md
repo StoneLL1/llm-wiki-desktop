@@ -60,4 +60,4 @@ PR #73 合并前，三平台源码 CI 和最终本地完整检查（15 分 45.6 
 - 清空子进程环境也移除了 Windows Python 所需的用户目录，Docling 导入时无法解析 home。健康探测和实际调用现共用最小 OS/用户目录/缓存/临时目录环境，真实 Python 回归覆盖 HOME/USERPROFILE、中文空格临时路径及凭据隔离。
 - 资源工作流可选直接在 GitHub runner 发布独立资源，复用现有可恢复发布器，公开后完整核验程序和模型下载 SHA；离线模型 ZIP 使用固定元数据，以便同一构建的发布步骤安全续跑。
 
-PR #74 已合并；修复后的三平台源码 CI 全部通过，本地完整检查通过（17 分 23.4 秒）。原生资源验收还暴露浏览器冒烟测试的固定 100ms 弹窗等待竞态，后续维护源码改为等待 popup 事件；实际浏览器交互在本机已有 Chrome 和可用 Playwright 环境通过。资源和 App 的最终发布结果在完成后补充。
+PR #74 已合并；修复后的三平台源码 CI 全部通过，本地完整检查通过（17 分 23.4 秒）。原生资源验收还暴露浏览器冒烟测试的固定 100ms 弹窗等待竞态，后续维护源码改为等待 popup 事件；实际浏览器交互在本机已有 Chrome 和可用 Playwright 环境通过。[独立能力资源](https://github.com/StoneLL1/llm-wiki-desktop/releases/tag/capabilities-2026-09-14) 已公开：43 项原生安装/启用/重启/功能验收通过，61 个附件上传核验通过，58 个程序和模型公开下载完整 SHA-256 通过。App 内置目录与公开目录逐字节一致。App 安装包和后续发布状态见 [Releases](https://github.com/StoneLL1/llm-wiki-desktop/releases)。
