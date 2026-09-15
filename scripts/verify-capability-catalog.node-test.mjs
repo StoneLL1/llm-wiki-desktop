@@ -230,22 +230,16 @@ test("provenance emission is deterministic", async (context) => {
   assert.equal(emitted.endsWith("\n"), true);
 });
 
-test("the repository source catalog stays a valid development fallback", async () => {
+test("the repository catalog is valid for source builds and public releases", async () => {
   const catalog = JSON.parse(
     await fs.readFile(path.join(repositoryRoot, "capabilities/install-catalog.json"), "utf8"),
   );
   const keys = JSON.parse(
     await fs.readFile(path.join(repositoryRoot, "capabilities/trusted-keys.json"), "utf8"),
   );
-  assert.deepEqual(
-    verifyCapabilityCatalog({ catalog, trustedKeys: keys, mode: "source" }).errors,
-    [],
-  );
-  assert.equal(
-    verifyCapabilityCatalog({ catalog, trustedKeys: keys, mode: "release", expectedTag: "app-v0.1.0" })
-      .errors.length > 0,
-    true,
-  );
+  for (const mode of ["source", "release"]) {
+    assert.deepEqual(verifyCapabilityCatalog({ catalog, trustedKeys: keys, mode }).errors, []);
+  }
 });
 
 test("independent model resources require safe paths and pinned identities", () => {

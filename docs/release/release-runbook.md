@@ -40,6 +40,6 @@
 
 只有发布 job 有 `contents: write`；构建从 `desktop-release` 环境读取 updater 签名密钥。App/updater 的签名保持原合同，Windows Authenticode 和 Apple Developer ID/notarization 仍非必需。环境没有人工 reviewer；已有分支/tag 范围约束不变。
 
-国内用户能否下载取决于实际托管位置，可使用国内 HTTPS 静态存储或完整离线资源目录；见 [能力资源分发](../../capabilities/RELEASE.md)。空目录或不存在的下载地址不能靠放宽发布检查变成可用功能。当前源码 catalog 仍为空，占位目录必须在真实发布前替换。
+国内用户能否下载取决于实际托管位置，可使用国内 HTTPS 静态存储或完整离线资源目录；见 [能力资源分发](../../capabilities/RELEASE.md)。空目录或不存在的下载地址不能靠放宽发布检查变成可用功能。App 内置 catalog 应来自已经公开并完成下载核验的资源；发布前提交这份真实目录。
 
 本地维护验证使用 `npm run check`、`npm run check:release-config`；已有 `actionlint` 时可检查 Actions 语法。历史验收清单与审查报告是证据，不是每次发版要重新填写的审批步骤。密钥轮换见 [发布身份与访问](release-identity-and-access.md#updater-signing-key-operations)。

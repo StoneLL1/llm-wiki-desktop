@@ -721,7 +721,10 @@ async fn copy_official_archive(
         write_partial_metadata_background(blocking_work, &paths.metadata, &metadata, token).await
     }
     .await;
-    drop(output);
+    // Tokio writes may still own a blocking worker's file handle after
+    // write_all returns. Wait for that work and close the OS handle before
+    // deleting a rejected/cancelled copy, especially on Windows.
+    drop(output.into_std().await);
     if result.is_err() {
         remove_partial_background(blocking_work, paths).await?;
     }
@@ -959,6 +962,7 @@ async fn download_archive_inner(
     loop {
         let next = loop {
             if token.is_cancelled() {
+                drop(file.into_std().await);
                 if !token.is_pause_requested() {
                     remove_partial_background(blocking_work, paths).await?;
                 }
@@ -1034,6 +1038,7 @@ async fn download_archive_inner(
             .prefix_sha256
             .eq_ignore_ascii_case(&entry.archive_sha256)
     {
+        drop(file.into_std().await);
         remove_partial_background(blocking_work, paths).await?;
         return Err(install_error("Capability archive integrity check failed."));
     }
@@ -2998,6 +3003,87 @@ mod tests {
         assert!(!paths.archive.exists());
         assert!(!paths.metadata.exists());
         assert_eq!(std::fs::read(source).unwrap(), bad);
+    }
+
+    #[tokio::test]
+    async fn cancelled_local_copy_closes_pending_writes_before_removing_partial() {
+        let fixture = SignedFixture::new(b"offline-runtime", "release-a");
+        std::fs::create_dir_all(fixture.install_root()).unwrap();
+        let original = std::fs::read(&fixture.archive).unwrap();
+        let paths = partial_paths(&fixture.install_root(), &fixture.entry).unwrap();
+        let token = CancellationToken::new();
+        let error = copy_official_archive(
+            &BlockingWorkCoordinator::default(),
+            &fixture.archive,
+            &fixture.entry,
+            &paths,
+            "offline",
+            &token,
+            &mut |_, copied, _| {
+                if copied > 0 {
+                    token.cancel();
+                }
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, crate::errors::IMPORT_V2_CANCELLED);
+        assert!(!paths.archive.exists());
+        assert!(!paths.metadata.exists());
+        assert_eq!(std::fs::read(&fixture.archive).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn rejected_or_cancelled_download_closes_the_file_before_removing_partial() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt as _};
+
+        for cancel in [false, true] {
+            let fixture = SignedFixture::new(b"download-runtime", "release-a");
+            std::fs::create_dir_all(fixture.install_root()).unwrap();
+            let mut bytes = std::fs::read(&fixture.archive).unwrap();
+            bytes[0] ^= 1;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut entry = fixture.entry.clone();
+            let paths = partial_paths(&fixture.install_root(), &entry).unwrap();
+            entry.url = format!("http://{}/pack.zip", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 8 * 1024];
+                stream.read(&mut request).await.unwrap();
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    bytes.len()
+                );
+                stream.write_all(header.as_bytes()).await.unwrap();
+                stream.write_all(&bytes).await.unwrap();
+            });
+            let token = CancellationToken::new();
+            let error = download_archive(
+                &BlockingWorkCoordinator::default(),
+                &entry,
+                &paths,
+                "download",
+                &token,
+                &mut |_, downloaded, _| {
+                    if cancel && downloaded > 0 {
+                        token.cancel();
+                    }
+                },
+            )
+            .await
+            .unwrap_err();
+            tokio::time::timeout(Duration::from_secs(5), server)
+                .await
+                .unwrap()
+                .unwrap();
+            if cancel {
+                assert_eq!(error.code, crate::errors::IMPORT_V2_CANCELLED);
+            } else {
+                assert!(error.message.contains("integrity check failed"));
+            }
+            assert!(!paths.archive.exists());
+            assert!(!paths.metadata.exists());
+        }
     }
 
     #[tokio::test]

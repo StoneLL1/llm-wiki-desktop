@@ -251,9 +251,24 @@ fn capability_inventory_is_available_without_an_active_project() {
     assert!(views
         .iter()
         .all(|view| view.current_project_waiting_count == 0));
-    assert!(views
-        .iter()
-        .all(|view| view.publisher_key_id.is_some() == view.target_version.is_some()));
+    // A published resource need not carry a legacy publisher signature.
+    // Check the actual catalog metadata without coupling availability to a key.
+    for view in &views {
+        let entry = llm_wiki_desktop_lib::services::import_v2::capability_installer::catalog_entry(
+            &view.capability_id,
+            &view.target_triple,
+        );
+        assert_eq!(
+            view.target_version,
+            entry.as_ref().map(|entry| entry.version.clone())
+        );
+        assert_eq!(
+            view.publisher_key_id,
+            entry
+                .filter(|entry| !entry.signing_key_id.is_empty())
+                .map(|entry| entry.signing_key_id)
+        );
+    }
     assert!(views
         .iter()
         .filter(|view| view.target_version.is_some())

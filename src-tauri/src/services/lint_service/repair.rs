@@ -1047,16 +1047,12 @@ fn ensure_direct_child_directory(parent: &Path, child: &Path) -> Result<(), Back
             "Candidate directory is not a direct child of its owned parent.",
         ));
     }
-    match fs::symlink_metadata(child) {
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir(child).map_err(|error| {
-                workspace_io_error("LINT_AGENT_WORKSPACE_CREATE_FAILED", error, child)
-            })?;
-        }
+    match fs::create_dir(child) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => {
             return Err(workspace_io_error(
-                "LINT_AGENT_WORKSPACE_UNSAFE",
+                "LINT_AGENT_WORKSPACE_CREATE_FAILED",
                 error,
                 child,
             ));
