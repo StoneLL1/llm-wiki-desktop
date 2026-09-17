@@ -5,7 +5,7 @@
   <p>A local-first workspace for turning documents, links, and media into a connected Markdown knowledge base.</p>
   <p>
     <a href="https://github.com/StoneLL1/llm-wiki-desktop/releases/latest"><img src="https://img.shields.io/github/v/release/StoneLL1/llm-wiki-desktop?style=flat-square&color=30363d" alt="Latest release" /></a>
-    <a href="https://github.com/StoneLL1/llm-wiki-desktop/actions/workflows/ci.yml"><img src="https://github.com/StoneLL1/llm-wiki-desktop/actions/workflows/ci.yml/badge.svg?branch=master" alt="CI" /></a>
+
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-30363d?style=flat-square" alt="Apache 2.0 license" /></a>
   </p>
   <p><a href="https://github.com/StoneLL1/llm-wiki-desktop/releases/latest">Download</a> · <a href="#get-started">Get started</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="CONTRIBUTING.md">Contributing</a></p>
