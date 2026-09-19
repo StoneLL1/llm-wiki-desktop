@@ -707,9 +707,11 @@ impl SourceRegistry {
     ) -> Result<PathBuf, BackendError> {
         let wiki_path = normalize_project_path(wiki_path.trim());
         let wiki_absolute = context.resolve_project_path(&wiki_path)?;
-        if !wiki_path.starts_with("wiki/")
+        if !context
+            .layout
+            .source_paths()?
+            .contains_source_markdown(&wiki_path)
             || !wiki_path.ends_with(".md")
-            || wiki_absolute.strip_prefix(&context.wiki_dir).is_err()
             || !wiki_absolute.is_file()
         {
             return Err(wiki_asset_not_found(&wiki_path, asset_path));
@@ -1119,7 +1121,9 @@ impl SourceRegistry {
             .canonical_url
             .as_deref()
             .map(normalize_locator)
-            .filter(|canonical_url| !canonical_url.is_empty())
+            .filter(|canonical_url| {
+                !canonical_url.is_empty() && !input.normalized_locator.starts_with("url:v1:")
+            })
         {
             next_index.by_locator.insert(canonical_url, pointer);
         }

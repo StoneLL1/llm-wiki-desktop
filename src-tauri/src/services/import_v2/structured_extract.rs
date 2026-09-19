@@ -1,3 +1,4 @@
+use super::office_postprocess::{Cell, Sheet};
 use crate::errors::BackendError;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
@@ -102,7 +103,7 @@ fn read_docx_text<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<String,
 
 fn docx_xml_to_markdown(xml: &str) -> Result<String, BackendError> {
     let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
+    reader.config_mut().trim_text(false);
     let mut output = String::new();
     let mut paragraph = String::new();
     let mut heading_level = None;
@@ -125,6 +126,8 @@ fn docx_xml_to_markdown(xml: &str) -> Result<String, BackendError> {
                 b"pStyle" => heading_level = heading_level_from_attributes(&event),
                 b"numPr" => is_list = true,
                 b"t" => in_text = true,
+                b"tab" => paragraph.push('\t'),
+                b"br" | b"cr" => paragraph.push('\n'),
                 b"tbl" => {
                     in_table = true;
                     table.clear();
@@ -139,6 +142,8 @@ fn docx_xml_to_markdown(xml: &str) -> Result<String, BackendError> {
             Ok(Event::Empty(event)) => match local_name(event.name().as_ref()) {
                 b"pStyle" => heading_level = heading_level_from_attributes(&event),
                 b"numPr" => is_list = true,
+                b"tab" => paragraph.push('\t'),
+                b"br" | b"cr" => paragraph.push('\n'),
                 _ => {}
             },
             Ok(Event::Text(text)) if in_text => {
@@ -495,6 +500,38 @@ fn pptx_slide_to_markdown(xml: &str) -> Result<String, BackendError> {
 }
 
 fn read_xlsx_text<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<String, BackendError> {
+    let mut output = String::new();
+    for sheet in read_xlsx_sheets(archive)? {
+        output.push_str(&format!("## {}\n\n", sheet.name.replace(['\r', '\n'], " ")));
+        let rows = sheet
+            .rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| {
+                        markdown_table_cell(&cell.formula.as_ref().map_or_else(
+                            || cell.value.clone(),
+                            |formula| format!("`{formula}` → {}", cell.value),
+                        ))
+                    })
+                    .collect()
+            })
+            .collect::<Vec<_>>();
+        output.push_str(&rows_to_markdown_table(&rows));
+        output.push('\n');
+    }
+    Ok(output)
+}
+
+pub(crate) fn extract_xlsx_sheets_from_bytes(bytes: &[u8]) -> Result<Vec<Sheet>, BackendError> {
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).map_err(zip_read_err)?;
+    validate_archive_limits(&mut archive)?;
+    read_xlsx_sheets(&mut archive)
+}
+
+fn read_xlsx_sheets<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+) -> Result<Vec<Sheet>, BackendError> {
     let mut shared = Vec::new();
     if let Ok(mut entry) = archive.by_name("xl/sharedStrings.xml") {
         ensure_entry_size(&entry)?;
@@ -520,13 +557,27 @@ fn read_xlsx_text<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<String,
         fallback
     });
 
-    let mut output = String::new();
+    let mut output = Vec::new();
     for sheet in sheets {
         let xml = read_required_archive_text(archive, &sheet.part)?;
         let rows = read_xlsx_rows(&xml, &shared)?;
-        output.push_str(&format!("## {}\n\n", sheet.name.replace(['\r', '\n'], " ")));
-        output.push_str(&rows_to_markdown_table(&rows));
-        output.push('\n');
+        if rows
+            .iter()
+            .flatten()
+            .any(|cell| !cell.value.trim().is_empty() || cell.formula.is_some())
+        {
+            output.push(Sheet {
+                name: sheet.name,
+                hidden: false,
+                declared_columns: rows.iter().map(Vec::len).max().unwrap_or(0) as u32,
+                rows,
+            });
+        }
+    }
+    if output.is_empty() {
+        return Err(xlsx_parse_error(
+            "The workbook contains no non-empty sheets.",
+        ));
     }
     Ok(output)
 }
@@ -630,7 +681,7 @@ fn read_shared_strings(xml: &str) -> Result<Vec<String>, BackendError> {
     Ok(strings)
 }
 
-fn read_xlsx_rows(xml: &str, shared: &[String]) -> Result<Vec<Vec<String>>, BackendError> {
+fn read_xlsx_rows(xml: &str, shared: &[String]) -> Result<Vec<Vec<Cell>>, BackendError> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
     let mut rows = Vec::new();
@@ -709,7 +760,7 @@ fn read_xlsx_rows(xml: &str, shared: &[String]) -> Result<Vec<Vec<String>>, Back
                 b"f" => in_formula = false,
                 b"t" => in_inline_text = false,
                 b"c" => {
-                    row.resize(cell_column + 1, String::new());
+                    row.resize(cell_column + 1, Cell::value(""));
                     let value = if cell_type == "s" {
                         let index = cell_value.trim().parse::<usize>().map_err(|_| {
                             BackendError::new(
@@ -772,9 +823,9 @@ fn read_xlsx_rows(xml: &str, shared: &[String]) -> Result<Vec<Vec<String>>, Back
                                 "An XLSX formula cell has no cached display value.",
                             ));
                         }
-                        markdown_table_cell(&format!("`={}` → {}", formula, value))
+                        Cell::formula(format!("={formula}"), value)
                     } else {
-                        markdown_table_cell(&value)
+                        Cell::value(value)
                     };
                 }
                 b"row" => rows.push(std::mem::take(&mut row)),

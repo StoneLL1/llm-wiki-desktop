@@ -3622,7 +3622,13 @@ impl ImportV2Service {
                 ImportStage::Extract,
             );
         }
-        let planned_routes = self.planned_routes(context, &input, recovery_action)?;
+        let planned_routes = if input.kind == ImportInputKind::Url && snapshot.authenticated_retry {
+            // An authenticated retry must reach the stage that consumes the
+            // bound profile. Native-first policy applies to anonymous imports.
+            vec![("web.generic.browser", QualityFloor::ComparisonFallback)]
+        } else {
+            self.planned_routes(context, &input, recovery_action)?
+        };
         let mut engines = Vec::with_capacity(planned_routes.len());
         for attempt in &planned_routes {
             let route_input = route_resolution_input(attempt.0, &input);
@@ -3753,6 +3759,7 @@ impl ImportV2Service {
         let mut recovery_error = None;
         let mut terminal_web_error = None;
         let mut request = request;
+        let mut capability_input_materialized = false;
         let max_task_progress = Cell::new(5_u64);
         for ((_, quality_floor), engine) in engines {
             let descriptor = describe_engine(engine.as_ref())?;
@@ -3774,9 +3781,11 @@ impl ImportV2Service {
             if is_capability_route(&descriptor.route)
                 && !descriptor.engine_id.starts_with("builtin.")
                 && request.input.source_identity.is_some()
+                && !capability_input_materialized
             {
                 request.input =
                     materialize_capability_input(context, &staging_root, &request.input)?;
+                capability_input_materialized = true;
             }
             let started_at = chrono::Utc::now().to_rfc3339();
             let report_engine_progress = |progress: EngineProgress| {
@@ -4605,41 +4614,74 @@ impl ImportV2Service {
             source_identity: None,
             media_save_mode: Default::default(),
         };
-        let probe_embedded = request.input.kind == ImportInputKind::File;
         let companion_fallback = staging.join("transcripts/companion-fallback.md");
-        let engine = match self
-            .engines
-            .resolve_media_asr(&asr_input, request.asr_profile.as_ref())
-        {
-            Ok(engine) => engine,
-            Err(_) if companion_fallback.is_file() => {
-                return apply_companion_transcript_fallback(context, files, &staging, web_result)
+        let mut asr_request = request.clone();
+        asr_request.request_id = uuid::Uuid::new_v4().to_string();
+        asr_request.input = asr_input;
+        asr_request.chained_input = Some(temporary_input_path);
+        let mut embedded = None;
+        if request.input.kind == ImportInputKind::File {
+            if let Ok(decoder) = self
+                .engines
+                .resolve_route("media.embedded-subtitle", &asr_request.input)
+            {
+                asr_request.asr_probe_only = true;
+                match execute_engine_with_progress(
+                    decoder.as_ref(),
+                    &asr_request,
+                    token,
+                    &|progress| {
+                        update_continuation_progress(tasks, task_id, max_task_progress, progress)
+                    },
+                ) {
+                    Ok(result) => embedded = Some((decoder, result)),
+                    Err(error) if optional_subtitle_probe_failure(&error) => {
+                        if companion_fallback.is_file() {
+                            web_result.warnings.push(error.code);
+                            return apply_companion_transcript_fallback(
+                                context, files, &staging, web_result,
+                            );
+                        }
+                        if error.code != "IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE" {
+                            return Err(error);
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
             }
-            Err(error) => return Err(error),
-        };
-        if !request.local_asr_authorized && !probe_embedded {
+        }
+        if embedded.is_none() && companion_fallback.is_file() {
+            return apply_companion_transcript_fallback(context, files, &staging, web_result);
+        }
+        if embedded.is_none() && !request.local_asr_authorized {
             return Err(asr_unavailable());
         }
+        let (engine, embedded_result) = if let Some((decoder, result)) = embedded {
+            (decoder, Some(result))
+        } else {
+            (
+                self.engines
+                    .resolve_media_asr(&asr_request.input, request.asr_profile.as_ref())?,
+                None,
+            )
+        };
         let descriptor = describe_engine(engine.as_ref())?;
         let shard_key = asr_shard_key(&canonical_media, &descriptor, request)?;
         let shard_root = staging.join("asr-shards");
         let started_at = chrono::Utc::now().to_rfc3339();
-        let mut asr_request = request.clone();
-        asr_request.request_id = uuid::Uuid::new_v4().to_string();
-        asr_request.input = asr_input;
-        // Capability runners receive staging artifacts through the dedicated
-        // relative-path field. Passing Rust's canonical Windows path here can
-        // introduce a `\\?\` prefix that Node treats as a different root and
-        // rejects with IMPORT_ASR_POLICY_BLOCKED.
-        asr_request.chained_input = Some(temporary_input_path);
         let outcome = (|| -> Result<(EngineResult, Vec<String>), BackendError> {
-            if let Some(cached) = load_completed_asr_shard(
-                &shard_root,
-                &shard_key,
-                &descriptor,
-                &staging,
-                request.local_asr_authorized,
-            )? {
+            let cached = if embedded_result.is_some() {
+                None
+            } else {
+                load_completed_asr_shard(
+                    &shard_root,
+                    &shard_key,
+                    &descriptor,
+                    &staging,
+                    request.local_asr_authorized,
+                )?
+            };
+            if let Some(cached) = cached {
                 let base_path = staging.join(&web_result.markdown_path);
                 let mut base =
                     std::fs::read_to_string(&base_path).map_err(|_| asr_unavailable())?;
@@ -4655,6 +4697,15 @@ impl ImportV2Service {
                     .asset_paths
                     .push("transcripts/local-asr.md".into());
                 if let Some(metadata) = cached.metadata {
+                    if descriptor.route == "media.embedded-subtitle" {
+                        preserve_embedded_subtitle(
+                            context,
+                            files,
+                            &staging,
+                            &metadata,
+                            &mut web_result,
+                        )?;
+                    }
                     files
                         .write_project_bytes_absolute(
                             context,
@@ -4703,40 +4754,8 @@ impl ImportV2Service {
                     .map(|_| ())
                 }
             };
-            let (mut asr_result, authorization_required) = if probe_embedded {
-                asr_request.asr_probe_only = true;
-                match execute_engine_with_progress(
-                    engine.as_ref(),
-                    &asr_request,
-                    token,
-                    &report_asr_progress,
-                ) {
-                    Ok(result) => (result, false),
-                    Err(error) if error.code == "IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE" => {
-                        if companion_fallback.is_file() {
-                            return apply_companion_transcript_fallback(
-                                context, files, &staging, web_result,
-                            )
-                            .map(|result| {
-                                (result, vec!["IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE".into()])
-                            });
-                        }
-                        if !request.local_asr_authorized {
-                            return Err(asr_unavailable());
-                        }
-                        asr_request.asr_probe_only = false;
-                        (
-                            execute_engine_with_progress(
-                                engine.as_ref(),
-                                &asr_request,
-                                token,
-                                &report_asr_progress,
-                            )?,
-                            true,
-                        )
-                    }
-                    Err(error) => return Err(error),
-                }
+            let (mut asr_result, authorization_required) = if let Some(result) = embedded_result {
+                (result, false)
             } else {
                 asr_request.asr_probe_only = false;
                 (
@@ -4767,7 +4786,12 @@ impl ImportV2Service {
             if output_metadata.file_type().is_symlink()
                 || !output_metadata.is_file()
                 || !output_path.starts_with(&canonical_staging)
-                || !is_allowed_local_asr_output_workspace(&canonical_staging, output_workspace)
+                || !(is_allowed_local_asr_output_workspace(&canonical_staging, output_workspace)
+                    || (descriptor.route == "media.embedded-subtitle"
+                        && output_workspace.parent() == Some(canonical_staging.as_path())
+                        && output_workspace.file_name().is_some_and(|name| {
+                            name.to_string_lossy().starts_with(".media-output-")
+                        })))
             {
                 return Err(asr_unavailable());
             }
@@ -4810,6 +4834,15 @@ impl ImportV2Service {
                 .asset_paths
                 .push("transcripts/local-asr.md".into());
             if let Some(metadata) = transcript_metadata {
+                if descriptor.route == "media.embedded-subtitle" {
+                    preserve_embedded_subtitle(
+                        context,
+                        files,
+                        &staging,
+                        &metadata,
+                        &mut web_result,
+                    )?;
+                }
                 files
                     .write_project_bytes_absolute(
                         context,
@@ -6195,6 +6228,46 @@ fn apply_companion_transcript_fallback(
     Ok(result)
 }
 
+fn preserve_embedded_subtitle(
+    context: &ProjectContext,
+    files: &FileStore,
+    staging: &Path,
+    metadata: &[u8],
+    result: &mut EngineResult,
+) -> Result<(), BackendError> {
+    let value: serde_json::Value =
+        serde_json::from_slice(metadata).map_err(|_| asr_unavailable())?;
+    if let Some(original) = value
+        .get("originalSubtitle")
+        .and_then(|value| value.as_str())
+    {
+        let relative = "subtitles/embedded.srt";
+        files.write_project_bytes_absolute(
+            context,
+            &staging.join(relative),
+            original.as_bytes(),
+        )?;
+        if !result.asset_paths.iter().any(|path| path == relative) {
+            result.asset_paths.push(relative.into());
+        }
+    }
+    Ok(())
+}
+
+fn optional_subtitle_probe_failure(error: &BackendError) -> bool {
+    // Optional availability/decoder failures may not erase a reliable sidecar.
+    // Integrity, path, cancellation and source-change failures must propagate.
+    matches!(
+        error.code.as_str(),
+        "IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE"
+            | "IMPORT_MEDIA_ENGINE_FAILED"
+            | "IMPORT_ASR_DECODE_FAILED"
+            | "IMPORT_V2_ENGINE_UNAVAILABLE"
+            | "IMPORT_V2_ENGINE_TIMEOUT"
+            | "IMPORT_V2_ENGINE_FAILED"
+    )
+}
+
 fn is_allowed_local_asr_output_workspace(staging: &Path, workspace: &Path) -> bool {
     let Some(name) = workspace.file_name().map(|value| value.to_string_lossy()) else {
         return false;
@@ -6616,6 +6689,7 @@ fn is_capability_route(route: &str) -> bool {
 
 fn is_non_fallback_error(error: &BackendError) -> bool {
     error.code == crate::errors::IMPORT_V2_CANCELLED
+        || error.code == "IMPORT_FILE_SOURCE_CHANGED"
         || error.code == "IMPORT_PDF_ENCRYPTED_UNSUPPORTED"
         || error.code == "IMPORT_PDF_ACTIVE_CONTENT_REJECTED"
         || error.code.contains("PASSWORD")
@@ -6733,7 +6807,22 @@ fn materialize_capability_input(
     let mut authorized = input.clone();
     authorized.locator = destination.to_string_lossy().into_owned();
     authorized.normalized_locator = Some(relative.replace('\\', "/"));
-    authorized.source_identity = None;
+    let mut staged_identity = identity.clone();
+    staged_identity.canonical_path = destination
+        .canonicalize()
+        .map_err(|_| {
+            BackendError::new(
+                "IMPORT_FILE_STAGE_FAILED",
+                "The staged original could not be resolved.",
+                true,
+                false,
+            )
+        })?
+        .to_string_lossy()
+        .into_owned();
+    staged_identity.modified_nanos = None;
+    staged_identity.file_id = None;
+    authorized.source_identity = Some(staged_identity);
     Ok(authorized)
 }
 
@@ -7993,6 +8082,7 @@ mod tests {
         root: PathBuf,
         probe_seen: Arc<std::sync::atomic::AtomicBool>,
         embedded_available: bool,
+        failure_code: Option<&'static str>,
     }
 
     impl ImportEngine for EmbeddedSubtitleProbeFixtureEngine {
@@ -8000,7 +8090,7 @@ mod tests {
             EngineDescriptor {
                 engine_id: "embedded-subtitle-probe.fixture".into(),
                 engine_version: "1".into(),
-                route: "media.asr".into(),
+                route: "media.embedded-subtitle".into(),
             }
         }
 
@@ -8023,6 +8113,14 @@ mod tests {
             }
             self.probe_seen
                 .store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(code) = self.failure_code {
+                return Err(BackendError::new(
+                    code,
+                    "The optional decoder probe failed.",
+                    true,
+                    true,
+                ));
+            }
             if !self.embedded_available {
                 return Err(BackendError::new(
                     "IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE",
@@ -10692,6 +10790,7 @@ mod tests {
                 root: fixture.root.clone(),
                 probe_seen: Arc::clone(&probe_seen),
                 embedded_available: true,
+                failure_code: None,
             }))
             .unwrap();
         let (session, item, task) = fixture.seed_one_item_named("interview.mp4");
@@ -10726,6 +10825,77 @@ mod tests {
     }
 
     #[test]
+    fn local_media_preserves_sidecar_on_optional_probe_failure_but_propagates_integrity_errors() {
+        for code in [
+            None,
+            Some("IMPORT_MEDIA_ENGINE_FAILED"),
+            Some("IMPORT_V2_ENGINE_UNAVAILABLE"),
+            Some("IMPORT_MEDIA_POLICY_BLOCKED"),
+            Some("IMPORT_V2_CANCELLED"),
+            Some("IMPORT_SOURCE_CHANGED"),
+        ] {
+            let fixture = OrchestratorFixture::new("companion-probe-failures");
+            if let Some(failure_code) = code {
+                fixture
+                    .service
+                    .register_engine(Arc::new(EmbeddedSubtitleProbeFixtureEngine {
+                        root: fixture.root.clone(),
+                        probe_seen: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        embedded_available: false,
+                        failure_code: Some(failure_code),
+                    }))
+                    .unwrap();
+            }
+            let (session, item, task) = fixture.seed_one_item_named("interview.mp4");
+            let sidecar = "1\n00:00:00,000 --> 00:00:02,000\n2026 [可靠伴随稿]\n";
+            std::fs::write(fixture.root.join("fixtures/interview.srt"), sidecar).unwrap();
+            let result = fixture.service.run_item(
+                &fixture.context,
+                &fixture.files,
+                &fixture.tasks,
+                &session.session_id,
+                &item.item_id,
+                &task.id,
+            );
+            let ordinary_failure = code.is_none_or(|code| {
+                matches!(
+                    code,
+                    "IMPORT_MEDIA_ENGINE_FAILED" | "IMPORT_V2_ENGINE_UNAVAILABLE"
+                )
+            });
+            if ordinary_failure {
+                let result = result.unwrap();
+                assert_eq!(
+                    result.status,
+                    ImportItemStatus::PreviewReady,
+                    "{code:?}: {result:?}"
+                );
+                let preview = result.preview.unwrap();
+                let staging = fixture.root.join(format!(
+                    ".app/import-sessions/{}/items/{}/staging",
+                    session.session_id, item.item_id
+                ));
+                let markdown =
+                    std::fs::read_to_string(staging.join(preview.markdown.relative_path)).unwrap();
+                assert!(markdown.contains("2026 [可靠伴随稿]"), "{markdown}");
+                assert_eq!(
+                    std::fs::read_to_string(staging.join("subtitles/companion.srt")).unwrap(),
+                    sidecar
+                );
+                assert_eq!(
+                    std::fs::read(staging.join("source.bin")).unwrap(),
+                    std::fs::read(fixture.root.join("fixtures/interview.mp4")).unwrap()
+                );
+            } else {
+                match result {
+                    Err(error) => assert_eq!(Some(error.code.as_str()), code),
+                    Ok(item) => assert_eq!(item.status, ImportItemStatus::Cancelled),
+                }
+            }
+        }
+    }
+
+    #[test]
     fn local_media_uses_companion_before_asr_when_embedded_probe_is_empty() {
         let fixture = OrchestratorFixture::new("companion-before-asr");
         let probe_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -10735,6 +10905,7 @@ mod tests {
                 root: fixture.root.clone(),
                 probe_seen: Arc::clone(&probe_seen),
                 embedded_available: false,
+                failure_code: None,
             }))
             .unwrap();
         let (session, item, task) = fixture.seed_one_item_named("interview.mp4");

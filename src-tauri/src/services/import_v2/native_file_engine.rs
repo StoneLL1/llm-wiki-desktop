@@ -136,8 +136,11 @@ impl ImportEngine for NativeFileEngine {
         let bytes = safe_read_source(&source, identity)?;
         let text = decode_text(&bytes)?;
         let prefix = &bytes[..bytes.len().min(8192)];
-        let (format, _) =
-            crate::services::import_v2::file_discovery::identify_file(&source, prefix)?;
+        let format = if request.input.kind == ImportInputKind::ClipboardText {
+            FileFormat::Markdown
+        } else {
+            crate::services::import_v2::file_discovery::identify_file(&source, prefix)?.0
+        };
         let allow_remote_images = format == FileFormat::Html;
         let (markdown, mut warnings) = match format {
             FileFormat::Html => html_to_markdown(&text),
@@ -246,12 +249,8 @@ impl ImportEngine for NativeCsvPackageEngine {
             .ok_or_else(source_changed)?;
         let bytes = safe_read_source(&source, identity)?;
         let text = decode_text(&bytes)?;
-        let delimiter = detect_delimiter(&text);
-        let mut reader = csv::ReaderBuilder::new()
-            .delimiter(delimiter)
-            .flexible(true)
-            .has_headers(false)
-            .from_reader(text.as_bytes());
+        let delimiter = super::markdown_normalizer::detect_csv_delimiter(&text).unwrap_or(b',');
+        let mut reader = super::markdown_normalizer::csv_reader(&text, delimiter);
         let rows = reader
             .records()
             .map(|record| {
@@ -454,7 +453,14 @@ impl ImportEngine for NativeStructuredFileEngine {
         let mut pdf_inspection = None;
         let mut pdf_page_plan = None;
         let mut continuation = None;
+        let mut workbook_sheets = None;
         let mut markdown: String = match self.extension() {
+            "xlsx" => {
+                workbook_sheets = Some(super::structured_extract::extract_xlsx_sheets_from_bytes(
+                    &bytes,
+                )?);
+                String::new()
+            }
             "pdf" => {
                 let inspection =
                     crate::services::import_v2::pdf_router::inspect_pdf(&source, None).map_err(
@@ -556,7 +562,7 @@ impl ImportEngine for NativeStructuredFileEngine {
         let mut meaningful_image_coverage = None;
         let mut presentation_image_preservation_incomplete = false;
         if extension == "xlsx" {
-            let sheets = workbook_sheets_from_markdown(&markdown)?;
+            let sheets = workbook_sheets.expect("XLSX extraction produces structured sheets");
             let output = crate::services::import_v2::office_postprocess::WorkbookPlan::new(
                 "pending",
                 "pending",
@@ -688,73 +694,6 @@ impl ImportEngine for NativeStructuredFileEngine {
             warnings,
         })
     }
-}
-
-fn workbook_sheets_from_markdown(
-    markdown: &str,
-) -> Result<Vec<crate::services::import_v2::office_postprocess::Sheet>, BackendError> {
-    use crate::services::import_v2::office_postprocess::{Cell, Sheet};
-    let mut sheets = Vec::new();
-    let mut current_name = None::<String>;
-    let mut rows = Vec::<Vec<Cell>>::new();
-    let flush = |sheets: &mut Vec<Sheet>, name: &mut Option<String>, rows: &mut Vec<Vec<Cell>>| {
-        if let Some(name) = name.take() {
-            let declared_columns = rows.iter().map(Vec::len).max().unwrap_or(0) as u32;
-            if rows
-                .iter()
-                .any(|row| row.iter().any(|cell| !cell.value.trim().is_empty()))
-            {
-                sheets.push(Sheet {
-                    name,
-                    hidden: false,
-                    rows: std::mem::take(rows),
-                    declared_columns,
-                });
-            } else {
-                rows.clear();
-            }
-        }
-    };
-    for line in markdown.lines() {
-        if let Some(name) = line.strip_prefix("## ") {
-            flush(&mut sheets, &mut current_name, &mut rows);
-            current_name = Some(name.trim().to_string());
-            continue;
-        }
-        if current_name.is_some()
-            && line.starts_with('|')
-            && line.ends_with('|')
-            && !line
-                .trim_matches('|')
-                .split('|')
-                .all(|cell| cell.trim().chars().all(|char| char == '-' || char == ':'))
-        {
-            rows.push(
-                line.trim_matches('|')
-                    .split('|')
-                    .map(|value| workbook_cell_from_markdown(value.trim()))
-                    .collect(),
-            );
-        }
-    }
-    flush(&mut sheets, &mut current_name, &mut rows);
-    if sheets.is_empty() {
-        return Err(invalid("The workbook contains no non-empty sheets."));
-    }
-    Ok(sheets)
-}
-
-fn workbook_cell_from_markdown(
-    value: &str,
-) -> crate::services::import_v2::office_postprocess::Cell {
-    use crate::services::import_v2::office_postprocess::Cell;
-    let value = unescape_table_cell(value);
-    if let Some(rest) = value.strip_prefix("`=") {
-        if let Some((formula, displayed)) = rest.split_once("` → ") {
-            return Cell::formula(format!("={formula}"), displayed);
-        }
-    }
-    Cell::value(value)
 }
 
 fn stage_workbook_package(
@@ -1367,13 +1306,6 @@ mod presentation_media_tests {
     }
 }
 
-fn unescape_table_cell(value: &str) -> String {
-    value
-        .replace("<br>", "\n")
-        .replace("\\|", "|")
-        .replace("\\\\", "\\")
-}
-
 fn short_name_hash(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))[..12].to_string()
 }
@@ -1746,6 +1678,7 @@ fn copy_and_rewrite_local_assets(
 ) -> Result<(String, Vec<String>, Vec<String>), BackendError> {
     let mut paths = Vec::new();
     let mut replacements = Vec::new();
+    let mut unavailable_images = Vec::new();
     let mut warnings = Vec::new();
     let canonical_root = root
         .canonicalize()
@@ -1776,12 +1709,24 @@ fn copy_and_rewrite_local_assets(
                     paths.push(stable.clone());
                     replacements.push((destination.to_string(), stable));
                 }
-                Err(_) => {
+                Err(err) => {
+                    if cancellation.is_cancelled() {
+                        return Err(cancelled());
+                    }
                     warnings.push("IMPORT_REMOTE_IMAGE_UNAVAILABLE".to_string());
-                    replacements.push((
-                        destination.to_string(),
-                        "assets/remote-image-unavailable".to_string(),
-                    ));
+                    if let Some(range) = resource.image_range {
+                        warnings.push(format!(
+                            "IMPORT_REMOTE_IMAGE_UNAVAILABLE_AT_BYTE_{}:{}",
+                            range.start, err.code
+                        ));
+                        // Keep the caption at its article position, without an
+                        // active remote image or a fabricated local resource.
+                        let caption = markdown[range.start + 2..range.end]
+                            .split_once("](")
+                            .map(|(caption, _)| caption)
+                            .unwrap_or("");
+                        unavailable_images.push((range, format!("[Image unavailable: {caption}]")));
+                    }
                 }
             }
             continue;
@@ -1844,6 +1789,9 @@ fn copy_and_rewrite_local_assets(
     paths.sort();
     paths.dedup();
     let mut rewritten = markdown.to_string();
+    for (range, caption) in unavailable_images.into_iter().rev() {
+        rewritten.replace_range(range, &caption);
+    }
     for (original, stable) in replacements {
         rewritten = rewritten.replace(&format!("]({original})"), &format!("]({stable})"));
         rewritten = rewritten.replace(&format!("](<{original}>)"), &format!("]({stable})"));
@@ -1858,6 +1806,7 @@ fn copy_and_rewrite_local_assets(
 struct MarkdownResource {
     destination: String,
     image: bool,
+    image_range: Option<std::ops::Range<usize>>,
 }
 
 fn markdown_resources(markdown: &str) -> Vec<MarkdownResource> {
@@ -1883,6 +1832,9 @@ fn markdown_resources(markdown: &str) -> Vec<MarkdownResource> {
             resources.push(MarkdownResource {
                 destination: destination.to_string(),
                 image,
+                image_range: opening
+                    .filter(|_| image)
+                    .map(|opening| opening - 1..close + 1),
             });
         }
         offset = close + 1;
@@ -1906,6 +1858,7 @@ fn markdown_resources(markdown: &str) -> Vec<MarkdownResource> {
             resources.push(MarkdownResource {
                 destination: destination.to_string(),
                 image: reference_is_image(markdown, trimmed),
+                image_range: None,
             });
         }
     }
@@ -2047,23 +2000,6 @@ fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
         }
     }
     None
-}
-
-fn detect_delimiter(text: &str) -> u8 {
-    [b',', b'\t', b';']
-        .into_iter()
-        .max_by_key(|delimiter| {
-            text.lines()
-                .take(4)
-                .map(|line| {
-                    line.as_bytes()
-                        .iter()
-                        .filter(|byte| **byte == *delimiter)
-                        .count()
-                })
-                .sum::<usize>()
-        })
-        .unwrap_or(b',')
 }
 
 fn rows_to_gfm(rows: &[Vec<String>]) -> String {

@@ -40,6 +40,74 @@ pub fn normalize_markdown(value: &str) -> String {
     format!("{}\n", normalized.trim_end_matches('\n'))
 }
 
+/// Discovery reads only a prefix. An unfinished final code point is not a
+/// malformed document; complete document reads still use strict `decode_text`.
+pub(crate) fn decode_text_prefix(bytes: &[u8]) -> Result<String, BackendError> {
+    let (encoding, encoded) = if let Some(encoded) = bytes.strip_prefix(&[0xff, 0xfe]) {
+        (UTF_16LE, encoded)
+    } else if let Some(encoded) = bytes.strip_prefix(&[0xfe, 0xff]) {
+        (UTF_16BE, encoded)
+    } else {
+        let encoded = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
+        match std::str::from_utf8(encoded) {
+            Ok(text) => return Ok(text.to_owned()),
+            Err(error) if error.error_len().is_none() => {
+                return Ok(std::str::from_utf8(&encoded[..error.valid_up_to()])
+                    .expect("validated UTF-8 prefix")
+                    .to_owned());
+            }
+            _ => (GB18030, bytes),
+        }
+    };
+    let mut decoder = encoding.new_decoder_without_bom_handling();
+    let mut text = String::with_capacity(encoded.len() * 3 + 4);
+    let (_, _, had_errors) = decoder.decode_to_string(encoded, &mut text, false);
+    if had_errors {
+        return decode_text(bytes);
+    }
+    Ok(text)
+}
+
+pub(crate) fn csv_reader(text: &str, delimiter: u8) -> csv::Reader<&[u8]> {
+    csv::ReaderBuilder::new()
+        .delimiter(delimiter)
+        .flexible(true)
+        .has_headers(false)
+        .from_reader(text.trim_start_matches('\u{feff}').as_bytes())
+}
+
+/// Choose a delimiter for an already identified CSV. Discovery separately
+/// requires repeated record structure before classifying ordinary text as CSV.
+pub(crate) fn detect_csv_delimiter(text: &str) -> Option<u8> {
+    [b';', b'\t', b',']
+        .into_iter()
+        .filter_map(|delimiter| {
+            let rows = csv_reader(text, delimiter)
+                .records()
+                .take(16)
+                .collect::<Result<Vec<_>, _>>()
+                .ok()?;
+            let columns = rows.first()?.len();
+            let matching = rows.iter().filter(|row| row.len() == columns).count();
+            let boundaries = rows
+                .iter()
+                .map(|row| row.len().saturating_sub(1))
+                .sum::<usize>();
+            // The first record establishes the shape. Wrong delimiter candidates
+            // often split quoted field contents in later rows but leave it intact.
+            (boundaries > 0).then_some((
+                delimiter,
+                columns > 1,
+                if columns > 1 { matching } else { 0 },
+                boundaries,
+            ))
+        })
+        .max_by_key(|(_, has_header_columns, matching, boundaries)| {
+            (*has_header_columns, *matching, *boundaries)
+        })
+        .map(|(delimiter, _, _, _)| delimiter)
+}
+
 pub fn csv_to_gfm(value: &str) -> Result<String, BackendError> {
     let mut reader = csv::ReaderBuilder::new()
         .flexible(true)
@@ -82,13 +150,68 @@ fn invalid_csv() -> BackendError {
 pub fn html_article_to_markdown(value: &str) -> (String, Vec<String>) {
     let lower = value.to_ascii_lowercase();
     for name in ["article", "main"] {
-        if let Some(start) = lower.find(&format!("<{name}")) {
+        if let Some(start) = opening_tag_start(&lower, name) {
             if let Some(end) = lower[start..].find(&format!("</{name}>")) {
-                return html_to_markdown(&value[start..start + end + name.len() + 3]);
+                let candidate = html_to_markdown(&strip_article_chrome(
+                    &value[start..start + end + name.len() + 3],
+                ));
+                if has_article_body(&candidate.0) {
+                    return candidate;
+                }
             }
         }
     }
-    html_to_markdown(value)
+    // Head metadata and navigation cannot establish article content. Keep a
+    // plain body/div/paragraph fallback for short, unstructured static pages.
+    let body = strip_article_chrome(value);
+    let (markdown, warnings) = html_to_markdown(&body);
+    if has_article_body(&markdown) {
+        (markdown, warnings)
+    } else {
+        (String::new(), warnings)
+    }
+}
+
+fn strip_article_chrome(value: &str) -> String {
+    [
+        "head", "title", "nav", "header", "footer", "aside", "script", "style", "template",
+    ]
+    .into_iter()
+    .fold(value.to_owned(), |body, tag| remove_element(&body, tag))
+}
+
+pub(crate) fn has_article_body(markdown: &str) -> bool {
+    markdown.lines().any(|line| {
+        let line = line.trim();
+        if line.starts_with('#')
+            || line.starts_with("```")
+            || line.starts_with("~~~")
+            || matches!(line, "---" | "***" | "___")
+            || (line.starts_with('[') && line.ends_with(')'))
+        {
+            return false;
+        }
+        let mut prose = line.to_owned();
+        while let Some(start) = prose.find("![") {
+            let Some(destination) = prose[start..].find("](") else {
+                break;
+            };
+            let Some(end) = prose[start + destination + 2..].find(')') else {
+                break;
+            };
+            prose.replace_range(start..start + destination + 2 + end + 1, "");
+        }
+        let prose = prose.trim();
+        let prose = prose
+            .strip_prefix("- ")
+            .or_else(|| prose.strip_prefix("* "))
+            .unwrap_or(prose);
+        let prose = prose
+            .split_once(". ")
+            .filter(|(prefix, _)| !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()))
+            .map_or(prose, |(_, body)| body);
+        !prose.is_empty() && !matches!(prose, "___" | "（图片不可用）")
+    })
 }
 
 pub fn html_to_markdown(value: &str) -> (String, Vec<String>) {
@@ -148,7 +271,7 @@ fn remove_element(value: &str, name: &str) -> String {
     let mut rest = value;
     loop {
         let lower = rest.to_ascii_lowercase();
-        let Some(start) = lower.find(&format!("<{name}")) else {
+        let Some(start) = opening_tag_start(&lower, name) else {
             output.push_str(rest);
             break;
         };
@@ -159,6 +282,17 @@ fn remove_element(value: &str, name: &str) -> String {
         rest = &rest[start + close + name.len() + 3..];
     }
     output
+}
+
+fn opening_tag_start(lowercase: &str, name: &str) -> Option<usize> {
+    let needle = format!("<{name}");
+    lowercase.match_indices(&needle).find_map(|(start, _)| {
+        lowercase
+            .as_bytes()
+            .get(start + needle.len())
+            .is_some_and(|byte| byte.is_ascii_whitespace() || matches!(byte, b'>' | b'/'))
+            .then_some(start)
+    })
 }
 
 fn render_tag(tag: &str, output: &mut String) {
@@ -289,6 +423,39 @@ mod tests {
     #[test]
     fn rejects_unrecognized_binary_bytes() {
         assert!(decode_text(&[0xff, 0xfe, 0x00]).is_err());
+    }
+
+    #[test]
+    fn prefix_decoder_buffers_only_trailing_partial_characters() {
+        use super::decode_text_prefix;
+        assert_eq!(decode_text_prefix(b"title\xe4\xb8").unwrap(), "title");
+        assert_eq!(decode_text_prefix(b"\xff\xfeA\0\0\xd8").unwrap(), "A");
+        assert_eq!(decode_text_prefix(b"\xfe\xff\0A\xd8\0").unwrap(), "A");
+        assert!(decode_text(b"\xff\xfeA\0\0\xd8").is_err());
+        assert!(decode_text_prefix(b"\xff\xfe\0\xdcA\0").is_err());
+    }
+
+    #[test]
+    fn csv_detection_uses_record_structure_and_ignores_quoted_delimiters() {
+        use super::{csv_reader, detect_csv_delimiter};
+        for (text, delimiter) in [
+            ("name,description\nAlice,\"a;b;c;d\"\n", b','),
+            ("name;description\nAlice;\"a,b,c,d\"\n", b';'),
+            ("name\tnote\nAlice\t\"a,b;c\"\n", b'\t'),
+        ] {
+            assert_eq!(detect_csv_delimiter(text), Some(delimiter));
+            let records = csv_reader(text, delimiter)
+                .records()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(records.len(), 2);
+            assert!(records.iter().all(|record| record.len() == 2));
+        }
+        assert_eq!(detect_csv_delimiter("name;age"), Some(b';'));
+        assert_eq!(
+            detect_csv_delimiter("name;age\nAlice;20;extra\nBob;30"),
+            Some(b';')
+        );
     }
 
     #[test]

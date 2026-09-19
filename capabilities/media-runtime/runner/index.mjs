@@ -4,14 +4,15 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { promisify, TextDecoder } from "node:util";
+import { promisify } from "node:util";
 
-import { restrictedEnvironment } from "./core.mjs";
+import { restrictedEnvironment, textSubtitleTracks, renderSrt } from "./core.mjs";
 
 const execFileAsync = promisify(execFile);
 const packRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ffmpeg = path.join(packRoot, "runtime", "ffmpeg", "bin", process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg");
-const allowedExtensions = new Set(["gif", "wma", "wmv", "srt", "vtt", "ass", "ssa", "lrc"]);
+const videoExtensions = ["mp4", "mkv", "mov", "m4v", "webm", "avi", "wmv"];
+const allowedExtensions = new Set(["gif", "wma", ...videoExtensions]);
 const MAX_RPC_BYTES = 1024 * 1024;
 
 async function readRpc() {
@@ -33,39 +34,62 @@ function contained(root, candidate) {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-function subtitleMarkdown(text) {
-  return text.replace(/^WEBVTT[^\n]*\n/iu, "").replace(/\d{1,2}:\d{2}(?::\d{2})?[.,]\d{3}\s+-->[^\n]+/gu, "")
-    .replace(/^Dialogue:[^,]*(?:,[^,]*){8},/gmu, "").replace(/^\[\d{1,2}:\d{2}(?:\.\d{1,3})?\]/gmu, "")
-    .split(/\r?\n/u).map((line) => line.trim()).filter((line) => line && !/^\d+$/u.test(line) && !line.startsWith("[")).join("\n\n");
-}
 
 let rpc;
+let output;
+let completed = false;
 try {
   rpc = await readRpc();
   const params = rpc?.params;
   if (rpc?.method === "capability.health") {
-    if (params?.protocolVersion !== "2" || params?.capabilityId !== "media-runtime" || !["media.subtitle", "media.keyframes"].includes(params?.route)) throw new Error("IMPORT_MEDIA_INVALID_REQUEST");
+    if (params?.protocolVersion !== "2" || params?.capabilityId !== "media-runtime" || !["media.embedded-subtitle", "media.keyframes"].includes(params?.route)) throw new Error("IMPORT_MEDIA_INVALID_REQUEST");
     if (!(await fs.stat(ffmpeg).catch(() => null))?.isFile()) throw new Error("IMPORT_MEDIA_ENGINE_INTEGRITY_FAILED");
     process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { healthy: true, protocolVersion: "2", capabilityId: "media-runtime", route: params.route }, error: null })}\n`);
     process.exit(0);
   }
   if (rpc?.jsonrpc !== "2.0" || params?.operation !== "extract" || params?.input?.kind !== "file") throw new Error("IMPORT_MEDIA_INVALID_REQUEST");
-  const projectRoot = path.resolve(params.projectRoot);
-  const stagingRoot = path.resolve(projectRoot, params.stagingRoot);
+  const projectRoot = await fs.realpath(path.resolve(params.projectRoot));
+  const stagingRoot = await fs.realpath(path.resolve(projectRoot, params.stagingRoot));
   const source = path.resolve(stagingRoot, params.chainedInput || params.input.locator);
-  if (!contained(projectRoot, stagingRoot) || !contained(stagingRoot, source) || !(await fs.stat(source).catch(() => null))?.isFile()) throw new Error("IMPORT_MEDIA_POLICY_BLOCKED");
+  if (!contained(projectRoot, stagingRoot) || !contained(stagingRoot, source) || (await fs.lstat(source)).isSymbolicLink() || !contained(stagingRoot, await fs.realpath(source)) || !(await fs.stat(source).catch(() => null))?.isFile()) throw new Error("IMPORT_MEDIA_POLICY_BLOCKED");
   const extension = path.extname(source).slice(1).toLowerCase();
   if (!allowedExtensions.has(extension) || (await fs.stat(source)).size <= 0) throw new Error("IMPORT_MEDIA_INVALID_INPUT");
-  const output = await fs.mkdtemp(path.join(stagingRoot, ".media-output-"));
+  output = await fs.mkdtemp(path.join(stagingRoot, ".media-output-"));
   const sourcePath = path.join(output, `source.${extension || "bin"}`);
   await fs.copyFile(source, sourcePath);
   let markdown;
+  let subtitleMetadata = null;
   let continuation = null;
   const assets = [];
-  if (["srt", "vtt", "ass", "ssa", "lrc"].includes(extension)) {
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(await fs.readFile(source));
-    if (!text.trim()) throw new Error("IMPORT_MEDIA_INVALID_INPUT");
-    markdown = `# Subtitle\n\n${subtitleMarkdown(text)}\n`;
+  if (params.asrProbeOnly === true) {
+    if (!videoExtensions.includes(extension)) throw new Error("IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE");
+    const options = { shell: false, env: restrictedEnvironment(packRoot), windowsHide: true, timeout: 10 * 60 * 1000, maxBuffer: 32 * 1024 * 1024 };
+    let inventory;
+    try {
+      const result = await execFileAsync(ffmpeg, ["-nostdin", "-hide_banner", "-protocol_whitelist", "file,pipe", "-i", source], options);
+      inventory = result.stderr;
+    } catch (error) {
+      // FFmpeg's inventory-only invocation exits 1 because no output is requested.
+      if (error.code !== 1 || typeof error.stderr !== "string" || !error.stderr.includes("At least one output file must be specified")) throw error;
+      inventory = error.stderr;
+    }
+    const subtitlePath = path.join(output, "embedded.srt");
+    for (const track of textSubtitleTracks(inventory, params.recognitionLanguage)) {
+      try {
+        await execFileAsync(ffmpeg, ["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-protocol_whitelist", "file,pipe", "-i", source, "-map", `0:${track.index}`, "-vn", "-an", "-dn", "-c:s", "srt", "-f", "srt", subtitlePath], options);
+        const status = await fs.stat(subtitlePath);
+        if (status.size > 32 * 1024 * 1024) throw new Error("IMPORT_MEDIA_INVALID_INPUT");
+        const originalSubtitle = await fs.readFile(subtitlePath, "utf8");
+        const transcript = renderSrt(originalSubtitle);
+        markdown = transcript.markdown;
+        subtitleMetadata = { provenance: "local-embedded-subtitle", provider: "embedded_subtitle", language: track.language, trackIndex: track.index, segments: transcript.segments, originalSubtitle };
+        assets.push(path.relative(stagingRoot, subtitlePath).split(path.sep).join("/"));
+        break;
+      } catch (error) {
+        if (error?.killed || error?.message === "IMPORT_MEDIA_INVALID_INPUT") throw error;
+      }
+    }
+    if (!subtitleMetadata) throw new Error("IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE");
   } else {
     const frames = path.join(output, "frames");
     await fs.mkdir(frames);
@@ -78,10 +102,14 @@ try {
   }
   const markdownPath = path.join(output, "candidate.md");
   const metadataPath = path.join(output, "metadata.json");
-  await Promise.all([fs.writeFile(markdownPath, markdown), fs.writeFile(metadataPath, JSON.stringify({ engine: "ffmpeg", version: "8.1.2", route: continuation ? "media.keyframes" : "media.subtitle" }))]);
+  await Promise.all([fs.writeFile(markdownPath, markdown), fs.writeFile(metadataPath, JSON.stringify({ engine: "ffmpeg", version: "8.1.2", route: continuation ? "media.keyframes" : "media.embedded-subtitle", ...subtitleMetadata }))]);
   const relative = (value) => path.relative(stagingRoot, value).split(path.sep).join("/");
+  completed = true;
   process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { sourceSnapshotPath: relative(sourcePath), markdownPath: relative(markdownPath), assetPaths: assets, metadataPath: relative(metadataPath), title: path.parse(source).name, textCoverage: continuation ? null : 1, continuation, warnings: [] }, error: null })}\n`);
 } catch (error) {
-  const code = /^IMPORT_MEDIA_[A-Z_]+$/u.test(error?.message || "") ? error.message : "IMPORT_MEDIA_ENGINE_FAILED";
+  const code = /^IMPORT_(?:MEDIA|EMBEDDED_SUBTITLE)_[A-Z_]+$/u.test(error?.message || "") ? error.message : "IMPORT_MEDIA_ENGINE_FAILED";
   process.stdout.write(`${JSON.stringify(failure(rpc?.id, code))}\n`);
+}
+ finally {
+  if (output && !completed) await fs.rm(output, { recursive: true, force: true }).catch(() => {});
 }

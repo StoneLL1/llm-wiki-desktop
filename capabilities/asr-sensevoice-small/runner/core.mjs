@@ -8,11 +8,11 @@ import process from "node:process";
 export const ENGINE_VERSION = "sherpa-onnx-1.13.4";
 export const MODEL_ID = "SenseVoiceSmall-int8-2024-07-17";
 export const MAX_MEDIA_BYTES = 8 * 1024 * 1024 * 1024;
-export const MAX_DECODED_BYTES = 256 * 1024 * 1024;
+export const MAX_DECODED_BYTES = 8 * 1024 * 1024 * 1024;
 export const MAX_TRANSCRIPT_BYTES = 32 * 1024 * 1024;
 export const MAX_TOKENS = 250_000;
 export const SENSEVOICE_CHUNK_SECONDS = 20;
-export const MAX_SENSEVOICE_CHUNKS = Math.ceil(7_200 / SENSEVOICE_CHUNK_SECONDS);
+export const MAX_SENSEVOICE_CHUNKS = Math.ceil(MAX_DECODED_BYTES / (16_000 * 2 * SENSEVOICE_CHUNK_SECONDS));
 export const MAX_SENSEVOICE_BATCH_CHUNKS = 24;
 
 const MEDIA_EXTENSIONS = new Set([
@@ -119,7 +119,7 @@ export function buildFfmpegArguments(mediaPath, wavPath) {
     "-protocol_whitelist", "file,pipe",
     "-i", nativeToolPath(mediaPath),
     "-map", "0:a:0", "-vn", "-sn", "-dn",
-    "-t", "7200", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+    "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
     nativeToolPath(wavPath),
   ];
 }
@@ -130,7 +130,7 @@ export function buildChunkedFfmpegArguments(mediaPath, wavPattern) {
     "-protocol_whitelist", "file,pipe",
     "-i", nativeToolPath(mediaPath),
     "-map", "0:a:0", "-vn", "-sn", "-dn",
-    "-t", "7200", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+    "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
     "-f", "segment", "-segment_time", String(SENSEVOICE_CHUNK_SECONDS),
     "-reset_timestamps", "1",
     nativeToolPath(wavPattern),
@@ -295,8 +295,8 @@ function normalizeSenseVoiceCandidate(result, allowEmpty = false) {
       tokens.some((item) => !item)) {
     throw asError("IMPORT_ASR_OUTPUT_INVALID");
   }
-  if (!text) {
-    if (allowEmpty && timestamps.length === 0 && tokens.length === 0) return null;
+  if (!/[\p{L}\p{N}]/u.test(text)) {
+    if (allowEmpty) return null;
     throw asError("IMPORT_ASR_OUTPUT_INVALID");
   }
   return {
@@ -349,6 +349,9 @@ export function parseSenseVoiceBatchStdout(value, chunkStartsMs) {
 
 export function mergeSenseVoiceTranscripts(transcripts) {
   if (!Array.isArray(transcripts)) throw asError("IMPORT_ASR_INVALID_REQUEST");
+  // Real silent shards may contain punctuation such as a solitary full stop.
+  // Those are not speech, including in already completed local batch caches.
+  transcripts = transcripts.filter((item) => /[\p{L}\p{N}]/u.test(cleanText(item?.text)));
   const segments = transcripts.flatMap((item) => Array.isArray(item?.segments) ? item.segments : []);
   const tokenTimings = transcripts.flatMap((item) => Array.isArray(item?.tokenTimings) ? item.tokenTimings : []);
   if (segments.length === 0 || segments.length > MAX_SENSEVOICE_CHUNKS ||
@@ -530,4 +533,73 @@ export function isNoAudioExecutionError(error) {
   }
   return /(?:stream map.*0:a:0.*matches no streams|does not contain any audio stream|no audio stream|audio stream.*not found|failed to find.*audio)/iu
     .test(details.join("\n"));
+}
+
+// Version 2 proves an EOF decode, including every contiguous PCM shard. Version 1
+// may have been produced by the old two-hour-limited decoder and is not reusable.
+export function completeDecodeMarker(mediaSha256, chunks) {
+  return { schemaVersion: 2, complete: true, mediaSha256,
+    chunkSeconds: SENSEVOICE_CHUNK_SECONDS,
+    durationMs: chunks.reduce((sum, chunk) => sum + chunk.durationMs, 0),
+    chunks: chunks.map(({ startMs, durationMs, bytes }) => ({ startMs, durationMs, bytes })) };
+}
+
+export function canReuseDecodedChunks(marker, mediaSha256, chunks) {
+  return marker?.schemaVersion === 2 && marker.complete === true && chunks.length > 0 &&
+    JSON.stringify(marker) === JSON.stringify(completeDecodeMarker(mediaSha256, chunks));
+}
+
+export async function decodedChunks(directory) {
+  const entries = (await fs.readdir(directory, { withFileTypes: true }))
+    .filter((entry) => entry.isFile() && /^decoded-\d{4,}\.wav$/u.test(entry.name))
+    .sort((a, b) => Number(a.name.slice(8, -4)) - Number(b.name.slice(8, -4)));
+  if (!entries.length || entries.length > MAX_SENSEVOICE_CHUNKS) throw asError("IMPORT_ASR_DECODE_FAILED");
+  let totalBytes = 0;
+  let startMs = 0;
+  const chunks = [];
+  for (let index = 0; index < entries.length; index += 1) {
+    if (entries[index].name !== `decoded-${String(index).padStart(4, "0")}.wav`) throw asError("IMPORT_ASR_DECODE_FAILED");
+    const chunkPath = path.join(directory, entries[index].name);
+    const status = await fs.lstat(chunkPath);
+    if (!status.isFile() || status.isSymbolicLink()) throw asError("IMPORT_ASR_DECODE_FAILED");
+    totalBytes += status.size;
+    if (totalBytes > MAX_DECODED_BYTES) throw asError("IMPORT_ASR_DECODE_FAILED");
+    const handle = await fs.open(chunkPath, "r");
+    const header = Buffer.alloc(Math.min(status.size, 65536));
+    try { await handle.read(header, 0, header.length, 0); } finally { await handle.close(); }
+    if (header.toString("ascii", 0, 4) !== "RIFF" || header.toString("ascii", 8, 12) !== "WAVE") throw asError("IMPORT_ASR_DECODE_FAILED");
+    let pcm = false;
+    let dataBytes = 0;
+    let dataOffset = 0;
+    for (let offset = 12; offset + 8 <= header.length;) {
+      const kind = header.toString("ascii", offset, offset + 4);
+      const bytes = header.readUInt32LE(offset + 4);
+      if (kind === "fmt " && bytes >= 16 && offset + 24 <= header.length) {
+        pcm = header.readUInt16LE(offset + 8) === 1 && header.readUInt16LE(offset + 10) === 1 &&
+          header.readUInt32LE(offset + 12) === 16000 && header.readUInt16LE(offset + 22) === 16;
+      }
+      if (kind === "data") {
+        if (offset + 8 + bytes !== status.size) throw asError("IMPORT_ASR_DECODE_FAILED");
+        dataBytes = bytes; dataOffset = offset + 8; break;
+      }
+      offset += 8 + bytes + (bytes % 2);
+    }
+    if (!pcm || dataBytes <= 0 || dataBytes % 2) throw asError("IMPORT_ASR_DECODE_FAILED");
+    const durationMs = dataBytes / 32;
+    // Exact digital silence is a decoding fact, not an ASR result. Some models
+    // hallucinate words even for all-zero PCM; do not send those shards to ASR.
+    let hasSignal = false;
+    const pcmHandle = await fs.open(chunkPath, "r");
+    try {
+      const buffer = Buffer.alloc(65536);
+      for (let offset = dataOffset; offset < status.size; offset += buffer.length) {
+        const { bytesRead } = await pcmHandle.read(buffer, 0, Math.min(buffer.length, status.size - offset), offset);
+        if (!bytesRead) throw asError("IMPORT_ASR_DECODE_FAILED");
+        if (buffer.subarray(0, bytesRead).some((byte) => byte !== 0)) { hasSignal = true; break; }
+      }
+    } finally { await pcmHandle.close(); }
+    chunks.push({ path: chunkPath, startMs: Math.round(startMs), durationMs, bytes: status.size, hasSignal });
+    startMs += durationMs;
+  }
+  return chunks;
 }

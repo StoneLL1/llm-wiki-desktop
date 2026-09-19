@@ -296,20 +296,48 @@ impl EngineRegistry {
         input: &ImportInput,
     ) -> Result<Arc<dyn ImportEngine>, BackendError> {
         let engines = self.engines.read().map_err(|_| registry_error())?;
-        let mut selected: Option<(bool, Arc<dyn ImportEngine>)> = None;
+        let mut selected: Option<((u8, String), Arc<dyn ImportEngine>)> = None;
         for engine in engines.iter() {
             let descriptor = describe_engine(engine.as_ref())?;
             if descriptor.route != route || !engine_supports(engine.as_ref(), input)? {
                 continue;
             }
-            // Built-ins are safe fallbacks. Prefer an installed capability pack
-            // when it provides the same planned route (notably browser/web).
-            let is_builtin = descriptor.engine_id.starts_with("builtin.");
+            // App-supplied engines are explicit overrides (also used by isolated
+            // transports in tests). Installed packs only supplement native routes.
+            let id = descriptor.engine_id;
+            let native_route = matches!(
+                route,
+                "file.native"
+                    | "file.csv-package"
+                    | "office.modern.docx"
+                    | "office.modern.xlsx"
+                    | "office.modern.pptx"
+                    | "pdf.text"
+                    | "media.subtitle"
+                    | "media.companion"
+                    | "web.generic.readability"
+                    | "web.wechat.article"
+                    | "web.xiaohongshu.note"
+                    | "web.douyin.video"
+                    | "web.bilibili.video"
+            );
+            let priority = if !id.starts_with("builtin.") && !id.starts_with("pack.") {
+                0
+            } else if native_route && id.starts_with("builtin.") {
+                1
+            } else if id.starts_with("pack.browser-runtime-lite.") {
+                2
+            } else if id.starts_with("pack.") {
+                3
+            } else {
+                4
+            };
+            let key = (priority, id);
             if selected
                 .as_ref()
-                .is_none_or(|(selected_is_builtin, _)| *selected_is_builtin && !is_builtin)
+                .is_none_or(|(selected_key, _)| key < *selected_key)
             {
-                selected = Some((is_builtin, engine.clone()));
+                selected = Some((key, engine.clone()));
             }
         }
         selected.map(|(_, engine)| engine).ok_or_else(|| {
@@ -811,6 +839,68 @@ mod tests {
                 .engine_id,
             "pack.browser"
         );
+    }
+
+    #[test]
+    fn native_routes_are_stable_across_pack_install_and_restart_order() {
+        for route in [
+            "media.subtitle",
+            "web.wechat.article",
+            "web.generic.readability",
+            "office.modern.docx",
+        ] {
+            for ids in [
+                [
+                    "builtin.native",
+                    "pack.browser-runtime-lite.route",
+                    "pack.browser-runtime.route",
+                ],
+                [
+                    "pack.browser-runtime.route",
+                    "pack.browser-runtime-lite.route",
+                    "builtin.native",
+                ],
+                [
+                    "pack.browser-runtime-lite.route",
+                    "builtin.native",
+                    "pack.browser-runtime.route",
+                ],
+            ] {
+                let registry = EngineRegistry::default();
+                for id in ids {
+                    registry
+                        .register(Arc::new(FixtureEngine::with_route(id, route, true)))
+                        .unwrap();
+                }
+                let input = ImportInput {
+                    source_identity: None,
+                    kind: ImportInputKind::File,
+                    display_name: "字幕.srt".into(),
+                    locator: "字幕.srt".into(),
+                    normalized_locator: None,
+                    media_save_mode: Default::default(),
+                };
+                assert_eq!(
+                    registry
+                        .resolve_route(route, &input)
+                        .unwrap()
+                        .descriptor()
+                        .engine_id,
+                    "builtin.native"
+                );
+                registry
+                    .replace_registered(Arc::new(FixtureEngine::with_route(ids[0], route, true)))
+                    .unwrap();
+                assert_eq!(
+                    registry
+                        .resolve_route(route, &input)
+                        .unwrap()
+                        .descriptor()
+                        .engine_id,
+                    "builtin.native"
+                );
+            }
+        }
     }
 
     #[test]

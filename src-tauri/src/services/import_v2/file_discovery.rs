@@ -5,7 +5,9 @@ use crate::models::import_v2_file::{
     FileSkipReason, LargeDataEstimate, SkippedFile,
 };
 use crate::models::paths::ProjectContext;
-use crate::services::import_v2::markdown_normalizer::decode_text;
+use crate::services::import_v2::markdown_normalizer::{
+    csv_reader, decode_text_prefix, detect_csv_delimiter,
+};
 use sha2::{Digest, Sha256};
 use std::collections::{HashSet, VecDeque};
 use std::fs::{self, File};
@@ -198,7 +200,19 @@ impl FileDiscoveryService {
                 );
                 continue;
             }
-            let prefix = read_prefix(&path)?;
+            let prefix = match read_prefix(&path) {
+                Ok(prefix) => prefix,
+                Err(err) => {
+                    skip(
+                        &mut result,
+                        &path,
+                        relative,
+                        FileSkipReason::Unreadable,
+                        err.message,
+                    );
+                    continue;
+                }
+            };
             let (format, identity) = match identify_file(&path, &prefix) {
                 Ok(value) => value,
                 Err(err) => {
@@ -206,7 +220,11 @@ impl FileDiscoveryService {
                         &mut result,
                         &path,
                         relative,
-                        FileSkipReason::UnsupportedFormat,
+                        if err.code == "IMPORT_FILE_IO" {
+                            FileSkipReason::Unreadable
+                        } else {
+                            FileSkipReason::UnsupportedFormat
+                        },
                         err.message,
                     );
                     continue;
@@ -269,6 +287,25 @@ impl FileDiscoveryService {
                 continue;
             };
             enforce_file_count_limit(result.files.len(), policy.max_files)?;
+            let inspected =
+                source_identity(&canonical, &metadata, &is_cancelled).and_then(|identity| {
+                    estimate_large_data(&path, format, metadata.len())
+                        .map(|estimate| (identity, estimate))
+                });
+            let (source_identity, large_data) = match inspected {
+                Ok(inspected) => inspected,
+                Err(err) if err.code == "IMPORT_FILE_SCAN_CANCELLED" => return Err(err),
+                Err(err) => {
+                    skip(
+                        &mut result,
+                        &path,
+                        relative,
+                        FileSkipReason::Unreadable,
+                        err.message,
+                    );
+                    continue;
+                }
+            };
             let file = DiscoveredFile {
                 source_path,
                 relative_path: relative.unwrap_or_else(|| display_name.clone()),
@@ -277,8 +314,8 @@ impl FileDiscoveryService {
                 content_kind: format.content_kind(),
                 size_bytes: metadata.len(),
                 identity,
-                source_identity: source_identity(&canonical, &metadata, &is_cancelled)?,
-                large_data: estimate_large_data(&path, format, metadata.len())?,
+                source_identity,
+                large_data,
             };
             result.files.push(file.clone());
             pending.push(file);
@@ -324,8 +361,14 @@ pub fn identify_file(
         .and_then(|v| v.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    let detected = identify_binary(path, prefix, &extension)?
-        .or_else(|| identify_structured_text(prefix, &extension));
+    // UTF-16LE's BOM also matches the broad MPEG sync prefix. Honor the
+    // explicit text encoding before probing untagged audio frames.
+    let detected = if prefix.starts_with(&[0xff, 0xfe]) || prefix.starts_with(&[0xfe, 0xff]) {
+        identify_structured_text(prefix, &extension)
+    } else {
+        identify_binary(path, prefix, &extension)?
+            .or_else(|| identify_structured_text(prefix, &extension))
+    };
     let Some((format, magic, mime, method)) = detected else {
         return Err(error(
             "IMPORT_FILE_UNSUPPORTED",
@@ -626,7 +669,7 @@ fn identify_structured_text(
     prefix: &[u8],
     extension: &str,
 ) -> Option<(FileFormat, &'static str, &'static str, FileDetectionMethod)> {
-    let decoded = decode_text(prefix).ok()?;
+    let decoded = decode_text_prefix(prefix).ok()?;
     let text = decoded.trim_start_matches('\u{feff}').trim_start();
     if text.is_empty() {
         return text_extension_fallback(extension);
@@ -931,18 +974,21 @@ fn looks_like_markdown(text: &str) -> bool {
 }
 
 fn looks_like_csv(text: &str) -> bool {
-    let mut lines = text.lines().filter(|line| !line.trim().is_empty()).take(4);
-    let Some(first) = lines.next() else {
+    let Some(delimiter) = detect_csv_delimiter(text) else {
         return false;
     };
-    [',', '\t', ';'].into_iter().any(|delimiter| {
-        let columns = first.split(delimiter).count();
-        columns > 1
-            && lines
-                .clone()
-                .take(2)
-                .all(|line| line.split(delimiter).count() == columns)
-    })
+    let mut reader = csv_reader(text, delimiter);
+    let mut records = reader.records().take(16);
+    let Some(Ok(first)) = records.next() else {
+        return false;
+    };
+    let Some(Ok(second)) = records.next() else {
+        return false;
+    };
+    let columns = first.len();
+    columns > 1
+        && second.len() == columns
+        && records.all(|row| row.is_ok_and(|row| row.len() == columns))
 }
 
 fn looks_like_srt(text: &str) -> bool {

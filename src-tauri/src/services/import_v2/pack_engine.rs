@@ -594,6 +594,9 @@ impl ImportEngine for PackProcessEngine {
                     ));
                 }
                 validate_engine_result(&request.staging_root, &result)?;
+                if self.descriptor.route == "pack.markitdown" {
+                    validate_document_snapshot(&request, &result)?;
+                }
                 sanitize_capability_text_artifacts(&request, &result)?;
                 localize_remote_assets(
                     &request,
@@ -637,7 +640,10 @@ fn scope_request_to_invocation_root(
             return Err(engine_error("The capability input path is invalid."));
         }
         scoped.input.locator = relative.clone();
-        scoped.input.normalized_locator = Some(relative);
+        scoped.input.normalized_locator = Some(relative.clone());
+        if let Some(identity) = scoped.input.source_identity.as_mut() {
+            identity.canonical_path = relative;
+        }
     }
     Ok(scoped)
 }
@@ -658,6 +664,7 @@ fn stable_capability_error_code(code: Option<&str>) -> &str {
     code.filter(|value| {
         value.starts_with("IMPORT_WEB_")
             || value.starts_with("IMPORT_ASR_")
+            || value.starts_with("IMPORT_MEDIA_")
             || value.starts_with("IMPORT_OCR_")
             || *value == "IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE"
     })
@@ -1054,6 +1061,7 @@ fn localize_remote_assets(
     let markdown_path = root.join(&result.markdown_path);
     let mut markdown = std::fs::read_to_string(&markdown_path)
         .map_err(|_| engine_error("The web candidate could not be reopened."))?;
+    let article_body_present = super::markdown_normalizer::has_article_body(&markdown);
     let bilibili_video = metadata_declares_platform_video(&root, result, "bilibili");
     let xiaohongshu_video = metadata_declares_platform_video(&root, result, "xiaohongshu");
     let mut transcription_ready = false;
@@ -1113,13 +1121,12 @@ fn localize_remote_assets(
         {
             continue;
         }
-        if matches!(content, WebFetchContent::Image | WebFetchContent::Media)
+        if content == WebFetchContent::Media
             && !temporary_image
             && request.media_save_mode == MediaSaveMode::ExtractOnly
         {
-            // Extraction-only imports must not leave a durable image or media
-            // copy. Only the derived Markdown candidate is changed; the raw
-            // source snapshot has already crossed its immutable write boundary.
+            // Article illustrations are part of the readable Source in both
+            // modes. This preference only controls audio/video originals.
             markdown = remove_asset_reference(&markdown, &marker);
             continue;
         }
@@ -1278,9 +1285,11 @@ fn localize_remote_assets(
                     WebFetchContent::Media => "Original media",
                     _ => unreachable!(),
                 };
-                result
-                    .warnings
-                    .push(format!("{label} was not localized: {}", error.message));
+                result.warnings.push(format!(
+                    "{label} {} was not localized: {}",
+                    index + 1,
+                    error.message
+                ));
                 continue;
             }
             Err(error) => return Err(error),
@@ -1455,7 +1464,7 @@ fn localize_remote_assets(
             true,
         ));
     }
-    if remote_image_output_is_empty(saw_image, successful_images, result.text_coverage) {
+    if remote_image_output_is_empty(saw_image, successful_images, article_body_present) {
         return Err(BackendError::new(
             "IMPORT_WEB_MEDIA_UNAVAILABLE",
             "The image post had no text and none of its images could be localized.",
@@ -1631,9 +1640,9 @@ fn escape_metadata_text(value: &str) -> String {
 fn remote_image_output_is_empty(
     saw_image: bool,
     successful_images: usize,
-    text_coverage: Option<f64>,
+    article_body_present: bool,
 ) -> bool {
-    saw_image && successful_images == 0 && text_coverage.unwrap_or_default() <= 0.0
+    saw_image && successful_images == 0 && !article_body_present
 }
 
 fn required_ocr_image_output_is_empty(saw_temporary_image: bool, successful_images: usize) -> bool {
@@ -1667,24 +1676,51 @@ fn mark_remote_asset_unavailable(markdown: &str, marker: &str, content: WebFetch
     if content != WebFetchContent::Image {
         return remove_asset_reference(markdown, marker);
     }
-    let had_trailing_newline = markdown.ends_with('\n');
-    let mut lines = markdown
-        .lines()
-        .map(|line| {
-            if !line.contains(marker) {
-                return line.to_owned();
+    let mut output = markdown.to_owned();
+    while let Some(marker_start) = output.find(marker) {
+        let prefix = &output[..marker_start];
+        let image_start = prefix.rfind("![");
+        let image_end = output[marker_start + marker.len()..]
+            .find(')')
+            .map(|end| marker_start + marker.len() + end + 1);
+        if let (Some(start), Some(end)) = (image_start, image_end) {
+            if prefix[start..].contains("](") && !prefix[start..].contains('\n') {
+                output.replace_range(start..end, "（图片不可用）");
+                continue;
             }
-            if let Some(image_start) = line.find("![") {
-                return format!("{}（图片不可用）", &line[..image_start]);
-            }
-            line.replace(marker, "（图片不可用）")
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    if had_trailing_newline {
-        lines.push('\n');
+        }
+        output.replace_range(marker_start..marker_start + marker.len(), "（图片不可用）");
     }
-    lines
+    output
+}
+
+fn validate_document_snapshot(
+    request: &EngineRequest,
+    result: &EngineResult,
+) -> Result<(), BackendError> {
+    if request.input.kind != ImportInputKind::File {
+        return Ok(());
+    }
+    let changed = || {
+        BackendError::new(
+            "IMPORT_FILE_SOURCE_CHANGED",
+            "The document parser did not preserve the original source snapshot.",
+            true,
+            true,
+        )
+    };
+    let identity = request.input.source_identity.as_ref().ok_or_else(changed)?;
+    let root = Path::new(&request.project_root);
+    let path = root
+        .join(&request.staging_root)
+        .join(&result.source_snapshot_path);
+    let bytes = super::transaction::read_project_file_nofollow(root, &path)?;
+    let (hash, size) =
+        super::artifact::hash_reader(&mut bytes.as_slice()).map_err(|_| changed())?;
+    if hash != identity.sha256 || size != identity.size_bytes {
+        return Err(changed());
+    }
+    Ok(())
 }
 
 fn sanitize_capability_text_artifacts(
@@ -1692,10 +1728,10 @@ fn sanitize_capability_text_artifacts(
     result: &EngineResult,
 ) -> Result<(), BackendError> {
     let root = std::path::Path::new(&request.project_root).join(&request.staging_root);
-    let mut paths = vec![
-        root.join(&result.source_snapshot_path),
-        root.join(&result.markdown_path),
-    ];
+    let mut paths = vec![root.join(&result.markdown_path)];
+    if request.input.kind == ImportInputKind::Url {
+        paths.push(root.join(&result.source_snapshot_path));
+    }
     if let Some(metadata) = result.metadata_path.as_deref() {
         paths.push(root.join(metadata));
     }
@@ -1813,6 +1849,10 @@ fn engine_error(message: &str) -> BackendError {
 }
 
 #[cfg(test)]
+#[path = "pack_engine_reliability_tests.rs"]
+mod reliability_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::services::import_v2::capability_pack::CapabilityPackManifest;
@@ -1912,7 +1952,10 @@ print(json.dumps({
         assert_eq!(result["windowsHome"], home.to_string_lossy().as_ref());
         assert_eq!(
             result["doclingCache"],
-            home.join(".cache").join("docling").to_string_lossy().as_ref()
+            home.join(".cache")
+                .join("docling")
+                .to_string_lossy()
+                .as_ref()
         );
         assert_eq!(result["temporary"], runtime_temp.to_string_lossy().as_ref());
     }
@@ -2292,9 +2335,9 @@ print(json.dumps({
 
     #[test]
     fn an_image_only_remote_post_requires_at_least_one_localized_image() {
-        assert!(remote_image_output_is_empty(true, 0, Some(0.0)));
-        assert!(!remote_image_output_is_empty(true, 1, Some(0.0)));
-        assert!(!remote_image_output_is_empty(true, 0, Some(1.0)));
+        assert!(remote_image_output_is_empty(true, 0, false));
+        assert!(!remote_image_output_is_empty(true, 1, false));
+        assert!(!remote_image_output_is_empty(true, 0, true));
     }
 
     #[test]

@@ -8,11 +8,11 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
   ENGINE_VERSION,
-  MAX_DECODED_BYTES,
   MAX_SENSEVOICE_BATCH_CHUNKS,
-  MAX_SENSEVOICE_CHUNKS,
   MODEL_ID,
-  SENSEVOICE_CHUNK_SECONDS,
+  decodedChunks,
+  completeDecodeMarker,
+  canReuseDecodedChunks,
   assertProviderWasUsed,
   buildChunkedFfmpegArguments,
   buildEmbeddedSubtitleArguments,
@@ -83,33 +83,6 @@ async function runFile(program, arguments_, options, stage) {
   } catch (error) {
     throw new Error(classifyExecutionError(error, stage), { cause: error });
   }
-}
-
-async function decodedChunks(temporaryRoot) {
-  const entries = (await fs.readdir(temporaryRoot, { withFileTypes: true }))
-    .filter((entry) => entry.isFile() && /^decoded-\d{4}\.wav$/u.test(entry.name))
-    .sort((left, right) => left.name.localeCompare(right.name, "en"));
-  if (entries.length === 0 || entries.length > MAX_SENSEVOICE_CHUNKS) {
-    throw new Error("IMPORT_ASR_DECODE_FAILED");
-  }
-  let totalBytes = 0;
-  const chunks = [];
-  for (let index = 0; index < entries.length; index += 1) {
-    const expectedName = `decoded-${String(index).padStart(4, "0")}.wav`;
-    if (entries[index].name !== expectedName) throw new Error("IMPORT_ASR_DECODE_FAILED");
-    const chunkPath = path.join(temporaryRoot, entries[index].name);
-    const status = await fs.lstat(chunkPath).catch(() => null);
-    if (!status?.isFile() || status.isSymbolicLink() || status.size <= 44) {
-      throw new Error("IMPORT_ASR_DECODE_FAILED");
-    }
-    totalBytes += status.size;
-    if (totalBytes > MAX_DECODED_BYTES) throw new Error("IMPORT_ASR_DECODE_FAILED");
-    chunks.push({
-      path: chunkPath,
-      startMs: index * SENSEVOICE_CHUNK_SECONDS * 1_000,
-    });
-  }
-  return chunks;
 }
 
 async function readJson(filePath) {
@@ -266,10 +239,8 @@ try {
     const decodeMarkerPath = path.join(shardRoot, "decode.complete.json");
     let chunks = [];
     const decodeMarker = await readJson(decodeMarkerPath);
-    if (decodeMarker?.mediaSha256 === mediaSha256 &&
-        decodeMarker?.chunkSeconds === SENSEVOICE_CHUNK_SECONDS) {
-      try { chunks = await decodedChunks(shardRoot); } catch { chunks = []; }
-    }
+    try { chunks = await decodedChunks(shardRoot); } catch { chunks = []; }
+    if (!canReuseDecodedChunks(decodeMarker, mediaSha256, chunks)) chunks = [];
     let execution;
     try {
     if (chunks.length === 0) {
@@ -283,13 +254,7 @@ try {
         timeout: DECODE_TIMEOUT_MS,
       }, "decode");
       chunks = await decodedChunks(shardRoot);
-      await writeJsonAtomic(decodeMarkerPath, {
-        schemaVersion: 1,
-        complete: true,
-        mediaSha256,
-        chunkSeconds: SENSEVOICE_CHUNK_SECONDS,
-        chunks: chunks.length,
-      });
+      await writeJsonAtomic(decodeMarkerPath, completeDecodeMarker(mediaSha256, chunks));
     } else {
       writeProgress(20, "asr.reusing_shards");
     }
@@ -300,21 +265,30 @@ try {
       const transcripts = [];
       for (let offset = 0; offset < chunks.length; offset += MAX_SENSEVOICE_BATCH_CHUNKS) {
         const batch = chunks.slice(offset, offset + MAX_SENSEVOICE_BATCH_CHUNKS);
+        const audible = batch.filter((chunk) => chunk.hasSignal);
+        if (audible.length === 0) {
+          writeProgress(22 + Math.round((Math.min(chunks.length, offset + batch.length) / chunks.length) * 70), "asr.recognizing");
+          continue;
+        }
         const batchPath = path.join(
           shardRoot,
           `batch-${String(offset).padStart(4, "0")}-${provider}-${recognitionLanguage}.complete.json`,
         );
         const cached = await readJson(batchPath);
-        if (cached?.schemaVersion === 1 && cached?.complete === true &&
-            cached?.mediaSha256 === mediaSha256 && Array.isArray(cached.transcripts)) {
-          transcripts.push(...cached.transcripts);
+        if (cached?.schemaVersion === 2 && cached?.complete === true &&
+            cached?.mediaSha256 === mediaSha256 && cached?.modelSha256 === modelSha256 &&
+            cached?.tokensSha256 === tokensSha256 && cached?.chunkStarts?.join() === batch.map((chunk) => chunk.startMs).join() &&
+            Array.isArray(cached.transcripts) && cached.transcripts.length <= batch.length) {
+          transcripts.push(...cached.transcripts.filter((transcript) =>
+            transcript.segments?.some((segment) => audible.some((chunk) =>
+              segment.startMs >= chunk.startMs && segment.startMs < chunk.startMs + chunk.durationMs))));
         } else {
           const result = await runFile(
             sherpa,
             buildSenseVoiceBatchArguments(
               model,
               tokens,
-              batch.map((chunk) => chunk.path),
+              audible.map((chunk) => chunk.path),
               provider,
               threads,
               recognitionLanguage,
@@ -325,12 +299,15 @@ try {
           assertProviderWasUsed(provider, result.stderr);
           const parsed = parseSenseVoiceBatchStdout(
             result.stdout,
-            batch.map((chunk) => chunk.startMs),
+            audible.map((chunk) => chunk.startMs),
           );
           await writeJsonAtomic(batchPath, {
-            schemaVersion: 1,
+            schemaVersion: 2,
             complete: true,
             mediaSha256,
+            modelSha256,
+            tokensSha256,
+            chunkStarts: batch.map((chunk) => chunk.startMs),
             provider,
             recognitionLanguage,
             transcripts: parsed,

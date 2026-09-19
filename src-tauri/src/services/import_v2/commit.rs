@@ -33,7 +33,7 @@ use crate::services::import_v2::source_registry::{
     SourceArtifactRecord, SourceCommitInput, SourceManifest, SourcePointer, SourceRegistry,
     SourceResolution,
 };
-use crate::services::import_v2::transaction::FileTransaction;
+use crate::services::import_v2::transaction::{read_project_file_nofollow, FileTransaction};
 use crate::services::import_v2::ImportV2Service;
 use crate::services::{FileStore, GitService};
 use crate::utils::markdown_utils::{parse_frontmatter, split_frontmatter};
@@ -225,7 +225,7 @@ impl ImportV2Service {
         session_id: &str,
         item: &ImportItem,
     ) -> Result<ImportResolutionContext, BackendError> {
-        derive_resolution_context(context, files, session_id, item)
+        derive_resolution_context(context, files, session_id, item, &self.web_targets)
     }
 
     pub fn get_three_way_merge_context(
@@ -246,7 +246,8 @@ impl ImportV2Service {
                     "Import item was not found for three-way merge.",
                 )
             })?;
-        let resolution = derive_resolution_context(context, files, session_id, item)?;
+        let resolution =
+            derive_resolution_context(context, files, session_id, item, &self.web_targets)?;
         if resolution.kind != ImportResolutionKind::NeedsThreeWayMerge {
             return Err(commit_error(
                 IMPORT_V2_STATE_INVALID,
@@ -332,8 +333,13 @@ impl ImportV2Service {
                     "Import item was not found for merge resolution.",
                 )
             })?;
-        let latest_resolution =
-            derive_resolution_context(context, files, session_id, &session.items[item_position])?;
+        let latest_resolution = derive_resolution_context(
+            context,
+            files,
+            session_id,
+            &session.items[item_position],
+            &self.web_targets,
+        )?;
         if latest_resolution.kind != ImportResolutionKind::NeedsThreeWayMerge {
             return Err(commit_error(
                 IMPORT_V2_STATE_INVALID,
@@ -400,8 +406,13 @@ impl ImportV2Service {
                     "Import item was not found for manual merge.",
                 )
             })?;
-        let latest_resolution =
-            derive_resolution_context(context, files, session_id, &session.items[item_position])?;
+        let latest_resolution = derive_resolution_context(
+            context,
+            files,
+            session_id,
+            &session.items[item_position],
+            &self.web_targets,
+        )?;
         let item = &mut session.items[item_position];
         let preview = item.preview.as_mut().ok_or_else(|| {
             commit_error(
@@ -1628,15 +1639,7 @@ impl ImportV2Service {
             .then(|| files.file_hash(context, &index_path))
             .transpose()?;
         let index = SourceRegistry::read_index(context, files)?;
-        let locator = canonical_candidate_locator(&item.input.kind, &candidate)
-            .or_else(|| canonical_platform_locator(&item.input.kind, &markdown))
-            .or_else(|| item.input.normalized_locator.clone())
-            .ok_or_else(|| {
-                commit_error(
-                    IMPORT_V2_STATE_INVALID,
-                    "Normalized source locator is missing.",
-                )
-            })?;
+        let locator = candidate_locator(&item, &candidate, &markdown, &self.web_targets)?;
         let resolution = SourceRegistry::resolve(&index, &locator, &content_hash);
         let duplicate = matches!(
             resolution,
@@ -1950,10 +1953,16 @@ impl ImportV2Service {
                         .flatten()
                 })
             });
-        let human_edited = current_hash
-            .as_deref()
-            .zip(baseline_hash.as_deref())
-            .is_some_and(|(current, baseline)| current != baseline);
+        let package_edited = existing_package
+            .as_ref()
+            .map(|package| source_package_has_edits(context, files, package))
+            .transpose()?
+            .unwrap_or(false);
+        let human_edited = package_edited
+            || current_hash
+                .as_deref()
+                .zip(baseline_hash.as_deref())
+                .is_some_and(|(current, baseline)| current != baseline);
         let resolved = resolve_item_resolution(
             &resolution,
             decision.resolution.as_ref(),
@@ -1975,7 +1984,11 @@ impl ImportV2Service {
                     version_id: current_version_id.clone(),
                 },
             );
-            if let Some(canonical_url) = candidate.canonical_url.as_ref() {
+            if let Some(canonical_url) = candidate
+                .canonical_url
+                .as_ref()
+                .filter(|_| !locator.starts_with("url:v1:"))
+            {
                 plan.next_index.by_locator.insert(
                     canonical_url.clone(),
                     SourcePointer {
@@ -1983,6 +1996,22 @@ impl ImportV2Service {
                         version_id: current_version_id,
                     },
                 );
+            }
+        }
+        if !duplicate
+            && matches!(
+                decision.resolution,
+                Some(ImportItemResolution::ManualMerge { .. })
+            )
+        {
+            if let Some(manifest) = existing_manifest.as_ref() {
+                retain_merged_assets(
+                    context,
+                    manifest,
+                    &committed_markdown,
+                    &plan.asset_root_path,
+                    &mut asset_writes,
+                )?;
             }
         }
         if !duplicate {
@@ -2033,8 +2062,7 @@ impl ImportV2Service {
             .iter()
             .position(|version| version.version_id == plan.version_id)
             .ok_or_else(|| commit_error(IMPORT_V2_COMMIT_FAILED, "Source version is missing."))?;
-        let final_source = resolved
-            .apply_wiki
+        let candidate_source = (!duplicate)
             .then(|| {
                 finalize_source(FinalizationInput {
                     candidate_markdown: &committed_markdown,
@@ -2048,11 +2076,16 @@ impl ImportV2Service {
                 })
             })
             .transpose()?;
+        let final_source = if resolved.apply_wiki {
+            candidate_source.as_ref()
+        } else {
+            None
+        };
         let mut package_writes: Vec<(String, String, Vec<u8>, Option<String>)> = Vec::new();
         let mut package_removals: Vec<(String, String)> = Vec::new();
         if !duplicate {
             if let Some(mut package) = staged_package.as_ref().cloned() {
-                let final_source = final_source.as_ref().ok_or_else(|| {
+                let final_source = candidate_source.as_ref().ok_or_else(|| {
                     commit_error(
                         IMPORT_V2_COMMIT_FAILED,
                         "A Source package cannot be committed without its index page.",
@@ -2123,7 +2156,7 @@ impl ImportV2Service {
                         "The committed Source package contract is invalid.",
                     )
                 })?;
-                if let Some(previous) = existing_package.as_ref() {
+                if let Some(previous) = existing_package.as_ref().filter(|_| resolved.apply_wiki) {
                     validate_source_package_update(context, files, previous, &package)?;
                     package_removals.extend(
                         previous
@@ -2393,7 +2426,7 @@ impl ImportV2Service {
                     &mut transaction,
                     &context.resolve_project_path(&plan.raw_path)?,
                 )?;
-                let baseline_bytes = final_source
+                let baseline_bytes = candidate_source
                     .as_ref()
                     .map(|source| source.bytes.as_slice())
                     .unwrap_or(markdown.as_slice());
@@ -2427,6 +2460,9 @@ impl ImportV2Service {
             }
             for (wiki_path, baseline_path, bytes, existing_hash) in &package_writes {
                 transaction.write_new(&context.resolve_project_path(baseline_path)?, bytes)?;
+                if !resolved.apply_wiki {
+                    continue;
+                }
                 let wiki = context.resolve_project_path(wiki_path)?;
                 if let Some(existing_hash) = existing_hash {
                     transaction.write_if_hash_matches(&wiki, bytes, existing_hash)?;
@@ -3264,9 +3300,13 @@ fn planned_new_source_wiki_path_internal(
         let planned = planned_wiki_target_identity(context, &session.session_id, item)?;
         if target_item && item.status == ImportItemStatus::Completed {
             if let Some(pointer) = index
-                .by_locator
-                .get(&planned.locator)
-                .or_else(|| index.by_content_hash.get(&planned.content_hash))
+                .by_content_hash
+                .get(&planned.content_hash)
+                .or_else(|| {
+                    (item.input.kind != ImportInputKind::Url)
+                        .then(|| index.by_locator.get(&planned.locator))
+                        .flatten()
+                })
             {
                 let manifest = SourceRegistry::read_manifest(
                     context,
@@ -3542,6 +3582,94 @@ fn load_current_source_package(
     Ok(package)
 }
 
+fn retain_merged_assets(
+    context: &ProjectContext,
+    manifest: &SourceManifest,
+    markdown: &[u8],
+    new_asset_root: &str,
+    writes: &mut Vec<(String, PreparedContent, String)>,
+) -> Result<(), BackendError> {
+    let current = manifest
+        .versions
+        .iter()
+        .find(|v| v.version_id == manifest.current_version_id)
+        .ok_or_else(staging_artifact_error)?;
+    let old_root = context
+        .layout
+        .source_paths()?
+        .asset_root(&manifest.source_id, &current.version_id)?;
+    let text = std::str::from_utf8(markdown).map_err(|_| staging_artifact_error())?;
+    for target in super::quality_gate::image_destinations(text) {
+        let path = target.split(['?', '#']).next().unwrap_or("");
+        let path = path.strip_prefix("./").unwrap_or(path);
+        let Some(relative) = path.strip_prefix("assets/") else {
+            continue;
+        };
+        if relative
+            .split('/')
+            .any(|p| p.is_empty() || p == "." || p == ".." || p.contains([':', '\\']))
+        {
+            return Err(staging_artifact_error());
+        }
+        let old_path = format!("{old_root}/{relative}");
+        let target = format!("{new_asset_root}/{relative}");
+        let legacy_path = format!(
+            "raw/sources/{}/{}/assets/{relative}",
+            manifest.source_id, current.version_id
+        );
+        let old = current.assets.iter().find(|asset| {
+            asset_collision_key(&asset.path) == asset_collision_key(&old_path)
+                || asset_collision_key(&asset.path) == asset_collision_key(&legacy_path)
+        });
+        let next = writes
+            .iter()
+            .find(|(path, _, _)| asset_collision_key(path) == asset_collision_key(&target));
+        match (old, next) {
+            (Some(old), Some((_, next, _)))
+                if old.sha256 != next.record(&target, "asset").sha256 =>
+            {
+                return Err(commit_error(IMPORT_V2_COMMIT_CONFLICT,
+                    "The merged Source references an image name shared by different versions. Rename the candidate image or remove the ambiguous reference before merging."));
+            }
+            (Some(old), None) => {
+                let absolute = context.resolve_project_path(&old.path)?;
+                let bytes = read_project_file_nofollow(&context.root, &absolute)?;
+                if bytes.len() as u64 != old.size_bytes
+                    || format!("{:x}", Sha256::digest(&bytes)) != old.sha256
+                {
+                    return Err(staging_artifact_error());
+                }
+                writes.push((target, bytes.into(), old.kind.clone()));
+            }
+            (None, None) => {
+                return Err(commit_error(
+                    IMPORT_V2_COMMIT_CONFLICT,
+                    "The merged Source references a missing asset.",
+                ))
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn source_package_has_edits(
+    context: &ProjectContext,
+    files: &FileStore,
+    package: &SourcePackageManifest,
+) -> Result<bool, BackendError> {
+    for member in &package.members {
+        if files
+            .file_hash_if_exists(context, &member.wiki_path)?
+            .as_deref()
+            != Some(member.human_edit_hash.as_str())
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn validate_source_package_update(
     context: &ProjectContext,
     files: &FileStore,
@@ -3657,6 +3785,7 @@ fn derive_resolution_context(
     files: &FileStore,
     session_id: &str,
     item: &ImportItem,
+    web_targets: &super::web_target_store::WebTargetStore,
 ) -> Result<ImportResolutionContext, BackendError> {
     let preview = item
         .preview
@@ -3668,7 +3797,7 @@ fn derive_resolution_context(
             .import_paths()?
             .item_staging(session_id, &item.item_id)?,
     )?;
-    derive_resolution_context_from_staging(context, files, item, preview, &staging)
+    derive_resolution_context_from_staging(context, files, item, preview, &staging, web_targets)
 }
 
 fn derive_resolution_context_from_staging(
@@ -3677,6 +3806,7 @@ fn derive_resolution_context_from_staging(
     item: &ImportItem,
     preview: &crate::models::import_v2::ImportPreviewArtifact,
     staging: &Path,
+    web_targets: &super::web_target_store::WebTargetStore,
 ) -> Result<ImportResolutionContext, BackendError> {
     let markdown = verified_artifact(
         staging,
@@ -3711,15 +3841,7 @@ fn derive_resolution_context_from_staging(
         &preview.markdown.sha256,
         &preview.assets,
     );
-    let locator = canonical_candidate_locator(&item.input.kind, &candidate)
-        .or_else(|| canonical_platform_locator(&item.input.kind, &markdown))
-        .or_else(|| item.input.normalized_locator.clone())
-        .ok_or_else(|| {
-            commit_error(
-                IMPORT_V2_STATE_INVALID,
-                "Normalized source locator is missing.",
-            )
-        })?;
+    let locator = candidate_locator(item, &candidate, &markdown, web_targets)?;
     let index = SourceRegistry::read_index(context, files)?;
     let source_resolution = SourceRegistry::resolve(&index, &locator, &candidate_hash);
     if source_resolution == SourceResolution::New {
@@ -3758,10 +3880,20 @@ fn derive_resolution_context_from_staging(
             .ok()
             .flatten()
     });
-    let human_edited = current_hash
-        .as_deref()
-        .zip(baseline_hash.as_deref())
-        .is_some_and(|(current, baseline)| current != baseline);
+    let package_edited = if manifest.wiki_path.ends_with("/index.md") {
+        source_package_has_edits(
+            context,
+            files,
+            &load_current_source_package(context, files, &manifest)?,
+        )?
+    } else {
+        false
+    };
+    let human_edited = package_edited
+        || current_hash
+            .as_deref()
+            .zip(baseline_hash.as_deref())
+            .is_some_and(|(current, baseline)| current != baseline);
     let binding = ImportResolutionBinding {
         source_id: source_id.clone(),
         candidate_hash,
@@ -3983,6 +4115,37 @@ fn artifact_record(path: &str, bytes: &[u8], kind: &str) -> SourceArtifactRecord
         size_bytes: bytes.len() as u64,
         kind: kind.into(),
     }
+}
+
+fn candidate_locator(
+    item: &ImportItem,
+    candidate: &super::source_finalization::CandidateMetadata,
+    markdown: &[u8],
+    web_targets: &super::web_target_store::WebTargetStore,
+) -> Result<String, BackendError> {
+    if let Some(locator) = canonical_candidate_locator(&item.input.kind, candidate)
+        .or_else(|| canonical_platform_locator(&item.input.kind, markdown))
+    {
+        return Ok(locator);
+    }
+    if item.input.kind == ImportInputKind::Url {
+        return web_targets
+            .resolve(
+                &item.input.locator,
+                if item.input.locator.starts_with("import-web-target:") {
+                    item.input.normalized_locator.as_deref()
+                } else {
+                    None
+                },
+            )
+            .map(|target| target.source_locator());
+    }
+    item.input.normalized_locator.clone().ok_or_else(|| {
+        commit_error(
+            IMPORT_V2_STATE_INVALID,
+            "Normalized source locator is missing.",
+        )
+    })
 }
 
 fn canonical_candidate_locator(
@@ -4626,10 +4789,27 @@ source_url: https://www.xiaohongshu.com/explore/other-note
 
     impl CommitFixture {
         fn two_ready_items() -> Self {
+            Self::two_ready_items_with_layout(false)
+        }
+        fn two_ready_items_with_layout(compatible: bool) -> Self {
             let root =
                 std::env::temp_dir().join(format!("import-v2-commit-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&root).unwrap();
-            let context = ProjectContext::new("project", root.clone());
+            let mut context = ProjectContext::new("project", root.clone());
+            if compatible {
+                for directory in [".obsidian", ".app/compat", "资料", "知识库", "导出"] {
+                    std::fs::create_dir_all(root.join(directory)).unwrap();
+                }
+                for name in ["purpose.md", "schema.md"] {
+                    std::fs::write(
+                        root.join(".app/compat").join(name),
+                        "# Compatible fixture\n",
+                    )
+                    .unwrap();
+                }
+                std::fs::write(root.join(".app/compat/layout.json"), r#"{"schemaVersion":1,"wikiWriteRoot":"知识库","sourceWriteRoot":"资料","exportRoot":"导出"}"#).unwrap();
+                context = context.with_resolved_layout().unwrap();
+            }
             let files = FileStore;
             let git = GitService;
             let service = ImportV2Service::default();
@@ -4693,7 +4873,13 @@ source_url: https://www.xiaohongshu.com/explore/other-note
             }
         }
         fn updated_source() -> Self {
+            Self::updated_source_with_package(false)
+        }
+        fn updated_source_with_package(package: bool) -> Self {
             let mut fixture = Self::two_ready_items();
+            if package {
+                fixture.stage_first_as_sheet_package();
+            }
             fixture
                 .git
                 .initialize_repository(&fixture.context, "initial")
@@ -4762,6 +4948,9 @@ source_url: https://www.xiaohongshu.com/explore/other-note
                 .unwrap();
             fixture.session_id = session.session_id;
             fixture.first_item_id = session.items[0].item_id.clone();
+            if package {
+                fixture.stage_first_as_sheet_package();
+            }
             fixture
         }
         fn ready_url_item() -> Self {
@@ -5071,6 +5260,64 @@ source_url: https://www.xiaohongshu.com/explore/other-note
                 sha256: format!("{:x}", Sha256::digest(&package_bytes)),
                 size_bytes: package_bytes.len() as u64,
             });
+            self.service
+                .sessions
+                .save(&self.context, &self.files, &session)
+                .unwrap();
+        }
+        fn stage_first_as_sheet_package(&self) {
+            self.stage_first_as_index_package();
+            let mut session = self
+                .service
+                .sessions
+                .load(&self.context, &self.files, &self.session_id)
+                .unwrap();
+            let item = session
+                .items
+                .iter_mut()
+                .find(|i| i.item_id == self.first_item_id)
+                .unwrap();
+            let preview = item.preview.as_mut().unwrap();
+            let staging = self.root.join(format!(
+                ".app/import-sessions/{}/items/{}/staging",
+                self.session_id, self.first_item_id
+            ));
+            let package_artifact = preview
+                .assets
+                .iter_mut()
+                .find(|a| a.relative_path == "source-package.json")
+                .unwrap();
+            let mut package: SourcePackageManifest = serde_json::from_slice(
+                &std::fs::read(staging.join("source-package.json")).unwrap(),
+            )
+            .unwrap();
+            let child = format!("# Sheet 数据\n\n{}\n", preview.title).into_bytes();
+            let child_hash = format!("{:x}", Sha256::digest(&child));
+            std::fs::create_dir_all(staging.join("package/pages")).unwrap();
+            std::fs::write(staging.join("package/pages/sheet.md"), &child).unwrap();
+            package
+                .members
+                .push(crate::models::source_package::SourcePackageMember {
+                    order: 1,
+                    role: SourcePackageMemberRole::Sheet,
+                    title: "数据".into(),
+                    staging_path: "package/pages/sheet.md".into(),
+                    wiki_path: String::new(),
+                    baseline_path: String::new(),
+                    content_hash: child_hash.clone(),
+                    human_edit_hash: child_hash.clone(),
+                });
+            let bytes = serde_json::to_vec_pretty(&package).unwrap();
+            std::fs::write(staging.join("source-package.json"), &bytes).unwrap();
+            package_artifact.sha256 = format!("{:x}", Sha256::digest(&bytes));
+            package_artifact.size_bytes = bytes.len() as u64;
+            preview.assets.push(ImportArtifact {
+                kind: ArtifactKind::Attachment,
+                relative_path: "package/pages/sheet.md".into(),
+                sha256: child_hash,
+                size_bytes: child.len() as u64,
+            });
+            refresh_new_source_wiki_targets(&self.context, &self.files, &mut session).unwrap();
             self.service
                 .sessions
                 .save(&self.context, &self.files, &session)
@@ -6175,6 +6422,371 @@ source_url: https://www.xiaohongshu.com/explore/other-note
             index.by_locator["file:d:/first.pdf"].version_id,
             before.current_version_id
         );
+    }
+
+    #[test]
+    fn package_child_edits_are_visible_and_keep_current_saves_complete_candidate() {
+        let fixture = CommitFixture::updated_source_with_package(true);
+        let before = fixture.manifest();
+        let previous =
+            super::load_current_source_package(&fixture.context, &fixture.files, &before).unwrap();
+        let child = previous
+            .members
+            .iter()
+            .find(|m| m.role == SourcePackageMemberRole::Sheet)
+            .unwrap();
+        let index_bytes = std::fs::read(fixture.root.join(&before.wiki_path)).unwrap();
+        std::fs::write(
+            fixture.root.join(&child.wiki_path),
+            b"# Human edited sheet\n",
+        )
+        .unwrap();
+        let session = fixture
+            .service
+            .sessions
+            .load(&fixture.context, &fixture.files, &fixture.session_id)
+            .unwrap();
+        let resolution = fixture
+            .service
+            .derive_resolution_context(
+                &fixture.context,
+                &fixture.files,
+                &fixture.session_id,
+                &session.items[0],
+            )
+            .unwrap();
+        assert_eq!(resolution.kind, ImportResolutionKind::NeedsThreeWayMerge);
+        let kept = fixture.bound_resolution("keep");
+        fixture
+            .service
+            .set_item_resolution(
+                &fixture.context,
+                &fixture.files,
+                &fixture.session_id,
+                &fixture.first_item_id,
+                kept.clone(),
+            )
+            .unwrap();
+        let result = fixture.commit_with(Some(kept));
+        assert_eq!(result.committed_count, 1, "{result:?}");
+        let after = fixture.manifest();
+        assert_eq!(after.current_version_id, before.current_version_id);
+        assert_eq!(
+            std::fs::read(fixture.root.join(&before.wiki_path)).unwrap(),
+            index_bytes
+        );
+        assert_eq!(
+            std::fs::read(fixture.root.join(&child.wiki_path)).unwrap(),
+            b"# Human edited sheet\n"
+        );
+        let candidate = after.versions.last().unwrap();
+        assert_ne!(candidate.version_id, after.current_version_id);
+        let manifest = candidate
+            .raw_evidence
+            .iter()
+            .find(|r| r.kind == "source_package_manifest")
+            .unwrap();
+        let package: SourcePackageManifest = fixture
+            .files
+            .read_json(&fixture.context, &manifest.path)
+            .unwrap();
+        for member in package.members {
+            let bytes = std::fs::read(fixture.root.join(member.baseline_path)).unwrap();
+            assert_eq!(format!("{:x}", Sha256::digest(&bytes)), member.content_hash);
+        }
+    }
+
+    #[test]
+    fn merged_source_carries_old_image_into_its_new_version_and_reopens() {
+        let fixture = CommitFixture::updated_source();
+        let before = fixture.manifest();
+        let mut session = fixture
+            .service
+            .sessions
+            .load(&fixture.context, &fixture.files, &fixture.session_id)
+            .unwrap();
+        session.items[0]
+            .preview
+            .as_mut()
+            .unwrap()
+            .assets
+            .retain(|a| a.relative_path != "assets/asset.png");
+        fixture
+            .service
+            .sessions
+            .save(&fixture.context, &fixture.files, &session)
+            .unwrap();
+        std::fs::write(
+            fixture.root.join(&before.wiki_path),
+            "# Human note\n\n![old](assets/asset.png)\n",
+        )
+        .unwrap();
+        let old_path = SourceRegistry::resolve_wiki_asset_path(
+            &fixture.context,
+            &fixture.files,
+            &before.wiki_path,
+            "assets/asset.png",
+        );
+        // The edited page lacks frontmatter; the merge still uses the registered immutable version.
+        assert!(old_path.is_err());
+        let merged = "# Merged\n\nNew text and preserved image.\n\n![old](assets/asset.png)\n\n`![example](assets/inline.png)`\n\n```markdown\n![example](assets/fenced.png)\n```\n";
+        fixture
+            .service
+            .stage_manual_merge(
+                &fixture.context,
+                &fixture.files,
+                &fixture.session_id,
+                &fixture.first_item_id,
+                merged,
+            )
+            .unwrap();
+        let result = fixture.commit_all();
+        assert_eq!(result.committed_count, 1, "{result:?}");
+        let after = fixture.manifest();
+        let path = SourceRegistry::resolve_wiki_asset_path(
+            &fixture.context,
+            &fixture.files,
+            &after.wiki_path,
+            "assets/asset.png",
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"png");
+        assert!(path.to_string_lossy().contains(&after.current_version_id));
+        let source = std::fs::read_to_string(fixture.root.join(&after.wiki_path)).unwrap();
+        assert!(source.contains("New text and preserved image"));
+    }
+
+    #[test]
+    fn merged_same_name_different_image_is_rejected_without_changing_current_source() {
+        let fixture = CommitFixture::updated_source();
+        let before = fixture.manifest();
+        let wiki = fixture.root.join(&before.wiki_path);
+        let edited = "# Edited\n\n![old](assets/asset.png)\n";
+        std::fs::write(&wiki, edited).unwrap();
+        let mut session = fixture
+            .service
+            .sessions
+            .load(&fixture.context, &fixture.files, &fixture.session_id)
+            .unwrap();
+        let image = session.items[0]
+            .preview
+            .as_mut()
+            .unwrap()
+            .assets
+            .iter_mut()
+            .find(|a| a.relative_path == "assets/asset.png")
+            .unwrap();
+        let bytes = b"different image";
+        std::fs::write(
+            fixture.root.join(format!(
+                ".app/import-sessions/{}/items/{}/staging/assets/asset.png",
+                fixture.session_id, fixture.first_item_id
+            )),
+            bytes,
+        )
+        .unwrap();
+        image.sha256 = format!("{:x}", Sha256::digest(bytes));
+        image.size_bytes = bytes.len() as u64;
+        fixture
+            .service
+            .sessions
+            .save(&fixture.context, &fixture.files, &session)
+            .unwrap();
+        fixture
+            .service
+            .stage_manual_merge(
+                &fixture.context,
+                &fixture.files,
+                &fixture.session_id,
+                &fixture.first_item_id,
+                edited,
+            )
+            .unwrap();
+        let result = fixture.commit_all();
+        assert_eq!(result.committed_count, 0);
+        assert_eq!(
+            result.items[0].error_code.as_deref(),
+            Some(IMPORT_V2_COMMIT_CONFLICT)
+        );
+        assert_eq!(fixture.manifest(), before);
+        assert_eq!(std::fs::read_to_string(wiki).unwrap(), edited);
+    }
+
+    #[test]
+    fn renewing_only_url_signature_updates_the_same_source() {
+        let fixture = CommitFixture::two_ready_items();
+        fixture
+            .git
+            .initialize_repository(&fixture.context, "initial")
+            .unwrap();
+        let mut session = fixture
+            .service
+            .sessions
+            .load(&fixture.context, &fixture.files, &fixture.session_id)
+            .unwrap();
+        for (position, item) in session.items.iter_mut().enumerate() {
+            item.input.kind = ImportInputKind::Url;
+            item.input.locator =
+                format!("https://example.com/view?title=Alpha&signature=secret-{position}");
+            item.input.normalized_locator = Some("https://example.com/view".into());
+            let resolution = fixture
+                .service
+                .derive_resolution_context(
+                    &fixture.context,
+                    &fixture.files,
+                    &fixture.session_id,
+                    item,
+                )
+                .unwrap();
+            item.preview.as_mut().unwrap().resolution = Some(resolution);
+        }
+        refresh_new_source_wiki_targets(&fixture.context, &fixture.files, &mut session).unwrap();
+        fixture
+            .service
+            .sessions
+            .save(&fixture.context, &fixture.files, &session)
+            .unwrap();
+        let first = fixture.commit_with(None);
+        assert_eq!(first.committed_count, 1, "{first:?}");
+        let session = fixture
+            .service
+            .sessions
+            .load(&fixture.context, &fixture.files, &fixture.session_id)
+            .unwrap();
+        let item = &session.items[1];
+        let resolution = fixture
+            .service
+            .derive_resolution_context(&fixture.context, &fixture.files, &fixture.session_id, item)
+            .unwrap();
+        let second = fixture
+            .service
+            .commit_items(
+                &fixture.context,
+                &fixture.files,
+                &fixture.git,
+                &fixture.request(vec![CommitItemDecision {
+                    item_id: item.item_id.clone(),
+                    resolution: resolution.default_resolution,
+                }]),
+            )
+            .unwrap();
+        assert_eq!(second.committed_count, 1, "{second:?}");
+        assert_eq!(first.items[0].source_id, second.items[0].source_id);
+        let source_id = second.items[0].source_id.as_ref().unwrap();
+        let manifest: SourceManifest = fixture
+            .files
+            .read_json(&fixture.context, &format!(".app/sources/{source_id}.json"))
+            .unwrap();
+        assert_eq!(manifest.versions.len(), 2);
+        let serialized = serde_json::to_string(&manifest).unwrap();
+        assert!(!serialized.contains("secret-"));
+        assert!(
+            std::fs::read_to_string(fixture.root.join(manifest.wiki_path))
+                .unwrap()
+                .contains("second.pdf")
+        );
+    }
+
+    #[test]
+    fn query_selected_articles_commit_as_distinct_sources_without_plaintext_secrets() {
+        let fixture = CommitFixture::two_ready_items();
+        let mut session = fixture
+            .service
+            .sessions
+            .load(&fixture.context, &fixture.files, &fixture.session_id)
+            .unwrap();
+        for (position, item) in session.items.iter_mut().enumerate() {
+            let raw = format!("https://example.com/view?title={position}&signature=top-secret");
+            let target = super::super::url_policy::UrlPolicy
+                .normalize_for_session(&raw)
+                .unwrap();
+            item.input.kind = ImportInputKind::Url;
+            item.input.locator = raw;
+            item.input.normalized_locator = Some(target.public.public_url);
+            let resolution = fixture
+                .service
+                .derive_resolution_context(
+                    &fixture.context,
+                    &fixture.files,
+                    &fixture.session_id,
+                    item,
+                )
+                .unwrap();
+            item.preview.as_mut().unwrap().resolution = Some(resolution);
+        }
+        refresh_new_source_wiki_targets(&fixture.context, &fixture.files, &mut session).unwrap();
+        fixture
+            .service
+            .sessions
+            .save(&fixture.context, &fixture.files, &session)
+            .unwrap();
+        let result = fixture.commit_all();
+        assert_eq!(result.committed_count, 2, "{result:?}");
+        assert_ne!(result.items[0].source_id, result.items[1].source_id);
+        let index = SourceRegistry::read_index(&fixture.context, &fixture.files).unwrap();
+        assert_eq!(index.by_locator.len(), 2);
+        assert!(index
+            .by_locator
+            .keys()
+            .all(|key| key.starts_with("url:v1:")));
+        let persisted =
+            std::fs::read_to_string(fixture.root.join(".app/source-index-v2.json")).unwrap();
+        assert!(!persisted.contains("top-secret"));
+        // Old display-only aliases remain readable but never establish ambiguous URL identity.
+        let mut legacy = index.clone();
+        legacy.by_locator.clear();
+        legacy.by_locator.insert(
+            "https://example.com/view".into(),
+            index.by_content_hash.values().next().unwrap().clone(),
+        );
+        legacy.schema_version = 2;
+        fixture
+            .files
+            .write_json_atomic(&fixture.context, ".app/source-index-v2.json", &legacy)
+            .unwrap();
+        let old_index_bytes =
+            std::fs::read(fixture.root.join(".app/source-index-v2.json")).unwrap();
+        let legacy = SourceRegistry::read_index(&fixture.context, &fixture.files).unwrap();
+        assert_eq!(
+            std::fs::read(fixture.root.join(".app/source-index-v2.json")).unwrap(),
+            old_index_bytes
+        );
+        let changed = super::super::url_policy::UrlPolicy
+            .normalize_for_session("https://example.com/view?title=other")
+            .unwrap();
+        assert_eq!(
+            SourceRegistry::resolve(&legacy, &changed.source_locator(), "new content"),
+            super::SourceResolution::New
+        );
+        for result in result.items {
+            let body =
+                std::fs::read_to_string(fixture.root.join(result.wiki_path.unwrap())).unwrap();
+            assert!(body.contains(".pdf"));
+        }
+    }
+
+    #[test]
+    fn compatible_source_root_supports_committed_image_reread() {
+        let fixture = CommitFixture::two_ready_items_with_layout(true);
+        let result = fixture.commit_with(None);
+        assert_eq!(result.committed_count, 1, "{result:?}");
+        let manifest = fixture.manifest();
+        assert!(manifest.wiki_path.starts_with("资料/"));
+        let reopened_context = ProjectContext::new("project", fixture.root.clone())
+            .with_resolved_layout()
+            .unwrap();
+        assert_eq!(
+            reopened_context.layout.app_state_root.as_deref(),
+            Some(".app/compat")
+        );
+        let reopened = SourceRegistry::resolve_wiki_asset_path(
+            &reopened_context,
+            &fixture.files,
+            &manifest.wiki_path,
+            "assets/asset.png",
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(reopened).unwrap(), b"png");
     }
 
     #[test]

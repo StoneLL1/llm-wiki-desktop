@@ -247,3 +247,434 @@ async fn real_preparation_recognition_preview_save_and_reopen() {
     }
     eprintln!("REAL_ARTICLE path={} preparation_ms={preparation_ms} recognition_ms={recognition_ms} download_bytes={download_bytes}\n{article}", article_path.display());
 }
+
+#[test]
+#[ignore = "executes local Node and FFmpeg; set LLM_WIKI_TEST_NODE and LLM_WIKI_TEST_FFMPEG"]
+fn real_decoder_without_asr_model_commits_subtitles_and_reopens_original_evidence() {
+    use llm_wiki_desktop_lib::services::import_v2::capability_pack::{
+        CapabilityPackManifest, ResolvedCapabilityPack,
+    };
+    use sha2::{Digest, Sha256};
+    let node = PathBuf::from(std::env::var("LLM_WIKI_TEST_NODE").unwrap());
+    let ffmpeg = PathBuf::from(std::env::var("LLM_WIKI_TEST_FFMPEG").unwrap());
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("临时知识库");
+    fs::create_dir_all(root.join(".app")).unwrap();
+    let context = ProjectContext::new("decoder-acceptance", root.clone());
+    let files = FileStore;
+    let service = ImportV2Service::with_secret_service(SecretService::memory());
+    let tasks = TaskService::default();
+    let pack_root = temporary.path().join("decoder-pack");
+    fs::create_dir_all(pack_root.join("runner")).unwrap();
+    fs::create_dir_all(pack_root.join("runtime/ffmpeg/bin")).unwrap();
+    let source_root =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../capabilities/media-runtime");
+    for file in ["index.mjs", "core.mjs"] {
+        fs::copy(
+            source_root.join("runner").join(file),
+            pack_root.join("runner").join(file),
+        )
+        .unwrap();
+    }
+    let node_name = if cfg!(windows) { "node.exe" } else { "node" };
+    let ffmpeg_name = if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    };
+    fs::copy(node, pack_root.join(node_name)).unwrap();
+    fs::copy(
+        &ffmpeg,
+        pack_root.join("runtime/ffmpeg/bin").join(ffmpeg_name),
+    )
+    .unwrap();
+    let mut manifest_json: serde_json::Value =
+        serde_json::from_slice(&fs::read(source_root.join("manifest.json")).unwrap()).unwrap();
+    for field in [
+        "payloadStatus",
+        "buildProvenance",
+        "execution",
+        "distributionNote",
+    ] {
+        manifest_json.as_object_mut().unwrap().remove(field);
+    }
+    let mut manifest: CapabilityPackManifest = serde_json::from_value(manifest_json).unwrap();
+    manifest.entrypoint = node_name.into();
+    manifest.entrypoint_args = vec!["runner/index.mjs".into()];
+    let entrypoint = pack_root.join(node_name).canonicalize().unwrap();
+    service
+        .register_capability_pack(
+            ResolvedCapabilityPack {
+                manifest,
+                root: pack_root.canonicalize().unwrap(),
+                entrypoint_sha256: format!("{:x}", Sha256::digest(fs::read(&entrypoint).unwrap())),
+                entrypoint,
+            },
+            "media.embedded-subtitle".into(),
+            vec!["mp4".into(), "mkv".into()],
+            std::time::Duration::from_secs(60),
+        )
+        .unwrap();
+    assert!(!service
+        .registered_engine_routes()
+        .unwrap()
+        .contains(&"media.asr".into()));
+    let subtitle = temporary.path().join("字幕.srt");
+    fs::write(&subtitle, "1\n00:00:00,000 --> 00:00:01,000\n2026 [中文可靠字幕]\n\n2\n00:00:01,000 --> 00:00:02,000\n42\n").unwrap();
+    let input = temporary.path().join("影片.mp4");
+    let status = std::process::Command::new(&ffmpeg)
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=size=16x16:rate=1:duration=2",
+            "-i",
+        ])
+        .arg(&subtitle)
+        .args([
+            "-map", "0", "-map", "1", "-c:v", "mpeg4", "-c:s", "mov_text",
+        ])
+        .arg(&input)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let original = fs::read(&input).unwrap();
+    let scan = FileDiscoveryService
+        .scan(
+            &context,
+            &[input],
+            FileScanPolicy::default(),
+            |_| {},
+            || false,
+        )
+        .unwrap();
+    let session = service
+        .create_session(&context, &files, ImportResourceMode::Balanced)
+        .unwrap();
+    let session = service
+        .add_inputs(
+            &context,
+            &files,
+            &session.session_id,
+            new_import_inputs(&session, scan.files),
+        )
+        .unwrap();
+    let item_id = session.items[0].item_id.clone();
+    let task = tasks
+        .create_project_task(
+            TaskType::Import,
+            context.project_id.clone(),
+            root.clone(),
+            "Decoder only".into(),
+            true,
+        )
+        .unwrap();
+    let prepared = service
+        .run_item(
+            &context,
+            &files,
+            &tasks,
+            &session.session_id,
+            &item_id,
+            &task.id,
+        )
+        .unwrap();
+    assert_eq!(
+        prepared.status,
+        ImportItemStatus::PreviewReady,
+        "{prepared:?}"
+    );
+    let preview = prepared.preview.unwrap();
+    GitService
+        .initialize_repository(&context, "Acceptance fixture")
+        .unwrap();
+    let committed = service
+        .commit_items(
+            &context,
+            &files,
+            &GitService,
+            &CommitImportSessionRequest {
+                project_id: context.project_id.clone(),
+                project_root_path: root.to_string_lossy().into_owned(),
+                session_id: session.session_id.clone(),
+                batch_task_id: None,
+                acknowledge_restricted_content: false,
+                expected_selection_revision: None,
+                expected_confirmation_digest: None,
+                decisions: vec![CommitItemDecision {
+                    item_id,
+                    resolution: preview
+                        .resolution
+                        .and_then(|resolution| resolution.default_resolution),
+                }],
+            },
+        )
+        .unwrap();
+    assert_eq!(committed.committed_count, 1, "{committed:?}");
+    let article =
+        fs::read_to_string(root.join(committed.items[0].wiki_path.as_ref().unwrap())).unwrap();
+    assert!(article.contains("2026 [中文可靠字幕]"), "{article}");
+    assert!(article.contains("42"), "{article}");
+    drop(service);
+    let reopened = ImportV2Service::with_secret_service(SecretService::memory());
+    assert_eq!(
+        reopened
+            .load_session(&context, &files, &session.session_id)
+            .unwrap()
+            .items[0]
+            .status,
+        ImportItemStatus::Completed
+    );
+    fn all_files(root: &std::path::Path) -> Vec<PathBuf> {
+        fs::read_dir(root)
+            .unwrap()
+            .flat_map(|entry| {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    all_files(&path)
+                } else {
+                    vec![path]
+                }
+            })
+            .collect()
+    }
+    let persisted = all_files(&root.join("raw"));
+    assert!(
+        persisted
+            .iter()
+            .any(|path| fs::read(path).unwrap() == original),
+        "original media bytes missing"
+    );
+    assert!(
+        persisted.iter().any(
+            |path| path.file_name().is_some_and(|name| name == "embedded.srt")
+                && fs::read_to_string(path)
+                    .unwrap()
+                    .contains("2026 [中文可靠字幕]")
+        ),
+        "original subtitle evidence missing"
+    );
+}
+
+#[test]
+#[ignore = "reuses a completed real long-audio run; set LLM_WIKI_TEST_SENSEVOICE_ROOT to its isolated pack/staging directory"]
+fn real_long_sensevoice_runner_cache_commits_late_speech_and_reopens() {
+    use llm_wiki_desktop_lib::services::import_v2::capability_pack::{
+        CapabilityPackManifest, ResolvedCapabilityPack,
+    };
+    use sha2::{Digest, Sha256};
+    let acceptance = PathBuf::from(std::env::var("LLM_WIKI_TEST_SENSEVOICE_ROOT").unwrap());
+    let pack_root = acceptance.join("pack").canonicalize().unwrap();
+    let manifest: CapabilityPackManifest =
+        serde_json::from_slice(&fs::read(pack_root.join("manifest.json")).unwrap()).unwrap();
+    let entrypoint = pack_root.join(&manifest.entrypoint).canonicalize().unwrap();
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("long-audio-knowledge-base");
+    fs::create_dir_all(root.join(".app")).unwrap();
+    let context = ProjectContext::new("long-speech-acceptance", root.clone());
+    let files = FileStore;
+    let service = ImportV2Service::with_secret_service(SecretService::memory());
+    let tasks = TaskService::default();
+    service
+        .register_capability_pack(
+            ResolvedCapabilityPack {
+                manifest,
+                root: pack_root,
+                entrypoint_sha256: format!("{:x}", Sha256::digest(fs::read(&entrypoint).unwrap())),
+                entrypoint,
+            },
+            "media.asr".into(),
+            vec!["flac".into()],
+            std::time::Duration::from_secs(120),
+        )
+        .unwrap();
+    let input = acceptance.join("staging/input.flac");
+    let original = fs::read(&input).unwrap();
+    let scan = FileDiscoveryService
+        .scan(
+            &context,
+            &[input],
+            FileScanPolicy::default(),
+            |_| {},
+            || false,
+        )
+        .unwrap();
+    let session = service
+        .create_session(&context, &files, ImportResourceMode::Balanced)
+        .unwrap();
+    let session = service
+        .add_inputs(
+            &context,
+            &files,
+            &session.session_id,
+            new_import_inputs(&session, scan.files),
+        )
+        .unwrap();
+    let item_id = session.items[0].item_id.clone();
+    let waiting_task = tasks
+        .create_project_task(
+            TaskType::Import,
+            context.project_id.clone(),
+            root.clone(),
+            "Inspect long media".into(),
+            true,
+        )
+        .unwrap();
+    let waiting = service
+        .run_item(
+            &context,
+            &files,
+            &tasks,
+            &session.session_id,
+            &item_id,
+            &waiting_task.id,
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            waiting.status,
+            ImportItemStatus::WaitingAuthorization | ImportItemStatus::WaitingCapability
+        ),
+        "{waiting:?}"
+    );
+    service
+        .authorize_media_for_session(
+            &context,
+            &files,
+            &session.session_id,
+            &item_id,
+            ImportMediaAuthorizationKind::Asr,
+            Some(ImportAsrProfile::Balanced),
+            Some("zh".into()),
+        )
+        .unwrap();
+    let staging = root.join(format!(
+        ".app/import-sessions/{}/items/{}/staging",
+        session.session_id, item_id
+    ));
+    fn copy_tree(source: &std::path::Path, destination: &std::path::Path) {
+        fs::create_dir_all(destination).unwrap();
+        for entry in fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let target = destination.join(entry.file_name());
+            if entry.path().is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+    // These are actual completed model shards, never synthetic transcripts.
+    copy_tree(
+        &acceptance.join("staging/asr-shards"),
+        &staging.join("asr-shards"),
+    );
+    let task = tasks
+        .create_project_task(
+            TaskType::Import,
+            context.project_id.clone(),
+            root.clone(),
+            "Late speech".into(),
+            true,
+        )
+        .unwrap();
+    let prepared = service
+        .run_item(
+            &context,
+            &files,
+            &tasks,
+            &session.session_id,
+            &item_id,
+            &task.id,
+        )
+        .unwrap();
+    assert_eq!(
+        prepared.status,
+        ImportItemStatus::PreviewReady,
+        "{prepared:?}"
+    );
+    let preview = prepared.preview.unwrap();
+    let metadata: serde_json::Value = serde_json::from_slice(
+        &fs::read(staging.join("transcripts/local-asr.metadata.json")).unwrap(),
+    )
+    .unwrap();
+    let late = metadata["segments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|segment| {
+            segment["startMs"]
+                .as_u64()
+                .is_some_and(|start| start > 7_200_000)
+        })
+        .map(|segment| segment["text"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(!late.is_empty(), "late speech absent: {metadata}");
+    let expected = late.join(" ");
+    assert!(
+        (expected.contains("九点") || expected.contains("9点"))
+            && (expected.contains("五点") || expected.contains("5点")),
+        "known qualification speech missing: {expected}"
+    );
+    GitService
+        .initialize_repository(&context, "Acceptance fixture")
+        .unwrap();
+    let committed = service
+        .commit_items(
+            &context,
+            &files,
+            &GitService,
+            &CommitImportSessionRequest {
+                project_id: context.project_id.clone(),
+                project_root_path: root.to_string_lossy().into_owned(),
+                session_id: session.session_id.clone(),
+                batch_task_id: None,
+                acknowledge_restricted_content: false,
+                expected_selection_revision: None,
+                expected_confirmation_digest: None,
+                decisions: vec![CommitItemDecision {
+                    item_id,
+                    resolution: preview
+                        .resolution
+                        .and_then(|resolution| resolution.default_resolution),
+                }],
+            },
+        )
+        .unwrap();
+    assert_eq!(committed.committed_count, 1, "{committed:?}");
+    let article =
+        fs::read_to_string(root.join(committed.items[0].wiki_path.as_ref().unwrap())).unwrap();
+    for text in late {
+        assert!(
+            article.contains(text),
+            "committed late speech missing: {text}"
+        );
+    }
+    assert!(article.contains("02:00:"), "late anchor missing: {article}");
+    drop(service);
+    let reopened = ImportV2Service::with_secret_service(SecretService::memory());
+    assert_eq!(
+        reopened
+            .load_session(&context, &files, &session.session_id)
+            .unwrap()
+            .items[0]
+            .status,
+        ImportItemStatus::Completed
+    );
+    fn contains_bytes(root: &std::path::Path, expected: &[u8]) -> bool {
+        fs::read_dir(root).unwrap().any(|entry| {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                contains_bytes(&path, expected)
+            } else {
+                fs::read(path).unwrap() == expected
+            }
+        })
+    }
+    assert!(
+        contains_bytes(&root.join("raw"), &original),
+        "original media bytes missing"
+    );
+}

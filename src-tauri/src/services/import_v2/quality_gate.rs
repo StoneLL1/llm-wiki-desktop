@@ -385,21 +385,67 @@ fn normalize_relative(value: &str) -> Result<String, BackendError> {
 
 fn validate_markdown_content(markdown: &str, rendered: &str) -> Result<(), BackendError> {
     let lowercase = decode_html_entities(rendered).to_ascii_lowercase();
-    let compact: String = lowercase
-        .chars()
-        .filter(|character| !character.is_ascii_whitespace() && !character.is_ascii_control())
-        .collect();
     if markdown.trim().is_empty()
         || lowercase.contains("<script")
         || lowercase.contains("<iframe")
         || contains_unsafe_html_attribute(&lowercase)
-        || compact.contains("javascript:")
-        || compact.contains("vbscript:")
-        || compact.contains("data:text/html")
+        || contains_unsafe_link_destination(&lowercase)
     {
         return Err(quality_error());
     }
     Ok(())
+}
+
+fn contains_unsafe_link_destination(markdown: &str) -> bool {
+    let unsafe_uri = |value: &str| {
+        let compact: String = value
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace() && !c.is_ascii_control() && *c != '\\')
+            .collect();
+        ["javascript:", "vbscript:", "data:text/html"]
+            .iter()
+            .any(|scheme| compact.starts_with(scheme))
+    };
+    // Inspect destinations, not ordinary prose explaining a URI scheme.
+    if reference_definitions(markdown)
+        .values()
+        .any(|value| unsafe_uri(value))
+    {
+        return true;
+    }
+    let mut rest = markdown;
+    while let Some(start) = rest.find("](") {
+        rest = &rest[start + 2..];
+        let raw = rest
+            .split(')')
+            .next()
+            .unwrap_or(rest)
+            .trim()
+            .trim_start_matches('<');
+        if unsafe_uri(raw) {
+            return true;
+        }
+    }
+    rest = markdown;
+    while let Some(start) = rest.find('<') {
+        rest = &rest[start + 1..];
+        let Some(end) = rest.find('>') else { break };
+        let tag = &rest[..end];
+        if unsafe_uri(tag)
+            || ["href", "src", "action", "formaction", "xlink:href"]
+                .iter()
+                .filter_map(|name| html_attribute(tag, name))
+                .any(|value| unsafe_uri(&value))
+        {
+            return true;
+        }
+        rest = &rest[end + 1..];
+    }
+    false
+}
+
+pub(super) fn image_destinations(markdown: &str) -> Vec<String> {
+    image_destinations_from_rendered(&strip_code_contexts(markdown))
 }
 
 fn image_destinations_from_rendered(rendered: &str) -> Vec<String> {
@@ -612,7 +658,7 @@ fn html_attribute(tag: &str, wanted: &str) -> Option<String> {
         let name_start = index;
         while bytes
             .get(index)
-            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':'))
         {
             index += 1;
         }
@@ -930,6 +976,8 @@ mod tests {
             "<script>alert(1)</script>",
             "[x](javascript:alert(1))",
             "[x](data:text/html,bad)",
+            "[x][bad]\n\n[bad]: javascript:alert(1)",
+            "<a href=\"java&#x73;cript:alert(1)\">bad</a>",
         ] {
             let fixture = quality_fixture(markdown);
             let error = QualityGate::default()
@@ -937,6 +985,16 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error.code, IMPORT_V2_QUALITY_FAILED);
         }
+    }
+
+    #[test]
+    fn protocol_names_in_prose_are_not_executable_links() {
+        let fixture = quality_fixture(
+            "This guide explains the javascript: URL scheme, vbscript: and data:text/html.\n",
+        );
+        QualityGate::default()
+            .evaluate(&fixture.root, &fixture.result)
+            .unwrap();
     }
 
     #[test]

@@ -40,6 +40,9 @@ pub(super) fn detect_input_format(
     if input.kind == ImportInputKind::Url {
         return Ok(None);
     }
+    if input.kind == ImportInputKind::ClipboardText {
+        return Ok(Some(FileFormat::Markdown));
+    }
     let locator = Path::new(&input.locator);
     let path = if locator.is_absolute() {
         locator.to_path_buf()

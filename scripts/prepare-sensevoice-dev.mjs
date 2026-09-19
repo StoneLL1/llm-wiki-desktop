@@ -14,7 +14,7 @@ import { stageSenseVoiceCapability } from "./stage-sensevoice-capability.mjs";
 
 const VERSION = "1.13.4+2024.07.17";
 const NODE_VERSION = "22.17.0";
-const PREPARATION_REVISION = 6;
+const PREPARATION_REVISION = 7;
 
 function comparePaths(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
