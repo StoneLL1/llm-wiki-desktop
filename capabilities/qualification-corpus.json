@@ -15,6 +15,12 @@
     "xlsx": "workbook.xlsx"
   },
   "fixtureByCapability": {
+    "media-runtime": {
+      "mp4": "media/text.mp4", "m4v": "media/text.m4v",
+      "mov": "media/text.mov", "mkv": "media/text.mkv",
+      "avi": "media/text.avi", "wmv": "media/text.wmv",
+      "webm": "media/text.webm", "gif": "media/text.gif"
+    },
     "asr-sensevoice-small": {
       "aac": "asr/speech.aac", "avi": "asr/speech.avi",
       "flac": "asr/speech.flac", "m4a": "asr/speech.m4a",

@@ -27,10 +27,11 @@ function parse(arguments_) {
   };
 }
 
-function run(program, arguments_, cwd, capture = false) {
+function run(program, arguments_, cwd, capture = false, env = process.env) {
   return new Promise((resolve, reject) => {
     const child = spawn(program, arguments_, {
       cwd,
+      env,
       shell: false,
       windowsHide: true,
       // Non-captured child stdout is forwarded to stderr so caller stdout stays parseable.
@@ -218,9 +219,14 @@ export async function fetchSenseVoiceSources({ target, output, config }) {
     await requireFile(path.join(modelRoot, "test_wavs", "zh.wav"), "SenseVoice qualification fixture");
     const ffmpegCli = path.join(ffmpegRoot, "bin", `ffmpeg${executable}`);
     await requireFile(ffmpegCli, "FFmpeg CLI");
-    const filters = await run(ffmpegCli, ["-hide_banner", "-filters"], ffmpegRoot, true);
+    const probeEnvironment = { ...process.env };
+    const libraryVariable = process.platform === "linux" ? "LD_LIBRARY_PATH"
+      : process.platform === "darwin" ? "DYLD_LIBRARY_PATH" : "PATH";
+    const libraryDirectory = path.join(ffmpegRoot, process.platform === "win32" ? "bin" : "lib");
+    probeEnvironment[libraryVariable] = [libraryDirectory, process.env[libraryVariable]].filter(Boolean).join(path.delimiter);
+    const filters = await run(ffmpegCli, ["-hide_banner", "-filters"], ffmpegRoot, true, probeEnvironment);
     if (!/\bscale\s+V->V\b/u.test(filters)) throw new Error("FFmpeg payload must support the scale filter for video OCR");
-    const encoders = await run(ffmpegCli, ["-hide_banner", "-encoders"], ffmpegRoot, true);
+    const encoders = await run(ffmpegCli, ["-hide_banner", "-encoders"], ffmpegRoot, true, probeEnvironment);
     if (!/\bpng\s/u.test(encoders)) throw new Error("FFmpeg payload must support PNG encoding for video OCR");
     await fs.writeFile(path.join(output, "SOURCE-PROVENANCE.json"), `${JSON.stringify({
       schemaVersion: 1,
