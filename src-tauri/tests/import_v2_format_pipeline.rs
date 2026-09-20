@@ -49,7 +49,7 @@ const PRODUCTION_FORMAT_CASES: &[(&str, &str)] = &[
     ("image.tiff", "ocr.cjk-accurate"),
     ("media.heic", "ocr.cjk-accurate"),
     ("media.heif", "ocr.cjk-accurate"),
-    ("animated.gif", "media.companion"),
+    ("animated.gif", "media.keyframes"),
     ("audio.mp3", "media.companion"),
     ("audio.wav", "media.companion"),
     ("media.m4a", "media.companion"),
@@ -157,6 +157,8 @@ fn run_batch9_capability(request: &EngineRequest) -> Result<EngineResult, &'stat
         "png" | "jpg" | "jpeg" | "webp" | "bmp" | "tif" | "tiff" | "heic" | "heif" => {
             run_ocr_capability(request, &staging, &bytes)
         }
+        "gif" if request.local_ocr_authorized => run_ocr_capability(request, &staging, &bytes),
+        "gif" => Err("IMPORT_VIDEO_FRAME_OCR_REQUIRED"),
         _ if request.asr_probe_only => Err("IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE"),
         _ if request.local_asr_authorized => run_asr_capability(request, &staging, &bytes),
         _ => Err("IMPORT_ASR_AUTHORIZATION_REQUIRED"),
@@ -245,7 +247,10 @@ fn run_ocr_capability(
         &bytes[..bytes.len().min(8192)],
     )
     .map_err(|_| "IMPORT_OCR_INVALID_IMAGE")?;
-    if routes_for_format(format).first().copied() != Some("ocr.cjk-accurate") {
+    if !matches!(
+        routes_for_format(format).first().copied(),
+        Some("ocr.cjk-accurate" | "media.keyframes")
+    ) {
         return Err("IMPORT_OCR_INVALID_IMAGE");
     }
     let digest = format!("{:x}", Sha256::digest(bytes));
@@ -505,6 +510,7 @@ fn every_supported_local_format_runs_discovery_route_execution_candidate_and_com
     let runtime_pack = install_batch9_runtime_pack(temp.path());
     for (route, extensions) in [
         ("pack.office-legacy", vec!["doc", "xls", "ppt"]),
+        ("media.keyframes", vec!["gif"]),
         (
             "ocr.cjk-accurate",
             vec![
@@ -617,10 +623,21 @@ fn every_supported_local_format_runs_discovery_route_execution_candidate_and_com
                         item.input.display_name
                     )
                 });
-            let authorization = match *route {
-                "ocr.cjk-accurate" => Some(ImportMediaAuthorizationKind::Ocr),
-                "media.companion" => Some(ImportMediaAuthorizationKind::Asr),
-                _ => None,
+            let authorization = if result.issue.as_ref().is_some_and(|issue| {
+                issue.recovery_actions.contains(
+                    &llm_wiki_desktop_lib::models::import_v2::ImportRecoveryAction::EnableOcr,
+                )
+            }) {
+                // Converted presentations may have only a title plus a screenshot.
+                Some(ImportMediaAuthorizationKind::Ocr)
+            } else {
+                match *route {
+                    "ocr.cjk-accurate" | "media.keyframes" => {
+                        Some(ImportMediaAuthorizationKind::Ocr)
+                    }
+                    "media.companion" => Some(ImportMediaAuthorizationKind::Asr),
+                    _ => None,
+                }
             };
             if let Some(authorization) = authorization {
                 assert_eq!(result.status, ImportItemStatus::WaitingAuthorization);
@@ -674,6 +691,7 @@ fn every_supported_local_format_runs_discovery_route_execution_candidate_and_com
                 "pdf.text" => "builtin.pdf-text",
                 "media.companion" => "builtin.local-media-companion",
                 "media.subtitle" => "builtin.local-subtitle",
+                "media.keyframes" => "pack.batch9-runtime-fixture.media.keyframes",
                 "pack.office-legacy" => "pack.batch9-runtime-fixture.pack.office-legacy",
                 "ocr.cjk-accurate" => "pack.batch9-runtime-fixture.ocr.cjk-accurate",
                 _ => unreachable!("unexpected production route {route}"),

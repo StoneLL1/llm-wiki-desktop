@@ -143,6 +143,8 @@ test("development preparation refreshes changed runner sources instead of reusin
     "models/tokens.txt",
     "qualification/zh.wav",
     "runner/index.mjs",
+    "runner/core.mjs",
+    "runner/video-frames.mjs",
     "runner/qualification.mjs",
   ];
   await Promise.all(requiredFiles.map((relativePath) =>
@@ -154,14 +156,14 @@ test("development preparation refreshes changed runner sources instead of reusin
   })));
   await writeFile(path.join(packRoot, "manifest.json"), JSON.stringify({
     packId: "asr-sensevoice-small",
-    version: "1.13.4+2024.07.17",
+    version: "1.13.4+2024.07.17.resources.3",
     targetTriples: ["x86_64-pc-windows-msvc"],
     files,
   }));
   await writeFile(publicKeyPath, "a".repeat(64));
   await writeFile(statePath, JSON.stringify({
-    revision: 7,
-    version: "1.13.4+2024.07.17",
+    revision: 8,
+    version: "1.13.4+2024.07.17.resources.3",
     target: "x86_64-pc-windows-msvc",
     runnerSha256,
   }));

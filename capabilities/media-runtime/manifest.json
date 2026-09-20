@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "packId": "media-runtime",
-  "version": "8.1.2+resources.2",
+  "version": "8.1.2+resources.3",
   "protocolVersion": "2",
   "targetTriples": ["x86_64-pc-windows-msvc", "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"],
   "archiveSha256": "0000000000000000000000000000000000000000000000000000000000000000",
@@ -19,7 +19,9 @@
       {"name": "libavformat", "license": "LGPL-3.0-or-later"},
       {"name": "libavcodec", "license": "LGPL-3.0-or-later"},
       {"name": "libavutil", "license": "LGPL-3.0-or-later"},
-      {"name": "libswresample", "license": "LGPL-3.0-or-later"}
+      {"name": "libswresample", "license": "LGPL-3.0-or-later"},
+      {"name": "libavfilter", "license": "LGPL-3.0-or-later"},
+      {"name": "libswscale", "license": "LGPL-3.0-or-later"}
     ],
     "sourceRecipe": "Release CI fetches the locked FFmpeg 8.1.2 source or reviewed target payload, verifies its pinned digest and byte count, configures only the audited LGPL component inventory with the declared flags where a source build is required, and emits signed inventory, SBOM, notices, and catalog measurements."
   },

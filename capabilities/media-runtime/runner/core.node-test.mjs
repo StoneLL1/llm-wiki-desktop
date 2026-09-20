@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import process from "node:process";
 import { Buffer } from "node:buffer";
-import { textSubtitleTracks, renderSrt } from "./core.mjs";
+import { textSubtitleTracks, renderSrt, selectStableTextFrameIndexes } from "./core.mjs";
 
 test("decoder skips bitmap tracks and retains text track language and priority", () => {
   const inventory = "  Stream #0:1: Subtitle: hdmv_pgs_subtitle (default)\n  Stream #0:2(eng): Subtitle: subrip\n  Stream #0:3(zho): Subtitle: ass (default)\n";
@@ -80,4 +80,67 @@ test("real decoder RPC extracts MP4 and MKV text without models, including a pre
   assert.equal(metadata.language, "zho");
   assert.ok(metadata.originalSubtitle.includes("中文正文"));
 
+});
+
+
+test("binary PGM whitespace pixels and repeated opening scenes preserve later frames", () => {
+  const frame = (first, shift = 0) => {
+    const pixels = Buffer.alloc(32 * 32, 240);
+    for (let y = 0; y < 32; y += 1) pixels[y * 32 + 4 + shift] = 20;
+    pixels[0] = first;
+    return Buffer.concat([Buffer.from("P5\n32 32\n255\n"), pixels]);
+  };
+  for (const first of [9, 10, 13, 32]) {
+    const opening = frame(first);
+    const late = frame(first, 10);
+    assert.deepEqual(selectStableTextFrameIndexes([...Array(24).fill(opening), late, late]), [1, 24]);
+  }
+});
+
+test("real video RPC requires OCR consent and deduplicates the opening across the full duration", { skip: !process.env.LLM_WIKI_TEST_FFMPEG }, async (t) => {
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+  const os = await import("node:os");
+  const { execFileSync } = await import("node:child_process");
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "video-frames-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const runner = path.join(root, "pack", "runner");
+  const bin = path.join(root, "pack", "runtime", "ffmpeg", "bin");
+  const staging = path.join(root, "staging");
+  await fs.mkdir(bin, { recursive: true }); await fs.mkdir(staging);
+  await fs.cp(import.meta.dirname, runner, { recursive: true });
+  await fs.symlink(process.env.LLM_WIKI_TEST_FFMPEG, path.join(bin, process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg"));
+  for (let scene = 0; scene < 2; scene += 1) {
+    const pixels = Buffer.alloc(480 * 240, 240);
+    for (let y = 20; y < 220; y += 1) for (let x = 20 + scene * 160; x < 160 + scene * 160; x += 8) pixels[y * 480 + x] = 20;
+    await fs.writeFile(path.join(staging, `scene-${scene}.pgm`), Buffer.concat([Buffer.from("P5\n480 240\n255\n"), pixels]));
+  }
+  const source = path.join(staging, "movie.mp4");
+  execFileSync(process.env.LLM_WIKI_TEST_FFMPEG, ["-v", "error", "-loop", "1", "-framerate", "1", "-t", "1900", "-i", path.join(staging, "scene-0.pgm"), "-loop", "1", "-framerate", "1", "-t", "100", "-i", path.join(staging, "scene-1.pgm"), "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0", "-r", "1", "-c:v", "mpeg4", source]);
+  const original = await fs.readFile(source);
+  for (const authorized of [false, true]) {
+    const rpc = JSON.parse(execFileSync(process.execPath, [path.join(runner, "index.mjs")], { input: JSON.stringify({ jsonrpc: "2.0", id: "frames", method: "import.extract", params: { operation: "extract", projectRoot: root, stagingRoot: "staging", chainedInput: "movie.mp4", input: { kind: "file", locator: source }, localOcrAuthorized: authorized } }), encoding: "utf8" }));
+    if (!authorized) { assert.equal(rpc.error?.data?.code, "IMPORT_VIDEO_FRAME_OCR_REQUIRED", JSON.stringify(rpc)); continue; }
+    assert.equal(rpc.error, null, JSON.stringify(rpc));
+    assert.equal(rpc.result.continuation, null);
+    const evidence = rpc.result.videoFrames;
+    assert.equal(evidence.frames.length, 2);
+    assert.ok(evidence.frames[1].timestampMs >= 1900000, JSON.stringify(evidence));
+    assert.ok(evidence.durationMs >= 2000000);
+    for (const frame of evidence.frames) {
+      assert.match(frame.path, /^\.ocr-input-[^/]+\/frame-at-\d+\.png$/u);
+      assert.deepEqual((await fs.readFile(path.join(staging, frame.path))).subarray(0, 8), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    }
+    assert.deepEqual(await fs.readFile(path.join(staging, rpc.result.sourceSnapshotPath)), original);
+  }
+});
+
+test("real FFmpeg PGM preserves whitespace-valued first raster bytes", { skip: !process.env.LLM_WIKI_TEST_FFMPEG }, async () => {
+  const { execFileSync } = await import("node:child_process");
+  for (const first of [9, 10, 13, 32]) {
+    const raster = Buffer.alloc(16 * 16, first);
+    const pgm = execFileSync(process.env.LLM_WIKI_TEST_FFMPEG, ["-v", "error", "-f", "rawvideo", "-pixel_format", "gray", "-video_size", "16x16", "-i", "pipe:0", "-frames:v", "1", "-f", "image2pipe", "-c:v", "pgm", "pipe:1"], { input: raster });
+    assert.equal(pgm.at(-256), first);
+    assert.deepEqual(selectStableTextFrameIndexes([pgm, pgm]), []);
+  }
 });

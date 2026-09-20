@@ -12,9 +12,9 @@ import { fetchNodeRuntime } from "./fetch-capability-runtime.mjs";
 import { fetchSenseVoiceSources } from "./fetch-sensevoice-sources.mjs";
 import { stageSenseVoiceCapability } from "./stage-sensevoice-capability.mjs";
 
-const VERSION = "1.13.4+2024.07.17";
+const VERSION = "1.13.4+2024.07.17.resources.3";
 const NODE_VERSION = "22.17.0";
-const PREPARATION_REVISION = 7;
+const PREPARATION_REVISION = 8;
 
 function comparePaths(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
@@ -105,6 +105,8 @@ async function hasCompletePayloadInventory(
       "models/tokens.txt",
       "qualification/zh.wav",
       "runner/index.mjs",
+      "runner/core.mjs",
+      "runner/video-frames.mjs",
       "runner/qualification.mjs",
     ]);
     const root = await fs.realpath(packRoot);

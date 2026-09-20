@@ -11,7 +11,7 @@ import {
   useTaskStore,
 } from "../../stores/taskStore";
 import { useToastStore } from "../../stores/toastStore";
-import { translateBackendError } from "../../lib/backendError";
+import { translateBackendError, normalizeBackendError } from "../../lib/backendError";
 import type { CommitItemDecision, ImportItemResolution, ImportRecoveryAction, ImportSession, MediaSaveMode } from "../../types/importV2";
 import type { ProjectSummary } from "../../types/project";
 import type { AsrAuthorizationOptions, ImportWorkflow } from "./importWorkflow";
@@ -685,10 +685,19 @@ export function useImportWorkflow(
     }
   }, [beginPendingItems, endPendingItems, isScopeCurrent, nextSessionMutationRevision, projectId, projectKey, pushToast, reconcileMutationSession, refreshForScope, rootPath, t]);
 
+  const [authorizationFailureState, setAuthorizationFailureState] = useState<{
+    scope: string; failures: NonNullable<ImportWorkflow["authorizationFailures"]>;
+  }>({ scope: "", failures: [] });
+  const authorizationScope = `${projectKey}\0${sessionEpoch}`;
+  const authorizationFailures = authorizationFailureState.scope === authorizationScope ? authorizationFailureState.failures : [];
+
   const authorizeLocalAsrGroup = useCallback(async (itemIds: readonly string[], options: AsrAuthorizationOptions) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey) return;
-    const ids = [...new Set(itemIds)];
+    const ids = [...new Set(itemIds)].filter((id) => {
+      const item = current.itemById[id];
+      return item && ["waiting_authorization", "waiting_capability", "failed"].includes(item.status);
+    });
     if (ids.length === 0) return;
     const epoch = current.sessionEpoch;
     const sessionId = current.session.sessionId;
@@ -696,7 +705,7 @@ export function useImportWorkflow(
     if (acceptedIds.length === 0) return;
     nextSessionMutationRevision();
     let succeeded: string[] = [];
-    let failed = 0;
+    const failures: NonNullable<ImportWorkflow["authorizationFailures"]> = [];
     let refreshError: unknown = null;
     try {
       const results = await Promise.allSettled(acceptedIds.map((itemId) =>
@@ -710,7 +719,12 @@ export function useImportWorkflow(
         }),
       ));
       succeeded = acceptedIds.filter((_itemId, index) => results[index]?.status === "fulfilled");
-      failed = results.length - succeeded.length;
+      results.forEach((result, index) => {
+        if (result.status === "rejected") failures.push({
+          itemId: acceptedIds[index], label: current.itemById[acceptedIds[index]]?.input.displayName ?? acceptedIds[index],
+          kind: "asr", error: normalizeBackendError(result.reason, { actionKindOverride: "retry", defaultRecoverable: true }),
+        });
+      });
     } finally {
       try {
         if (isScopeCurrent(projectKey, epoch, sessionId)) {
@@ -723,16 +737,23 @@ export function useImportWorkflow(
       }
     }
     if (!isScopeCurrent(projectKey, epoch, sessionId)) return;
+    const scope = `${projectKey}\0${epoch}`;
+    setAuthorizationFailureState((previous) => ({ scope, failures: [
+      ...(previous.scope === scope ? previous.failures.filter((failure) => !acceptedIds.includes(failure.itemId)) : []),
+      ...failures,
+    ] }));
     if (succeeded.length > 0) await startItems(succeeded);
     if (refreshError && isScopeCurrent(projectKey, epoch, sessionId)) {
       pushToast("error", t("importV2.workflow.error", { message: errorMessage(refreshError) }));
     }
-    if (failed > 0 && isScopeCurrent(projectKey, epoch, sessionId)) {
-      pushToast("warning", t("importV2.workflow.authorizationPartial", {
+    if (failures.length > 0 && isScopeCurrent(projectKey, epoch, sessionId)) {
+      pushToast("warning", `${t("importV2.workflow.authorizationPartial", {
         succeeded: succeeded.length,
-        failed,
-      }));
+        failed: failures.length,
+      })} ${failures.map((failure) => `${failure.label}: ${errorMessage(failure.error)}`).join("; ")}`);
+      return false;
     }
+    return true;
   }, [beginPendingItems, endPendingItems, errorMessage, isScopeCurrent, nextSessionMutationRevision, projectId, projectKey, pushToast, refreshForScope, rootPath, startItems, t]);
 
   const authorizeLocalAsr = useCallback(
@@ -744,7 +765,11 @@ export function useImportWorkflow(
   const authorizeLocalOcrGroup = useCallback(async (itemIds: readonly string[]) => {
     const current = useImportStore.getState();
     if (!current.session || current.projectKey !== projectKey) return;
-    const ids = [...new Set(itemIds)];
+    const ids = [...new Set(itemIds)].filter((id) => {
+      const item = current.itemById[id];
+      return item && (["waiting_authorization", "waiting_capability", "failed"].includes(item.status)
+        || (item.status === "preview_ready" && item.issue?.code === "IMPORT_WEB_OCR_UNAVAILABLE"));
+    });
     if (ids.length === 0) return;
     const epoch = current.sessionEpoch;
     const sessionId = current.session.sessionId;
@@ -752,7 +777,7 @@ export function useImportWorkflow(
     if (acceptedIds.length === 0) return;
     nextSessionMutationRevision();
     let succeeded: string[] = [];
-    let failed = 0;
+    const failures: NonNullable<ImportWorkflow["authorizationFailures"]> = [];
     let refreshError: unknown = null;
     try {
       const results = await Promise.allSettled(acceptedIds.map((itemId) =>
@@ -764,7 +789,12 @@ export function useImportWorkflow(
         }),
       ));
       succeeded = acceptedIds.filter((_itemId, index) => results[index]?.status === "fulfilled");
-      failed = results.length - succeeded.length;
+      results.forEach((result, index) => {
+        if (result.status === "rejected") failures.push({
+          itemId: acceptedIds[index], label: current.itemById[acceptedIds[index]]?.input.displayName ?? acceptedIds[index],
+          kind: "ocr", error: normalizeBackendError(result.reason, { actionKindOverride: "retry", defaultRecoverable: true }),
+        });
+      });
     } finally {
       try {
         if (isScopeCurrent(projectKey, epoch, sessionId)) {
@@ -777,16 +807,23 @@ export function useImportWorkflow(
       }
     }
     if (!isScopeCurrent(projectKey, epoch, sessionId)) return;
+    const scope = `${projectKey}\0${epoch}`;
+    setAuthorizationFailureState((previous) => ({ scope, failures: [
+      ...(previous.scope === scope ? previous.failures.filter((failure) => !acceptedIds.includes(failure.itemId)) : []),
+      ...failures,
+    ] }));
     if (succeeded.length > 0) await startItems(succeeded);
     if (refreshError && isScopeCurrent(projectKey, epoch, sessionId)) {
       pushToast("error", t("importV2.workflow.error", { message: errorMessage(refreshError) }));
     }
-    if (failed > 0 && isScopeCurrent(projectKey, epoch, sessionId)) {
-      pushToast("warning", t("importV2.workflow.authorizationPartial", {
+    if (failures.length > 0 && isScopeCurrent(projectKey, epoch, sessionId)) {
+      pushToast("warning", `${t("importV2.workflow.authorizationPartial", {
         succeeded: succeeded.length,
-        failed,
-      }));
+        failed: failures.length,
+      })} ${failures.map((failure) => `${failure.label}: ${errorMessage(failure.error)}`).join("; ")}`);
+      return false;
     }
+    return true;
   }, [beginPendingItems, endPendingItems, errorMessage, isScopeCurrent, nextSessionMutationRevision, projectId, projectKey, pushToast, refreshForScope, rootPath, startItems, t]);
 
   const authorizeLocalOcr = useCallback(
@@ -820,7 +857,7 @@ export function useImportWorkflow(
     const item = current.itemById[itemId];
     if (!item || current.projectKey !== projectKey) return;
     const epoch = current.sessionEpoch;
-    const acceptedIds = beginPendingItems([itemId], projectKey, epoch);
+    const acceptedIds = beginPendingItems([`cancel:${itemId}`], projectKey, epoch);
     if (acceptedIds.length === 0) return;
     const mutationRevision = nextSessionMutationRevision();
     try {
@@ -1307,6 +1344,7 @@ export function useImportWorkflow(
     retryItem,
     cancelItem,
     skipItem,
+    authorizationFailures,
     authorizeLocalAsr,
     authorizeLocalAsrGroup,
     authorizeLocalOcr,

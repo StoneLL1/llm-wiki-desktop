@@ -743,7 +743,7 @@ impl ImportIssue {
                 (true, true, vec![SwitchRoute, InstallMediaCapability])
             }
             "IMPORT_WEB_MEDIA_UNAVAILABLE" => {
-                (true, true, vec![InstallBrowserCapability, SwitchRoute])
+                (true, true, vec![RetryRoute, SwitchRoute])
             }
             "IMPORT_WEB_STRUCTURE_CHANGED" => (true, true, vec![SwitchRoute, InvokeAgent]),
             "IMPORT_WEB_SUBTITLE_UNAVAILABLE" => (

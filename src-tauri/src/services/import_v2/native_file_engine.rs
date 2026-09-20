@@ -454,7 +454,15 @@ impl ImportEngine for NativeStructuredFileEngine {
         let mut pdf_page_plan = None;
         let mut continuation = None;
         let mut workbook_sheets = None;
+        let mut docx_extraction = None;
         let mut markdown: String = match self.extension() {
+            "docx" => {
+                let extracted =
+                    super::structured_extract::extract_docx_with_images(&bytes, &staging)?;
+                let markdown = extracted.markdown.clone();
+                docx_extraction = Some(extracted);
+                markdown
+            }
             "xlsx" => {
                 workbook_sheets = Some(super::structured_extract::extract_xlsx_sheets_from_bytes(
                     &bytes,
@@ -462,8 +470,8 @@ impl ImportEngine for NativeStructuredFileEngine {
                 String::new()
             }
             "pdf" => {
-                let inspection =
-                    crate::services::import_v2::pdf_router::inspect_pdf(&source, None).map_err(
+                let (inspection, page_texts) =
+                    crate::services::import_v2::pdf_router::inspect_pdf_with_text(&source, None).map_err(
                         |error| match error {
                             crate::services::import_v2::pdf_router::PdfInspectionError::PasswordRequired { .. }
                             | crate::services::import_v2::pdf_router::PdfInspectionError::InvalidPassword { .. } => {
@@ -523,24 +531,21 @@ impl ImportEngine for NativeStructuredFileEngine {
                     ));
                 }
                 let page_plan = pdf_page_plan.as_deref().unwrap_or_default();
-                if page_plan.iter().any(|page| {
-                    page.route == crate::services::import_v2::pdf_router::PdfPageRoute::SelectiveOcr
-                }) {
-                    std::fs::create_dir_all(&staging).map_err(|_| {
-                        invalid("The PDF selective OCR staging directory could not be created.")
-                    })?;
-                    let prepared = crate::services::import_v2::pdf_router::prepare_selective_ocr(
-                        &source, &staging, page_plan,
+                std::fs::create_dir_all(&staging)
+                    .map_err(|_| invalid("The PDF staging directory could not be created."))?;
+                let prepared =
+                    crate::services::import_v2::pdf_router::prepare_selective_ocr_with_text(
+                        &source,
+                        &staging,
+                        page_plan,
+                        Some(&page_texts),
                     )?;
+                if !prepared.temporary_input_paths.is_empty() {
                     continuation = Some(EngineContinuation::LocalOcr {
                         temporary_input_paths: prepared.temporary_input_paths,
                     });
-                    prepared.markdown
-                } else {
-                    crate::services::import_v2::structured_extract::extract_pdf_markdown_from_bytes(
-                        &bytes,
-                    )?
                 }
+                prepared.markdown
             }
             extension => {
                 crate::services::import_v2::structured_extract::extract_ooxml_markdown_from_bytes(
@@ -561,6 +566,12 @@ impl ImportEngine for NativeStructuredFileEngine {
         let mut formula_value_pairs = None;
         let mut meaningful_image_coverage = None;
         let mut presentation_image_preservation_incomplete = false;
+        let mut office_ocr_images = Vec::new();
+        if let Some(extracted) = docx_extraction {
+            asset_paths = extracted.assets;
+            office_ocr_images = extracted.ocr_images;
+            meaningful_image_coverage = (!asset_paths.is_empty()).then_some(1.0);
+        }
         if extension == "xlsx" {
             let sheets = workbook_sheets.expect("XLSX extraction produces structured sheets");
             let output = crate::services::import_v2::office_postprocess::WorkbookPlan::new(
@@ -591,6 +602,38 @@ impl ImportEngine for NativeStructuredFileEngine {
                     .remove(&slide.number)
                     .unwrap_or_default();
             }
+            if slides.iter().all(|slide| {
+                slide.title == format!("Slide {}", slide.number)
+                    && slide.body.is_empty()
+                    && slide
+                        .notes
+                        .as_ref()
+                        .is_none_or(|notes| notes.trim().is_empty())
+                    && slide.images.is_empty()
+            }) {
+                return Err(BackendError::new(
+                    "IMPORT_FILE_QUALITY_FAILED",
+                    "The presentation has no readable text or screenshot body.",
+                    true,
+                    true,
+                ));
+            }
+            for slide in &slides {
+                if slide.body.is_empty()
+                    && slide
+                        .notes
+                        .as_ref()
+                        .is_none_or(|notes| notes.trim().is_empty())
+                {
+                    office_ocr_images.extend(
+                        slide
+                            .images
+                            .iter()
+                            .filter(|image| image.width_px >= 32 && image.height_px >= 32)
+                            .map(|image| image.path.clone()),
+                    );
+                }
+            }
             meaningful_image_coverage = presentation_media.meaningful_image_coverage();
             presentation_image_preservation_incomplete = presentation_media
                 .preserved_image_references
@@ -603,6 +646,44 @@ impl ImportEngine for NativeStructuredFileEngine {
             .map_err(|_| invalid("The presentation output plan could not be rendered."))?;
             markdown = output.candidates.join("\n\n");
             slide_count_exact = Some(1.0);
+        }
+        let mut seen_ocr_images = std::collections::HashSet::new();
+        office_ocr_images.retain(|image| seen_ocr_images.insert(image.clone()));
+        if !office_ocr_images.is_empty() {
+            if !request.local_ocr_authorized {
+                return Err(BackendError::new("IMPORT_WEB_OCR_UNAVAILABLE", "Office screenshot sections need local OCR before a readable Source can be created.", true, true));
+            }
+            let workspace = super::media_router::TemporaryMediaWorkspace::create_unique(
+                &staging,
+                ".ocr-input",
+            )?;
+            let mut temporary_input_paths = Vec::new();
+            for (index, image) in office_ocr_images.iter().enumerate() {
+                let extension = Path::new(image)
+                    .extension()
+                    .and_then(|v| v.to_str())
+                    .unwrap_or("png");
+                let target = workspace
+                    .path()
+                    .join(format!("image-{:03}.{extension}", index + 1));
+                std::fs::copy(staging.join(image), &target)
+                    .map_err(|_| invalid("An Office OCR image could not be staged."))?;
+                temporary_input_paths.push(
+                    target
+                        .strip_prefix(&staging)
+                        .map_err(|_| invalid("The Office OCR path escaped staging."))?
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
+                markdown = markdown.replace(
+                    &format!("]({image})"),
+                    &format!("]({image})\n\n<!-- OCR_IMAGE_{:03} -->", index + 1),
+                );
+            }
+            workspace.retain();
+            continuation = Some(EngineContinuation::LocalOcr {
+                temporary_input_paths,
+            });
         }
         let descriptor = self.descriptor();
         let mut warnings = match self.extension() {
@@ -672,16 +753,19 @@ impl ImportEngine for NativeStructuredFileEngine {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into_owned(),
-            text_coverage: pdf_inspection.as_ref().and_then(|inspection| {
-                inspection
-                    .text_characters_per_page
-                    .iter()
-                    .enumerate()
-                    .all(|(index, count)| {
-                        *count == 0 || inspection.image_only_pages.contains(&(index as u32))
-                    })
-                    .then_some(0.0)
-            }),
+            text_coverage: pdf_inspection
+                .as_ref()
+                .and_then(|inspection| {
+                    inspection
+                        .text_characters_per_page
+                        .iter()
+                        .enumerate()
+                        .all(|(index, count)| {
+                            *count == 0 || inspection.image_only_pages.contains(&(index as u32))
+                        })
+                        .then_some(0.0)
+                })
+                .or_else(|| (!office_ocr_images.is_empty()).then_some(0.0)),
             // The fallback reader extracts cell text but does not verify table
             // structure, formulas, or displayed values.
             table_cell_accuracy: None,

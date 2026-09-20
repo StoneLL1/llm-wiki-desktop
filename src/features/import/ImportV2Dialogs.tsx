@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { normalizeBackendError, type NormalizedBackendError, backendErrorCode } from "../../lib/backendError";
 import { useImportStore } from "../../stores/importStore";
 import { useTaskStore } from "../../stores/taskStore";
 import type { ImportItem } from "../../types/importV2";
@@ -56,6 +57,16 @@ export function ImportV2Dialogs({ workflow, privateItem, asrItem, asrItemIds = [
   const loginItem = useImportStore((state) => loginItemId ? state.itemById[loginItemId] ?? null : null);
   const previewIdentity = sessionId && previewItem ? { sessionId, itemId: previewItem.itemId, candidateId: null } : null;
 
+  const requirementItemId = capabilityItemId ?? loginItemId;
+  const requirementItem = capabilityItem ?? loginItem;
+  const [queryRevision, setQueryRevision] = useState(0);
+  const [capabilityLoading, setCapabilityLoading] = useState(false);
+  const [capabilityError, setCapabilityError] = useState<NormalizedBackendError | null>(null);
+  const [asrPlanError, setAsrPlanError] = useState<NormalizedBackendError | null>(null);
+  const preparedLogin = useRef<string | null>(null);
+  const browserInstallCompletion = useTaskStore((state) => state.tasks.filter((task) =>
+    task.operation?.kind === "app_capability_install" && task.operation.capabilityId === "browser-runtime"
+    && task.status === "succeeded").reduce((latest, task) => task.updatedAt > latest ? task.updatedAt : latest, ""));
   const [capability, setCapability] = useState<ImportCapabilityRequirement | null>(null);
   const [asrPlan, setAsrPlan] = useState<ImportAsrEnablementPlan | null>(null);
   const [asrPlanLoading, setAsrPlanLoading] = useState(false);
@@ -68,6 +79,7 @@ export function ImportV2Dialogs({ workflow, privateItem, asrItem, asrItemIds = [
     setAsrPlan(null);
     setAsrPlanLoading(false);
     setConnector(null);
+    preparedLogin.current = null;
   }, [workflow.projectKey]);
 
   useEffect(() => {
@@ -77,19 +89,25 @@ export function ImportV2Dialogs({ workflow, privateItem, asrItem, asrItemIds = [
   }, [restoredCollection, workflow.collectionPreview, workflow.restoreCollection]);
 
   useEffect(() => {
-    if (!capabilityItemId) {
-      setCapability(null);
-      return;
-    }
-    let current = true;
     setCapability(null);
-    void workflow.getCapabilityRequirement(capabilityItemId).then((next) => {
-      if (current) setCapability(next);
-    }).catch(() => {
-      if (current) setCapability(null);
-    });
+    setCapabilityError(null);
+    if (!requirementItemId) { setCapabilityLoading(false); return; }
+    let current = true;
+    setCapabilityLoading(true);
+    void workflow.getCapabilityRequirement(requirementItemId).then(async (next) => {
+      if (!current) return;
+      setCapability(next);
+      if (next?.available && loginItemId === requirementItemId && preparedLogin.current === loginItemId) {
+        preparedLogin.current = null;
+        const locator = loginItem?.input.normalizedLocator ?? loginItem?.input.locator ?? "";
+        const connected = await workflow.beginLogin(loginItemId, importPlatformForLocator(locator));
+        if (current) setConnector(connected);
+      }
+    }).catch((error) => {
+      if (current) setCapabilityError(normalizeBackendError(error, { defaultActionKind: "retry", defaultRecoverable: true }));
+    }).finally(() => { if (current) setCapabilityLoading(false); });
     return () => { current = false; };
-  }, [capabilityItemId, workflow.getCapabilityRequirement]);
+  }, [requirementItemId, loginItemId, loginItem?.input.locator, loginItem?.input.normalizedLocator, workflow.getCapabilityRequirement, workflow.beginLogin, workflow.projectKey, queryRevision, browserInstallCompletion]);
 
   useEffect(() => {
     if (!asrItemId) {
@@ -100,15 +118,16 @@ export function ImportV2Dialogs({ workflow, privateItem, asrItem, asrItemIds = [
     let current = true;
     setAsrPlan(null);
     setAsrPlanLoading(true);
+    setAsrPlanError(null);
     void workflow.getAsrEnablementPlan(asrItemId).then((next) => {
       if (current) setAsrPlan(next);
-    }).catch(() => {
-      if (current) setAsrPlan(null);
+    }).catch((error) => {
+      if (current) setAsrPlanError(normalizeBackendError(error, { defaultActionKind: "retry", defaultRecoverable: true }));
     }).finally(() => {
       if (current) setAsrPlanLoading(false);
     });
     return () => { current = false; };
-  }, [asrItemId, workflow.getAsrEnablementPlan]);
+  }, [asrItemId, workflow.getAsrEnablementPlan, workflow.projectKey, queryRevision]);
 
   useEffect(() => {
     if (!loginItemId) setConnector(null);
@@ -140,58 +159,75 @@ export function ImportV2Dialogs({ workflow, privateItem, asrItem, asrItemIds = [
       />
       <ImportMarkdownPreviewDialog open={Boolean(previewIdentity)} identity={previewIdentity} loadContent={workflow.loadPreview} onClose={closePreview} />
       <ImportCapabilityDialog
-        open={Boolean(capabilityItemId && capability)}
+        open={Boolean(capabilityItemId || (loginItemId && !capability?.available))}
+        loading={capabilityLoading}
+        loadError={capabilityError}
+        onRetryLoad={() => setQueryRevision((value) => value + 1)}
         requirement={capability}
         sessionId={sessionId}
-        itemId={capabilityItem?.itemId ?? null}
-        onCancel={closeCapability}
+        itemId={requirementItem?.itemId ?? null}
+        onCancel={capabilityItemId ? closeCapability : closeLogin}
         onInstall={async (capabilityId) => {
           if (capabilityItem && capability?.available) {
             const projectKey = workflow.projectKey;
             if (capability.route.startsWith("ocr.")) {
-              await workflow.authorizeLocalOcr(capabilityItem.itemId);
+              if (await workflow.authorizeLocalOcr(capabilityItem.itemId) === false) return null;
             } else {
               await workflow.retryItem(capabilityItem.itemId);
             }
             if (activeProjectKeyRef.current === projectKey) closeCapability();
             return null;
           }
-          if (capabilityItem && capability) return workflow.installCapability(
-            capabilityItem.itemId,
-            capabilityId,
-            capability.requirementRevision,
-          );
+          if (requirementItem && capability) {
+            if (loginItemId === requirementItem.itemId) preparedLogin.current = loginItemId;
+            try {
+              return await workflow.installCapability(requirementItem.itemId, capabilityId, capability.requirementRevision);
+            } catch (error) {
+              preparedLogin.current = null;
+              if (backendErrorCode(error) === "IMPORT_V2_CAPABILITY_REQUIREMENT_STALE") setQueryRevision((value) => value + 1);
+              throw error;
+            }
+          }
           return null;
         }}
       />
       <ImportAsrDialog
         open={Boolean(asrItem)}
         plan={asrPlan}
+        authorizationError={workflow.authorizationFailures?.find((failure) => (failure.itemId === asrItemId || asrItemIds.includes(failure.itemId)))?.error}
         loading={asrPlanLoading}
+        loadError={asrPlanError}
+        onRetryLoad={() => setQueryRevision((value) => value + 1)}
         onCancel={onCloseAsr}
         onConfirm={async (options) => {
           if (!asrItem) return;
+          const projectKey = workflow.projectKey;
           const itemIds = asrItemIds.length > 0 ? asrItemIds : [asrItem.itemId];
           if (workflow.authorizeLocalAsrGroup) {
-            await workflow.authorizeLocalAsrGroup(itemIds, options);
+            if (await workflow.authorizeLocalAsrGroup(itemIds, options) === false) return;
           } else {
             for (const itemId of itemIds) {
-              await workflow.authorizeLocalAsr(itemId, options);
+              if (await workflow.authorizeLocalAsr(itemId, options) === false) return;
             }
           }
-          onCloseAsr();
+          if (activeProjectKeyRef.current === projectKey) onCloseAsr();
         }}
         sessionId={sessionId}
         itemId={asrItem?.itemId ?? null}
         onInstall={async (capabilityId, options) => {
           if (!asrItem) return;
-          return workflow.installCapability(
+          try {
+            return await workflow.installCapability(
             asrItem.itemId,
             capabilityId,
             asrPlan!.requirementRevision,
             options,
             asrItemIds.filter((id) => id !== asrItem.itemId),
-          );
+            );
+          } catch (error) {
+            if (backendErrorCode(error) === "IMPORT_V2_CAPABILITY_REQUIREMENT_STALE") setQueryRevision((value) => value + 1);
+            throw error;
+          }
         }}
       />
       <ImportSubtitleDialog
@@ -205,7 +241,7 @@ export function ImportV2Dialogs({ workflow, privateItem, asrItem, asrItemIds = [
         }}
       />
       <ImportLoginDialog
-        open={Boolean(loginItem)}
+        open={Boolean(loginItem && capability?.available && !capabilityError)}
         platform={loginPlatformLabel}
         publicDomain={loginDomain}
         authState={loginAuthState}

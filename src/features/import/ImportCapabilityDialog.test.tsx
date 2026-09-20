@@ -226,6 +226,15 @@ describe("ImportCapabilityDialog", () => {
     expect(screen.queryByText(/11\.7 KiB \/ 11\.7 KiB/)).not.toBeInTheDocument();
   });
 
+  it("does not treat a healthy older pack as satisfying the current item requirement", () => {
+    useAppCapabilityStore.setState({ capabilities: [{ ...globalCapability,
+      installation: { state: "healthy", healthyVersion: "1.3.0" },
+    }] });
+    render(<ImportCapabilityDialog open requirement={{ ...requirement, installable: false, unavailableReasonCode: "resource_update_not_published" }} onInstall={vi.fn()} onCancel={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: /continue import/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /prepare and continue/i })).toBeDisabled();
+  });
+
   it("shows a stable reason code when details are unavailable", () => {
     const unavailable = {
       ...globalCapability,

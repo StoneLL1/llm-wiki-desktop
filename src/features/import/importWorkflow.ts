@@ -114,10 +114,11 @@ export interface ImportWorkflow {
   retryItem: (itemId: string, recoveryAction?: ImportRecoveryAction | null) => Promise<void>;
   cancelItem: (itemId: string) => Promise<void>;
   skipItem: (itemId: string) => Promise<void>;
-  authorizeLocalAsr: (itemId: string, options: AsrAuthorizationOptions) => Promise<void>;
-  authorizeLocalAsrGroup?: (itemIds: readonly string[], options: AsrAuthorizationOptions) => Promise<void>;
-  authorizeLocalOcr: (itemId: string) => Promise<void>;
-  authorizeLocalOcrGroup?: (itemIds: readonly string[]) => Promise<void>;
+  authorizationFailures?: { itemId: string; label: string; kind: "ocr" | "asr"; error: NormalizedBackendError }[];
+  authorizeLocalAsr: (itemId: string, options: AsrAuthorizationOptions) => Promise<boolean | void>;
+  authorizeLocalAsrGroup?: (itemIds: readonly string[], options: AsrAuthorizationOptions) => Promise<boolean | void>;
+  authorizeLocalOcr: (itemId: string) => Promise<boolean | void>;
+  authorizeLocalOcrGroup?: (itemIds: readonly string[]) => Promise<boolean | void>;
   selectSubtitle: (itemId: string, fileName: string) => Promise<void>;
   confirm: (legacyDecisions?: CommitItemDecision[]) => Promise<void>;
   restrictedCommitPending: boolean;

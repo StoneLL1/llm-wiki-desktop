@@ -14,7 +14,8 @@ MODEL_VERSION = "PP-OCRv5-mobile-v3.8.0"
 MAX_IMAGE_BYTES = 64 * 1024 * 1024
 MAX_IMAGE_DIMENSION = 16_384
 MAX_IMAGE_PIXELS = 64 * 1024 * 1024
-MAX_IMAGE_FRAMES = 1
+MAX_IMAGE_FRAMES = 200
+MAX_TOTAL_IMAGE_PIXELS = MAX_IMAGE_PIXELS * 4
 MAX_BLOCKS = 10_000
 MAX_TEXT_CHARACTERS = 16_384
 
@@ -135,8 +136,27 @@ def validate_image_geometry(width: Any, height: Any, frames: Any) -> None:
         _fail("IMPORT_OCR_INVALID_IMAGE")
     if width > MAX_IMAGE_DIMENSION or height > MAX_IMAGE_DIMENSION:
         _fail("IMPORT_OCR_IMAGE_TOO_LARGE")
-    if width * height > MAX_IMAGE_PIXELS or frames > MAX_IMAGE_FRAMES:
+    if frames > MAX_IMAGE_FRAMES:
+        _fail("IMPORT_OCR_PAGE_LIMIT")
+    if width * height > MAX_IMAGE_PIXELS:
         _fail("IMPORT_OCR_IMAGE_TOO_LARGE")
+
+
+def stage_tiff_pages(image, output_root: Path) -> list[Path]:
+    frames = int(getattr(image, "n_frames", 1))
+    validate_image_geometry(image.width, image.height, frames)
+    paths = []
+    total_pixels = 0
+    for index in range(frames):
+        image.seek(index)
+        validate_image_geometry(image.width, image.height, 1)
+        total_pixels += image.width * image.height
+        if total_pixels > MAX_TOTAL_IMAGE_PIXELS:
+            _fail("IMPORT_OCR_IMAGE_TOO_LARGE")
+        output = output_root / f"page-{index + 1}.png"
+        image.convert("RGB").save(output, format="PNG")
+        paths.append(output)
+    return paths
 
 
 def verify_signed_file(pack_root_value: Path, manifest: Any, relative_path: str) -> Path:

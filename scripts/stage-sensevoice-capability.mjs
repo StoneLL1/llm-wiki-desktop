@@ -82,6 +82,9 @@ async function writeCompliance(output, provenance, modelBytes, ffmpegEvidence) {
     { name: "sherpa-onnx", SPDXID: "SPDXRef-SherpaONNX", versionInfo: provenance.sherpa.version, licenseDeclared: "Apache-2.0" },
     { name: "SenseVoiceSmall int8 model", SPDXID: "SPDXRef-SenseVoiceModel", versionInfo: provenance.model.version, licenseDeclared: "Apache-2.0" },
     { name: "FFmpeg", SPDXID: "SPDXRef-FFmpeg", versionInfo: provenance.ffmpeg.version, licenseDeclared: "LGPL-3.0-or-later" },
+    ...(provenance.ffmpeg.componentInventory ?? []).map((name) => ({
+      name, SPDXID: `SPDXRef-${name}`, versionInfo: provenance.ffmpeg.version, licenseDeclared: "LGPL-3.0-or-later",
+    })),
   ].map((item) => ({ ...item, downloadLocation: "NOASSERTION", filesAnalyzed: false, licenseConcluded: item.licenseDeclared }));
   await fs.writeFile(path.join(output, "SBOM.spdx.json"), `${JSON.stringify({
     spdxVersion: "SPDX-2.3",
@@ -168,7 +171,7 @@ export async function stageSenseVoiceCapability(options) {
     nodeVersion: options.nodeVersion.replace(/^v/, ""),
     runtimeNetwork: false,
     callerFlags: false,
-    mediaLimitSeconds: 7200,
+    mediaLimitSeconds: null,
   };
   await fs.writeFile(path.join(options.output, "BUILD-PROVENANCE.json"), `${JSON.stringify(provenance, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
   await writeCompliance(options.output, provenance, modelStatus.size, ffmpegEvidence);

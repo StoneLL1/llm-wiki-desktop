@@ -1,11 +1,13 @@
 //! Real lite RPC -> production adapter -> Source transaction in a disposable project.
 use super::*;
+use crate::services::import_v2::capability_pack::CapabilityPackManifest;
 use crate::services::import_v2::{source_registry::SourceRegistry, ImportV2Service};
 use crate::{
     models::{import_v2::*, paths::ProjectContext, task::TaskType},
     services::{FileStore, GitService, SecretService},
     tasks::TaskService,
 };
+use std::path::PathBuf;
 use std::{
     io::Cursor,
     net::{IpAddr, Ipv4Addr, TcpListener},
@@ -498,4 +500,321 @@ fn legacy_conversion_native_failure_fallback_preserves_original_identity_through
             .unwrap()
             .contains("original bytes survive")
     );
+}
+
+/// Source runner + available real Chromium + production PackProcessEngine,
+/// with an isolated cookie profile and an HTTP server that rejects anonymous
+/// article requests. No mock engine or anonymous prefetch is involved.
+#[test]
+#[ignore = "requires LLM_WIKI_TEST_BROWSER_ROOT built by prepare-local-acceptance.mjs"]
+fn real_browser_authenticated_profile_reaches_preview_commit_and_restart_without_anonymous_fetch() {
+    real_browser_authenticated_journey(false);
+    real_browser_authenticated_journey(true);
+}
+
+fn real_browser_authenticated_journey(replay_session_cookie: bool) {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let pack_root = PathBuf::from(std::env::var("LLM_WIKI_TEST_BROWSER_ROOT").unwrap());
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    listener.set_nonblocking(true).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let authenticated = Arc::new(AtomicUsize::new(0));
+    let anonymous = Arc::new(AtomicUsize::new(0));
+    let flags = (stop.clone(), authenticated.clone(), anonymous.clone());
+    let server = std::thread::spawn(move || {
+        while !flags.0.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let mut buffer = [0; 8192];
+                    let size = stream.read(&mut buffer).unwrap_or(0);
+                    if size == 0 {
+                        continue;
+                    }
+                    let request = String::from_utf8_lossy(&buffer[..size]);
+                    let has_cookie = request.contains("acceptance_session=authenticated");
+                    if has_cookie {
+                        flags.1.fetch_add(1, Ordering::SeqCst);
+                    } else {
+                        flags.2.fetch_add(1, Ordering::SeqCst);
+                    }
+                    let body = if has_cookie {
+                        "<html><head><title>Authenticated article</title></head><body><article><h1>Authenticated article</h1><p>登录后的实际正文。This article discusses captcha and login required as ordinary prose, with faithful readable body.</p></article></body></html>"
+                    } else {
+                        "<form id='challenge-form'>login required</form>"
+                    };
+                    let status = if has_cookie {
+                        "200 OK"
+                    } else {
+                        "401 Unauthorized"
+                    };
+                    let _ = write!(stream, "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5))
+                }
+                Err(error) => panic!("{error}"),
+            }
+        }
+    });
+    let temp = tempfile::tempdir().unwrap();
+    let context = ProjectContext::new("browser-auth-fidelity", temp.path().join("知识库"));
+    std::fs::create_dir_all(context.root.join(".app")).unwrap();
+    let profile = temp.path().join("isolated-profile");
+    let url = if replay_session_cookie {
+        "https://mp.weixin.qq.com/s/acceptance".into()
+    } else {
+        format!("http://127.0.0.1:{port}/article")
+    };
+    let seeded = Command::new(pack_root.join("node"))
+        .arg(pack_root.join("runner/acceptance-seed.mjs"))
+        .arg(&profile)
+        .arg(&url)
+        .output()
+        .unwrap();
+    assert!(
+        seeded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&seeded.stderr)
+    );
+    let secrets = SecretService::memory();
+    if replay_session_cookie {
+        secrets.set_account("connector-cookie:wechat", &serde_json::json!([{
+            "name": "wxuin", "value": "authenticated", "domain": "mp.weixin.qq.com", "path": "/", "expires": -1, "httpOnly": true, "secure": true
+        }]).to_string()).unwrap();
+    }
+    let service = ImportV2Service::with_secret_service(secrets);
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(pack_root.join("manifest.json")).unwrap()).unwrap();
+    json.as_object_mut().unwrap().remove("browserRevision");
+    let mut manifest: CapabilityPackManifest = serde_json::from_value(json).unwrap();
+    if replay_session_cookie {
+        let fixture_path = pack_root.join("acceptance/host-cookie.json");
+        std::fs::create_dir_all(fixture_path.parent().unwrap()).unwrap();
+        std::fs::write(&fixture_path, serde_json::json!({
+            "requireCookie": "wxuin",
+            "html": "<meta charset='utf-8'><h1 id='activity-name'>Session cookie article</h1><div id='js_content'><p>登录后的实际正文。Discussion of captcha and login required.</p></div>"
+        }).to_string()).unwrap();
+        manifest.entrypoint_args = vec![
+            "runner/acceptance-fixture-entry.mjs".into(),
+            "acceptance/host-cookie.json".into(),
+        ];
+    }
+    let entrypoint = pack_root.join("node").canonicalize().unwrap();
+    service
+        .register_capability_pack(
+            ResolvedCapabilityPack {
+                manifest,
+                root: pack_root.canonicalize().unwrap(),
+                entrypoint_sha256: format!(
+                    "{:x}",
+                    Sha256::digest(std::fs::read(&entrypoint).unwrap())
+                ),
+                entrypoint,
+            },
+            "web.generic.browser".into(),
+            vec![],
+            Duration::from_secs(60),
+        )
+        .unwrap();
+    let session = service
+        .create_session(&context, &FileStore, ImportResourceMode::Balanced)
+        .unwrap();
+    let target = UrlPolicy.normalize_for_session(&url).unwrap();
+    let session = service
+        .add_inputs(
+            &context,
+            &FileStore,
+            &session.session_id,
+            vec![ImportInput {
+                kind: ImportInputKind::Url,
+                display_name: "Authenticated article".into(),
+                locator: service.store_web_target(&target).unwrap(),
+                normalized_locator: Some(target.public.public_url),
+                source_identity: None,
+                media_save_mode: MediaSaveMode::ExtractOnly,
+            }],
+        )
+        .unwrap();
+    let item_id = session.items[0].item_id.clone();
+    let mut waiting = session.items[0].clone();
+    waiting.status = ImportItemStatus::WaitingLogin;
+    service
+        .sessions
+        .write_item(&context, &FileStore, &session.session_id, &waiting)
+        .unwrap();
+    service
+        .bind_authenticated_profiles(
+            &context.project_id,
+            &session.session_id,
+            std::slice::from_ref(&item_id),
+            &profile,
+        )
+        .unwrap();
+    service
+        .mark_authenticated_login_group(
+            &context,
+            &FileStore,
+            &session.session_id,
+            std::slice::from_ref(&item_id),
+            Some("Fixture account"),
+        )
+        .unwrap();
+    service
+        .authorize_private_target(super::super::url_policy::PrivateTargetGrant {
+            item_id: item_id.clone(),
+            scheme: "http".into(),
+            host: "127.0.0.1".into(),
+            port,
+            resolved_ips: vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+        })
+        .unwrap();
+    let tasks = TaskService::default();
+    let task = tasks
+        .create_project_task(
+            TaskType::Import,
+            context.project_id.clone(),
+            context.root.clone(),
+            "real browser".into(),
+            true,
+        )
+        .unwrap();
+    let prepared = service
+        .run_item(
+            &context,
+            &FileStore,
+            &tasks,
+            &session.session_id,
+            &item_id,
+            &task.id,
+        )
+        .unwrap();
+    stop.store(true, Ordering::SeqCst);
+    server.join().unwrap();
+    assert_eq!(
+        prepared.status,
+        ImportItemStatus::PreviewReady,
+        "{:?}",
+        prepared.issue
+    );
+    if !replay_session_cookie {
+        assert!(authenticated.load(Ordering::SeqCst) >= 1);
+    }
+    assert_eq!(
+        anonymous.load(Ordering::SeqCst),
+        0,
+        "authenticated recovery must not prefetch anonymously"
+    );
+    let preview = prepared.preview.unwrap();
+    let batch = service
+        .commit_items(
+            &context,
+            &FileStore,
+            &GitService,
+            &CommitImportSessionRequest {
+                project_id: context.project_id.clone(),
+                project_root_path: context.root.to_string_lossy().into(),
+                session_id: session.session_id.clone(),
+                batch_task_id: None,
+                acknowledge_restricted_content: false,
+                expected_selection_revision: None,
+                expected_confirmation_digest: None,
+                decisions: vec![CommitItemDecision {
+                    item_id,
+                    resolution: preview.resolution.and_then(|r| r.default_resolution),
+                }],
+            },
+        )
+        .unwrap();
+    assert_eq!(batch.committed_count, 1, "{batch:?}");
+    drop(service);
+    let restarted = ImportV2Service::with_secret_service(SecretService::memory());
+    assert_eq!(
+        restarted
+            .load_session(&context, &FileStore, &session.session_id)
+            .unwrap()
+            .items[0]
+            .status,
+        ImportItemStatus::Completed
+    );
+    let body = std::fs::read_to_string(
+        context
+            .root
+            .join(batch.items[0].wiki_path.as_ref().unwrap()),
+    )
+    .unwrap();
+    assert!(body.contains("登录后的实际正文。"));
+    assert!(body.contains("captcha and login required"));
+    assert!(!body.contains("acceptance_session"));
+    assert!(!body.contains("wxuin"));
+    let persisted = serde_json::to_string(
+        &restarted
+            .load_session(&context, &FileStore, &session.session_id)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(!persisted.contains("cookieBackup"));
+    assert!(!persisted.contains("wxuin"));
+}
+
+#[test]
+fn browser_rpc_subtitle_kind_never_promotes_translation_or_unknown_to_source() {
+    for (kind, reliable) in [
+        (Some("author_original"), true),
+        (Some("platform_auto_original"), true),
+        (Some("author_other"), true),
+        (Some("machine_translation"), false),
+        (Some("unknown"), false),
+        (None, false),
+    ] {
+        let mut notification = serde_json::json!({
+            "jsonrpc": "2.0", "method": "import.remoteAsset", "params": {
+                "placeholder": "platform-subtitle-0", "url": "https://sns-subtitle-s2.xhscdn.com/source.srt",
+                "kind": "subtitle", "automatic": true, "language": "zh-CN", "label": "source"
+            }
+        });
+        if let Some(kind) = kind {
+            notification["params"]["subtitleKind"] = kind.into();
+        }
+        let response = serde_json::json!({ "jsonrpc": "2.0", "id": "r1", "error": null,
+            "result": {"sourceSnapshotPath": "source.html", "markdownPath": "candidate.md", "assetPaths": [], "title": "Video", "warnings": []} });
+        let rpc = format!("{notification}\n{response}\n");
+        let parsed = read_response(Cursor::new(rpc)).unwrap();
+        assert_eq!(parsed.remote_assets.len(), 1);
+        let asset = &parsed.remote_assets[0];
+        assert_eq!(asset.subtitle_kind.as_deref(), kind);
+        assert_eq!(asset.language.as_deref(), Some("zh-CN"));
+        assert_eq!(
+            subtitle_kind(asset).is_some_and(|kind| kind.is_reliable_source()),
+            reliable
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires real Chromium qualification RPC under LLM_WIKI_TEST_BROWSER_ROOT"]
+fn real_browser_subtitle_notifications_keep_reliability_through_host_adapter() {
+    let root = PathBuf::from(std::env::var("LLM_WIKI_TEST_BROWSER_ROOT").unwrap());
+    for (name, kind, reliable) in [
+        ("xhs-original", "platform_auto_original", true),
+        ("xhs-translation", "machine_translation", false),
+    ] {
+        let bytes = std::fs::read(root.join("acceptance").join(name).join("rpc.jsonl")).unwrap();
+        let parsed = read_response(Cursor::new(bytes)).unwrap();
+        parsed.rpc.validate("r1").unwrap();
+        let asset = parsed
+            .remote_assets
+            .iter()
+            .find(|asset| asset.kind == "subtitle")
+            .unwrap();
+        assert_eq!(asset.subtitle_kind.as_deref(), Some(kind));
+        assert_eq!(
+            subtitle_kind(asset).is_some_and(|kind| kind.is_reliable_source()),
+            reliable
+        );
+    }
 }

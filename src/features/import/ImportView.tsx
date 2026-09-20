@@ -760,6 +760,14 @@ export function ImportView({ workflow, capabilities = EMPTY_CAPABILITIES }: Impo
               onConfirmScan={(paths) => workflow.confirmDiscovery?.(paths)}
               confirmingLargeData={workflow.isAddingPaths}
             />
+            {workflow.authorizationFailures?.map((failure) => (
+              <section key={failure.itemId} aria-label={failure.label}>
+                <p className="text-[12px]">{failure.label}</p>
+                <ActionableErrorNotice error={failure.error} onAction={() => handleAction(
+                  failure.kind === "ocr" ? "enable_ocr" : "authorize_local_asr", failure.itemId,
+                )} />
+              </section>
+            ))}
             <ImportActionGroups
               groups={workflow.overview?.actionGroups ?? []}
               pendingItemIds={pendingItemIds}

@@ -391,3 +391,130 @@ fn encrypted_real_pdf_fails_before_any_raw_or_source_write() {
     assert!(!root.path().join("wiki").exists());
     assert!(!root.path().join(".app/sources").exists());
 }
+
+#[test]
+fn passive_open_action_destinations_are_allowed_but_indirect_scripts_are_rejected() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("initial view.pdf");
+    save_one_page_pdf(&path, false);
+    let mut document = Document::load(&path).unwrap();
+    let page = *document.get_pages().values().next().unwrap();
+    let catalog = document
+        .trailer
+        .get(b"Root")
+        .unwrap()
+        .as_reference()
+        .unwrap();
+    document
+        .get_object_mut(catalog)
+        .unwrap()
+        .as_dict_mut()
+        .unwrap()
+        .set(
+            "OpenAction",
+            vec![Object::Reference(page), Object::Name(b"Fit".to_vec())],
+        );
+    document.save(&path).unwrap();
+    assert!(inspect_pdf(&path, None).is_ok());
+    let destination = document.add_object(dictionary! { "S" => "GoTo", "D" => vec![Object::Reference(page), Object::Name(b"Fit".to_vec())] });
+    document
+        .get_object_mut(catalog)
+        .unwrap()
+        .as_dict_mut()
+        .unwrap()
+        .set("OpenAction", destination);
+    document.save(&path).unwrap();
+    assert!(inspect_pdf(&path, None).is_ok());
+    document
+        .get_object_mut(destination)
+        .unwrap()
+        .as_dict_mut()
+        .unwrap()
+        .set("S", Object::Name(b"JavaScript".to_vec()));
+    document.save(&path).unwrap();
+    assert_eq!(
+        inspect_pdf(&path, None),
+        Err(PdfInspectionError::ActiveContentRejected)
+    );
+}
+
+#[test]
+fn long_scan_headers_garbled_text_and_vector_outlines_need_ocr() {
+    use lopdf::Stream;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("scan with header.pdf");
+    let mut doc = Document::load(batch3_pdf("mixed-text-scan.pdf")).unwrap();
+    let pages = doc.get_pages();
+    let font = doc.add_object(
+        dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" },
+    );
+    let mut content = doc.get_page_content(pages[&2]).unwrap();
+    content.extend_from_slice(b"\nBT /FHeader 10 Tf 50 780 Td (This header is more than thirty two characters but the body is scanned.) Tj ET");
+    let stream = doc.add_object(Stream::new(dictionary! {}, content));
+    let mut resources = doc
+        .get_page_resources(pages[&2])
+        .unwrap()
+        .0
+        .unwrap()
+        .clone();
+    resources.set("Font", dictionary! { "FHeader" => font });
+    let page = doc
+        .get_object_mut(pages[&2])
+        .unwrap()
+        .as_dict_mut()
+        .unwrap();
+    page.set("Contents", stream);
+    page.set("Resources", resources);
+    doc.save(&path).unwrap();
+    let report = inspect_pdf(&path, None).unwrap();
+    assert!(report.text_characters_per_page[1] > 32);
+    assert_eq!(report.image_only_pages, vec![1]);
+    let content = doc.add_object(Stream::new(
+        dictionary! {},
+        b"0 0 m 30 30 l 40 20 l f".to_vec(),
+    ));
+    doc.get_object_mut(pages[&2])
+        .unwrap()
+        .as_dict_mut()
+        .unwrap()
+        .set("Contents", content);
+    doc.save(&path).unwrap();
+    assert_eq!(inspect_pdf(&path, None).unwrap().image_only_pages, vec![1]);
+    let content = doc.add_object(Stream::new(
+        dictionary! {},
+        b"BT /FHeader 10 Tf 50 400 Td (?????????????????????????????????????????????) Tj ET"
+            .to_vec(),
+    ));
+    doc.get_object_mut(pages[&2])
+        .unwrap()
+        .as_dict_mut()
+        .unwrap()
+        .set("Contents", content);
+    doc.save(&path).unwrap();
+    assert_eq!(inspect_pdf(&path, None).unwrap().image_only_pages, vec![1]);
+}
+
+#[test]
+fn short_readable_pdf_with_small_logo_does_not_require_ocr() {
+    use lopdf::Stream;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("short article and logo.pdf");
+    save_one_page_pdf(&path, false);
+    let mut doc = Document::load(&path).unwrap();
+    let page = *doc.get_pages().values().next().unwrap();
+    let font = doc.add_object(
+        dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" },
+    );
+    let logo = doc.add_object(Stream::new(dictionary! { "Type" => "XObject", "Subtype" => "Image", "Width" => 1, "Height" => 1, "ColorSpace" => "DeviceRGB", "BitsPerComponent" => 8 }, vec![0, 0, 0]));
+    let content = doc.add_object(Stream::new(dictionary! {}, b"q 24 0 0 24 50 730 cm /Logo Do Q\nBT /Text 12 Tf 50 680 Td (A short readable article.) Tj ET".to_vec()));
+    let page = doc.get_object_mut(page).unwrap().as_dict_mut().unwrap();
+    page.set("Contents", content);
+    page.set("Resources", dictionary! { "Font" => dictionary! { "Text" => font }, "XObject" => dictionary! { "Logo" => logo }});
+    doc.save(&path).unwrap();
+    let inspection = inspect_pdf(&path, None).unwrap();
+    assert!(inspection.image_only_pages.is_empty());
+    assert_eq!(
+        plan_pdf_pages(&inspection, PdfRouteCapabilities::default()).unwrap()[0].route,
+        PdfPageRoute::TextLayer
+    );
+}

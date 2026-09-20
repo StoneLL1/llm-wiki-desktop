@@ -175,7 +175,7 @@ const LOCAL_FORMAT_CASES: &[LocalFormatCase] = &[
         fixture: "animated.gif",
         format: FileFormat::AnimatedGif,
         content_kind: FileContentKind::Video,
-        routes: MEDIA_ROUTE_MATRIX,
+        routes: &["media.keyframes"],
     },
     LocalFormatCase {
         fixture: "audio.mp3",

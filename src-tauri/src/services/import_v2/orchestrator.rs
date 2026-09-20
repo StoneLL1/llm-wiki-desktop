@@ -3729,7 +3729,6 @@ impl ImportV2Service {
         let local_asr_authorized = snapshot.media_authorization.local_asr_authorized;
         let local_ocr_authorized = snapshot.media_authorization.local_ocr_authorized;
         let selected_subtitle = snapshot.selected_subtitle.clone();
-        let authenticated_retry = snapshot.authenticated_retry;
         let media_save_mode = input.media_save_mode.clone();
         let request = EngineRequest {
             protocol_version: "2".into(),
@@ -3853,24 +3852,6 @@ impl ImportV2Service {
                         .item_revision;
                     worker_revision.set(snapshot.expected_item_revision);
                     if is_web_user_wait(&error) {
-                        if authenticated_retry {
-                            return self.finish_failed(
-                                context,
-                                files,
-                                tasks,
-                                session_id,
-                                item_id,
-                                task_id,
-                                snapshot.expected_item_revision,
-                                BackendError::new(
-                                    "IMPORT_WEB_ACCOUNT_PERMISSION_DENIED",
-                                    "The current account cannot access this content.",
-                                    false,
-                                    true,
-                                ),
-                                ImportStage::Extract,
-                            );
-                        }
                         return self.finish_waiting_login(
                             context,
                             files,
@@ -3911,7 +3892,9 @@ impl ImportV2Service {
                             ImportStage::Extract,
                         );
                     }
-                    if error.code == "IMPORT_WEB_OCR_UNAVAILABLE" {
+                    if error.code == "IMPORT_WEB_OCR_UNAVAILABLE"
+                        || requires_explicit_video_frame_ocr(&error.code)
+                    {
                         return self.finish_waiting_local_ocr(
                             context,
                             files,
@@ -4179,6 +4162,32 @@ impl ImportV2Service {
                 last_error = Some(error);
                 continue;
             }
+            if descriptor.route == "pack.office-legacy" {
+                if let Some(converted) = candidate
+                    .asset_paths
+                    .iter()
+                    .find(|path| path.starts_with("converted/"))
+                {
+                    snapshot.expected_item_revision = self
+                        .record_attempt_claimed(
+                            context,
+                            files,
+                            session_id,
+                            item_id,
+                            task_id,
+                            snapshot.expected_item_revision,
+                            &descriptor,
+                            started_at,
+                            crate::models::import_v2::AttemptOutcome::Succeeded,
+                            None,
+                            candidate.warnings.clone(),
+                        )?
+                        .item_revision;
+                    worker_revision.set(snapshot.expected_item_revision);
+                    request.chained_input = Some(converted.clone());
+                    continue;
+                }
+            }
             // Attempt-level precheck selects a candidate; the formal QualityGate still runs once.
             let required_coverage = quality_floor.requirements().minimum_text_coverage as f64;
             if !candidate_meets_floor(&request.input, &candidate, *quality_floor) {
@@ -4215,32 +4224,6 @@ impl ImportV2Service {
                     continue;
                 }
             }
-            if descriptor.route == "pack.office-legacy" {
-                if let Some(converted) = candidate
-                    .asset_paths
-                    .iter()
-                    .find(|path| path.starts_with("converted/"))
-                {
-                    snapshot.expected_item_revision = self
-                        .record_attempt_claimed(
-                            context,
-                            files,
-                            session_id,
-                            item_id,
-                            task_id,
-                            snapshot.expected_item_revision,
-                            &descriptor,
-                            started_at,
-                            crate::models::import_v2::AttemptOutcome::Succeeded,
-                            None,
-                            candidate.warnings.clone(),
-                        )?
-                        .item_revision;
-                    worker_revision.set(snapshot.expected_item_revision);
-                    request.chained_input = Some(converted.clone());
-                    continue;
-                }
-            }
             selected = Some((descriptor, started_at, candidate));
             break;
         }
@@ -4270,6 +4253,26 @@ impl ImportV2Service {
                     error,
                     ImportStage::Extract,
                 );
+            }
+            if request.input.kind == ImportInputKind::Url
+                && last_error
+                    .as_ref()
+                    .is_some_and(|error| error.code == "IMPORT_WEB_STRUCTURE_CHANGED")
+                && planned_routes
+                    .iter()
+                    .any(|(route, _)| *route == "web.generic.browser")
+                && !self
+                    .engines
+                    .registered_routes()?
+                    .iter()
+                    .any(|route| route == "web.generic.browser")
+            {
+                last_error = Some(BackendError::new(
+                    "IMPORT_WEB_PLATFORM_CAPABILITY_MISSING",
+                    "Prepare the browser to load this page's readable content.",
+                    true,
+                    true,
+                ));
             }
             return self.finish_failed(
                 context,
@@ -4575,6 +4578,7 @@ impl ImportV2Service {
     ) -> Result<EngineResult, BackendError> {
         let Some(EngineContinuation::LocalAsr {
             temporary_input_path,
+            media_kind,
             ..
         }) = web_result.continuation.take()
         else {
@@ -4652,6 +4656,67 @@ impl ImportV2Service {
         }
         if embedded.is_none() && companion_fallback.is_file() {
             return apply_companion_transcript_fallback(context, files, &staging, web_result);
+        }
+        if embedded.is_none() && request.local_ocr_authorized && media_kind == "video" {
+            let decoder = self
+                .engines
+                .resolve_route("media.keyframes", &asr_request.input)
+                .or_else(|error| {
+                    if request.local_asr_authorized {
+                        self.engines
+                            .resolve_media_asr(&asr_request.input, request.asr_profile.as_ref())
+                    } else {
+                        Err(error)
+                    }
+                })
+                .map_err(|_| {
+                    BackendError::new(
+                        "IMPORT_VIDEO_OCR_DECODER_MISSING",
+                        "Prepare the media decoder to recognize video frames.",
+                        true,
+                        true,
+                    )
+                })?;
+            asr_request.asr_probe_only = false;
+            let descriptor = describe_engine(decoder.as_ref())?;
+            let started_at = chrono::Utc::now().to_rfc3339();
+            let outcome =
+                execute_engine_with_progress(decoder.as_ref(), &asr_request, token, &|progress| {
+                    update_continuation_progress(tasks, task_id, max_task_progress, progress)
+                });
+            *expected_item_revision = self
+                .record_attempt_claimed(
+                    context,
+                    files,
+                    session_id,
+                    item_id,
+                    task_id,
+                    *expected_item_revision,
+                    &descriptor,
+                    started_at,
+                    if outcome.is_ok() {
+                        crate::models::import_v2::AttemptOutcome::Succeeded
+                    } else {
+                        crate::models::import_v2::AttemptOutcome::Failed
+                    },
+                    outcome.as_ref().err().map(|error| error.code.clone()),
+                    Vec::new(),
+                )?
+                .item_revision;
+            worker_revision.set(*expected_item_revision);
+            let mut frames = outcome?;
+            validate_engine_result(staging_root, &frames)?;
+            if frames.continuation.as_ref().is_some_and(|continuation| {
+                !matches!(continuation, EngineContinuation::LocalOcr { .. })
+            }) {
+                return Err(ocr_unavailable());
+            }
+            // Preserve the original source snapshot and the host-validated frame
+            // assets. The OCR step fills the frame markers in this same candidate.
+            frames.source_snapshot_path = web_result.source_snapshot_path;
+            frames.asset_paths.extend(web_result.asset_paths);
+            frames.warnings.extend(web_result.warnings);
+            return Ok(frames);
         }
         if embedded.is_none() && !request.local_asr_authorized {
             return Err(asr_unavailable());
@@ -4863,10 +4928,15 @@ impl ImportV2Service {
             files
                 .write_project_bytes_absolute(context, &base_path, base.as_bytes())
                 .map_err(|_| asr_unavailable())?;
+            web_result
+                .asset_paths
+                .extend(asr_result.asset_paths.clone());
+            if chained_continuation.is_some() {
+                web_result.text_coverage = Some(0.0);
+            }
             for relative in std::iter::once(&asr_result.markdown_path)
                 .chain(std::iter::once(&asr_result.source_snapshot_path))
                 .chain(asr_result.metadata_path.iter())
-                .chain(asr_result.asset_paths.iter())
             {
                 let path = staging.join(relative);
                 let _ = remove_project_file(&context.root, &path);
@@ -5649,6 +5719,12 @@ impl ImportV2Service {
         error: BackendError,
         stage: ImportStage,
     ) -> Result<ImportItem, BackendError> {
+        let waiting_resource = matches!(
+            error.code.as_str(),
+            "IMPORT_VIDEO_OCR_RESOURCE_UPDATE_REQUIRED"
+                | "IMPORT_VIDEO_OCR_DECODER_MISSING"
+                | "IMPORT_WEB_PLATFORM_CAPABILITY_MISSING"
+        );
         let staging = context
             .resolve_project_path(&item_staging_relative_path(context, session_id, item_id)?)?;
         let batch_operation = is_batch_operation_task(tasks, task_id);
@@ -5672,8 +5748,28 @@ impl ImportV2Service {
             task_id,
             expected_item_revision,
             |item| {
-                transition_item(item, ImportItemStatus::Failed)?;
+                transition_item(
+                    item,
+                    if waiting_resource {
+                        ImportItemStatus::WaitingCapability
+                    } else {
+                        ImportItemStatus::Failed
+                    },
+                )?;
                 let mut issue = issue_from_engine_error_for_input(&error, stage, &item.input.kind);
+                if waiting_resource {
+                    issue.code = error.code.clone();
+                    issue.message = error.message.clone();
+                    issue.recovery_actions = vec![
+                        if error.code == "IMPORT_WEB_PLATFORM_CAPABILITY_MISSING" {
+                            ImportRecoveryAction::InstallBrowserCapability
+                        } else {
+                            ImportRecoveryAction::InstallCapability
+                        },
+                        ImportRecoveryAction::Retry,
+                        ImportRecoveryAction::ViewLog,
+                    ];
+                }
                 if is_agent_eligible_failure(&error.code, &issue) {
                     issue.available_actions =
                         vec![crate::models::import_v2_agent::AgentRecoveryAction::InvokeLocalAgent];
@@ -5685,7 +5781,14 @@ impl ImportV2Service {
         if !batch_operation {
             task_call(tasks.append_log(task_id, LogLevel::Error, "Import engine failed.".into()))?;
             task_call(tasks.set_error(task_id, issue_safe_error(&error)))?;
-            task_call(tasks.transition_status(task_id, TaskStatus::Failed))?;
+            task_call(tasks.transition_status(
+                task_id,
+                if waiting_resource {
+                    TaskStatus::WaitingForConfirmation
+                } else {
+                    TaskStatus::Failed
+                },
+            ))?;
         }
         Err(issue_safe_error(&error))
     }
@@ -5763,7 +5866,7 @@ impl ImportV2Service {
                     if asr_available {
                         !matches!(action, ImportRecoveryAction::InstallMediaCapability)
                     } else {
-                        !matches!(action, ImportRecoveryAction::AuthorizeLocalAsr)
+                        true
                     }
                 });
                 item.issue = Some(issue);
@@ -6282,12 +6385,39 @@ fn ocr_article_text(markdown: &str, metadata: Option<&[u8]>) -> String {
         metadata.and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
     {
         if let Some(blocks) = value.get("blocks").and_then(|value| value.as_array()) {
-            let texts: Vec<_> = blocks
-                .iter()
-                .filter_map(|block| block.get("text").and_then(|value| value.as_str()))
-                .map(str::trim)
-                .filter(|text| !text.is_empty())
-                .collect();
+            let multi_page = value
+                .get("pageCount")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(1)
+                > 1
+                || blocks.iter().any(|block| {
+                    block
+                        .get("pageNumber")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(1)
+                        > 1
+                });
+            let mut texts = Vec::new();
+            let mut current_page = None;
+            for block in blocks {
+                let Some(text) = block
+                    .get("text")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                else {
+                    continue;
+                };
+                let page = block
+                    .get("pageNumber")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(1);
+                if multi_page && current_page != Some(page) {
+                    texts.push(format!("## Page {page}"));
+                    current_page = Some(page);
+                }
+                texts.push(text.to_owned());
+            }
             if !texts.is_empty() {
                 return texts.join("\n\n");
             }
@@ -6453,7 +6583,7 @@ fn load_completed_asr_shard(
     root: &Path,
     key: &str,
     descriptor: &crate::services::import_v2::engine::EngineDescriptor,
-    staging: &Path,
+    _staging: &Path,
     local_asr_authorized: bool,
 ) -> Result<Option<CachedAsrShard>, BackendError> {
     let marker_bytes = match std::fs::read(root.join(format!("{key}.complete.json"))) {
@@ -6467,47 +6597,12 @@ fn load_completed_asr_shard(
     };
     if marker.schema_version != 1
         || !marker.complete
+        || marker.continuation.is_some()
         || marker.engine_id != descriptor.engine_id
         || marker.engine_version != descriptor.engine_version
         || (marker.authorization_required && !local_asr_authorized)
     {
         return Ok(None);
-    }
-    if let Some(EngineContinuation::LocalOcr {
-        temporary_input_paths,
-    }) = &marker.continuation
-    {
-        let canonical_staging = staging.canonicalize().map_err(|_| asr_unavailable())?;
-        for relative in temporary_input_paths {
-            let relative_path = Path::new(relative);
-            if relative_path.is_absolute()
-                || relative_path.components().any(|component| {
-                    matches!(
-                        component,
-                        std::path::Component::ParentDir
-                            | std::path::Component::RootDir
-                            | std::path::Component::Prefix(_)
-                    )
-                })
-            {
-                return Ok(None);
-            }
-            let candidate = staging.join(relative_path);
-            let metadata = match std::fs::symlink_metadata(&candidate) {
-                Ok(metadata) => metadata,
-                Err(_) => return Ok(None),
-            };
-            let canonical = match candidate.canonicalize() {
-                Ok(canonical) => canonical,
-                Err(_) => return Ok(None),
-            };
-            if metadata.file_type().is_symlink()
-                || !metadata.is_file()
-                || !canonical.starts_with(&canonical_staging)
-            {
-                return Ok(None);
-            }
-        }
     }
     let transcript_bytes = match std::fs::read(root.join(format!("{key}.md"))) {
         Ok(bytes) => bytes,
@@ -6549,6 +6644,9 @@ fn store_completed_asr_shard(
     continuation: Option<&EngineContinuation>,
     authorization_required: bool,
 ) -> Result<(), BackendError> {
+    if continuation.is_some() {
+        return Ok(());
+    }
     let transcript_path = root.join(format!("{key}.md"));
     let (binding, _) = BoundProjectMutationRoot::ensure_and_bind(project_root, &transcript_path)
         .map_err(|_| asr_unavailable())?;

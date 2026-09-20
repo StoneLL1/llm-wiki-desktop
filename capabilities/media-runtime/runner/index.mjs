@@ -8,6 +8,8 @@ import { promisify } from "node:util";
 
 import { restrictedEnvironment, textSubtitleTracks, renderSrt } from "./core.mjs";
 
+import { prepareVideoFrames } from "./video-frames.mjs";
+
 const execFileAsync = promisify(execFile);
 const packRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ffmpeg = path.join(packRoot, "runtime", "ffmpeg", "bin", process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg");
@@ -59,7 +61,7 @@ try {
   await fs.copyFile(source, sourcePath);
   let markdown;
   let subtitleMetadata = null;
-  let continuation = null;
+  let videoFrames = null;
   const assets = [];
   if (params.asrProbeOnly === true) {
     if (!videoExtensions.includes(extension)) throw new Error("IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE");
@@ -91,23 +93,20 @@ try {
     }
     if (!subtitleMetadata) throw new Error("IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE");
   } else {
-    const frames = path.join(output, "frames");
-    await fs.mkdir(frames);
-    await execFileAsync(ffmpeg, ["-nostdin", "-hide_banner", "-loglevel", "error", "-i", source, "-vf", "select='eq(n,0)+gte(t-prev_selected_t,10)',scale='min(1280,iw)':-2", "-fps_mode", "vfr", "-frames:v", "6", path.join(frames, "frame-%03d.png")], { shell: false, env: restrictedEnvironment(packRoot), windowsHide: true, timeout: 10 * 60 * 1000, maxBuffer: 1024 * 1024 });
-    const framePaths = (await fs.readdir(frames)).filter((name) => /^frame-\d{3}\.png$/u.test(name)).sort().map((name) => path.relative(stagingRoot, path.join(frames, name)).split(path.sep).join("/"));
-    if (!framePaths.length) throw new Error("IMPORT_MEDIA_NO_STABLE_FRAMES");
-    assets.push(...framePaths);
-    continuation = { type: "local_ocr", temporary_input_paths: framePaths };
-    markdown = "# Media keyframes\n\nStable frames were selected for explicitly authorized local OCR.\n";
+    videoFrames = await prepareVideoFrames((args) => execFileAsync(ffmpeg, args, {
+      shell: false, env: restrictedEnvironment(packRoot), windowsHide: true,
+      timeout: 10 * 60 * 1000, maxBuffer: 1024 * 1024,
+    }), source, stagingRoot, output, params.localOcrAuthorized === true);
+    markdown = "# Video text\n";
   }
   const markdownPath = path.join(output, "candidate.md");
   const metadataPath = path.join(output, "metadata.json");
-  await Promise.all([fs.writeFile(markdownPath, markdown), fs.writeFile(metadataPath, JSON.stringify({ engine: "ffmpeg", version: "8.1.2", route: continuation ? "media.keyframes" : "media.embedded-subtitle", ...subtitleMetadata }))]);
+  await Promise.all([fs.writeFile(markdownPath, markdown), fs.writeFile(metadataPath, JSON.stringify({ engine: "ffmpeg", version: "8.1.2", route: videoFrames ? "media.keyframes" : "media.embedded-subtitle", ...subtitleMetadata }))]);
   const relative = (value) => path.relative(stagingRoot, value).split(path.sep).join("/");
   completed = true;
-  process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { sourceSnapshotPath: relative(sourcePath), markdownPath: relative(markdownPath), assetPaths: assets, metadataPath: relative(metadataPath), title: path.parse(source).name, textCoverage: continuation ? null : 1, continuation, warnings: [] }, error: null })}\n`);
+  process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { sourceSnapshotPath: relative(sourcePath), markdownPath: relative(markdownPath), assetPaths: assets, metadataPath: relative(metadataPath), title: path.parse(source).name, textCoverage: videoFrames ? null : 1, continuation: null, videoFrames, warnings: [] }, error: null })}\n`);
 } catch (error) {
-  const code = /^IMPORT_(?:MEDIA|EMBEDDED_SUBTITLE)_[A-Z_]+$/u.test(error?.message || "") ? error.message : "IMPORT_MEDIA_ENGINE_FAILED";
+  const code = /^IMPORT_(?:MEDIA|ASR|VIDEO_FRAME|EMBEDDED_SUBTITLE)_[A-Z_]+$/u.test(error?.message || "") ? error.message : "IMPORT_MEDIA_ENGINE_FAILED";
   process.stdout.write(`${JSON.stringify(failure(rpc?.id, code))}\n`);
 }
  finally {

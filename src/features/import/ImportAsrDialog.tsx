@@ -22,6 +22,9 @@ export interface ImportAsrDialogProps {
   open: boolean;
   plan: ImportAsrEnablementPlan | null;
   loading: boolean;
+  authorizationError?: NormalizedBackendError | null;
+  loadError?: NormalizedBackendError | null;
+  onRetryLoad?: () => void;
   sessionId?: string | null;
   itemId?: string | null;
   onConfirm: (options: AsrAuthorizationOptions) => Promise<void> | void;
@@ -66,6 +69,9 @@ export function ImportAsrDialog({
   open,
   plan,
   loading,
+  authorizationError,
+  loadError,
+  onRetryLoad,
   sessionId,
   itemId,
   onConfirm,
@@ -178,6 +184,7 @@ export function ImportAsrDialog({
             </p>
           ) : null}
 
+          {loadError ? <ActionableErrorNotice error={loadError} onAction={() => onRetryLoad?.()} /> : null}
           <fieldset className="mt-4 border-0 p-0" disabled={loading || blocked}>
             <legend className="mb-2 text-[12px] font-semibold">{t("importV2.asr.profile")}</legend>
             <div className="grid gap-2">
@@ -284,8 +291,8 @@ export function ImportAsrDialog({
               {installState.totalBytes ? <progress className="mt-1 w-full" max={installState.totalBytes} value={installState.downloadedBytes ?? 0} /> : null}
             </div>
           ) : null}
-          {installError ?? taskError ? (
-            <ActionableErrorNotice className="mt-3" error={(installError ?? taskError)!} onAction={() => submit()} />
+          {installError ?? authorizationError ?? taskError ? (
+            <ActionableErrorNotice className="mt-3" error={(installError ?? authorizationError ?? taskError)!} onAction={() => submit()} />
           ) : null}
         </div>
 

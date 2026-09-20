@@ -13,8 +13,6 @@ import {
   buildAudioDecodeArguments,
   buildArguments,
   buildEmbeddedSubtitleArguments,
-  buildVideoOcrFrameArguments,
-  buildVideoTextProbeArguments,
   classifyAudioProbeError,
   classifyExecutionError,
   ffmpegRelativePath,
@@ -24,10 +22,11 @@ import {
   parseWhisperJson,
   renderTranscript,
   resolveStagingMedia,
-  selectStableTextFrameIndexes,
   sha256File,
   verifyArtifact,
 } from "./core.mjs";
+
+import { prepareVideoFrames } from "./video-frames.mjs";
 
 const execFileAsync = promisify(execFile);
 const MAX_RPC_BYTES = 1024 * 1024;
@@ -122,40 +121,10 @@ async function runFfmpeg(binary, args, options) {
   }
 }
 
-async function prepareVideoOcrContinuation(
-  ffmpeg,
-  mediaPath,
-  stagingRoot,
-  temporaryRoot,
-  localOcrAuthorized,
-) {
-  const probeRoot = path.join(temporaryRoot, "video-text-probe");
-  await fs.mkdir(probeRoot, { recursive: true });
-  await runFfmpeg(
-    ffmpeg,
-    buildVideoTextProbeArguments(mediaPath, path.join(probeRoot, "probe-%04d.pgm")),
-    { cwd: packRoot, env: restrictedEnvironment(), timeout: EXECUTION_TIMEOUT_MS },
-  );
-  const probeFiles = (await fs.readdir(probeRoot))
-    .filter((name) => /^probe-\d{4}\.pgm$/u.test(name))
-    .sort((left, right) => left.localeCompare(right, "en"));
-  const selected = selectStableTextFrameIndexes(
-    await Promise.all(probeFiles.map((name) => fs.readFile(path.join(probeRoot, name)))),
-  );
-  if (selected.length === 0) throw new Error("IMPORT_ASR_NO_SPEECH");
-  if (!localOcrAuthorized) throw new Error("IMPORT_VIDEO_FRAME_OCR_REQUIRED");
-  const ocrRoot = await fs.mkdtemp(path.join(stagingRoot, ".ocr-input-"));
-  const temporaryInputPaths = [];
-  for (const [outputIndex, probeIndex] of selected.slice(0, 6).entries()) {
-    const output = path.join(ocrRoot, `frame-${String(outputIndex + 1).padStart(3, "0")}.png`);
-    await runFfmpeg(
-      ffmpeg,
-      buildVideoOcrFrameArguments(mediaPath, probeIndex * 10, output),
-      { cwd: packRoot, env: restrictedEnvironment(), timeout: EXECUTION_TIMEOUT_MS },
-    );
-    temporaryInputPaths.push(path.relative(stagingRoot, output).split(path.sep).join("/"));
-  }
-  return temporaryInputPaths;
+async function prepareVideoOcrContinuation(ffmpeg, mediaPath, stagingRoot, temporaryRoot, localOcrAuthorized) {
+  return prepareVideoFrames((args) => runFfmpeg(ffmpeg, args, {
+    cwd: packRoot, env: restrictedEnvironment(), timeout: EXECUTION_TIMEOUT_MS,
+  }), mediaPath, stagingRoot, temporaryRoot, localOcrAuthorized);
 }
 
 let rpc;
@@ -275,7 +244,7 @@ try {
   let transcript = await readJson(shardPath);
   let markdown;
   let safeMetadata;
-  let continuation = null;
+  let videoFrames = null;
   let warnings = [];
   if (transcript?.schemaVersion === 1 && transcript?.complete === true &&
       transcript?.mediaSha256 === mediaSha256 && transcript?.recognitionLanguage === recognitionLanguage) {
@@ -298,7 +267,7 @@ try {
         if (!decodedAudio?.isFile() || decodedAudio.size <= 44) throw new Error("IMPORT_ASR_INVALID_MEDIA");
       } catch (error) {
         if (isVideoMedia(mediaPath) && isNoAudioExecutionError(error)) {
-          const temporaryInputPaths = await prepareVideoOcrContinuation(
+          videoFrames = await prepareVideoOcrContinuation(
             ffmpeg,
             mediaPath,
             stagingRoot,
@@ -314,19 +283,15 @@ try {
             profile: asrProfile,
             speechDetected: false,
             audioTrackPresent: false,
-            stableFrameCandidates: temporaryInputPaths.length,
+            stableFrameCandidates: videoFrames.frames.length,
             provenance: "authorized-local-video-text-probe",
-          };
-          continuation = {
-            type: "local_ocr",
-            temporary_input_paths: temporaryInputPaths,
           };
           warnings = ["IMPORT_ASR_NO_AUDIO_TRACK_VIDEO_OCR"];
         } else {
           throw new Error(classifyAudioProbeError(error), { cause: error });
         }
       }
-      if (!continuation) {
+      if (!videoFrames) {
         try {
           await execFileAsync(binary, buildArguments(model, decodedAudioPath, outputPrefix, recognitionLanguage), {
             cwd: packRoot,
@@ -344,7 +309,7 @@ try {
               runtimeDeclaration.ffmpeg,
               ffmpegRelativePath(),
             );
-            const temporaryInputPaths = await prepareVideoOcrContinuation(
+            videoFrames = await prepareVideoOcrContinuation(
               ffmpeg,
               mediaPath,
               stagingRoot,
@@ -360,12 +325,8 @@ try {
               profile: asrProfile,
               speechDetected: false,
               audioTrackPresent: false,
-              stableFrameCandidates: temporaryInputPaths.length,
+              stableFrameCandidates: videoFrames.frames.length,
               provenance: "authorized-local-video-text-probe",
-            };
-            continuation = {
-              type: "local_ocr",
-              temporary_input_paths: temporaryInputPaths,
             };
             warnings = ["IMPORT_ASR_NO_AUDIO_TRACK_VIDEO_OCR"];
           } else {
@@ -376,7 +337,7 @@ try {
     } finally {
       await fs.rm(decodedAudioPath, { force: true }).catch(() => {});
     }
-    if (!continuation) try {
+    if (!videoFrames) try {
       try {
         transcript = parseWhisperJson(JSON.parse(await readBounded(`${outputPrefix}.json`)));
       } catch (jsonError) {
@@ -392,7 +353,7 @@ try {
         runtimeDeclaration.ffmpeg,
         ffmpegRelativePath(),
       );
-      const temporaryInputPaths = await prepareVideoOcrContinuation(
+      videoFrames = await prepareVideoOcrContinuation(
         ffmpeg,
         mediaPath,
         stagingRoot,
@@ -407,12 +368,8 @@ try {
         requestedLanguage: recognitionLanguage,
         profile: asrProfile,
         speechDetected: false,
-        stableFrameCandidates: temporaryInputPaths.length,
+        stableFrameCandidates: videoFrames.frames.length,
         provenance: "authorized-local-video-text-probe",
-      };
-      continuation = {
-        type: "local_ocr",
-        temporary_input_paths: temporaryInputPaths,
       };
       warnings = ["IMPORT_ASR_NO_SPEECH_VIDEO_OCR"];
       transcript = null;
@@ -427,7 +384,7 @@ try {
       });
     }
   }
-  if (!continuation) {
+  if (!videoFrames) {
     markdown = renderTranscript(transcript, path.basename(mediaPath));
     safeMetadata = {
       engine: ENGINE_VERSION,
@@ -455,8 +412,9 @@ try {
     assetPaths: [],
     metadataPath: relative(metadataPath),
     title: `Transcript - ${path.basename(mediaPath)}`,
-    textCoverage: continuation ? null : 1,
-    continuation,
+    textCoverage: videoFrames ? null : 1,
+    continuation: null,
+    videoFrames,
     warnings,
   }, error: null })}\n`);
   completed = true;

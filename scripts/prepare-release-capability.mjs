@@ -392,7 +392,7 @@ async function fetchFfmpeg(target, work, prepared, sources) {
   if (declaration.kind === "source") {
     await run("./configure", [
       "--disable-doc", "--disable-debug", "--disable-programs", "--enable-ffmpeg",
-      "--disable-gpl", "--disable-nonfree",
+      "--disable-gpl", "--disable-nonfree", "--enable-swscale", "--enable-zlib",
       // Shared dylibs with loader-relative install names keep whisper-cli and the
       // ffmpeg CLI runnable straight from the extracted payload on macOS.
       "--disable-static", "--enable-shared", "--install-name-dir=@loader_path/../lib",

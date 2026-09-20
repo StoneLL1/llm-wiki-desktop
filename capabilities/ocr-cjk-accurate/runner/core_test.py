@@ -5,6 +5,7 @@ import unittest
 
 from core import (
     OcrPolicyError,
+    stage_tiff_pages,
     mean_confidence,
     native_tool_path,
     normalize_blocks,
@@ -51,12 +52,35 @@ class OcrCoreTests(unittest.TestCase):
             r"C:\deep\input.png",
         )
 
-    def test_rejects_oversized_or_multiframe_images_before_decode(self):
+    def test_bounds_each_page_and_total_page_count(self):
         validate_image_geometry(4096, 4096, 1)
-        for geometry in ((16385, 1, 1), (9000, 9000, 1), (100, 100, 2)):
+        validate_image_geometry(800, 1200, 2)
+        with self.assertRaisesRegex(OcrPolicyError, "IMPORT_OCR_PAGE_LIMIT"):
+            validate_image_geometry(100, 100, 201)
+        for geometry in ((16385, 1, 1), (9000, 9000, 1)):
             with self.assertRaises(OcrPolicyError) as raised:
                 validate_image_geometry(*geometry)
             self.assertEqual(raised.exception.code, "IMPORT_OCR_IMAGE_TOO_LARGE")
+
+    def test_tiff_pages_keep_order_and_different_geometry(self):
+        import tempfile
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow required for actual TIFF page decoding")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "多页.tiff"
+            Image.new("RGB", (800, 1200), "white").save(path, save_all=True,
+                append_images=[Image.new("RGB", (640, 900), "black")])
+            with Image.open(path) as image:
+                pages = stage_tiff_pages(image, root)
+            self.assertEqual(len(pages), 2)
+            with Image.open(pages[0]) as first, Image.open(pages[1]) as second:
+                self.assertEqual(first.size, (800, 1200))
+                self.assertEqual(second.size, (640, 900))
+                self.assertEqual(first.getpixel((0, 0)), (255, 255, 255))
+                self.assertEqual(second.getpixel((0, 0)), (0, 0, 0))
 
     def test_normalizes_quadrilaterals_and_confidence(self):
         blocks = normalize_blocks(

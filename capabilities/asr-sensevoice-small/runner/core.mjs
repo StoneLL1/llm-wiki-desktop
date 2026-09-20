@@ -151,13 +151,14 @@ export function isVideoMedia(mediaPath) {
   return VIDEO_EXTENSIONS.has(path.extname(mediaPath).toLowerCase());
 }
 
-export function buildVideoTextProbeArguments(mediaPath, outputPattern) {
+export function buildVideoTextProbeArguments(mediaPath, outputPattern, intervalSeconds = 10) {
+  if (!Number.isFinite(intervalSeconds) || intervalSeconds <= 0) throw asError("IMPORT_ASR_INVALID_REQUEST");
   return [
     "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
     "-protocol_whitelist", "file,pipe",
     "-i", nativeToolPath(mediaPath),
-    "-an", "-sn", "-dn", "-t", "1800",
-    "-vf", "fps=1/10,scale=480:-2:flags=area,format=gray",
+    "-an", "-sn", "-dn",
+    "-vf", `fps=1/${intervalSeconds}:start_time=0:round=down,scale=480:-2:flags=area,format=gray`,
     "-frames:v", "180", nativeToolPath(outputPattern),
   ];
 }
@@ -188,7 +189,9 @@ function parsePortableGraymap(value) {
     while (offset < value.length && !/\s/u.test(String.fromCharCode(value[offset]))) offset += 1;
     tokens.push(value.subarray(start, offset).toString("ascii"));
   }
-  while (offset < value.length && /\s/u.test(String.fromCharCode(value[offset]))) offset += 1;
+  // The P5 raster starts after exactly one separator; pixel bytes may be whitespace.
+  if (value[offset] === 13 && value[offset + 1] === 10) offset += 2;
+  else if (/\s/u.test(String.fromCharCode(value[offset]))) offset += 1;
   const [magic, widthValue, heightValue, maximumValue] = tokens;
   const width = Number(widthValue);
   const height = Number(heightValue);
@@ -203,7 +206,7 @@ export function selectStableTextFrameIndexes(frames) {
   if (!Array.isArray(frames) || frames.length < 2 || frames.length > 180) return [];
   const parsed = frames.map(parsePortableGraymap);
   const selected = [];
-  for (let index = 1; index < parsed.length && selected.length < 12; index += 1) {
+  for (let index = 1; index < parsed.length; index += 1) {
     const current = parsed[index];
     const previous = parsed[index - 1];
     if (current.width !== previous.width || current.height !== previous.height) continue;
@@ -222,7 +225,21 @@ export function selectStableTextFrameIndexes(frames) {
     }
     const edgeDensity = samples === 0 ? 0 : edges / samples;
     const meanDifference = samples === 0 ? 255 : difference / samples;
-    if (edgeDensity >= 0.035 && edgeDensity <= 0.45 && meanDifference <= 12) selected.push(index);
+    if (edgeDensity >= 0.035 && edgeDensity <= 0.45 && meanDifference <= 12) {
+      // Deduplicate consecutive scenes before applying the OCR quota.
+      const duplicate = selected.slice(-1).some((otherIndex) => {
+        const other = parsed[otherIndex];
+        if (other.width !== current.width || other.height !== current.height) return false;
+        let delta = 0;
+        let count = 0;
+        for (let position = 0; position < current.pixels.length; position += 3) {
+          delta += Math.abs(current.pixels[position] - other.pixels[position]);
+          count += 1;
+        }
+        return delta / count <= 2;
+      });
+      if (!duplicate) selected.push(index);
+    }
   }
   return selected;
 }
@@ -531,7 +548,7 @@ export function isNoAudioExecutionError(error) {
     }
     current = current.cause;
   }
-  return /(?:stream map.*0:a:0.*matches no streams|does not contain any audio stream|no audio stream|audio stream.*not found|failed to find.*audio)/iu
+  return /(?:stream map.*0:a:0.*matches no streams|stream map[^\n]*matches no streams[\s\S]*failed to set value ['"]0:a:0['"]|does not contain any audio stream|no audio stream|audio stream.*not found|failed to find.*audio)/iu
     .test(details.join("\n"));
 }
 

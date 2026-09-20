@@ -20,6 +20,9 @@ interface SharedProps {
 export interface ImportLinkedCapabilityDialogProps extends SharedProps {
   origin?: "import";
   requirement: ImportCapabilityRequirement | null;
+  loading?: boolean;
+  loadError?: NormalizedBackendError | null;
+  onRetryLoad?: () => void;
   sessionId?: string | null;
   itemId?: string | null;
   onInstall: (capabilityId: string) => Promise<BackendTask | null | void> | BackendTask | null | void;
@@ -94,9 +97,9 @@ export function ImportCapabilityDialog(props: ImportCapabilityDialogProps) {
   const busy = starting || isBusy(task);
   const paused = task?.status === "interrupted" || capability?.operation.state === "paused";
   const failed = task?.status === "failed" || capability?.operation.state === "failed";
-  const installed = capability?.installation.state === "healthy" || (!management && requirement?.available === true);
+  const installed = management ? capability?.installation.state === "healthy" : requirement?.available === true;
   const mutationIntent = management ? props.intent !== "details" : true;
-  const installable = capability?.installAllowed ?? requirement?.installable ?? false;
+  const installable = management ? capability?.installAllowed ?? false : requirement?.installable ?? false;
   const canConfirm = mutationIntent && (installable || (!management && installed)) && (!management || acknowledged) && !busy && !paused;
 
   useEffect(() => {
@@ -110,6 +113,18 @@ export function ImportCapabilityDialog(props: ImportCapabilityDialogProps) {
     return () => { session.current += 1; };
   }, [props.open, capabilityId, capability?.targetVersion, capability?.acknowledgementVersion, management ? props.intent : requirement?.requirementRevision]);
 
+  if (props.open && !management && !requirement) {
+    return <div ref={dialogRef} tabIndex={-1} className="dialog-overlay" role="dialog" aria-modal="true" aria-labelledby="import-capability-title">
+      <section className="import-capability-dialog">
+        <header><h2 id="import-capability-title">{t("importV2.capability.title")}</h2></header>
+        <div className="import-capability-dialog__body">
+          {props.loading ? <p role="status">{t("importV2.common.loading")}</p> : null}
+          {props.loadError ? <ActionableErrorNotice error={props.loadError} onAction={() => props.onRetryLoad?.()} /> : null}
+        </div>
+        <footer><button type="button" className="btn btn--sm" onClick={closeDialog}>{t("importV2.capability.close")}</button></footer>
+      </section>
+    </div>;
+  }
   if (!props.open || !capabilityId || (!management && !requirement)) return null;
 
   const taskError = task?.error ? normalizeBackendError(task.error, {
@@ -117,7 +132,7 @@ export function ImportCapabilityDialog(props: ImportCapabilityDialogProps) {
     defaultActionKind: "retry",
     defaultRecoverable: true,
   }) : null;
-  const version = capability?.targetVersion ?? requirement?.requirement.minimumVersion ?? null;
+  const version = requirement?.requirement.minimumVersion ?? capability?.targetVersion ?? null;
   const target = capability?.targetTriple ?? requirement?.requirement.targetTriple ?? "—";
   const license = capability?.licenseExpression ?? requirement?.license ?? requirement?.requirement.acceptedLicenseExpressions.join(", ") ?? "—";
   const packageBytes = management ? capability?.compressedBytes : installed ? 0 : requirement?.downloadBytes ?? capability?.compressedBytes ?? requirement?.compressedBytes;
@@ -198,7 +213,8 @@ export function ImportCapabilityDialog(props: ImportCapabilityDialogProps) {
   const progressTotal = task?.progress?.total ?? capability?.operation.progressTotal;
   const progressState = capability?.operation.state ?? (paused ? "paused" : failed ? "failed" : busy ? "downloading" : null);
   const downloading = progressState === "downloading";
-  const installResult = installed && task?.result?.reference?.type === "app_capability_install"
+  const installResult = task?.status === "succeeded" && task.result?.reference?.type === "app_capability_install"
+    && (!requirement?.requirement.minimumVersion || task.result.reference.version === requirement.requirement.minimumVersion || installed)
     ? task.result.reference
     : null;
   const reviewContinuationCount = installResult

@@ -17,8 +17,6 @@ import {
   buildChunkedFfmpegArguments,
   buildEmbeddedSubtitleArguments,
   buildSenseVoiceBatchArguments,
-  buildVideoOcrFrameArguments,
-  buildVideoTextProbeArguments,
   classifyExecutionError,
   executeWithProviderFallback,
   ffmpegRelativePath,
@@ -32,11 +30,12 @@ import {
   renderTranscript,
   resolveStagingMedia,
   restrictedEnvironment,
-  selectStableTextFrameIndexes,
   sha256File,
   sherpaRelativePath,
   verifySignedFile,
 } from "./core.mjs";
+
+import { prepareVideoFrames } from "./video-frames.mjs";
 
 const execFileAsync = promisify(execFile);
 const MAX_RPC_BYTES = 1024 * 1024;
@@ -96,43 +95,10 @@ async function writeJsonAtomic(filePath, value) {
   await fs.rename(temporary, filePath);
 }
 
-async function prepareVideoOcrContinuation(
-  ffmpeg,
-  mediaPath,
-  stagingRoot,
-  temporaryRoot,
-  environment,
-  localOcrAuthorized,
-) {
-  const probeRoot = path.join(temporaryRoot, "video-text-probe");
-  await fs.mkdir(probeRoot, { recursive: true });
-  await runFile(
-    ffmpeg,
-    buildVideoTextProbeArguments(mediaPath, path.join(probeRoot, "probe-%04d.pgm")),
-    { cwd: packRoot, env: environment, timeout: DECODE_TIMEOUT_MS },
-    "decode",
-  );
-  const probeFiles = (await fs.readdir(probeRoot))
-    .filter((name) => /^probe-\d{4}\.pgm$/u.test(name))
-    .sort((left, right) => left.localeCompare(right, "en"));
-  const selected = selectStableTextFrameIndexes(
-    await Promise.all(probeFiles.map((name) => fs.readFile(path.join(probeRoot, name)))),
-  );
-  if (selected.length === 0) throw new Error("IMPORT_ASR_NO_SPEECH");
-  if (!localOcrAuthorized) throw new Error("IMPORT_VIDEO_FRAME_OCR_REQUIRED");
-  const ocrRoot = await fs.mkdtemp(path.join(stagingRoot, ".ocr-input-"));
-  const temporaryInputPaths = [];
-  for (const [outputIndex, probeIndex] of selected.slice(0, 6).entries()) {
-    const output = path.join(ocrRoot, `frame-${String(outputIndex + 1).padStart(3, "0")}.png`);
-    await runFile(
-      ffmpeg,
-      buildVideoOcrFrameArguments(mediaPath, probeIndex * 10, output),
-      { cwd: packRoot, env: environment, timeout: DECODE_TIMEOUT_MS },
-      "decode",
-    );
-    temporaryInputPaths.push(path.relative(stagingRoot, output).split(path.sep).join("/"));
-  }
-  return temporaryInputPaths;
+async function prepareVideoOcrContinuation(ffmpeg, mediaPath, stagingRoot, temporaryRoot, environment, localOcrAuthorized) {
+  return prepareVideoFrames((args) => runFile(ffmpeg, args, {
+    cwd: packRoot, env: environment, timeout: DECODE_TIMEOUT_MS,
+  }, "decode"), mediaPath, stagingRoot, temporaryRoot, localOcrAuthorized);
 }
 
 let rpc;
@@ -202,7 +168,7 @@ try {
   let markdown;
   let safeMetadata;
   let warnings = [];
-  let continuation = null;
+  let videoFrames = null;
   if (embeddedTranscript) {
     markdown = renderEmbeddedTranscript(embeddedTranscript, path.basename(mediaPath));
     safeMetadata = {
@@ -324,7 +290,7 @@ try {
         isNoAudioExecutionError(error);
       if (error?.message !== "IMPORT_ASR_OUTPUT_INVALID" && !noAudioTrack) throw error;
       if (!isVideoMedia(mediaPath)) throw new Error("IMPORT_ASR_NO_SPEECH");
-      const temporaryInputPaths = await prepareVideoOcrContinuation(
+      videoFrames = await prepareVideoOcrContinuation(
         ffmpeg,
         mediaPath,
         stagingRoot,
@@ -340,16 +306,12 @@ try {
         requestedLanguage: recognitionLanguage,
         profile: asrProfile,
         speechDetected: false,
-        stableFrameCandidates: temporaryInputPaths.length,
+        stableFrameCandidates: videoFrames.frames.length,
         provenance: "authorized-local-video-text-probe",
-      };
-      continuation = {
-        type: "local_ocr",
-        temporary_input_paths: temporaryInputPaths,
       };
       warnings = ["IMPORT_ASR_NO_SPEECH_VIDEO_OCR"];
     }
-    if (!continuation) {
+    if (!videoFrames) {
       const transcript = execution.value;
       markdown = renderTranscript(transcript, path.basename(mediaPath), execution.provider);
       safeMetadata = {
@@ -392,8 +354,9 @@ try {
     assetPaths: [],
     metadataPath: relative(metadataPath),
     title: `Transcript - ${path.basename(mediaPath)}`,
-    textCoverage: continuation ? null : 1,
-    continuation,
+    textCoverage: videoFrames ? null : 1,
+    continuation: null,
+    videoFrames,
     warnings,
   }, error: null })}\n`);
   completed = true;

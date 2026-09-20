@@ -372,10 +372,18 @@ export function useImportTaskCoordinator({
     nextSessionMutationRevision();
     current.patchItems(requestKey, patch.items, epoch);
     current.recordOperationCounts(requestKey, patch.batchId, patch.counts, patch.items, epoch);
+    const pending = pendingItemTasks.current.get(patch.batchId);
+    const appliedItems = useImportStore.getState().itemById;
+    const settledIds = (pending?.itemIds ?? []).filter((id) => {
+      const item = appliedItems[id];
+      return item?.taskId === patch.batchId
+        && !["queued", "inspecting", "extracting", "validating", "committing"].includes(item.status);
+    });
+    endPendingItems(settledIds, requestKey, epoch);
+    if (pending) pending.itemIds = pending.itemIds.filter((id) => !settledIds.includes(id));
     if (patch.counts.processed !== patch.counts.total) return;
     const firstTerminalPatch = !settledOperationTaskIdsRef.current.has(patch.batchId);
     settledOperationTaskIdsRef.current.add(patch.batchId);
-    const pending = pendingItemTasks.current.get(patch.batchId);
     if (pending?.operation) {
       pendingItemTasks.current.delete(patch.batchId);
       endPendingItems(pending.itemIds, pending.projectKey, pending.epoch);

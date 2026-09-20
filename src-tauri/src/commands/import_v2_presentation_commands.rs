@@ -958,9 +958,11 @@ pub fn get_import_capability_requirement_v2(
             "This import item does not currently require a capability pack.",
         )
     })?;
+    let minimum_version =
+        required_resource_update(item).map(|(_, _, _, version)| version.to_owned());
     let requirement = CapabilityRequirement {
         capability_id: capability_id.into(),
-        minimum_version: None,
+        minimum_version: minimum_version.clone(),
         protocol_version: "2".into(),
         target_triple: target_triple(),
         accepted_license_expressions: vec![license.into()],
@@ -969,11 +971,23 @@ pub fn get_import_capability_requirement_v2(
         .import_capability_runtime
         .statuses()
         .into_iter()
-        .any(|status| status.capability_id == capability_id && status.available);
+        .any(|status| {
+            status.capability_id == capability_id
+                && status.available
+                && (minimum_version.is_none()
+                    || status.healthy_version.as_deref().is_some_and(|version| {
+                        meets_resource_update(version, minimum_version.as_deref())
+                    }))
+        });
     let catalog = catalog_entry(capability_id, &requirement.target_triple);
-    let installable = !available && catalog.is_some();
+    let installable = !available
+        && catalog
+            .as_ref()
+            .is_some_and(|entry| meets_resource_update(&entry.version, minimum_version.as_deref()));
     let unavailable_reason_code = (!available).then(|| {
-        if installable {
+        if minimum_version.is_some() && !installable {
+            "resource_update_not_published"
+        } else if installable {
             "not_installed"
         } else if catalog_availability() == CapabilityCatalogAvailability::CatalogUnavailable {
             "catalog_unavailable"
@@ -1026,14 +1040,16 @@ pub fn get_import_asr_enablement_plan_v2(
         .ok_or_else(|| {
             presentation_error("IMPORT_V2_ITEM_NOT_FOUND", "Import item was not found.")
         })?;
-    if !item.issue.as_ref().is_some_and(|issue| {
-        issue
-            .recovery_actions
-            .contains(&ImportRecoveryAction::AuthorizeLocalAsr)
-            || issue
+    if !can_prepare_capability(item)
+        || !item.issue.as_ref().is_some_and(|issue| {
+            issue
                 .recovery_actions
-                .contains(&ImportRecoveryAction::InstallMediaCapability)
-    }) {
+                .contains(&ImportRecoveryAction::AuthorizeLocalAsr)
+                || issue
+                    .recovery_actions
+                    .contains(&ImportRecoveryAction::InstallMediaCapability)
+        })
+    {
         return Err(presentation_error(
             "IMPORT_V2_ASR_NOT_REQUIRED",
             "This import item does not currently require local speech recognition.",
@@ -1147,19 +1163,16 @@ pub fn install_import_capability_v2(
     // Validate the entire explicit selection before registering any intent.
     let mut requirements = Vec::with_capacity(selected_items.len());
     for item in selected_items {
-        if !matches!(
-            item.status,
-            ImportItemStatus::WaitingCapability | ImportItemStatus::WaitingAuthorization
-        ) && !(item.status == ImportItemStatus::PreviewReady
-            && item
-                .issue
-                .as_ref()
-                .is_some_and(|issue| issue.code == "IMPORT_WEB_OCR_UNAVAILABLE"))
-        {
+        if !can_prepare_capability(item) {
             return Err(presentation_error(
                 "IMPORT_V2_CAPABILITY_REQUIREMENT_STALE",
-                "The item no longer needs preparation.",
+                "The item no longer needs preparation. Reload its current requirement.",
             ));
+        }
+        if let Some((_, _, _, minimum)) = required_resource_update(item) {
+            if !meets_resource_update(&entry.version, Some(minimum)) {
+                return Err(presentation_error("IMPORT_V2_CAPABILITY_INSTALL_UNAVAILABLE", "The required resource update has not been published in this application's catalog."));
+            }
         }
         let asr_choice_allowed = item.issue.as_ref().is_some_and(|issue| {
             issue
@@ -1332,15 +1345,7 @@ pub(crate) fn resume_import_capability_continuation(
         .ok_or_else(|| {
             presentation_error("IMPORT_V2_ITEM_NOT_FOUND", "Import item was not found.")
         })?;
-    let can_continue = matches!(
-        item.status,
-        ImportItemStatus::WaitingCapability | ImportItemStatus::WaitingAuthorization
-    ) || (item.status == ImportItemStatus::PreviewReady
-        && continuation.recovery_action == Some(ImportRecoveryAction::EnableOcr)
-        && item
-            .issue
-            .as_ref()
-            .is_some_and(|issue| issue.code == "IMPORT_WEB_OCR_UNAVAILABLE"));
+    let can_continue = can_prepare_capability(&item);
     if !can_continue
         || capability_requirement_revision(
             &item,
@@ -1349,6 +1354,11 @@ pub(crate) fn resume_import_capability_continuation(
         ) != continuation.requirement_revision
     {
         return Ok(false);
+    }
+    // Preparing a browser does not authenticate the user. Keep this item at its
+    // login checkpoint; the existing login dialog can now consume the runtime.
+    if item.status == ImportItemStatus::WaitingLogin {
+        return Ok(!token.is_cancelled());
     }
     if let Some(profile) = continuation.asr_profile.clone() {
         let state_handle = app.state::<AppState>();
@@ -1553,10 +1563,92 @@ fn validate_identifier(value: &str) -> Result<(), BackendError> {
     }
 }
 
+fn required_resource_update(
+    item: &ImportItem,
+) -> Option<(&'static str, &'static str, &'static str, &'static str)> {
+    if item.issue.as_ref()?.code != "IMPORT_VIDEO_OCR_RESOURCE_UPDATE_REQUIRED" {
+        return None;
+    }
+    let engine = item
+        .attempts
+        .iter()
+        .rev()
+        .find(|attempt| {
+            attempt.error_code.as_deref() == Some("IMPORT_VIDEO_OCR_RESOURCE_UPDATE_REQUIRED")
+        })
+        .map(|attempt| attempt.engine_id.as_str())
+        .unwrap_or_default();
+    if engine.contains("asr-whisper") {
+        Some((
+            "asr-whisper",
+            "media.asr",
+            "MIT AND LGPL-3.0-or-later",
+            "1.8.3+resources.2",
+        ))
+    } else if engine.contains("asr-sensevoice-small") {
+        Some((
+            "asr-sensevoice-small",
+            "media.asr",
+            "Apache-2.0 AND LGPL-3.0-or-later AND MIT",
+            "1.13.4+2024.07.17.resources.3",
+        ))
+    } else {
+        Some((
+            "media-runtime",
+            "media.keyframes",
+            "MIT AND LGPL-3.0-or-later",
+            "8.1.2+resources.3",
+        ))
+    }
+}
+
+// Resource revisions are build metadata, which VersionReq deliberately ignores.
+// Compare complete versions for this specific feature update, not all installed packs.
+fn meets_resource_update(version: &str, minimum: Option<&str>) -> bool {
+    minimum.is_none_or(|minimum| {
+        semver::Version::parse(version)
+            .ok()
+            .zip(semver::Version::parse(minimum).ok())
+            .is_some_and(|(version, minimum)| version >= minimum)
+    })
+}
+
+fn can_prepare_capability(item: &ImportItem) -> bool {
+    matches!(
+        item.status,
+        ImportItemStatus::WaitingCapability | ImportItemStatus::WaitingAuthorization
+    ) || (item.status == ImportItemStatus::WaitingLogin
+        && item.issue.as_ref().is_some_and(|issue| {
+            issue
+                .recovery_actions
+                .contains(&ImportRecoveryAction::BeginLogin)
+        }))
+        || (item.status == ImportItemStatus::PreviewReady
+            && item
+                .issue
+                .as_ref()
+                .is_some_and(|issue| issue.code == "IMPORT_WEB_OCR_UNAVAILABLE"))
+}
+
 fn capability_for_item(item: &ImportItem) -> Option<(&'static str, &'static str, &'static str)> {
     const BROWSER_BUNDLE_LICENSE: &str = "Apache-2.0 AND MIT AND BSD-2-Clause AND BSD-3-Clause AND ISC AND MIT-0 AND LicenseRef-Bundled-Third-Party-Notices";
+    if !can_prepare_capability(item) {
+        return None;
+    }
+    if let Some((id, route, license, _)) = required_resource_update(item) {
+        return Some((id, route, license));
+    }
+    if item.issue.as_ref()?.code == "IMPORT_VIDEO_OCR_DECODER_MISSING" {
+        return Some((
+            "media-runtime",
+            "media.keyframes",
+            "MIT AND LGPL-3.0-or-later",
+        ));
+    }
     let actions = item.issue.as_ref()?.recovery_actions.as_slice();
-    if actions.contains(&ImportRecoveryAction::InstallBrowserCapability) {
+    if actions.contains(&ImportRecoveryAction::InstallBrowserCapability)
+        || actions.contains(&ImportRecoveryAction::BeginLogin)
+    {
         Some((
             "browser-runtime",
             "web.generic.browser",
@@ -1587,7 +1679,25 @@ fn capability_for_item(item: &ImportItem) -> Option<(&'static str, &'static str,
             "Apache-2.0 AND MIT AND BSD-3-Clause AND HPND AND MPL-2.0 AND PSF-2.0 AND LGPL-2.1-only AND LGPL-3.0-only",
         ))
     } else if actions.contains(&ImportRecoveryAction::InstallCapability) {
-        Some(("document-standard", "pack.markitdown", "MIT"))
+        match Path::new(&item.input.locator)
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "doc" | "xls" | "ppt" => Some((
+                "office-legacy",
+                "pack.office-legacy",
+                "(MPL-2.0 OR LGPL-3.0-or-later) AND PSF-2.0 AND MPL-2.0",
+            )),
+            "gif" => Some((
+                "media-runtime",
+                "media.keyframes",
+                "MIT AND LGPL-3.0-or-later",
+            )),
+            _ => Some(("document-standard", "pack.markitdown", "MIT")),
+        }
     } else {
         None
     }
@@ -1999,6 +2109,74 @@ mod tests {
             super::capability_for_item(&item).unwrap().0,
             "ocr-cjk-accurate"
         );
+    }
+
+    #[test]
+    fn video_resource_minimum_includes_build_revision_without_blocking_other_routes() {
+        assert!(!meets_resource_update(
+            "8.1.2+resources.2",
+            Some("8.1.2+resources.3")
+        ));
+        assert!(meets_resource_update(
+            "8.1.2+resources.3",
+            Some("8.1.2+resources.3")
+        ));
+        assert!(meets_resource_update(
+            "8.1.2+resources.10",
+            Some("8.1.2+resources.3")
+        ));
+        assert!(meets_resource_update("8.1.2+resources.1", None));
+        assert!(!meets_resource_update(
+            "1.13.4+2024.07.17",
+            Some("1.13.4+2024.07.17.resources.3")
+        ));
+    }
+
+    #[test]
+    fn preparation_queries_and_execution_share_state_eligibility() {
+        let mut item = ImportItem::queued(
+            "login",
+            ImportInput {
+                kind: ImportInputKind::Url,
+                display_name: "article".into(),
+                locator: "https://example.com".into(),
+                normalized_locator: None,
+                source_identity: None,
+                media_save_mode: MediaSaveMode::ExtractOnly,
+            },
+        );
+        item.status = ImportItemStatus::WaitingLogin;
+        item.issue = Some(crate::models::import_v2::ImportIssue::for_web_code(
+            "IMPORT_WEB_LOGIN_REQUIRED",
+            ImportStage::Extract,
+        ));
+        assert!(can_prepare_capability(&item));
+        assert_eq!(capability_for_item(&item).unwrap().0, "browser-runtime");
+        item.status = ImportItemStatus::Failed;
+        item.issue = Some(crate::models::import_v2::ImportIssue::for_web_code(
+            "IMPORT_WEB_MEDIA_UNAVAILABLE",
+            ImportStage::Extract,
+        ));
+        assert!(!can_prepare_capability(&item));
+        assert!(capability_for_item(&item).is_none());
+        assert!(!item
+            .issue
+            .as_ref()
+            .unwrap()
+            .recovery_actions
+            .contains(&ImportRecoveryAction::InstallBrowserCapability));
+        item.status = ImportItemStatus::WaitingCapability;
+        item.issue = Some(crate::models::import_v2::ImportIssue::for_web_code(
+            "IMPORT_ASR_ENGINE_UNAVAILABLE",
+            ImportStage::Extract,
+        ));
+        assert!(can_prepare_capability(&item));
+        assert_eq!(
+            capability_for_item(&item).unwrap().0,
+            "asr-sensevoice-small"
+        );
+        item.status = ImportItemStatus::Completed;
+        assert!(capability_for_item(&item).is_none());
     }
 
     #[test]

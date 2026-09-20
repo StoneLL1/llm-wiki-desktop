@@ -111,6 +111,7 @@ pub fn routes_for_format(format: FileFormat) -> Vec<&'static str> {
         FileFormat::Srt | FileFormat::Vtt | FileFormat::Ass | FileFormat::Lrc => {
             vec!["media.subtitle"]
         }
+        FileFormat::AnimatedGif => vec!["media.keyframes"],
         FileFormat::Mp3
         | FileFormat::Wav
         | FileFormat::M4a
@@ -125,8 +126,7 @@ pub fn routes_for_format(format: FileFormat) -> Vec<&'static str> {
         | FileFormat::Webm
         | FileFormat::Avi
         | FileFormat::M4v
-        | FileFormat::Wmv
-        | FileFormat::AnimatedGif => {
+        | FileFormat::Wmv => {
             vec![
                 "media.companion",
                 "media.subtitle",
@@ -239,8 +239,9 @@ pub(super) fn explicit_routes(input: &ImportInput) -> Vec<&'static str> {
             "agent.pdf",
         ],
         "srt" | "vtt" | "lrc" | "ass" | "ssa" => vec!["media.subtitle"],
+        "gif" => vec!["media.keyframes"],
         "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg" | "opus" | "wma" | "mp4" | "mov" | "mkv"
-        | "webm" | "avi" | "m4v" | "wmv" | "gif" => {
+        | "webm" | "avi" | "m4v" | "wmv" => {
             vec!["media.companion", "media.asr"]
         }
         "png" | "jpg" | "jpeg" | "webp" | "bmp" | "tif" | "tiff" | "heic" | "heif" => {

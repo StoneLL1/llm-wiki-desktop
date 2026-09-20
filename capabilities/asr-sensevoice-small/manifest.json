@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "packId": "asr-sensevoice-small",
-  "version": "1.13.4+2024.07.17.resources.2",
+  "version": "1.13.4+2024.07.17.resources.3",
   "protocolVersion": "2",
   "targetTriples": [],
   "archiveSha256": "",
@@ -43,6 +43,9 @@
   "audioDecoding": {
     "acceptedContainers": ["m4a", "mp4", "mp3", "ogg", "opus", "flac", "wav"],
     "component": "FFmpeg 8.1.2",
+    "videoFilters": ["scale"],
+    "videoEncoders": ["png"],
+    "libraries": ["libavformat", "libavcodec", "libavutil", "libavfilter", "libswresample", "libswscale"],
     "license": "LGPL-3.0-or-later",
     "gpl": false,
     "nonfree": false

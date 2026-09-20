@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import path from "node:path";
 import process from "node:process";
 
@@ -62,4 +63,98 @@ export function renderSrt(value) {
     return `## [${stamp}]\n\n${text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}\n`;
   }).join("\n");
   return { markdown, segments };
+}
+
+// Same bounded frame selection contract as the ASR resources.
+export function buildVideoTextProbeArguments(mediaPath, outputPattern, intervalSeconds = 10) {
+  if (!Number.isFinite(intervalSeconds) || intervalSeconds <= 0) throw new Error("IMPORT_ASR_INVALID_REQUEST");
+  return [
+    "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+    "-protocol_whitelist", "file,pipe",
+    "-i", (mediaPath),
+    "-an", "-sn", "-dn",
+    "-vf", `fps=1/${intervalSeconds}:start_time=0:round=down,scale=480:-2:flags=area,format=gray`,
+    "-frames:v", "180", (outputPattern),
+  ];
+}
+
+export function buildVideoOcrFrameArguments(mediaPath, seconds, outputPath) {
+  if (!Number.isFinite(seconds) || seconds < 0) throw new Error("IMPORT_ASR_INVALID_REQUEST");
+  return [
+    "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+    "-protocol_whitelist", "file,pipe",
+    "-ss", seconds.toFixed(3), "-i", (mediaPath),
+    "-an", "-sn", "-dn", "-frames:v", "1",
+    "-vf", "scale='min(1920,iw)':-2:flags=lanczos",
+    (outputPath),
+  ];
+}
+
+function parsePortableGraymap(value) {
+  if (!Buffer.isBuffer(value) || value.length < 16) throw new Error("IMPORT_ASR_VIDEO_PROBE_FAILED");
+  let offset = 0;
+  const tokens = [];
+  while (tokens.length < 4 && offset < value.length) {
+    while (offset < value.length && /\s/u.test(String.fromCharCode(value[offset]))) offset += 1;
+    if (value[offset] === 0x23) {
+      while (offset < value.length && value[offset] !== 0x0a) offset += 1;
+      continue;
+    }
+    const start = offset;
+    while (offset < value.length && !/\s/u.test(String.fromCharCode(value[offset]))) offset += 1;
+    tokens.push(value.subarray(start, offset).toString("ascii"));
+  }
+  // The P5 raster starts after exactly one separator; pixel bytes may be whitespace.
+  if (value[offset] === 13 && value[offset + 1] === 10) offset += 2;
+  else if (/\s/u.test(String.fromCharCode(value[offset]))) offset += 1;
+  const [magic, widthValue, heightValue, maximumValue] = tokens;
+  const width = Number(widthValue);
+  const height = Number(heightValue);
+  if (magic !== "P5" || !Number.isSafeInteger(width) || !Number.isSafeInteger(height) ||
+      width <= 0 || height <= 0 || maximumValue !== "255" || value.length - offset !== width * height) {
+    throw new Error("IMPORT_ASR_VIDEO_PROBE_FAILED");
+  }
+  return { width, height, pixels: value.subarray(offset) };
+}
+
+export function selectStableTextFrameIndexes(frames) {
+  if (!Array.isArray(frames) || frames.length < 2 || frames.length > 180) return [];
+  const parsed = frames.map(parsePortableGraymap);
+  const selected = [];
+  for (let index = 1; index < parsed.length; index += 1) {
+    const current = parsed[index];
+    const previous = parsed[index - 1];
+    if (current.width !== previous.width || current.height !== previous.height) continue;
+    let edges = 0;
+    let difference = 0;
+    let samples = 0;
+    for (let y = 1; y < current.height; y += 2) {
+      for (let x = 1; x < current.width; x += 2) {
+        const position = y * current.width + x;
+        const pixel = current.pixels[position];
+        if (Math.abs(pixel - current.pixels[position - 1]) > 36 ||
+            Math.abs(pixel - current.pixels[position - current.width]) > 36) edges += 1;
+        difference += Math.abs(pixel - previous.pixels[position]);
+        samples += 1;
+      }
+    }
+    const edgeDensity = samples === 0 ? 0 : edges / samples;
+    const meanDifference = samples === 0 ? 255 : difference / samples;
+    if (edgeDensity >= 0.035 && edgeDensity <= 0.45 && meanDifference <= 12) {
+      // Deduplicate consecutive scenes before applying the OCR quota.
+      const duplicate = selected.slice(-1).some((otherIndex) => {
+        const other = parsed[otherIndex];
+        if (other.width !== current.width || other.height !== current.height) return false;
+        let delta = 0;
+        let count = 0;
+        for (let position = 0; position < current.pixels.length; position += 3) {
+          delta += Math.abs(current.pixels[position] - other.pixels[position]);
+          count += 1;
+        }
+        return delta / count <= 2;
+      });
+      if (!duplicate) selected.push(index);
+    }
+  }
+  return selected;
 }
