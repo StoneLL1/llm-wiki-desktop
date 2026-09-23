@@ -335,6 +335,56 @@ impl CompileService {
                         format!("Running {}", agent.command()),
                     )
                     .map_err(task_operation_error)?;
+                if *agent != AgentKind::Claude || cfg!(windows) {
+                    // One-shot CLIs return the same validated plan/manifest
+                    // protocol as BYOK. The backend owns all candidate files;
+                    // no CLI-specific write tool or Windows sandbox is needed.
+                    let plan_prompt =
+                        Self::provider_plan_prompt_with_policy(workspace, &language, policy)?;
+                    let plan_invocation =
+                        AgentService::chat_invocation(*agent, workspace, &plan_prompt)?;
+                    let raw_plan = services.agent_service.run_task_streaming_for_agent(
+                        *agent,
+                        &plan_invocation,
+                        services.task_service,
+                        task_id,
+                    )?;
+                    let plan = Self::parse_plan(&raw_plan)?;
+                    validate_compile_plan(context, &plan, baseline, sources)?;
+                    observer.begin_candidate_generation()?;
+                    let manifest_prompt = Self::provider_manifest_prompt_with_policy(
+                        workspace,
+                        &language,
+                        Some(&plan),
+                        policy,
+                    )?;
+                    let manifest_invocation =
+                        AgentService::chat_invocation(*agent, workspace, &manifest_prompt)?;
+                    let raw_manifest = services.agent_service.run_task_streaming_for_agent(
+                        *agent,
+                        &manifest_invocation,
+                        services.task_service,
+                        task_id,
+                    )?;
+                    observer.begin_validation()?;
+                    let manifest = Self::parse_manifest_with_policy(
+                        &raw_manifest,
+                        policy.allows_reviewable_deletions(),
+                    )?;
+                    let known_sources = Self::known_source_refs_for_sources(sources);
+                    Self::validate_manifest_semantics_with_policy(
+                        context,
+                        &manifest,
+                        Some(&plan),
+                        &known_sources,
+                        policy.allows_reviewable_deletions(),
+                    )?;
+                    return Ok(CompileCandidate {
+                        route,
+                        plan,
+                        manifest,
+                    });
+                }
                 let mut prompt = Self::compile_prompt_with_policy(workspace, &language, policy);
                 let existing_pages = match reviewable_workspace_paths.as_ref() {
                     Some(paths) => paths.clone(),

@@ -731,6 +731,91 @@ fn source_ai_candidate_stays_staged_then_applies_checkpointed_version_and_restor
 }
 
 #[test]
+fn source_ai_memory_candidate_reviews_then_applies_without_candidate_file() {
+    let fixture = package_fixture("ai-memory-candidate");
+    let service = ImportV2Service::with_secret_service(SecretService::memory());
+    let files = FileStore;
+    let extended = extend_source_for_ai(&fixture);
+    write(&fixture.root, &fixture.wiki_path, extended.as_bytes());
+    let input = service
+        .prepare_source_ai_organize_input(
+            &fixture.context,
+            &files,
+            &fixture.source_id,
+            &fixture.version_id,
+            &digest(extended.as_bytes()),
+            None,
+        )
+        .unwrap();
+    let (_, body) = parse_final_source(&extended).unwrap();
+    let raw = serde_json::json!({"overview":"仅在内存中的候选。", "bodyMarkdown":body}).to_string();
+    let markdown = source_ai_organize::build_candidate_markdown(&extended, "数据集", &raw).unwrap();
+    let candidate = service
+        .store_source_ai_organize_candidate_memory(
+            &fixture.context,
+            &files,
+            &input,
+            "task-memory",
+            SourceAiOrganizeRoute::Agent,
+            "codex".into(),
+            "cli-default".into(),
+            None,
+            markdown,
+        )
+        .unwrap();
+    assert!(!fixture
+        .root
+        .join(format!(
+            ".app/source-candidates/{}/{}.json",
+            fixture.source_id, candidate.candidate_id
+        ))
+        .exists());
+    assert_eq!(
+        service
+            .get_source_detail(&fixture.context, &files, &fixture.source_id)
+            .unwrap()
+            .candidate
+            .unwrap()
+            .candidate_id,
+        candidate.candidate_id
+    );
+    let preview = service
+        .preview_source_update(
+            &fixture.context,
+            &files,
+            &fixture.source_id,
+            &candidate.candidate_id,
+        )
+        .unwrap();
+    assert_eq!(preview.mode, SourceUpdateMode::TwoWay);
+    assert!(preview.ephemeral);
+    GitService
+        .initialize_repository(&fixture.context, "fixture baseline")
+        .unwrap();
+    service
+        .apply_source_candidate(
+            &fixture.context,
+            &files,
+            &GitService,
+            &ApplySourceCandidateRequest {
+                project_id: fixture.context.project_id.clone(),
+                project_root_path: fixture.root.to_string_lossy().into_owned(),
+                source_id: fixture.source_id.clone(),
+                candidate_id: candidate.candidate_id.clone(),
+                guard_token: preview.guard_token,
+                merged_markdown: None,
+            },
+        )
+        .unwrap();
+    assert!(service
+        .get_source_detail(&fixture.context, &files, &fixture.source_id)
+        .unwrap()
+        .candidate
+        .is_none());
+    fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
 fn source_ai_generation_survives_external_edit_but_stale_apply_requires_rediff() {
     let fixture = package_fixture("ai-external-edit");
     let service = ImportV2Service::default();

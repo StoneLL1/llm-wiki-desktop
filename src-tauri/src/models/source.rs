@@ -245,6 +245,8 @@ pub struct SourceUpdatePreview {
     pub current_markdown_hash: String,
     pub candidate_markdown_hash: String,
     pub guard_token: String,
+    #[serde(default)]
+    pub ephemeral: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -64,6 +64,49 @@ struct SuccessfulAgent {
     delete_path: Option<String>,
 }
 
+impl SuccessfulAgent {
+    fn structured_output(&self, invocation: &AgentInvocation) -> Result<String, BackendError> {
+        let target = "wiki/concepts/工作流成功.md";
+        if invocation
+            .stdin
+            .as_deref()
+            .is_some_and(|prompt| prompt.contains("--- Accepted CompilePlan ---"))
+        {
+            return Ok(serde_json::json!({
+                "summary": "update wiki",
+                "files": [
+                    { "path": "wiki/index.md", "content": "# Index\n- [[concepts/工作流成功]]\n" },
+                    { "path": "wiki/overview.md", "content": "# Overview\nUpdated\n" },
+                    { "path": "wiki/log.md", "content": "# Log\n- Updated\n" },
+                    { "path": target, "content": "---\ntype: concept\nsources:\n  - 资料.md\n---\n# 工作流成功\n\n> Sources: [资料](../sources/资料.md)\n" }
+                ],
+                "deletions": self.delete_path.clone().into_iter().collect::<Vec<_>>()
+            })
+            .to_string());
+        }
+        serde_json::to_string(&CompilePlan {
+            summary: "update wiki".into(),
+            items: vec![CompilePlanItem {
+                action: CompileAction::Create,
+                target_path: target.into(),
+                page_type: CompilePageType::Concept,
+                source_ids: vec!["资料.md".into()],
+                affected_existing_pages: self.delete_path.clone().into_iter().collect(),
+                reason: "new evidence".into(),
+                risk_flags: self
+                    .delete_path
+                    .as_ref()
+                    .map(|_| vec!["rename".into()])
+                    .unwrap_or_default(),
+            }],
+            global_risk_flags: Vec::new(),
+        })
+        .map_err(|error| {
+            BackendError::new("TEST_SERIALIZATION_FAILED", error.to_string(), false, false)
+        })
+    }
+}
+
 #[cfg(not(windows))]
 struct InterveningAgent {
     project_root: PathBuf,
@@ -165,7 +208,7 @@ impl ProcessRunner for SuccessfulAgent {
         _args: &[&str],
         _timeout: Duration,
     ) -> Result<String, BackendError> {
-        Ok("--print --output-format --verbose --permission-mode --settings --bare --safe-mode --disable-slash-commands --no-session-persistence --no-chrome --prompt-suggestions --strict-mcp-config --tools --allowedTools --json-schema".into())
+        Ok("--print --output-format --verbose --permission-mode --settings --bare --safe-mode --disable-slash-commands --no-session-persistence --no-chrome --prompt-suggestions --strict-mcp-config --tools --allowedTools --json-schema --json --ephemeral --ignore-rules --ignore-user-config --sandbox --skip-git-repo-check -C --cd --message-file --cwd --no-auth-env-only --oneshot --query-file --format --in".into())
     }
 
     fn run_capture(&self, _invocation: &AgentInvocation) -> Result<(String, String), BackendError> {
@@ -178,51 +221,61 @@ impl ProcessRunner for SuccessfulAgent {
         _tasks: &TaskService,
         _task_id: &str,
     ) -> Result<String, BackendError> {
-        let target = "wiki/concepts/工作流成功.md";
-        fs::write(
-            invocation.cwd.join("compile-plan.json"),
-            serde_json::to_vec_pretty(&CompilePlan {
-                summary: "update wiki".into(),
-                items: vec![CompilePlanItem {
-                    action: CompileAction::Create,
-                    target_path: target.into(),
-                    page_type: CompilePageType::Concept,
-                    source_ids: vec!["资料.md".into()],
-                    affected_existing_pages: self.delete_path.clone().into_iter().collect(),
-                    reason: "new evidence".into(),
-                    risk_flags: self
-                        .delete_path
-                        .as_ref()
-                        .map(|_| vec!["rename".into()])
-                        .unwrap_or_default(),
-                }],
-                global_risk_flags: Vec::new(),
-            })
-            .unwrap(),
-        )
-        .unwrap();
-        fs::write(
-            invocation.cwd.join("wiki/index.md"),
-            "# Index\n- [[concepts/工作流成功]]\n",
-        )
-        .unwrap();
-        fs::write(
-            invocation.cwd.join("wiki/overview.md"),
-            "# Overview\nUpdated\n",
-        )
-        .unwrap();
-        fs::write(invocation.cwd.join("wiki/log.md"), "# Log\n- Updated\n").unwrap();
-        let target_path = invocation.cwd.join(target);
-        fs::create_dir_all(target_path.parent().unwrap()).unwrap();
-        fs::write(
+        #[cfg(windows)]
+        {
+            return self.structured_output(invocation);
+        }
+        #[cfg(not(windows))]
+        {
+            if invocation.program != "claude" {
+                return self.structured_output(invocation);
+            }
+            let target = "wiki/concepts/工作流成功.md";
+            fs::write(
+                invocation.cwd.join("compile-plan.json"),
+                serde_json::to_vec_pretty(&CompilePlan {
+                    summary: "update wiki".into(),
+                    items: vec![CompilePlanItem {
+                        action: CompileAction::Create,
+                        target_path: target.into(),
+                        page_type: CompilePageType::Concept,
+                        source_ids: vec!["资料.md".into()],
+                        affected_existing_pages: self.delete_path.clone().into_iter().collect(),
+                        reason: "new evidence".into(),
+                        risk_flags: self
+                            .delete_path
+                            .as_ref()
+                            .map(|_| vec!["rename".into()])
+                            .unwrap_or_default(),
+                    }],
+                    global_risk_flags: Vec::new(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                invocation.cwd.join("wiki/index.md"),
+                "# Index\n- [[concepts/工作流成功]]\n",
+            )
+            .unwrap();
+            fs::write(
+                invocation.cwd.join("wiki/overview.md"),
+                "# Overview\nUpdated\n",
+            )
+            .unwrap();
+            fs::write(invocation.cwd.join("wiki/log.md"), "# Log\n- Updated\n").unwrap();
+            let target_path = invocation.cwd.join(target);
+            fs::create_dir_all(target_path.parent().unwrap()).unwrap();
+            fs::write(
             target_path,
             "---\ntype: concept\nsources:\n  - 资料.md\n---\n# 工作流成功\n\n> Sources: [资料](../sources/资料.md)\n",
         )
         .unwrap();
-        if let Some(path) = &self.delete_path {
-            fs::remove_file(invocation.cwd.join(path)).unwrap();
+            if let Some(path) = &self.delete_path {
+                fs::remove_file(invocation.cwd.join(path)).unwrap();
+            }
+            Ok("completed".into())
         }
-        Ok("completed".into())
     }
 }
 
@@ -259,6 +312,17 @@ fn enqueue_update(
     mode: UpdateWikiMode,
     source: WorkflowSourceVersionRef,
 ) -> llm_wiki_desktop_lib::models::workflow::WorkflowRun {
+    enqueue_update_with_agent(context, tasks, coordinator, mode, source, AgentKind::Claude)
+}
+
+fn enqueue_update_with_agent(
+    context: &ProjectContext,
+    tasks: &TaskService,
+    coordinator: &WorkflowCoordinator,
+    mode: UpdateWikiMode,
+    source: WorkflowSourceVersionRef,
+    agent: AgentKind,
+) -> llm_wiki_desktop_lib::models::workflow::WorkflowRun {
     let scope = WorkflowScope::UpdateWiki {
         mode,
         source_versions: vec![source],
@@ -275,7 +339,7 @@ fn enqueue_update(
                 kind: WorkflowKind::UpdateWiki,
                 scope,
                 route: Some(WorkflowRoute::Agent {
-                    agent: AgentKind::Claude,
+                    agent,
                     model: None,
                     route_revision: "route-test".into(),
                 }),
@@ -921,16 +985,13 @@ async fn real_low_risk_runner_completes_all_stages_consumes_source_and_commits()
     let completed = tasks.get_workflow_run(&run.task_id).unwrap();
     #[cfg(windows)]
     {
-        assert_eq!(completed.display_status, WorkflowDisplayStatus::Failed);
         assert_eq!(
-            completed.error.as_ref().map(|error| error.code.as_str()),
-            Some("AGENT_MUTATION_PROFILE_UNSUPPORTED")
+            completed.display_status,
+            WorkflowDisplayStatus::Completed,
+            "workflow failed: {:?}",
+            completed.error
         );
-        assert!(!context.wiki_dir.join("concepts/工作流成功.md").exists());
-        assert!(!std::env::temp_dir()
-            .join("llm-wiki-desktop")
-            .join(&run.task_id)
-            .exists());
+        assert!(context.wiki_dir.join("concepts/工作流成功.md").is_file());
         assert!(!GitService.repository_status(&context).unwrap().has_changes);
     }
     #[cfg(not(windows))]
@@ -1006,6 +1067,68 @@ async fn real_low_risk_runner_completes_all_stages_consumes_source_and_commits()
 }
 
 #[tokio::test]
+async fn one_shot_agents_generate_validated_plan_and_manifest_before_apply() {
+    for kind in [AgentKind::Codex, AgentKind::Openclaw, AgentKind::Hermes] {
+        let (context, root) = project(kind.command());
+        let (scope, _) = source_scope(&context);
+        GitService
+            .initialize_repository(&context, "initial")
+            .unwrap();
+        let tasks = TaskService::default();
+        let coordinator = WorkflowCoordinator::default();
+        let run = enqueue_update_with_agent(
+            &context,
+            &tasks,
+            &coordinator,
+            UpdateWikiMode::ChangedSources,
+            scope,
+            kind,
+        );
+        let agents = AgentService::with_runner(Arc::new(SuccessfulAgent { delete_path: None }));
+        let llm = LlmService;
+        let secrets = SecretService::default();
+        let settings = SettingsService::default();
+        let file_store = FileStore;
+        let bookmarks = BookmarkService::default();
+        let search = SearchService::default();
+        let confirmations = Default::default();
+        let services = UpdateWikiExecutionServices {
+            compile: CompileExecutionServices {
+                agent_service: &agents,
+                llm_service: &llm,
+                secret_service: &secrets,
+                settings_service: &settings,
+                task_service: &tasks,
+            },
+            git_service: &GitService,
+            file_store: &file_store,
+            bookmark_service: &bookmarks,
+            search_service: &search,
+            confirmation_registry: &confirmations,
+            coordinator: &coordinator,
+        };
+        run_update_wiki(&context, run.clone(), &services).await;
+        let completed = tasks.get_workflow_run(&run.task_id).unwrap();
+        assert_eq!(
+            completed.display_status,
+            WorkflowDisplayStatus::Completed,
+            "{kind:?} workflow failed: {:?}",
+            completed.error,
+        );
+        assert!(context.wiki_dir.join("concepts/工作流成功.md").is_file());
+        assert!(GitService
+            .history_snapshot(&context, &run.task_id, "after")
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            fs::read(root.join("raw/sources/资料.txt")).unwrap(),
+            b"Original source bytes\n"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+}
+
+#[tokio::test]
 async fn real_generated_deletion_enters_persisted_waiting_without_mutating_wiki() {
     let (context, root) = project("delete-runner");
     let old_path = "wiki/concepts/旧名称.md";
@@ -1057,17 +1180,14 @@ async fn real_generated_deletion_enters_persisted_waiting_without_mutating_wiki(
     let waiting = tasks.get_workflow_run(&run.task_id).unwrap();
     #[cfg(windows)]
     {
-        assert_eq!(waiting.display_status, WorkflowDisplayStatus::Failed);
         assert_eq!(
-            waiting.error.as_ref().map(|error| error.code.as_str()),
-            Some("AGENT_MUTATION_PROFILE_UNSUPPORTED")
+            waiting.display_status,
+            WorkflowDisplayStatus::WaitingForConfirmation,
+            "workflow failed: {:?}",
+            waiting.error
         );
         assert!(context.resolve_project_path(old_path).unwrap().is_file());
         assert!(!context.wiki_dir.join("concepts/工作流成功.md").exists());
-        assert!(!std::env::temp_dir()
-            .join("llm-wiki-desktop")
-            .join(&run.task_id)
-            .exists());
     }
     #[cfg(not(windows))]
     {

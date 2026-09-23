@@ -21,6 +21,7 @@ use crate::models::paths::ProjectContext;
 use crate::models::task::{
     BackendTask, TaskActivity, TaskActivityStatus, TaskResult, TaskStatus, TaskType,
 };
+use crate::models::workflow::WorkflowFilesystemAccess;
 use crate::services::{
     AgentService, CandidateChange, ChatIntent, ConvenienceAuditStatus, LlmService, RetrievalContext,
 };
@@ -28,11 +29,50 @@ use crate::tasks::task_model::{CancellationToken, LogLevel};
 
 const MAX_CHAT_CONTENT_CHARS: usize = 32_000;
 
+fn chat_context(
+    state: &AppState,
+    project_id: &str,
+    root_path: &str,
+) -> Result<ProjectContext, BackendError> {
+    let context = state.resolve_project_context(project_id, root_path)?;
+    let access = state.resolve_workflow_read_access(&context)?;
+    let chat_root_writable = context
+        .layout
+        .chat_state_root
+        .as_deref()
+        .is_some_and(|relative| {
+            context
+                .resolve_project_path(relative)
+                .ok()
+                .is_some_and(|path| {
+                    let parent = if path.exists() {
+                        path.as_path()
+                    } else {
+                        path.parent().unwrap_or(&path)
+                    };
+                    std::fs::metadata(parent)
+                        .is_ok_and(|metadata| !metadata.permissions().readonly())
+                })
+        });
+    if access.filesystem_access != WorkflowFilesystemAccess::Writable || !chat_root_writable {
+        state.chat_service.use_memory_for_project(&context);
+    }
+    Ok(context)
+}
+
 #[tauri::command]
 pub fn create_chat_session(
     state: State<'_, AppState>,
     request: CreateChatSessionRequest,
 ) -> Result<ChatSession, BackendError> {
+    let context = chat_context(&state, &request.project_id, &request.project_root_path)?;
+    if state.chat_service.is_memory_project(&context) {
+        return state.chat_service.create_session(
+            &context,
+            request.title.as_deref(),
+            request.context_page_path.as_deref(),
+        );
+    }
     state.with_current_project_write_access(
         &request.project_id,
         &request.project_root_path,
@@ -51,7 +91,7 @@ pub fn list_chat_sessions(
     state: State<'_, AppState>,
     request: ListChatsRequest,
 ) -> Result<Vec<ChatSessionSummary>, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let context = chat_context(&state, &request.project_id, &request.project_root_path)?;
     state.chat_service.list_sessions(&context)
 }
 
@@ -60,7 +100,7 @@ pub fn load_chat_session(
     state: State<'_, AppState>,
     request: LoadChatRequest,
 ) -> Result<ChatSession, BackendError> {
-    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    let context = chat_context(&state, &request.project_id, &request.project_root_path)?;
     state
         .chat_service
         .load_session(&context, &request.session_id)
@@ -71,6 +111,12 @@ pub fn rename_chat_session(
     state: State<'_, AppState>,
     request: RenameChatRequest,
 ) -> Result<ChatSession, BackendError> {
+    let context = chat_context(&state, &request.project_id, &request.project_root_path)?;
+    if state.chat_service.is_memory_project(&context) {
+        return state
+            .chat_service
+            .rename_session(&context, &request.session_id, &request.title);
+    }
     state.with_current_project_write_access(
         &request.project_id,
         &request.project_root_path,
@@ -87,6 +133,13 @@ pub fn delete_chat_session(
     state: State<'_, AppState>,
     request: DeleteChatRequest,
 ) -> Result<(), BackendError> {
+    let context = chat_context(&state, &request.project_id, &request.project_root_path)?;
+    if state.chat_service.is_memory_project(&context) {
+        let _send_guard = state.chat_service.try_acquire_send()?;
+        return state
+            .chat_service
+            .delete_session(&context, &request.session_id);
+    }
     state.with_current_project_write_access(
         &request.project_id,
         &request.project_root_path,
@@ -128,23 +181,39 @@ pub fn send_chat_message(
     let content = validate_chat_content(&request.content)?;
     let request = SendChatMessageRequest { content, ..request };
     let send_guard = state.chat_service.try_acquire_send()?;
-    let (context, task) = state.with_current_project_write_access(
-        &request.project_id,
-        &request.project_root_path,
-        |_permit, context| {
-            let task = state
-                .task_service
-                .create_project_task(
-                    TaskType::LlmRequest,
-                    request.project_id.clone(),
-                    context.root.clone(),
-                    format!("Chat: {}", truncate_title(&request.content)),
-                    true,
-                )
-                .map_err(task_error)?;
-            Ok((context.clone(), task))
-        },
-    )?;
+    let context = chat_context(&state, &request.project_id, &request.project_root_path)?;
+    state.require_external_ai_access(&context)?;
+    let (context, task) = if state.chat_service.is_memory_project(&context) {
+        let task = state
+            .task_service
+            .create_memory_project_task(
+                TaskType::LlmRequest,
+                request.project_id.clone(),
+                context.root.clone(),
+                format!("Chat: {}", truncate_title(&request.content)),
+                true,
+            )
+            .map_err(task_error)?;
+        (context, task)
+    } else {
+        state.with_current_project_write_access(
+            &request.project_id,
+            &request.project_root_path,
+            |_permit, context| {
+                let task = state
+                    .task_service
+                    .create_project_task(
+                        TaskType::LlmRequest,
+                        request.project_id.clone(),
+                        context.root.clone(),
+                        format!("Chat: {}", truncate_title(&request.content)),
+                        true,
+                    )
+                    .map_err(task_error)?;
+                Ok((context.clone(), task))
+            },
+        )?
+    };
     let task_id = task.id.clone();
     tauri::async_runtime::spawn(async move {
         let _send_guard = send_guard;
@@ -181,16 +250,23 @@ async fn run_chat_send(
     if state.task_service.is_cancelled(task_id) {
         return Err(chat_cancelled_error());
     }
-    state.with_current_project_write_access(
-        &request.project_id,
-        &request.project_root_path,
-        |_permit, _| {
-            state
-                .task_service
-                .transition_status(task_id, TaskStatus::Running)
-                .map_err(task_error)
-        },
-    )?;
+    if state.chat_service.is_memory_project(context) {
+        state
+            .task_service
+            .transition_status(task_id, TaskStatus::Running)
+            .map_err(task_error)?;
+    } else {
+        state.with_current_project_write_access(
+            &request.project_id,
+            &request.project_root_path,
+            |_permit, _| {
+                state
+                    .task_service
+                    .transition_status(task_id, TaskStatus::Running)
+                    .map_err(task_error)
+            },
+        )?;
+    }
     let mut session = state
         .chat_service
         .load_session(context, &request.session_id)?;
@@ -207,15 +283,21 @@ async fn run_chat_send(
         retrieval_diagnostics: None,
         saved_path: None,
     };
-    state.with_current_project_write_access(
-        &request.project_id,
-        &request.project_root_path,
-        |_permit, current| {
-            state
-                .chat_service
-                .append_message(current, &mut session, user_message)
-        },
-    )?;
+    if state.chat_service.is_memory_project(context) {
+        state
+            .chat_service
+            .append_message(context, &mut session, user_message)?;
+    } else {
+        state.with_current_project_write_access(
+            &request.project_id,
+            &request.project_root_path,
+            |_permit, current| {
+                state
+                    .chat_service
+                    .append_message(current, &mut session, user_message)
+            },
+        )?;
+    }
 
     state
         .task_service
@@ -238,6 +320,14 @@ async fn run_chat_send(
         .chat_convenience_service
         .classify_chat_intent(&request.content);
     if should_use_convenience_flow(request.convenience_enabled, intent) {
+        if state.chat_service.is_memory_project(context) {
+            return Err(BackendError::new(
+                "PROJECT_WRITE_READ_ONLY",
+                "Chat editing requires a writable project.",
+                true,
+                true,
+            ));
+        }
         let retrieval = state.chat_service.build_convenience_retrieval_context(
             context,
             &state.search_service,
@@ -472,24 +562,37 @@ async fn run_chat_send(
     let assistant_message_id = assistant_message.id.clone();
     // Check cancellation again while holding the session mutation lock so a
     // cancel that races with another writer cannot persist an abandoned answer.
-    let appended = state.with_current_project_write_access(
-        &request.project_id,
-        &request.project_root_path,
-        |_permit, current| {
-            state
-                .chat_service
-                .append_message_if(current, &mut session, assistant_message, || {
-                    state.task_service.is_cancelled(task_id)
-                })
-        },
-    )?;
+    let appended = if state.chat_service.is_memory_project(context) {
+        state
+            .chat_service
+            .append_message_if(context, &mut session, assistant_message, || {
+                state.task_service.is_cancelled(task_id)
+            })?
+    } else {
+        state.with_current_project_write_access(
+            &request.project_id,
+            &request.project_root_path,
+            |_permit, current| {
+                state.chat_service.append_message_if(
+                    current,
+                    &mut session,
+                    assistant_message,
+                    || state.task_service.is_cancelled(task_id),
+                )
+            },
+        )?
+    };
     if !appended {
         return Err(chat_cancelled_error());
     }
 
     let result = TaskResult {
         summary: "Chat answer ready.".into(),
-        affected_paths: vec![format!(".app/chats/{}.json", session.id)],
+        affected_paths: if state.chat_service.is_memory_project(context) {
+            Vec::new()
+        } else {
+            vec![format!(".app/chats/{}.json", session.id)]
+        },
         reference: None,
         pending_action: None,
     };

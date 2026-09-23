@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use chrono::Utc;
 use sha2::{Digest, Sha256};
@@ -20,6 +20,10 @@ use crate::{
 };
 
 use super::{
+    agent_tools::{
+        ImportAgentToolBroker, ImportAgentToolCall, ImportAgentToolTaskContext,
+        LocalImportAgentToolExecutor,
+    },
     agent_workspace::{AgentTaskBundle, AgentWorkspaceBuilder},
     ImportV2Service,
 };
@@ -28,7 +32,7 @@ use super::{
 pub enum LocalAgentStartDecision {
     Start,
     AgentUnavailable,
-    AttemptBudgetExhausted,
+    AutomaticBudgetExhausted,
 }
 
 pub struct AgentAssistanceService<'a> {
@@ -60,12 +64,15 @@ impl<'a> AgentAssistanceService<'a> {
         policy: &AgentAssistancePolicy,
         available: bool,
         prior_agent_attempts: usize,
+        trigger: AgentAssistanceTrigger,
     ) -> LocalAgentStartDecision {
-        if prior_agent_attempts >= usize::from(policy.max_attempts_per_item) {
-            return LocalAgentStartDecision::AttemptBudgetExhausted;
-        }
         if !available {
             return LocalAgentStartDecision::AgentUnavailable;
+        }
+        if trigger == AgentAssistanceTrigger::QualityOptimization
+            && prior_agent_attempts >= usize::from(policy.max_attempts_per_item)
+        {
+            return LocalAgentStartDecision::AutomaticBudgetExhausted;
         }
         LocalAgentStartDecision::Start
     }
@@ -87,13 +94,20 @@ impl<'a> AgentAssistanceService<'a> {
             .ok_or_else(|| {
                 assistance_error("IMPORT_V2_ITEM_NOT_FOUND", "Import item was not found.")
             })?;
-        let settings = self.settings.read_settings(context)?;
-        if agent_kind != AgentKind::Claude {
-            return Err(assistance_error(
-                "IMPORT_AGENT_PROFILE_UNSUPPORTED",
-                "The selected Agent CLI has no verified tool-free Import profile.",
-            ));
+        if let Some(active_id) = item.task_id.as_deref() {
+            if let Some(existing) = self.tasks.get_task(active_id) {
+                if matches!(
+                    existing.status,
+                    TaskStatus::Queued | TaskStatus::Running | TaskStatus::Cancelling
+                ) && item.attempts.iter().any(|attempt| {
+                    attempt.route == format!("agent_assistance/{active_id}")
+                        && attempt.engine_id == format!("{agent_kind:?}").to_ascii_lowercase()
+                }) {
+                    return Ok(existing);
+                }
+            }
         }
+        let settings = self.settings.read_settings(context)?;
         if item.status == ImportItemStatus::Failed
             && !item.issue.as_ref().is_some_and(|issue| {
                 issue.available_actions.contains(
@@ -115,6 +129,7 @@ impl<'a> AgentAssistanceService<'a> {
             &settings.import_agent_policy,
             self.agents.is_available(agent_kind),
             attempts,
+            trigger,
         );
         match decision {
             LocalAgentStartDecision::AgentUnavailable => {
@@ -123,10 +138,10 @@ impl<'a> AgentAssistanceService<'a> {
                     "The selected local Agent is not installed or detected. Installation was not attempted.",
                 ));
             }
-            LocalAgentStartDecision::AttemptBudgetExhausted => {
+            LocalAgentStartDecision::AutomaticBudgetExhausted => {
                 return Err(assistance_error(
-                    "IMPORT_AGENT_ATTEMPT_LIMIT",
-                    "The Agent assistance attempt budget is exhausted for this item.",
+                    "IMPORT_AGENT_AUTOMATIC_ATTEMPT_LIMIT",
+                    "Automatic Agent optimization reached its per-item attempt limit. You can still retry manually.",
                 ));
             }
             _ => {}
@@ -333,18 +348,100 @@ impl<'a> AgentAssistanceService<'a> {
                     return Err(error);
                 }
             };
-            let output = match self.agents.run_import_assistance(
-                agent_kind,
-                &invocation,
-                self.tasks,
-                task_id,
-            ) {
-                Ok(output) => output,
-                Err(error) => {
-                    self.cleanup_terminal_if_current(state, execution, context, &workspace);
-                    return Err(error);
+            let broker = ImportAgentToolBroker::new(Arc::new(LocalImportAgentToolExecutor));
+            let mut invocation = invocation;
+            let mut output = String::new();
+            for round in 0..=3 {
+                output = match self.agents.run_import_assistance(
+                    agent_kind,
+                    &invocation,
+                    self.tasks,
+                    task_id,
+                ) {
+                    Ok(output) => output,
+                    Err(error) => {
+                        self.cleanup_terminal_if_current(state, execution, context, &workspace);
+                        return Err(error);
+                    }
+                };
+                let Some(requests) = parse_tool_requests(&output)? else {
+                    break;
+                };
+                if round == 3 {
+                    return Err(assistance_error(
+                        "IMPORT_AGENT_TOOL_ROUND_LIMIT",
+                        "Agent tool request limit was reached without a candidate.",
+                    ));
                 }
-            };
+                let tool_context = ImportAgentToolTaskContext {
+                    task_id: task_id.into(),
+                    project_id: context.project_id.clone(),
+                    session_id: session_id.into(),
+                    item_id: item_id.into(),
+                    item_staging_root: workspace
+                        .root
+                        .parent()
+                        .and_then(Path::parent)
+                        .ok_or_else(|| {
+                            assistance_error(
+                                "IMPORT_AGENT_WORKSPACE_INVALID",
+                                "Item staging root is unavailable.",
+                            )
+                        })?
+                        .to_path_buf(),
+                    workspace_root: workspace.root.clone(),
+                    grants: bundle.allowed_tools.clone(),
+                    input_hashes: bundle.input_hashes.clone(),
+                    cancelled: self.tasks.is_cancelled(task_id),
+                };
+                let mut results = Vec::new();
+                for call in requests {
+                    let result = broker.invoke(&tool_context, call.clone())?;
+                    audit.tool_calls.push(call.safe_name().into());
+                    let mut result_json = serde_json::to_value(&result).map_err(|_| {
+                        assistance_error(
+                            "IMPORT_AGENT_TOOL_OUTPUT_INVALID",
+                            "Tool result could not be encoded.",
+                        )
+                    })?;
+                    if matches!(call, ImportAgentToolCall::RunDeterministicRoute { .. }) {
+                        let path = workspace.root.join("logs/native-route/document.md");
+                        let bytes = super::agent_workspace::read_isolated_regular_file(
+                            &workspace.root,
+                            &path,
+                            128 * 1024,
+                        )?;
+                        let text = String::from_utf8(bytes).map_err(|_| {
+                            assistance_error(
+                                "IMPORT_AGENT_TOOL_OUTPUT_INVALID",
+                                "Native parser did not return UTF-8 Markdown.",
+                            )
+                        })?;
+                        result_json["markdown"] = serde_json::Value::String(text);
+                    }
+                    results.push(result_json);
+                }
+                let result_text = serde_json::to_string(&results).map_err(|_| {
+                    assistance_error(
+                        "IMPORT_AGENT_TOOL_OUTPUT_INVALID",
+                        "Tool results could not be encoded.",
+                    )
+                })?;
+                let prompt = invocation.stdin.get_or_insert_with(String::new);
+                prompt.push_str("\n\n<application-tool-results>\n");
+                prompt.push_str(&result_text);
+                prompt.push_str("\n</application-tool-results>\nReturn the final Markdown candidate, or one further granted tool request.\n");
+            }
+            if output.trim_start().starts_with('{') {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&output) {
+                    if let Some(candidate) = value
+                        .get("candidateMarkdown")
+                        .and_then(|value| value.as_str())
+                    {
+                        output = candidate.to_string();
+                    }
+                }
+            }
             if self.tasks.is_cancelled(task_id) {
                 self.cleanup_terminal_if_current(state, execution, context, &workspace);
                 return Err(assistance_error(
@@ -386,7 +483,7 @@ impl<'a> AgentAssistanceService<'a> {
                 }
                 write_candidate_manifest(
                     &workspace.output_dir,
-                    "sandboxed-local-agent",
+                    &audit.tool_calls,
                     &format!("{:x}", Sha256::digest(output.as_bytes())),
                 )?;
                 self.files.write_json_atomic(current, &audit_path, &audit)
@@ -512,9 +609,38 @@ fn assistance_error(code: &str, message: &str) -> BackendError {
     BackendError::new(code, message, true, true)
 }
 
+fn parse_tool_requests(output: &str) -> Result<Option<Vec<ImportAgentToolCall>>, BackendError> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(output.trim()) else {
+        return Ok(None);
+    };
+    let Some(requests) = value.get("toolRequests") else {
+        return Ok(None);
+    };
+    if value.get("candidateMarkdown").is_some() {
+        return Err(assistance_error(
+            "IMPORT_AGENT_TOOL_OUTPUT_INVALID",
+            "Tool requests and a final candidate cannot be returned together.",
+        ));
+    }
+    let requests: Vec<ImportAgentToolCall> =
+        serde_json::from_value(requests.clone()).map_err(|_| {
+            assistance_error(
+                "IMPORT_AGENT_TOOL_OUTPUT_INVALID",
+                "Agent tool requests are malformed.",
+            )
+        })?;
+    if requests.is_empty() || requests.len() > 4 {
+        return Err(assistance_error(
+            "IMPORT_AGENT_TOOL_OUTPUT_INVALID",
+            "Agent tool request batch must contain one to four calls.",
+        ));
+    }
+    Ok(Some(requests))
+}
+
 fn write_candidate_manifest(
     output_dir: &Path,
-    route: &str,
+    tool_calls: &[String],
     markdown_sha256: &str,
 ) -> Result<(), BackendError> {
     let manifest = AgentCandidateManifest {
@@ -523,7 +649,11 @@ fn write_candidate_manifest(
         markdown_sha256: markdown_sha256.into(),
         asset_sha256: std::collections::BTreeMap::new(),
         processing_summary: "AI-assisted Markdown candidate staged for validation.".into(),
-        tools_used: vec![route.into()],
+        tools_used: if tool_calls.is_empty() {
+            vec!["tool-free-local-agent".into()]
+        } else {
+            tool_calls.to_vec()
+        },
         uncertainties: vec![
             "The generated structure may differ from the deterministic extraction.".into(),
         ],

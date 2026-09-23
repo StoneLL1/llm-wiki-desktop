@@ -5,7 +5,7 @@ use llm_wiki_desktop_lib::{
     models::import_v2_agent::AgentToolGrant,
     services::import_v2::agent_tools::{
         ImportAgentToolBroker, ImportAgentToolCall, ImportAgentToolExecutor, ImportAgentToolResult,
-        ImportAgentToolTaskContext,
+        ImportAgentToolTaskContext, LocalImportAgentToolExecutor,
     },
 };
 
@@ -154,4 +154,53 @@ fn tool_protocol_has_no_arbitrary_authority_variants() {
     ] {
         assert!(!source.contains(forbidden));
     }
+}
+
+#[test]
+fn production_broker_runs_native_text_parser_inside_item_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let tool_context = context(root.path(), vec![AgentToolGrant::RunDeterministicRoute]);
+    std::fs::create_dir_all(tool_context.workspace_root.join("source")).unwrap();
+    std::fs::write(
+        tool_context.workspace_root.join("source/资料.txt"),
+        "# 资料\n\n可读正文。\n",
+    )
+    .unwrap();
+    let broker = ImportAgentToolBroker::new(Arc::new(LocalImportAgentToolExecutor));
+    let result = broker
+        .invoke(
+            &tool_context,
+            ImportAgentToolCall::RunDeterministicRoute {
+                route: "file.native".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(result.outcome, "succeeded");
+    assert_eq!(result.output_hashes.len(), 1);
+    assert!(std::fs::read_to_string(
+        tool_context
+            .workspace_root
+            .join("logs/native-route/document.md")
+    )
+    .unwrap()
+    .contains("可读正文"));
+    assert!(
+        std::fs::read_to_string(tool_context.workspace_root.join("logs/tool-ledger.json"))
+            .unwrap()
+            .contains("run_deterministic_route")
+    );
+    let denied = ImportAgentToolBroker::new(Arc::new(LocalImportAgentToolExecutor));
+    let no_grant = context(root.path(), vec![]);
+    assert_eq!(
+        denied
+            .invoke(
+                &no_grant,
+                ImportAgentToolCall::RunDeterministicRoute {
+                    route: "file.native".into()
+                }
+            )
+            .unwrap_err()
+            .code,
+        "IMPORT_AGENT_TOOL_NOT_GRANTED"
+    );
 }

@@ -1142,6 +1142,9 @@ function ResultView({
     const { body, frontmatter } = splitFrontmatter(preview.candidateMarkdown);
     return (
       <div className="source-ai-workbench__final">
+        {preview.ephemeral ? (
+          <InlineAlert>{t("source.aiOrganize.workbench.ephemeralCandidate")}</InlineAlert>
+        ) : null}
         {preview.mode === "three_way" ? (
           <InlineAlert>{t("source.candidate.threeWay")}</InlineAlert>
         ) : null}

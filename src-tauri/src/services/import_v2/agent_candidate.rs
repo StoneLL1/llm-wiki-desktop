@@ -12,7 +12,7 @@ use crate::models::import_v2::{
     ArtifactKind, ImportArtifact, ImportBatchResult, ImportItem, ImportPreviewArtifact,
 };
 use crate::models::import_v2_agent::{
-    AgentAuditRecord, AgentCandidate, AgentCandidateDiff, AgentCandidateManifest,
+    AgentAuditRecord, AgentCandidate, AgentCandidateDiff, AgentCandidateManifest, AgentToolGrant,
 };
 use crate::models::paths::ProjectContext;
 use crate::models::task::{TaskResultReference, TaskStatus, TaskType};
@@ -1011,6 +1011,17 @@ fn validate_candidate_audit(
     task_id: &str,
 ) -> Result<(), BackendError> {
     let exact_output = audit.output_hashes == vec![manifest.markdown_sha256.clone()];
+    let tools_match = if audit.tool_calls.is_empty() {
+        manifest.tools_used.len() == 1 && manifest.tools_used[0] == "tool-free-local-agent"
+    } else {
+        audit.tool_calls == manifest.tools_used
+            && audit.tool_calls.iter().all(|call| {
+                bundle
+                    .allowed_tools
+                    .iter()
+                    .any(|grant| agent_tool_grant_name(grant) == call)
+            })
+    };
     let common = audit.task_id == task_id
         && audit.session_id == session_id
         && audit.item_id == item_id
@@ -1018,7 +1029,7 @@ fn validate_candidate_audit(
         && matches!(audit.outcome.as_str(), "output_staged" | "succeeded")
         && audit.completed_at.is_some()
         && !audit.agent_version.trim().is_empty()
-        && audit.tool_calls.is_empty()
+        && tools_match
         && exact_output;
     let route_valid = if let Some(command) = audit.route.strip_prefix("local/") {
         audit
@@ -1038,6 +1049,17 @@ fn validate_candidate_audit(
         Err(candidate_error(
             "Agent candidate provenance does not match the completed task.",
         ))
+    }
+}
+
+fn agent_tool_grant_name(grant: &AgentToolGrant) -> &'static str {
+    match grant {
+        AgentToolGrant::InspectSource => "inspect_source",
+        AgentToolGrant::RunDeterministicRoute => "run_deterministic_route",
+        AgentToolGrant::RunOcr => "run_ocr",
+        AgentToolGrant::RunAsr => "run_asr",
+        AgentToolGrant::ParseSanitizedSnapshot => "parse_sanitized_snapshot",
+        AgentToolGrant::ValidateCandidate => "validate_candidate",
     }
 }
 

@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use llm_wiki_desktop_lib::{
     errors::BackendError,
     models::{
-        import_v2_agent::{AgentAssistancePolicy, AgentToolGrant},
+        import_v2_agent::{AgentAssistancePolicy, AgentAssistanceTrigger, AgentToolGrant},
         task::{TaskStatus, TaskType},
     },
     services::import_v2::{
@@ -108,21 +108,45 @@ fn threat_corpus_denies_injected_authority_secret_echo_and_executables() {
 }
 
 #[test]
-fn product_policy_allows_only_explicit_local_agent_start() {
+fn product_policy_allows_explicit_local_agent_retry_after_prior_attempts() {
     let policy = AgentAssistancePolicy {
         max_attempts_per_item: 2,
     };
     assert_eq!(
-        AgentAssistanceService::local_start_decision(&policy, true, 0,),
+        AgentAssistanceService::local_start_decision(
+            &policy,
+            true,
+            0,
+            AgentAssistanceTrigger::Manual
+        ),
         LocalAgentStartDecision::Start
     );
     assert_eq!(
-        AgentAssistanceService::local_start_decision(&policy, false, 0,),
+        AgentAssistanceService::local_start_decision(
+            &policy,
+            false,
+            0,
+            AgentAssistanceTrigger::Manual
+        ),
         LocalAgentStartDecision::AgentUnavailable
     );
     assert_eq!(
-        AgentAssistanceService::local_start_decision(&policy, true, 2),
-        LocalAgentStartDecision::AttemptBudgetExhausted
+        AgentAssistanceService::local_start_decision(
+            &policy,
+            true,
+            2,
+            AgentAssistanceTrigger::Manual
+        ),
+        LocalAgentStartDecision::Start
+    );
+    assert_eq!(
+        AgentAssistanceService::local_start_decision(
+            &policy,
+            true,
+            2,
+            AgentAssistanceTrigger::QualityOptimization,
+        ),
+        LocalAgentStartDecision::AutomaticBudgetExhausted
     );
 }
 

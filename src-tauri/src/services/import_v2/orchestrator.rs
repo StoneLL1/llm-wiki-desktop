@@ -95,6 +95,8 @@ pub struct ImportV2Service {
     agent_candidate_action_lock: Mutex<()>,
     #[cfg_attr(not(feature = "gui"), allow(dead_code))]
     source_ai_active: Mutex<HashSet<String>>,
+    pub(super) source_ai_memory_candidates:
+        Mutex<HashMap<String, super::source_lifecycle::StoredSourceCandidate>>,
     pub(super) web_targets: Arc<WebTargetStore>,
     connector_profiles_root: Arc<RwLock<Option<PathBuf>>>,
     target_reservation_registry: Mutex<
@@ -389,6 +391,7 @@ impl ImportV2Service {
             lock_registry: ImportLockRegistry::default(),
             agent_candidate_action_lock: Mutex::new(()),
             source_ai_active: Mutex::new(HashSet::new()),
+            source_ai_memory_candidates: Mutex::new(HashMap::new()),
             web_targets,
             connector_profiles_root,
             target_reservation_registry: Mutex::new(HashMap::new()),
@@ -1617,9 +1620,11 @@ impl ImportV2Service {
                 .iter()
                 .filter(|attempt| attempt.route.starts_with("agent_assistance/"))
                 .collect::<Vec<_>>();
-            if agent_attempts.len() >= usize::from(max_attempts) {
+            if trigger == AgentAssistanceTrigger::QualityOptimization
+                && agent_attempts.len() >= usize::from(max_attempts)
+            {
                 return Err(task_error(
-                    "The Agent assistance attempt budget is exhausted for this item.",
+                    "Automatic Agent optimization reached its per-item attempt limit.",
                 ));
             }
             if agent_attempts
