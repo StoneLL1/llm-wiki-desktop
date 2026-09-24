@@ -228,7 +228,7 @@ Rules whose logical roots do not exist in the active layout are reported as not 
 - Agent repair writes only inside a task-owned candidate workspace. Its write scope is Wiki Markdown selected by the backend layout and explicitly excludes `raw/**`, faithful Source pages, `wiki/sources/**`, layout-defined Source roots, and app-owned state. The backend validates candidate manifests and applies accepted changes; the Agent never writes the real project root directly.
 - The user approves the whole selected Finding batch once. Safe selected-path updates and safe new Wiki pages are covered by that approval; deletes, overwrites outside the pre-authorized existing-path set, and baseline/user-edit conflicts require a second persistent confirmation with lazy Diff.
 - Each applied round is followed by deterministic Lint. Agent repair is limited to three rounds; unresolved work retains the verified Diff and Git rollback facts and becomes a typed partial/manual-review result. There is no fourth invocation and no BYOK repair fallback.
-- Claude Code and Codex are the initial Agent kinds eligible for this contract once their exact invocation/output tests and later route-enablement batches pass. OpenClaw and Hermes remain unsupported until equivalent contracts land.
+- Claude Code, Codex, OpenClaw, and Hermes use the same backend operation capability contract. Each route must still pass its current executable and invocation/output checks before execution.
 
 This decision closes the product-choice portion of `WF-D01`. H3 enabled the backend-derived Claude/Codex Complete Health route, H4B registered the guarded repair operation, and H5 exposed the downstream Lint/Workflows repair surface. Forged or stale routes still fail before invocation, and the visible Overview remains the same fixed three workflows.
 
@@ -307,7 +307,7 @@ Workflow entries remain visible in an empty or partially configured context, but
 | Project is read-only | 只读检查可继续；写入工作流说明“需要可写知识库” |
 | Update Wiki has no project-local Git | 应用在任务开始后自动准备本地历史；Git 不可用时在写入前失败 |
 | Other checkpoint-required writes have no Git capability | 启用本地 Git或保持只读能力 |
-| Dirty Git blocks another high-risk write (excluding Update Wiki) | 先自行处理，或明确确认把当前全部变更作为检查点 |
+| Dirty Git blocks a remaining branch-checkpoint write (excluding Update Wiki and Agent Lint repair) | 先自行处理，或明确确认把当前全部变更作为检查点 |
 | Update Wiki has no Sources | 先添加来源 → Import |
 | Health Check has no readable Source or Wiki Markdown | 导入资料 / 等待扫描 |
 | Generate Content has no pages | 先更新 Wiki |
@@ -315,7 +315,7 @@ Workflow entries remain visible in an empty or partially configured context, but
 
 Completing a prerequisite returns the user to the intended preparation context when possible, but does not automatically launch work.
 
-External AI, Agent and Skill execution requires a trusted project. Any mutation additionally requires writable permission, and checkpoint-required mutation requires recoverable Git history. Update Wiki establishes its application-owned history automatically during execution; other workflows retain their existing checkpoint policy. These conditions are revalidated by the backend when the user starts or confirms work; frontend disabled state is not authorization.
+External AI, Agent and Skill execution requires a trusted project. Any mutation additionally requires writable permission, and checkpoint-required mutation requires recoverable Git history. Update Wiki and Agent Lint repair establish application-owned private history during execution; other workflows retain their existing checkpoint policy. These conditions are revalidated by the backend when the user starts or confirms work; frontend disabled state is not authorization.
 
 ## 9. Queue and Project Isolation
 
@@ -435,7 +435,7 @@ Rules:
 - A project without local Git may initialize object storage when the user starts Update Wiki, without an all-files initial commit. A project nested inside an external Git repository is rejected before initialization to preserve that repository’s behavior. Preparation and navigation never initialize Git.
 - Completed updates expose undo in their task detail. Failed/interrupted publication can restore from the durable before/planned snapshots. Restore compares current bytes with the operation’s before/installed bytes, preserving later external edits. Durable `undo-started`/`undo` refs distinguish incomplete and completed recovery; new Update Wiki publication waits for incomplete recovery to finish.
 - Preparation opens immediately and restores the selected workflow’s local draft. Discovery runs in the background; cancelling preparation dismisses UI intent and ignores late results. Selected Source versions and guidance bind start admission; the Wiki baseline is captured when the queued update runs, rather than hashing the whole Wiki during navigation.
-- Health Check itself creates no checkpoint. After a selected repair batch is approved, queued dispatch must create the required clean-HEAD project-local checkpoint before the first Agent repair invocation; checkpoint failure means zero Agent invocations and zero candidate or real-project mutation.
+- Health Check itself creates no checkpoint. After a selected repair batch is approved, queued dispatch captures authorized paths in a private `before` history ref before the first Agent repair invocation. A completed repair captures `after`; undo uses the same path and current-byte guards. Unrelated staged and unstaged files, HEAD, and index remain untouched. Snapshot failure means zero Agent invocations and zero candidate or real-project mutation.
 - Generate Content requires a checkpoint before overwriting an existing artifact; creating a new artifact does not require one.
 - Users cannot disable a checkpoint required by a high-risk action.
 - Safe selected-path updates and safe new Wiki pages may apply under the initial batch approval after candidate validation.

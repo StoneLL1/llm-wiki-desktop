@@ -14,6 +14,7 @@ const REPAIR_ERROR_KEYS: Record<string, string> = {
   LINT_REPAIR_HEALTH_REPORT_REQUIRED: "lint.repair.errors.healthReportRequired",
   LINT_REPAIR_WIKI_ROOT_REQUIRED: "lint.repair.errors.wikiRootRequired",
   LINT_REPAIR_GIT_CLEAN_REQUIRED: "lint.repair.errors.gitCleanRequired",
+  LINT_REPAIR_GIT_REQUIRED: "lint.repair.errors.gitRequired",
   LINT_REPAIR_GIT_HEAD_REQUIRED: "lint.repair.errors.gitHeadRequired",
   LINT_REPAIR_PREPARATION_STALE: "lint.repair.errors.preparationStale",
   LINT_REPAIR_CONFIRMATION_MISMATCH: "lint.repair.errors.confirmationMismatch",

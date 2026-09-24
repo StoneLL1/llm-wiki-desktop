@@ -64,6 +64,54 @@ struct SuccessfulAgent {
     delete_path: Option<String>,
 }
 
+struct DeferredSourceAgent;
+
+impl ProcessRunner for DeferredSourceAgent {
+    fn find_executable(&self, command: &str) -> Option<PathBuf> {
+        SuccessfulAgent { delete_path: None }.find_executable(command)
+    }
+
+    fn run_with_timeout(
+        &self,
+        command: &str,
+        args: &[&str],
+        timeout: Duration,
+    ) -> Result<String, BackendError> {
+        SuccessfulAgent { delete_path: None }.run_with_timeout(command, args, timeout)
+    }
+
+    fn run_capture(&self, invocation: &AgentInvocation) -> Result<(String, String), BackendError> {
+        SuccessfulAgent { delete_path: None }.run_capture(invocation)
+    }
+
+    fn run_task_streaming(
+        &self,
+        invocation: &AgentInvocation,
+        _tasks: &TaskService,
+        _task_id: &str,
+    ) -> Result<String, BackendError> {
+        let raw = SuccessfulAgent { delete_path: None }.structured_output(invocation)?;
+        if invocation
+            .stdin
+            .as_deref()
+            .is_some_and(|prompt| prompt.contains("--- Accepted CompilePlan ---"))
+        {
+            return Ok(raw);
+        }
+        let mut plan: CompilePlan = serde_json::from_str(&raw).unwrap();
+        plan.source_decisions.push(
+            llm_wiki_desktop_lib::models::compile::CompilePlanSourceDecision {
+                source_id: "第二.md".into(),
+                status: llm_wiki_desktop_lib::models::compile::CompileSourceOutcomeStatus::Deferred,
+                reason: "Needs another source document".into(),
+                evidence_path: None,
+                evidence_excerpt: None,
+            },
+        );
+        Ok(serde_json::to_string(&plan).unwrap())
+    }
+}
+
 impl SuccessfulAgent {
     fn structured_output(&self, invocation: &AgentInvocation) -> Result<String, BackendError> {
         let target = "wiki/concepts/工作流成功.md";
@@ -100,6 +148,7 @@ impl SuccessfulAgent {
                     .unwrap_or_default(),
             }],
             global_risk_flags: Vec::new(),
+            source_decisions: Vec::new(),
         })
         .map_err(|error| {
             BackendError::new("TEST_SERIALIZATION_FAILED", error.to_string(), false, false)
@@ -221,61 +270,7 @@ impl ProcessRunner for SuccessfulAgent {
         _tasks: &TaskService,
         _task_id: &str,
     ) -> Result<String, BackendError> {
-        #[cfg(windows)]
-        {
-            return self.structured_output(invocation);
-        }
-        #[cfg(not(windows))]
-        {
-            if invocation.program != "claude" {
-                return self.structured_output(invocation);
-            }
-            let target = "wiki/concepts/工作流成功.md";
-            fs::write(
-                invocation.cwd.join("compile-plan.json"),
-                serde_json::to_vec_pretty(&CompilePlan {
-                    summary: "update wiki".into(),
-                    items: vec![CompilePlanItem {
-                        action: CompileAction::Create,
-                        target_path: target.into(),
-                        page_type: CompilePageType::Concept,
-                        source_ids: vec!["资料.md".into()],
-                        affected_existing_pages: self.delete_path.clone().into_iter().collect(),
-                        reason: "new evidence".into(),
-                        risk_flags: self
-                            .delete_path
-                            .as_ref()
-                            .map(|_| vec!["rename".into()])
-                            .unwrap_or_default(),
-                    }],
-                    global_risk_flags: Vec::new(),
-                })
-                .unwrap(),
-            )
-            .unwrap();
-            fs::write(
-                invocation.cwd.join("wiki/index.md"),
-                "# Index\n- [[concepts/工作流成功]]\n",
-            )
-            .unwrap();
-            fs::write(
-                invocation.cwd.join("wiki/overview.md"),
-                "# Overview\nUpdated\n",
-            )
-            .unwrap();
-            fs::write(invocation.cwd.join("wiki/log.md"), "# Log\n- Updated\n").unwrap();
-            let target_path = invocation.cwd.join(target);
-            fs::create_dir_all(target_path.parent().unwrap()).unwrap();
-            fs::write(
-            target_path,
-            "---\ntype: concept\nsources:\n  - 资料.md\n---\n# 工作流成功\n\n> Sources: [资料](../sources/资料.md)\n",
-        )
-        .unwrap();
-            if let Some(path) = &self.delete_path {
-                fs::remove_file(invocation.cwd.join(path)).unwrap();
-            }
-            Ok("completed".into())
-        }
+        self.structured_output(invocation)
     }
 }
 
@@ -323,9 +318,20 @@ fn enqueue_update_with_agent(
     source: WorkflowSourceVersionRef,
     agent: AgentKind,
 ) -> llm_wiki_desktop_lib::models::workflow::WorkflowRun {
+    enqueue_update_sources(context, tasks, coordinator, mode, vec![source], agent)
+}
+
+fn enqueue_update_sources(
+    context: &ProjectContext,
+    tasks: &TaskService,
+    coordinator: &WorkflowCoordinator,
+    mode: UpdateWikiMode,
+    sources: Vec<WorkflowSourceVersionRef>,
+    agent: AgentKind,
+) -> llm_wiki_desktop_lib::models::workflow::WorkflowRun {
     let scope = WorkflowScope::UpdateWiki {
         mode,
-        source_versions: vec![source],
+        source_versions: sources,
     };
     let baseline = workflow_baseline_for_scope(context, &scope).unwrap();
     let outcome = coordinator
@@ -598,6 +604,7 @@ fn risk_classification_covers_safe_update_delete_broad_rewrite_external_edit_and
             risk_flags: Vec::new(),
         }],
         global_risk_flags: Vec::new(),
+        source_decisions: Vec::new(),
     };
     let manifest = CompileManifest {
         files: vec![
@@ -684,6 +691,9 @@ fn delete_overwrite_broad_rewrite_and_conflict_review_is_persisted_as_waiting() 
     let (context, root) = project("waiting");
     fs::write(context.wiki_dir.join("concepts/旧名称.md"), "# Old\n").unwrap();
     let (scope, _) = source_scope(&context);
+    let source_version = CompileService::selected_source_versions(&context, &[scope.clone()])
+        .unwrap()
+        .remove(0);
     let checkpoint_hash = GitService
         .initialize_repository(&context, "initial")
         .unwrap()
@@ -711,6 +721,15 @@ fn delete_overwrite_broad_rewrite_and_conflict_review_is_persisted_as_waiting() 
     }
     sink.start("review_risk").unwrap();
     let candidate = CompileCandidate {
+        source_outcomes: vec![llm_wiki_desktop_lib::models::compile::CompileSourceOutcome {
+            source_version,
+            source_path: "raw/extracted/资料.md".into(),
+            status: Default::default(),
+            integrated_paths: vec!["wiki/concepts/新名称.md".into()],
+            evidence_path: None,
+            evidence_excerpt: None,
+            reason: None,
+        }],
         route: ResolvedCompileRoute::Agent {
             agent: AgentKind::Claude,
             model: None,
@@ -727,6 +746,7 @@ fn delete_overwrite_broad_rewrite_and_conflict_review_is_persisted_as_waiting() 
                 risk_flags: vec!["rename".into()],
             }],
             global_risk_flags: vec!["broad_rewrite".into()],
+            source_decisions: Vec::new(),
         },
         manifest: CompileManifest {
             files: vec![
@@ -777,6 +797,24 @@ fn delete_overwrite_broad_rewrite_and_conflict_review_is_persisted_as_waiting() 
             "wiki/concepts/新名称.md".into(),
         ],
         &CompileService::snapshot_wiki(&context).unwrap(),
+        &std::collections::HashMap::from([
+            (
+                "purpose.md".to_string(),
+                Some(FileStore.file_hash(&context, "purpose.md").unwrap()),
+            ),
+            (
+                "schema.md".to_string(),
+                Some(FileStore.file_hash(&context, "schema.md").unwrap()),
+            ),
+            (
+                "raw/extracted/资料.md".to_string(),
+                Some(
+                    FileStore
+                        .file_hash(&context, "raw/extracted/资料.md")
+                        .unwrap(),
+                ),
+            ),
+        ]),
         Some(checkpoint_hash.clone()),
         &services,
     )
@@ -1209,6 +1247,161 @@ async fn real_generated_deletion_enters_persisted_waiting_without_mutating_wiki(
             WorkflowDisplayStatus::Failed
         );
     }
+    fs::remove_dir_all(root).ok();
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn confirmed_candidate_rejects_changed_guidance_and_preserves_unrelated_edits() {
+    for change in ["guidance", "unrelated"] {
+        let (context, root) = project("input-revalidation");
+        let old_path = "wiki/concepts/旧名称.md";
+        fs::write(root.join(old_path), "# Old\n").unwrap();
+        GitService
+            .initialize_repository(&context, "initial")
+            .unwrap();
+        let harness = UpdateHarness::new(Arc::new(SuccessfulAgent {
+            delete_path: Some(old_path.into()),
+        }));
+        let (source, _) = source_scope(&context);
+        let run = enqueue_update(
+            &context,
+            &harness.tasks,
+            &harness.coordinator,
+            UpdateWikiMode::ChangedSources,
+            source,
+        );
+        run_update_wiki(&context, run.clone(), &harness.services()).await;
+        let waiting = harness.tasks.get_workflow_run(&run.task_id).unwrap();
+        assert_eq!(
+            waiting.display_status,
+            WorkflowDisplayStatus::WaitingForConfirmation,
+            "{change}: {:?}",
+            waiting.error
+        );
+        if change == "guidance" {
+            fs::write(root.join("purpose.md"), "# Changed guidance\n").unwrap();
+            assert!(!update_wiki_candidate_is_valid(&run.task_id, &root));
+            let failure = confirm_update_wiki_review(&context, &run.task_id, &harness.services())
+                .unwrap_err();
+            assert_eq!(failure.error.code, "WORKFLOW_INPUT_BASELINE_CHANGED");
+            assert!(root.join(old_path).is_file());
+            assert!(!root.join("wiki/concepts/工作流成功.md").exists());
+        } else {
+            fs::write(root.join("wiki/concepts/unrelated.md"), "# User edit\n").unwrap();
+            assert!(update_wiki_candidate_is_valid(&run.task_id, &root));
+            let (completed, _) =
+                confirm_update_wiki_review(&context, &run.task_id, &harness.services()).unwrap();
+            assert_eq!(completed.display_status, WorkflowDisplayStatus::Completed);
+            assert_eq!(
+                fs::read_to_string(root.join("wiki/concepts/unrelated.md")).unwrap(),
+                "# User edit\n"
+            );
+        }
+        fs::remove_dir_all(root).ok();
+    }
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn deferred_legacy_source_stays_pending_after_reviewed_partial_update() {
+    use llm_wiki_desktop_lib::services::undo_update_wiki_history;
+    let (context, root) = project("deferred-source");
+    fs::write(
+        root.join("raw/extracted/第二.md"),
+        "# 第二\nPending knowledge\n",
+    )
+    .unwrap();
+    fs::write(root.join("raw/sources/第二.txt"), "Second original\n").unwrap();
+    fs::write(root.join(".app/source-index.json"), r#"{"sources":{"raw/sources/资料.txt":["raw/extracted/资料.md"],"raw/sources/第二.txt":["raw/extracted/第二.md"]}}"#).unwrap();
+    GitService
+        .initialize_repository(&context, "initial")
+        .unwrap();
+    let versions = CompileService::list_source_versions(&context).unwrap();
+    assert_eq!(versions.len(), 2);
+    let requested = versions
+        .iter()
+        .map(|source| WorkflowSourceVersionRef {
+            source_id: source.source_id.clone(),
+            version_id: source.version_id.clone(),
+        })
+        .collect::<Vec<_>>();
+    let harness = UpdateHarness::new(Arc::new(DeferredSourceAgent));
+    let run = enqueue_update_sources(
+        &context,
+        &harness.tasks,
+        &harness.coordinator,
+        UpdateWikiMode::ChangedSources,
+        requested,
+        AgentKind::Claude,
+    );
+    run_update_wiki(&context, run.clone(), &harness.services()).await;
+    let waiting = harness.tasks.get_workflow_run(&run.task_id).unwrap();
+    assert_eq!(
+        waiting.display_status,
+        WorkflowDisplayStatus::WaitingForConfirmation,
+        "{:?}",
+        waiting.error
+    );
+    assert!(update_wiki_decision_review(&run.task_id, &root)
+        .unwrap()
+        .reason
+        .contains("第二"));
+    assert!(!context
+        .app_dir
+        .join("compile")
+        .join(format!("{}.json", run.task_id))
+        .exists());
+    let (completed, _) =
+        confirm_update_wiki_review(&context, &run.task_id, &harness.services()).unwrap();
+    let llm_wiki_desktop_lib::models::workflow::WorkflowResult::UpdateWiki {
+        source_integrated,
+        source_deferred,
+        ref source_outcomes,
+        ..
+    } = completed.result.as_ref().unwrap()
+    else {
+        panic!("expected Update Wiki result")
+    };
+    assert_eq!((*source_integrated, *source_deferred), (1, 1));
+    assert!(source_outcomes.iter().any(|outcome| outcome.status
+        == llm_wiki_desktop_lib::models::compile::CompileSourceOutcomeStatus::Deferred
+        && outcome.reason.as_deref() == Some("Needs another source document")));
+    let record: CompileConsumptionRecord = serde_json::from_slice(
+        &fs::read(
+            context
+                .app_dir
+                .join("compile")
+                .join(format!("{}.json", run.task_id)),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(record.source_versions.len(), 1);
+    let deferred = source_outcomes
+        .iter()
+        .find(|outcome| {
+            outcome.status
+                == llm_wiki_desktop_lib::models::compile::CompileSourceOutcomeStatus::Deferred
+        })
+        .unwrap();
+    assert_ne!(record.source_versions[0], deferred.source_version);
+    let undone = undo_update_wiki_history(
+        &context,
+        &completed,
+        &FileStore,
+        &harness.bookmarks,
+        &harness.search,
+        &harness.tasks,
+    )
+    .unwrap();
+    assert!(undone.undone);
+    assert!(!root.join("wiki/concepts/工作流成功.md").exists());
+    assert!(!context
+        .app_dir
+        .join("compile")
+        .join(format!("{}.json", run.task_id))
+        .exists());
     fs::remove_dir_all(root).ok();
 }
 
@@ -1697,6 +1890,9 @@ async fn derived_index_warning_does_not_repeat_or_rollback_successful_wiki_write
 #[test]
 fn cjk_wikilinks_and_resource_links_survive_workflow_semantic_validation() {
     let (context, root) = project("wikilink-resource");
+    fs::write(root.join("wiki/concepts/相关概念.md"), "# 相关概念\n").unwrap();
+    fs::create_dir_all(root.join("wiki/assets")).unwrap();
+    fs::write(root.join("wiki/assets/结构图.png"), b"image").unwrap();
     let target = "wiki/concepts/代理记忆.md";
     let plan = CompilePlan {
         summary: "create cjk page".into(),
@@ -1710,6 +1906,7 @@ fn cjk_wikilinks_and_resource_links_survive_workflow_semantic_validation() {
             risk_flags: Vec::new(),
         }],
         global_risk_flags: Vec::new(),
+        source_decisions: Vec::new(),
     };
     let body = "---\ntype: concept\nsources:\n  - 资料.md\n---\n# 代理记忆\n\n参见 [[相关概念]]。\n\n![结构图](../assets/结构图.png)\n\n> Sources: [[sources/资料]]\n";
     let manifest = CompileManifest {

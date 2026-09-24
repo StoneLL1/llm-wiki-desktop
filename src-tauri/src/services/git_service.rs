@@ -376,18 +376,59 @@ impl GitService {
         Ok(())
     }
 
+    pub fn head_matches(
+        &self,
+        context: &ProjectContext,
+        expected_head: &str,
+    ) -> Result<bool, BackendError> {
+        if !owns_project_repository(context)? {
+            return Ok(false);
+        }
+        if expected_head.len() < 7 || !expected_head.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Ok(false);
+        }
+        let expected_ref = format!("{expected_head}^{{commit}}");
+        let expected = run_git(context, &["rev-parse", "--verify", &expected_ref])?;
+        let current = run_git(context, &["rev-parse", "--verify", "HEAD"])?;
+        Ok(current.trim() == expected.trim())
+    }
+
     pub fn checkpoint_exists(project_root: &Path, checkpoint_hash: &str) -> bool {
+        Self::checkpoint_exists_checked(project_root, checkpoint_hash).unwrap_or(false)
+    }
+
+    /// Preserve process and repository errors for recovery callers. The bool
+    /// wrapper remains for older best-effort UI probes.
+    pub fn checkpoint_exists_checked(
+        project_root: &Path,
+        checkpoint_hash: &str,
+    ) -> Result<bool, BackendError> {
         if !(7..=64).contains(&checkpoint_hash.len())
             || !checkpoint_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
         {
-            return false;
+            return Ok(false);
         }
         let context = ProjectContext::new("workflow-recovery", project_root.to_path_buf());
-        if !owns_project_repository(&context).unwrap_or(false) {
-            return false;
+        if !owns_project_repository(&context)? {
+            return Ok(false);
         }
         let commit = format!("{checkpoint_hash}^{{commit}}");
-        run_git(&context, &["rev-parse", "--verify", "--quiet", &commit]).is_ok()
+        let output = run_git_process(
+            &context,
+            &["rev-parse", "--verify", "--quiet", &commit],
+            Duration::from_secs(5),
+            4096,
+            git_task_cancelled,
+        )
+        .map_err(|error| git_process_error(error, &["rev-parse", "--verify"]))?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(git_command_error(
+                &output.stderr,
+                &["rev-parse", "--verify"],
+            )),
+        }
     }
 
     /// Read a UTF-8 project file exactly as it existed at a validated checkpoint.
@@ -1506,11 +1547,13 @@ fn run_git_process(
         .map_err(|error| BoundedProcessError::Wait(std::io::Error::other(error.message)))?;
     let started = Instant::now();
     let _lane = lock_git_lane(&lane, timeout, &effective_cancelled)?;
-    reject_local_git_filters(
-        context,
-        timeout.saturating_sub(started.elapsed()),
-        &effective_cancelled,
-    )?;
+    if !git_raw_object_operation(args) {
+        reject_local_git_filters(
+            context,
+            timeout.saturating_sub(started.elapsed()),
+            &effective_cancelled,
+        )?;
+    }
     let mut command = hardened_git_command(context);
     command.args(args);
     run_bounded_process(
@@ -1520,6 +1563,27 @@ fn run_git_process(
         max_stream_bytes,
         effective_cancelled,
     )
+}
+
+/// These built-ins operate on object IDs, refs, or an app-owned temporary
+/// index. They do not read working-tree attributes or invoke clean filters.
+/// Keep the generic worktree command policy fail-closed.
+fn git_raw_object_operation(args: &[&str]) -> bool {
+    matches!(
+        args.first().copied(),
+        Some(
+            "rev-parse"
+                | "cat-file"
+                | "ls-tree"
+                | "for-each-ref"
+                | "rev-list"
+                | "read-tree"
+                | "write-tree"
+                | "update-ref"
+                | "commit-tree"
+        )
+    ) || matches!(args, ["hash-object", "-w", "--no-filters", "--stdin-paths"])
+        || matches!(args, ["update-index", "-z", "--index-info"])
 }
 
 fn reject_local_git_filters(

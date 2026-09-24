@@ -119,6 +119,11 @@ export function presentWorkflowResult(run: WorkflowRun): WorkflowResultPresentat
           { labelKey: "workflows.result.skipped", value: { kind: "count", value: result.skipped } },
           { labelKey: "workflows.result.deleted", value: { kind: "count", value: result.deleted } },
           { labelKey: "workflows.result.conflicted", value: { kind: "count", value: result.conflicted } },
+          ...(result.sourceIntegrated != null ? [
+            { labelKey: "workflows.result.sourceIntegrated", value: { kind: "count" as const, value: result.sourceIntegrated } },
+            { labelKey: "workflows.result.sourceAlreadyCovered", value: { kind: "count" as const, value: result.sourceAlreadyCovered ?? 0 } },
+            { labelKey: "workflows.result.sourceDeferred", value: { kind: "count" as const, value: result.sourceDeferred ?? 0 } },
+          ] : []),
           { labelKey: "workflows.result.checkpointHash", value: { kind: "text", value: result.checkpointHash, mono: true } },
           { labelKey: "workflows.result.finalCommit", value: { kind: "text", value: result.finalCommit, mono: true } },
           ...commonRows,

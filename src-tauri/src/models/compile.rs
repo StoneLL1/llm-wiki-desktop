@@ -84,6 +84,46 @@ pub struct CompileCandidate {
     pub route: ResolvedCompileRoute,
     pub plan: CompilePlan,
     pub manifest: CompileManifest,
+    #[serde(default)]
+    pub source_outcomes: Vec<CompileSourceOutcome>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompileSourceOutcome {
+    pub source_version: SourceVersionRef,
+    #[serde(default)]
+    pub source_path: String,
+    #[serde(default)]
+    pub status: CompileSourceOutcomeStatus,
+    pub integrated_paths: Vec<String>,
+    #[serde(default)]
+    pub evidence_path: Option<String>,
+    #[serde(default)]
+    pub evidence_excerpt: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompileSourceOutcomeStatus {
+    #[default]
+    Integrated,
+    AlreadyCovered,
+    Deferred,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompilePlanSourceDecision {
+    pub source_id: String,
+    pub status: CompileSourceOutcomeStatus,
+    pub reason: String,
+    #[serde(default)]
+    pub evidence_path: Option<String>,
+    #[serde(default)]
+    pub evidence_excerpt: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -124,6 +164,8 @@ pub struct CompilePlan {
     pub items: Vec<CompilePlanItem>,
     #[serde(default)]
     pub global_risk_flags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_decisions: Vec<CompilePlanSourceDecision>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -228,6 +270,7 @@ mod tests {
                 risk_flags: vec!["new_concept".into()],
             }],
             global_risk_flags: vec!["cascade_required".into()],
+            source_decisions: Vec::new(),
         };
 
         let json = serde_json::to_string(&plan).unwrap();

@@ -674,6 +674,27 @@ pub fn resolve_compile_conflict(
             request.resolution,
             &request.manual_files,
         )?;
+        let consumed_versions = CompileService::source_versions_for_accepted_manifest(
+            &plan,
+            &resolved_manifest,
+            &revalidated,
+        );
+        let accepted_paths = resolved_manifest
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let accepted_plan = crate::models::compile::CompilePlan {
+            summary: plan.summary.clone(),
+            items: plan
+                .items
+                .iter()
+                .filter(|item| accepted_paths.contains(item.target_path.as_str()))
+                .cloned()
+                .collect(),
+            global_risk_flags: plan.global_risk_flags.clone(),
+            source_decisions: plan.source_decisions.clone(),
+        };
         state
             .confirmation_registry
             .confirm(&request.action_id, ConfirmationStatus::Confirmed)?;
@@ -686,7 +707,7 @@ pub fn resolve_compile_conflict(
         let affected_paths = match CompileService::apply_confirmed_manifest(
             context,
             &resolved_manifest,
-            Some(&plan),
+            (!accepted_plan.items.is_empty()).then_some(&accepted_plan),
             &hashes,
         ) {
             Ok(paths) => paths,
@@ -706,7 +727,7 @@ pub fn resolve_compile_conflict(
             route,
             affected_paths,
             checkpoint_hash,
-            &source_versions,
+            &consumed_versions,
         ) {
             if !failure.durable {
                 let _ = state

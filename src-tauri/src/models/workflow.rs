@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::models::agent::AgentKind;
+use crate::models::compile::CompileSourceOutcome;
 use crate::models::confirmation::{PendingActionType, RiskLevel};
 use crate::models::lint::{
     AgentLintRepairFinding, AgentLintRepairOutcome, AgentLintRepairRoundSummary, WikiLintSkillRef,
@@ -729,6 +730,14 @@ pub enum WorkflowResult {
         skipped: u64,
         deleted: u64,
         conflicted: u64,
+        #[serde(default)]
+        source_integrated: u64,
+        #[serde(default)]
+        source_already_covered: u64,
+        #[serde(default)]
+        source_deferred: u64,
+        #[serde(default)]
+        source_outcomes: Vec<CompileSourceOutcome>,
         affected_paths: Vec<String>,
         checkpoint_hash: Option<String>,
         final_commit: Option<String>,

@@ -22,6 +22,19 @@ pub use repair::{
 };
 pub use rules::{health_source_paths, LocalLintPhase};
 
+impl LintService {
+    pub(crate) fn candidate_resource_refs(body: &str) -> Vec<String> {
+        rules::extract_local_resource_refs(body)
+    }
+
+    pub(crate) fn candidate_resource_paths(page: &str, reference: &str) -> Vec<String> {
+        rules::source_path_candidates(page, reference)
+            .into_iter()
+            .filter_map(|candidate| rules::normalize_resource_path(&candidate))
+            .collect()
+    }
+}
+
 pub(crate) const LINT_REPORTS_DIR: &str = ".app/lint-reports";
 
 /// Facade for deterministic lint rules, deep analysis, report persistence,
