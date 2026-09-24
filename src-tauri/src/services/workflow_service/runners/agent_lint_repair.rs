@@ -41,7 +41,7 @@ use super::update_wiki::{
 const CREATE_CHECKPOINT: &str = "create_checkpoint";
 const FINALIZE_REPAIR: &str = "finalize_repair";
 const REPAIR_DESCRIPTOR: &str = "agent-lint-repair-candidate.json";
-const REPAIR_DESCRIPTOR_SCHEMA_VERSION: u32 = 1;
+const REPAIR_DESCRIPTOR_SCHEMA_VERSION: u32 = 2;
 const MAX_REPAIR_ROUNDS: u8 = 3;
 
 type StartCallback = dyn Fn(WorkflowRun) + Send + Sync;
@@ -501,13 +501,47 @@ where
     let sink = WorkflowStageSink::new(services.task_service, services.coordinator, &run.task_id);
     sink.start(CREATE_CHECKPOINT).map_err(task_error)?;
     let _authority = authorize_boundary()?;
-    let allowed_task_state = task_state_noise_paths(&run.task_id);
+    if !services
+        .git_service
+        .head_matches(context, expected_git_head)?
+    {
+        return Err(repair_error(
+            "LINT_REPAIR_CHECKPOINT_STALE",
+            "Git HEAD changed before repair history was captured.",
+            WorkflowProjectMutationState::NotModified,
+        ));
+    }
+    let app_root = context.layout.app_state_root.as_deref().unwrap_or(".app");
+    let graph_cache_path = format!("{}/graph-cache.json", app_root.trim_end_matches('/'));
+    let mut history_paths = authorized_path_hashes.keys().cloned().collect::<Vec<_>>();
+    history_paths.push(graph_cache_path);
+    history_paths.sort();
+    history_paths.dedup();
+    let history_files =
+        services
+            .git_service
+            .capture_history_files(context, &history_paths, None)?;
+    for (path, expected) in authorized_path_hashes {
+        let actual = history_files
+            .get(path)
+            .and_then(Option::as_deref)
+            .map(hex_sha256);
+        if &actual != expected {
+            return Err(repair_error(
+                "LINT_REPAIR_BATCH_STALE",
+                format!("An authorized repair path changed before history capture: {path}"),
+                WorkflowProjectMutationState::NotModified,
+            ));
+        }
+    }
     let checkpoint = with_agent_lint_git_cancellation(services, &run.task_id, || {
-        services.git_service.clean_head_checkpoint_allowing_paths(
+        services.git_service.create_history_snapshot(
             context,
-            CheckpointPurpose::HighRiskOperation,
-            &format!("Before Agent lint repair {}", run.task_id),
-            &allowed_task_state,
+            &run.task_id,
+            "before",
+            "Before Agent lint repair",
+            None,
+            &history_files,
         )
     })
     .map_err(|error| {
@@ -524,13 +558,6 @@ where
             WorkflowProjectMutationState::NotModified,
         )
     })?;
-    if &checkpoint_hash != expected_git_head {
-        return Err(repair_error(
-            "LINT_REPAIR_CHECKPOINT_STALE",
-            "Git HEAD changed before the repair checkpoint was captured.",
-            WorkflowProjectMutationState::NotModified,
-        ));
-    }
     let baseline_hashes = CompileService::snapshot_wiki(context)?;
     let mut descriptor = PersistedAgentLintRepairCandidate {
         schema_version: REPAIR_DESCRIPTOR_SCHEMA_VERSION,
@@ -872,8 +899,10 @@ fn load_descriptor(
     if !post_metadata.is_file() || crate::models::layout::is_link_or_reparse(&post_metadata) {
         return Err(stale_candidate_error());
     }
-    if descriptor.schema_version != REPAIR_DESCRIPTOR_SCHEMA_VERSION
-        || descriptor.task_id != task_id
+    if !matches!(
+        descriptor.schema_version,
+        1 | REPAIR_DESCRIPTOR_SCHEMA_VERSION
+    ) || descriptor.task_id != task_id
         || descriptor.operation != run.operation
         || descriptor.canonical_identity_key != run.canonical_identity_key
         || descriptor.identity_revision != run.identity_revision
@@ -917,7 +946,7 @@ fn load_descriptor(
             != descriptor.selected_finding_ids.len()
         || &descriptor.skill != skill
         || &descriptor.authorized_path_hashes != authorized_path_hashes
-        || &descriptor.checkpoint_hash != expected_git_head
+        || (descriptor.schema_version == 1 && &descriptor.checkpoint_hash != expected_git_head)
         || descriptor.completed_round > MAX_REPAIR_ROUNDS
         || descriptor.rounds.len() != descriptor.completed_round as usize
         || descriptor
@@ -1175,8 +1204,10 @@ pub(crate) fn agent_lint_repair_candidate_is_valid_for_workflow(
     let Some(candidate) = descriptor.pending_round.as_ref() else {
         return false;
     };
-    if descriptor.schema_version != REPAIR_DESCRIPTOR_SCHEMA_VERSION
-        || descriptor.task_id != task_id
+    if !matches!(
+        descriptor.schema_version,
+        1 | REPAIR_DESCRIPTOR_SCHEMA_VERSION
+    ) || descriptor.task_id != task_id
         || descriptor.operation != workflow.execution_options.operation
         || descriptor.canonical_identity_key != workflow.canonical_identity_key
         || descriptor.identity_revision != workflow.identity_revision
@@ -1788,10 +1819,15 @@ fn ensure_repair_head_and_paths(
     descriptor: &PersistedAgentLintRepairCandidate,
     services: &AgentLintRepairExecutionServices<'_>,
 ) -> Result<(), BackendError> {
-    let status = with_agent_lint_git_cancellation(services, &run.task_id, || {
-        services.git_service.repository_status(context)
-    })?;
-    if status.head.as_deref() != Some(descriptor.checkpoint_hash.as_str()) {
+    let expected_head = match &run.operation {
+        WorkflowOperation::AgentLintRepair {
+            expected_git_head, ..
+        } if descriptor.schema_version >= 2 => expected_git_head.as_str(),
+        _ => descriptor.checkpoint_hash.as_str(),
+    };
+    if !with_agent_lint_git_cancellation(services, &run.task_id, || {
+        services.git_service.head_matches(context, expected_head)
+    })? {
         return Err(repair_error(
             "LINT_REPAIR_CHECKPOINT_STALE",
             "Git HEAD changed during Agent lint repair.",
@@ -1818,17 +1854,32 @@ fn ensure_repair_head_and_paths(
             ));
         }
     }
-    let mut allowed = task_state_noise_paths(&run.task_id);
-    allowed.extend(descriptor.affected_paths.iter().cloned());
-    let changed = with_agent_lint_git_cancellation(services, &run.task_id, || {
-        services.git_service.changed_paths(context)
-    })?;
-    if changed.iter().any(|path| !allowed.contains(path)) {
-        return Err(repair_error(
-            "LINT_REPAIR_GIT_STATE_CHANGED",
-            "Project content outside the approved repair batch changed.",
-            WorkflowProjectMutationState::NotModified,
-        ));
+    if descriptor.schema_version >= 2 {
+        for (path, expected) in &descriptor.authorized_path_hashes {
+            if descriptor.affected_paths.contains(path) {
+                continue;
+            }
+            if services.file_store.file_hash_if_exists(context, path)? != *expected {
+                return Err(repair_error(
+                    "LINT_REPAIR_BATCH_STALE",
+                    format!("An authorized repair path changed outside this batch: {path}"),
+                    WorkflowProjectMutationState::NotModified,
+                ));
+            }
+        }
+    } else {
+        let mut allowed = task_state_noise_paths(&run.task_id);
+        allowed.extend(descriptor.affected_paths.iter().cloned());
+        let changed = with_agent_lint_git_cancellation(services, &run.task_id, || {
+            services.git_service.changed_paths(context)
+        })?;
+        if changed.iter().any(|path| !allowed.contains(path)) {
+            return Err(repair_error(
+                "LINT_REPAIR_GIT_STATE_CHANGED",
+                "Project content outside the approved repair batch changed.",
+                WorkflowProjectMutationState::NotModified,
+            ));
+        }
     }
     Ok(())
 }
@@ -1926,18 +1977,54 @@ where
         }
     }
     let final_checkpoint = match with_agent_lint_git_cancellation(services, &run.task_id, || {
-        services.git_service.create_scoped_checkpoint(
-            context,
-            CheckpointPurpose::FinalResult,
-            &format!("Agent lint repair {}", run.task_id),
-            &commit_paths,
-        )
+        if descriptor.schema_version >= 2 {
+            let mut paths = descriptor
+                .authorized_path_hashes
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>();
+            paths.push(graph_cache_path.clone());
+            paths.sort();
+            paths.dedup();
+            let files = services
+                .git_service
+                .capture_history_files(context, &paths, None)?;
+            for (path, expected) in &affected_path_hashes {
+                let actual = files.get(path).and_then(Option::as_deref).map(hex_sha256);
+                if &actual != expected {
+                    return Err(repair_error(
+                        "LINT_REPAIR_FINAL_COMMIT_STALE",
+                        format!("A repair output changed before final history capture: {path}"),
+                        WorkflowProjectMutationState::Modified,
+                    ));
+                }
+            }
+            services.git_service.create_history_snapshot(
+                context,
+                &run.task_id,
+                "after",
+                "Agent lint repair result",
+                Some(&descriptor.checkpoint_hash),
+                &files,
+            )
+        } else {
+            services.git_service.create_scoped_checkpoint(
+                context,
+                CheckpointPurpose::FinalResult,
+                &format!("Agent lint repair {}", run.task_id),
+                &commit_paths,
+            )
+        }
     }) {
         Ok(checkpoint) => checkpoint,
         Err(error) => {
-            let graph_rollback = services
-                .git_service
-                .rollback_paths_to_head_preserving_ignored(context, &[graph_cache_path], &[]);
+            let graph_rollback = if descriptor.schema_version >= 2 {
+                Ok(())
+            } else {
+                services
+                    .git_service
+                    .rollback_paths_to_head_preserving_ignored(context, &[graph_cache_path], &[])
+            };
             if let Err(rollback) = graph_rollback {
                 return Err(repair_error(
                     "LINT_REPAIR_ROLLBACK_FAILED",
@@ -1951,16 +2038,15 @@ where
             return Err(error);
         }
     };
-    let final_commit =
-        final_checkpoint
-            .created
-            .then_some(final_checkpoint.commit_hash.clone().ok_or_else(|| {
-                repair_error(
-                    "LINT_REPAIR_FINAL_COMMIT_FAILED",
-                    "The repair final commit has no commit hash.",
-                    WorkflowProjectMutationState::Modified,
-                )
-            })?);
+    let final_commit = (descriptor.schema_version >= 2 || final_checkpoint.created).then_some(
+        final_checkpoint.commit_hash.clone().ok_or_else(|| {
+            repair_error(
+                "LINT_REPAIR_FINAL_COMMIT_FAILED",
+                "The repair final commit has no commit hash.",
+                WorkflowProjectMutationState::Modified,
+            )
+        })?,
+    );
     descriptor.final_commit = final_commit;
     descriptor.current_hashes = current_manifest_hashes(
         context,
@@ -2065,6 +2151,36 @@ fn rollback_attested_repair_journal(
         .collect::<Vec<_>>();
     rollback_paths.sort();
     rollback_paths.dedup();
+    if services
+        .git_service
+        .history_snapshot(context, &run.task_id, "before")?
+        .as_deref()
+        == Some(journal.checkpoint_hash.as_str())
+    {
+        let before = services.git_service.read_history_files(
+            context,
+            &journal.checkpoint_hash,
+            &rollback_paths,
+        )?;
+        let current = services
+            .git_service
+            .capture_history_files(context, &rollback_paths, None)?;
+        for (path, bytes) in &current {
+            let hash = bytes.as_deref().map(hex_sha256);
+            if !journal_allows_uncommitted_hash(journal, path, &hash)
+                && before.get(path).and_then(Option::as_deref).map(hex_sha256) != hash
+            {
+                return Err(repair_error(
+                    "LINT_REPAIR_ROLLBACK_CONFLICT",
+                    format!("A repair path changed outside the operation: {path}"),
+                    WorkflowProjectMutationState::Modified,
+                ));
+            }
+        }
+        let restore = CompileService::prepare_history_restore(context, &before, &current)?;
+        CompileService::restore_prepared_history_outputs(context, &restore)?;
+        return Ok(rollback_paths);
+    }
     let allowed_noise = task_state_noise_paths(&run.task_id);
     let changed = services.git_service.changed_paths(context)?;
     if changed
@@ -2581,7 +2697,27 @@ pub fn reconcile_agent_lint_repair_after_recovery(
             .terminal_task_status
             .as_deref()
             .ok_or_else(stale_candidate_error)?;
-        if let Some(expected_head) = final_commit.as_deref().or(checkpoint_hash.as_deref()) {
+        let private_history = checkpoint_hash.as_deref().is_some_and(|checkpoint| {
+            services
+                .git_service
+                .history_snapshot(context, &run.task_id, "before")
+                .ok()
+                .flatten()
+                .as_deref()
+                == Some(checkpoint)
+        });
+        if private_history {
+            let after = services
+                .git_service
+                .history_snapshot(context, &run.task_id, "after")?;
+            if final_commit.as_deref() != after.as_deref() {
+                return Err(repair_error(
+                    "LINT_REPAIR_FINAL_COMMIT_STALE",
+                    "The durable private repair result is unavailable.",
+                    WorkflowProjectMutationState::Modified,
+                ));
+            }
+        } else if let Some(expected_head) = final_commit.as_deref().or(checkpoint_hash.as_deref()) {
             if services
                 .git_service
                 .repository_status(context)?

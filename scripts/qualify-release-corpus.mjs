@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
@@ -36,13 +37,18 @@ function response(result, id) {
   }).find((message) => message?.id === id);
 }
 
-function requestFor(projectRoot, relative, id, stagingRoot = "staging") {
+async function requestFor(projectRoot, relative, id, stagingRoot = "staging") {
+  // Model the host's chained conversion request, including its immutable original.
+  const source = path.join(projectRoot, stagingRoot, relative);
+  const bytes = await fs.readFile(source);
+  await fs.copyFile(source, path.join(projectRoot, stagingRoot, "source.bin"));
+  const sourceIdentity = { sizeBytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
   return {
     jsonrpc: "2.0", id, method: "import.execute",
     params: {
       protocolVersion: "2", requestId: id, sessionId: "release-qualification",
       itemId: id, taskId: "release-qualification", operation: "extract",
-      input: { kind: "file", displayName: relative, locator: relative, normalizedLocator: relative, sourceIdentity: null },
+      input: { kind: "file", displayName: relative, locator: relative, normalizedLocator: relative, sourceIdentity },
       projectRoot, stagingRoot, chainedInput: relative,
       localAsrAuthorized: true, localOcrAuthorized: true, asrProbeOnly: false,
       recognitionLanguage: "auto", asrProfile: "balanced",
@@ -50,8 +56,16 @@ function requestFor(projectRoot, relative, id, stagingRoot = "staging") {
   };
 }
 
-async function assertContainedOutputs(message, staging) {
+async function assertContainedOutputs(message, staging, requireVideoFrames = false) {
   assert.equal(message?.error, null, JSON.stringify(message?.error));
+  if (requireVideoFrames) {
+    assert.ok(message.result.videoFrames?.frames?.length > 0, "text video produced no OCR frames");
+    for (const frame of message.result.videoFrames.frames) {
+      const resolved = path.resolve(staging, frame.path);
+      assert.ok(resolved.startsWith(`${path.resolve(staging)}${path.sep}`), "OCR frame escapes staging");
+      assert.ok((await fs.stat(resolved)).size > 0, "OCR frame is empty");
+    }
+  }
   for (const key of ["sourceSnapshotPath", "markdownPath", "metadataPath"]) {
     const value = message?.result?.[key];
     assert.equal(typeof value, "string", `${key} is missing`);
@@ -95,26 +109,26 @@ try {
 
     const normal = `normal.${extension}`;
     await fs.copyFile(source, path.join(staging, normal));
-    const normalResult = await invoke(program, contract.entrypointArgs, requestFor(root, normal, `${extension}-normal`), payload);
+    const normalResult = await invoke(program, contract.entrypointArgs, await requestFor(root, normal, `${extension}-normal`), payload);
     const normalResponse = response(normalResult, `${extension}-normal`);
     if (indirectExtensions.has(extension)) {
       assert.ok(normalResponse?.error, `${extension} direct input was accepted despite requiring an upstream conversion route`);
       assert.equal(typeof normalResponse.error.code, "number", `${extension} direct rejection was not a typed JSON-RPC error`);
       cases.push({ extension, case: "normal", status: "passed-indirect-rejection" });
     } else {
-      await assertContainedOutputs(normalResponse, staging);
+      await assertContainedOutputs(normalResponse, staging, contract.capabilityId === "media-runtime");
       cases.push({ extension, case: "normal", status: "passed" });
     }
 
     const masquerade = `${extension}-masquerade.txt`;
     await fs.copyFile(source, path.join(staging, masquerade));
-    const masqueradeResult = await invoke(program, contract.entrypointArgs, requestFor(root, masquerade, `${extension}-masquerade`), payload);
+    const masqueradeResult = await invoke(program, contract.entrypointArgs, await requestFor(root, masquerade, `${extension}-masquerade`), payload);
     assert.ok(response(masqueradeResult, `${extension}-masquerade`)?.error, `${extension} masquerade was accepted`);
     cases.push({ extension, case: "extension-masquerade", status: "passed" });
 
     const corrupt = `${extension}-corrupt.${extension}`;
     await fs.writeFile(path.join(staging, corrupt), Buffer.from([0, 255, 0, 255]));
-    const corruptResult = await invoke(program, contract.entrypointArgs, requestFor(root, corrupt, `${extension}-corrupt`), payload);
+    const corruptResult = await invoke(program, contract.entrypointArgs, await requestFor(root, corrupt, `${extension}-corrupt`), payload);
     assert.ok(response(corruptResult, `${extension}-corrupt`)?.error, `${extension} corruption was accepted`);
     cases.push({ extension, case: "corrupt", status: "passed" });
 
@@ -122,14 +136,14 @@ try {
     await fs.mkdir(boundaryDirectory, { recursive: true });
     const boundary = path.join("边界-qualification", extension, `source.${extension}`);
     await fs.copyFile(source, path.join(staging, boundary));
-    const boundaryResult = await invoke(program, contract.entrypointArgs, requestFor(root, boundary, `${extension}-boundary`), payload);
+    const boundaryResult = await invoke(program, contract.entrypointArgs, await requestFor(root, boundary, `${extension}-boundary`), payload);
     const boundaryResponse = response(boundaryResult, `${extension}-boundary`);
     if (indirectExtensions.has(extension)) {
       assert.ok(boundaryResponse?.error, `${extension} boundary input bypassed its upstream conversion route`);
       assert.equal(typeof boundaryResponse.error.code, "number", `${extension} boundary rejection was not a typed JSON-RPC error`);
       cases.push({ extension, case: "boundary", status: "passed-indirect-rejection" });
     } else {
-      await assertContainedOutputs(boundaryResponse, staging);
+      await assertContainedOutputs(boundaryResponse, staging, contract.capabilityId === "media-runtime");
       cases.push({ extension, case: "boundary", status: "passed" });
     }
 
@@ -140,7 +154,7 @@ try {
     await killForCancellation(
       program,
       contract.entrypointArgs,
-      requestFor(root, normal, `${extension}-cancel`, cancellationStagingName),
+      await requestFor(root, normal, `${extension}-cancel`, cancellationStagingName),
       payload,
     );
     assert.equal((await fs.stat(path.join(cancellationStaging, "candidate.md")).catch(() => null)), null);

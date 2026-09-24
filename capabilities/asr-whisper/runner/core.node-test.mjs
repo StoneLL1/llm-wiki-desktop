@@ -204,3 +204,24 @@ test("renders sparse anchors and exposes only bounded local video probe argument
   assert.equal(ffmpegRelativePath("win32"), "runtime/ffmpeg/bin/ffmpeg.exe");
   assert.equal(ffmpegRelativePath("linux"), "runtime/ffmpeg/bin/ffmpeg");
 });
+
+
+test("binary PGM whitespace pixels and repeated opening scenes preserve later frames", () => {
+  const frame = (first, shift = 0) => {
+    const pixels = Buffer.alloc(32 * 32, 240);
+    for (let y = 0; y < 32; y += 1) pixels[y * 32 + 4 + shift] = 20;
+    pixels[0] = first;
+    return Buffer.concat([Buffer.from("P5\n32 32\n255\n"), pixels]);
+  };
+  for (const first of [9, 10, 13, 32]) {
+    const opening = frame(first);
+    const late = frame(first, 10);
+    assert.deepEqual(selectStableTextFrameIndexes([...Array(24).fill(opening), late, late]), [1, 24]);
+  }
+});
+
+
+test("FFmpeg 8 empty stream-map diagnostics still identify a missing audio track", () => {
+  assert.equal(isNoAudioExecutionError({ stderr: "Stream map '' matches no streams.\nFailed to set value '0:a:0' for option 'map': Invalid argument" }), true);
+  assert.equal(isNoAudioExecutionError({ stderr: "Stream map '' matches no streams.\nFailed to set value '0:s:0' for option 'map': Invalid argument" }), false);
+});

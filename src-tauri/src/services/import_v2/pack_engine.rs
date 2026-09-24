@@ -348,6 +348,14 @@ impl ImportEngine for PackProcessEngine {
         if cancellation.is_cancelled() {
             return Err(cancelled());
         }
+        if video_frame_resource_update_required(
+            &self.pack.manifest.pack_id,
+            &self.pack.manifest.version,
+            &self.descriptor.route,
+            request,
+        ) {
+            return Err(video_frame_resource_update_error());
+        }
         if self.descriptor.route == "media.asr" {
             report_progress(EngineProgress {
                 current: 0,
@@ -356,7 +364,7 @@ impl ImportEngine for PackProcessEngine {
             })?;
         }
         let mut request = if request.input.kind == ImportInputKind::Url {
-            if self.descriptor.route == "web.generic.browser" {
+            if self.pack.manifest.pack_id == "browser-runtime" {
                 // Browser packs must receive the one-shot request URL, not
                 // the opaque WebTargetStore reference.  Do not prefetch here:
                 // the browser is the authenticated/dynamic fetch path.
@@ -410,6 +418,18 @@ impl ImportEngine for PackProcessEngine {
         } else {
             None
         };
+        let cookie_backup =
+            if self.pack.manifest.pack_id == "browser-runtime" && authenticated_profile.is_some() {
+                self.web_targets.connector_cookie_backup_for_locator(
+                    request
+                        .input
+                        .normalized_locator
+                        .as_deref()
+                        .unwrap_or(&request.input.locator),
+                )?
+            } else {
+                None
+            };
         validate_entrypoint_unchanged(&self.pack)?;
         let project_root = std::fs::canonicalize(&request.project_root)
             .map_err(|_| engine_error("The capability project root is unavailable."))?;
@@ -419,6 +439,13 @@ impl ImportEngine for PackProcessEngine {
         } else {
             project_root.join(requested_staging)
         };
+        crate::utils::safe_project_dir::BoundProjectMutationRoot::ensure_and_bind(
+            &project_root,
+            &staging_candidate.join(".capability-staging-probe"),
+        )
+        .map_err(|_| {
+            engine_error("The capability staging directory could not be safely prepared.")
+        })?;
         let staging_root = std::fs::canonicalize(staging_candidate)
             .map_err(|_| engine_error("The capability staging root is unavailable."))?;
         if !staging_root.starts_with(&project_root) {
@@ -443,7 +470,7 @@ impl ImportEngine for PackProcessEngine {
         if let Some(profile) = authenticated_profile {
             command.env("LLM_WIKI_CONNECTOR_PROFILE", profile);
         }
-        if self.descriptor.route == "web.generic.browser"
+        if self.pack.manifest.pack_id == "browser-runtime"
             && request.input.kind == ImportInputKind::Url
         {
             if let Some(grant) = self
@@ -474,11 +501,19 @@ impl ImportEngine for PackProcessEngine {
         let lifetime = ProcessLifetimeGuard::attach_capability(&mut child)
             .map_err(|_| engine_error("The capability process could not be isolated."))?;
         let mut child = ProcessGuard(child, None, None, Some(lifetime));
+        let mut params = serde_json::to_value(&pack_request)
+            .map_err(|_| engine_error("The capability request could not be encoded."))?;
+        if let Some(cookies) = cookie_backup {
+            params
+                .as_object_mut()
+                .ok_or_else(|| engine_error("The capability request is invalid."))?
+                .insert("cookieBackup".into(), cookies);
+        }
         let rpc = JsonRpcRequest {
             jsonrpc: "2.0".into(),
             id: pack_request.request_id.clone(),
             method: "import.execute".into(),
-            params: pack_request,
+            params,
         };
         let mut stdin = child
             .0
@@ -588,12 +623,37 @@ impl ImportEngine for PackProcessEngine {
                     .rpc
                     .result
                     .ok_or_else(|| engine_error("The capability process reported an error."))?;
+                if matches!(
+                    result.continuation,
+                    Some(super::engine::EngineContinuation::LocalOcr { .. })
+                ) && request.local_ocr_authorized
+                    && matches!(
+                        (
+                            self.pack.manifest.pack_id.as_str(),
+                            self.descriptor.route.as_str()
+                        ),
+                        ("media-runtime", "media.keyframes")
+                            | ("asr-whisper" | "asr-sensevoice-small", "media.asr")
+                    )
+                {
+                    return Err(video_frame_resource_update_error());
+                }
                 if result.continuation.is_some() {
                     return Err(engine_error(
                         "Capability packs cannot create privileged continuations directly.",
                     ));
                 }
                 validate_engine_result(&request.staging_root, &result)?;
+                if self.descriptor.route == "pack.markitdown" {
+                    validate_document_snapshot(&request, &result)?;
+                }
+                adapt_video_frames(
+                    &request,
+                    &mut result,
+                    response.video_frames,
+                    &self.pack.manifest.pack_id,
+                    &self.descriptor.route,
+                )?;
                 sanitize_capability_text_artifacts(&request, &result)?;
                 localize_remote_assets(
                     &request,
@@ -637,7 +697,10 @@ fn scope_request_to_invocation_root(
             return Err(engine_error("The capability input path is invalid."));
         }
         scoped.input.locator = relative.clone();
-        scoped.input.normalized_locator = Some(relative);
+        scoped.input.normalized_locator = Some(relative.clone());
+        if let Some(identity) = scoped.input.source_identity.as_mut() {
+            identity.canonical_path = relative;
+        }
     }
     Ok(scoped)
 }
@@ -658,8 +721,10 @@ fn stable_capability_error_code(code: Option<&str>) -> &str {
     code.filter(|value| {
         value.starts_with("IMPORT_WEB_")
             || value.starts_with("IMPORT_ASR_")
+            || value.starts_with("IMPORT_MEDIA_")
             || value.starts_with("IMPORT_OCR_")
             || *value == "IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE"
+            || *value == "IMPORT_VIDEO_FRAME_OCR_REQUIRED"
     })
     .unwrap_or(IMPORT_V2_ENGINE_UNAVAILABLE)
 }
@@ -916,6 +981,195 @@ fn is_reparse(_: &std::fs::Metadata) -> bool {
     false
 }
 
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VideoFrameEvidence {
+    frames: Vec<VideoFrame>,
+    duration_ms: u64,
+    sampled_frame_count: u32,
+}
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VideoFrame {
+    path: String,
+    timestamp_ms: u64,
+}
+
+// A runner supplies bounded evidence, never authority. Only registered decoder
+// or ASR routes with explicit OCR consent can produce this host continuation.
+fn video_frame_resource_update_error() -> BackendError {
+    BackendError::new("IMPORT_VIDEO_OCR_RESOURCE_UPDATE_REQUIRED",
+        "This installed media resource uses an older frame protocol. Prepare its updated resource to continue video OCR.", true, true)
+}
+
+fn video_frame_resource_update_required(
+    pack_id: &str,
+    version: &str,
+    route: &str,
+    request: &EngineRequest,
+) -> bool {
+    if !request.local_ocr_authorized
+        || request.asr_probe_only
+        || request.input.kind != ImportInputKind::File
+    {
+        return false;
+    }
+    let Some(minimum) = (match (pack_id, route) {
+        ("media-runtime", "media.keyframes") => Some("8.1.2+resources.3"),
+        ("asr-sensevoice-small", "media.asr") => Some("1.13.4+2024.07.17.resources.3"),
+        ("asr-whisper", "media.asr") => Some("1.8.3+resources.2"),
+        _ => None,
+    }) else {
+        return false;
+    };
+    let extension = Path::new(&request.input.locator)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !matches!(
+        extension.as_str(),
+        "mp4" | "mkv" | "mov" | "m4v" | "webm" | "avi" | "wmv" | "gif"
+    ) {
+        return false;
+    }
+    !semver::Version::parse(version)
+        .ok()
+        .zip(semver::Version::parse(minimum).ok())
+        .is_some_and(|(version, minimum)| version >= minimum)
+}
+
+fn adapt_video_frames(
+    request: &EngineRequest,
+    result: &mut EngineResult,
+    evidence: Option<VideoFrameEvidence>,
+    pack_id: &str,
+    route: &str,
+) -> Result<(), BackendError> {
+    let Some(evidence) = evidence else {
+        return Ok(());
+    };
+    if !request.local_ocr_authorized
+        || request.input.kind != ImportInputKind::File
+        || !matches!(
+            (pack_id, route),
+            ("media-runtime", "media.keyframes")
+                | ("asr-whisper" | "asr-sensevoice-small", "media.asr")
+        )
+        || result.continuation.is_some()
+        || evidence.frames.is_empty()
+        || evidence.frames.len() > 6
+        || evidence.duration_ms == 0
+        || !(2..=180).contains(&evidence.sampled_frame_count)
+    {
+        return Err(engine_error(
+            "Video frame evidence is not authorized for this route.",
+        ));
+    }
+    let root = Path::new(&request.project_root).join(&request.staging_root);
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|_| engine_error("Video staging is unavailable."))?;
+    let mut inputs = Vec::new();
+    let mut previous = None;
+    for frame in &evidence.frames {
+        let components: Vec<_> = frame.path.split('/').collect();
+        if components.len() != 2
+            || !components[0].starts_with(".ocr-input-")
+            || components[0].len() <= ".ocr-input-".len()
+            || components
+                .iter()
+                .any(|part| part.contains('\\') || matches!(*part, "." | ".."))
+            || components[1] != format!("frame-at-{}.png", frame.timestamp_ms)
+            || frame.timestamp_ms >= evidence.duration_ms
+            || previous.is_some_and(|time| frame.timestamp_ms <= time)
+        {
+            return Err(engine_error("Video frame path or timestamp is invalid."));
+        }
+        let path = root.join(&frame.path);
+        let directory = path
+            .parent()
+            .ok_or_else(|| engine_error("Video frame directory is invalid."))?;
+        for entry in [directory, path.as_path()] {
+            let metadata = std::fs::symlink_metadata(entry)
+                .map_err(|_| engine_error("Video frame is unavailable."))?;
+            if metadata.file_type().is_symlink() || is_reparse(&metadata) {
+                return Err(engine_error("Video frame links are not allowed."));
+            }
+        }
+        let metadata =
+            std::fs::metadata(&path).map_err(|_| engine_error("Video frame is unavailable."))?;
+        if !metadata.is_file()
+            || metadata.len() < 8
+            || metadata.len() > 32 * 1024 * 1024
+            || path
+                .canonicalize()
+                .map_err(|_| engine_error("Video frame cannot be resolved."))?
+                .parent()
+                .and_then(Path::parent)
+                != Some(canonical_root.as_path())
+        {
+            return Err(engine_error(
+                "Video frame escaped its bounded staging directory.",
+            ));
+        }
+        let mut signature = [0; 8];
+        std::fs::File::open(&path)
+            .and_then(|mut file| file.read_exact(&mut signature))
+            .map_err(|_| engine_error("Video frame cannot be read."))?;
+        if signature != *b"\x89PNG\r\n\x1a\n" {
+            return Err(engine_error("Video frame is not a PNG image."));
+        }
+        previous = Some(frame.timestamp_ms);
+        inputs.push(frame.path.clone());
+    }
+    let asset_root = root.join("assets");
+    crate::utils::safe_project_dir::BoundProjectMutationRoot::ensure_and_bind(
+        &root,
+        &asset_root.join(".video-assets-probe"),
+    )
+    .map_err(|_| engine_error("Video assets could not be safely prepared."))?;
+    let assets = TemporaryMediaWorkspace::create_unique(&asset_root, "video-frames")?;
+    let asset_name = format!(
+        "assets/{}",
+        assets.path().file_name().unwrap().to_string_lossy()
+    );
+    let mut markdown = "# Video text\n\n> 画面文字来自有限抽样，可能遗漏短暂画面 / Sampled frames; brief scenes may be missing.\n".to_string();
+    for (index, frame) in evidence.frames.iter().enumerate() {
+        let seconds = frame.timestamp_ms / 1000;
+        let relative = format!("{asset_name}/frame-{:03}.png", index + 1);
+        std::fs::copy(root.join(&frame.path), root.join(&relative))
+            .map_err(|_| engine_error("Video frame could not be preserved."))?;
+        markdown.push_str(&format!("\n## [{:02}:{:02}:{:02}.{:03}]\n\n![Video frame]({relative})\n\n<!-- OCR_IMAGE_{:03} -->\n", seconds / 3600, seconds / 60 % 60, seconds % 60, frame.timestamp_ms % 1000, index + 1));
+        result.asset_paths.push(relative);
+    }
+    std::fs::write(root.join(&result.markdown_path), markdown)
+        .map_err(|_| engine_error("Video candidate could not be written."))?;
+    let evidence_relative = format!("{asset_name}/frames.json");
+    let persisted_evidence = serde_json::json!({
+        "durationMs": evidence.duration_ms, "sampledFrameCount": evidence.sampled_frame_count,
+        "coverage": "sampled", "frames": evidence.frames.iter().enumerate().map(|(index, frame)| serde_json::json!({
+            "path": format!("{asset_name}/frame-{:03}.png", index + 1), "timestampMs": frame.timestamp_ms,
+        })).collect::<Vec<_>>(),
+    });
+    std::fs::write(
+        root.join(&evidence_relative),
+        serde_json::to_vec_pretty(&persisted_evidence)
+            .map_err(|_| engine_error("Video evidence is invalid."))?,
+    )
+    .map_err(|_| engine_error("Video evidence could not be written."))?;
+    result.asset_paths.push(evidence_relative);
+    result.text_coverage = Some(0.0);
+    result
+        .warnings
+        .push("IMPORT_VIDEO_OCR_SAMPLED_COVERAGE".into());
+    result.continuation = Some(super::engine::EngineContinuation::LocalOcr {
+        temporary_input_paths: inputs,
+    });
+    assets.retain();
+    Ok(())
+}
+
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RemoteAssetRequest {
@@ -925,10 +1179,12 @@ struct RemoteAssetRequest {
     automatic: Option<bool>,
     language: Option<String>,
     label: Option<String>,
+    subtitle_kind: Option<String>,
 }
 struct PackResponse {
     rpc: JsonRpcResponse<EngineResult>,
     remote_assets: Vec<RemoteAssetRequest>,
+    video_frames: Option<VideoFrameEvidence>,
 }
 
 enum PackOutputEvent {
@@ -1033,8 +1289,19 @@ fn read_response_with_progress(
                 on_progress(progress);
                 continue;
             }
+            let video_frames = value
+                .get("result")
+                .and_then(|result| result.get("videoFrames"))
+                .filter(|frames| !frames.is_null())
+                .map(|frames| serde_json::from_value::<VideoFrameEvidence>(frames.clone()))
+                .transpose()
+                .map_err(|_| ())?;
             if let Ok(rpc) = serde_json::from_value::<JsonRpcResponse<EngineResult>>(value) {
-                return Ok(PackResponse { rpc, remote_assets });
+                return Ok(PackResponse {
+                    rpc,
+                    remote_assets,
+                    video_frames,
+                });
             }
         }
     }
@@ -1044,7 +1311,7 @@ fn read_response_with_progress(
 fn localize_remote_assets(
     request: &EngineRequest,
     result: &mut EngineResult,
-    assets: Vec<RemoteAssetRequest>,
+    mut assets: Vec<RemoteAssetRequest>,
     cancellation: &CancellationToken,
     limiter: Arc<DomainLimiter>,
     private_grant: Option<&crate::services::import_v2::url_policy::PrivateTargetGrant>,
@@ -1054,6 +1321,7 @@ fn localize_remote_assets(
     let markdown_path = root.join(&result.markdown_path);
     let mut markdown = std::fs::read_to_string(&markdown_path)
         .map_err(|_| engine_error("The web candidate could not be reopened."))?;
+    let article_body_present = super::markdown_normalizer::has_article_body(&markdown);
     let bilibili_video = metadata_declares_platform_video(&root, result, "bilibili");
     let xiaohongshu_video = metadata_declares_platform_video(&root, result, "xiaohongshu");
     let mut transcription_ready = false;
@@ -1074,6 +1342,15 @@ fn localize_remote_assets(
             label: "images.downloading".into(),
         })?;
     }
+    // Stable ordering keeps images in source order, with reliable originals
+    // before alternate/unknown subtitle evidence and temporary ASR media.
+    assets.sort_by_key(|asset| {
+        if asset.kind == "subtitle" {
+            subtitle_kind(asset).map(|kind| kind.rank()).unwrap_or(4)
+        } else {
+            5
+        }
+    });
     let mut localized_media = BTreeMap::<String, String>::new();
     for (index, asset) in assets.into_iter().enumerate() {
         if cancellation.is_cancelled() {
@@ -1106,20 +1383,15 @@ fn localize_remote_assets(
             content,
             WebFetchContent::Media | WebFetchContent::TemporaryMedia
         );
-        if matches!(
-            content,
-            WebFetchContent::Subtitle | WebFetchContent::TemporaryMedia
-        ) && transcription_ready
-        {
+        if content == WebFetchContent::TemporaryMedia && transcription_ready {
             continue;
         }
-        if matches!(content, WebFetchContent::Image | WebFetchContent::Media)
+        if content == WebFetchContent::Media
             && !temporary_image
             && request.media_save_mode == MediaSaveMode::ExtractOnly
         {
-            // Extraction-only imports must not leave a durable image or media
-            // copy. Only the derived Markdown candidate is changed; the raw
-            // source snapshot has already crossed its immutable write boundary.
+            // Article illustrations are part of the readable Source in both
+            // modes. This preference only controls audio/video originals.
             markdown = remove_asset_reference(&markdown, &marker);
             continue;
         }
@@ -1278,9 +1550,11 @@ fn localize_remote_assets(
                     WebFetchContent::Media => "Original media",
                     _ => unreachable!(),
                 };
-                result
-                    .warnings
-                    .push(format!("{label} was not localized: {}", error.message));
+                result.warnings.push(format!(
+                    "{label} {} was not localized: {}",
+                    index + 1,
+                    error.message
+                ));
                 continue;
             }
             Err(error) => return Err(error),
@@ -1396,6 +1670,21 @@ fn localize_remote_assets(
             std::fs::write(&destination, &fetched.bytes)
                 .map_err(|_| engine_error("A localized web asset could not be written."))?;
         }
+        if content == WebFetchContent::Subtitle {
+            let provenance_path = format!("subtitles/web-{index}.metadata.json");
+            let provenance = serde_json::json!({
+                "subtitleKind": asset.subtitle_kind.as_deref().unwrap_or("unknown"),
+                "automatic": asset.automatic, "language": asset.language, "label": asset.label,
+                "usedAsBody": transcript.is_some() && !transcription_ready && subtitle_kind(&asset).is_some_and(|kind| kind.is_reliable_source()),
+            });
+            std::fs::write(
+                root.join(&provenance_path),
+                serde_json::to_vec(&provenance)
+                    .map_err(|_| engine_error("Subtitle evidence is invalid."))?,
+            )
+            .map_err(|_| engine_error("Subtitle evidence could not be saved."))?;
+            result.asset_paths.push(provenance_path);
+        }
         if content == WebFetchContent::TemporaryMedia {
             if let Some(workspace) = workspace {
                 workspace.retain();
@@ -1412,7 +1701,10 @@ fn localize_remote_assets(
         if content == WebFetchContent::Image {
             successful_images += 1;
         }
-        if let Some(transcript) = transcript.filter(|_| !transcription_ready) {
+        if let Some(transcript) = transcript.filter(|_| {
+            !transcription_ready
+                && subtitle_kind(&asset).is_some_and(|kind| kind.is_reliable_source())
+        }) {
             append_platform_transcript(&mut markdown, &transcript, &asset);
             update_transcript_metadata(&root, result, &asset)?;
             transcription_ready = true;
@@ -1455,7 +1747,7 @@ fn localize_remote_assets(
             true,
         ));
     }
-    if remote_image_output_is_empty(saw_image, successful_images, result.text_coverage) {
+    if remote_image_output_is_empty(saw_image, successful_images, article_body_present) {
         return Err(BackendError::new(
             "IMPORT_WEB_MEDIA_UNAVAILABLE",
             "The image post had no text and none of its images could be localized.",
@@ -1542,16 +1834,26 @@ fn transcript_failure_required(unresolved_transcript: bool, local_asr_ready: boo
     unresolved_transcript && !local_asr_ready
 }
 
+fn subtitle_kind(
+    asset: &RemoteAssetRequest,
+) -> Option<super::platform_provider::PlatformSubtitleKind> {
+    serde_json::from_value(serde_json::Value::String(asset.subtitle_kind.clone()?)).ok()
+}
+
 fn subtitle_metadata_is_valid(request: &RemoteAssetRequest) -> bool {
     let has_metadata =
         request.automatic.is_some() || request.language.is_some() || request.label.is_some();
     if request.kind != "subtitle" && has_metadata {
         return false;
     }
-    [request.language.as_deref(), request.label.as_deref()]
-        .into_iter()
-        .flatten()
-        .all(|value| !value.is_empty() && value.len() <= 64 && !value.chars().any(char::is_control))
+    [
+        request.language.as_deref(),
+        request.label.as_deref(),
+        request.subtitle_kind.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .all(|value| !value.is_empty() && value.len() <= 64 && !value.chars().any(char::is_control))
 }
 
 fn append_platform_transcript(markdown: &mut String, transcript: &str, asset: &RemoteAssetRequest) {
@@ -1601,6 +1903,14 @@ fn update_transcript_metadata(
         None => "platform_subtitle",
     };
     object.insert("transcriptSource".into(), source.into());
+    object.insert(
+        "subtitleKind".into(),
+        asset
+            .subtitle_kind
+            .clone()
+            .unwrap_or_else(|| "unknown".into())
+            .into(),
+    );
     if let Some(language) = asset.language.as_deref() {
         object.insert(
             "transcriptLanguage".into(),
@@ -1631,9 +1941,9 @@ fn escape_metadata_text(value: &str) -> String {
 fn remote_image_output_is_empty(
     saw_image: bool,
     successful_images: usize,
-    text_coverage: Option<f64>,
+    article_body_present: bool,
 ) -> bool {
-    saw_image && successful_images == 0 && text_coverage.unwrap_or_default() <= 0.0
+    saw_image && successful_images == 0 && !article_body_present
 }
 
 fn required_ocr_image_output_is_empty(saw_temporary_image: bool, successful_images: usize) -> bool {
@@ -1667,24 +1977,51 @@ fn mark_remote_asset_unavailable(markdown: &str, marker: &str, content: WebFetch
     if content != WebFetchContent::Image {
         return remove_asset_reference(markdown, marker);
     }
-    let had_trailing_newline = markdown.ends_with('\n');
-    let mut lines = markdown
-        .lines()
-        .map(|line| {
-            if !line.contains(marker) {
-                return line.to_owned();
+    let mut output = markdown.to_owned();
+    while let Some(marker_start) = output.find(marker) {
+        let prefix = &output[..marker_start];
+        let image_start = prefix.rfind("![");
+        let image_end = output[marker_start + marker.len()..]
+            .find(')')
+            .map(|end| marker_start + marker.len() + end + 1);
+        if let (Some(start), Some(end)) = (image_start, image_end) {
+            if prefix[start..].contains("](") && !prefix[start..].contains('\n') {
+                output.replace_range(start..end, "（图片不可用）");
+                continue;
             }
-            if let Some(image_start) = line.find("![") {
-                return format!("{}（图片不可用）", &line[..image_start]);
-            }
-            line.replace(marker, "（图片不可用）")
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    if had_trailing_newline {
-        lines.push('\n');
+        }
+        output.replace_range(marker_start..marker_start + marker.len(), "（图片不可用）");
     }
-    lines
+    output
+}
+
+fn validate_document_snapshot(
+    request: &EngineRequest,
+    result: &EngineResult,
+) -> Result<(), BackendError> {
+    if request.input.kind != ImportInputKind::File {
+        return Ok(());
+    }
+    let changed = || {
+        BackendError::new(
+            "IMPORT_FILE_SOURCE_CHANGED",
+            "The document parser did not preserve the original source snapshot.",
+            true,
+            true,
+        )
+    };
+    let identity = request.input.source_identity.as_ref().ok_or_else(changed)?;
+    let root = Path::new(&request.project_root);
+    let path = root
+        .join(&request.staging_root)
+        .join(&result.source_snapshot_path);
+    let bytes = super::transaction::read_project_file_nofollow(root, &path)?;
+    let (hash, size) =
+        super::artifact::hash_reader(&mut bytes.as_slice()).map_err(|_| changed())?;
+    if hash != identity.sha256 || size != identity.size_bytes {
+        return Err(changed());
+    }
+    Ok(())
 }
 
 fn sanitize_capability_text_artifacts(
@@ -1692,10 +2029,10 @@ fn sanitize_capability_text_artifacts(
     result: &EngineResult,
 ) -> Result<(), BackendError> {
     let root = std::path::Path::new(&request.project_root).join(&request.staging_root);
-    let mut paths = vec![
-        root.join(&result.source_snapshot_path),
-        root.join(&result.markdown_path),
-    ];
+    let mut paths = vec![root.join(&result.markdown_path)];
+    if request.input.kind == ImportInputKind::Url {
+        paths.push(root.join(&result.source_snapshot_path));
+    }
     if let Some(metadata) = result.metadata_path.as_deref() {
         paths.push(root.join(metadata));
     }
@@ -1813,6 +2150,14 @@ fn engine_error(message: &str) -> BackendError {
 }
 
 #[cfg(test)]
+#[path = "pack_engine_video_tests.rs"]
+mod video_tests;
+
+#[cfg(test)]
+#[path = "pack_engine_reliability_tests.rs"]
+mod reliability_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::services::import_v2::capability_pack::CapabilityPackManifest;
@@ -1912,7 +2257,10 @@ print(json.dumps({
         assert_eq!(result["windowsHome"], home.to_string_lossy().as_ref());
         assert_eq!(
             result["doclingCache"],
-            home.join(".cache").join("docling").to_string_lossy().as_ref()
+            home.join(".cache")
+                .join("docling")
+                .to_string_lossy()
+                .as_ref()
         );
         assert_eq!(result["temporary"], runtime_temp.to_string_lossy().as_ref());
     }
@@ -2292,9 +2640,9 @@ print(json.dumps({
 
     #[test]
     fn an_image_only_remote_post_requires_at_least_one_localized_image() {
-        assert!(remote_image_output_is_empty(true, 0, Some(0.0)));
-        assert!(!remote_image_output_is_empty(true, 1, Some(0.0)));
-        assert!(!remote_image_output_is_empty(true, 0, Some(1.0)));
+        assert!(remote_image_output_is_empty(true, 0, false));
+        assert!(!remote_image_output_is_empty(true, 1, false));
+        assert!(!remote_image_output_is_empty(true, 0, true));
     }
 
     #[test]

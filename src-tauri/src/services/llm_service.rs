@@ -602,6 +602,53 @@ impl LlmService {
         prompt: &str,
     ) -> Result<String, BackendError> {
         let request = Self::build_request(config, secret, prompt)?;
+        Self::send_completion_request(config.provider, request).await
+    }
+
+    /// Update Wiki sets an explicit output allowance so input and output fit
+    /// inside the configured model context instead of relying on a provider's
+    /// implicit default.
+    pub async fn complete_with_output_limit(
+        &self,
+        config: &LlmProviderConfig,
+        secret: Option<&str>,
+        prompt: &str,
+        max_output_tokens: u64,
+    ) -> Result<String, BackendError> {
+        let request =
+            Self::build_request_with_output_limit(config, secret, prompt, max_output_tokens)?;
+        Self::send_completion_request(config.provider, request).await
+    }
+
+    fn build_request_with_output_limit(
+        config: &LlmProviderConfig,
+        secret: Option<&str>,
+        prompt: &str,
+        max_output_tokens: u64,
+    ) -> Result<ProviderHttpRequest, BackendError> {
+        let mut request = Self::build_request(config, secret, prompt)?;
+        let limit = max_output_tokens.max(1).min(config.context_window);
+        match config.provider {
+            LlmProviderKind::OpenAi => {
+                request.body["max_completion_tokens"] = serde_json::json!(limit);
+            }
+            LlmProviderKind::Custom | LlmProviderKind::Anthropic => {
+                request.body["max_tokens"] = serde_json::json!(limit);
+            }
+            LlmProviderKind::Google => {
+                request.body["generationConfig"] = serde_json::json!({ "maxOutputTokens": limit });
+            }
+            LlmProviderKind::Ollama => {
+                request.body["options"] = serde_json::json!({ "num_predict": limit });
+            }
+        }
+        Ok(request)
+    }
+
+    async fn send_completion_request(
+        provider: LlmProviderKind,
+        request: ProviderHttpRequest,
+    ) -> Result<String, BackendError> {
         let (client, url) =
             validated_provider_client(&request.url, Duration::from_secs(120)).await?;
         let mut builder = client.post(url).json(&request.body);
@@ -631,7 +678,15 @@ impl LlmService {
                 false,
             )
         })?;
-        extract_text(config.provider, &value).ok_or_else(|| {
+        if Self::provider_response_truncated(provider, &value) {
+            return Err(BackendError::new(
+                "LLM_OUTPUT_TRUNCATED",
+                "The model stopped at its output limit before the Wiki batch was complete. Review the unfinished batch and continue explicitly with a smaller scope or higher configured limit.",
+                true,
+                true,
+            ));
+        }
+        extract_text(provider, &value).ok_or_else(|| {
             BackendError::new(
                 "LLM_RESPONSE_INVALID",
                 "Provider response contained no text.",
@@ -639,6 +694,19 @@ impl LlmService {
                 false,
             )
         })
+    }
+
+    fn provider_response_truncated(provider: LlmProviderKind, value: &serde_json::Value) -> bool {
+        match provider {
+            LlmProviderKind::OpenAi | LlmProviderKind::Custom => {
+                value["choices"][0]["finish_reason"] == "length"
+                    || value["status"] == "incomplete"
+                    || value["incomplete_details"]["reason"] == "max_output_tokens"
+            }
+            LlmProviderKind::Anthropic => value["stop_reason"] == "max_tokens",
+            LlmProviderKind::Google => value["candidates"][0]["finishReason"] == "MAX_TOKENS",
+            LlmProviderKind::Ollama => value["done_reason"] == "length",
+        }
     }
 
     /// Stream a completion token-by-token from the provider.
@@ -1229,6 +1297,83 @@ fn parse_stream_line(provider: LlmProviderKind, line: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_length_stop_is_not_accepted_as_complete_wiki_json() {
+        for (provider, response) in [
+            (
+                LlmProviderKind::OpenAi,
+                serde_json::json!({"choices":[{"finish_reason":"length"}]}),
+            ),
+            (
+                LlmProviderKind::Custom,
+                serde_json::json!({"status":"incomplete"}),
+            ),
+            (
+                LlmProviderKind::Anthropic,
+                serde_json::json!({"stop_reason":"max_tokens"}),
+            ),
+            (
+                LlmProviderKind::Google,
+                serde_json::json!({"candidates":[{"finishReason":"MAX_TOKENS"}]}),
+            ),
+            (
+                LlmProviderKind::Ollama,
+                serde_json::json!({"done_reason":"length"}),
+            ),
+        ] {
+            assert!(LlmService::provider_response_truncated(provider, &response));
+        }
+        assert!(!LlmService::provider_response_truncated(
+            LlmProviderKind::OpenAi,
+            &serde_json::json!({"choices":[{"finish_reason":"stop"}]}),
+        ));
+    }
+
+    #[test]
+    fn bounded_compile_requests_set_each_provider_output_cap() {
+        for (provider, base, field) in [
+            (
+                LlmProviderKind::OpenAi,
+                "https://api.openai.com",
+                "/max_completion_tokens",
+            ),
+            (
+                LlmProviderKind::Custom,
+                "https://example.com",
+                "/max_tokens",
+            ),
+            (
+                LlmProviderKind::Anthropic,
+                "https://api.anthropic.com",
+                "/max_tokens",
+            ),
+            (
+                LlmProviderKind::Google,
+                "https://generativelanguage.googleapis.com",
+                "/generationConfig/maxOutputTokens",
+            ),
+            (
+                LlmProviderKind::Ollama,
+                "http://localhost:11434",
+                "/options/num_predict",
+            ),
+        ] {
+            let request = LlmService::build_request_with_output_limit(
+                &config(provider, base),
+                Some("test-secret"),
+                "中文 Wiki batch",
+                512,
+            )
+            .unwrap();
+            assert_eq!(
+                request.body.pointer(field),
+                Some(&serde_json::json!(512)),
+                "{provider:?}"
+            );
+            assert!(request.body.to_string().contains("中文 Wiki batch"));
+        }
+    }
 
     fn config(provider: LlmProviderKind, base_url: &str) -> LlmProviderConfig {
         LlmProviderConfig {

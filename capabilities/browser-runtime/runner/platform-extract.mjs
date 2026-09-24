@@ -1003,7 +1003,7 @@ export function selectRelevantApiEvidence(platform, candidates, baseUrl, limit =
 }
 
 export function classifyRemoteImageKind(platform, hasPlayableMedia, localOcrAuthorized, mediaSaveMode = "preserve_original") {
-  if (platform === "generic") return "image";
+  if (["generic", "wechat", "zhihu"].includes(platform)) return "image";
   if (hasPlayableMedia) return mediaSaveMode === "preserve_original" ? "image" : null;
   if (localOcrAuthorized) return "temporary_image";
   return mediaSaveMode === "preserve_original" ? "image" : null;

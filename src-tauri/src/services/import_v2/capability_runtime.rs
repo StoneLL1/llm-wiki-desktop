@@ -188,6 +188,11 @@ impl ImportCapabilityRuntime {
                 Ok::<_, BackendError>(pack)
             });
             let result = resolved.clone().and_then(|pack| {
+                if spec.route == "media.embedded-subtitle"
+                    && !declares_embedded_subtitle_decoder(&pack)
+                {
+                    return Err(capability_route_contract_error());
+                }
                 let healthy_version = pack.manifest.version.clone();
                 let browser_pack = (spec.id == "browser-runtime").then(|| pack.clone());
                 let route = spec.route.into();
@@ -237,7 +242,7 @@ impl ImportCapabilityRuntime {
         version: &str,
         cancellation: &CancellationToken,
     ) -> Result<ProbedCapabilityVersion, BackendError> {
-        let route_specs = route_specs_for(capability_id)?;
+        let mut route_specs = route_specs_for(capability_id)?;
         let spec = PACK_SPECS
             .iter()
             .find(|spec| spec.id == capability_id)
@@ -259,6 +264,9 @@ impl ImportCapabilityRuntime {
         );
         let pack = manager.resolve_version(&requirement, version)?;
         validate_signed_product_contract(&pack)?;
+        if capability_id == "media-runtime" && !declares_embedded_subtitle_decoder(&pack) {
+            route_specs.retain(|spec| spec.route != "media.embedded-subtitle");
+        }
         probe_declared_routes(&pack, &route_specs, cancellation, |route| {
             super::pack_engine::probe_capability_pack(&pack, capability_id, route, cancellation)
         })?;
@@ -285,6 +293,10 @@ impl ImportCapabilityRuntime {
             || probed.routes.is_empty()
             || route_specs_for(capability_id)?
                 .iter()
+                .filter(|spec| {
+                    spec.route != "media.embedded-subtitle"
+                        || declares_embedded_subtitle_decoder(&probed.pack)
+                })
                 .map(|spec| spec.route.as_str())
                 .ne(probed.routes.iter().map(|spec| spec.route.as_str()))
         {
@@ -372,6 +384,18 @@ struct SignedRuntimePermissions {
     filesystem: Vec<String>,
 }
 
+fn declares_embedded_subtitle_decoder(pack: &ResolvedCapabilityPack) -> bool {
+    std::fs::read(pack.root.join("CAPABILITY-CONTRACT.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<SignedCapabilityContract>(&bytes).ok())
+        .is_some_and(|contract| {
+            contract
+                .routes
+                .iter()
+                .any(|route| route == "media.embedded-subtitle")
+        })
+}
+
 fn validate_signed_product_contract(pack: &ResolvedCapabilityPack) -> Result<(), BackendError> {
     if super::capability_pack::read_installation_receipt(&pack.root)?.is_some() {
         // The App catalog authenticated this program at installation. Build-time
@@ -398,14 +422,17 @@ fn validate_signed_product_contract(pack: &ResolvedCapabilityPack) -> Result<(),
                     .is_some_and(|value| !value.is_empty())
             })
         });
+    let legacy_media = pack.manifest.pack_id == "media-runtime"
+        && contract.routes == ["media.subtitle", "media.keyframes"]
+        && contract.formats.extensions == ["gif", "wma", "wmv", "srt", "vtt", "ass", "ssa", "lrc"];
     if contract.schema_version != 1
         || contract.capability_id != pack.manifest.pack_id
         || contract.target_triple != target_triple()
         || contract.protocol_version != pack.manifest.protocol_version
         || contract.entrypoint != pack.manifest.entrypoint
         || contract.entrypoint_args != pack.manifest.entrypoint_args
-        || contract.routes != definition.routes
-        || contract.formats.extensions != definition.formats.extensions
+        || (!legacy_media && contract.routes != definition.routes)
+        || (!legacy_media && contract.formats.extensions != definition.formats.extensions)
         || contract.formats.platform_content_types != definition.formats.platform_content_types
         || contract.runtime.network != definition.runtime.network
         || contract.runtime.subprocess != definition.runtime.subprocess
@@ -616,15 +643,15 @@ const PACK_SPECS: &[PackSpec] = &[
     },
     PackSpec {
         id: "media-runtime",
-        route: "media.subtitle",
-        extensions: &["gif", "wma", "wmv", "srt", "vtt", "ass", "ssa", "lrc"],
+        route: "media.embedded-subtitle",
+        extensions: &["gif", "wma", "mp4", "mkv", "mov", "m4v", "webm", "avi", "wmv"],
         licenses: &["MIT AND LGPL-3.0-or-later"],
         timeout_seconds: DEFAULT_PACK_TIMEOUT_SECONDS,
     },
     PackSpec {
         id: "media-runtime",
         route: "media.keyframes",
-        extensions: &["gif", "wma", "wmv", "srt", "vtt", "ass", "ssa", "lrc"],
+        extensions: &["gif", "wma", "mp4", "mkv", "mov", "m4v", "webm", "avi", "wmv"],
         licenses: &["MIT AND LGPL-3.0-or-later"],
         timeout_seconds: DEFAULT_PACK_TIMEOUT_SECONDS,
     },
@@ -951,6 +978,27 @@ mod tests {
             .iter()
             .any(|route| route == "media.asr"));
         std::fs::remove_dir_all(production_root).ok();
+    }
+
+    #[test]
+    fn legacy_media_contract_keeps_keyframes_without_advertising_model_free_decoder() {
+        let root = tempfile::tempdir().unwrap();
+        let pack = signed_test_pack(root.path(), "media-runtime");
+        assert!(declares_embedded_subtitle_decoder(&pack));
+        validate_signed_product_contract(&pack).unwrap();
+        let contract_path = pack.root.join("CAPABILITY-CONTRACT.json");
+        let mut contract: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&contract_path).unwrap()).unwrap();
+        contract["routes"] = serde_json::json!(["media.subtitle", "media.keyframes"]);
+        contract["formats"]["extensions"] =
+            serde_json::json!(["gif", "wma", "wmv", "srt", "vtt", "ass", "ssa", "lrc"]);
+        std::fs::write(&contract_path, serde_json::to_vec(&contract).unwrap()).unwrap();
+        validate_signed_product_contract(&pack).unwrap();
+        assert!(!declares_embedded_subtitle_decoder(&pack));
+        // Compatibility is limited to the known old route/format declaration.
+        contract["routes"] = serde_json::json!(["media.subtitle", "untrusted.route"]);
+        std::fs::write(&contract_path, serde_json::to_vec(&contract).unwrap()).unwrap();
+        assert!(validate_signed_product_contract(&pack).is_err());
     }
 
     fn test_keys() -> HashMap<String, Vec<u8>> {

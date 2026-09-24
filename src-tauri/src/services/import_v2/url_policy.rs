@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
 use url::{Host, Url};
 
 use crate::errors::BackendError;
@@ -13,6 +14,39 @@ const PUBLIC_QUERY_KEYS: &[&str] = &["id", "p", "page", "article", "aid", "bvid"
 pub struct SessionWebTarget {
     pub request_url: Url,
     pub public: NormalizedWebUrl,
+}
+
+impl SessionWebTarget {
+    /// A versioned opaque identity, independent of the deliberately lossy display URL.
+    pub fn source_locator(&self) -> String {
+        let mut identity = self.request_url.clone();
+        identity.set_query(None);
+        for (key, value) in self.request_url.query_pairs() {
+            let lower = key.to_ascii_lowercase();
+            if super::redaction::is_sensitive_json_key(&key)
+                || lower.starts_with("utm_")
+                || lower.starts_with("x-amz-")
+                || lower.starts_with("x-goog-")
+                || matches!(
+                    lower.as_str(),
+                    "token"
+                        | "access_token"
+                        | "auth"
+                        | "authorization"
+                        | "signature"
+                        | "sig"
+                        | "expires"
+                        | "fbclid"
+                        | "gclid"
+                )
+            {
+                continue;
+            }
+            // Preserve pair order and repetitions: unknown selectors are not proven equivalent.
+            identity.query_pairs_mut().append_pair(&key, &value);
+        }
+        format!("url:v1:{:x}", Sha256::digest(identity.as_str().as_bytes()))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,6 +357,29 @@ mod tests {
 
     fn ip(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+    }
+
+    #[test]
+    fn source_identity_preserves_content_selectors_without_disclosing_credentials() {
+        let target = |query: &str| {
+            UrlPolicy
+                .normalize_for_session(&format!("https://example.com/view?{query}"))
+                .unwrap()
+        };
+        let alpha = target("title=Alpha&token=secret&signature=one");
+        let beta = target("title=Beta&token=other&signature=two");
+        assert_eq!(alpha.public.public_url, beta.public.public_url);
+        assert_ne!(alpha.source_locator(), beta.source_locator());
+        assert_eq!(
+            alpha.source_locator(),
+            target("title=Alpha&token=renewed&signature=two&utm_source=new").source_locator()
+        );
+        assert_ne!(
+            target("title=Alpha&title=Beta").source_locator(),
+            target("title=Beta&title=Alpha").source_locator()
+        );
+        assert!(!alpha.source_locator().contains("secret"));
+        assert!(!alpha.source_locator().contains("Alpha"));
     }
 
     #[test]

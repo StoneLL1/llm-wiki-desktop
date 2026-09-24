@@ -59,6 +59,15 @@ fn agent_candidate_manifest_rejects_unknown_fields() {
 
 #[test]
 fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
+    validates_agent_candidate_source_identity(false);
+}
+
+#[test]
+fn legacy_public_url_alias_does_not_attach_an_agent_candidate_to_an_ambiguous_source() {
+    validates_agent_candidate_source_identity(true);
+}
+
+fn validates_agent_candidate_source_identity(legacy_public_only: bool) {
     let root = tempfile::tempdir().unwrap();
     let context = ProjectContext::new("project-a", root.path().to_path_buf());
     let files = FileStore;
@@ -78,7 +87,7 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
         ImportInput {
             kind: ImportInputKind::Url,
             display_name: "Example".into(),
-            locator: "https://example.com".into(),
+            locator: "https://example.com/?title=Alpha".into(),
             normalized_locator: Some("https://example.com/".into()),
             source_identity: None,
             media_save_mode: Default::default(),
@@ -133,9 +142,18 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
     index
         .by_content_hash
         .insert(old_content_hash.clone(), pointer.clone());
-    index
-        .by_locator
-        .insert("https://example.com/".into(), pointer);
+    let source_locator = llm_wiki_desktop_lib::services::import_v2::url_policy::UrlPolicy
+        .normalize_for_session("https://example.com/?title=Alpha")
+        .unwrap()
+        .source_locator();
+    index.by_locator.insert(
+        if legacy_public_only {
+            "https://example.com/".into()
+        } else {
+            source_locator
+        },
+        pointer,
+    );
     files
         .write_json_atomic(&context, ".app/source-index-v2.json", &index)
         .unwrap();
@@ -295,6 +313,33 @@ fn accepts_staged_candidate_with_exact_hashes_and_preserves_baseline() {
     let candidate = service
         .accept_staged_output(&context, "session-a", "item-a", &task.id)
         .unwrap();
+    if legacy_public_only {
+        let (_, diff) = service
+            .load_candidate(&context, "session-a", "item-a", &candidate.candidate_id)
+            .unwrap();
+        assert!(!diff.needs_three_way_merge);
+        assert!(diff.current_markdown.is_none());
+        assert!(diff.baseline_markdown.is_empty());
+        let selected = service
+            .select_candidate(
+                &context,
+                "session-a",
+                "item-a",
+                &candidate.candidate_id,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            selected.preview.unwrap().resolution.unwrap().kind,
+            llm_wiki_desktop_lib::models::import_v2::ImportResolutionKind::NewSource
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(wiki_path)).unwrap(),
+            current
+        );
+        return;
+    }
     assert_eq!(candidate.source_snapshot_sha256, source_hash);
     assert_eq!(candidate.audit_id, "audit-a");
     assert_eq!(candidate.agent_kind, Some(AgentKind::Claude));

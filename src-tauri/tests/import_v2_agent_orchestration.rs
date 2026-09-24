@@ -92,11 +92,21 @@ fn policy_matrix_only_checks_explicit_local_agent_availability_and_budget() {
         max_attempts_per_item: 1,
     };
     assert_eq!(
-        AgentAssistanceService::local_start_decision(&policy, true, 0,),
+        AgentAssistanceService::local_start_decision(
+            &policy,
+            true,
+            0,
+            AgentAssistanceTrigger::Manual
+        ),
         LocalAgentStartDecision::Start
     );
     assert_eq!(
-        AgentAssistanceService::local_start_decision(&policy, false, 0,),
+        AgentAssistanceService::local_start_decision(
+            &policy,
+            false,
+            0,
+            AgentAssistanceTrigger::Manual
+        ),
         LocalAgentStartDecision::AgentUnavailable
     );
 }

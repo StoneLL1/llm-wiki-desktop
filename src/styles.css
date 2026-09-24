@@ -4669,7 +4669,7 @@ select:focus-visible {
 .workflow-error { margin: 0 0 var(--sp-5); border: 1px solid var(--border-strong); border-radius: var(--radius-md); padding: var(--sp-3); background: var(--surface-raised); }
 .workflow-attention__title { display: flex; align-items: center; gap: 7px; margin-bottom: var(--sp-2); }
 .workflow-attention__title h3 { margin: 0; }
-.workflow-decision-reason { max-width: 70ch; }
+.workflow-decision-reason { max-width: 70ch; white-space: pre-line; }
 .workflow-attention p,
 .workflow-error p { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
 .workflow-error code { display: block; margin-top: 6px; color: var(--danger-text); font-size: 12px; }

@@ -27,10 +27,11 @@ function parse(arguments_) {
   };
 }
 
-function run(program, arguments_, cwd, capture = false) {
+function run(program, arguments_, cwd, capture = false, env = process.env) {
   return new Promise((resolve, reject) => {
     const child = spawn(program, arguments_, {
       cwd,
+      env,
       shell: false,
       windowsHide: true,
       // Non-captured child stdout is forwarded to stderr so caller stdout stays parseable.
@@ -153,7 +154,7 @@ async function buildMacFfmpeg(sourceRoot, destination) {
     "--disable-static", "--enable-shared", "--enable-small",
     "--disable-network", "--disable-autodetect", "--disable-gpl", "--disable-nonfree",
     "--disable-sdl2", "--disable-vulkan", "--disable-videotoolbox", "--disable-audiotoolbox",
-    "--disable-avdevice", "--disable-swscale", "--disable-x86asm",
+    "--disable-avdevice", "--enable-swscale", "--enable-zlib", "--disable-x86asm",
     "--install-name-dir=@loader_path/../lib",
   ], sourceRoot);
   await run("make", ["-j2"], sourceRoot);
@@ -216,7 +217,17 @@ export async function fetchSenseVoiceSources({ target, output, config }) {
     await requireFile(path.join(modelRoot, "model.int8.onnx"), "SenseVoice model");
     await requireFile(path.join(modelRoot, "tokens.txt"), "SenseVoice tokens");
     await requireFile(path.join(modelRoot, "test_wavs", "zh.wav"), "SenseVoice qualification fixture");
-    await requireFile(path.join(ffmpegRoot, "bin", `ffmpeg${executable}`), "FFmpeg CLI");
+    const ffmpegCli = path.join(ffmpegRoot, "bin", `ffmpeg${executable}`);
+    await requireFile(ffmpegCli, "FFmpeg CLI");
+    const probeEnvironment = { ...process.env };
+    const libraryVariable = process.platform === "linux" ? "LD_LIBRARY_PATH"
+      : process.platform === "darwin" ? "DYLD_LIBRARY_PATH" : "PATH";
+    const libraryDirectory = path.join(ffmpegRoot, process.platform === "win32" ? "bin" : "lib");
+    probeEnvironment[libraryVariable] = [libraryDirectory, process.env[libraryVariable]].filter(Boolean).join(path.delimiter);
+    const filters = await run(ffmpegCli, ["-hide_banner", "-filters"], ffmpegRoot, true, probeEnvironment);
+    if (!/\bscale\s+V->V\b/u.test(filters)) throw new Error("FFmpeg payload must support the scale filter for video OCR");
+    const encoders = await run(ffmpegCli, ["-hide_banner", "-encoders"], ffmpegRoot, true, probeEnvironment);
+    if (!/\bpng\s/u.test(encoders)) throw new Error("FFmpeg payload must support PNG encoding for video OCR");
     await fs.writeFile(path.join(output, "SOURCE-PROVENANCE.json"), `${JSON.stringify({
       schemaVersion: 1,
       target,
@@ -227,6 +238,11 @@ export async function fetchSenseVoiceSources({ target, output, config }) {
         file: ffmpeg.file,
         sha256: ffmpeg.sha256,
         kind: ffmpeg.kind,
+        requiredFilters: ["scale"],
+        requiredEncoders: ["png"],
+        systemDependencies: [{ name: "zlib", license: "Zlib" }],
+        componentInventory: ["libavformat", "libavcodec", "libavutil", "libavfilter", "libswresample", "libswscale"],
+        ...(ffmpeg.kind === "source" ? { configureFlags: ["--disable-gpl", "--disable-nonfree", "--enable-shared", "--enable-swscale", "--enable-zlib"] } : {}),
         buildEnvironment: ffmpegBuildEnvironment,
       },
     }, null, 2)}\n`, { encoding: "utf8", flag: "wx" });

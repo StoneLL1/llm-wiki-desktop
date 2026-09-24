@@ -8,7 +8,7 @@ mod test_support;
 
 use crate::models::chat::{ChatCitation, ChatRetrievalDiagnostics, ChatSourceRef};
 use crate::services::file_store::FileStore;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
@@ -22,6 +22,8 @@ pub struct ChatService {
     /// process. Atomic file replacement protects readers from partial JSON,
     /// but cannot prevent two sends from overwriting each other's messages.
     pub(super) session_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    pub(super) memory_roots: Mutex<HashSet<String>>,
+    pub(super) memory_sessions: Mutex<HashMap<String, crate::models::chat::ChatSession>>,
     /// Chat currently exposes one global streaming slot in the UI. Enforce
     /// the same invariant at the command boundary so two windows/projects
     /// cannot start overlapping runs before the first task id is observed.
@@ -33,6 +35,8 @@ impl Default for ChatService {
         Self {
             file_store: FileStore::default(),
             session_locks: Mutex::new(HashMap::new()),
+            memory_roots: Mutex::new(HashSet::new()),
+            memory_sessions: Mutex::new(HashMap::new()),
             send_gate: Arc::new(AsyncMutex::new(())),
         }
     }

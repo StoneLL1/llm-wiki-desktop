@@ -839,27 +839,14 @@ pub(crate) fn validate_agent_lint_repair_replay_facts(
 fn repair_replay_git_status(
     state: &AppState,
     context: &crate::models::paths::ProjectContext,
-    task_id: &str,
+    _task_id: &str,
 ) -> Result<crate::models::git::GitRepositoryStatus, BackendError> {
     let status = state.git_service.repository_status(context)?;
     if !status.is_repository {
         return Err(lint_repair_error(
-            "LINT_REPAIR_GIT_CLEAN_REQUIRED",
-            "Agent lint repair requires a clean project-local Git repository.",
+            "LINT_REPAIR_GIT_REQUIRED",
+            "Agent lint repair requires a project-local Git repository.",
         ));
-    }
-    if status.has_changes {
-        let allowed = [
-            format!(".app/tasks/{task_id}.json"),
-            format!(".app/tasks/{task_id}.log"),
-        ];
-        let changed = state.git_service.changed_paths(context)?;
-        if changed.iter().any(|path| !allowed.contains(path)) {
-            return Err(lint_repair_error(
-                "LINT_REPAIR_GIT_CLEAN_REQUIRED",
-                "Project content or unrelated app state changed after repair approval.",
-            ));
-        }
     }
     Ok(status)
 }
@@ -1150,10 +1137,10 @@ fn clean_git_status(
     context: &crate::models::paths::ProjectContext,
 ) -> Result<crate::models::git::GitRepositoryStatus, BackendError> {
     let status = state.git_service.repository_status(context)?;
-    if !status.is_repository || status.has_changes {
+    if !status.is_repository {
         return Err(lint_repair_error(
-            "LINT_REPAIR_GIT_CLEAN_REQUIRED",
-            "Commit or discard project changes before starting Agent lint repair.",
+            "LINT_REPAIR_GIT_REQUIRED",
+            "Agent lint repair requires a project-local Git repository for private operation history.",
         ));
     }
     Ok(status)
@@ -1407,6 +1394,26 @@ pub fn rollback_agent_lint_repair(
                     "The repair result has an incomplete affected-path hash binding.",
                 ));
             }
+            let private_history = state
+                .git_service
+                .history_snapshot(context, &run.task_id, "after")?
+                .as_deref()
+                == Some(final_commit.as_str());
+            let private_before = if private_history {
+                Some(state.git_service.read_history_files(context, &checkpoint_hash, &rollback_paths)?)
+            } else {
+                None
+            };
+            let undo_started = if private_history {
+                state.git_service.history_snapshot(context, &run.task_id, "undo-started")?
+            } else {
+                None
+            };
+            let completed_undo = if private_history {
+                state.git_service.history_snapshot(context, &run.task_id, "undo")?
+            } else {
+                None
+            };
             for path in &rollback_paths {
                 let expected = affected_path_hashes.get(path).ok_or_else(|| {
                     lint_repair_error(
@@ -1415,7 +1422,18 @@ pub fn rollback_agent_lint_repair(
                     )
                 })?;
                 let current = state.file_store.file_hash_if_exists(context, path)?;
-                if &current != expected {
+                let restored_hash = private_before.as_ref()
+                    .and_then(|files| files.get(path))
+                    .and_then(|bytes| bytes.as_deref())
+                    .map(|bytes| format!("{:x}", Sha256::digest(bytes)));
+                let already_restoring = undo_started.is_some() || completed_undo.is_some();
+                if completed_undo.is_some() && current != restored_hash {
+                    return Err(lint_repair_error(
+                        "LINT_REPAIR_ROLLBACK_NOT_CURRENT",
+                        "A completed repair undo no longer matches its restored paths.",
+                    ));
+                }
+                if &current != expected && !(already_restoring && current == restored_hash) {
                     return Err(BackendError::new(
                         "LINT_REPAIR_ROLLBACK_NOT_CURRENT",
                         "A repair-owned file changed after the Agent finished; rollback was not applied.",
@@ -1429,13 +1447,57 @@ pub fn rollback_agent_lint_repair(
                     })));
                 }
             }
-            let rollback = state.git_service.rollback_paths_to_checkpoint(
-                context,
-                &final_commit,
-                &checkpoint_hash,
-                &format!("Rollback Agent lint repair {}", run.task_id),
-                &rollback_paths,
-            )?;
+            let rollback = if private_history {
+                if let Some(undo_hash) = completed_undo {
+                    return Ok(AgentLintRepairRollbackResult {
+                        task_id: run.task_id,
+                        rolled_back_commit: final_commit,
+                        rollback_commit: undo_hash,
+                        affected_paths,
+                    });
+                }
+                let before = private_before.expect("private history was read above");
+                let after = state.git_service.read_history_files(
+                    context,
+                    &final_commit,
+                    &rollback_paths,
+                )?;
+                let undo_started_hash = if let Some(existing) = undo_started {
+                    existing
+                } else {
+                    state.git_service.create_history_snapshot(
+                        context,
+                        &run.task_id,
+                        "undo-started",
+                        "Before Agent lint repair undo",
+                        Some(&final_commit),
+                        &after,
+                    )?.commit_hash.ok_or_else(|| lint_repair_error("LINT_REPAIR_ROLLBACK_COMMIT_MISSING", "The repair undo-started snapshot has no commit hash."))?
+                };
+                let current = state.git_service.capture_history_files(context, &rollback_paths, None)?;
+                let restore = crate::services::CompileService::prepare_history_restore(
+                    context, &before, &current,
+                )?;
+                crate::services::CompileService::restore_prepared_history_outputs(
+                    context, &restore,
+                )?;
+                state.git_service.create_history_snapshot(
+                    context,
+                    &run.task_id,
+                    "undo",
+                    "Agent lint repair undo",
+                    Some(&undo_started_hash),
+                    &before,
+                )?
+            } else {
+                state.git_service.rollback_paths_to_checkpoint(
+                    context,
+                    &final_commit,
+                    &checkpoint_hash,
+                    &format!("Rollback Agent lint repair {}", run.task_id),
+                    &rollback_paths,
+                )?
+            };
             if let Ok(bookmarks) = state.bookmark_service.wiki_page_paths(context) {
                 let _ = state.search_service.scan_wiki(context, &bookmarks);
             }

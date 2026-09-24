@@ -70,7 +70,7 @@ The superseded Agent page, right panel, and generic Run Agent dialog were retire
 
 ## Decision Gate H status
 
-As of 2026-08-13, H3–H5 provide backend-derived Agent Health availability and the guarded Lint repair task surface while preserving the existing queue, confirmation, checkpoint, result, and Diff contracts. H6 final validation remains no-go: the recorded full gate is not green in the current Windows environment, and the complete performance/negative/WebView2 evidence matrix is not closed. Do not mark Decision Gate H or Batch 7 unblocked.
+H3–H5 provide backend-derived Agent Health availability and the guarded Lint repair task surface. Lint repair now records private before/after operation history for authorized paths, allowing unrelated staged and unstaged changes while leaving HEAD and index unchanged. The Windows release and real Agent acceptance matrix remains open; local protocol tests do not replace it.
 
 ## Verification commands
 

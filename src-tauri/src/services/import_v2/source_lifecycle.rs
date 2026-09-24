@@ -55,7 +55,7 @@ const DELETE_CONFIRMATION_TEXT: &str = "永久删除此来源";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct StoredSourceCandidate {
+pub(super) struct StoredSourceCandidate {
     schema_version: u32,
     candidate_id: String,
     source_id: String,
@@ -104,6 +104,155 @@ struct AppliedSourceProvenance {
 }
 
 impl ImportV2Service {
+    fn memory_candidate_key(
+        context: &ProjectContext,
+        source_id: &str,
+        candidate_id: &str,
+    ) -> String {
+        format!(
+            "{}::{}::{source_id}::{candidate_id}",
+            context.project_id,
+            context.root.display()
+        )
+    }
+
+    fn memory_candidate_prefix(context: &ProjectContext, source_id: &str) -> String {
+        format!(
+            "{}::{}::{source_id}::",
+            context.project_id,
+            context.root.display()
+        )
+    }
+
+    fn latest_candidate(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        source_id: &str,
+    ) -> Result<Option<StoredSourceCandidate>, BackendError> {
+        let disk = if context.layout.source_state_root.is_some() {
+            latest_candidate(context, files, source_id)?
+        } else {
+            None
+        };
+        let prefix = Self::memory_candidate_prefix(context, source_id);
+        let memory = self
+            .source_ai_memory_candidates
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .filter(|(key, _)| key.starts_with(&prefix))
+            .map(|(_, candidate)| candidate.clone())
+            .max_by(|a, b| a.created_at.cmp(&b.created_at));
+        Ok([disk, memory]
+            .into_iter()
+            .flatten()
+            .max_by(|a, b| a.created_at.cmp(&b.created_at)))
+    }
+
+    fn load_candidate(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        source_id: &str,
+        candidate_id: &str,
+    ) -> Result<StoredSourceCandidate, BackendError> {
+        if !safe_id(source_id) || !safe_id(candidate_id) {
+            return Err(source_not_found());
+        }
+        if let Some(candidate) = self
+            .source_ai_memory_candidates
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&Self::memory_candidate_key(
+                context,
+                source_id,
+                candidate_id,
+            ))
+            .cloned()
+        {
+            validate_candidate(&candidate, source_id)?;
+            return Ok(candidate);
+        }
+        load_candidate(context, files, source_id, candidate_id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn store_source_ai_organize_candidate_memory(
+        &self,
+        context: &ProjectContext,
+        files: &FileStore,
+        input: &SourceAiOrganizeInput,
+        task_id: &str,
+        route: SourceAiOrganizeRoute,
+        engine: String,
+        model: String,
+        engine_version: Option<String>,
+        candidate_markdown: String,
+    ) -> Result<SourceCandidateSummary, BackendError> {
+        source_ai_organize::validate_exactly_one_overview(&candidate_markdown)?;
+        let loaded = load_source(context, files, &input.source_id)?;
+        if digest(input.current_markdown.as_bytes()) != input.markdown_hash {
+            return Err(source_invalid());
+        }
+        let base_version = loaded
+            .manifest
+            .versions
+            .iter()
+            .find(|version| version.version_id == input.version_id)
+            .ok_or_else(source_invalid)?;
+        let candidate = StoredSourceCandidate {
+            schema_version: 1,
+            candidate_id: uuid::Uuid::new_v4().to_string(),
+            source_id: input.source_id.clone(),
+            base_version_id: input.version_id.clone(),
+            base_markdown_hash: input.markdown_hash.clone(),
+            candidate_markdown_hash: digest(candidate_markdown.as_bytes()),
+            kind: SourceCandidateKind::AiOrganize,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            base_markdown: input.current_markdown.clone(),
+            candidate_markdown,
+            quality: base_version.quality.clone(),
+            processing_evidence: Vec::new(),
+            ai_organize: Some(SourceAiOrganizeCandidateMeta {
+                task_id: task_id.into(),
+                route,
+                engine,
+                model,
+                engine_version,
+            }),
+        };
+        let summary = candidate_summary(&candidate);
+        let prefix = Self::memory_candidate_prefix(context, &input.source_id);
+        let mut candidates = self
+            .source_ai_memory_candidates
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        candidates.retain(|key, _| !key.starts_with(&prefix));
+        candidates.insert(
+            Self::memory_candidate_key(context, &input.source_id, &candidate.candidate_id),
+            candidate,
+        );
+        Ok(summary)
+    }
+
+    pub(crate) fn discard_memory_source_candidate(
+        &self,
+        context: &ProjectContext,
+        source_id: &str,
+        candidate_id: &str,
+    ) -> bool {
+        self.source_ai_memory_candidates
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&Self::memory_candidate_key(
+                context,
+                source_id,
+                candidate_id,
+            ))
+            .is_some()
+    }
+
     pub fn get_source_detail(
         &self,
         context: &ProjectContext,
@@ -111,7 +260,7 @@ impl ImportV2Service {
         source_id: &str,
     ) -> Result<SourceDetail, BackendError> {
         let loaded = load_source(context, files, source_id)?;
-        let candidate = latest_candidate(context, files, source_id)?;
+        let candidate = self.latest_candidate(context, files, source_id)?;
         let status = source_status(&loaded.version, candidate.is_some());
         let available_actions = available_actions(&loaded.manifest, &loaded.version);
         let primary_action = if candidate.is_some() {
@@ -534,7 +683,27 @@ impl ImportV2Service {
     ) -> Result<(), BackendError> {
         let project_locks = self.project_locks(context)?;
         let _guard = self.lock_project(&project_locks);
-        let candidate = load_candidate(context, files, source_id, candidate_id)?;
+        let key = Self::memory_candidate_key(context, source_id, candidate_id);
+        {
+            let mut candidates = self
+                .source_ai_memory_candidates
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(candidate) = candidates.get(&key) {
+                if candidate.kind != SourceCandidateKind::AiOrganize
+                    || candidate
+                        .ai_organize
+                        .as_ref()
+                        .map(|meta| meta.task_id.as_str())
+                        != Some(task_id)
+                {
+                    return Err(source_invalid());
+                }
+                candidates.remove(&key);
+                return Ok(());
+            }
+        }
+        let candidate = self.load_candidate(context, files, source_id, candidate_id)?;
         if candidate.kind != SourceCandidateKind::AiOrganize
             || candidate
                 .ai_organize
@@ -565,8 +734,11 @@ impl ImportV2Service {
     ) -> Result<(), BackendError> {
         let project_locks = self.project_locks(context)?;
         let _guard = self.lock_project(&project_locks);
+        if self.discard_memory_source_candidate(context, source_id, candidate_id) {
+            return Ok(());
+        }
         FileTransaction::reconcile_context(context)?;
-        let candidate = load_candidate(context, files, source_id, candidate_id)?;
+        let candidate = self.load_candidate(context, files, source_id, candidate_id)?;
         let path = candidate_path(context, &candidate.source_id, &candidate.candidate_id)?;
         let hash = files.file_hash(context, &path)?;
         let mut transaction = FileTransaction::new_for_context(context)?;
@@ -587,7 +759,16 @@ impl ImportV2Service {
         candidate_id: &str,
     ) -> Result<SourceUpdatePreview, BackendError> {
         let loaded = load_source(context, files, source_id)?;
-        let candidate = load_candidate(context, files, source_id, candidate_id)?;
+        let candidate = self.load_candidate(context, files, source_id, candidate_id)?;
+        let ephemeral = self
+            .source_ai_memory_candidates
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains_key(&Self::memory_candidate_key(
+                context,
+                source_id,
+                candidate_id,
+            ));
         let current = String::from_utf8(loaded.current_markdown).map_err(|_| source_invalid())?;
         let mode = if loaded.version.version_id == candidate.base_version_id
             && loaded.current_hash == candidate.base_markdown_hash
@@ -609,6 +790,7 @@ impl ImportV2Service {
             current_markdown_hash: loaded.current_hash,
             candidate_markdown_hash: candidate.candidate_markdown_hash.clone(),
             guard_token,
+            ephemeral,
         })
     }
 
@@ -623,7 +805,8 @@ impl ImportV2Service {
         let _guard = self.lock_project(&project_locks);
         FileTransaction::reconcile_context(context)?;
         let loaded = load_source(context, files, &request.source_id)?;
-        let candidate = load_candidate(context, files, &request.source_id, &request.candidate_id)?;
+        let candidate =
+            self.load_candidate(context, files, &request.source_id, &request.candidate_id)?;
         let expected_guard =
             update_guard_token(&candidate, &loaded.manifest_hash, &loaded.current_hash);
         if request.guard_token != expected_guard {
@@ -670,11 +853,22 @@ impl ImportV2Service {
             .iter()
             .map(|artifact| artifact.path.clone())
             .collect::<Vec<_>>();
-        candidate_paths.push(candidate_path(
-            context,
-            &request.source_id,
-            &request.candidate_id,
-        )?);
+        let memory_candidate = self
+            .source_ai_memory_candidates
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains_key(&Self::memory_candidate_key(
+                context,
+                &request.source_id,
+                &request.candidate_id,
+            ));
+        if !memory_candidate {
+            candidate_paths.push(candidate_path(
+                context,
+                &request.source_id,
+                &request.candidate_id,
+            )?);
+        }
         let provenance = candidate
             .ai_organize
             .as_ref()
@@ -689,7 +883,7 @@ impl ImportV2Service {
                     .clone()
                     .unwrap_or_else(|| metadata.model.clone()),
             });
-        apply_markdown_version(
+        let result = apply_markdown_version(
             context,
             files,
             git,
@@ -700,7 +894,15 @@ impl ImportV2Service {
             processing_evidence,
             None,
             provenance,
-        )
+        );
+        if result.is_ok() && memory_candidate {
+            self.discard_memory_source_candidate(
+                context,
+                &request.source_id,
+                &request.candidate_id,
+            );
+        }
+        result
     }
 
     fn restore_source_version_unchecked(

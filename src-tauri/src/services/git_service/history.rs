@@ -59,7 +59,7 @@ impl GitService {
         paths: &[String],
         byte_limit: usize,
     ) -> Result<BTreeMap<String, Option<Vec<u8>>>, BackendError> {
-        if !Self::checkpoint_exists(&context.root, commit) {
+        if !Self::checkpoint_exists_checked(&context.root, commit)? {
             return Err(history_error("The recovery snapshot is unavailable."));
         }
         let tree = run_git_bytes(context, &["ls-tree", "-r", "-l", "-z", commit])?;
@@ -117,8 +117,6 @@ impl GitService {
         if !present.is_empty() {
             let lane = git_project_lane(&context.root)?;
             let _guard = lock_git_lane(&lane, HISTORY_TIMEOUT, git_task_cancelled)
-                .map_err(|error| git_process_error(error, &["history", "read"]))?;
-            reject_local_git_filters(context, HISTORY_TIMEOUT, &git_task_cancelled)
                 .map_err(|error| git_process_error(error, &["history", "read"]))?;
             let mut command = hardened_git_command(context);
             command.args(["cat-file", "--batch"]);
@@ -222,12 +220,6 @@ impl GitService {
         let started = Instant::now();
         let _guard = lock_git_lane(&lane, HISTORY_TIMEOUT, git_task_cancelled)
             .map_err(|error| git_process_error(error, &["history"]))?;
-        reject_local_git_filters(
-            context,
-            HISTORY_TIMEOUT.saturating_sub(started.elapsed()),
-            &git_task_cancelled,
-        )
-        .map_err(|error| git_process_error(error, &["history"]))?;
         let directory =
             std::env::temp_dir().join(format!("llm-wiki-history-{}", uuid::Uuid::new_v4()));
         create_private_directory(&directory).map_err(|error| history_error(error.to_string()))?;
@@ -536,6 +528,82 @@ mod tests {
                 .unwrap(),
             files
         );
+    }
+
+    #[test]
+    fn raw_history_survives_unrelated_local_filters_and_includes() {
+        use std::io::Write;
+
+        let root = tempfile::tempdir().unwrap();
+        let context = ProjectContext::new("history", root.path().to_path_buf());
+        let path = "wiki/中文/Case.md".to_string();
+        let files = BTreeMap::from([(path.clone(), Some(b"original\n".to_vec()))]);
+        let task = uuid::Uuid::new_v4().to_string();
+        let hash = GitService
+            .create_history_snapshot(&context, &task, "before", "before", None, &files)
+            .unwrap()
+            .commit_hash
+            .unwrap();
+        let include = root.path().join("identity.config");
+        fs::write(&include, "[user]\n  name = Included Identity\n").unwrap();
+        let mut config = fs::OpenOptions::new()
+            .append(true)
+            .open(root.path().join(".git/config"))
+            .unwrap();
+        writeln!(
+            config,
+            "[include]\n  path = {}\n[includeIf \"gitdir:never/\"]\n  path = {}\n[filter \"unused\"]\n  clean = false",
+            include.to_string_lossy().replace('\\', "/"),
+            include.to_string_lossy().replace('\\', "/")
+        )
+        .unwrap();
+        #[cfg(not(windows))]
+        {
+            let marker = root.path().join("filter-executed");
+            let script = root.path().join("filter.sh");
+            fs::write(
+                &script,
+                format!("#!/bin/sh\nprintf executed > '{}'\ncat\n", marker.display()),
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+            writeln!(config, "[filter \"spy\"]\n  clean = {}", script.display()).unwrap();
+            fs::write(root.path().join(".gitattributes"), "*.md filter=spy\n").unwrap();
+            drop(config);
+            assert!(GitService::checkpoint_exists_checked(root.path(), &hash).unwrap());
+            assert_eq!(
+                GitService
+                    .read_history_files(&context, &hash, &[path.clone()])
+                    .unwrap(),
+                files
+            );
+            assert!(
+                !marker.exists(),
+                "raw history must not execute configured filters"
+            );
+        }
+        #[cfg(windows)]
+        drop(config);
+        assert!(GitService::checkpoint_exists_checked(root.path(), &hash).unwrap());
+        assert_eq!(
+            GitService
+                .read_history_files(&context, &hash, &[path.clone()])
+                .unwrap(),
+            files
+        );
+        assert_eq!(
+            GitService
+                .history_snapshot(&context, &task, "before")
+                .unwrap(),
+            Some(hash)
+        );
+        let next_task = uuid::Uuid::new_v4().to_string();
+        let next = GitService
+            .create_history_snapshot(&context, &next_task, "before", "next", None, &files)
+            .unwrap();
+        assert!(next.created);
+        assert!(!root.path().join(".git/index").exists());
     }
 
     #[test]

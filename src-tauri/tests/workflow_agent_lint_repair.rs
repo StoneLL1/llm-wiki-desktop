@@ -332,7 +332,7 @@ fn rewrite_persisted_run_as_running(fixture: &Fixture, task_id: &str) {
 }
 
 #[test]
-fn happy_path_uses_one_agent_round_and_one_scoped_final_commit() {
+fn happy_path_uses_one_agent_round_and_private_history() {
     let fixture = Fixture::new(true);
     let before_commits = git_commit_count(&fixture.context.root);
     let run = fixture.enqueue();
@@ -364,9 +364,14 @@ fn happy_path_uses_one_agent_round_and_one_scoped_final_commit() {
         "run={:#?}",
         fixture.task_service.get_workflow_run(&run.task_id)
     );
-    assert_eq!(git_commit_count(&fixture.context.root), before_commits + 1);
+    assert_eq!(git_commit_count(&fixture.context.root), before_commits);
     let completed = fixture.task_service.get_workflow_run(&run.task_id).unwrap();
-    assert_eq!(completed.display_status, WorkflowDisplayStatus::Completed);
+    assert_eq!(
+        completed.display_status,
+        WorkflowDisplayStatus::Completed,
+        "{:?}",
+        completed.error
+    );
     match completed.result.unwrap() {
         WorkflowResult::AgentLintRepair {
             outcome,
@@ -385,6 +390,230 @@ fn happy_path_uses_one_agent_round_and_one_scoped_final_commit() {
         }
         other => panic!("unexpected result: {other:?}"),
     }
+}
+
+#[test]
+fn unrelated_staged_and_unstaged_edits_survive_private_repair_history() {
+    let fixture = Fixture::new(true);
+    fs::write(
+        fixture.context.root.join("unrelated-staged.txt"),
+        "staged\n",
+    )
+    .unwrap();
+    let staged = std::process::Command::new("git")
+        .args(["add", "unrelated-staged.txt"])
+        .current_dir(&fixture.context.root)
+        .status()
+        .unwrap();
+    assert!(staged.success());
+    fs::write(
+        fixture.context.root.join("unrelated-unstaged.txt"),
+        "unstaged\n",
+    )
+    .unwrap();
+    let before_head = fixture
+        .git_service
+        .repository_status(&fixture.context)
+        .unwrap()
+        .head;
+    let before_commits = git_commit_count(&fixture.context.root);
+    let run = fixture.enqueue();
+    assert!(std::process::Command::new("git")
+        .args(["config", "--local", "filter.unrelated.clean", "/bin/false"])
+        .current_dir(&fixture.context.root)
+        .status()
+        .unwrap()
+        .success());
+    if let WorkflowOperation::AgentLintRepair {
+        expected_git_head, ..
+    } = &run.operation
+    {
+        assert!(
+            fixture
+                .git_service
+                .head_matches(&fixture.context, expected_git_head)
+                .unwrap(),
+            "the pinned HEAD must remain readable with unrelated filters: expected={expected_git_head:?}, actual={:?}",
+            std::process::Command::new("git")
+                .args(["rev-parse", "--verify", "HEAD"])
+                .current_dir(&fixture.context.root)
+                .output()
+                .unwrap()
+                .stdout
+        );
+    }
+    run_agent_lint_repair_with_round_executor(
+        &fixture.context,
+        run.clone(),
+        &fixture.services(),
+        "en",
+        || Ok(()),
+        |request, workspace, _| {
+            fs::write(
+                workspace.join("wiki/concepts/page.md"),
+                "---\ntitle: Page\ntype: concept\nsources:\n  - wiki/sources/source-a.md\n---\n\n# Page\n\nRepaired\n\n> Sources: [[wiki/sources/source-a.md]]\n",
+            )
+            .unwrap();
+            Ok(output(request, AgentLintRepairFindingStatus::Attempted))
+        },
+    );
+    let completed = fixture.task_service.get_workflow_run(&run.task_id).unwrap();
+    assert!(std::process::Command::new("git")
+        .args(["config", "--local", "--unset-all", "filter.unrelated.clean"])
+        .current_dir(&fixture.context.root)
+        .status()
+        .unwrap()
+        .success());
+    assert_eq!(
+        completed.display_status,
+        WorkflowDisplayStatus::Completed,
+        "{:?}",
+        completed.error
+    );
+    assert_eq!(
+        fixture
+            .git_service
+            .repository_status(&fixture.context)
+            .unwrap()
+            .head,
+        before_head
+    );
+    assert_eq!(git_commit_count(&fixture.context.root), before_commits);
+    assert_eq!(
+        fs::read_to_string(fixture.context.root.join("unrelated-staged.txt")).unwrap(),
+        "staged\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.context.root.join("unrelated-unstaged.txt")).unwrap(),
+        "unstaged\n"
+    );
+    let staged_names = std::process::Command::new("git")
+        .args(["diff", "--cached", "--name-only"])
+        .current_dir(&fixture.context.root)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8(staged_names.stdout)
+        .unwrap()
+        .lines()
+        .any(|name| name == "unrelated-staged.txt"));
+    assert!(fixture
+        .git_service
+        .history_snapshot(&fixture.context, &run.task_id, "before")
+        .unwrap()
+        .is_some());
+    assert!(fixture
+        .git_service
+        .history_snapshot(&fixture.context, &run.task_id, "after")
+        .unwrap()
+        .is_some());
+    let WorkflowResult::AgentLintRepair {
+        affected_paths,
+        checkpoint_hash: Some(checkpoint),
+        final_commit: Some(final_commit),
+        ..
+    } = completed.result.unwrap()
+    else {
+        panic!("completed repair must have private history");
+    };
+    let mut rollback_paths = affected_paths;
+    rollback_paths.push(".app/graph-cache.json".into());
+    rollback_paths.sort();
+    rollback_paths.dedup();
+    let before = fixture
+        .git_service
+        .read_history_files(&fixture.context, &checkpoint, &rollback_paths)
+        .unwrap();
+    let after = fixture
+        .git_service
+        .read_history_files(&fixture.context, &final_commit, &rollback_paths)
+        .unwrap();
+    let page_path = fixture.context.root.join("wiki/concepts/page.md");
+    fs::write(&page_path, "External edit after repair\n").unwrap();
+    assert_eq!(
+        llm_wiki_desktop_lib::services::CompileService::prepare_history_restore(
+            &fixture.context,
+            &before,
+            &after,
+        )
+        .err()
+        .unwrap()
+        .code,
+        "WORKFLOW_UNDO_CONFLICT"
+    );
+    fs::write(
+        &page_path,
+        after["wiki/concepts/page.md"].as_deref().unwrap(),
+    )
+    .unwrap();
+    let undo_started = fixture
+        .git_service
+        .create_history_snapshot(
+            &fixture.context,
+            &run.task_id,
+            "undo-started",
+            "Before Agent lint repair undo",
+            Some(&final_commit),
+            &after,
+        )
+        .unwrap();
+    fs::write(
+        &page_path,
+        before["wiki/concepts/page.md"].as_deref().unwrap(),
+    )
+    .unwrap();
+    let current = fixture
+        .git_service
+        .capture_history_files(&fixture.context, &rollback_paths, None)
+        .unwrap();
+    let restore = llm_wiki_desktop_lib::services::CompileService::prepare_history_restore(
+        &fixture.context,
+        &before,
+        &current,
+    )
+    .unwrap();
+    llm_wiki_desktop_lib::services::CompileService::restore_prepared_history_outputs(
+        &fixture.context,
+        &restore,
+    )
+    .unwrap();
+    fixture
+        .git_service
+        .create_history_snapshot(
+            &fixture.context,
+            &run.task_id,
+            "undo",
+            "Agent lint repair undo",
+            undo_started.commit_hash.as_deref(),
+            &before,
+        )
+        .unwrap();
+    assert!(
+        fs::read_to_string(fixture.context.root.join("wiki/concepts/page.md"))
+            .unwrap()
+            .contains("Original")
+    );
+    assert_eq!(
+        fixture
+            .git_service
+            .repository_status(&fixture.context)
+            .unwrap()
+            .head,
+        before_head
+    );
+    assert_eq!(git_commit_count(&fixture.context.root), before_commits);
+    assert_eq!(
+        fs::read_to_string(fixture.context.root.join("unrelated-unstaged.txt")).unwrap(),
+        "unstaged\n"
+    );
+    let staged_names = std::process::Command::new("git")
+        .args(["diff", "--cached", "--name-only"])
+        .current_dir(&fixture.context.root)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8(staged_names.stdout)
+        .unwrap()
+        .lines()
+        .any(|name| name == "unrelated-staged.txt"));
 }
 
 #[test]
@@ -599,7 +828,7 @@ fn deletion_waits_for_exact_second_confirmation_before_project_mutation() {
     .unwrap_or_else(|failure| panic!("confirmation failed: {}", failure.error.message));
 
     assert!(!fixture.context.root.join("wiki/concepts/page.md").exists());
-    assert_eq!(git_commit_count(&fixture.context.root), before_commits + 1);
+    assert_eq!(git_commit_count(&fixture.context.root), before_commits);
     assert_eq!(
         fixture
             .task_service
@@ -641,12 +870,18 @@ fn external_edit_after_review_is_never_overwritten_by_confirmation() {
     )
     .unwrap_err();
 
-    assert!(matches!(
-        failure.error.code.as_str(),
-        "LINT_REPAIR_GIT_STATE_CHANGED"
-            | "LINT_REPAIR_CANDIDATE_STALE"
-            | "LINT_REPAIR_ROLLBACK_FAILED"
-    ));
+    assert!(
+        matches!(
+            failure.error.code.as_str(),
+            "LINT_REPAIR_GIT_STATE_CHANGED"
+                | "LINT_REPAIR_CANDIDATE_STALE"
+                | "LINT_REPAIR_BATCH_STALE"
+                | "LINT_REPAIR_ROLLBACK_FAILED"
+        ),
+        "{}: {}",
+        failure.error.code,
+        failure.error.message
+    );
     assert_eq!(
         fs::read_to_string(fixture.context.root.join("wiki/concepts/page.md")).unwrap(),
         "---\ntitle: Page\ntype: concept\n---\n\n# Page\n\nExternal edit\n"
@@ -996,7 +1231,7 @@ fn completed_noop_receipt_recovers_manual_result_before_task_finish() {
             completed_result,
             Some(WorkflowResult::AgentLintRepair {
                 outcome: AgentLintRepairOutcome::ManualReviewRequired,
-                final_commit: None,
+                final_commit: Some(_),
                 ..
             })
         ),
@@ -1033,7 +1268,7 @@ fn completed_noop_receipt_recovers_manual_result_before_task_finish() {
         reconciled.result,
         Some(WorkflowResult::AgentLintRepair {
             outcome: AgentLintRepairOutcome::ManualReviewRequired,
-            final_commit: None,
+            final_commit: Some(_),
             ..
         })
     ));

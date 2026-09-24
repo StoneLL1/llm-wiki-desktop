@@ -1,3 +1,4 @@
+use super::office_postprocess::{Cell, Sheet};
 use crate::errors::BackendError;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
@@ -8,32 +9,6 @@ use zip::ZipArchive;
 const MAX_OOXML_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_OOXML_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_OOXML_ENTRIES: usize = 4_096;
-
-pub(crate) fn extract_pdf_markdown_from_bytes(bytes: &[u8]) -> Result<String, BackendError> {
-    let pages = pdf_extract::extract_text_from_mem_by_pages(bytes).map_err(|error| {
-        BackendError::new(
-            "IMPORT_FILE_PARSE_FAILED",
-            format!("PDF parsing failed: {error}"),
-            true,
-            true,
-        )
-    })?;
-    let text = pages
-        .iter()
-        .map(|page| page.trim())
-        .filter(|page| !page.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    if text.trim().is_empty() {
-        return Err(BackendError::new(
-            "IMPORT_FILE_QUALITY_FAILED",
-            "The PDF has no extractable text layer; OCR or layout assistance is required.",
-            true,
-            true,
-        ));
-    }
-    Ok(normalize_extracted_markdown(&text))
-}
 
 pub(crate) fn extract_ooxml_markdown_from_bytes(
     extension: &str,
@@ -100,9 +75,152 @@ fn read_docx_text<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<String,
     Ok(output)
 }
 
+pub(crate) struct DocxExtraction {
+    pub markdown: String,
+    pub assets: Vec<String>,
+    pub ocr_images: Vec<String>,
+}
+
+pub(crate) fn extract_docx_with_images(
+    bytes: &[u8],
+    staging: &std::path::Path,
+) -> Result<DocxExtraction, BackendError> {
+    use sha2::{Digest, Sha256};
+    let mut archive = ZipArchive::new(Cursor::new(bytes))
+        .map_err(|error| io_read_err(std::io::Error::other(error)))?;
+    validate_archive_limits(&mut archive)?;
+    let mut markdown = String::new();
+    let mut assets = Vec::new();
+    for part in [
+        "word/document.xml",
+        "word/footnotes.xml",
+        "word/endnotes.xml",
+    ] {
+        let Some(xml) = read_optional_archive_text(&mut archive, part)? else {
+            continue;
+        };
+        let rels = read_optional_archive_text(&mut archive, &relationship_part_path(part))?
+            .map(|xml| read_ooxml_relationships(&xml))
+            .transpose()?
+            .unwrap_or_default();
+        let mut references = std::collections::BTreeSet::new();
+        let mut reader = Reader::from_str(&xml);
+        let mut buffer = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buffer) {
+                Ok(Event::Start(event)) | Ok(Event::Empty(event))
+                    if matches!(local_name(event.name().as_ref()), b"blip" | b"imagedata") =>
+                {
+                    for attribute in event
+                        .attributes()
+                        .flatten()
+                        .filter(|a| matches!(local_name(a.key.as_ref()), b"embed" | b"id"))
+                    {
+                        references
+                            .insert(String::from_utf8_lossy(attribute.value.as_ref()).into_owned());
+                    }
+                }
+                Ok(Event::Eof) => break,
+                Err(error) => return Err(xml_err(error)),
+                _ => {}
+            }
+            buffer.clear();
+        }
+        let mut images = BTreeMap::new();
+        for relationship in rels
+            .into_iter()
+            .filter(|rel| rel.relationship_type.ends_with("/image") && references.contains(&rel.id))
+        {
+            let Some(target) = resolve_ooxml_target(part, &relationship.target) else {
+                continue;
+            };
+            if !target.starts_with("word/media/") {
+                continue;
+            }
+            let extension = std::path::Path::new(&target)
+                .extension()
+                .and_then(|v| v.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if !matches!(
+                extension.as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff"
+            ) {
+                continue;
+            }
+            let Ok(mut entry) = archive.by_name(&target) else {
+                continue;
+            };
+            ensure_entry_size(&entry)?;
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data).map_err(io_read_err)?;
+            let digest = format!("{:x}", Sha256::digest(&data));
+            let path = format!("assets/document/{}.{}", &digest[..16], extension);
+            images.insert(relationship.id, path.clone());
+            // Only actual drawing references are copied, not unrelated media entries.
+            if !assets.contains(&path) {
+                std::fs::create_dir_all(staging.join("assets/document")).map_err(io_read_err)?;
+                std::fs::write(staging.join(&path), data).map_err(io_read_err)?;
+                assets.push(path);
+            }
+        }
+        if references.iter().any(|id| !images.contains_key(id)) {
+            return Err(BackendError::new("IMPORT_FILE_QUALITY_FAILED", "A referenced Word image is missing or unsupported; the original remains unchanged.", true, true));
+        }
+        markdown.push_str(&docx_xml_with_images(&xml, &images)?);
+        markdown.push_str("\n\n");
+    }
+    // Textless sections containing screenshots need recognition. Ordinary
+    // illustrations in sections with native prose are preserved without OCR.
+    let mut ocr_images = Vec::new();
+    for (index, section) in markdown.split("\n#").enumerate() {
+        let section = if index == 0 {
+            section.to_string()
+        } else {
+            format!("#{section}")
+        };
+        let section_images = assets
+            .iter()
+            .filter(|path| section.contains(&format!("]({path})")))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut text = section.clone();
+        for path in &section_images {
+            text = text.replace(&format!("![Document image]({path})"), "");
+        }
+        let prose = text
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .any(|line| line.chars().any(char::is_alphanumeric));
+        if !prose {
+            ocr_images.extend(section_images);
+        }
+    }
+    if markdown.trim().is_empty() {
+        return Err(BackendError::new(
+            "IMPORT_FILE_QUALITY_FAILED",
+            "The Office file contains no extractable body or image.",
+            true,
+            true,
+        ));
+    }
+    Ok(DocxExtraction {
+        markdown,
+        assets,
+        ocr_images,
+    })
+}
+
 fn docx_xml_to_markdown(xml: &str) -> Result<String, BackendError> {
+    docx_xml_with_images(xml, &BTreeMap::new())
+}
+
+fn docx_xml_with_images(
+    xml: &str,
+    images: &BTreeMap<String, String>,
+) -> Result<String, BackendError> {
     let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
+    reader.config_mut().trim_text(false);
     let mut output = String::new();
     let mut paragraph = String::new();
     let mut heading_level = None;
@@ -122,9 +240,23 @@ fn docx_xml_to_markdown(xml: &str) -> Result<String, BackendError> {
                     heading_level = None;
                     is_list = false;
                 }
+                b"blip" | b"imagedata" => {
+                    if let Some(path) = event.attributes().flatten().find_map(|attr| {
+                        matches!(local_name(attr.key.as_ref()), b"embed" | b"id")
+                            .then(|| {
+                                images
+                                    .get(&String::from_utf8_lossy(attr.value.as_ref()).into_owned())
+                            })
+                            .flatten()
+                    }) {
+                        paragraph.push_str(&format!("\n\n![Document image]({path})\n\n"));
+                    }
+                }
                 b"pStyle" => heading_level = heading_level_from_attributes(&event),
                 b"numPr" => is_list = true,
                 b"t" => in_text = true,
+                b"tab" => paragraph.push('\t'),
+                b"br" | b"cr" => paragraph.push('\n'),
                 b"tbl" => {
                     in_table = true;
                     table.clear();
@@ -137,8 +269,22 @@ fn docx_xml_to_markdown(xml: &str) -> Result<String, BackendError> {
                 _ => {}
             },
             Ok(Event::Empty(event)) => match local_name(event.name().as_ref()) {
+                b"blip" | b"imagedata" => {
+                    if let Some(path) = event.attributes().flatten().find_map(|attr| {
+                        matches!(local_name(attr.key.as_ref()), b"embed" | b"id")
+                            .then(|| {
+                                images
+                                    .get(&String::from_utf8_lossy(attr.value.as_ref()).into_owned())
+                            })
+                            .flatten()
+                    }) {
+                        paragraph.push_str(&format!("\n\n![Document image]({path})\n\n"));
+                    }
+                }
                 b"pStyle" => heading_level = heading_level_from_attributes(&event),
                 b"numPr" => is_list = true,
+                b"tab" => paragraph.push('\t'),
+                b"br" | b"cr" => paragraph.push('\n'),
                 _ => {}
             },
             Ok(Event::Text(text)) if in_text => {
@@ -495,6 +641,38 @@ fn pptx_slide_to_markdown(xml: &str) -> Result<String, BackendError> {
 }
 
 fn read_xlsx_text<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<String, BackendError> {
+    let mut output = String::new();
+    for sheet in read_xlsx_sheets(archive)? {
+        output.push_str(&format!("## {}\n\n", sheet.name.replace(['\r', '\n'], " ")));
+        let rows = sheet
+            .rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| {
+                        markdown_table_cell(&cell.formula.as_ref().map_or_else(
+                            || cell.value.clone(),
+                            |formula| format!("`{formula}` → {}", cell.value),
+                        ))
+                    })
+                    .collect()
+            })
+            .collect::<Vec<_>>();
+        output.push_str(&rows_to_markdown_table(&rows));
+        output.push('\n');
+    }
+    Ok(output)
+}
+
+pub(crate) fn extract_xlsx_sheets_from_bytes(bytes: &[u8]) -> Result<Vec<Sheet>, BackendError> {
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).map_err(zip_read_err)?;
+    validate_archive_limits(&mut archive)?;
+    read_xlsx_sheets(&mut archive)
+}
+
+fn read_xlsx_sheets<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+) -> Result<Vec<Sheet>, BackendError> {
     let mut shared = Vec::new();
     if let Ok(mut entry) = archive.by_name("xl/sharedStrings.xml") {
         ensure_entry_size(&entry)?;
@@ -520,13 +698,27 @@ fn read_xlsx_text<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<String,
         fallback
     });
 
-    let mut output = String::new();
+    let mut output = Vec::new();
     for sheet in sheets {
         let xml = read_required_archive_text(archive, &sheet.part)?;
         let rows = read_xlsx_rows(&xml, &shared)?;
-        output.push_str(&format!("## {}\n\n", sheet.name.replace(['\r', '\n'], " ")));
-        output.push_str(&rows_to_markdown_table(&rows));
-        output.push('\n');
+        if rows
+            .iter()
+            .flatten()
+            .any(|cell| !cell.value.trim().is_empty() || cell.formula.is_some())
+        {
+            output.push(Sheet {
+                name: sheet.name,
+                hidden: false,
+                declared_columns: rows.iter().map(Vec::len).max().unwrap_or(0) as u32,
+                rows,
+            });
+        }
+    }
+    if output.is_empty() {
+        return Err(xlsx_parse_error(
+            "The workbook contains no non-empty sheets.",
+        ));
     }
     Ok(output)
 }
@@ -630,7 +822,7 @@ fn read_shared_strings(xml: &str) -> Result<Vec<String>, BackendError> {
     Ok(strings)
 }
 
-fn read_xlsx_rows(xml: &str, shared: &[String]) -> Result<Vec<Vec<String>>, BackendError> {
+fn read_xlsx_rows(xml: &str, shared: &[String]) -> Result<Vec<Vec<Cell>>, BackendError> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
     let mut rows = Vec::new();
@@ -709,7 +901,7 @@ fn read_xlsx_rows(xml: &str, shared: &[String]) -> Result<Vec<Vec<String>>, Back
                 b"f" => in_formula = false,
                 b"t" => in_inline_text = false,
                 b"c" => {
-                    row.resize(cell_column + 1, String::new());
+                    row.resize(cell_column + 1, Cell::value(""));
                     let value = if cell_type == "s" {
                         let index = cell_value.trim().parse::<usize>().map_err(|_| {
                             BackendError::new(
@@ -772,9 +964,9 @@ fn read_xlsx_rows(xml: &str, shared: &[String]) -> Result<Vec<Vec<String>>, Back
                                 "An XLSX formula cell has no cached display value.",
                             ));
                         }
-                        markdown_table_cell(&format!("`={}` → {}", formula, value))
+                        Cell::formula(format!("={formula}"), value)
                     } else {
-                        markdown_table_cell(&value)
+                        Cell::value(value)
                     };
                 }
                 b"row" => rows.push(std::mem::take(&mut row)),

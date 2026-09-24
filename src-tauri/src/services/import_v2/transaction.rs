@@ -884,7 +884,7 @@ impl FileTransaction {
         }
         #[cfg(not(unix))]
         {
-            let _ = (binding, temporary);
+            let _ = (self, binding, temporary);
             Ok(None)
         }
     }

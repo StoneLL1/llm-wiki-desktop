@@ -211,7 +211,7 @@ fn redact_json_value(value: &mut serde_json::Value) {
     }
 }
 
-fn is_sensitive_json_key(key: &str) -> bool {
+pub(super) fn is_sensitive_json_key(key: &str) -> bool {
     let normalized = key
         .bytes()
         .filter(|value| value.is_ascii_alphanumeric())

@@ -116,6 +116,7 @@ export interface SourceUpdatePreview {
   currentMarkdownHash: string;
   candidateMarkdownHash: string;
   guardToken: string;
+  ephemeral?: boolean;
 }
 
 export interface SourceMutationResult {

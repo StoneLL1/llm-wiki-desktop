@@ -32,6 +32,9 @@ const PLATFORM_NAVIGATION_HOSTS = Object.freeze({
 });
 
 const PLATFORM_ASSET_HOSTS = Object.freeze({
+  wechat: ["mmbiz.qpic.cn", "mmbiz.qlogo.cn", "res.wx.qq.com"],
+  zhihu: ["zhimg.com"],
+  x: ["twimg.com"],
   bilibili: ["bilivideo.com", "bilivideo.cn", "hdslb.com", "biliimg.com", "edge.mountaintoys.cn"],
   xiaohongshu: ["xhscdn.com", "xhscdn.net", "xhslink.com", "xhslink.cn"],
   douyin: ["douyinvod.com", "douyincdn.com", "douyinpic.com", "amemv.com", "byteimg.com", "ibytedtos.com", "bytecdn.cn", "zjcdn.com"],
@@ -161,6 +164,16 @@ export function sanitizeCookieBackup(platform, cookies) {
       path: String(cookie.path || "/"), expires: Number(cookie.expires || -1),
       httpOnly: Boolean(cookie.httpOnly), secure: Boolean(cookie.secure), sameSite: cookie.sameSite,
     }));
+}
+
+// A profile may have rotated a persistent token since login. Restore only
+// missing session cookies; an older OS backup must not overwrite newer cookies.
+export async function restoreCookieBackup(context, platform, backup) {
+  const existing = await context.cookies();
+  const domain = (cookie) => String(cookie.domain || "").replace(/^\./, "").toLowerCase();
+  const missing = sanitizeCookieBackup(platform, backup).filter((cookie) => !existing.some((current) =>
+    current.name === cookie.name && domain(current) === domain(cookie) && current.path === cookie.path && current.value));
+  if (missing.length) await context.addCookies(missing);
 }
 
 export function sanitizeAccountLabel(value) {

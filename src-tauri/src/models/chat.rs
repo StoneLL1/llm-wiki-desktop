@@ -173,6 +173,8 @@ pub struct ChatSession {
     /// JSON — no database. Defaults to None for older session files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_page_path: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ephemeral: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -187,6 +189,8 @@ pub struct ChatSessionSummary {
     /// page-scoped chats without loading each full session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_page_path: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ephemeral: bool,
 }
 
 /// One retrieved wiki page with a bounded body excerpt for the model prompt.
@@ -592,6 +596,7 @@ mod tests {
             updated_at: "2026-07-07T00:00:00Z".into(),
             messages: Vec::new(),
             context_page_path: None,
+            ephemeral: false,
         })
         .unwrap();
         assert!(value.get("contextPagePath").is_none());

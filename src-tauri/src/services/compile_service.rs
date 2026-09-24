@@ -6,14 +6,14 @@ use crate::models::agent::{AgentDetectionState, AgentKind};
 use crate::models::compile::{
     CompileAction, CompileCandidate, CompileChangeSummary, CompileConflictResolution, CompileFile,
     CompileManifest, CompilePageType, CompilePlan, CompilePlanItem, CompileRoutePreference,
-    ResolvedCompileRoute, SourceVersionRef,
+    CompileSourceOutcome, CompileSourceOutcomeStatus, ResolvedCompileRoute, SourceVersionRef,
 };
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
 use crate::models::paths::ProjectContext;
 use crate::services::import_v2::source_registry::SourceRegistry;
 use crate::services::{
-    AgentService, CompileLegacyAdapter, CompilePromptRoute, FileStore, LlmService, SecretService,
-    SettingsService, WriteMode,
+    AgentService, CompileLegacyAdapter, CompilePromptRoute, FileStore, LintService, LlmService,
+    SecretService, SettingsService, WriteMode,
 };
 use crate::tasks::task_model::LogLevel;
 use crate::tasks::TaskService;
@@ -23,6 +23,12 @@ use crate::utils::safe_project_dir::{
     remove_project_file, rename_project_file, BoundProjectMutationRoot,
 };
 use sha2::{Digest, Sha256};
+
+#[path = "compile_service/byok_batch_cache.rs"]
+mod byok_batch_cache;
+#[path = "compile_service/links.rs"]
+mod links;
+use byok_batch_cache::ByokBatchCache;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileApplyOutcome {
@@ -180,6 +186,11 @@ impl CompileService {
             policy.allows_reviewable_deletions(),
         );
         prompt.push('\n');
+        if policy == CompileGenerationPolicy::WorkflowReviewableDeletes {
+            prompt.push_str("Every selected Source must appear in sourceIds of a derived plan item, or in sourceDecisions with a reason. sourceDecisions entries use {sourceId,status,reason,evidencePath,evidenceExcerpt}; status is deferred or already_covered. Deferred Sources remain unprocessed. already_covered requires an existing Wiki page path and an exact excerpt proving the prior coverage; the user reviews this decision. Never omit a Source while reporting success.\n");
+        } else {
+            prompt.push_str("Every selected Source must appear in sourceIds of at least one derived plan item. If a Source cannot be integrated, stop and explain why; never omit it while reporting success.\n");
+        }
         Self::append_workspace_markdown(&mut prompt, workspace)?;
         Ok(prompt)
     }
@@ -335,6 +346,69 @@ impl CompileService {
                         format!("Running {}", agent.command()),
                     )
                     .map_err(task_operation_error)?;
+                if policy == CompileGenerationPolicy::WorkflowReviewableDeletes
+                    || *agent != AgentKind::Claude
+                    || cfg!(windows)
+                {
+                    // One-shot CLIs return the same validated plan/manifest
+                    // protocol as BYOK. The backend owns all candidate files;
+                    // no CLI-specific write tool or Windows sandbox is needed.
+                    let plan_prompt =
+                        Self::provider_plan_prompt_with_policy(workspace, &language, policy)?;
+                    let plan_invocation =
+                        AgentService::chat_invocation(*agent, workspace, &plan_prompt)?;
+                    let raw_plan = services.agent_service.run_task_streaming_for_agent(
+                        *agent,
+                        &plan_invocation,
+                        services.task_service,
+                        task_id,
+                    )?;
+                    let plan = Self::parse_plan(&raw_plan)?;
+                    validate_compile_plan(context, &plan, baseline, sources)?;
+                    Self::ensure_plan_target_context(context, workspace, &plan, baseline)?;
+                    observer.begin_candidate_generation()?;
+                    let manifest_prompt = Self::provider_manifest_prompt_with_policy(
+                        workspace,
+                        &language,
+                        Some(&plan),
+                        policy,
+                    )?;
+                    let manifest_invocation =
+                        AgentService::chat_invocation(*agent, workspace, &manifest_prompt)?;
+                    let raw_manifest = services.agent_service.run_task_streaming_for_agent(
+                        *agent,
+                        &manifest_invocation,
+                        services.task_service,
+                        task_id,
+                    )?;
+                    observer.begin_validation()?;
+                    let manifest = Self::parse_manifest_with_policy(
+                        &raw_manifest,
+                        policy.allows_reviewable_deletions(),
+                    )?;
+                    let known_sources =
+                        Self::allowed_source_refs_for_plan(context, sources, &plan)?;
+                    Self::validate_manifest_semantics_with_policy(
+                        context,
+                        &manifest,
+                        Some(&plan),
+                        &known_sources,
+                        policy.allows_reviewable_deletions(),
+                    )?;
+                    if policy == CompileGenerationPolicy::LegacyNoDeletes
+                        && !plan.source_decisions.is_empty()
+                    {
+                        return Err(BackendError::new("COMPILE_SOURCE_COVERAGE_INCOMPLETE", "This compile route requires every selected Source to be integrated into a derived page.", true, true));
+                    }
+                    return Ok(CompileCandidate {
+                        route,
+                        source_outcomes: source_outcomes_for_candidate(
+                            context, &plan, &manifest, sources,
+                        )?,
+                        plan,
+                        manifest,
+                    });
+                }
                 let mut prompt = Self::compile_prompt_with_policy(workspace, &language, policy);
                 let existing_pages = match reviewable_workspace_paths.as_ref() {
                     Some(paths) => paths.clone(),
@@ -359,7 +433,7 @@ impl CompileService {
                     policy,
                     reviewable_workspace_paths.as_ref(),
                 )?;
-                let known_sources = Self::known_source_refs_for_sources(sources);
+                let known_sources = Self::allowed_source_refs_for_plan(context, sources, &plan)?;
                 Self::validate_manifest_semantics_with_policy(
                     context,
                     &manifest,
@@ -425,25 +499,57 @@ impl CompileService {
                         format!("Calling {:?} for compile plan", provider),
                     )
                     .map_err(task_operation_error)?;
-                let plan_prompt =
-                    Self::provider_plan_prompt_with_policy(workspace, &language, policy)?;
-                let raw_plan = crate::tasks::byok_progress::poll_with_progress(
-                    services.task_service,
+                let output_limit = compile_output_token_limit(&config);
+                let batch_cache = if policy == CompileGenerationPolicy::WorkflowReviewableDeletes {
+                    ByokBatchCache::for_workflow(
+                        services.task_service,
+                        task_id,
+                        context,
+                        &config,
+                        sources,
+                    )?
+                } else {
+                    None
+                };
+                let plan = generate_byok_plan(
+                    workspace,
                     task_id,
-                    "Planning",
-                    services
-                        .llm_service
-                        .complete(&config, secret.as_deref(), &plan_prompt),
+                    &language,
+                    policy,
+                    sources,
+                    &config,
+                    secret.as_deref(),
+                    services,
+                    output_limit,
+                    batch_cache.as_ref(),
                 )
-                .await
-                .map_err(|_| {
-                    crate::tasks::byok_progress::cancelled_error(
-                        "COMPILE_CANCELLED",
-                        "Wiki compile was cancelled.",
-                    )
-                })??;
-                let plan = Self::parse_plan(&raw_plan)?;
-                validate_compile_plan(context, &plan, baseline, sources)?;
+                .await;
+                let plan = match plan {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        if matches!(
+                            error.code.as_str(),
+                            "COMPILE_PLAN_CONFLICT"
+                                | "COMPILE_SOURCE_COVERAGE_INCOMPLETE"
+                                | "COMPILE_PLAN_INVALID"
+                        ) {
+                            if let Some(cache) = &batch_cache {
+                                let _ = cache.cleanup();
+                            }
+                        }
+                        return Err(error);
+                    }
+                };
+                if let Err(error) = validate_compile_plan(context, &plan, baseline, sources)
+                    .and_then(|_| {
+                        Self::ensure_plan_target_context(context, workspace, &plan, baseline)
+                    })
+                {
+                    if let Some(cache) = &batch_cache {
+                        let _ = cache.cleanup();
+                    }
+                    return Err(error);
+                }
                 observer.begin_candidate_generation()?;
                 services
                     .task_service
@@ -453,45 +559,83 @@ impl CompileService {
                         format!("Calling {:?} for compile manifest", provider),
                     )
                     .map_err(task_operation_error)?;
-                let manifest_prompt = Self::provider_manifest_prompt_with_policy(
-                    workspace,
-                    &language,
-                    Some(&plan),
-                    policy,
-                )?;
-                let raw_manifest = crate::tasks::byok_progress::poll_with_progress(
-                    services.task_service,
-                    task_id,
-                    "Generating",
-                    services
-                        .llm_service
-                        .complete(&config, secret.as_deref(), &manifest_prompt),
-                )
-                .await
-                .map_err(|_| {
-                    crate::tasks::byok_progress::cancelled_error(
-                        "COMPILE_CANCELLED",
-                        "Wiki compile was cancelled.",
+                let manifest = if policy == CompileGenerationPolicy::WorkflowReviewableDeletes {
+                    generate_byok_manifest_pages(
+                        workspace,
+                        task_id,
+                        &language,
+                        &plan,
+                        sources,
+                        &config,
+                        secret.as_deref(),
+                        services,
+                        output_limit,
+                        batch_cache.as_ref(),
                     )
-                })??;
+                    .await?
+                } else {
+                    let manifest_prompt = Self::provider_manifest_prompt_with_policy(
+                        workspace,
+                        &language,
+                        Some(&plan),
+                        policy,
+                    )?;
+                    check_compile_prompt_budget(&config, &manifest_prompt, output_limit)?;
+                    let raw_manifest = crate::tasks::byok_progress::poll_with_progress(
+                        services.task_service,
+                        task_id,
+                        "Generating",
+                        services.llm_service.complete_with_output_limit(
+                            &config,
+                            secret.as_deref(),
+                            &manifest_prompt,
+                            output_limit,
+                        ),
+                    )
+                    .await
+                    .map_err(|_| {
+                        crate::tasks::byok_progress::cancelled_error(
+                            "COMPILE_CANCELLED",
+                            "Wiki compile was cancelled.",
+                        )
+                    })??;
+                    Self::parse_manifest_with_policy(
+                        &raw_manifest,
+                        policy.allows_reviewable_deletions(),
+                    )?
+                };
                 observer.begin_validation()?;
-                let manifest = Self::parse_manifest_with_policy(
-                    &raw_manifest,
-                    policy.allows_reviewable_deletions(),
-                )?;
-                let known_sources = Self::known_source_refs_for_sources(sources);
-                Self::validate_manifest_semantics_with_policy(
+                let known_sources = Self::allowed_source_refs_for_plan(context, sources, &plan)?;
+                if let Err(error) = Self::validate_manifest_semantics_with_policy(
                     context,
                     &manifest,
                     Some(&plan),
                     &known_sources,
                     policy.allows_reviewable_deletions(),
-                )?;
+                ) {
+                    if let Some(cache) = &batch_cache {
+                        let _ = cache.cleanup();
+                    }
+                    return Err(error);
+                }
+                if let Some(cache) = batch_cache {
+                    if let Err(error) = cache.cleanup() {
+                        let _ = services.task_service.append_log(
+                            task_id,
+                            LogLevel::Warn,
+                            format!("Could not remove verified BYOK batches: {}", error.message),
+                        );
+                    }
+                }
                 (plan, manifest)
             }
         };
+        if policy == CompileGenerationPolicy::LegacyNoDeletes && !plan.source_decisions.is_empty() {
+            return Err(BackendError::new("COMPILE_SOURCE_COVERAGE_INCOMPLETE", "This compile route requires every selected Source to be integrated into a derived page.", true, true));
+        }
         Ok(CompileCandidate {
             route,
+            source_outcomes: source_outcomes_for_candidate(context, &plan, &manifest, sources)?,
             plan,
             manifest,
         })
@@ -518,6 +662,33 @@ impl CompileService {
                     BackendError::new("COMPILE_INPUT_READ_FAILED", error.to_string(), true, false)
                 })?;
                 prompt.push_str(&format!("\n--- {relative} ---\n{content}"));
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_plan_target_context(
+        context: &ProjectContext,
+        workspace: &Path,
+        plan: &CompilePlan,
+        baseline: &HashMap<String, String>,
+    ) -> Result<(), BackendError> {
+        for item in &plan.items {
+            let Some(expected) = baseline.get(&item.target_path) else {
+                continue;
+            };
+            if FileStore.file_hash(context, &item.target_path)? != *expected {
+                return Err(BackendError::new(
+                    "WORKFLOW_INPUT_BASELINE_CHANGED",
+                    "A planned Wiki target changed before generation. Start a new update.",
+                    true,
+                    true,
+                ));
+            }
+            let source = context.resolve_project_path(&item.target_path)?;
+            let destination = workspace.join(&item.target_path);
+            if !destination.is_file() {
+                copy_workspace_file(&source, &destination)?;
             }
         }
         Ok(())
@@ -782,6 +953,40 @@ impl CompileService {
         Ok(resolved)
     }
 
+    pub fn source_versions_for_accepted_manifest(
+        plan: &CompilePlan,
+        accepted: &CompileManifest,
+        selected: &[ResolvedCompileSource],
+    ) -> Vec<SourceVersionRef> {
+        let known = Self::known_source_refs_for_sources(selected);
+        let accepted_paths = accepted
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<HashSet<_>>();
+        selected
+            .iter()
+            .filter(|source| {
+                let targets = plan
+                    .items
+                    .iter()
+                    .filter(|item| {
+                        !is_structural_page(&item.target_path)
+                            && item.source_ids.iter().any(|raw| {
+                                canonical_source_ref(raw, &known).as_deref()
+                                    == Some(source.workspace_path.as_str())
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                !targets.is_empty()
+                    && targets
+                        .iter()
+                        .all(|item| accepted_paths.contains(item.target_path.as_str()))
+            })
+            .map(|source| source.reference.clone())
+            .collect()
+    }
+
     pub fn parse_manifest(raw: &str) -> Result<CompileManifest, BackendError> {
         Self::parse_manifest_with_policy(raw, false)
     }
@@ -861,8 +1066,14 @@ impl CompileService {
         workspace: &Path,
         sources: &[ResolvedCompileSource],
     ) -> Result<(), BackendError> {
-        for name in ["purpose.md", "schema.md"] {
-            let source = context.root.join(name);
+        for (name, document) in [
+            ("purpose.md", context.layout.purpose_context.as_ref()),
+            ("schema.md", context.layout.schema_context.as_ref()),
+        ] {
+            let relative = document
+                .and_then(|document| document.read_path.as_deref())
+                .unwrap_or(name);
+            let source = context.resolve_project_path(relative)?;
             if !source.is_file() {
                 return Err(BackendError::new(
                     "COMPILE_INPUT_MISSING",
@@ -874,18 +1085,68 @@ impl CompileService {
             copy_workspace_file(&source, &workspace.join(name))?;
         }
         let selected_refs = Self::known_source_refs_for_sources(sources);
+        let selected_bodies = sources
+            .iter()
+            .map(|source| {
+                std::fs::read_to_string(&source.absolute_path).map_err(|error| {
+                    io_error("COMPILE_INPUT_READ_FAILED", error, &source.absolute_path)
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         for source in sources {
             copy_workspace_file(
                 &source.absolute_path,
                 &workspace.join(&source.workspace_path),
             )?;
         }
+        let mut indexed_targets = HashSet::new();
+        for structural in [
+            context
+                .layout
+                .wiki_index_path
+                .as_deref()
+                .unwrap_or("wiki/index.md"),
+            context
+                .layout
+                .wiki_overview_path
+                .as_deref()
+                .unwrap_or("wiki/overview.md"),
+        ] {
+            let absolute = context.resolve_project_path(structural)?;
+            if let Ok(content) = std::fs::read_to_string(&absolute) {
+                indexed_targets.extend(
+                    crate::utils::markdown_utils::extract_wikilinks(&content)
+                        .into_iter()
+                        .map(|target| target.to_lowercase()),
+                );
+                for target in LintService::candidate_resource_refs(&content) {
+                    indexed_targets.extend(
+                        LintService::candidate_resource_paths(structural, &target)
+                            .into_iter()
+                            .map(|path| path.to_lowercase()),
+                    );
+                }
+            }
+        }
         for absolute in FileStore.list_markdown_files(&context.wiki_dir)? {
             let relative = context.to_project_relative(&absolute)?;
             if is_compile_protected_path(&relative) {
                 continue;
             }
+            let stem = Path::new(&relative)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("")
+                .to_lowercase();
             let include = is_structural_page(&relative)
+                || context.layout.wiki_index_path.as_deref() == Some(relative.as_str())
+                || context.layout.wiki_overview_path.as_deref() == Some(relative.as_str())
+                || indexed_targets.contains(&stem)
+                || indexed_targets.contains(&relative.to_lowercase())
+                || (stem.chars().count() >= 2
+                    && selected_bodies
+                        .iter()
+                        .any(|body| body.to_lowercase().contains(&stem)))
                 || std::fs::read_to_string(&absolute)
                     .map(|content| {
                         selected_refs
@@ -1527,7 +1788,7 @@ impl CompileService {
     }
 
     fn validate_manifest_semantics_with_policy(
-        _context: &ProjectContext,
+        context: &ProjectContext,
         manifest: &CompileManifest,
         accepted_plan: Option<&CompilePlan>,
         known_sources: &HashSet<String>,
@@ -1657,6 +1918,9 @@ impl CompileService {
                 )
                 .with_details(serde_json::json!({ "path": file.path })));
             }
+        }
+        if allow_reviewable_deletions {
+            links::validate_final_links(context, manifest, known_sources)?;
         }
         Ok(())
     }
@@ -2113,7 +2377,7 @@ impl CompileService {
 
     /// An operation's before/after refs are its durable undo journal. Already
     /// restored paths are accepted on retry after a partial undo or restart.
-    pub(crate) fn prepare_history_restore(
+    pub fn prepare_history_restore(
         context: &ProjectContext,
         before: &std::collections::BTreeMap<String, Option<Vec<u8>>>,
         after: &std::collections::BTreeMap<String, Option<Vec<u8>>>,
@@ -2146,7 +2410,7 @@ impl CompileService {
         Ok(CompileBackup { entries })
     }
 
-    pub(crate) fn restore_prepared_history_outputs(
+    pub fn restore_prepared_history_outputs(
         context: &ProjectContext,
         backup: &CompileBackup,
     ) -> Result<(), BackendError> {
@@ -2243,6 +2507,78 @@ impl CompileService {
         }
         refs
     }
+
+    /// Existing target pages may retain references to older, still present
+    /// Sources. Only references already bound to a target page are admitted;
+    /// this does not authorize inventing evidence on a new page.
+    pub fn allowed_source_refs_for_plan(
+        context: &ProjectContext,
+        selected: &[ResolvedCompileSource],
+        plan: &CompilePlan,
+    ) -> Result<HashSet<String>, BackendError> {
+        let mut refs = Self::known_source_refs_for_sources(selected);
+        let source_root = context
+            .layout
+            .source_write_root
+            .as_deref()
+            .unwrap_or("wiki/sources");
+        for item in &plan.items {
+            let target = context.resolve_project_path(&item.target_path)?;
+            if !target.is_file() {
+                continue;
+            }
+            let old = FileStore.read_markdown(context, &item.target_path)?;
+            let split = split_frontmatter(&old);
+            let Some(frontmatter) = split.frontmatter.as_deref() else {
+                continue;
+            };
+            for raw in parse_frontmatter(frontmatter).get_list("sources") {
+                let normalized = raw.trim().replace('\\', "/");
+                if normalized.is_empty() || source_ref_known(&normalized, &refs) {
+                    continue;
+                }
+                let candidate = if normalized.contains('/') {
+                    normalized.clone()
+                } else {
+                    format!("{source_root}/{normalized}")
+                };
+                if context.resolve_project_path(&candidate)?.is_file() {
+                    refs.insert(candidate);
+                }
+            }
+        }
+        Ok(refs)
+    }
+
+    pub fn validate_selected_source_coverage_for_workflow(
+        plan: &CompilePlan,
+        sources: &[ResolvedCompileSource],
+    ) -> Result<(), BackendError> {
+        validate_selected_source_coverage(
+            plan,
+            sources,
+            &Self::known_source_refs_for_sources(sources),
+        )
+    }
+
+    pub fn validate_workflow_source_outcomes(
+        context: &ProjectContext,
+        candidate: &CompileCandidate,
+        selected: &[ResolvedCompileSource],
+    ) -> Result<(), BackendError> {
+        let expected =
+            source_outcomes_for_candidate(context, &candidate.plan, &candidate.manifest, selected)?;
+        if candidate.source_outcomes == expected {
+            Ok(())
+        } else {
+            Err(BackendError::new(
+                "COMPILE_SOURCE_COVERAGE_INCOMPLETE",
+                "The candidate Source outcomes no longer match its accepted pages and versions.",
+                true,
+                true,
+            ))
+        }
+    }
 }
 
 fn read_agent_compile_plan(workspace: &Path) -> Result<CompilePlan, BackendError> {
@@ -2267,9 +2603,566 @@ fn validate_compile_plan(
     baseline: &HashMap<String, String>,
     sources: &[ResolvedCompileSource],
 ) -> Result<(), BackendError> {
-    let known_sources = CompileService::known_source_refs_for_sources(sources);
+    let known_sources = CompileService::allowed_source_refs_for_plan(context, sources, plan)?;
     let existing_pages = baseline.keys().cloned().collect::<Vec<_>>();
-    CompileService::validate_plan(context, plan, &existing_pages, &known_sources)
+    CompileService::validate_plan(context, plan, &existing_pages, &known_sources)?;
+    validate_selected_source_coverage(plan, sources, &known_sources)
+}
+
+fn compile_output_token_limit(config: &LlmProviderConfig) -> u64 {
+    (config.context_window / 3)
+        .clamp(256, 8192)
+        .min(config.context_window)
+}
+
+fn check_compile_prompt_budget(
+    config: &LlmProviderConfig,
+    prompt: &str,
+    output_limit: u64,
+) -> Result<(), BackendError> {
+    // Byte count is a conservative tokenizer-free estimate for Latin and CJK
+    // text. The extra reserve covers provider wrappers and JSON framing.
+    let available = config
+        .context_window
+        .saturating_sub(output_limit)
+        .saturating_sub(512);
+    if (prompt.len() as u64) <= available {
+        Ok(())
+    } else {
+        Err(BackendError::new(
+            "COMPILE_INPUT_TOO_LARGE",
+            "The selected BYOK model context cannot hold this Wiki batch. Select fewer Sources or configure a model with a larger context window.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({
+            "estimatedInputTokens": prompt.len(),
+            "availableInputTokens": available,
+            "estimate": "conservative_utf8_bytes",
+            "model": config.model,
+        })))
+    }
+}
+
+fn byok_plan_group_prompt(
+    workspace: &Path,
+    language: &str,
+    policy: CompileGenerationPolicy,
+    sources: &[ResolvedCompileSource],
+) -> Result<String, BackendError> {
+    let mut prompt = crate::services::render_compile_prompt_header_with_policy(
+        CompilePromptRoute::ByokPlan,
+        language,
+        policy.allows_reviewable_deletions(),
+    );
+    if policy == CompileGenerationPolicy::WorkflowReviewableDeletes {
+        prompt.push_str("\nPlan every Source shown below. Return only CompilePlan JSON. Put each integrated Source in a derived page's sourceIds; otherwise include a reasoned sourceDecisions entry with status deferred or already_covered, and exact existing Wiki evidence for already_covered. This is one bounded planning group; other groups are planned separately.\n");
+    } else {
+        prompt.push_str("\nPlan every Source shown below. Return only CompilePlan JSON; every Source must appear in a derived page's sourceIds.\n");
+    }
+    for name in ["purpose.md", "schema.md"] {
+        let content = std::fs::read_to_string(workspace.join(name)).map_err(|error| {
+            BackendError::new("COMPILE_INPUT_READ_FAILED", error.to_string(), true, false)
+        })?;
+        prompt.push_str(&format!("\n--- {name} ---\n{content}\n"));
+    }
+    for path in ["wiki/index.md", "wiki/overview.md"] {
+        let target = workspace.join(path);
+        if target.is_file() {
+            let content = std::fs::read_to_string(target).map_err(|error| {
+                BackendError::new("COMPILE_INPUT_READ_FAILED", error.to_string(), true, false)
+            })?;
+            prompt.push_str(&format!("\n--- {path} ---\n{content}\n"));
+        }
+    }
+    let mut selected_bodies = Vec::new();
+    for source in sources {
+        let content =
+            std::fs::read_to_string(workspace.join(&source.workspace_path)).map_err(|error| {
+                BackendError::new("COMPILE_INPUT_READ_FAILED", error.to_string(), true, false)
+            })?;
+        prompt.push_str(&format!("\n--- {} ---\n{content}\n", source.workspace_path));
+        selected_bodies.push(content.to_lowercase());
+    }
+    for absolute in FileStore.list_markdown_files(&workspace.join("wiki"))? {
+        let relative = absolute
+            .strip_prefix(workspace)
+            .map_err(|error| {
+                BackendError::new("COMPILE_WORKSPACE_INVALID", error.to_string(), false, true)
+            })?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if is_structural_page(&relative)
+            || sources
+                .iter()
+                .any(|source| source.workspace_path == relative)
+        {
+            continue;
+        }
+        let stem = absolute
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if stem.chars().count() < 2 || !selected_bodies.iter().any(|body| body.contains(&stem)) {
+            continue;
+        }
+        let content = std::fs::read_to_string(&absolute).map_err(|error| {
+            BackendError::new("COMPILE_INPUT_READ_FAILED", error.to_string(), true, false)
+        })?;
+        prompt.push_str(&format!("\n--- Existing related {relative}; preserve old knowledge and citations ---\n{content}\n"));
+    }
+    Ok(prompt)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn generate_byok_plan(
+    workspace: &Path,
+    task_id: &str,
+    language: &str,
+    policy: CompileGenerationPolicy,
+    sources: &[ResolvedCompileSource],
+    config: &LlmProviderConfig,
+    secret: Option<&str>,
+    services: &CompileExecutionServices<'_>,
+    output_limit: u64,
+    batch_cache: Option<&ByokBatchCache>,
+) -> Result<CompilePlan, BackendError> {
+    let full = CompileService::provider_plan_prompt_with_policy(workspace, language, policy)?;
+    let available = config
+        .context_window
+        .saturating_sub(output_limit)
+        .saturating_sub(512);
+    let prompts = if full.len() as u64 <= available {
+        vec![(full, sources.to_vec())]
+    } else {
+        let mut groups: Vec<Vec<ResolvedCompileSource>> = Vec::new();
+        let mut current = Vec::new();
+        for source in sources {
+            let mut trial = current.clone();
+            trial.push(source.clone());
+            let prompt = byok_plan_group_prompt(workspace, language, policy, &trial)?;
+            if prompt.len() as u64 > available && !current.is_empty() {
+                groups.push(current);
+                current = vec![source.clone()];
+                check_compile_prompt_budget(
+                    config,
+                    &byok_plan_group_prompt(workspace, language, policy, &current)?,
+                    output_limit,
+                )?;
+            } else {
+                check_compile_prompt_budget(config, &prompt, output_limit)?;
+                current = trial;
+            }
+        }
+        if !current.is_empty() {
+            groups.push(current);
+        }
+        groups
+            .iter()
+            .map(|group| {
+                Ok((
+                    byok_plan_group_prompt(workspace, language, policy, group)?,
+                    group.clone(),
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let mut combined: Option<CompilePlan> = None;
+    for (index, (prompt, group_sources)) in prompts.iter().enumerate() {
+        check_compile_prompt_budget(config, prompt, output_limit)?;
+        let cached = batch_cache
+            .map(|cache| cache.load::<CompilePlan>("plan", prompt))
+            .transpose()?
+            .flatten();
+        let plan = if let Some(plan) = cached {
+            plan
+        } else {
+            let raw = crate::tasks::byok_progress::poll_with_progress(
+                services.task_service,
+                task_id,
+                &format!("Planning group {} of {}", index + 1, prompts.len()),
+                services.llm_service.complete_with_output_limit(
+                    config,
+                    secret,
+                    prompt,
+                    output_limit,
+                ),
+            )
+            .await
+            .map_err(|_| {
+                crate::tasks::byok_progress::cancelled_error(
+                    "COMPILE_CANCELLED",
+                    "Wiki compile was cancelled.",
+                )
+            })??;
+            let plan = CompileService::parse_plan(&raw)?;
+            validate_selected_source_coverage(
+                &plan,
+                group_sources,
+                &CompileService::known_source_refs_for_sources(group_sources),
+            )?;
+            if let Some(cache) = batch_cache {
+                cache.save("plan", prompt, &plan)?;
+            }
+            plan
+        };
+        if let Some(existing) = &mut combined {
+            existing.source_decisions.extend(plan.source_decisions);
+            for item in plan.items {
+                if let Some(previous) = existing
+                    .items
+                    .iter_mut()
+                    .find(|previous| previous.target_path == item.target_path)
+                {
+                    if previous.page_type != item.page_type || previous.action != item.action {
+                        return Err(BackendError::new(
+                            "COMPILE_PLAN_CONFLICT",
+                            format!("Planning groups disagreed about {}.", item.target_path),
+                            true,
+                            true,
+                        ));
+                    }
+                    previous.source_ids.extend(item.source_ids);
+                    previous.source_ids.sort();
+                    previous.source_ids.dedup();
+                    previous
+                        .affected_existing_pages
+                        .extend(item.affected_existing_pages);
+                    previous.affected_existing_pages.sort();
+                    previous.affected_existing_pages.dedup();
+                    previous.risk_flags.extend(item.risk_flags);
+                    previous.risk_flags.sort();
+                    previous.risk_flags.dedup();
+                } else {
+                    existing.items.push(item);
+                }
+            }
+            existing.global_risk_flags.extend(plan.global_risk_flags);
+            existing.global_risk_flags.sort();
+            existing.global_risk_flags.dedup();
+        } else {
+            combined = Some(plan);
+        }
+    }
+    combined.ok_or_else(|| {
+        BackendError::new(
+            "COMPILE_PLAN_INVALID",
+            "No BYOK planning group completed.",
+            true,
+            true,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn generate_byok_manifest_pages(
+    workspace: &Path,
+    task_id: &str,
+    language: &str,
+    plan: &CompilePlan,
+    sources: &[ResolvedCompileSource],
+    config: &LlmProviderConfig,
+    secret: Option<&str>,
+    services: &CompileExecutionServices<'_>,
+    output_limit: u64,
+    batch_cache: Option<&ByokBatchCache>,
+) -> Result<CompileManifest, BackendError> {
+    let mut targets = plan
+        .items
+        .iter()
+        .map(|item| item.target_path.clone())
+        .collect::<Vec<_>>();
+    for scaffold in ["wiki/index.md", "wiki/overview.md", "wiki/log.md"] {
+        if !targets.iter().any(|path| path == scaffold) {
+            targets.push(scaffold.to_string());
+        }
+    }
+    targets.sort();
+    targets.dedup();
+    let known_sources = CompileService::known_source_refs_for_sources(sources);
+    let mut files = Vec::new();
+    for (index, target) in targets.iter().enumerate() {
+        let item = plan.items.iter().find(|item| &item.target_path == target);
+        let mut prompt = crate::services::render_compile_prompt_header_with_policy(
+            CompilePromptRoute::ByokManifest,
+            language,
+            false,
+        );
+        prompt.push_str(&format!(
+            "\nGenerate only `{target}`. Return JSON {{\"files\":[{{\"path\":\"{target}\",\"content\":\"...\"}}],\"deletions\":[],\"summary\":\"...\"}}. This is page {} of {}. Do not return any other page.\n",
+            index + 1,
+            targets.len(),
+        ));
+        prompt.push_str(&format!("\n--- Plan summary ---\n{}\n", plan.summary));
+        if let Some(item) = item {
+            prompt.push_str(&format!(
+                "\n--- Target plan item ---\n{}\n",
+                serde_json::to_string(item).map_err(|error| BackendError::new(
+                    "COMPILE_PLAN_INVALID",
+                    error.to_string(),
+                    true,
+                    false,
+                ))?
+            ));
+        } else {
+            prompt.push_str("\nUpdate this structural page to reflect the accepted plan.\n");
+            for item in &plan.items {
+                prompt.push_str(&format!("- {}: {}\n", item.target_path, item.reason));
+            }
+        }
+        for name in ["purpose.md", "schema.md"] {
+            let content = std::fs::read_to_string(workspace.join(name)).map_err(|error| {
+                BackendError::new("COMPILE_INPUT_READ_FAILED", error.to_string(), true, false)
+            })?;
+            prompt.push_str(&format!("\n--- {name} ---\n{content}\n"));
+        }
+        let existing = workspace.join(target);
+        if existing.is_file() {
+            let content = std::fs::read_to_string(&existing).map_err(|error| {
+                BackendError::new("COMPILE_INPUT_READ_FAILED", error.to_string(), true, false)
+            })?;
+            prompt.push_str(&format!("\n--- Existing {target}; preserve valid old knowledge and citations ---\n{content}\n"));
+        }
+        if let Some(item) = item {
+            for source in sources {
+                if item.source_ids.iter().any(|raw| {
+                    canonical_source_ref(raw, &known_sources).as_deref()
+                        == Some(source.workspace_path.as_str())
+                }) {
+                    let content = std::fs::read_to_string(workspace.join(&source.workspace_path))
+                        .map_err(|error| {
+                        BackendError::new(
+                            "COMPILE_INPUT_READ_FAILED",
+                            error.to_string(),
+                            true,
+                            false,
+                        )
+                    })?;
+                    prompt.push_str(&format!("\n--- {} ---\n{content}\n", source.workspace_path,));
+                }
+            }
+        }
+        check_compile_prompt_budget(config, &prompt, output_limit)?;
+        let cached = batch_cache
+            .map(|cache| cache.load::<CompileManifest>("page", &prompt))
+            .transpose()?
+            .flatten();
+        let (fragment, generated) = if let Some(fragment) = cached {
+            (fragment, false)
+        } else {
+            let raw = crate::tasks::byok_progress::poll_with_progress(
+                services.task_service,
+                task_id,
+                &format!("Generating page {} of {}", index + 1, targets.len()),
+                services.llm_service.complete_with_output_limit(
+                    config,
+                    secret,
+                    &prompt,
+                    output_limit,
+                ),
+            )
+            .await
+            .map_err(|_| {
+                crate::tasks::byok_progress::cancelled_error(
+                    "COMPILE_CANCELLED",
+                    "Wiki compile was cancelled.",
+                )
+            })??;
+            let fragment: CompileManifest =
+                serde_json::from_str(extract_json_object(&raw, "COMPILE_OUTPUT_INVALID")?)
+                    .map_err(|error| {
+                        BackendError::new("COMPILE_OUTPUT_INVALID", error.to_string(), true, false)
+                    })?;
+            (fragment, true)
+        };
+        if fragment.files.len() != 1
+            || fragment.files[0].path != *target
+            || !fragment.deletions.is_empty()
+        {
+            return Err(BackendError::new(
+                "COMPILE_OUTPUT_INVALID",
+                format!("BYOK page batch returned an unexpected target for {target}."),
+                true,
+                true,
+            ));
+        }
+        if generated {
+            if let Some(cache) = batch_cache {
+                cache.save("page", &prompt, &fragment)?;
+            }
+        }
+        files.push(fragment.files.into_iter().next().unwrap());
+    }
+    let manifest = CompileManifest {
+        files,
+        deletions: Vec::new(),
+        summary: plan.summary.clone(),
+    };
+    CompileService::validate_workflow_manifest(&manifest)?;
+    Ok(manifest)
+}
+
+fn validate_selected_source_coverage(
+    plan: &CompilePlan,
+    sources: &[ResolvedCompileSource],
+    known_sources: &HashSet<String>,
+) -> Result<(), BackendError> {
+    let decisions = validated_source_decisions(plan, sources, known_sources)?;
+    let covered = plan
+        .items
+        .iter()
+        .filter(|item| !is_structural_page(&item.target_path))
+        .flat_map(|item| item.source_ids.iter())
+        .filter_map(|source| canonical_source_ref(source, known_sources))
+        .collect::<HashSet<_>>();
+    let missing = sources
+        .iter()
+        .filter(|source| {
+            !covered.contains(&source.workspace_path)
+                && !decisions.contains_key(&source.workspace_path)
+        })
+        .map(|source| source.reference.clone())
+        .collect::<Vec<_>>();
+    if decisions.keys().any(|source| covered.contains(source)) {
+        return Err(BackendError::new(
+            "COMPILE_SOURCE_COVERAGE_INCOMPLETE",
+            "A selected Source cannot be both integrated and declared deferred or already covered.",
+            true,
+            true,
+        ));
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(BackendError::new(
+            "COMPILE_SOURCE_COVERAGE_INCOMPLETE",
+            "The Wiki plan omitted selected Sources. No Source was marked consumed; generate a complete candidate or select a smaller batch.",
+            true,
+            true,
+        )
+        .with_details(serde_json::json!({ "missingSourceVersions": missing })))
+    }
+}
+
+fn validated_source_decisions<'a>(
+    plan: &'a CompilePlan,
+    sources: &[ResolvedCompileSource],
+    known_sources: &HashSet<String>,
+) -> Result<HashMap<String, &'a crate::models::compile::CompilePlanSourceDecision>, BackendError> {
+    let selected = sources
+        .iter()
+        .map(|source| source.workspace_path.as_str())
+        .collect::<HashSet<_>>();
+    let mut decisions = HashMap::new();
+    for decision in &plan.source_decisions {
+        let canonical = canonical_source_ref(&decision.source_id, known_sources);
+        let valid = canonical
+            .as_deref()
+            .is_some_and(|path| selected.contains(path))
+            && decision.status != CompileSourceOutcomeStatus::Integrated
+            && !decision.reason.trim().is_empty();
+        if !valid || decisions.insert(canonical.unwrap(), decision).is_some() {
+            return Err(BackendError::new(
+                "COMPILE_SOURCE_COVERAGE_INCOMPLETE",
+                "A Source decision is unknown, duplicated, or lacks an actionable reason.",
+                true,
+                true,
+            ));
+        }
+    }
+    Ok(decisions)
+}
+
+fn source_outcomes_for_candidate(
+    context: &ProjectContext,
+    plan: &CompilePlan,
+    manifest: &CompileManifest,
+    selected: &[ResolvedCompileSource],
+) -> Result<Vec<CompileSourceOutcome>, BackendError> {
+    let known_sources = CompileService::known_source_refs_for_sources(selected);
+    validate_selected_source_coverage(plan, selected, &known_sources)?;
+    let decisions = validated_source_decisions(plan, selected, &known_sources)?;
+    let manifest_paths = manifest
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<HashSet<_>>();
+    selected
+        .iter()
+        .map(|source| {
+            if let Some(decision) = decisions.get(&source.workspace_path) {
+                if decision.status == CompileSourceOutcomeStatus::Deferred {
+                    return Ok(CompileSourceOutcome {
+                        source_version: source.reference.clone(),
+                        source_path: source.workspace_path.clone(),
+                        status: CompileSourceOutcomeStatus::Deferred,
+                        integrated_paths: Vec::new(),
+                        evidence_path: None,
+                        evidence_excerpt: None,
+                        reason: Some(decision.reason.clone()),
+                    });
+                }
+                let path = decision.evidence_path.as_deref().ok_or_else(|| {
+                    BackendError::new("COMPILE_SOURCE_COVERAGE_INCOMPLETE", "An already-covered Source requires a Wiki evidence path.", true, true)
+                })?;
+                let excerpt = decision.evidence_excerpt.as_deref().filter(|value| !value.trim().is_empty()).ok_or_else(|| {
+                    BackendError::new("COMPILE_SOURCE_COVERAGE_INCOMPLETE", "An already-covered Source requires an exact existing passage.", true, true)
+                })?;
+                if !is_safe_wiki_markdown(path) || is_compile_protected_path(path)
+                    || manifest.deletions.iter().any(|deleted| deleted == path)
+                {
+                    return Err(BackendError::new("COMPILE_SOURCE_COVERAGE_INCOMPLETE", "An already-covered Source points to an invalid or deleted Wiki page.", true, true));
+                }
+                let old = FileStore.read_markdown(context, path)?;
+                let final_content = manifest.files.iter().find(|file| file.path == path).map(|file| file.content.as_str()).unwrap_or(&old);
+                if !old.contains(excerpt) || !final_content.contains(excerpt) {
+                    return Err(BackendError::new("COMPILE_SOURCE_COVERAGE_INCOMPLETE", "The claimed coverage passage is not present in the old and accepted Wiki page.", true, true));
+                }
+                return Ok(CompileSourceOutcome {
+                    source_version: source.reference.clone(),
+                    source_path: source.workspace_path.clone(),
+                    status: CompileSourceOutcomeStatus::AlreadyCovered,
+                    integrated_paths: Vec::new(),
+                    evidence_path: Some(path.to_string()),
+                    evidence_excerpt: Some(excerpt.to_string()),
+                    reason: Some(decision.reason.clone()),
+                });
+            }
+            let mut paths = plan
+                .items
+                .iter()
+                .filter(|item| {
+                    !is_structural_page(&item.target_path)
+                        && item.source_ids.iter().any(|raw| {
+                            canonical_source_ref(raw, &known_sources).as_deref()
+                                == Some(source.workspace_path.as_str())
+                        })
+                        && manifest_paths.contains(item.target_path.as_str())
+                })
+                .map(|item| item.target_path.clone())
+                .collect::<Vec<_>>();
+            paths.sort();
+            paths.dedup();
+            if paths.is_empty() {
+                return Err(BackendError::new(
+                    "COMPILE_SOURCE_COVERAGE_INCOMPLETE",
+                    "A selected Source has no accepted derived page. It cannot be consumed.",
+                    true,
+                    true,
+                ));
+            }
+            Ok(CompileSourceOutcome {
+                source_version: source.reference.clone(),
+                source_path: source.workspace_path.clone(),
+                status: CompileSourceOutcomeStatus::Integrated,
+                integrated_paths: paths,
+                evidence_path: None,
+                evidence_excerpt: None,
+                reason: None,
+            })
+        })
+        .collect()
 }
 
 fn select_compile_provider(
@@ -3148,6 +4041,7 @@ mod tests {
                 risk_flags: vec![],
             }],
             global_risk_flags: vec![],
+            source_decisions: Vec::new(),
         };
 
         let error = CompileService::validate_plan(&context, &no_source, &[], &known_sources)
@@ -3166,6 +4060,7 @@ mod tests {
                 risk_flags: vec![],
             }],
             global_risk_flags: vec![],
+            source_decisions: Vec::new(),
         };
 
         let error = CompileService::validate_plan(
@@ -3195,6 +4090,7 @@ mod tests {
                 risk_flags: vec![],
             }],
             global_risk_flags: vec![],
+            source_decisions: Vec::new(),
         };
         let error = CompileService::validate_plan(&context, &protected, &[], &known_sources)
             .expect_err("wiki/sources plan target must fail");
@@ -3221,6 +4117,7 @@ mod tests {
                 })
                 .collect(),
             global_risk_flags: vec![],
+            source_decisions: Vec::new(),
         };
         let error = CompileService::validate_plan(&context, &structural_only, &[], &known_sources)
             .expect_err("compile cannot plan only structural pages");
@@ -3346,6 +4243,7 @@ mod tests {
                 risk_flags: vec![],
             }],
             global_risk_flags: vec![],
+            source_decisions: Vec::new(),
         };
         let structural_only = CompileManifest {
             files: vec![
@@ -4057,5 +4955,293 @@ mod tests {
                 "unexpected protection decision for {path}"
             );
         }
+    }
+
+    #[test]
+    fn omitted_selected_source_cannot_be_consumed_from_a_valid_page_plan() {
+        let source = |name: &str| ResolvedCompileSource {
+            reference: SourceVersionRef {
+                source_id: name.into(),
+                version_id: "v1".into(),
+                content_hash: format!("hash-{name}"),
+            },
+            project_path: format!("wiki/sources/{name}.md"),
+            workspace_path: format!("wiki/sources/{name}.md"),
+            absolute_path: std::path::PathBuf::new(),
+            already_consumed: false,
+            registry: CompileSourceRegistry::V2,
+        };
+        let sources = vec![source("covered"), source("omitted")];
+        let plan = CompilePlan {
+            summary: "one page".into(),
+            items: vec![CompilePlanItem {
+                action: CompileAction::Create,
+                target_path: "wiki/concepts/page.md".into(),
+                page_type: CompilePageType::Concept,
+                source_ids: vec!["covered.md".into()],
+                affected_existing_pages: vec![],
+                reason: "covered source".into(),
+                risk_flags: vec![],
+            }],
+            global_risk_flags: vec![],
+            source_decisions: Vec::new(),
+        };
+        let known = CompileService::known_source_refs_for_sources(&sources);
+        let error = validate_selected_source_coverage(&plan, &sources, &known).unwrap_err();
+        assert_eq!(error.code, "COMPILE_SOURCE_COVERAGE_INCOMPLETE");
+        assert_eq!(
+            error.details.unwrap()["missingSourceVersions"][0]["sourceId"],
+            "omitted"
+        );
+    }
+
+    #[test]
+    fn kept_current_page_removes_its_sources_from_consumption() {
+        let source = |name: &str| ResolvedCompileSource {
+            reference: SourceVersionRef {
+                source_id: name.into(),
+                version_id: "v1".into(),
+                content_hash: format!("hash-{name}"),
+            },
+            project_path: format!("wiki/sources/{name}.md"),
+            workspace_path: format!("wiki/sources/{name}.md"),
+            absolute_path: std::path::PathBuf::new(),
+            already_consumed: false,
+            registry: CompileSourceRegistry::V2,
+        };
+        let selected = vec![source("a"), source("b")];
+        let plan = CompilePlan {
+            summary: "two pages".into(),
+            items: vec![
+                CompilePlanItem {
+                    action: CompileAction::Create,
+                    target_path: "wiki/concepts/a.md".into(),
+                    page_type: CompilePageType::Concept,
+                    source_ids: vec!["a.md".into()],
+                    affected_existing_pages: vec![],
+                    reason: "a".into(),
+                    risk_flags: vec![],
+                },
+                CompilePlanItem {
+                    action: CompileAction::Create,
+                    target_path: "wiki/concepts/b.md".into(),
+                    page_type: CompilePageType::Concept,
+                    source_ids: vec!["b.md".into()],
+                    affected_existing_pages: vec![],
+                    reason: "b".into(),
+                    risk_flags: vec![],
+                },
+            ],
+            global_risk_flags: vec![],
+            source_decisions: Vec::new(),
+        };
+        let accepted = CompileManifest {
+            files: vec![CompileFile::new("wiki/concepts/a.md", "# a")],
+            deletions: vec![],
+            summary: "keep b".into(),
+        };
+        assert_eq!(
+            CompileService::source_versions_for_accepted_manifest(&plan, &accepted, &selected),
+            vec![selected[0].reference.clone()],
+        );
+    }
+
+    #[test]
+    fn explicit_deferred_and_reviewable_covered_sources_bind_exact_versions_and_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("wiki/concepts")).unwrap();
+        fs::write(
+            root.path().join("wiki/concepts/prior.md"),
+            "# Prior\nVerified passage\n",
+        )
+        .unwrap();
+        let context = ProjectContext::new("source-decisions", root.path().to_path_buf());
+        let source = |name: &str| ResolvedCompileSource {
+            reference: SourceVersionRef {
+                source_id: name.into(),
+                version_id: "v1".into(),
+                content_hash: format!("hash-{name}"),
+            },
+            project_path: format!("wiki/sources/{name}.md"),
+            workspace_path: format!("wiki/sources/{name}.md"),
+            absolute_path: std::path::PathBuf::new(),
+            already_consumed: false,
+            registry: CompileSourceRegistry::V2,
+        };
+        let selected = vec![source("a"), source("b"), source("c")];
+        let mut plan = CompilePlan {
+            summary: "partial".into(),
+            items: vec![CompilePlanItem {
+                action: CompileAction::Create,
+                target_path: "wiki/concepts/a.md".into(),
+                page_type: CompilePageType::Concept,
+                source_ids: vec!["a.md".into()],
+                affected_existing_pages: vec![],
+                reason: "a".into(),
+                risk_flags: vec![],
+            }],
+            global_risk_flags: vec![],
+            source_decisions: vec![
+                crate::models::compile::CompilePlanSourceDecision {
+                    source_id: "b.md".into(),
+                    status: CompileSourceOutcomeStatus::Deferred,
+                    reason: "needs more context".into(),
+                    evidence_path: None,
+                    evidence_excerpt: None,
+                },
+                crate::models::compile::CompilePlanSourceDecision {
+                    source_id: "c.md".into(),
+                    status: CompileSourceOutcomeStatus::AlreadyCovered,
+                    reason: "previously documented".into(),
+                    evidence_path: Some("wiki/concepts/prior.md".into()),
+                    evidence_excerpt: Some("Verified passage".into()),
+                },
+            ],
+        };
+        let manifest = CompileManifest {
+            files: vec![CompileFile::new("wiki/concepts/a.md", "# A")],
+            deletions: vec![],
+            summary: "partial".into(),
+        };
+        let outcomes =
+            source_outcomes_for_candidate(&context, &plan, &manifest, &selected).unwrap();
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|outcome| outcome.status)
+                .collect::<Vec<_>>(),
+            vec![
+                CompileSourceOutcomeStatus::Integrated,
+                CompileSourceOutcomeStatus::Deferred,
+                CompileSourceOutcomeStatus::AlreadyCovered
+            ]
+        );
+        assert_eq!(outcomes[1].source_version.content_hash, "hash-b");
+        plan.source_decisions[1].evidence_excerpt = Some("invented passage".into());
+        assert_eq!(
+            source_outcomes_for_candidate(&context, &plan, &manifest, &selected)
+                .unwrap_err()
+                .code,
+            "COMPILE_SOURCE_COVERAGE_INCOMPLETE"
+        );
+        plan.source_decisions[1].evidence_excerpt = Some("Verified passage".into());
+        plan.source_decisions.push(plan.source_decisions[1].clone());
+        assert_eq!(
+            validate_selected_source_coverage(
+                &plan,
+                &selected,
+                &CompileService::known_source_refs_for_sources(&selected)
+            )
+            .unwrap_err()
+            .code,
+            "COMPILE_SOURCE_COVERAGE_INCOMPLETE"
+        );
+    }
+
+    #[test]
+    fn byok_budget_counts_full_utf8_input_and_reserves_output() {
+        let config = LlmProviderConfig {
+            provider: LlmProviderKind::OpenAi,
+            model: "test-model".into(),
+            base_url: "https://api.openai.com".into(),
+            context_window: 4096,
+            enabled: true,
+        };
+        let output_limit = compile_output_token_limit(&config);
+        check_compile_prompt_budget(&config, &"a".repeat(1000), output_limit).unwrap();
+        let error =
+            check_compile_prompt_budget(&config, &"知识".repeat(800), output_limit).unwrap_err();
+        assert_eq!(error.code, "COMPILE_INPUT_TOO_LARGE");
+        assert_eq!(
+            error.details.unwrap()["estimate"],
+            "conservative_utf8_bytes"
+        );
+    }
+
+    #[test]
+    fn byok_group_prompt_includes_related_old_page_without_unrelated_pages() {
+        let root = tempfile::tempdir().unwrap();
+        for path in ["wiki/sources", "wiki/concepts"] {
+            fs::create_dir_all(root.path().join(path)).unwrap();
+        }
+        for (path, content) in [
+            ("purpose.md", "# Purpose\n"),
+            ("schema.md", "# Schema\n"),
+            ("wiki/index.md", "# Index\n"),
+            ("wiki/overview.md", "# Overview\n"),
+            ("wiki/sources/新.md", "# 新证据\n代理记忆的新情况\n"),
+            ("wiki/concepts/代理记忆.md", "# 代理记忆\n旧事实与旧引用\n"),
+            ("wiki/concepts/无关主题.md", "# 无关主题\n不应随组发送\n"),
+        ] {
+            fs::write(root.path().join(path), content).unwrap();
+        }
+        let source = ResolvedCompileSource {
+            reference: SourceVersionRef {
+                source_id: "new".into(),
+                version_id: "v1".into(),
+                content_hash: "hash".into(),
+            },
+            project_path: "wiki/sources/新.md".into(),
+            workspace_path: "wiki/sources/新.md".into(),
+            absolute_path: root.path().join("wiki/sources/新.md"),
+            already_consumed: false,
+            registry: CompileSourceRegistry::V2,
+        };
+        let prompt = byok_plan_group_prompt(
+            root.path(),
+            "zh",
+            CompileGenerationPolicy::WorkflowReviewableDeletes,
+            &[source],
+        )
+        .unwrap();
+        assert!(prompt.contains("旧事实与旧引用"));
+        assert!(!prompt.contains("不应随组发送"));
+    }
+
+    #[test]
+    fn existing_target_may_retain_verified_old_source_without_selecting_it() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("wiki/concepts")).unwrap();
+        fs::create_dir_all(root.path().join("wiki/sources")).unwrap();
+        fs::write(root.path().join("wiki/sources/旧.md"), "# old evidence\n").unwrap();
+        fs::write(
+            root.path().join("wiki/concepts/topic.md"),
+            "---\ntype: concept\nsources: [旧.md]\n---\n# prior knowledge\n",
+        )
+        .unwrap();
+        let context = ProjectContext::new("historical-source", root.path().to_path_buf());
+        let source = ResolvedCompileSource {
+            reference: SourceVersionRef {
+                source_id: "new".into(),
+                version_id: "v1".into(),
+                content_hash: "new-hash".into(),
+            },
+            project_path: "wiki/sources/新.md".into(),
+            workspace_path: "wiki/sources/新.md".into(),
+            absolute_path: root.path().join("wiki/sources/新.md"),
+            already_consumed: false,
+            registry: CompileSourceRegistry::V2,
+        };
+        let plan = CompilePlan {
+            summary: "merge".into(),
+            items: vec![CompilePlanItem {
+                action: CompileAction::Merge,
+                target_path: "wiki/concepts/topic.md".into(),
+                page_type: CompilePageType::Concept,
+                source_ids: vec!["旧.md".into(), "新.md".into()],
+                affected_existing_pages: vec!["wiki/concepts/topic.md".into()],
+                reason: "combine prior and new evidence".into(),
+                risk_flags: vec![],
+            }],
+            global_risk_flags: vec![],
+            source_decisions: Vec::new(),
+        };
+        let known =
+            CompileService::allowed_source_refs_for_plan(&context, &[source.clone()], &plan)
+                .unwrap();
+        assert!(known.contains("wiki/sources/旧.md"));
+        CompileService::validate_plan(&context, &plan, &["wiki/concepts/topic.md".into()], &known)
+            .unwrap();
+        validate_selected_source_coverage(&plan, &[source], &known).unwrap();
     }
 }

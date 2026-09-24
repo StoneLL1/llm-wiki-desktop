@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -13,6 +14,8 @@ from core import (
     ENGINE_ID,
     ENGINE_VERSION,
     MAX_IMAGE_PIXELS,
+    MAX_TOTAL_IMAGE_PIXELS,
+    stage_tiff_pages,
     MODEL_DECLARATIONS,
     MODEL_VERSION,
     OcrPolicyError,
@@ -181,20 +184,30 @@ try:
             total_pixels = 0
             for page_index in range(len(document)):
                 rendered = rendered_pdf_root / f"page-{page_index + 1}.png"
-                document[page_index].render(scale=2).to_pil().save(rendered, format="PNG")
+                page = document[page_index]
+                width, height = page.get_size()
+                validate_image_geometry(math.ceil(width * 2), math.ceil(height * 2), 1)
+                total_pixels += math.ceil(width * 2) * math.ceil(height * 2)
+                if total_pixels > MAX_TOTAL_IMAGE_PIXELS:
+                    raise OcrPolicyError("IMPORT_OCR_IMAGE_TOO_LARGE")
+                page.render(scale=2).to_pil().save(rendered, format="PNG")
+                page.close()
                 images_for_ocr.append(rendered)
             document.close()
+        elif image_path.suffix.lower() in {".tif", ".tiff"}:
+            rendered_pdf_root = Path(tempfile.mkdtemp(prefix=".tiff-ocr-input-", dir=staging_root))
+            with Image.open(native_tool_path(image_path)) as tiff:
+                images_for_ocr = stage_tiff_pages(tiff, rendered_pdf_root)
         for image_for_ocr in images_for_ocr:
             with Image.open(native_tool_path(image_for_ocr)) as image_probe:
+                if (int(getattr(image_probe, "n_frames", 1)) > 1
+                        and image_path.suffix.lower() not in {".heic", ".heif"}):
+                    raise OcrPolicyError("IMPORT_OCR_MULTIPAGE_UNSUPPORTED")
                 validate_image_geometry(
                     image_probe.width,
                     image_probe.height,
-                    int(getattr(image_probe, "n_frames", 1)),
+                    1,  # TIFF pages were split; HEIF auxiliary images are not document pages.
                 )
-                if image_path.suffix.lower() == ".pdf":
-                    total_pixels += image_probe.width * image_probe.height
-                    if total_pixels > MAX_IMAGE_PIXELS * 4:
-                        raise OcrPolicyError("IMPORT_OCR_IMAGE_TOO_LARGE")
     except OcrPolicyError:
         raise
     except Image.DecompressionBombError:

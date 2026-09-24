@@ -8,6 +8,9 @@ import test from "node:test";
 
 import {
   verifySignedFile,
+  completeDecodeMarker,
+  canReuseDecodedChunks,
+  decodedChunks,
   assertProviderWasUsed,
   buildChunkedFfmpegArguments,
   buildEmbeddedSubtitleArguments,
@@ -84,13 +87,13 @@ test("builds fixed local-only decode and SenseVoice commands", () => {
   assert.deepEqual(buildFfmpegArguments("input.m4a", "decoded.wav"), [
     "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
     "-protocol_whitelist", "file,pipe", "-i", "input.m4a",
-    "-map", "0:a:0", "-vn", "-sn", "-dn", "-t", "7200",
+    "-map", "0:a:0", "-vn", "-sn", "-dn",
     "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "decoded.wav",
   ]);
   assert.deepEqual(buildChunkedFfmpegArguments("input.m4a", "decoded-%04d.wav"), [
     "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
     "-protocol_whitelist", "file,pipe", "-i", "input.m4a",
-    "-map", "0:a:0", "-vn", "-sn", "-dn", "-t", "7200",
+    "-map", "0:a:0", "-vn", "-sn", "-dn",
     "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
     "-f", "segment", "-segment_time", "20", "-reset_timestamps", "1",
     "decoded-%04d.wav",
@@ -271,4 +274,89 @@ test("installed models are checked for availability without repeating download h
   assert.equal(await verifySignedFile(root, manifest, "models/model.int8.onnx"), await fs.realpath(model));
   await fs.writeFile(model, "short");
   await assert.rejects(verifySignedFile(root, manifest, "models/model.int8.onnx"), /INTEGRITY_FAILED/u);
+});
+
+
+test("decode caches reject legacy, interrupted, missing and changed coverage", () => {
+  const chunks = [{ startMs: 0, durationMs: 20032, bytes: 641102 }, { startMs: 20032, durationMs: 968, bytes: 31054 }];
+  const marker = completeDecodeMarker("input-hash", chunks);
+  assert.equal(canReuseDecodedChunks(marker, "input-hash", chunks), true);
+  assert.equal(marker.durationMs, 21000);
+  assert.equal(canReuseDecodedChunks({ schemaVersion: 1, complete: true, mediaSha256: "input-hash", chunkSeconds: 20, chunks: 360 }, "input-hash", chunks), false);
+  assert.equal(canReuseDecodedChunks({ ...marker, complete: false }, "input-hash", chunks), false);
+  assert.equal(canReuseDecodedChunks(marker, "other-input", chunks), false);
+  assert.equal(canReuseDecodedChunks(marker, "input-hash", chunks.slice(0, 1)), false);
+  assert.equal(canReuseDecodedChunks(marker, "input-hash", [{ ...chunks[0], bytes: 641104 }, chunks[1]]), false);
+});
+
+test("decoded PCM coverage uses real sample lengths and rejects partial WAVs", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "sensevoice-coverage-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const wav = (samples) => {
+    const result = Buffer.alloc(44 + samples * 2);
+    result.write("RIFF"); result.writeUInt32LE(result.length - 8, 4); result.write("WAVEfmt ", 8);
+    result.writeUInt32LE(16, 16); result.writeUInt16LE(1, 20); result.writeUInt16LE(1, 22);
+    result.writeUInt32LE(16000, 24); result.writeUInt32LE(32000, 28); result.writeUInt16LE(2, 32); result.writeUInt16LE(16, 34);
+    result.write("data", 36); result.writeUInt32LE(samples * 2, 40); return result;
+  };
+  await fs.writeFile(path.join(root, "decoded-0000.wav"), wav(320512));
+  await fs.writeFile(path.join(root, "decoded-0001.wav"), wav(15488));
+  const chunks = await decodedChunks(root);
+  assert.equal(chunks[1].startMs, 20032);
+  assert.equal(chunks[0].hasSignal, false);
+  const signal = wav(15488); signal[44] = 1;
+  await fs.writeFile(path.join(root, "decoded-0001.wav"), signal);
+  assert.equal((await decodedChunks(root))[1].hasSignal, true);
+  assert.equal(completeDecodeMarker("hash", chunks).durationMs, 21000);
+  await fs.writeFile(path.join(root, "decoded-0001.wav"), wav(15488).subarray(0, 500));
+  await assert.rejects(decodedChunks(root), /IMPORT_ASR_DECODE_FAILED/);
+});
+
+test("real FFmpeg decodes beyond two hours to EOF and verifies reusable full coverage", { skip: !process.env.LLM_WIKI_TEST_FFMPEG }, async (t) => {
+  const { execFileSync } = await import("node:child_process");
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "sensevoice-long-decode-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const source = path.join(root, "input.flac");
+  execFileSync(process.env.LLM_WIKI_TEST_FFMPEG, ["-v", "error", "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono", "-t", "7221", "-c:a", "flac", source]);
+  execFileSync(process.env.LLM_WIKI_TEST_FFMPEG, buildChunkedFfmpegArguments(source, path.join(root, "decoded-%04d.wav")));
+  const chunks = await decodedChunks(root);
+  assert.equal(chunks.length, 362);
+  const marker = completeDecodeMarker("hash", chunks);
+  assert.equal(marker.durationMs, 7221000);
+  assert.ok(chunks.at(-1).startMs > 7200000);
+  assert.equal(canReuseDecodedChunks(marker, "hash", chunks), true);
+  await fs.rm(chunks.at(-1).path);
+  assert.equal(canReuseDecodedChunks(marker, "hash", await decodedChunks(root)), false);
+});
+
+
+test("silent punctuation-only shards are not speech or placeholder Sources", () => {
+  const silent = '{"text":"。","timestamps":[19.86],"tokens":["。"]}';
+  assert.deepEqual(parseSenseVoiceBatchStdout(silent, [0]), []);
+  assert.throws(() => parseSenseVoiceStdout(silent), /IMPORT_ASR_OUTPUT_INVALID/);
+  const oldSilentCache = { text: "。", segments: [{ startMs: 19860, text: "。" }], tokenTimings: [{ startMs: 19860, token: "。" }] };
+  assert.throws(() => mergeSenseVoiceTranscripts([oldSilentCache]), /IMPORT_ASR_OUTPUT_INVALID/);
+  const speech = parseSenseVoiceBatchStdout('{"text":"2026 中文尾段","timestamps":[5],"tokens":["2026 中文尾段"]}', [7200000]);
+  assert.equal(mergeSenseVoiceTranscripts([oldSilentCache, ...speech]).text, "2026 中文尾段");
+});
+
+
+test("binary PGM whitespace pixels and repeated opening scenes preserve later frames", () => {
+  const frame = (first, shift = 0) => {
+    const pixels = Buffer.alloc(32 * 32, 240);
+    for (let y = 0; y < 32; y += 1) pixels[y * 32 + 4 + shift] = 20;
+    pixels[0] = first;
+    return Buffer.concat([Buffer.from("P5\n32 32\n255\n"), pixels]);
+  };
+  for (const first of [9, 10, 13, 32]) {
+    const opening = frame(first);
+    const late = frame(first, 10);
+    assert.deepEqual(selectStableTextFrameIndexes([...Array(24).fill(opening), late, late]), [1, 24]);
+  }
+});
+
+
+test("FFmpeg 8 empty stream-map diagnostics still identify a missing audio track", () => {
+  assert.equal(isNoAudioExecutionError({ stderr: "Stream map '' matches no streams.\nFailed to set value '0:a:0' for option 'map': Invalid argument" }), true);
+  assert.equal(isNoAudioExecutionError({ stderr: "Stream map '' matches no streams.\nFailed to set value '0:s:0' for option 'map': Invalid argument" }), false);
 });

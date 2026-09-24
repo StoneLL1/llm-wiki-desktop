@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 mod history;
@@ -7,8 +7,10 @@ pub use history::{
 };
 
 use crate::errors::BackendError;
+#[cfg(test)]
+use crate::models::compile::CompileFile;
 use crate::models::compile::{
-    CompileCandidate, CompileConsumptionRecord, CompileFile, CompileManifest, ResolvedCompileRoute,
+    CompileCandidate, CompileConsumptionRecord, CompileManifest, ResolvedCompileRoute,
     SourceVersionRef,
 };
 use crate::models::confirmation::{
@@ -202,6 +204,10 @@ where
                 skipped: selected_refs.len() as u64,
                 deleted: 0,
                 conflicted: 0,
+                source_integrated: 0,
+                source_already_covered: 0,
+                source_deferred: 0,
+                source_outcomes: Vec::new(),
                 affected_paths: Vec::new(),
                 checkpoint_hash: None,
                 final_commit: None,
@@ -211,7 +217,7 @@ where
     }
 
     let wiki_baseline = CompileService::snapshot_wiki(context)?;
-    let input_baseline = snapshot_compile_inputs(context, &selected_sources, &wiki_baseline)?;
+    let mut input_baseline = snapshot_compile_inputs(context, &selected_sources)?;
     sink.start(CREATE_CHECKPOINT).map_err(task_error)?;
     with_update_wiki_git_cancellation(services, task_id, || {
         services
@@ -238,6 +244,8 @@ where
 
     let workspace =
         CompileService::create_workspace_for_sources(context, task_id, &selected_sources)?;
+    let workspace_inputs =
+        snapshot_workspace_context_inputs(context, &workspace, &selected_sources)?;
     let result = async {
         let protected_sources = CompileService::snapshot_workspace_sources(&workspace)?;
         sink.start(PLAN_UPDATES).map_err(task_error)?;
@@ -265,6 +273,32 @@ where
         .await;
         publication.started();
         let candidate = candidate?;
+        let output_paths = candidate
+            .manifest
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .chain(candidate.manifest.deletions.iter().map(String::as_str))
+            .collect::<HashSet<_>>();
+        input_baseline.extend(
+            workspace_inputs
+                .iter()
+                .filter(|(path, _)| !output_paths.contains(path.as_str()))
+                .map(|(path, hash)| (path.clone(), hash.clone())),
+        );
+        for outcome in &candidate.source_outcomes {
+            if outcome.status == crate::models::compile::CompileSourceOutcomeStatus::AlreadyCovered
+            {
+                if let Some(path) = outcome.evidence_path.as_deref() {
+                    if !output_paths.contains(path) {
+                        input_baseline.insert(
+                            path.to_string(),
+                            FileStore.file_hash_if_exists(context, path)?,
+                        );
+                    }
+                }
+            }
+        }
         sink.progress(
             VALIDATE_STRUCTURE,
             candidate
@@ -290,9 +324,17 @@ where
                 .iter()
                 .map(|source| source.reference.clone())
                 .collect::<Vec<_>>();
+            let consumable = candidate
+                .source_outcomes
+                .iter()
+                .filter(|outcome| {
+                    outcome.status != crate::models::compile::CompileSourceOutcomeStatus::Deferred
+                })
+                .map(|outcome| &outcome.source_version)
+                .collect::<Vec<_>>();
             if CompileService::resolve_source_versions(context, &source_versions)?
                 .iter()
-                .any(|source| source.already_consumed)
+                .any(|source| source.already_consumed && consumable.contains(&&source.reference))
             {
                 return Err(BackendError::new(
                     "COMPILE_SOURCE_VERSION_STALE",
@@ -302,13 +344,14 @@ where
                 ));
             }
         }
-        let summary = CompileService::classify_workflow_changes(
+        let mut summary = CompileService::classify_workflow_changes(
             context,
             &candidate.manifest,
             &candidate.plan,
             &wiki_baseline,
             mode == UpdateWikiMode::FullRecompile,
         )?;
+        mark_covered_sources_for_review(&candidate, &mut summary);
         sink.progress(
             REVIEW_RISK,
             summary.affected_paths().first().cloned(),
@@ -316,13 +359,18 @@ where
             Some(summary.affected_paths().len() as u64),
         )
         .map_err(task_error)?;
-        if summary.requires_confirmation() {
+        if summary.requires_confirmation()
+            || candidate.source_outcomes.iter().any(|outcome| {
+                outcome.status == crate::models::compile::CompileSourceOutcomeStatus::Deferred
+            })
+        {
             persist_update_wiki_review(
                 context,
                 run,
                 &candidate,
                 &summary.affected_paths(),
                 &wiki_baseline,
+                &input_baseline,
                 checkpoint.commit_hash.clone(),
                 services,
             )?;
@@ -341,6 +389,7 @@ where
             &candidate_sources,
             &current_hashes,
             &wiki_baseline,
+            &input_baseline,
             checkpoint.commit_hash.clone(),
         )?;
         let descriptor =
@@ -476,33 +525,88 @@ fn workflow_compile_route(run: &WorkflowRun) -> Result<ResolvedCompileRoute, Bac
 fn snapshot_compile_inputs(
     context: &ProjectContext,
     sources: &[crate::services::ResolvedCompileSource],
-    wiki_baseline: &HashMap<String, String>,
-) -> Result<HashMap<String, String>, BackendError> {
-    let mut snapshot = wiki_baseline.clone();
-    for path in ["purpose.md", "schema.md"] {
-        if context.resolve_project_path(path)?.is_file() {
-            snapshot.insert(path.into(), FileStore.file_hash(context, path)?);
+) -> Result<HashMap<String, Option<String>>, BackendError> {
+    let mut snapshot = HashMap::new();
+    for (name, document) in [
+        ("purpose.md", context.layout.purpose_context.as_ref()),
+        ("schema.md", context.layout.schema_context.as_ref()),
+    ] {
+        // Track absent alternatives too: a new compatible guidance file can
+        // take precedence while a candidate waits for confirmation.
+        snapshot.insert(
+            name.to_string(),
+            FileStore.file_hash_if_exists(context, name)?,
+        );
+        if context.layout.app_state_root.as_deref() == Some(".app/compat") {
+            let compatible = format!(".app/compat/{name}");
+            snapshot.insert(
+                compatible.clone(),
+                FileStore.file_hash_if_exists(context, &compatible)?,
+            );
         }
+        let path = document
+            .and_then(|document| document.read_path.as_deref())
+            .unwrap_or(name);
+        snapshot.insert(
+            path.to_string(),
+            FileStore.file_hash_if_exists(context, path)?,
+        );
     }
     for source in sources {
         snapshot.insert(
             source.project_path.clone(),
-            FileStore.file_hash(context, &source.project_path)?,
+            Some(FileStore.file_hash(context, &source.project_path)?),
         );
+    }
+    Ok(snapshot)
+}
+
+fn snapshot_workspace_context_inputs(
+    context: &ProjectContext,
+    workspace: &std::path::Path,
+    sources: &[crate::services::ResolvedCompileSource],
+) -> Result<HashMap<String, Option<String>>, BackendError> {
+    let source_aliases = sources
+        .iter()
+        .map(|source| source.workspace_path.as_str())
+        .collect::<HashSet<_>>();
+    let mut snapshot = HashMap::new();
+    for absolute in FileStore.list_markdown_files(&workspace.join("wiki"))? {
+        let relative = absolute
+            .strip_prefix(workspace)
+            .map_err(|error| {
+                BackendError::new("COMPILE_WORKSPACE_INVALID", error.to_string(), false, true)
+            })?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if source_aliases.contains(relative.as_str()) {
+            continue;
+        }
+        let content = std::fs::read(&absolute).map_err(|error| {
+            BackendError::new("COMPILE_INPUT_READ_FAILED", error.to_string(), true, false)
+        })?;
+        use sha2::Digest;
+        let copied_hash = format!("{:x}", sha2::Sha256::digest(&content));
+        let current_hash = FileStore.file_hash_if_exists(context, &relative)?;
+        if current_hash.as_deref() != Some(copied_hash.as_str()) {
+            return Err(BackendError::new(
+                "WORKFLOW_INPUT_BASELINE_CHANGED",
+                format!("A Wiki context page changed while preparing Update Wiki: {relative}"),
+                true,
+                true,
+            ));
+        }
+        snapshot.insert(relative, current_hash);
     }
     Ok(snapshot)
 }
 
 fn revalidate_non_wiki_inputs(
     context: &ProjectContext,
-    baseline: &HashMap<String, String>,
+    baseline: &HashMap<String, Option<String>>,
 ) -> Result<(), BackendError> {
-    for (path, expected) in baseline
-        .iter()
-        .filter(|(path, _)| !path.starts_with("wiki/") || path.starts_with("wiki/sources/"))
-    {
-        let absolute = context.resolve_project_path(path)?;
-        if !absolute.is_file() || FileStore.file_hash(context, path)? != *expected {
+    for (path, expected) in baseline {
+        if FileStore.file_hash_if_exists(context, path)? != *expected {
             return Err(BackendError::new(
                 "WORKFLOW_INPUT_BASELINE_CHANGED",
                 "Update Wiki inputs changed during generation. Prepare and run again.",
@@ -514,12 +618,71 @@ fn revalidate_non_wiki_inputs(
     Ok(())
 }
 
+fn mark_covered_sources_for_review(
+    candidate: &CompileCandidate,
+    summary: &mut crate::models::compile::CompileChangeSummary,
+) {
+    summary
+        .high_risk
+        .extend(candidate.source_outcomes.iter().filter_map(|outcome| {
+            (outcome.status == crate::models::compile::CompileSourceOutcomeStatus::AlreadyCovered)
+                .then(|| outcome.evidence_path.clone())
+                .flatten()
+        }));
+    summary.high_risk.sort();
+    summary.high_risk.dedup();
+}
+
+fn source_outcome_counts(candidate: &CompileCandidate) -> (u64, u64, u64) {
+    let mut integrated = 0;
+    let mut already_covered = 0;
+    let mut deferred = 0;
+    for outcome in &candidate.source_outcomes {
+        match outcome.status {
+            crate::models::compile::CompileSourceOutcomeStatus::Integrated => integrated += 1,
+            crate::models::compile::CompileSourceOutcomeStatus::AlreadyCovered => {
+                already_covered += 1
+            }
+            crate::models::compile::CompileSourceOutcomeStatus::Deferred => deferred += 1,
+        }
+    }
+    (integrated, already_covered, deferred)
+}
+
+fn source_outcome_review_notes(candidate: &CompileCandidate) -> Vec<String> {
+    candidate
+        .source_outcomes
+        .iter()
+        .filter(|outcome| {
+            outcome.status != crate::models::compile::CompileSourceOutcomeStatus::Integrated
+        })
+        .map(|outcome| {
+            format!(
+                "{} ({:?}): {} — {}",
+                if outcome.source_path.is_empty() {
+                    &outcome.source_version.source_id
+                } else {
+                    &outcome.source_path
+                },
+                outcome.status,
+                outcome.evidence_path.as_deref().unwrap_or("pending"),
+                outcome
+                    .evidence_excerpt
+                    .as_deref()
+                    .or(outcome.reason.as_deref())
+                    .unwrap_or("")
+            )
+        })
+        .collect()
+}
+
 fn register_waiting_decision(
     context: &ProjectContext,
     run: &WorkflowRun,
     candidate: &CompileCandidate,
     affected_paths: &[String],
     baseline_hashes: &HashMap<String, String>,
+    input_hashes: &HashMap<String, Option<String>>,
     checkpoint_hash: Option<String>,
     services: &UpdateWikiExecutionServices<'_>,
 ) -> Result<(WorkflowPendingAction, ConfirmationExecution), BackendError> {
@@ -539,21 +702,28 @@ fn register_waiting_decision(
         &source_versions,
         &current_hashes,
         baseline_hashes,
+        input_hashes,
         checkpoint_hash.clone(),
     )?;
     let candidate_id = format!("{}:{candidate_hash}", run.task_id);
+    let coverage_notes = source_outcome_review_notes(candidate);
+    let review_message = if coverage_notes.is_empty() {
+        "Generated Wiki changes include conflicts, deletes, overwrites, or a broad rewrite and require review.".to_string()
+    } else {
+        format!("Review the Source outcomes before applying this partial Wiki update. Deferred Sources remain pending; previously covered Sources will be consumed only after this confirmation:\n{}", coverage_notes.join("\n"))
+    };
     let action = PendingAction {
         id: action_id.clone(),
         action_type: PendingActionType::MergeConflict,
         title: "Review Update Wiki changes".into(),
-        message: "Generated Wiki changes include conflicts, deletes, overwrites, or a broad rewrite and require review.".into(),
+        message: review_message,
         risk_level: RiskLevel::High,
         affected_paths: affected_paths.to_vec(),
         preview: Some(ActionPreview {
             summary: format!("{} path(s) require review", affected_paths.len()),
             before: None,
             after: None,
-            diff: Some(CompileService::candidate_diff(&candidate.manifest)),
+            diff: Some(render_manifest_actual_diff(context, &candidate.manifest)?),
         }),
         expires_at: None,
         checkpoint_hash: checkpoint_hash.clone(),
@@ -597,6 +767,8 @@ struct PersistedUpdateWikiCandidate {
     source_versions: Vec<SourceVersionRef>,
     current_hashes: HashMap<String, String>,
     baseline_hashes: HashMap<String, String>,
+    #[serde(default)]
+    input_hashes: HashMap<String, Option<String>>,
     checkpoint_hash: Option<String>,
     #[serde(default)]
     reconciliation_result: Option<WorkflowResult>,
@@ -609,6 +781,7 @@ fn persist_candidate_state(
     source_versions: &[SourceVersionRef],
     current_hashes: &HashMap<String, String>,
     baseline_hashes: &HashMap<String, String>,
+    input_hashes: &HashMap<String, Option<String>>,
     checkpoint_hash: Option<String>,
 ) -> Result<String, BackendError> {
     let workspace = create_candidate_workspace_for_task(task_id)?;
@@ -632,7 +805,7 @@ fn persist_candidate_state(
     let identity =
         super::super::persistence::project_identity(&context.root).map_err(task_error)?;
     let descriptor = PersistedUpdateWikiCandidate {
-        schema_version: 1,
+        schema_version: 3,
         task_id: task_id.to_string(),
         project_identity_key: identity.canonical_identity_key,
         project_identity_revision: identity.identity_revision,
@@ -640,6 +813,7 @@ fn persist_candidate_state(
         source_versions: source_versions.to_vec(),
         current_hashes: current_hashes.clone(),
         baseline_hashes: baseline_hashes.clone(),
+        input_hashes: input_hashes.clone(),
         checkpoint_hash,
         reconciliation_result: None,
     };
@@ -746,6 +920,7 @@ pub fn persist_update_wiki_review(
     candidate: &CompileCandidate,
     affected_paths: &[String],
     baseline_hashes: &HashMap<String, String>,
+    input_hashes: &HashMap<String, Option<String>>,
     checkpoint_hash: Option<String>,
     services: &UpdateWikiExecutionServices<'_>,
 ) -> Result<WorkflowRun, BackendError> {
@@ -755,6 +930,7 @@ pub fn persist_update_wiki_review(
         candidate,
         affected_paths,
         baseline_hashes,
+        input_hashes,
         checkpoint_hash,
         services,
     )?;
@@ -1004,6 +1180,15 @@ fn apply_persisted_update_wiki_candidate(
         context,
         descriptor.checkpoint_hash.as_deref(),
     )?;
+    if descriptor.schema_version < 3 || descriptor.input_hashes.is_empty() {
+        return Err(BackendError::new(
+            "WORKFLOW_REPREPARATION_REQUIRED",
+            "This older Wiki candidate has no recorded input dependencies. Generate a new candidate before applying it.",
+            true,
+            true,
+        ));
+    }
+    revalidate_non_wiki_inputs(context, &descriptor.input_hashes)?;
     if current_manifest_hashes(context, &descriptor.candidate.manifest, services.file_store)?
         != descriptor.current_hashes
     {
@@ -1016,10 +1201,28 @@ fn apply_persisted_update_wiki_candidate(
     }
     let resolved_sources =
         CompileService::resolve_source_versions(context, &descriptor.source_versions)?;
+    CompileService::validate_selected_source_coverage_for_workflow(
+        &descriptor.candidate.plan,
+        &resolved_sources,
+    )?;
+    CompileService::validate_workflow_source_outcomes(
+        context,
+        &descriptor.candidate,
+        &resolved_sources,
+    )?;
+    let consumable = descriptor
+        .candidate
+        .source_outcomes
+        .iter()
+        .filter(|outcome| {
+            outcome.status != crate::models::compile::CompileSourceOutcomeStatus::Deferred
+        })
+        .map(|outcome| &outcome.source_version)
+        .collect::<Vec<_>>();
     if mode == UpdateWikiMode::ChangedSources
         && resolved_sources
             .iter()
-            .any(|source| source.already_consumed)
+            .any(|source| source.already_consumed && consumable.contains(&&source.reference))
     {
         return Err(BackendError::new(
             "COMPILE_SOURCE_VERSION_STALE",
@@ -1028,20 +1231,25 @@ fn apply_persisted_update_wiki_candidate(
             true,
         ));
     }
-    let known_sources = CompileService::known_source_refs_for_sources(&resolved_sources);
+    let known_sources = CompileService::allowed_source_refs_for_plan(
+        context,
+        &resolved_sources,
+        &descriptor.candidate.plan,
+    )?;
     CompileService::validate_workflow_manifest_semantics(
         context,
         &descriptor.candidate.manifest,
         Some(&descriptor.candidate.plan),
         &known_sources,
     )?;
-    let summary = CompileService::classify_workflow_changes(
+    let mut summary = CompileService::classify_workflow_changes(
         context,
         &descriptor.candidate.manifest,
         &descriptor.candidate.plan,
         &descriptor.baseline_hashes,
         mode == UpdateWikiMode::FullRecompile,
     )?;
+    mark_covered_sources_for_review(&descriptor.candidate, &mut summary);
     // Admission to the non-interruptible apply phase must be atomic with the
     // updater's final guard validation. Holding this lease prevents Windows
     // updater handoff from terminating the process during project writes.
@@ -1085,6 +1293,7 @@ fn apply_persisted_update_wiki_candidate(
         .map_err(task_error)?;
     let preapply_check = (|| {
         ensure_history_checkpoint(services, task_id, context, checkpoint_hash.as_deref())?;
+        revalidate_non_wiki_inputs(context, &descriptor.input_hashes)?;
         if current_manifest_hashes(context, &descriptor.candidate.manifest, services.file_store)?
             != descriptor.current_hashes
         {
@@ -1180,12 +1389,18 @@ fn apply_persisted_update_wiki_candidate(
         )?;
         return Err(mark_update_wiki_error_rolled_back(error));
     }
+    let (source_integrated, source_already_covered, source_deferred) =
+        source_outcome_counts(&descriptor.candidate);
     let pending_result = WorkflowResult::UpdateWiki {
         created: summary.created.len() as u64,
         updated: summary.updated.len() as u64,
         skipped: summary.skipped.len() as u64,
         deleted: summary.deleted.len() as u64,
         conflicted: summary.conflicted.len() as u64,
+        source_integrated,
+        source_already_covered,
+        source_deferred,
+        source_outcomes: descriptor.candidate.source_outcomes.clone(),
         affected_paths: affected_paths.clone(),
         checkpoint_hash: checkpoint_hash.clone(),
         final_commit: None,
@@ -1230,6 +1445,10 @@ fn apply_persisted_update_wiki_candidate(
         skipped: summary.skipped.len() as u64,
         deleted: summary.deleted.len() as u64,
         conflicted: summary.conflicted.len() as u64,
+        source_integrated,
+        source_already_covered,
+        source_deferred,
+        source_outcomes: descriptor.candidate.source_outcomes.clone(),
         affected_paths,
         checkpoint_hash,
         final_commit,
@@ -1365,7 +1584,15 @@ fn prepare_planned_history(
             compile_task_id: task_id.into(),
             route: descriptor.candidate.route.legacy_kind(),
             consumed_at: chrono::Utc::now().to_rfc3339(),
-            source_versions: descriptor.source_versions.clone(),
+            source_versions: descriptor
+                .candidate
+                .source_outcomes
+                .iter()
+                .filter(|outcome| {
+                    outcome.status != crate::models::compile::CompileSourceOutcomeStatus::Deferred
+                })
+                .map(|outcome| outcome.source_version.clone())
+                .collect(),
             affected_paths,
             checkpoint: checkpoint_hash.map(str::to_string),
         },
@@ -1745,11 +1972,19 @@ fn finish_error(
             &current,
             WorkflowErrorSummary {
                 code: error.code.clone(),
-                message_key: if error.code.contains("STALE") || error.code.contains("BASELINE") {
-                    "workflows.error.prepareAgain".into()
-                } else {
-                    "workflows.error.updateWikiFailed".into()
-                },
+                message_key: match error.code.as_str() {
+                    "COMPILE_SOURCE_COVERAGE_INCOMPLETE" => {
+                        "workflows.error.sourceCoverageIncomplete"
+                    }
+                    "COMPILE_INPUT_TOO_LARGE" => "workflows.error.inputTooLarge",
+                    "LLM_OUTPUT_TRUNCATED" => "workflows.error.outputTruncated",
+                    "COMPILE_LINK_INVALID" => "workflows.error.linkInvalid",
+                    _ if error.code.contains("STALE") || error.code.contains("BASELINE") => {
+                        "workflows.error.prepareAgain"
+                    }
+                    _ => "workflows.error.updateWikiFailed",
+                }
+                .into(),
                 recoverable: error.recoverable,
                 user_action_required: error.user_action_required,
                 suggested_action: if error.code.contains("STALE") || error.code.contains("BASELINE")
@@ -1892,7 +2127,16 @@ pub fn discard_update_wiki_candidate(task_id: &str) -> Result<(), BackendError> 
 }
 
 pub fn update_wiki_candidate_is_valid(task_id: &str, project_root: &std::path::Path) -> bool {
-    load_valid_update_wiki_candidate(task_id, project_root, None).is_some()
+    load_valid_update_wiki_candidate(task_id, project_root, None).is_some_and(|candidate| {
+        if candidate.schema_version < 3 || candidate.input_hashes.is_empty() {
+            return false;
+        }
+        ProjectContext::new("workflow-recovery", project_root.to_path_buf())
+            .with_resolved_layout()
+            .is_ok_and(|context| {
+                revalidate_non_wiki_inputs(&context, &candidate.input_hashes).is_ok()
+            })
+    })
 }
 
 pub(crate) fn committed_update_wiki_result(
@@ -2117,22 +2361,16 @@ fn paginate_task_owned_file_diff_source(
                 true,
             ));
         }
-        page.push("```diff\n");
-        if let Some(content) = candidate {
-            page.push(&format!("--- {path} (current)\n+++ {path} (candidate)\n"));
-            for line in content.lines() {
-                if page.is_full() {
-                    page.mark_remaining();
-                    break;
-                }
-                page.push("+");
-                page.push(line);
-                page.push("\n");
-            }
+        let current = if current_hash.is_some() {
+            Some(FileStore.read_markdown(context, path)?)
         } else {
-            page.push(&format!("--- {path}\n+++ /dev/null\n"));
-        }
-        page.push("```");
+            None
+        };
+        page.push(&render_actual_file_diff(
+            path,
+            current.as_deref(),
+            candidate,
+        ));
     }
     page.finish(kind)
 }
@@ -2267,21 +2505,89 @@ fn materialize_task_owned_file_diff(
             candidate,
         ));
     }
-    Some(CompileService::candidate_diff(&CompileManifest {
-        files: candidate
-            .map(|content| CompileFile {
-                path: path.to_string(),
-                content: content.to_string(),
-            })
-            .into_iter()
-            .collect(),
-        deletions: candidate
-            .is_none()
-            .then(|| path.to_string())
-            .into_iter()
-            .collect(),
-        summary: source.manifest.summary.clone(),
-    }))
+    let current = if source.current_hashes.contains_key(path) {
+        Some(FileStore.read_markdown(context, path).ok()?)
+    } else {
+        None
+    };
+    Some(render_actual_file_diff(path, current.as_deref(), candidate))
+}
+
+fn render_actual_file_diff(path: &str, before: Option<&str>, after: Option<&str>) -> String {
+    let old_lines = before.map_or(Vec::new(), |value| value.split_inclusive('\n').collect());
+    let new_lines = after.map_or(Vec::new(), |value| value.split_inclusive('\n').collect());
+    let common_prefix = old_lines
+        .iter()
+        .zip(new_lines.iter())
+        .take_while(|(old, new)| old == new)
+        .count();
+    let common_suffix = old_lines[common_prefix..]
+        .iter()
+        .rev()
+        .zip(new_lines[common_prefix..].iter().rev())
+        .take_while(|(old, new)| old == new)
+        .count();
+    let context_before = common_prefix.min(3);
+    let context_after = common_suffix.min(3);
+    let old_start = common_prefix - context_before;
+    let new_start = common_prefix - context_before;
+    let old_end = old_lines.len() - common_suffix + context_after;
+    let new_end = new_lines.len() - common_suffix + context_after;
+    let mut diff = format!(
+        "```diff\n--- {}\n+++ {}\n@@ -{},{} +{},{} @@\n",
+        before.map_or("/dev/null".to_string(), |_| path.to_string()),
+        after.map_or("/dev/null".to_string(), |_| path.to_string()),
+        old_start + usize::from(old_end > old_start),
+        old_end - old_start,
+        new_start + usize::from(new_end > new_start),
+        new_end - new_start,
+    );
+    for (marker, lines) in [
+        (' ', &old_lines[old_start..common_prefix]),
+        (
+            '-',
+            &old_lines[common_prefix..old_lines.len() - common_suffix],
+        ),
+        (
+            '+',
+            &new_lines[common_prefix..new_lines.len() - common_suffix],
+        ),
+        (' ', &old_lines[old_lines.len() - common_suffix..old_end]),
+    ] {
+        for line in lines {
+            diff.push(marker);
+            diff.push_str(line);
+            if !line.ends_with('\n') {
+                diff.push_str("\n\\ No newline at end of file\n");
+            }
+        }
+    }
+    diff.push_str("```");
+    diff
+}
+
+fn render_manifest_actual_diff(
+    context: &ProjectContext,
+    manifest: &CompileManifest,
+) -> Result<String, BackendError> {
+    let mut result = String::new();
+    for (path, candidate) in manifest
+        .files
+        .iter()
+        .map(|file| (file.path.as_str(), Some(file.content.as_str())))
+        .chain(manifest.deletions.iter().map(|path| (path.as_str(), None)))
+    {
+        let before = if FileStore.file_hash_if_exists(context, path)?.is_some() {
+            Some(FileStore.read_markdown(context, path)?)
+        } else {
+            None
+        };
+        if !result.is_empty() {
+            result.push('\n');
+        }
+        result.push_str(&render_actual_file_diff(path, before.as_deref(), candidate));
+    }
+    Ok(result)
 }
 
 fn render_three_way_comparison(
@@ -2325,13 +2631,17 @@ fn update_wiki_decision_review_from_descriptor(
         current_hashes: &descriptor.current_hashes,
         checkpoint_hash: descriptor.checkpoint_hash.as_deref(),
     };
-    task_owned_candidate_decision_review(
-        &context,
-        &source,
-        &summary,
-        &descriptor.candidate.plan.summary,
-        include_diffs,
-    )
+    let outcome_notes = source_outcome_review_notes(&descriptor.candidate);
+    let reason = if outcome_notes.is_empty() {
+        descriptor.candidate.plan.summary.clone()
+    } else {
+        format!(
+            "{}\n{}",
+            descriptor.candidate.plan.summary,
+            outcome_notes.join("\n")
+        )
+    };
+    task_owned_candidate_decision_review(&context, &source, &summary, &reason, include_diffs)
 }
 
 pub(crate) fn task_owned_candidate_decision_review(
@@ -2358,41 +2668,30 @@ pub(crate) fn task_owned_candidate_decision_review(
         .iter()
         .map(|file| {
             let kind = task_owned_file_diff_kind(source, &file.path);
-            let diff = include_diffs
-                .then(|| {
-                    materialize_task_owned_file_diff(
-                        context,
-                        source,
-                        &file.path,
-                        Some(&file.content),
-                        kind,
-                    )
-                })
-                .flatten();
+            let materialized = materialize_task_owned_file_diff(
+                context,
+                source,
+                &file.path,
+                Some(&file.content),
+                kind,
+            );
             WorkflowFileDiff {
                 file_id: String::new(),
                 path: file.path.clone(),
-                diff_bytes: diff.as_ref().map_or_else(
-                    || candidate_file_diff_len(&file.path, Some(&file.content)),
-                    String::len,
-                ),
-                diff,
+                diff_bytes: materialized.as_ref().map_or(0, String::len),
+                diff: include_diffs.then_some(materialized).flatten(),
                 kind,
             }
         })
         .collect::<Vec<_>>();
     file_diffs.extend(source.manifest.deletions.iter().map(|path| {
         let kind = task_owned_file_diff_kind(source, path);
-        let diff = include_diffs
-            .then(|| materialize_task_owned_file_diff(context, source, path, None, kind))
-            .flatten();
+        let materialized = materialize_task_owned_file_diff(context, source, path, None, kind);
         WorkflowFileDiff {
             file_id: String::new(),
             path: path.clone(),
-            diff_bytes: diff
-                .as_ref()
-                .map_or_else(|| candidate_file_diff_len(path, None), String::len),
-            diff,
+            diff_bytes: materialized.as_ref().map_or(0, String::len),
+            diff: include_diffs.then_some(materialized).flatten(),
             kind,
         }
     }));
@@ -2443,6 +2742,23 @@ mod real_route_acceptance;
 mod batch6_diff_summary_tests {
     use super::*;
     use crate::models::compile::CompileRoute;
+
+    #[test]
+    fn newly_created_compatible_guidance_invalidates_input_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let mut context = ProjectContext::new("compatible", root.path().to_path_buf());
+        context.layout.app_state_root = Some(".app/compat".into());
+        let baseline = snapshot_compile_inputs(&context, &[]).unwrap();
+        assert_eq!(baseline.get(".app/compat/purpose.md"), Some(&None));
+        std::fs::create_dir_all(root.path().join(".app/compat")).unwrap();
+        std::fs::write(root.path().join(".app/compat/purpose.md"), "New guidance").unwrap();
+        assert_eq!(
+            revalidate_non_wiki_inputs(&context, &baseline)
+                .unwrap_err()
+                .code,
+            "WORKFLOW_INPUT_BASELINE_CHANGED"
+        );
+    }
 
     #[test]
     fn planned_history_is_durable_before_any_wiki_write_and_recovers_partial_apply() {
@@ -2761,6 +3077,30 @@ mod batch6_diff_summary_tests {
     }
 
     #[test]
+    fn two_way_diff_contains_removed_content_for_replace_and_delete() {
+        let old = "old unique text\nshared\n";
+        let updated =
+            render_actual_file_diff("wiki/中文.md", Some(old), Some("new text\nshared\n"));
+        assert!(updated.contains("-old unique text\n"));
+        assert!(updated.contains("+new text\n"));
+        assert!(updated.contains(" shared\n"));
+        assert!(!updated.contains("-shared\n"));
+        let deletion = render_actual_file_diff("wiki/中文.md", Some(old), None);
+        assert!(deletion.contains("+++ /dev/null"));
+        assert!(deletion.contains("-old unique text\n"));
+        let mut first_page = VirtualDiffPageBuilder::new(0, 24);
+        first_page.push(&deletion);
+        let first_page = first_page.finish(WorkflowFileDiffKind::TwoWay).unwrap();
+        let mut next_page = VirtualDiffPageBuilder::new(first_page.next_cursor.unwrap(), 24);
+        next_page.push(&deletion);
+        let next_page = next_page.finish(WorkflowFileDiffKind::TwoWay).unwrap();
+        assert_eq!(
+            format!("{}{}", first_page.diff, next_page.diff),
+            deletion[..first_page.diff.len() + next_page.diff.len()]
+        );
+    }
+
+    #[test]
     fn three_way_comparison_keeps_baseline_current_and_candidate_distinct() {
         let rendered = render_three_way_comparison(
             "wiki/冲突.md",
@@ -2941,7 +3281,7 @@ fn load_valid_update_wiki_candidate(
     let Ok(identity) = super::super::persistence::project_identity(project_root) else {
         return None;
     };
-    if descriptor.schema_version != 1
+    if !matches!(descriptor.schema_version, 1 | 2 | 3)
         || descriptor.task_id != task_id
         || descriptor.project_identity_key != identity.canonical_identity_key
         || descriptor.project_identity_revision != identity.identity_revision

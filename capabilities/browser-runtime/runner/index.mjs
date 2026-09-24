@@ -6,12 +6,13 @@ import path from "node:path";
 import { Buffer } from "node:buffer";
 import { URL, fileURLToPath } from "node:url";
 import { JSDOM } from "jsdom";
-import { Readability } from "@mozilla/readability";
 import createDOMPurify from "dompurify";
 import TurndownService from "turndown";
-import { extractAccountSummary, hasPlatformAuthentication, isConfinedTargetUrl, isPinnedTargetHost, isPlatformNavigationHost, isSecureAssetProtocol, isTrustedPlatformAssetHost, platformNavigationHosts, privateTargetAuthorityMatches, resolvePinnedAddress, sanitizeCookieBackup } from "./policy.mjs";
+import { extractAccountSummary, hasPlatformAuthentication, isConfinedTargetUrl, isPinnedTargetHost, isPlatformNavigationHost, isSecureAssetProtocol, isTrustedPlatformAssetHost, platformNavigationHosts, privateTargetAuthorityMatches, resolvePinnedAddress, restoreCookieBackup, sanitizeCookieBackup } from "./policy.mjs";
 import { bilibiliMediaPolicy, classifyPlatformPage, classifyRemoteImageKind, extractBilibiliPlayerEvidenceFromHtml, extractPlatformPayload, extractPlatformPayloadFromValue, extractRelevantBilibiliPlayerEvidence, isBilibiliPlayerApiUrl, mergeBilibiliPlayerEvidence, platformHasVideoEvidence, renderPlatformMarkdown, resolveSubtitleReference, selectRelevantApiEvidence, xiaohongshuImageEvidenceReady, xiaohongshuImageOcrRequired } from "./platform-extract.mjs";
 import { isLoginChallengeState, redactJsonValue, redactSensitiveText, sanitizePublicUrl } from "./snapshot-policy.mjs";
+import { fetchPageResource, isPageResource } from "./page-resources.mjs";
+import { extractArticle } from "./article-extract.mjs";
 import { assertLinuxBrowserDependencies } from "./linux-deps.mjs";
 
 const packRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -95,8 +96,13 @@ async function confinePage(page, target, platform) {
       return;
     }
     if (assetHost) {
-      // Media/CDN URLs are emitted as remoteAsset notifications and fetched
-      // by Rust's pinned HTTP client. Chromium must not resolve them again.
+      if (route.request().method() === "GET"
+        && isPageResource(platform, target, requestUrl, route.request().resourceType())) {
+        try {
+          await route.fulfill(await fetchPageResource(platform, target, requestUrl, route.request().resourceType()));
+          return;
+        } catch { /* Block failed or unsafe resources without broadening access. */ }
+      }
       await route.abort("blockedbyclient");
       return;
     }
@@ -250,6 +256,9 @@ if (!retainedProfile) {
 }
 const context = await launchPinned(profile, target, true, platform);
 try {
+  if (retainedProfile && params.cookieBackup) {
+    await restoreCookieBackup(context, platform, params.cookieBackup);
+  }
   const page = await context.newPage();
   await confinePage(page, target, platform);
   const apiCandidates = [];
@@ -311,12 +320,13 @@ try {
         extractRelevantBilibiliPlayerEvidence(candidate, finalUrl, platformPayload.targetAliases)),
     ]);
   }
-  const platformFailure = platformPayload ? null : classifyPlatformPage(platform, bodyText, finalUrl);
+  const dom = new JSDOM(html, { url: finalUrl, runScripts: "outside-only", resources: undefined });
+  const article = extractArticle(dom.window.document, platform);
+  const platformFailure = platformPayload || article ? null : classifyPlatformPage(platform, bodyText, finalUrl);
   if (platformFailure) {
     process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "Platform access requires user action", data: { code: platformFailure } } })}\n`);
     process.exitCode = 0;
   } else {
-    const dom = new JSDOM(html, { url: finalUrl, runScripts: "outside-only", resources: undefined });
     if (platform === "xiaohongshu" && !platformPayload) {
       process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "The requested Xiaohongshu note payload was not found", data: { code: "IMPORT_WEB_STRUCTURE_CHANGED" } } })}\n`);
       throw new RpcHandled();
@@ -334,6 +344,7 @@ try {
         const subtitleUrl = normalizePlatformAssetUrl(platform, candidate.url, finalUrl);
         subtitleAssets.set(subtitleUrl.href, {
           url: subtitleUrl,
+          kind: candidate.kind || "unknown",
           automatic: Boolean(candidate.automatic),
           language: candidate.language || null,
           label: candidate.label || null,
@@ -346,6 +357,7 @@ try {
         if (!subtitleAssets.has(subtitleUrl.href)) {
           subtitleAssets.set(subtitleUrl.href, {
             url: subtitleUrl,
+            kind: "unknown",
             automatic: null,
             language: null,
             label: null,
@@ -358,6 +370,7 @@ try {
       if (!subtitleAssets.has(subtitleUrl.href)) {
         subtitleAssets.set(subtitleUrl.href, {
           url: subtitleUrl,
+          kind: "unknown",
           automatic: null,
           language: null,
           label: null,
@@ -374,6 +387,7 @@ try {
           placeholder: `platform-subtitle-${subtitleIndex++}`,
           url: subtitleUrl.href,
           kind: "subtitle",
+          subtitleKind: subtitle.kind,
           automatic: subtitle.automatic,
           language: subtitle.language,
           label: subtitle.label,
@@ -449,13 +463,12 @@ try {
         throw new RpcHandled();
       }
     }
-    const article = new Readability(dom.window.document.cloneNode(true)).parse();
     const warnings = [];
     const title = platformPayload?.title || article?.title || dom.window.document.querySelector('meta[property="og:title"]')?.getAttribute("content") || target.pathname;
     const safePublicUrl = sanitizePublicUrl(finalUrl || publicUrl);
     const readableContent = platformPayload?.description
       ? `<p>${escapeHtml(platformPayload.description)}</p>`
-      : article?.content || `<p>Media page imported from <a href="${safePublicUrl}">${safePublicUrl}</a>.</p>`;
+      : article?.content || "";
     const clean = createDOMPurify(dom.window).sanitize(readableContent, { FORBID_TAGS: ["script", "style", "iframe", "object", "embed", "form", "template"], FORBID_ATTR: ["style"] });
     const cleanDom = new JSDOM(clean, { url: finalUrl });
     for (const imageUrl of platformPayload?.images || []) {
@@ -467,8 +480,8 @@ try {
     const seenImages = new Set();
     const platformImageLinks = [];
     for (const image of cleanDom.window.document.querySelectorAll("img")) {
-      const raw = image.getAttribute("src") || image.getAttribute("data-src");
-      image.removeAttribute("srcset"); image.removeAttribute("data-src");
+      const raw = image.getAttribute("data-src") || image.getAttribute("data-original") || image.getAttribute("src");
+      image.removeAttribute("srcset"); image.removeAttribute("data-src"); image.removeAttribute("data-original");
       if (!raw) { image.remove(); continue; }
       let resolved;
       try { resolved = normalizePlatformAssetUrl(platform, raw, finalUrl); } catch { image.remove(); continue; }
@@ -498,7 +511,7 @@ try {
       process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: null, error: { code: -32010, message: "No Xiaohongshu note image was available for required OCR", data: { code: "IMPORT_WEB_MEDIA_UNAVAILABLE" } } })}\n`);
       throw new RpcHandled();
     }
-    if (platform !== "generic"
+    if (!article
       && !mediaRaw
       && !asrMediaRaw
       && subtitleIndex === 0
@@ -532,9 +545,7 @@ try {
       markdown = markdown.replace(/<!-- OCR_IMAGE_\d+ -->/gu, "");
       warnings.push("IMPORT_IMAGE_OCR_OPTIONAL");
     }
-    const extractedText = platform === "generic"
-      ? String(article?.textContent || bodyText || "").trim()
-      : String(platformPayload?.description || "").trim();
+    const extractedText = String(platformPayload?.description || article?.textContent || "").trim();
     if (platform === "generic" && !article) warnings.push("READABILITY_FALLBACK");
     await fs.writeFile(path.join(stagingRoot, "candidate.md"), platform !== "generic" && platformPayload ? markdown : `# ${title}\n\n${markdown}\n`);
     // `source.html` is the immutable raw evidence snapshot. Keep the
@@ -569,8 +580,9 @@ try {
       sourceEvidencePaths.push(evidencePath);
       if (sourceEvidencePaths.length >= 3) break;
     }
-    const textCoverage = platform === "xiaohongshu" && xiaohongshuImageOcrRequired(platformPayload, false)
-      ? 0 : extractedText ? 1 : 0;
+    const textCoverage = article ? null
+      : platform === "xiaohongshu" && xiaohongshuImageOcrRequired(platformPayload, false)
+        ? 0 : extractedText ? 1 : 0;
     process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { sourceSnapshotPath: "source.html", markdownPath: "candidate.md", assetPaths: sourceEvidencePaths, metadataPath: "metadata.json", title, textCoverage, warnings }, error: null })}\n`);
   }
 } catch (error) {

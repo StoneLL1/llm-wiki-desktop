@@ -1702,6 +1702,29 @@ describe("useImportWorkflow", () => {
     await waitFor(() => expect(result.current.batch).toMatchObject({ total: 1, active: 0, processed: 1, completed: 1 }));
   });
 
+  it("unlocks settled batch items while a running item remains cancellable", async () => {
+    const first = item("fast.md", "queued");
+    const second = item("slow.mp4", "queued");
+    const operation = { ...task("mixed-operation"), batchId: "import-v2-operation:session-project-a" };
+    api.createSession.mockResolvedValue(session(projectA.projectId, [first, second]));
+    api.startBatch.mockResolvedValue(operation);
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.bootstrapState).toBe("ready"));
+    await act(async () => result.current.startItems([first.itemId, second.itemId]));
+    await act(async () => notifyTaskEventListeners({
+      eventId: "mixed-patch", eventType: "import_session_patch", projectId: projectA.projectId,
+      taskId: operation.id, timestamp: "2026-09-19T00:00:00Z",
+      payload: { projectId: projectA.projectId, projectRootPath: projectA.rootPath,
+        sessionId: "session-project-a", batchId: operation.id,
+        items: [{ ...first, taskId: operation.id, status: "preview_ready" }, { ...second, taskId: operation.id, status: "extracting" }],
+        counts: { total: 2, processed: 1, succeeded: 1, waiting: 0, failed: 0, cancelled: 0 } },
+    }));
+    expect(result.current.pendingItemIds?.has(first.itemId)).toBe(false);
+    expect(result.current.pendingItemIds?.has(second.itemId)).toBe(true);
+    await act(async () => result.current.cancelItem(second.itemId));
+    expect(api.cancelItem).toHaveBeenCalledWith(expect.objectContaining({ itemId: second.itemId }));
+  });
+
   it("applies one operation patch, releases the cohort, and refreshes once at terminal", async () => {
     const queued = item("batch.md", "queued");
     const operation = {
@@ -2539,6 +2562,22 @@ describe("useImportWorkflow", () => {
     expect(result.current.pendingItemIds?.has(first.itemId)).toBe(true);
     expect(result.current.pendingItemIds?.has(second.itemId)).toBe(false);
     expect(useToastStore.getState().toasts.at(-1)?.tone).toBe("warning");
+    expect(useToastStore.getState().toasts.at(-1)?.message).toContain("second.png");
+    expect(result.current.authorizationFailures?.[0].error.technicalDetails).toContain("ocr denied");
+  });
+
+  it("retries only the failed ASR item after its successful peer reaches preview", async () => {
+    const first = item("first.mp4", "preview_ready");
+    const second = item("second.mp4", "waiting_authorization");
+    api.createSession.mockResolvedValue(session(projectA.projectId, [first, second]));
+    api.authorizeLocalAsr.mockResolvedValue(undefined);
+    const { result } = renderHook(() => useImportWorkflow(projectA, "import", launcher()));
+    await waitFor(() => expect(result.current.session?.items).toHaveLength(2));
+    await act(async () => result.current.authorizeLocalAsrGroup?.([first.itemId, second.itemId], { profile: "balanced", language: "auto" }));
+    expect(api.authorizeLocalAsr).toHaveBeenCalledTimes(1);
+    expect(api.authorizeLocalAsr).toHaveBeenCalledWith(expect.objectContaining({ itemId: second.itemId }));
+    expect(api.startBatch).toHaveBeenCalledWith(expect.objectContaining({ itemIds: [second.itemId] }));
+    expect(result.current.authorizationFailures).toHaveLength(0);
   });
 
   it("starts one observable history index task when paged history needs preparation", async () => {

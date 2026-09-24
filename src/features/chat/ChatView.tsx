@@ -280,6 +280,11 @@ export function ChatView() {
       </div>
 
       <div className="chat-stream-wrap flex min-h-0 min-w-0 flex-col overflow-hidden">
+        {activeSession?.ephemeral ? (
+          <div className="border-b border-[var(--border)] px-4 py-2 text-xs text-[var(--text-muted)]" role="status">
+            {t("chat.sessions.ephemeral")}
+          </div>
+        ) : null}
         {error ? (
           <ActionableErrorNotice
             className="rounded-none border-x-0 border-t-0 px-4"

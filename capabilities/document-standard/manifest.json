@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "packId": "document-standard",
-  "version": "0.1.0+resources.1",
+  "version": "0.1.0+resources.2",
   "protocolVersion": "2",
   "targetTriples": [
     "x86_64-pc-windows-msvc",

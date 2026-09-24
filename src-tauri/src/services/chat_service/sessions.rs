@@ -10,6 +10,70 @@ use std::sync::{Arc, Mutex};
 const DEFAULT_TITLE: &str = "New chat";
 
 impl ChatService {
+    fn memory_key(context: &ProjectContext, session_id: &str) -> String {
+        format!(
+            "{}::{}::{session_id}",
+            context.project_id,
+            context.root.display()
+        )
+    }
+
+    fn memory_root_key(context: &ProjectContext) -> String {
+        format!("{}::{}", context.project_id, context.root.display())
+    }
+
+    pub fn use_memory_for_project(&self, context: &ProjectContext) {
+        let first_activation = self
+            .memory_roots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(Self::memory_root_key(context));
+        if !first_activation {
+            return;
+        }
+        let Some(relative) = context.layout.chat_state_root.as_deref() else {
+            return;
+        };
+        let Ok(dir) = context.resolve_project_path(relative) else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut sessions = self
+            .memory_sessions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json")
+                || !std::fs::symlink_metadata(&path)
+                    .is_ok_and(|meta| meta.is_file() && !meta.file_type().is_symlink())
+            {
+                continue;
+            }
+            let Ok(mut session) = self.file_store.read_json_file::<ChatSession>(&path) else {
+                continue;
+            };
+            if session.project_id != context.project_id
+                || path.file_stem().and_then(|value| value.to_str()) != Some(session.id.as_str())
+            {
+                continue;
+            }
+            session.ephemeral = true;
+            sessions.insert(Self::memory_key(context, &session.id), session);
+        }
+    }
+
+    pub fn is_memory_project(&self, context: &ProjectContext) -> bool {
+        context.layout.chat_state_root.is_none()
+            || self
+                .memory_roots
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .contains(&Self::memory_root_key(context))
+    }
+
     pub fn create_session(
         &self,
         context: &ProjectContext,
@@ -34,13 +98,21 @@ impl ChatService {
             updated_at: now,
             messages: Vec::new(),
             context_page_path: normalized_page_path,
+            ephemeral: self.is_memory_project(context),
         };
-        self.file_store.write_json_atomic_checked(
-            context,
-            &session_path(context, &session.id)?,
-            &session,
-            WriteMode::CreateNew,
-        )?;
+        if self.is_memory_project(context) {
+            self.memory_sessions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(Self::memory_key(context, &session.id), session.clone());
+        } else {
+            self.file_store.write_json_atomic_checked(
+                context,
+                &session_path(context, &session.id)?,
+                &session,
+                WriteMode::CreateNew,
+            )?;
+        }
         Ok(session)
     }
 
@@ -50,6 +122,32 @@ impl ChatService {
         &self,
         context: &ProjectContext,
     ) -> Result<Vec<ChatSessionSummary>, BackendError> {
+        if self.is_memory_project(context) {
+            let prefix = format!("{}::{}::", context.project_id, context.root.display());
+            let sessions = self
+                .memory_sessions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let mut summaries = sessions
+                .iter()
+                .filter(|(key, _)| key.starts_with(&prefix))
+                .map(|(_, session)| ChatSessionSummary {
+                    id: session.id.clone(),
+                    title: session.title.clone(),
+                    created_at: session.created_at.clone(),
+                    updated_at: session.updated_at.clone(),
+                    message_count: session.messages.len(),
+                    context_page_path: session.context_page_path.clone(),
+                    ephemeral: true,
+                })
+                .collect::<Vec<_>>();
+            summaries.sort_by(|a, b| {
+                b.updated_at
+                    .cmp(&a.updated_at)
+                    .then_with(|| a.id.cmp(&b.id))
+            });
+            return Ok(summaries);
+        }
         let dir = context.resolve_project_path(chat_state_root(context)?)?;
         let mut summaries = Vec::new();
         if !dir.exists() {
@@ -73,6 +171,7 @@ impl ChatService {
                     updated_at: session.updated_at,
                     message_count: session.messages.len(),
                     context_page_path: session.context_page_path,
+                    ephemeral: false,
                 }),
                 Err(err) => {
                     eprintln!(
@@ -104,6 +203,22 @@ impl ChatService {
         context: &ProjectContext,
         session_id: &str,
     ) -> Result<ChatSession, BackendError> {
+        if self.is_memory_project(context) {
+            return self
+                .memory_sessions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(&Self::memory_key(context, session_id))
+                .cloned()
+                .ok_or_else(|| {
+                    BackendError::new(
+                        "CHAT_SESSION_NOT_FOUND",
+                        "Chat session is not in this run's memory.",
+                        true,
+                        true,
+                    )
+                });
+        }
         let path = session_path(context, session_id)?;
         self.file_store.read_json(context, &path).map_err(|err| {
             BackendError::new(
@@ -151,6 +266,13 @@ impl ChatService {
     ) -> Result<(), BackendError> {
         let lock = self.session_lock(context, session_id);
         let _guard = lock.lock().map_err(|_| session_lock_error())?;
+        if self.is_memory_project(context) {
+            self.memory_sessions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(&Self::memory_key(context, session_id));
+            return Ok(());
+        }
         let path = context.resolve_project_write_path(&session_path(context, session_id)?)?;
         if path.exists() {
             remove_project_file(&context.root, &path).map_err(|err| {
@@ -226,11 +348,7 @@ impl ChatService {
             })?;
         message.saved_path = Some(path.to_string());
         session.updated_at = now_rfc3339();
-        self.file_store.write_json_atomic(
-            context,
-            &session_path(context, &session.id)?,
-            &session,
-        )?;
+        self.write_session_unlocked(context, &session)?;
         Ok(session)
     }
 
@@ -322,8 +440,27 @@ impl ChatService {
             }
             Err(error) => return Err(error),
         };
-        self.file_store
-            .write_json_atomic(context, &session_path(context, &session.id)?, &session)
+        self.write_session_unlocked(context, &session)
+    }
+
+    fn write_session_unlocked(
+        &self,
+        context: &ProjectContext,
+        session: &ChatSession,
+    ) -> Result<(), BackendError> {
+        if self.is_memory_project(context) {
+            self.memory_sessions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(Self::memory_key(context, &session.id), session.clone());
+            Ok(())
+        } else {
+            self.file_store.write_json_atomic(
+                context,
+                &session_path(context, &session.id)?,
+                session,
+            )
+        }
     }
 
     fn session_lock(&self, context: &ProjectContext, session_id: &str) -> Arc<Mutex<()>> {
@@ -556,6 +693,44 @@ mod tests {
             .rename_session(&context, &session.id, "   ")
             .expect_err("empty title must be rejected");
         assert_eq!(err.code, "CHAT_TITLE_EMPTY");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn memory_session_lifecycle_is_project_scoped_and_never_writes_chat_files() {
+        let (context, root) = tmp_context("memory-lifecycle");
+        let service = ChatService::default();
+        service.use_memory_for_project(&context);
+        let mut session = service
+            .create_session(&context, Some("临时问答"), None)
+            .unwrap();
+        assert!(session.ephemeral);
+        service
+            .append_message(&context, &mut session, user_message("hello"))
+            .unwrap();
+        assert_eq!(
+            service
+                .load_session(&context, &session.id)
+                .unwrap()
+                .messages
+                .len(),
+            1
+        );
+        assert_eq!(service.list_sessions(&context).unwrap()[0].message_count, 1);
+        assert_eq!(
+            service
+                .rename_session(&context, &session.id, "Renamed")
+                .unwrap()
+                .title,
+            "Renamed"
+        );
+        let other =
+            crate::models::paths::ProjectContext::new("other-project", context.root.clone());
+        service.use_memory_for_project(&other);
+        assert!(service.list_sessions(&other).unwrap().is_empty());
+        assert!(!root.join(".app/chats").exists());
+        service.delete_session(&context, &session.id).unwrap();
+        assert!(service.list_sessions(&context).unwrap().is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -187,6 +187,12 @@ export function ImportItemActions({
       >
         <LoaderCircle size={14} className="animate-spin" aria-hidden="true" />
         {t("importV2.status.updating")}
+        {presentation.secondaryActions.includes("cancel") || presentation.primaryAction === "cancel" ? (
+          <button type="button" className="btn btn--sm" onClick={(event) => {
+            event.stopPropagation();
+            onAction("cancel", item.itemId);
+          }}>{t("importV2.action.cancel")}</button>
+        ) : null}
       </span>
     );
   }

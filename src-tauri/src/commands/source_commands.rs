@@ -19,6 +19,7 @@ use crate::models::task::{
     BackendTask, TaskActivity, TaskActivityStatus, TaskResult, TaskResultReference, TaskStatus,
     TaskType,
 };
+use crate::models::workflow::WorkflowFilesystemAccess;
 use crate::services::import_v2::source_ai_organize;
 use crate::services::{AgentService, LlmService};
 use crate::tasks::task_model::LogLevel;
@@ -98,6 +99,14 @@ pub fn discard_source_candidate(
     state: State<'_, AppState>,
     request: DiscardSourceCandidateRequest,
 ) -> Result<(), BackendError> {
+    let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
+    if state.import_v2_service.discard_memory_source_candidate(
+        &context,
+        &request.source_id,
+        &request.candidate_id,
+    ) {
+        return Ok(());
+    }
     state.with_current_project_write_access(
         &request.project_id,
         &request.project_root_path,
@@ -150,6 +159,10 @@ fn start_source_ai_organize_impl(
 ) -> Result<BackendTask, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
     state.require_external_ai_access(&context)?;
+    let access = state.resolve_workflow_read_access(&context)?;
+    let memory_only = access.filesystem_access != WorkflowFilesystemAccess::Writable
+        || context.layout.task_state_root.is_none()
+        || context.layout.source_state_root.is_none();
     let input = state.import_v2_service.prepare_source_ai_organize_input(
         &context,
         &state.file_store,
@@ -178,22 +191,36 @@ fn start_source_ai_organize_impl(
     state
         .import_v2_service
         .reserve_source_ai(reservation_key.clone())?;
-    let task = match state.with_current_project_write_access(
-        &request.project_id,
-        &request.project_root_path,
-        |_permit, current| {
-            state
-                .task_service
-                .create_project_task(
-                    TaskType::SourceAiOrganize,
-                    request.project_id.clone(),
-                    current.root.clone(),
-                    format!("AI organize Source: {}", input.title),
-                    true,
-                )
-                .map_err(source_task_error)
-        },
-    ) {
+    let task_result = if memory_only {
+        state
+            .task_service
+            .create_memory_project_task(
+                TaskType::SourceAiOrganize,
+                request.project_id.clone(),
+                context.root.clone(),
+                format!("AI organize Source: {}", input.title),
+                true,
+            )
+            .map_err(source_task_error)
+    } else {
+        state.with_current_project_write_access(
+            &request.project_id,
+            &request.project_root_path,
+            |_permit, current| {
+                state
+                    .task_service
+                    .create_project_task(
+                        TaskType::SourceAiOrganize,
+                        request.project_id.clone(),
+                        current.root.clone(),
+                        format!("AI organize Source: {}", input.title),
+                        true,
+                    )
+                    .map_err(source_task_error)
+            },
+        )
+    };
+    let task = match task_result {
         Ok(task) => task,
         Err(error) => {
             state.import_v2_service.release_source_ai(&reservation_key);
@@ -236,8 +263,16 @@ fn start_source_ai_organize_impl(
     let task_id = task.id.clone();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
-        let outcome =
-            run_source_ai_organize(&state, &context, &task_id, input, route, recovery).await;
+        let outcome = run_source_ai_organize(
+            &state,
+            &context,
+            &task_id,
+            input,
+            route,
+            recovery,
+            memory_only,
+        )
+        .await;
         state.import_v2_service.release_source_ai(&reservation_key);
         if let Err(error) = outcome {
             let _ = state
@@ -427,17 +462,25 @@ async fn run_source_ai_organize(
     input: source_ai_organize::SourceAiOrganizeInput,
     route: ResolvedSourceAiRoute,
     recovery: SourceAiRecovery,
+    memory_only: bool,
 ) -> Result<(), BackendError> {
-    state.with_current_project_write_access(
-        &context.project_id,
-        context.root.to_string_lossy().as_ref(),
-        |_permit, _| {
-            state
-                .task_service
-                .transition_status(task_id, TaskStatus::Running)
-                .map_err(source_task_error)
-        },
-    )?;
+    if memory_only {
+        state
+            .task_service
+            .transition_status(task_id, TaskStatus::Running)
+            .map_err(source_task_error)?;
+    } else {
+        state.with_current_project_write_access(
+            &context.project_id,
+            context.root.to_string_lossy().as_ref(),
+            |_permit, _| {
+                state
+                    .task_service
+                    .transition_status(task_id, TaskStatus::Running)
+                    .map_err(source_task_error)
+            },
+        )?;
+    }
     if state.task_service.is_cancelled(task_id) {
         return Err(source_ai_cancelled());
     }
@@ -562,26 +605,42 @@ async fn run_source_ai_organize(
     if state.task_service.is_cancelled(task_id) {
         return Err(source_ai_cancelled());
     }
-    let candidate = state.with_current_project_write_access(
-        &context.project_id,
-        context.root.to_string_lossy().as_ref(),
-        |permit, _current| {
-            state.require_current_execution_permit(permit, &execution_lease)?;
-            state
-                .import_v2_service
-                .store_source_ai_organize_candidate_authorized(
-                    permit,
-                    &state.file_store,
-                    &input,
-                    task_id,
-                    candidate_route,
-                    engine,
-                    model,
-                    engine_version,
-                    candidate_markdown,
-                )
-        },
-    )?;
+    let candidate = if memory_only {
+        state
+            .import_v2_service
+            .store_source_ai_organize_candidate_memory(
+                context,
+                &state.file_store,
+                &input,
+                task_id,
+                candidate_route,
+                engine,
+                model,
+                engine_version,
+                candidate_markdown,
+            )?
+    } else {
+        state.with_current_project_write_access(
+            &context.project_id,
+            context.root.to_string_lossy().as_ref(),
+            |permit, _current| {
+                state.require_current_execution_permit(permit, &execution_lease)?;
+                state
+                    .import_v2_service
+                    .store_source_ai_organize_candidate_authorized(
+                        permit,
+                        &state.file_store,
+                        &input,
+                        task_id,
+                        candidate_route,
+                        engine,
+                        model,
+                        engine_version,
+                        candidate_markdown,
+                    )
+            },
+        )?
+    };
     let candidate_path = format!(
         ".app/source-candidates/{}/{}.json",
         input.source_id, candidate.candidate_id
@@ -590,7 +649,11 @@ async fn run_source_ai_organize(
         task_id,
         TaskResult {
             summary: "Source AI candidate is ready for Diff review.".into(),
-            affected_paths: vec![candidate_path],
+            affected_paths: if memory_only {
+                Vec::new()
+            } else {
+                vec![candidate_path]
+            },
             reference: Some(TaskResultReference::SourceAiOrganize {
                 source_id: input.source_id.clone(),
                 base_version_id: input.version_id.clone(),
@@ -607,22 +670,30 @@ async fn run_source_ai_organize(
             pending_action: None,
         },
     ) {
-        let _ = state.with_current_project_write_access(
-            &context.project_id,
-            context.root.to_string_lossy().as_ref(),
-            |permit, _current| {
-                state.require_current_execution_permit(permit, &execution_lease)?;
-                state
-                    .import_v2_service
-                    .discard_source_ai_organize_candidate_authorized(
-                        permit,
-                        &state.file_store,
-                        &input.source_id,
-                        &candidate.candidate_id,
-                        task_id,
-                    )
-            },
-        );
+        if memory_only {
+            state.import_v2_service.discard_memory_source_candidate(
+                context,
+                &input.source_id,
+                &candidate.candidate_id,
+            );
+        } else {
+            let _ = state.with_current_project_write_access(
+                &context.project_id,
+                context.root.to_string_lossy().as_ref(),
+                |permit, _current| {
+                    state.require_current_execution_permit(permit, &execution_lease)?;
+                    state
+                        .import_v2_service
+                        .discard_source_ai_organize_candidate_authorized(
+                            permit,
+                            &state.file_store,
+                            &input.source_id,
+                            &candidate.candidate_id,
+                            task_id,
+                        )
+                },
+            );
+        }
         return Err(source_task_error(error));
     }
     Ok(())

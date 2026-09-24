@@ -4,6 +4,7 @@
 Dependencies are resolved only while building the release archive. This runner
 never invokes pip and writes only beneath the item staging directory.
 """
+import hashlib
 import json
 import shutil
 import sys
@@ -27,6 +28,14 @@ def contained(root, path):
         return True
     except ValueError:
         return False
+
+
+def snapshot_sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def handle(request):
@@ -66,9 +75,18 @@ def handle(request):
     try:
         from markitdown import MarkItDown
         staging.mkdir(parents=True, exist_ok=True)
+        snapshot = staging / "source.bin"
+        identity = params.get("input", {}).get("sourceIdentity") or {}
+        if chained or snapshot.exists():
+            if (not snapshot.is_file() or not contained(staging, snapshot)
+                    or not identity.get("sha256")
+                    or snapshot.stat().st_size != identity.get("sizeBytes")
+                    or snapshot_sha256(snapshot) != identity["sha256"]):
+                return fail(request_id, -32602, "original source snapshot is missing or changed")
+        else:
+            shutil.copyfile(source, snapshot)
         converted = MarkItDown(enable_plugins=False).convert(str(source))
         markdown = converted.text_content
-        shutil.copyfile(source, staging / "source.bin")
         (staging / "document.md").write_text(markdown, encoding="utf-8", newline="\n")
         metadata = {"engineId": "pack.document-standard", "engineVersion": "0.1.0",
                     "route": "pack.markitdown", "contract": "markitdown-fallback"}

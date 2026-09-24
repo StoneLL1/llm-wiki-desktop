@@ -148,7 +148,7 @@ const RECOVERY_ACTION_TO_ITEM_ACTION: Readonly<Partial<Record<ImportRecoveryActi
   authorize_private_target: "authorize_private_target",
   install_capability: "view_capability",
   install_browser_capability: "view_capability",
-  install_media_capability: "view_capability",
+  install_media_capability: "authorize_local_asr",
   install_ocr_capability: "view_capability",
   invoke_agent: "invoke_local_agent",
   view_log: "view_log",
@@ -291,6 +291,9 @@ export function presentImportItem(item: ImportItem): ImportItemPresentation {
   const actions = [...STATUS_ACTIONS[item.status]];
 
   for (const recoveryAction of item.issue?.recoveryActions ?? []) {
+    // Old sessions may retain an install action on a failed candidate. Retry
+    // reevaluates its actual prerequisites before offering preparation again.
+    if (item.status === "failed" && recoveryAction.startsWith("install_")) continue;
     const action = RECOVERY_ACTION_TO_ITEM_ACTION[recoveryAction];
     if (action) actions.push(action);
   }

@@ -93,6 +93,7 @@ export interface ChatSession {
    *  global Chat-view sessions. Persisted as typed metadata on the session
    *  JSON, never as a separate database. */
   contextPagePath?: string | null;
+  ephemeral?: boolean;
 }
 
 export interface ChatSessionSummary {
@@ -104,6 +105,7 @@ export interface ChatSessionSummary {
   /** Mirrors {@link ChatSession.contextPagePath} so the session list can group
    *  page-scoped chats without loading each full session. */
   contextPagePath?: string | null;
+  ephemeral?: boolean;
 }
 
 export interface SaveAnswerResult {

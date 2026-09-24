@@ -241,6 +241,18 @@ export type WorkflowResult =
       skipped: number;
       deleted: number;
       conflicted: number;
+      sourceIntegrated?: number;
+      sourceAlreadyCovered?: number;
+      sourceDeferred?: number;
+      sourceOutcomes?: Array<{
+        sourceVersion: { sourceId: string; versionId: string; contentHash: string };
+        sourcePath?: string;
+        status: "integrated" | "already_covered" | "deferred";
+        integratedPaths: string[];
+        evidencePath?: string | null;
+        evidenceExcerpt?: string | null;
+        reason?: string | null;
+      }>;
       affectedPaths: string[];
       checkpointHash: string | null;
       finalCommit: string | null;

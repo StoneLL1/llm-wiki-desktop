@@ -152,6 +152,48 @@ impl WebTargetStore {
             pending_collections: Arc::new(Mutex::new(HashMap::new())),
         }
     }
+    /// Only an authenticated browser invocation may call this helper. The
+    /// backup stays in OS credentials and the one-shot runner RPC, never in
+    /// project state, process arguments, or environment variables.
+    pub(super) fn connector_cookie_backup_for_locator(
+        &self,
+        locator: &str,
+    ) -> Result<Option<serde_json::Value>, BackendError> {
+        let Ok(url) = url::Url::parse(locator) else {
+            return Ok(None);
+        };
+        if url.scheme() != "https"
+            || url.port_or_known_default() != Some(443)
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            return Ok(None);
+        }
+        let platform = match url.host_str().unwrap_or_default() {
+            "mp.weixin.qq.com" => "wechat",
+            "zhihu.com" | "www.zhihu.com" => "zhihu",
+            "b23.tv" | "bilibili.com" | "www.bilibili.com" | "m.bilibili.com"
+            | "space.bilibili.com" | "api.bilibili.com" => "bilibili",
+            "xiaohongshu.com"
+            | "www.xiaohongshu.com"
+            | "xhslink.com"
+            | "www.xhslink.com"
+            | "xhslink.cn"
+            | "www.xhslink.cn"
+            | "edith.xiaohongshu.com" => "xiaohongshu",
+            "douyin.com" | "www.douyin.com" | "m.douyin.com" | "v.douyin.com" | "iesdouyin.com"
+            | "www.iesdouyin.com" => "douyin",
+            "x.com" | "www.x.com" | "twitter.com" | "www.twitter.com" | "t.co" => "x",
+            _ => return Ok(None),
+        };
+        Ok(self
+            .secrets
+            .get_account(&format!("connector-cookie:{platform}"))?
+            .filter(|value| value.len() <= 64 * 1024)
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+            .filter(|value| value.is_array()))
+    }
+
     pub fn store_collection(
         &self,
         project_id: &str,
@@ -909,6 +951,40 @@ mod tests {
     use super::{
         durable_collection_id, durable_collection_path, DurablePendingCollection, WebTargetStore,
     };
+
+    #[test]
+    fn connector_cookie_backup_is_scoped_to_https_platform_navigation() {
+        let secrets = SecretService::memory();
+        secrets.set_account("connector-cookie:xiaohongshu", r#"[{"name":"web_session","value":"fixture-session","domain":".xiaohongshu.com","expires":-1}]"#).unwrap();
+        let store = WebTargetStore::new(secrets.clone());
+        assert!(store
+            .connector_cookie_backup_for_locator("https://www.xiaohongshu.com/explore/note")
+            .unwrap()
+            .is_some());
+        for locator in [
+            "http://www.xiaohongshu.com/note",
+            "https://www.xiaohongshu.com:8443/note",
+            "https://www.xiaohongshu.com.evil.test/note",
+            "https://unreviewed.xiaohongshu.com/note",
+            "https://example.com",
+            "https://mp.weixin.qq.com/s/article",
+        ] {
+            assert!(
+                store
+                    .connector_cookie_backup_for_locator(locator)
+                    .unwrap()
+                    .is_none(),
+                "{locator}"
+            );
+        }
+        secrets
+            .set_account("connector-cookie:xiaohongshu", "{}")
+            .unwrap();
+        assert!(store
+            .connector_cookie_backup_for_locator("https://www.xiaohongshu.com")
+            .unwrap()
+            .is_none());
+    }
 
     #[test]
     fn collection_preview_is_session_bound_and_selection_keeps_source_order() {

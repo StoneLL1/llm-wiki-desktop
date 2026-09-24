@@ -12,14 +12,14 @@ use crate::models::import_v2::{
     ArtifactKind, ImportArtifact, ImportBatchResult, ImportItem, ImportPreviewArtifact,
 };
 use crate::models::import_v2_agent::{
-    AgentAuditRecord, AgentCandidate, AgentCandidateDiff, AgentCandidateManifest,
+    AgentAuditRecord, AgentCandidate, AgentCandidateDiff, AgentCandidateManifest, AgentToolGrant,
 };
 use crate::models::paths::ProjectContext;
 use crate::models::task::{TaskResultReference, TaskStatus, TaskType};
 use crate::services::import_v2::agent_workspace::AgentTaskBundle;
 use crate::services::import_v2::engine::EngineResult;
 use crate::services::import_v2::quality_gate::QualityGate;
-use crate::services::import_v2::source_registry::{SourceIndex, SourceRegistry};
+use crate::services::import_v2::source_registry::SourceRegistry;
 use crate::services::import_v2::ImportV2Service;
 use crate::services::{FileStore, GitService};
 use crate::tasks::TaskService;
@@ -276,6 +276,7 @@ impl<'a> AgentCandidateService<'a> {
             continuation: None,
         };
         let mut preview = QualityGate.evaluate_agent_candidate(&candidate_root, &engine_result)?;
+        prefix_artifact(&mut preview.source_snapshot, &candidate_artifact_prefix);
         prefix_artifact(&mut preview.markdown, &candidate_artifact_prefix);
         for asset in &mut preview.assets {
             prefix_artifact(asset, &candidate_artifact_prefix);
@@ -290,8 +291,10 @@ impl<'a> AgentCandidateService<'a> {
         let (registry_baseline, current_markdown) = registry_markdown_views(
             context,
             self.files,
-            item.input.normalized_locator.as_deref(),
-            &source_hash,
+            self.imports,
+            session_id,
+            item,
+            &preview,
         )?;
         let baseline_markdown = registry_baseline.unwrap_or(deterministic_markdown);
         let baseline_path = candidate_root.join("baseline.md");
@@ -574,6 +577,21 @@ impl<'a> AgentCandidateService<'a> {
                 return Err(candidate_error("Candidate asset changed after validation."));
             }
         }
+        let source = ImportArtifact {
+            kind: ArtifactKind::SourceSnapshot,
+            relative_path: format!("{artifact_prefix}/source.bin"),
+            sha256: stored.candidate.source_snapshot_sha256.clone(),
+            size_bytes: source_bytes.len() as u64,
+        };
+        let original_preview = ImportPreviewArtifact {
+            markdown: stored.candidate.markdown.clone(),
+            assets: stored.candidate.assets.clone(),
+            source_snapshot: source.clone(),
+            quality: stored.candidate.quality.clone(),
+            title: format!("AI-assisted: {}", item.input.display_name),
+            resolution: None,
+            manual_merge: None,
+        };
         let mut selected_markdown = stored.candidate.markdown.clone();
         let mut selected_quality = stored.candidate.quality.clone();
         let explicit_merge_current_hash = if stored.diff.needs_three_way_merge {
@@ -586,8 +604,10 @@ impl<'a> AgentCandidateService<'a> {
             let (_, current) = registry_markdown_views(
                 context,
                 self.files,
-                item.input.normalized_locator.as_deref(),
-                &stored.candidate.source_snapshot_sha256,
+                self.imports,
+                session_id,
+                item,
+                &original_preview,
             )?;
             let current = current
                 .ok_or_else(|| candidate_error("Current Wiki content is unavailable for merge."))?;
@@ -640,12 +660,6 @@ impl<'a> AgentCandidateService<'a> {
             ));
         } else {
             None
-        };
-        let source = ImportArtifact {
-            kind: ArtifactKind::SourceSnapshot,
-            relative_path: format!("{artifact_prefix}/source.bin"),
-            sha256: stored.candidate.source_snapshot_sha256.clone(),
-            size_bytes: source_bytes.len() as u64,
         };
         let preview = ImportPreviewArtifact {
             markdown: selected_markdown,
@@ -997,6 +1011,17 @@ fn validate_candidate_audit(
     task_id: &str,
 ) -> Result<(), BackendError> {
     let exact_output = audit.output_hashes == vec![manifest.markdown_sha256.clone()];
+    let tools_match = if audit.tool_calls.is_empty() {
+        manifest.tools_used.len() == 1 && manifest.tools_used[0] == "tool-free-local-agent"
+    } else {
+        audit.tool_calls == manifest.tools_used
+            && audit.tool_calls.iter().all(|call| {
+                bundle
+                    .allowed_tools
+                    .iter()
+                    .any(|grant| agent_tool_grant_name(grant) == call)
+            })
+    };
     let common = audit.task_id == task_id
         && audit.session_id == session_id
         && audit.item_id == item_id
@@ -1004,7 +1029,7 @@ fn validate_candidate_audit(
         && matches!(audit.outcome.as_str(), "output_staged" | "succeeded")
         && audit.completed_at.is_some()
         && !audit.agent_version.trim().is_empty()
-        && audit.tool_calls.is_empty()
+        && tools_match
         && exact_output;
     let route_valid = if let Some(command) = audit.route.strip_prefix("local/") {
         audit
@@ -1024,6 +1049,17 @@ fn validate_candidate_audit(
         Err(candidate_error(
             "Agent candidate provenance does not match the completed task.",
         ))
+    }
+}
+
+fn agent_tool_grant_name(grant: &AgentToolGrant) -> &'static str {
+    match grant {
+        AgentToolGrant::InspectSource => "inspect_source",
+        AgentToolGrant::RunDeterministicRoute => "run_deterministic_route",
+        AgentToolGrant::RunOcr => "run_ocr",
+        AgentToolGrant::RunAsr => "run_asr",
+        AgentToolGrant::ParseSanitizedSnapshot => "parse_sanitized_snapshot",
+        AgentToolGrant::ValidateCandidate => "validate_candidate",
     }
 }
 
@@ -1227,27 +1263,27 @@ fn single_source_relative(workspace: &Path) -> Result<String, BackendError> {
 fn registry_markdown_views(
     context: &ProjectContext,
     files: &FileStore,
-    normalized_locator: Option<&str>,
-    hash: &str,
+    imports: &ImportV2Service,
+    session_id: &str,
+    item: &ImportItem,
+    preview: &ImportPreviewArtifact,
 ) -> Result<(Option<String>, Option<String>), BackendError> {
-    let index: SourceIndex = super::source_registry::SourceRegistry::read_index(context, files)?;
-    let pointer = index.by_content_hash.get(hash).or_else(|| {
-        normalized_locator
-            .and_then(|locator| index.by_locator.get(&locator.trim().replace('\\', "/")))
-    });
-    let Some(pointer) = pointer else {
+    // Agent Diff and final selection use the same candidate identity as commit.
+    // A redacted display URL cannot establish ownership of a previous Source.
+    let mut candidate_item = item.clone();
+    candidate_item.preview = Some(preview.clone());
+    let resolution =
+        imports.derive_resolution_context(context, files, session_id, &candidate_item)?;
+    let Some(binding) = resolution.binding else {
         return Ok((None, None));
     };
     let manifest_path = context
         .layout
         .source_paths()?
-        .manifest(&pointer.source_id)?;
-    if !files.exists(context, &manifest_path) {
-        return Ok((None, None));
-    }
+        .manifest(&binding.source_id)?;
     let manifest = SourceRegistry::read_manifest(context, files, &manifest_path)
         .map_err(|_| candidate_error("Source Registry manifest is malformed."))?;
-    if manifest.source_id != pointer.source_id {
+    if manifest.source_id != binding.source_id {
         return Err(candidate_error(
             "Source Registry pointer and manifest do not match.",
         ));
@@ -1258,7 +1294,7 @@ fn registry_markdown_views(
     let baseline = manifest
         .versions
         .iter()
-        .find(|version| version.version_id == pointer.version_id)
+        .find(|version| version.version_id == binding.target_version_id)
         .filter(|version| files.exists(context, &version.baseline_path))
         .map(|version| read_project_text(context, &version.baseline_path))
         .transpose()?;

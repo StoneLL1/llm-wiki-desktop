@@ -307,6 +307,20 @@ export function WorkflowTaskDetail({
               </div>
             ))}
           </dl>
+          {run.result?.kind === "update_wiki" && (run.result.sourceOutcomes?.length ?? 0) > 0 ? (
+            <div className="workflow-result-paths" role="region" aria-label={t("workflows.result.sourceOutcomes")}>
+              <h4>{t("workflows.result.sourceOutcomes")}</h4>
+              <ul>{run.result.sourceOutcomes?.map((outcome) => (
+                <li key={`${outcome.sourceVersion.sourceId}:${outcome.sourceVersion.versionId}`}>
+                  <code>{outcome.sourcePath || outcome.sourceVersion.sourceId}</code> · {t(`workflows.result.sourceStatus.${outcome.status}`)}
+                  {outcome.integratedPaths.length > 0 ? ` · ${outcome.integratedPaths.join(", ")}` : null}
+                  {outcome.evidencePath ? ` · ${outcome.evidencePath}` : null}
+                  {outcome.evidenceExcerpt ? ` · “${outcome.evidenceExcerpt}”` : null}
+                  {outcome.reason ? ` · ${outcome.reason}` : null}
+                </li>
+              ))}</ul>
+            </div>
+          ) : null}
           {resultPresentation.paths.length > 0 ? (
             <div aria-label={t("workflows.result.paths")} className="workflow-result-paths" role="region">
               <h4>{t("workflows.result.paths")}</h4>

@@ -8,17 +8,15 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
   ENGINE_VERSION,
-  MAX_DECODED_BYTES,
   MAX_SENSEVOICE_BATCH_CHUNKS,
-  MAX_SENSEVOICE_CHUNKS,
   MODEL_ID,
-  SENSEVOICE_CHUNK_SECONDS,
+  decodedChunks,
+  completeDecodeMarker,
+  canReuseDecodedChunks,
   assertProviderWasUsed,
   buildChunkedFfmpegArguments,
   buildEmbeddedSubtitleArguments,
   buildSenseVoiceBatchArguments,
-  buildVideoOcrFrameArguments,
-  buildVideoTextProbeArguments,
   classifyExecutionError,
   executeWithProviderFallback,
   ffmpegRelativePath,
@@ -32,11 +30,12 @@ import {
   renderTranscript,
   resolveStagingMedia,
   restrictedEnvironment,
-  selectStableTextFrameIndexes,
   sha256File,
   sherpaRelativePath,
   verifySignedFile,
 } from "./core.mjs";
+
+import { prepareVideoFrames } from "./video-frames.mjs";
 
 const execFileAsync = promisify(execFile);
 const MAX_RPC_BYTES = 1024 * 1024;
@@ -85,33 +84,6 @@ async function runFile(program, arguments_, options, stage) {
   }
 }
 
-async function decodedChunks(temporaryRoot) {
-  const entries = (await fs.readdir(temporaryRoot, { withFileTypes: true }))
-    .filter((entry) => entry.isFile() && /^decoded-\d{4}\.wav$/u.test(entry.name))
-    .sort((left, right) => left.name.localeCompare(right.name, "en"));
-  if (entries.length === 0 || entries.length > MAX_SENSEVOICE_CHUNKS) {
-    throw new Error("IMPORT_ASR_DECODE_FAILED");
-  }
-  let totalBytes = 0;
-  const chunks = [];
-  for (let index = 0; index < entries.length; index += 1) {
-    const expectedName = `decoded-${String(index).padStart(4, "0")}.wav`;
-    if (entries[index].name !== expectedName) throw new Error("IMPORT_ASR_DECODE_FAILED");
-    const chunkPath = path.join(temporaryRoot, entries[index].name);
-    const status = await fs.lstat(chunkPath).catch(() => null);
-    if (!status?.isFile() || status.isSymbolicLink() || status.size <= 44) {
-      throw new Error("IMPORT_ASR_DECODE_FAILED");
-    }
-    totalBytes += status.size;
-    if (totalBytes > MAX_DECODED_BYTES) throw new Error("IMPORT_ASR_DECODE_FAILED");
-    chunks.push({
-      path: chunkPath,
-      startMs: index * SENSEVOICE_CHUNK_SECONDS * 1_000,
-    });
-  }
-  return chunks;
-}
-
 async function readJson(filePath) {
   try { return JSON.parse(await fs.readFile(filePath, "utf8")); }
   catch { return null; }
@@ -123,43 +95,10 @@ async function writeJsonAtomic(filePath, value) {
   await fs.rename(temporary, filePath);
 }
 
-async function prepareVideoOcrContinuation(
-  ffmpeg,
-  mediaPath,
-  stagingRoot,
-  temporaryRoot,
-  environment,
-  localOcrAuthorized,
-) {
-  const probeRoot = path.join(temporaryRoot, "video-text-probe");
-  await fs.mkdir(probeRoot, { recursive: true });
-  await runFile(
-    ffmpeg,
-    buildVideoTextProbeArguments(mediaPath, path.join(probeRoot, "probe-%04d.pgm")),
-    { cwd: packRoot, env: environment, timeout: DECODE_TIMEOUT_MS },
-    "decode",
-  );
-  const probeFiles = (await fs.readdir(probeRoot))
-    .filter((name) => /^probe-\d{4}\.pgm$/u.test(name))
-    .sort((left, right) => left.localeCompare(right, "en"));
-  const selected = selectStableTextFrameIndexes(
-    await Promise.all(probeFiles.map((name) => fs.readFile(path.join(probeRoot, name)))),
-  );
-  if (selected.length === 0) throw new Error("IMPORT_ASR_NO_SPEECH");
-  if (!localOcrAuthorized) throw new Error("IMPORT_VIDEO_FRAME_OCR_REQUIRED");
-  const ocrRoot = await fs.mkdtemp(path.join(stagingRoot, ".ocr-input-"));
-  const temporaryInputPaths = [];
-  for (const [outputIndex, probeIndex] of selected.slice(0, 6).entries()) {
-    const output = path.join(ocrRoot, `frame-${String(outputIndex + 1).padStart(3, "0")}.png`);
-    await runFile(
-      ffmpeg,
-      buildVideoOcrFrameArguments(mediaPath, probeIndex * 10, output),
-      { cwd: packRoot, env: environment, timeout: DECODE_TIMEOUT_MS },
-      "decode",
-    );
-    temporaryInputPaths.push(path.relative(stagingRoot, output).split(path.sep).join("/"));
-  }
-  return temporaryInputPaths;
+async function prepareVideoOcrContinuation(ffmpeg, mediaPath, stagingRoot, temporaryRoot, environment, localOcrAuthorized) {
+  return prepareVideoFrames((args) => runFile(ffmpeg, args, {
+    cwd: packRoot, env: environment, timeout: DECODE_TIMEOUT_MS,
+  }, "decode"), mediaPath, stagingRoot, temporaryRoot, localOcrAuthorized);
 }
 
 let rpc;
@@ -229,7 +168,7 @@ try {
   let markdown;
   let safeMetadata;
   let warnings = [];
-  let continuation = null;
+  let videoFrames = null;
   if (embeddedTranscript) {
     markdown = renderEmbeddedTranscript(embeddedTranscript, path.basename(mediaPath));
     safeMetadata = {
@@ -266,10 +205,8 @@ try {
     const decodeMarkerPath = path.join(shardRoot, "decode.complete.json");
     let chunks = [];
     const decodeMarker = await readJson(decodeMarkerPath);
-    if (decodeMarker?.mediaSha256 === mediaSha256 &&
-        decodeMarker?.chunkSeconds === SENSEVOICE_CHUNK_SECONDS) {
-      try { chunks = await decodedChunks(shardRoot); } catch { chunks = []; }
-    }
+    try { chunks = await decodedChunks(shardRoot); } catch { chunks = []; }
+    if (!canReuseDecodedChunks(decodeMarker, mediaSha256, chunks)) chunks = [];
     let execution;
     try {
     if (chunks.length === 0) {
@@ -283,13 +220,7 @@ try {
         timeout: DECODE_TIMEOUT_MS,
       }, "decode");
       chunks = await decodedChunks(shardRoot);
-      await writeJsonAtomic(decodeMarkerPath, {
-        schemaVersion: 1,
-        complete: true,
-        mediaSha256,
-        chunkSeconds: SENSEVOICE_CHUNK_SECONDS,
-        chunks: chunks.length,
-      });
+      await writeJsonAtomic(decodeMarkerPath, completeDecodeMarker(mediaSha256, chunks));
     } else {
       writeProgress(20, "asr.reusing_shards");
     }
@@ -300,21 +231,30 @@ try {
       const transcripts = [];
       for (let offset = 0; offset < chunks.length; offset += MAX_SENSEVOICE_BATCH_CHUNKS) {
         const batch = chunks.slice(offset, offset + MAX_SENSEVOICE_BATCH_CHUNKS);
+        const audible = batch.filter((chunk) => chunk.hasSignal);
+        if (audible.length === 0) {
+          writeProgress(22 + Math.round((Math.min(chunks.length, offset + batch.length) / chunks.length) * 70), "asr.recognizing");
+          continue;
+        }
         const batchPath = path.join(
           shardRoot,
           `batch-${String(offset).padStart(4, "0")}-${provider}-${recognitionLanguage}.complete.json`,
         );
         const cached = await readJson(batchPath);
-        if (cached?.schemaVersion === 1 && cached?.complete === true &&
-            cached?.mediaSha256 === mediaSha256 && Array.isArray(cached.transcripts)) {
-          transcripts.push(...cached.transcripts);
+        if (cached?.schemaVersion === 2 && cached?.complete === true &&
+            cached?.mediaSha256 === mediaSha256 && cached?.modelSha256 === modelSha256 &&
+            cached?.tokensSha256 === tokensSha256 && cached?.chunkStarts?.join() === batch.map((chunk) => chunk.startMs).join() &&
+            Array.isArray(cached.transcripts) && cached.transcripts.length <= batch.length) {
+          transcripts.push(...cached.transcripts.filter((transcript) =>
+            transcript.segments?.some((segment) => audible.some((chunk) =>
+              segment.startMs >= chunk.startMs && segment.startMs < chunk.startMs + chunk.durationMs))));
         } else {
           const result = await runFile(
             sherpa,
             buildSenseVoiceBatchArguments(
               model,
               tokens,
-              batch.map((chunk) => chunk.path),
+              audible.map((chunk) => chunk.path),
               provider,
               threads,
               recognitionLanguage,
@@ -325,12 +265,15 @@ try {
           assertProviderWasUsed(provider, result.stderr);
           const parsed = parseSenseVoiceBatchStdout(
             result.stdout,
-            batch.map((chunk) => chunk.startMs),
+            audible.map((chunk) => chunk.startMs),
           );
           await writeJsonAtomic(batchPath, {
-            schemaVersion: 1,
+            schemaVersion: 2,
             complete: true,
             mediaSha256,
+            modelSha256,
+            tokensSha256,
+            chunkStarts: batch.map((chunk) => chunk.startMs),
             provider,
             recognitionLanguage,
             transcripts: parsed,
@@ -347,7 +290,7 @@ try {
         isNoAudioExecutionError(error);
       if (error?.message !== "IMPORT_ASR_OUTPUT_INVALID" && !noAudioTrack) throw error;
       if (!isVideoMedia(mediaPath)) throw new Error("IMPORT_ASR_NO_SPEECH");
-      const temporaryInputPaths = await prepareVideoOcrContinuation(
+      videoFrames = await prepareVideoOcrContinuation(
         ffmpeg,
         mediaPath,
         stagingRoot,
@@ -363,16 +306,12 @@ try {
         requestedLanguage: recognitionLanguage,
         profile: asrProfile,
         speechDetected: false,
-        stableFrameCandidates: temporaryInputPaths.length,
+        stableFrameCandidates: videoFrames.frames.length,
         provenance: "authorized-local-video-text-probe",
-      };
-      continuation = {
-        type: "local_ocr",
-        temporary_input_paths: temporaryInputPaths,
       };
       warnings = ["IMPORT_ASR_NO_SPEECH_VIDEO_OCR"];
     }
-    if (!continuation) {
+    if (!videoFrames) {
       const transcript = execution.value;
       markdown = renderTranscript(transcript, path.basename(mediaPath), execution.provider);
       safeMetadata = {
@@ -415,8 +354,9 @@ try {
     assetPaths: [],
     metadataPath: relative(metadataPath),
     title: `Transcript - ${path.basename(mediaPath)}`,
-    textCoverage: continuation ? null : 1,
-    continuation,
+    textCoverage: videoFrames ? null : 1,
+    continuation: null,
+    videoFrames,
     warnings,
   }, error: null })}\n`);
   completed = true;

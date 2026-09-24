@@ -95,6 +95,8 @@ pub struct ImportV2Service {
     agent_candidate_action_lock: Mutex<()>,
     #[cfg_attr(not(feature = "gui"), allow(dead_code))]
     source_ai_active: Mutex<HashSet<String>>,
+    pub(super) source_ai_memory_candidates:
+        Mutex<HashMap<String, super::source_lifecycle::StoredSourceCandidate>>,
     pub(super) web_targets: Arc<WebTargetStore>,
     connector_profiles_root: Arc<RwLock<Option<PathBuf>>>,
     target_reservation_registry: Mutex<
@@ -389,6 +391,7 @@ impl ImportV2Service {
             lock_registry: ImportLockRegistry::default(),
             agent_candidate_action_lock: Mutex::new(()),
             source_ai_active: Mutex::new(HashSet::new()),
+            source_ai_memory_candidates: Mutex::new(HashMap::new()),
             web_targets,
             connector_profiles_root,
             target_reservation_registry: Mutex::new(HashMap::new()),
@@ -1617,9 +1620,11 @@ impl ImportV2Service {
                 .iter()
                 .filter(|attempt| attempt.route.starts_with("agent_assistance/"))
                 .collect::<Vec<_>>();
-            if agent_attempts.len() >= usize::from(max_attempts) {
+            if trigger == AgentAssistanceTrigger::QualityOptimization
+                && agent_attempts.len() >= usize::from(max_attempts)
+            {
                 return Err(task_error(
-                    "The Agent assistance attempt budget is exhausted for this item.",
+                    "Automatic Agent optimization reached its per-item attempt limit.",
                 ));
             }
             if agent_attempts
@@ -3622,7 +3627,13 @@ impl ImportV2Service {
                 ImportStage::Extract,
             );
         }
-        let planned_routes = self.planned_routes(context, &input, recovery_action)?;
+        let planned_routes = if input.kind == ImportInputKind::Url && snapshot.authenticated_retry {
+            // An authenticated retry must reach the stage that consumes the
+            // bound profile. Native-first policy applies to anonymous imports.
+            vec![("web.generic.browser", QualityFloor::ComparisonFallback)]
+        } else {
+            self.planned_routes(context, &input, recovery_action)?
+        };
         let mut engines = Vec::with_capacity(planned_routes.len());
         for attempt in &planned_routes {
             let route_input = route_resolution_input(attempt.0, &input);
@@ -3723,7 +3734,6 @@ impl ImportV2Service {
         let local_asr_authorized = snapshot.media_authorization.local_asr_authorized;
         let local_ocr_authorized = snapshot.media_authorization.local_ocr_authorized;
         let selected_subtitle = snapshot.selected_subtitle.clone();
-        let authenticated_retry = snapshot.authenticated_retry;
         let media_save_mode = input.media_save_mode.clone();
         let request = EngineRequest {
             protocol_version: "2".into(),
@@ -3753,6 +3763,7 @@ impl ImportV2Service {
         let mut recovery_error = None;
         let mut terminal_web_error = None;
         let mut request = request;
+        let mut capability_input_materialized = false;
         let max_task_progress = Cell::new(5_u64);
         for ((_, quality_floor), engine) in engines {
             let descriptor = describe_engine(engine.as_ref())?;
@@ -3774,9 +3785,11 @@ impl ImportV2Service {
             if is_capability_route(&descriptor.route)
                 && !descriptor.engine_id.starts_with("builtin.")
                 && request.input.source_identity.is_some()
+                && !capability_input_materialized
             {
                 request.input =
                     materialize_capability_input(context, &staging_root, &request.input)?;
+                capability_input_materialized = true;
             }
             let started_at = chrono::Utc::now().to_rfc3339();
             let report_engine_progress = |progress: EngineProgress| {
@@ -3844,24 +3857,6 @@ impl ImportV2Service {
                         .item_revision;
                     worker_revision.set(snapshot.expected_item_revision);
                     if is_web_user_wait(&error) {
-                        if authenticated_retry {
-                            return self.finish_failed(
-                                context,
-                                files,
-                                tasks,
-                                session_id,
-                                item_id,
-                                task_id,
-                                snapshot.expected_item_revision,
-                                BackendError::new(
-                                    "IMPORT_WEB_ACCOUNT_PERMISSION_DENIED",
-                                    "The current account cannot access this content.",
-                                    false,
-                                    true,
-                                ),
-                                ImportStage::Extract,
-                            );
-                        }
                         return self.finish_waiting_login(
                             context,
                             files,
@@ -3902,7 +3897,9 @@ impl ImportV2Service {
                             ImportStage::Extract,
                         );
                     }
-                    if error.code == "IMPORT_WEB_OCR_UNAVAILABLE" {
+                    if error.code == "IMPORT_WEB_OCR_UNAVAILABLE"
+                        || requires_explicit_video_frame_ocr(&error.code)
+                    {
                         return self.finish_waiting_local_ocr(
                             context,
                             files,
@@ -4170,6 +4167,32 @@ impl ImportV2Service {
                 last_error = Some(error);
                 continue;
             }
+            if descriptor.route == "pack.office-legacy" {
+                if let Some(converted) = candidate
+                    .asset_paths
+                    .iter()
+                    .find(|path| path.starts_with("converted/"))
+                {
+                    snapshot.expected_item_revision = self
+                        .record_attempt_claimed(
+                            context,
+                            files,
+                            session_id,
+                            item_id,
+                            task_id,
+                            snapshot.expected_item_revision,
+                            &descriptor,
+                            started_at,
+                            crate::models::import_v2::AttemptOutcome::Succeeded,
+                            None,
+                            candidate.warnings.clone(),
+                        )?
+                        .item_revision;
+                    worker_revision.set(snapshot.expected_item_revision);
+                    request.chained_input = Some(converted.clone());
+                    continue;
+                }
+            }
             // Attempt-level precheck selects a candidate; the formal QualityGate still runs once.
             let required_coverage = quality_floor.requirements().minimum_text_coverage as f64;
             if !candidate_meets_floor(&request.input, &candidate, *quality_floor) {
@@ -4206,32 +4229,6 @@ impl ImportV2Service {
                     continue;
                 }
             }
-            if descriptor.route == "pack.office-legacy" {
-                if let Some(converted) = candidate
-                    .asset_paths
-                    .iter()
-                    .find(|path| path.starts_with("converted/"))
-                {
-                    snapshot.expected_item_revision = self
-                        .record_attempt_claimed(
-                            context,
-                            files,
-                            session_id,
-                            item_id,
-                            task_id,
-                            snapshot.expected_item_revision,
-                            &descriptor,
-                            started_at,
-                            crate::models::import_v2::AttemptOutcome::Succeeded,
-                            None,
-                            candidate.warnings.clone(),
-                        )?
-                        .item_revision;
-                    worker_revision.set(snapshot.expected_item_revision);
-                    request.chained_input = Some(converted.clone());
-                    continue;
-                }
-            }
             selected = Some((descriptor, started_at, candidate));
             break;
         }
@@ -4261,6 +4258,26 @@ impl ImportV2Service {
                     error,
                     ImportStage::Extract,
                 );
+            }
+            if request.input.kind == ImportInputKind::Url
+                && last_error
+                    .as_ref()
+                    .is_some_and(|error| error.code == "IMPORT_WEB_STRUCTURE_CHANGED")
+                && planned_routes
+                    .iter()
+                    .any(|(route, _)| *route == "web.generic.browser")
+                && !self
+                    .engines
+                    .registered_routes()?
+                    .iter()
+                    .any(|route| route == "web.generic.browser")
+            {
+                last_error = Some(BackendError::new(
+                    "IMPORT_WEB_PLATFORM_CAPABILITY_MISSING",
+                    "Prepare the browser to load this page's readable content.",
+                    true,
+                    true,
+                ));
             }
             return self.finish_failed(
                 context,
@@ -4566,6 +4583,7 @@ impl ImportV2Service {
     ) -> Result<EngineResult, BackendError> {
         let Some(EngineContinuation::LocalAsr {
             temporary_input_path,
+            media_kind,
             ..
         }) = web_result.continuation.take()
         else {
@@ -4605,41 +4623,135 @@ impl ImportV2Service {
             source_identity: None,
             media_save_mode: Default::default(),
         };
-        let probe_embedded = request.input.kind == ImportInputKind::File;
         let companion_fallback = staging.join("transcripts/companion-fallback.md");
-        let engine = match self
-            .engines
-            .resolve_media_asr(&asr_input, request.asr_profile.as_ref())
-        {
-            Ok(engine) => engine,
-            Err(_) if companion_fallback.is_file() => {
-                return apply_companion_transcript_fallback(context, files, &staging, web_result)
+        let mut asr_request = request.clone();
+        asr_request.request_id = uuid::Uuid::new_v4().to_string();
+        asr_request.input = asr_input;
+        asr_request.chained_input = Some(temporary_input_path);
+        let mut embedded = None;
+        if request.input.kind == ImportInputKind::File {
+            if let Ok(decoder) = self
+                .engines
+                .resolve_route("media.embedded-subtitle", &asr_request.input)
+            {
+                asr_request.asr_probe_only = true;
+                match execute_engine_with_progress(
+                    decoder.as_ref(),
+                    &asr_request,
+                    token,
+                    &|progress| {
+                        update_continuation_progress(tasks, task_id, max_task_progress, progress)
+                    },
+                ) {
+                    Ok(result) => embedded = Some((decoder, result)),
+                    Err(error) if optional_subtitle_probe_failure(&error) => {
+                        if companion_fallback.is_file() {
+                            web_result.warnings.push(error.code);
+                            return apply_companion_transcript_fallback(
+                                context, files, &staging, web_result,
+                            );
+                        }
+                        if error.code != "IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE" {
+                            return Err(error);
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
             }
-            Err(error) => return Err(error),
-        };
-        if !request.local_asr_authorized && !probe_embedded {
+        }
+        if embedded.is_none() && companion_fallback.is_file() {
+            return apply_companion_transcript_fallback(context, files, &staging, web_result);
+        }
+        if embedded.is_none() && request.local_ocr_authorized && media_kind == "video" {
+            let decoder = self
+                .engines
+                .resolve_route("media.keyframes", &asr_request.input)
+                .or_else(|error| {
+                    if request.local_asr_authorized {
+                        self.engines
+                            .resolve_media_asr(&asr_request.input, request.asr_profile.as_ref())
+                    } else {
+                        Err(error)
+                    }
+                })
+                .map_err(|_| {
+                    BackendError::new(
+                        "IMPORT_VIDEO_OCR_DECODER_MISSING",
+                        "Prepare the media decoder to recognize video frames.",
+                        true,
+                        true,
+                    )
+                })?;
+            asr_request.asr_probe_only = false;
+            let descriptor = describe_engine(decoder.as_ref())?;
+            let started_at = chrono::Utc::now().to_rfc3339();
+            let outcome =
+                execute_engine_with_progress(decoder.as_ref(), &asr_request, token, &|progress| {
+                    update_continuation_progress(tasks, task_id, max_task_progress, progress)
+                });
+            *expected_item_revision = self
+                .record_attempt_claimed(
+                    context,
+                    files,
+                    session_id,
+                    item_id,
+                    task_id,
+                    *expected_item_revision,
+                    &descriptor,
+                    started_at,
+                    if outcome.is_ok() {
+                        crate::models::import_v2::AttemptOutcome::Succeeded
+                    } else {
+                        crate::models::import_v2::AttemptOutcome::Failed
+                    },
+                    outcome.as_ref().err().map(|error| error.code.clone()),
+                    Vec::new(),
+                )?
+                .item_revision;
+            worker_revision.set(*expected_item_revision);
+            let mut frames = outcome?;
+            validate_engine_result(staging_root, &frames)?;
+            if frames.continuation.as_ref().is_some_and(|continuation| {
+                !matches!(continuation, EngineContinuation::LocalOcr { .. })
+            }) {
+                return Err(ocr_unavailable());
+            }
+            // Preserve the original source snapshot and the host-validated frame
+            // assets. The OCR step fills the frame markers in this same candidate.
+            frames.source_snapshot_path = web_result.source_snapshot_path;
+            frames.asset_paths.extend(web_result.asset_paths);
+            frames.warnings.extend(web_result.warnings);
+            return Ok(frames);
+        }
+        if embedded.is_none() && !request.local_asr_authorized {
             return Err(asr_unavailable());
         }
+        let (engine, embedded_result) = if let Some((decoder, result)) = embedded {
+            (decoder, Some(result))
+        } else {
+            (
+                self.engines
+                    .resolve_media_asr(&asr_request.input, request.asr_profile.as_ref())?,
+                None,
+            )
+        };
         let descriptor = describe_engine(engine.as_ref())?;
         let shard_key = asr_shard_key(&canonical_media, &descriptor, request)?;
         let shard_root = staging.join("asr-shards");
         let started_at = chrono::Utc::now().to_rfc3339();
-        let mut asr_request = request.clone();
-        asr_request.request_id = uuid::Uuid::new_v4().to_string();
-        asr_request.input = asr_input;
-        // Capability runners receive staging artifacts through the dedicated
-        // relative-path field. Passing Rust's canonical Windows path here can
-        // introduce a `\\?\` prefix that Node treats as a different root and
-        // rejects with IMPORT_ASR_POLICY_BLOCKED.
-        asr_request.chained_input = Some(temporary_input_path);
         let outcome = (|| -> Result<(EngineResult, Vec<String>), BackendError> {
-            if let Some(cached) = load_completed_asr_shard(
-                &shard_root,
-                &shard_key,
-                &descriptor,
-                &staging,
-                request.local_asr_authorized,
-            )? {
+            let cached = if embedded_result.is_some() {
+                None
+            } else {
+                load_completed_asr_shard(
+                    &shard_root,
+                    &shard_key,
+                    &descriptor,
+                    &staging,
+                    request.local_asr_authorized,
+                )?
+            };
+            if let Some(cached) = cached {
                 let base_path = staging.join(&web_result.markdown_path);
                 let mut base =
                     std::fs::read_to_string(&base_path).map_err(|_| asr_unavailable())?;
@@ -4655,6 +4767,15 @@ impl ImportV2Service {
                     .asset_paths
                     .push("transcripts/local-asr.md".into());
                 if let Some(metadata) = cached.metadata {
+                    if descriptor.route == "media.embedded-subtitle" {
+                        preserve_embedded_subtitle(
+                            context,
+                            files,
+                            &staging,
+                            &metadata,
+                            &mut web_result,
+                        )?;
+                    }
                     files
                         .write_project_bytes_absolute(
                             context,
@@ -4703,40 +4824,8 @@ impl ImportV2Service {
                     .map(|_| ())
                 }
             };
-            let (mut asr_result, authorization_required) = if probe_embedded {
-                asr_request.asr_probe_only = true;
-                match execute_engine_with_progress(
-                    engine.as_ref(),
-                    &asr_request,
-                    token,
-                    &report_asr_progress,
-                ) {
-                    Ok(result) => (result, false),
-                    Err(error) if error.code == "IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE" => {
-                        if companion_fallback.is_file() {
-                            return apply_companion_transcript_fallback(
-                                context, files, &staging, web_result,
-                            )
-                            .map(|result| {
-                                (result, vec!["IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE".into()])
-                            });
-                        }
-                        if !request.local_asr_authorized {
-                            return Err(asr_unavailable());
-                        }
-                        asr_request.asr_probe_only = false;
-                        (
-                            execute_engine_with_progress(
-                                engine.as_ref(),
-                                &asr_request,
-                                token,
-                                &report_asr_progress,
-                            )?,
-                            true,
-                        )
-                    }
-                    Err(error) => return Err(error),
-                }
+            let (mut asr_result, authorization_required) = if let Some(result) = embedded_result {
+                (result, false)
             } else {
                 asr_request.asr_probe_only = false;
                 (
@@ -4767,7 +4856,12 @@ impl ImportV2Service {
             if output_metadata.file_type().is_symlink()
                 || !output_metadata.is_file()
                 || !output_path.starts_with(&canonical_staging)
-                || !is_allowed_local_asr_output_workspace(&canonical_staging, output_workspace)
+                || !(is_allowed_local_asr_output_workspace(&canonical_staging, output_workspace)
+                    || (descriptor.route == "media.embedded-subtitle"
+                        && output_workspace.parent() == Some(canonical_staging.as_path())
+                        && output_workspace.file_name().is_some_and(|name| {
+                            name.to_string_lossy().starts_with(".media-output-")
+                        })))
             {
                 return Err(asr_unavailable());
             }
@@ -4810,6 +4904,15 @@ impl ImportV2Service {
                 .asset_paths
                 .push("transcripts/local-asr.md".into());
             if let Some(metadata) = transcript_metadata {
+                if descriptor.route == "media.embedded-subtitle" {
+                    preserve_embedded_subtitle(
+                        context,
+                        files,
+                        &staging,
+                        &metadata,
+                        &mut web_result,
+                    )?;
+                }
                 files
                     .write_project_bytes_absolute(
                         context,
@@ -4830,10 +4933,15 @@ impl ImportV2Service {
             files
                 .write_project_bytes_absolute(context, &base_path, base.as_bytes())
                 .map_err(|_| asr_unavailable())?;
+            web_result
+                .asset_paths
+                .extend(asr_result.asset_paths.clone());
+            if chained_continuation.is_some() {
+                web_result.text_coverage = Some(0.0);
+            }
             for relative in std::iter::once(&asr_result.markdown_path)
                 .chain(std::iter::once(&asr_result.source_snapshot_path))
                 .chain(asr_result.metadata_path.iter())
-                .chain(asr_result.asset_paths.iter())
             {
                 let path = staging.join(relative);
                 let _ = remove_project_file(&context.root, &path);
@@ -5616,6 +5724,12 @@ impl ImportV2Service {
         error: BackendError,
         stage: ImportStage,
     ) -> Result<ImportItem, BackendError> {
+        let waiting_resource = matches!(
+            error.code.as_str(),
+            "IMPORT_VIDEO_OCR_RESOURCE_UPDATE_REQUIRED"
+                | "IMPORT_VIDEO_OCR_DECODER_MISSING"
+                | "IMPORT_WEB_PLATFORM_CAPABILITY_MISSING"
+        );
         let staging = context
             .resolve_project_path(&item_staging_relative_path(context, session_id, item_id)?)?;
         let batch_operation = is_batch_operation_task(tasks, task_id);
@@ -5639,8 +5753,28 @@ impl ImportV2Service {
             task_id,
             expected_item_revision,
             |item| {
-                transition_item(item, ImportItemStatus::Failed)?;
+                transition_item(
+                    item,
+                    if waiting_resource {
+                        ImportItemStatus::WaitingCapability
+                    } else {
+                        ImportItemStatus::Failed
+                    },
+                )?;
                 let mut issue = issue_from_engine_error_for_input(&error, stage, &item.input.kind);
+                if waiting_resource {
+                    issue.code = error.code.clone();
+                    issue.message = error.message.clone();
+                    issue.recovery_actions = vec![
+                        if error.code == "IMPORT_WEB_PLATFORM_CAPABILITY_MISSING" {
+                            ImportRecoveryAction::InstallBrowserCapability
+                        } else {
+                            ImportRecoveryAction::InstallCapability
+                        },
+                        ImportRecoveryAction::Retry,
+                        ImportRecoveryAction::ViewLog,
+                    ];
+                }
                 if is_agent_eligible_failure(&error.code, &issue) {
                     issue.available_actions =
                         vec![crate::models::import_v2_agent::AgentRecoveryAction::InvokeLocalAgent];
@@ -5652,7 +5786,14 @@ impl ImportV2Service {
         if !batch_operation {
             task_call(tasks.append_log(task_id, LogLevel::Error, "Import engine failed.".into()))?;
             task_call(tasks.set_error(task_id, issue_safe_error(&error)))?;
-            task_call(tasks.transition_status(task_id, TaskStatus::Failed))?;
+            task_call(tasks.transition_status(
+                task_id,
+                if waiting_resource {
+                    TaskStatus::WaitingForConfirmation
+                } else {
+                    TaskStatus::Failed
+                },
+            ))?;
         }
         Err(issue_safe_error(&error))
     }
@@ -5730,7 +5871,7 @@ impl ImportV2Service {
                     if asr_available {
                         !matches!(action, ImportRecoveryAction::InstallMediaCapability)
                     } else {
-                        !matches!(action, ImportRecoveryAction::AuthorizeLocalAsr)
+                        true
                     }
                 });
                 item.issue = Some(issue);
@@ -6195,6 +6336,46 @@ fn apply_companion_transcript_fallback(
     Ok(result)
 }
 
+fn preserve_embedded_subtitle(
+    context: &ProjectContext,
+    files: &FileStore,
+    staging: &Path,
+    metadata: &[u8],
+    result: &mut EngineResult,
+) -> Result<(), BackendError> {
+    let value: serde_json::Value =
+        serde_json::from_slice(metadata).map_err(|_| asr_unavailable())?;
+    if let Some(original) = value
+        .get("originalSubtitle")
+        .and_then(|value| value.as_str())
+    {
+        let relative = "subtitles/embedded.srt";
+        files.write_project_bytes_absolute(
+            context,
+            &staging.join(relative),
+            original.as_bytes(),
+        )?;
+        if !result.asset_paths.iter().any(|path| path == relative) {
+            result.asset_paths.push(relative.into());
+        }
+    }
+    Ok(())
+}
+
+fn optional_subtitle_probe_failure(error: &BackendError) -> bool {
+    // Optional availability/decoder failures may not erase a reliable sidecar.
+    // Integrity, path, cancellation and source-change failures must propagate.
+    matches!(
+        error.code.as_str(),
+        "IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE"
+            | "IMPORT_MEDIA_ENGINE_FAILED"
+            | "IMPORT_ASR_DECODE_FAILED"
+            | "IMPORT_V2_ENGINE_UNAVAILABLE"
+            | "IMPORT_V2_ENGINE_TIMEOUT"
+            | "IMPORT_V2_ENGINE_FAILED"
+    )
+}
+
 fn is_allowed_local_asr_output_workspace(staging: &Path, workspace: &Path) -> bool {
     let Some(name) = workspace.file_name().map(|value| value.to_string_lossy()) else {
         return false;
@@ -6209,12 +6390,39 @@ fn ocr_article_text(markdown: &str, metadata: Option<&[u8]>) -> String {
         metadata.and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
     {
         if let Some(blocks) = value.get("blocks").and_then(|value| value.as_array()) {
-            let texts: Vec<_> = blocks
-                .iter()
-                .filter_map(|block| block.get("text").and_then(|value| value.as_str()))
-                .map(str::trim)
-                .filter(|text| !text.is_empty())
-                .collect();
+            let multi_page = value
+                .get("pageCount")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(1)
+                > 1
+                || blocks.iter().any(|block| {
+                    block
+                        .get("pageNumber")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(1)
+                        > 1
+                });
+            let mut texts = Vec::new();
+            let mut current_page = None;
+            for block in blocks {
+                let Some(text) = block
+                    .get("text")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                else {
+                    continue;
+                };
+                let page = block
+                    .get("pageNumber")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(1);
+                if multi_page && current_page != Some(page) {
+                    texts.push(format!("## Page {page}"));
+                    current_page = Some(page);
+                }
+                texts.push(text.to_owned());
+            }
             if !texts.is_empty() {
                 return texts.join("\n\n");
             }
@@ -6380,7 +6588,7 @@ fn load_completed_asr_shard(
     root: &Path,
     key: &str,
     descriptor: &crate::services::import_v2::engine::EngineDescriptor,
-    staging: &Path,
+    _staging: &Path,
     local_asr_authorized: bool,
 ) -> Result<Option<CachedAsrShard>, BackendError> {
     let marker_bytes = match std::fs::read(root.join(format!("{key}.complete.json"))) {
@@ -6394,47 +6602,12 @@ fn load_completed_asr_shard(
     };
     if marker.schema_version != 1
         || !marker.complete
+        || marker.continuation.is_some()
         || marker.engine_id != descriptor.engine_id
         || marker.engine_version != descriptor.engine_version
         || (marker.authorization_required && !local_asr_authorized)
     {
         return Ok(None);
-    }
-    if let Some(EngineContinuation::LocalOcr {
-        temporary_input_paths,
-    }) = &marker.continuation
-    {
-        let canonical_staging = staging.canonicalize().map_err(|_| asr_unavailable())?;
-        for relative in temporary_input_paths {
-            let relative_path = Path::new(relative);
-            if relative_path.is_absolute()
-                || relative_path.components().any(|component| {
-                    matches!(
-                        component,
-                        std::path::Component::ParentDir
-                            | std::path::Component::RootDir
-                            | std::path::Component::Prefix(_)
-                    )
-                })
-            {
-                return Ok(None);
-            }
-            let candidate = staging.join(relative_path);
-            let metadata = match std::fs::symlink_metadata(&candidate) {
-                Ok(metadata) => metadata,
-                Err(_) => return Ok(None),
-            };
-            let canonical = match candidate.canonicalize() {
-                Ok(canonical) => canonical,
-                Err(_) => return Ok(None),
-            };
-            if metadata.file_type().is_symlink()
-                || !metadata.is_file()
-                || !canonical.starts_with(&canonical_staging)
-            {
-                return Ok(None);
-            }
-        }
     }
     let transcript_bytes = match std::fs::read(root.join(format!("{key}.md"))) {
         Ok(bytes) => bytes,
@@ -6476,6 +6649,9 @@ fn store_completed_asr_shard(
     continuation: Option<&EngineContinuation>,
     authorization_required: bool,
 ) -> Result<(), BackendError> {
+    if continuation.is_some() {
+        return Ok(());
+    }
     let transcript_path = root.join(format!("{key}.md"));
     let (binding, _) = BoundProjectMutationRoot::ensure_and_bind(project_root, &transcript_path)
         .map_err(|_| asr_unavailable())?;
@@ -6616,6 +6792,7 @@ fn is_capability_route(route: &str) -> bool {
 
 fn is_non_fallback_error(error: &BackendError) -> bool {
     error.code == crate::errors::IMPORT_V2_CANCELLED
+        || error.code == "IMPORT_FILE_SOURCE_CHANGED"
         || error.code == "IMPORT_PDF_ENCRYPTED_UNSUPPORTED"
         || error.code == "IMPORT_PDF_ACTIVE_CONTENT_REJECTED"
         || error.code.contains("PASSWORD")
@@ -6733,7 +6910,22 @@ fn materialize_capability_input(
     let mut authorized = input.clone();
     authorized.locator = destination.to_string_lossy().into_owned();
     authorized.normalized_locator = Some(relative.replace('\\', "/"));
-    authorized.source_identity = None;
+    let mut staged_identity = identity.clone();
+    staged_identity.canonical_path = destination
+        .canonicalize()
+        .map_err(|_| {
+            BackendError::new(
+                "IMPORT_FILE_STAGE_FAILED",
+                "The staged original could not be resolved.",
+                true,
+                false,
+            )
+        })?
+        .to_string_lossy()
+        .into_owned();
+    staged_identity.modified_nanos = None;
+    staged_identity.file_id = None;
+    authorized.source_identity = Some(staged_identity);
     Ok(authorized)
 }
 
@@ -7993,6 +8185,7 @@ mod tests {
         root: PathBuf,
         probe_seen: Arc<std::sync::atomic::AtomicBool>,
         embedded_available: bool,
+        failure_code: Option<&'static str>,
     }
 
     impl ImportEngine for EmbeddedSubtitleProbeFixtureEngine {
@@ -8000,7 +8193,7 @@ mod tests {
             EngineDescriptor {
                 engine_id: "embedded-subtitle-probe.fixture".into(),
                 engine_version: "1".into(),
-                route: "media.asr".into(),
+                route: "media.embedded-subtitle".into(),
             }
         }
 
@@ -8023,6 +8216,14 @@ mod tests {
             }
             self.probe_seen
                 .store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(code) = self.failure_code {
+                return Err(BackendError::new(
+                    code,
+                    "The optional decoder probe failed.",
+                    true,
+                    true,
+                ));
+            }
             if !self.embedded_available {
                 return Err(BackendError::new(
                     "IMPORT_EMBEDDED_SUBTITLE_UNAVAILABLE",
@@ -10692,6 +10893,7 @@ mod tests {
                 root: fixture.root.clone(),
                 probe_seen: Arc::clone(&probe_seen),
                 embedded_available: true,
+                failure_code: None,
             }))
             .unwrap();
         let (session, item, task) = fixture.seed_one_item_named("interview.mp4");
@@ -10726,6 +10928,77 @@ mod tests {
     }
 
     #[test]
+    fn local_media_preserves_sidecar_on_optional_probe_failure_but_propagates_integrity_errors() {
+        for code in [
+            None,
+            Some("IMPORT_MEDIA_ENGINE_FAILED"),
+            Some("IMPORT_V2_ENGINE_UNAVAILABLE"),
+            Some("IMPORT_MEDIA_POLICY_BLOCKED"),
+            Some("IMPORT_V2_CANCELLED"),
+            Some("IMPORT_SOURCE_CHANGED"),
+        ] {
+            let fixture = OrchestratorFixture::new("companion-probe-failures");
+            if let Some(failure_code) = code {
+                fixture
+                    .service
+                    .register_engine(Arc::new(EmbeddedSubtitleProbeFixtureEngine {
+                        root: fixture.root.clone(),
+                        probe_seen: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        embedded_available: false,
+                        failure_code: Some(failure_code),
+                    }))
+                    .unwrap();
+            }
+            let (session, item, task) = fixture.seed_one_item_named("interview.mp4");
+            let sidecar = "1\n00:00:00,000 --> 00:00:02,000\n2026 [可靠伴随稿]\n";
+            std::fs::write(fixture.root.join("fixtures/interview.srt"), sidecar).unwrap();
+            let result = fixture.service.run_item(
+                &fixture.context,
+                &fixture.files,
+                &fixture.tasks,
+                &session.session_id,
+                &item.item_id,
+                &task.id,
+            );
+            let ordinary_failure = code.is_none_or(|code| {
+                matches!(
+                    code,
+                    "IMPORT_MEDIA_ENGINE_FAILED" | "IMPORT_V2_ENGINE_UNAVAILABLE"
+                )
+            });
+            if ordinary_failure {
+                let result = result.unwrap();
+                assert_eq!(
+                    result.status,
+                    ImportItemStatus::PreviewReady,
+                    "{code:?}: {result:?}"
+                );
+                let preview = result.preview.unwrap();
+                let staging = fixture.root.join(format!(
+                    ".app/import-sessions/{}/items/{}/staging",
+                    session.session_id, item.item_id
+                ));
+                let markdown =
+                    std::fs::read_to_string(staging.join(preview.markdown.relative_path)).unwrap();
+                assert!(markdown.contains("2026 [可靠伴随稿]"), "{markdown}");
+                assert_eq!(
+                    std::fs::read_to_string(staging.join("subtitles/companion.srt")).unwrap(),
+                    sidecar
+                );
+                assert_eq!(
+                    std::fs::read(staging.join("source.bin")).unwrap(),
+                    std::fs::read(fixture.root.join("fixtures/interview.mp4")).unwrap()
+                );
+            } else {
+                match result {
+                    Err(error) => assert_eq!(Some(error.code.as_str()), code),
+                    Ok(item) => assert_eq!(item.status, ImportItemStatus::Cancelled),
+                }
+            }
+        }
+    }
+
+    #[test]
     fn local_media_uses_companion_before_asr_when_embedded_probe_is_empty() {
         let fixture = OrchestratorFixture::new("companion-before-asr");
         let probe_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -10735,6 +11008,7 @@ mod tests {
                 root: fixture.root.clone(),
                 probe_seen: Arc::clone(&probe_seen),
                 embedded_available: false,
+                failure_code: None,
             }))
             .unwrap();
         let (session, item, task) = fixture.seed_one_item_named("interview.mp4");

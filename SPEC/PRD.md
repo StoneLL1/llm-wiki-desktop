@@ -354,8 +354,8 @@ PRD 仅列出当前不纳入 MVP 的内容，后续可重新评估：
 | ID | 需求 | 优先级 | 验收标准 |
 |---|---|---|---|
 | PRD-LINT-001 | 本地快速 Lint | P0 | 对可读 Markdown 检查适用的死链、孤立页面、缺失 frontmatter、索引漂移、空页面、重复文件名；没有 Wiki 索引根时索引规则为 N/A；project app state 不可写时在内存运行并标注“本次运行有效 / 不会持久化” |
-| PRD-LINT-002 | Agent 深度 Lint | P0 | 项目已信任且 concrete route 可执行时，由内置固定 `wiki-lint` 识别六类语义 Finding；首期只允许通过同等 invocation/output 合同的 Claude/Codex，未支持或 forged/stale route 不广告且 invocation 为 0 |
-| PRD-LINT-003 | 自动修复可处理问题 | P0 | 仅 trusted writable + clean Git 项目可批准 selected Finding batch；批准后先 checkpoint，Agent 只写 task-owned candidate 的授权 Wiki，backend checked apply；最多三轮 deterministic recheck，无 BYOK fallback |
+| PRD-LINT-002 | Agent 深度 Lint | P0 | 项目已信任且所选 Agent 的操作协议可执行时，由内置固定 `wiki-lint` 识别六类语义 Finding；Claude、Codex、OpenClaw、Hermes 复用同一操作能力事实，未支持或 forged/stale route 不广告且 invocation 为 0 |
+| PRD-LINT-003 | 自动修复可处理问题 | P0 | trusted writable 且有项目本地 Git 时可批准 selected Finding batch；批准后为授权路径建立私有 before/after 操作快照，不改 HEAD/index 或无关 dirty 文件；Agent 只写 task-owned candidate 的授权 Wiki，backend checked apply；最多三轮 deterministic recheck，无 BYOK fallback |
 | PRD-LINT-004 | 高风险修改需要确认 | P0 | 初次批准覆盖整个选中批次的安全 selected-path 更新/新建；删除、未授权既有路径覆盖或冲突进入持久二次确认并提供按需 Diff；raw/Source 越界不可确认 |
 
 ### 9.9 Git 版本与恢复
