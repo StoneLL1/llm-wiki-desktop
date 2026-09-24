@@ -3,14 +3,14 @@
   "entries": [
     {
       "capabilityId": "asr-sensevoice-small",
-      "version": "1.13.4+2024.07.17.resources.1",
+      "version": "1.13.4+2024.07.17.resources.3",
       "targetTriple": "aarch64-apple-darwin",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/asr-sensevoice-small-1.13.4%2B2024.07.17.resources.1-aarch64-apple-darwin.zip",
-      "archiveSha256": "e882ab48d66c57cd6f215762b07a60e2ca32df2a6f935ff3abccb82fbd7043db",
-      "manifestSha256": "c9b9372d6eb549b011ca77c7291f01149b55df4828661ceeb1e8a803c40ddf1a",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/asr-sensevoice-small-1.13.4%2B2024.07.17.resources.3-aarch64-apple-darwin.zip",
+      "archiveSha256": "b3c87ff1819406b4075e4e4a080876031be14cecb2c0019108ab30510624ceed",
+      "manifestSha256": "e14e94884be99cee5721d0e14bcb8f7a90be18fbc395da2730bddf73290140e3",
       "signingKeyId": "",
-      "compressedBytes": 73515764,
-      "installedBytes": 212568924,
+      "compressedBytes": 74475620,
+      "installedBytes": 214804156,
       "modelBytes": 239549839,
       "modelFiles": [
         {
@@ -18,7 +18,7 @@
           "sha256": "763991a00edaea534ab36bf1b7cf89e61e911666dcfabbba71f91f9f7c593a63",
           "bytes": 104,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/763991a00edaea534ab36bf1b7cf89e61e911666dcfabbba71f91f9f7c593a63-UPSTREAM-README.md"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/763991a00edaea534ab36bf1b7cf89e61e911666dcfabbba71f91f9f7c593a63-UPSTREAM-README.md"
           ]
         },
         {
@@ -26,7 +26,7 @@
           "sha256": "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51",
           "bytes": 239233841,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51-model.int8.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51-model.int8.onnx"
           ]
         },
         {
@@ -34,7 +34,7 @@
           "sha256": "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc",
           "bytes": 315894,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc-tokens.txt"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc-tokens.txt"
           ]
         }
       ],
@@ -42,14 +42,14 @@
     },
     {
       "capabilityId": "asr-sensevoice-small",
-      "version": "1.13.4+2024.07.17.resources.1",
+      "version": "1.13.4+2024.07.17.resources.3",
       "targetTriple": "x86_64-apple-darwin",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/asr-sensevoice-small-1.13.4%2B2024.07.17.resources.1-x86_64-apple-darwin.zip",
-      "archiveSha256": "10ad424ecdd53602de3f32e29aab6d105f0ad377209c8f291b71a913b6c0d0b4",
-      "manifestSha256": "cfc97f3d32079d75dae76382b5d091b82b691b6993489bf8992369fec49644ff",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/asr-sensevoice-small-1.13.4%2B2024.07.17.resources.3-x86_64-apple-darwin.zip",
+      "archiveSha256": "fafb899e2ac18eb2b6f01563e04fd63f1a4fc14e5d294c6989c2d069977ba506",
+      "manifestSha256": "ebda613fe2289994cd310550ef9b11a631c1763a0a4896fcec03da0e4fadebfd",
       "signingKeyId": "",
-      "compressedBytes": 78667012,
-      "installedBytes": 226434689,
+      "compressedBytes": 79725851,
+      "installedBytes": 228953097,
       "modelBytes": 239549839,
       "modelFiles": [
         {
@@ -57,7 +57,7 @@
           "sha256": "763991a00edaea534ab36bf1b7cf89e61e911666dcfabbba71f91f9f7c593a63",
           "bytes": 104,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/763991a00edaea534ab36bf1b7cf89e61e911666dcfabbba71f91f9f7c593a63-UPSTREAM-README.md"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/763991a00edaea534ab36bf1b7cf89e61e911666dcfabbba71f91f9f7c593a63-UPSTREAM-README.md"
           ]
         },
         {
@@ -65,7 +65,7 @@
           "sha256": "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51",
           "bytes": 239233841,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51-model.int8.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51-model.int8.onnx"
           ]
         },
         {
@@ -73,7 +73,7 @@
           "sha256": "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc",
           "bytes": 315894,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc-tokens.txt"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc-tokens.txt"
           ]
         }
       ],
@@ -81,14 +81,14 @@
     },
     {
       "capabilityId": "asr-sensevoice-small",
-      "version": "1.13.4+2024.07.17.resources.1",
+      "version": "1.13.4+2024.07.17.resources.3",
       "targetTriple": "x86_64-pc-windows-msvc",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/asr-sensevoice-small-1.13.4%2B2024.07.17.resources.1-x86_64-pc-windows-msvc.zip",
-      "archiveSha256": "b7b46c32bd795b46d02224c91bf25cb3f23997c7cebf41b12944e3629602fd7c",
-      "manifestSha256": "228c5857bac4be12885fcc113e37855509976dd90eb179eaf283737891be5162",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/asr-sensevoice-small-1.13.4%2B2024.07.17.resources.3-x86_64-pc-windows-msvc.zip",
+      "archiveSha256": "13f079a59ade05f44ee6c769de8824a06a48791a74dbb35788044ae9450ede83",
+      "manifestSha256": "53b27b62baf76235f451b90bb578ba0d3db23eedbfc4eccb2fd09662faaf78a2",
       "signingKeyId": "",
-      "compressedBytes": 347930615,
-      "installedBytes": 1017815907,
+      "compressedBytes": 347934680,
+      "installedBytes": 1017829291,
       "modelBytes": 239549839,
       "modelFiles": [
         {
@@ -96,7 +96,7 @@
           "sha256": "763991a00edaea534ab36bf1b7cf89e61e911666dcfabbba71f91f9f7c593a63",
           "bytes": 104,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/763991a00edaea534ab36bf1b7cf89e61e911666dcfabbba71f91f9f7c593a63-UPSTREAM-README.md"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/763991a00edaea534ab36bf1b7cf89e61e911666dcfabbba71f91f9f7c593a63-UPSTREAM-README.md"
           ]
         },
         {
@@ -104,7 +104,7 @@
           "sha256": "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51",
           "bytes": 239233841,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51-model.int8.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51-model.int8.onnx"
           ]
         },
         {
@@ -112,7 +112,7 @@
           "sha256": "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc",
           "bytes": 315894,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc-tokens.txt"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc-tokens.txt"
           ]
         }
       ],
@@ -120,14 +120,14 @@
     },
     {
       "capabilityId": "asr-sensevoice-small",
-      "version": "1.13.4+2024.07.17.resources.1",
+      "version": "1.13.4+2024.07.17.resources.3",
       "targetTriple": "x86_64-unknown-linux-gnu",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/asr-sensevoice-small-1.13.4%2B2024.07.17.resources.1-x86_64-unknown-linux-gnu.zip",
-      "archiveSha256": "9029047086380a56600d1f2d333ea23d8c2e6846b5b2d8b837fbb74fcb37c21a",
-      "manifestSha256": "ddfc08396a42acf0c05f00071969ef489fe4b0c67a5689de51d8245ad8eb7c86",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/asr-sensevoice-small-1.13.4%2B2024.07.17.resources.3-x86_64-unknown-linux-gnu.zip",
+      "archiveSha256": "7db169d1712092ea24c8e53c2e5dfced0938c7a555a2374282956b4ee9599e16",
+      "manifestSha256": "4960bf457ef0afeaf6cfb99a7f02cdcf82f84228a15c3b77edc60b5650523787",
       "signingKeyId": "",
-      "compressedBytes": 486191073,
-      "installedBytes": 1009851156,
+      "compressedBytes": 486195136,
+      "installedBytes": 1009864378,
       "modelBytes": 239549839,
       "modelFiles": [
         {
@@ -135,7 +135,7 @@
           "sha256": "763991a00edaea534ab36bf1b7cf89e61e911666dcfabbba71f91f9f7c593a63",
           "bytes": 104,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/763991a00edaea534ab36bf1b7cf89e61e911666dcfabbba71f91f9f7c593a63-UPSTREAM-README.md"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/763991a00edaea534ab36bf1b7cf89e61e911666dcfabbba71f91f9f7c593a63-UPSTREAM-README.md"
           ]
         },
         {
@@ -143,7 +143,7 @@
           "sha256": "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51",
           "bytes": 239233841,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51-model.int8.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51-model.int8.onnx"
           ]
         },
         {
@@ -151,7 +151,7 @@
           "sha256": "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc",
           "bytes": 315894,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc-tokens.txt"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc-tokens.txt"
           ]
         }
       ],
@@ -159,14 +159,14 @@
     },
     {
       "capabilityId": "asr-whisper",
-      "version": "1.8.3+resources.1",
+      "version": "1.8.3+resources.2",
       "targetTriple": "aarch64-apple-darwin",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/asr-whisper-1.8.3%2Bresources.1-aarch64-apple-darwin.zip",
-      "archiveSha256": "843c29a064b77b3af6a62f20c8bc3c6be386b7f085f8af63f1e20ec54fdd9bd2",
-      "manifestSha256": "1b7e5c84f14a0c8b7f54c57f1ab511318e3878046cdcd6855ba567ad26fd8403",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/asr-whisper-1.8.3%2Bresources.2-aarch64-apple-darwin.zip",
+      "archiveSha256": "9300780b5f7e71f7e593557fa19ba11854448e68042a2eddbc7fbf177897f4a9",
+      "manifestSha256": "a6a28fd9b0be4b91272686ca1074f46556c98141c16425c86a16f17783f648b6",
       "signingKeyId": "",
-      "compressedBytes": 67981410,
-      "installedBytes": 179682294,
+      "compressedBytes": 67983461,
+      "installedBytes": 179685640,
       "modelBytes": 487601967,
       "modelFiles": [
         {
@@ -174,7 +174,7 @@
           "sha256": "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
           "bytes": 487601967,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b-ggml-small.bin"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b-ggml-small.bin"
           ]
         }
       ],
@@ -182,14 +182,14 @@
     },
     {
       "capabilityId": "asr-whisper",
-      "version": "1.8.3+resources.1",
+      "version": "1.8.3+resources.2",
       "targetTriple": "x86_64-apple-darwin",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/asr-whisper-1.8.3%2Bresources.1-x86_64-apple-darwin.zip",
-      "archiveSha256": "4e046980730fe22687bee7906332cd94aae55c0a095b9b687a4aa3fdfd6cf165",
-      "manifestSha256": "7e2863016f05e89c3f8a1ba34ca6b332ecdb00a8bfedeffa2b00f27f2b1fadc3",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/asr-whisper-1.8.3%2Bresources.2-x86_64-apple-darwin.zip",
+      "archiveSha256": "581dd4f51092f1467542e4e0e87f1b722fee383193286c17d7fcb13661d2c88e",
+      "manifestSha256": "65a6f1fd166c4eec45f325e1500f9048720431c594241e776b723964e60d5fd2",
       "signingKeyId": "",
-      "compressedBytes": 71708139,
-      "installedBytes": 189676901,
+      "compressedBytes": 71710418,
+      "installedBytes": 189680247,
       "modelBytes": 487601967,
       "modelFiles": [
         {
@@ -197,7 +197,7 @@
           "sha256": "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
           "bytes": 487601967,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b-ggml-small.bin"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b-ggml-small.bin"
           ]
         }
       ],
@@ -205,14 +205,14 @@
     },
     {
       "capabilityId": "asr-whisper",
-      "version": "1.8.3+resources.1",
+      "version": "1.8.3+resources.2",
       "targetTriple": "x86_64-pc-windows-msvc",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/asr-whisper-1.8.3%2Bresources.1-x86_64-pc-windows-msvc.zip",
-      "archiveSha256": "7e068d18f04311e100a18307880e6f979b00e968c4214247b13c8bcc09c785ef",
-      "manifestSha256": "a032562a440848ceee85092ae4c538033ef6ce4145ae05927360227a50c4c0e0",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/asr-whisper-1.8.3%2Bresources.2-x86_64-pc-windows-msvc.zip",
+      "archiveSha256": "6fe908b039b8b5f9a4c6c2e2357e2e7ba90fbb9769efd866be2d644815da1caf",
+      "manifestSha256": "6fe0ae51a5747a616e604faf6a2a2d924ca6c95b49550f763b9fbbb823bdbc41",
       "signingKeyId": "",
-      "compressedBytes": 103692547,
-      "installedBytes": 261933028,
+      "compressedBytes": 103694273,
+      "installedBytes": 261936394,
       "modelBytes": 487601967,
       "modelFiles": [
         {
@@ -220,7 +220,7 @@
           "sha256": "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
           "bytes": 487601967,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b-ggml-small.bin"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b-ggml-small.bin"
           ]
         }
       ],
@@ -228,14 +228,14 @@
     },
     {
       "capabilityId": "asr-whisper",
-      "version": "1.8.3+resources.1",
+      "version": "1.8.3+resources.2",
       "targetTriple": "x86_64-unknown-linux-gnu",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/asr-whisper-1.8.3%2Bresources.1-x86_64-unknown-linux-gnu.zip",
-      "archiveSha256": "4955131600fc8efe4d3eca83fc70dba4ef1c83a2a24ddeb8efb68acaecf4083d",
-      "manifestSha256": "6ad6d8ee9a4937cc8328cb9436674dc5a4815ed28cac080e5b71edd76709d9f7",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/asr-whisper-1.8.3%2Bresources.2-x86_64-unknown-linux-gnu.zip",
+      "archiveSha256": "915b9b9194a141a5e65ebe2a4ae99bd9a289b062ca08c81fea166e4cd8fb1029",
+      "manifestSha256": "43dc41fcd953dc375319a0450c90a9a37396a05f29d030681478f8f62eab32a2",
       "signingKeyId": "",
-      "compressedBytes": 249000483,
-      "installedBytes": 622637964,
+      "compressedBytes": 249002202,
+      "installedBytes": 622641289,
       "modelBytes": 487601967,
       "modelFiles": [
         {
@@ -243,7 +243,7 @@
           "sha256": "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
           "bytes": 487601967,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b-ggml-small.bin"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b-ggml-small.bin"
           ]
         }
       ],
@@ -251,53 +251,53 @@
     },
     {
       "capabilityId": "browser-runtime",
-      "version": "0.1.0+resources.1",
+      "version": "0.1.0+resources.2",
       "targetTriple": "aarch64-apple-darwin",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/browser-runtime-0.1.0%2Bresources.1-aarch64-apple-darwin.zip",
-      "archiveSha256": "393bc6759bd7b4783b74e9416769bf8711f93b8dd97b40854ac8e10ece649de4",
-      "manifestSha256": "3fc17b25441be2f4b8aee6a3a00483454206307d79be53d43a34ede283ad6c06",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/browser-runtime-0.1.0%2Bresources.2-aarch64-apple-darwin.zip",
+      "archiveSha256": "dbc37e172033f7fb8779909899a66140301b3bc887731eef311877dff23da632",
+      "manifestSha256": "d22c04ef092209ff27999af38b44b6e8023a048e400bb82dd36df74124b5ceb1",
       "signingKeyId": "",
-      "compressedBytes": 634612486,
-      "installedBytes": 1428701017,
+      "compressedBytes": 634620931,
+      "installedBytes": 1428720740,
       "modelBytes": null,
       "license": "Apache-2.0 AND MIT AND BSD-2-Clause AND BSD-3-Clause AND ISC AND MIT-0 AND LicenseRef-Bundled-Third-Party-Notices"
     },
     {
       "capabilityId": "browser-runtime",
-      "version": "0.1.0+resources.1",
+      "version": "0.1.0+resources.2",
       "targetTriple": "x86_64-apple-darwin",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/browser-runtime-0.1.0%2Bresources.1-x86_64-apple-darwin.zip",
-      "archiveSha256": "12fab67942f662232cbfb972699df0fe41936308baa5d8e28a301fe0a56d8e00",
-      "manifestSha256": "f5133a0d51a00519b0c0d30daf96d896c66336cb38c48cc1e46aa667dc558ab8",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/browser-runtime-0.1.0%2Bresources.2-x86_64-apple-darwin.zip",
+      "archiveSha256": "160bb6175c06f94fdcac362b1698db27247e40493fe70ffe93c9df885caf80e1",
+      "manifestSha256": "50dd97d8568dadd17e0be4e20dfa89fca173f74cfd3e3c67b26e1d60e61c2cf8",
       "signingKeyId": "",
-      "compressedBytes": 674288728,
-      "installedBytes": 1483231689,
+      "compressedBytes": 674297162,
+      "installedBytes": 1483251412,
       "modelBytes": null,
       "license": "Apache-2.0 AND MIT AND BSD-2-Clause AND BSD-3-Clause AND ISC AND MIT-0 AND LicenseRef-Bundled-Third-Party-Notices"
     },
     {
       "capabilityId": "browser-runtime",
-      "version": "0.1.0+resources.1",
+      "version": "0.1.0+resources.2",
       "targetTriple": "x86_64-pc-windows-msvc",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/browser-runtime-0.1.0%2Bresources.1-x86_64-pc-windows-msvc.zip",
-      "archiveSha256": "dcb2eb4cf1465a0b806a6ad30b36be0a2747b74e89e5976640bcb9761839e45f",
-      "manifestSha256": "f371668130e0d5ce81efbc1b8e316286022ec2d887f8e7fe0171a2b78f31f466",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/browser-runtime-0.1.0%2Bresources.2-x86_64-pc-windows-msvc.zip",
+      "archiveSha256": "e667094d036288f973911b6b1b4e3314a68434a8099a9939a8b3891958c46830",
+      "manifestSha256": "dbb4b66198b58aaac56468a45f6d679cd1501d59c50e26f26b13c04c22e9e94e",
       "signingKeyId": "",
-      "compressedBytes": 354536166,
-      "installedBytes": 845636306,
+      "compressedBytes": 354544653,
+      "installedBytes": 845656329,
       "modelBytes": null,
       "license": "Apache-2.0 AND MIT AND BSD-2-Clause AND BSD-3-Clause AND ISC AND MIT-0 AND LicenseRef-Bundled-Third-Party-Notices"
     },
     {
       "capabilityId": "browser-runtime",
-      "version": "0.1.0+resources.1",
+      "version": "0.1.0+resources.2",
       "targetTriple": "x86_64-unknown-linux-gnu",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/browser-runtime-0.1.0%2Bresources.1-x86_64-unknown-linux-gnu.zip",
-      "archiveSha256": "0778e63642a19bc10be1d8057e746303ee821f94bd7bba15452e16a5f766c316",
-      "manifestSha256": "016a3eedf2396faa7209e2922e4108109502c5049dd70dab88ba6ada3d7eb4bd",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/browser-runtime-0.1.0%2Bresources.2-x86_64-unknown-linux-gnu.zip",
+      "archiveSha256": "ecd9be6c25bc65a323fa1128df92b7acb79beacbcf535af1530e2bcbefc66d29",
+      "manifestSha256": "11451742d72ee8f7adad9259fb64d5ecabe6ddac94e84c371912168afaaffcdd",
       "signingKeyId": "",
-      "compressedBytes": 332319229,
-      "installedBytes": 833226856,
+      "compressedBytes": 332327671,
+      "installedBytes": 833246579,
       "modelBytes": null,
       "license": "Apache-2.0 AND MIT AND BSD-2-Clause AND BSD-3-Clause AND ISC AND MIT-0 AND LicenseRef-Bundled-Third-Party-Notices"
     },
@@ -305,7 +305,7 @@
       "capabilityId": "browser-runtime-lite",
       "version": "0.1.0+resources.1",
       "targetTriple": "aarch64-apple-darwin",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/browser-runtime-lite-0.1.0%2Bresources.1-aarch64-apple-darwin.zip",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/browser-runtime-lite-0.1.0%2Bresources.1-aarch64-apple-darwin.zip",
       "archiveSha256": "6815266ee6de808c4fe71925c2a0fcf85cf5c0edfa6bbe82235947a93c90ab6a",
       "manifestSha256": "df2eae56738618d296bf2af475fbcf6b0b4b61045a8b86cdff4405673deccc0e",
       "signingKeyId": "",
@@ -318,7 +318,7 @@
       "capabilityId": "browser-runtime-lite",
       "version": "0.1.0+resources.1",
       "targetTriple": "x86_64-apple-darwin",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/browser-runtime-lite-0.1.0%2Bresources.1-x86_64-apple-darwin.zip",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/browser-runtime-lite-0.1.0%2Bresources.1-x86_64-apple-darwin.zip",
       "archiveSha256": "1a2a81288dcddff10c1127080192d2376095bdcc8bb342532e336b0042aa899e",
       "manifestSha256": "d4de90307e48d933dcc57178d0b8d949663dd8c6a647f0b756d19ce426b88193",
       "signingKeyId": "",
@@ -331,7 +331,7 @@
       "capabilityId": "browser-runtime-lite",
       "version": "0.1.0+resources.1",
       "targetTriple": "x86_64-pc-windows-msvc",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/browser-runtime-lite-0.1.0%2Bresources.1-x86_64-pc-windows-msvc.zip",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/browser-runtime-lite-0.1.0%2Bresources.1-x86_64-pc-windows-msvc.zip",
       "archiveSha256": "f35a7bd60764c6700cb26ca08e22db22a59505ded47a5b4150f5f727d7109d33",
       "manifestSha256": "0d5ad73439a2382cb3ad5a5b14a801f9f369ff0d581942af61c4f7d1e2b7d7ae",
       "signingKeyId": "",
@@ -344,7 +344,7 @@
       "capabilityId": "browser-runtime-lite",
       "version": "0.1.0+resources.1",
       "targetTriple": "x86_64-unknown-linux-gnu",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/browser-runtime-lite-0.1.0%2Bresources.1-x86_64-unknown-linux-gnu.zip",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/browser-runtime-lite-0.1.0%2Bresources.1-x86_64-unknown-linux-gnu.zip",
       "archiveSha256": "9dc81b3c280783c75211e73ea84922e760735854aeea5ff0ac9d12efdd5b3915",
       "manifestSha256": "2a743097acc2ea96f6a3ff01c2f6a5c904a28034db8012d074cbe443716d9611",
       "signingKeyId": "",
@@ -357,12 +357,12 @@
       "capabilityId": "document-layout",
       "version": "2.48.0+resources.1",
       "targetTriple": "aarch64-apple-darwin",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/document-layout-2.48.0%2Bresources.1-aarch64-apple-darwin.zip",
-      "archiveSha256": "2decce7738359f146ad341b066742800d63551758d261f52038516b829856e0f",
-      "manifestSha256": "fa0acc54c868d85a956ae0522701443a176c78ffacc5b8365f29521d95ce67a9",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/document-layout-2.48.0%2Bresources.1-aarch64-apple-darwin.zip",
+      "archiveSha256": "8d28c7bf2bd1952811d908630271ea7890eef2dbc34d310988253473b307cf53",
+      "manifestSha256": "329250535306d6d448b6cbd53b5f3efe4222178029c5f8259709645ba8c6c876",
       "signingKeyId": "",
-      "compressedBytes": 335308120,
-      "installedBytes": 1147392717,
+      "compressedBytes": 335308456,
+      "installedBytes": 1147393098,
       "modelBytes": 529895308,
       "modelFiles": [
         {
@@ -370,7 +370,7 @@
           "sha256": "68b24d60b326aaf7daf7a3d87ab9bdc6db0fa5cdeab6e5c04279d81b4374f656",
           "bytes": 2864,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/68b24d60b326aaf7daf7a3d87ab9bdc6db0fa5cdeab6e5c04279d81b4374f656-config.json"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/68b24d60b326aaf7daf7a3d87ab9bdc6db0fa5cdeab6e5c04279d81b4374f656-config.json"
           ]
         },
         {
@@ -378,7 +378,7 @@
           "sha256": "31e60b4709571b613bc8736a9c982fb550d8d7a1809160a68a8282af60c8910b",
           "bytes": 171666216,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/31e60b4709571b613bc8736a9c982fb550d8d7a1809160a68a8282af60c8910b-model.safetensors"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/31e60b4709571b613bc8736a9c982fb550d8d7a1809160a68a8282af60c8910b-model.safetensors"
           ]
         },
         {
@@ -386,7 +386,7 @@
           "sha256": "cd38cd59999e7a95d68e487fbe5132df3d4e5c32a0836add57e6126ba0c4eaf1",
           "bytes": 444,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/cd38cd59999e7a95d68e487fbe5132df3d4e5c32a0836add57e6126ba0c4eaf1-preprocessor_config.json"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/cd38cd59999e7a95d68e487fbe5132df3d4e5c32a0836add57e6126ba0c4eaf1-preprocessor_config.json"
           ]
         },
         {
@@ -394,7 +394,7 @@
           "sha256": "2a7d6c924b3cd12fb99a09280ca9c33a89c5d60b93253617d2e088c1a40374d9",
           "bytes": 212758388,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/2a7d6c924b3cd12fb99a09280ca9c33a89c5d60b93253617d2e088c1a40374d9-tableformer_accurate.safetensors"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/2a7d6c924b3cd12fb99a09280ca9c33a89c5d60b93253617d2e088c1a40374d9-tableformer_accurate.safetensors"
           ]
         },
         {
@@ -402,7 +402,7 @@
           "sha256": "984e122ceb8ccf84d84c9d2882f6f2302a44b4f1e577babd6289892c36f3cffd",
           "bytes": 7060,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/984e122ceb8ccf84d84c9d2882f6f2302a44b4f1e577babd6289892c36f3cffd-tm_config.json"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/984e122ceb8ccf84d84c9d2882f6f2302a44b4f1e577babd6289892c36f3cffd-tm_config.json"
           ]
         },
         {
@@ -410,7 +410,7 @@
           "sha256": "3119563aab5a7c96fda4d621119b63fd8806272b86c30936d15507616422f718",
           "bytes": 145453276,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/3119563aab5a7c96fda4d621119b63fd8806272b86c30936d15507616422f718-tableformer_fast.safetensors"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/3119563aab5a7c96fda4d621119b63fd8806272b86c30936d15507616422f718-tableformer_fast.safetensors"
           ]
         },
         {
@@ -418,7 +418,7 @@
           "sha256": "dca6762508dddfae6d57d6cb4ef822c6000119dff0f3b6489db7413118c2622a",
           "bytes": 7060,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/dca6762508dddfae6d57d6cb4ef822c6000119dff0f3b6489db7413118c2622a-tm_config.json"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/dca6762508dddfae6d57d6cb4ef822c6000119dff0f3b6489db7413118c2622a-tm_config.json"
           ]
         }
       ],
@@ -428,11 +428,11 @@
       "capabilityId": "document-layout",
       "version": "2.48.0+resources.1",
       "targetTriple": "x86_64-pc-windows-msvc",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/document-layout-2.48.0%2Bresources.1-x86_64-pc-windows-msvc.zip",
-      "archiveSha256": "9a9ce8c718b81441e0e6fe2e65a1d1629946d460ac717d5d44c215da149e5b5a",
-      "manifestSha256": "7e4b0e5271b57366a52973337daec19226051aede057b0a916691b360aa05082",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/document-layout-2.48.0%2Bresources.1-x86_64-pc-windows-msvc.zip",
+      "archiveSha256": "2b0b8151433ff399e6350916abb787231ffe4e723bc646430e8a2999896021d2",
+      "manifestSha256": "ca0d62377c57b33ff73df0a00b1716d847eb18b032b3dd6b5c2460a251dc915f",
       "signingKeyId": "",
-      "compressedBytes": 352081968,
+      "compressedBytes": 352081767,
       "installedBytes": 1156143481,
       "modelBytes": 529895308,
       "modelFiles": [
@@ -441,7 +441,7 @@
           "sha256": "68b24d60b326aaf7daf7a3d87ab9bdc6db0fa5cdeab6e5c04279d81b4374f656",
           "bytes": 2864,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/68b24d60b326aaf7daf7a3d87ab9bdc6db0fa5cdeab6e5c04279d81b4374f656-config.json"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/68b24d60b326aaf7daf7a3d87ab9bdc6db0fa5cdeab6e5c04279d81b4374f656-config.json"
           ]
         },
         {
@@ -449,7 +449,7 @@
           "sha256": "31e60b4709571b613bc8736a9c982fb550d8d7a1809160a68a8282af60c8910b",
           "bytes": 171666216,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/31e60b4709571b613bc8736a9c982fb550d8d7a1809160a68a8282af60c8910b-model.safetensors"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/31e60b4709571b613bc8736a9c982fb550d8d7a1809160a68a8282af60c8910b-model.safetensors"
           ]
         },
         {
@@ -457,7 +457,7 @@
           "sha256": "cd38cd59999e7a95d68e487fbe5132df3d4e5c32a0836add57e6126ba0c4eaf1",
           "bytes": 444,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/cd38cd59999e7a95d68e487fbe5132df3d4e5c32a0836add57e6126ba0c4eaf1-preprocessor_config.json"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/cd38cd59999e7a95d68e487fbe5132df3d4e5c32a0836add57e6126ba0c4eaf1-preprocessor_config.json"
           ]
         },
         {
@@ -465,7 +465,7 @@
           "sha256": "2a7d6c924b3cd12fb99a09280ca9c33a89c5d60b93253617d2e088c1a40374d9",
           "bytes": 212758388,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/2a7d6c924b3cd12fb99a09280ca9c33a89c5d60b93253617d2e088c1a40374d9-tableformer_accurate.safetensors"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/2a7d6c924b3cd12fb99a09280ca9c33a89c5d60b93253617d2e088c1a40374d9-tableformer_accurate.safetensors"
           ]
         },
         {
@@ -473,7 +473,7 @@
           "sha256": "984e122ceb8ccf84d84c9d2882f6f2302a44b4f1e577babd6289892c36f3cffd",
           "bytes": 7060,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/984e122ceb8ccf84d84c9d2882f6f2302a44b4f1e577babd6289892c36f3cffd-tm_config.json"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/984e122ceb8ccf84d84c9d2882f6f2302a44b4f1e577babd6289892c36f3cffd-tm_config.json"
           ]
         },
         {
@@ -481,7 +481,7 @@
           "sha256": "3119563aab5a7c96fda4d621119b63fd8806272b86c30936d15507616422f718",
           "bytes": 145453276,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/3119563aab5a7c96fda4d621119b63fd8806272b86c30936d15507616422f718-tableformer_fast.safetensors"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/3119563aab5a7c96fda4d621119b63fd8806272b86c30936d15507616422f718-tableformer_fast.safetensors"
           ]
         },
         {
@@ -489,7 +489,7 @@
           "sha256": "dca6762508dddfae6d57d6cb4ef822c6000119dff0f3b6489db7413118c2622a",
           "bytes": 7060,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/dca6762508dddfae6d57d6cb4ef822c6000119dff0f3b6489db7413118c2622a-tm_config.json"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/dca6762508dddfae6d57d6cb4ef822c6000119dff0f3b6489db7413118c2622a-tm_config.json"
           ]
         }
       ],
@@ -499,11 +499,11 @@
       "capabilityId": "document-layout",
       "version": "2.48.0+resources.1",
       "targetTriple": "x86_64-unknown-linux-gnu",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/document-layout-2.48.0%2Bresources.1-x86_64-unknown-linux-gnu.zip",
-      "archiveSha256": "29912fdc0197432f5778bc04e9d6f8bb996124c4df26433ff3463014b6ac1273",
-      "manifestSha256": "4fbe2a671773b309be20fc22de7050342ae6f08a2efa054273b65d28fbd3cb75",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/document-layout-2.48.0%2Bresources.1-x86_64-unknown-linux-gnu.zip",
+      "archiveSha256": "5579d2cb4f0e70a5b89ea8e2730928edbb71264de04e4a79f57b2cc8d62b2e2d",
+      "manifestSha256": "33e61b94597251d2e861bedb907454ec0ecb487f4b36f0c72aaad4a21a255096",
       "signingKeyId": "",
-      "compressedBytes": 491460291,
+      "compressedBytes": 491460049,
       "installedBytes": 1607305333,
       "modelBytes": 529895308,
       "modelFiles": [
@@ -512,7 +512,7 @@
           "sha256": "68b24d60b326aaf7daf7a3d87ab9bdc6db0fa5cdeab6e5c04279d81b4374f656",
           "bytes": 2864,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/68b24d60b326aaf7daf7a3d87ab9bdc6db0fa5cdeab6e5c04279d81b4374f656-config.json"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/68b24d60b326aaf7daf7a3d87ab9bdc6db0fa5cdeab6e5c04279d81b4374f656-config.json"
           ]
         },
         {
@@ -520,7 +520,7 @@
           "sha256": "31e60b4709571b613bc8736a9c982fb550d8d7a1809160a68a8282af60c8910b",
           "bytes": 171666216,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/31e60b4709571b613bc8736a9c982fb550d8d7a1809160a68a8282af60c8910b-model.safetensors"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/31e60b4709571b613bc8736a9c982fb550d8d7a1809160a68a8282af60c8910b-model.safetensors"
           ]
         },
         {
@@ -528,7 +528,7 @@
           "sha256": "cd38cd59999e7a95d68e487fbe5132df3d4e5c32a0836add57e6126ba0c4eaf1",
           "bytes": 444,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/cd38cd59999e7a95d68e487fbe5132df3d4e5c32a0836add57e6126ba0c4eaf1-preprocessor_config.json"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/cd38cd59999e7a95d68e487fbe5132df3d4e5c32a0836add57e6126ba0c4eaf1-preprocessor_config.json"
           ]
         },
         {
@@ -536,7 +536,7 @@
           "sha256": "2a7d6c924b3cd12fb99a09280ca9c33a89c5d60b93253617d2e088c1a40374d9",
           "bytes": 212758388,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/2a7d6c924b3cd12fb99a09280ca9c33a89c5d60b93253617d2e088c1a40374d9-tableformer_accurate.safetensors"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/2a7d6c924b3cd12fb99a09280ca9c33a89c5d60b93253617d2e088c1a40374d9-tableformer_accurate.safetensors"
           ]
         },
         {
@@ -544,7 +544,7 @@
           "sha256": "984e122ceb8ccf84d84c9d2882f6f2302a44b4f1e577babd6289892c36f3cffd",
           "bytes": 7060,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/984e122ceb8ccf84d84c9d2882f6f2302a44b4f1e577babd6289892c36f3cffd-tm_config.json"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/984e122ceb8ccf84d84c9d2882f6f2302a44b4f1e577babd6289892c36f3cffd-tm_config.json"
           ]
         },
         {
@@ -552,7 +552,7 @@
           "sha256": "3119563aab5a7c96fda4d621119b63fd8806272b86c30936d15507616422f718",
           "bytes": 145453276,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/3119563aab5a7c96fda4d621119b63fd8806272b86c30936d15507616422f718-tableformer_fast.safetensors"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/3119563aab5a7c96fda4d621119b63fd8806272b86c30936d15507616422f718-tableformer_fast.safetensors"
           ]
         },
         {
@@ -560,7 +560,7 @@
           "sha256": "dca6762508dddfae6d57d6cb4ef822c6000119dff0f3b6489db7413118c2622a",
           "bytes": 7060,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/dca6762508dddfae6d57d6cb4ef822c6000119dff0f3b6489db7413118c2622a-tm_config.json"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/dca6762508dddfae6d57d6cb4ef822c6000119dff0f3b6489db7413118c2622a-tm_config.json"
           ]
         }
       ],
@@ -568,53 +568,53 @@
     },
     {
       "capabilityId": "document-standard",
-      "version": "0.1.0+resources.1",
+      "version": "0.1.0+resources.2",
       "targetTriple": "aarch64-apple-darwin",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/document-standard-0.1.0%2Bresources.1-aarch64-apple-darwin.zip",
-      "archiveSha256": "21bc64b32b6751dc9f22877b953033a1aba9a4af15911a2b28af5cbbdb1575d1",
-      "manifestSha256": "4bf5fd32ee854ee874b198bfb828301b0d380acc5428dec820365d00435dee27",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/document-standard-0.1.0%2Bresources.2-aarch64-apple-darwin.zip",
+      "archiveSha256": "29585afebf768f8f2edb5d218db03945086299f8544cdb28dc91b77d7d35a970",
+      "manifestSha256": "2f9a398ae9780518d2d232c178ba34a4d68e376045f673848b4371dfa8f35c95",
       "signingKeyId": "",
-      "compressedBytes": 135490959,
-      "installedBytes": 404166948,
+      "compressedBytes": 135492349,
+      "installedBytes": 404170210,
       "modelBytes": null,
       "license": "MIT AND PSF-2.0 AND MPL-2.0 AND LicenseRef-Bundled-Third-Party-Notices"
     },
     {
       "capabilityId": "document-standard",
-      "version": "0.1.0+resources.1",
+      "version": "0.1.0+resources.2",
       "targetTriple": "x86_64-apple-darwin",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/document-standard-0.1.0%2Bresources.1-x86_64-apple-darwin.zip",
-      "archiveSha256": "cd476f1e8ba28b66a9cbd67cf53d36a29135f972f2d7eb2da4fb3e52d9caf951",
-      "manifestSha256": "4947078f5ddf04bef2079cbccd3bd40bf87ba1b54fb49245c73ee01b1f464d1a",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/document-standard-0.1.0%2Bresources.2-x86_64-apple-darwin.zip",
+      "archiveSha256": "bf1f80e37a52445bbd0e5582808ca08f9b35f624f716e9212b938224def54901",
+      "manifestSha256": "1fa92696de4a59a3387216ecbe097494081f534ca427d06fb444c36bcd0d1285",
       "signingKeyId": "",
-      "compressedBytes": 123461298,
-      "installedBytes": 372942322,
+      "compressedBytes": 123462898,
+      "installedBytes": 372945713,
       "modelBytes": null,
       "license": "MIT AND PSF-2.0 AND MPL-2.0 AND LicenseRef-Bundled-Third-Party-Notices"
     },
     {
       "capabilityId": "document-standard",
-      "version": "0.1.0+resources.1",
+      "version": "0.1.0+resources.2",
       "targetTriple": "x86_64-pc-windows-msvc",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/document-standard-0.1.0%2Bresources.1-x86_64-pc-windows-msvc.zip",
-      "archiveSha256": "1b85d518c67e36b6858e219caf095fe3b8a85361514807c994fd5b0f370f8abe",
-      "manifestSha256": "f95fd63ace818dbc7d1700603a3010e29a5015277f3a2800424617289e546b10",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/document-standard-0.1.0%2Bresources.2-x86_64-pc-windows-msvc.zip",
+      "archiveSha256": "b687c36adc53749c15e5986994df932a73de2e01843f1d90b096f3846e2bcae9",
+      "manifestSha256": "df951c561a0228cd10b35b1bcc54b6721cbfc7026645f638da3304bf9ab9fd14",
       "signingKeyId": "",
-      "compressedBytes": 102943175,
-      "installedBytes": 287991374,
+      "compressedBytes": 102944556,
+      "installedBytes": 287994680,
       "modelBytes": null,
       "license": "MIT AND PSF-2.0 AND MPL-2.0 AND LicenseRef-Bundled-Third-Party-Notices"
     },
     {
       "capabilityId": "document-standard",
-      "version": "0.1.0+resources.1",
+      "version": "0.1.0+resources.2",
       "targetTriple": "x86_64-unknown-linux-gnu",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/document-standard-0.1.0%2Bresources.1-x86_64-unknown-linux-gnu.zip",
-      "archiveSha256": "7aa6074b60e401d161cfa298e79807dd1861f35770bde7d5ac2e571f71dea6a3",
-      "manifestSha256": "dadf3d93badf9d2af32677504a0b341b519fc04113c6eb690eb14ba917322876",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/document-standard-0.1.0%2Bresources.2-x86_64-unknown-linux-gnu.zip",
+      "archiveSha256": "c7acf2363ff74a13b5e39b9ff73b9a566b87462cbced8aac1d4980531cccf19f",
+      "manifestSha256": "2388605d7539d198f34a1d38ea81c7124d53386ade7ff52f3d6599f849ac8bf9",
       "signingKeyId": "",
-      "compressedBytes": 160382683,
-      "installedBytes": 462520968,
+      "compressedBytes": 160384062,
+      "installedBytes": 462524214,
       "modelBytes": null,
       "license": "MIT AND PSF-2.0 AND MPL-2.0 AND LicenseRef-Bundled-Third-Party-Notices"
     },
@@ -622,7 +622,7 @@
       "capabilityId": "media-metadata",
       "version": "0.1.0+resources.1",
       "targetTriple": "aarch64-apple-darwin",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/media-metadata-0.1.0%2Bresources.1-aarch64-apple-darwin.zip",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/media-metadata-0.1.0%2Bresources.1-aarch64-apple-darwin.zip",
       "archiveSha256": "78401df575a642034386fc1ec290f9f9e7bb6906a92ccf064068beb5fda548fc",
       "manifestSha256": "915b715183e6f8852a7ff911560bc85774f978fb76db6115ce1202cb9c26376a",
       "signingKeyId": "",
@@ -635,7 +635,7 @@
       "capabilityId": "media-metadata",
       "version": "0.1.0+resources.1",
       "targetTriple": "x86_64-apple-darwin",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/media-metadata-0.1.0%2Bresources.1-x86_64-apple-darwin.zip",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/media-metadata-0.1.0%2Bresources.1-x86_64-apple-darwin.zip",
       "archiveSha256": "3892acc74c6213320409bd47dd7912823780b960d8add90c6c4fcf9b101ec61a",
       "manifestSha256": "acf56a178353f83ba8a8aadb7c19c6c0865402b62ce5707ccc752b2ca3680140",
       "signingKeyId": "",
@@ -648,7 +648,7 @@
       "capabilityId": "media-metadata",
       "version": "0.1.0+resources.1",
       "targetTriple": "x86_64-pc-windows-msvc",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/media-metadata-0.1.0%2Bresources.1-x86_64-pc-windows-msvc.zip",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/media-metadata-0.1.0%2Bresources.1-x86_64-pc-windows-msvc.zip",
       "archiveSha256": "87157650098dc52d2c9a9274fd1cabe8df70146e7a0130d733a1f2d1550d8e82",
       "manifestSha256": "6b21e2dd3234a657805d0f2ba78585e9dee00d20a854302ba55d2861c29666db",
       "signingKeyId": "",
@@ -661,7 +661,7 @@
       "capabilityId": "media-metadata",
       "version": "0.1.0+resources.1",
       "targetTriple": "x86_64-unknown-linux-gnu",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/media-metadata-0.1.0%2Bresources.1-x86_64-unknown-linux-gnu.zip",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/media-metadata-0.1.0%2Bresources.1-x86_64-unknown-linux-gnu.zip",
       "archiveSha256": "3b9d3f06d478420bfbb7998a98ec26862615e40a8202ddea9b323b1cf4bebede",
       "manifestSha256": "c692a61b66f6ea51615b7703f33bb4d6e22539f199595c9bb555e530b3f3235f",
       "signingKeyId": "",
@@ -672,66 +672,66 @@
     },
     {
       "capabilityId": "media-runtime",
-      "version": "8.1.2+resources.1",
+      "version": "8.1.2+resources.3",
       "targetTriple": "aarch64-apple-darwin",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/media-runtime-8.1.2%2Bresources.1-aarch64-apple-darwin.zip",
-      "archiveSha256": "07231fb3be85efecfcab7138ca31f672a3ddf3e3b35b27b839f2f6541aefbe72",
-      "manifestSha256": "75e3fc9f2f21eddfeb60e69ac6c13d5914345fa14818739427d4f2138e7d12e0",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/media-runtime-8.1.2%2Bresources.3-aarch64-apple-darwin.zip",
+      "archiveSha256": "47b0bcc3b52427a7479d1a231b1e5a521001e71d57f1ca9ba88d3d1380290630",
+      "manifestSha256": "26f0f2c6582659ccf5550ce10b59472bf4cb06385fa70b3399080edf8f5dc755",
       "signingKeyId": "",
-      "compressedBytes": 66878173,
-      "installedBytes": 176737793,
+      "compressedBytes": 66886373,
+      "installedBytes": 176761181,
       "modelBytes": null,
       "license": "MIT AND LGPL-3.0-or-later"
     },
     {
       "capabilityId": "media-runtime",
-      "version": "8.1.2+resources.1",
+      "version": "8.1.2+resources.3",
       "targetTriple": "x86_64-apple-darwin",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/media-runtime-8.1.2%2Bresources.1-x86_64-apple-darwin.zip",
-      "archiveSha256": "a8e3c72f30b1396480355063016f71403cbce73f5c502b8643ffbbec4611d205",
-      "manifestSha256": "92ec52b91bab7d47629ac901ed522e94f0cfea96f11fabb615c963abd8b5faef",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/media-runtime-8.1.2%2Bresources.3-x86_64-apple-darwin.zip",
+      "archiveSha256": "6e8fc729a5d51cd2cb33cb281aef41510f28e84d69f9b51e6eecf7a72db7bd2e",
+      "manifestSha256": "a67d8af985056f121072386b10377d9b74d4bd8a5c68d423c51d972c158d385c",
       "signingKeyId": "",
-      "compressedBytes": 70424363,
-      "installedBytes": 186235240,
+      "compressedBytes": 70432756,
+      "installedBytes": 186258628,
       "modelBytes": null,
       "license": "MIT AND LGPL-3.0-or-later"
     },
     {
       "capabilityId": "media-runtime",
-      "version": "8.1.2+resources.1",
+      "version": "8.1.2+resources.3",
       "targetTriple": "x86_64-pc-windows-msvc",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/media-runtime-8.1.2%2Bresources.1-x86_64-pc-windows-msvc.zip",
-      "archiveSha256": "d53dc360c1ec193e5ac038f9429d0fc7951cddc41c8ae0ba5256eda854e70cde",
-      "manifestSha256": "cad8379130e835c044fcf3e2f83e11d04155c68283784ff71f70c1b71aac757a",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/media-runtime-8.1.2%2Bresources.3-x86_64-pc-windows-msvc.zip",
+      "archiveSha256": "c7dc12ecdd3676ae9dc2a31aa25def7ade66cbf95656f10f80195cfa7a1cd5eb",
+      "manifestSha256": "a2384303df296a7226a27b622f5b27a45605df1aa19b3a289dbdaa98307a02bc",
       "signingKeyId": "",
-      "compressedBytes": 102960125,
-      "installedBytes": 260171624,
+      "compressedBytes": 102968006,
+      "installedBytes": 260195352,
       "modelBytes": null,
       "license": "MIT AND LGPL-3.0-or-later"
     },
     {
       "capabilityId": "media-runtime",
-      "version": "8.1.2+resources.1",
+      "version": "8.1.2+resources.3",
       "targetTriple": "x86_64-unknown-linux-gnu",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/media-runtime-8.1.2%2Bresources.1-x86_64-unknown-linux-gnu.zip",
-      "archiveSha256": "a096d385c583548c2565855afd0ae5f21cd25aa9cd91607a72ca2cb69904d34a",
-      "manifestSha256": "3556edbf60a258eeabc3f3f006914b8aa366816c459f949b4e80eabac59c6a70",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/media-runtime-8.1.2%2Bresources.3-x86_64-unknown-linux-gnu.zip",
+      "archiveSha256": "5eba9702c3d703ff8e559e3f6986ba6007a5868e44dd8aec7804c19f324ba2ff",
+      "manifestSha256": "6aed2ad1afaa83bd2ce345dcdccf229e80a854873941fb12491ba915f2c3a848",
       "signingKeyId": "",
-      "compressedBytes": 247869187,
-      "installedBytes": 619941831,
+      "compressedBytes": 247877043,
+      "installedBytes": 619965198,
       "modelBytes": null,
       "license": "MIT AND LGPL-3.0-or-later"
     },
     {
       "capabilityId": "ocr-basic",
-      "version": "3.8.1+ppocrv5-basic.resources.1",
+      "version": "3.8.1+ppocrv5-basic.resources.2",
       "targetTriple": "aarch64-apple-darwin",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/ocr-basic-3.8.1%2Bppocrv5-basic.resources.1-aarch64-apple-darwin.zip",
-      "archiveSha256": "06bcd160c9779e148957eb96e940832737c35caf3c91f9e01ffd6519f830c5c5",
-      "manifestSha256": "5a0ea143432ed500e8da1b16b613d28eb5e84bc399b55aecc58551825c09bab1",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/ocr-basic-3.8.1%2Bppocrv5-basic.resources.2-aarch64-apple-darwin.zip",
+      "archiveSha256": "0d60719bc27721a1c774ac051fdc73ae3be931ee0094535206e29745bde47fc3",
+      "manifestSha256": "c6d488251f6c4e58ca5add2ddbbfb4b01e9debc0b38c565526804519084c60cd",
       "signingKeyId": "",
-      "compressedBytes": 122164323,
-      "installedBytes": 359755214,
+      "compressedBytes": 122165140,
+      "installedBytes": 359757877,
       "modelBytes": 22543402,
       "modelFiles": [
         {
@@ -739,7 +739,7 @@
           "sha256": "54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7",
           "bytes": 1018508,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7-ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7-ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx"
           ]
         },
         {
@@ -747,7 +747,7 @@
           "sha256": "4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae",
           "bytes": 4819576,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae-ch_PP-OCRv5_det_mobile.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae-ch_PP-OCRv5_det_mobile.onnx"
           ]
         },
         {
@@ -755,7 +755,7 @@
           "sha256": "5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5",
           "bytes": 16631306,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5-ch_PP-OCRv5_rec_mobile.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5-ch_PP-OCRv5_rec_mobile.onnx"
           ]
         },
         {
@@ -763,7 +763,7 @@
           "sha256": "d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b",
           "bytes": 74012,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b-ppocrv5_dict.txt"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b-ppocrv5_dict.txt"
           ]
         }
       ],
@@ -771,14 +771,14 @@
     },
     {
       "capabilityId": "ocr-basic",
-      "version": "3.8.1+ppocrv5-basic.resources.1",
+      "version": "3.8.1+ppocrv5-basic.resources.2",
       "targetTriple": "x86_64-apple-darwin",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/ocr-basic-3.8.1%2Bppocrv5-basic.resources.1-x86_64-apple-darwin.zip",
-      "archiveSha256": "91ed40b2b223fcfcedee1b0f1a0e2365421c7872489bb7025fea60aed54f0b7f",
-      "manifestSha256": "dbdeedc0c1f7c25768dba75d802b2543b2e9117e6bc12beb29b542245db96d74",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/ocr-basic-3.8.1%2Bppocrv5-basic.resources.2-x86_64-apple-darwin.zip",
+      "archiveSha256": "3db0e7e84c2b61dfad30a2e3c56443e85b05a52404a1d11df16e8a217ea07923",
+      "manifestSha256": "189da0e9f941e06331c70343f69cd195959bcc7a734690256a896777f4730fd7",
       "signingKeyId": "",
-      "compressedBytes": 147753314,
-      "installedBytes": 448391001,
+      "compressedBytes": 147754101,
+      "installedBytes": 448393653,
       "modelBytes": 22543402,
       "modelFiles": [
         {
@@ -786,7 +786,7 @@
           "sha256": "54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7",
           "bytes": 1018508,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7-ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7-ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx"
           ]
         },
         {
@@ -794,7 +794,7 @@
           "sha256": "4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae",
           "bytes": 4819576,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae-ch_PP-OCRv5_det_mobile.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae-ch_PP-OCRv5_det_mobile.onnx"
           ]
         },
         {
@@ -802,7 +802,7 @@
           "sha256": "5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5",
           "bytes": 16631306,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5-ch_PP-OCRv5_rec_mobile.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5-ch_PP-OCRv5_rec_mobile.onnx"
           ]
         },
         {
@@ -810,7 +810,7 @@
           "sha256": "d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b",
           "bytes": 74012,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b-ppocrv5_dict.txt"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b-ppocrv5_dict.txt"
           ]
         }
       ],
@@ -818,14 +818,14 @@
     },
     {
       "capabilityId": "ocr-basic",
-      "version": "3.8.1+ppocrv5-basic.resources.1",
+      "version": "3.8.1+ppocrv5-basic.resources.2",
       "targetTriple": "x86_64-pc-windows-msvc",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/ocr-basic-3.8.1%2Bppocrv5-basic.resources.1-x86_64-pc-windows-msvc.zip",
-      "archiveSha256": "db5cf94ac515b0ff064b5d04d24b1caa716b89dbdfec2ed4eeb9c1e4561f345a",
-      "manifestSha256": "d4f36f7b6d3aed4cb2ff4055666cac8d6caa49a8027561635feb2278e53723ce",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/ocr-basic-3.8.1%2Bppocrv5-basic.resources.2-x86_64-pc-windows-msvc.zip",
+      "archiveSha256": "e769db5329202cb91ff5f55bf87e10318edece215a98dd86ae60b555c324d66f",
+      "manifestSha256": "cc132209c22f5c94f2083bd637e57307dd844bc6364521c7c3c48b7ba4bb2a6e",
       "signingKeyId": "",
-      "compressedBytes": 115931463,
-      "installedBytes": 344733689,
+      "compressedBytes": 115932262,
+      "installedBytes": 344736398,
       "modelBytes": 22543402,
       "modelFiles": [
         {
@@ -833,7 +833,7 @@
           "sha256": "54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7",
           "bytes": 1018508,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7-ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7-ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx"
           ]
         },
         {
@@ -841,7 +841,7 @@
           "sha256": "4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae",
           "bytes": 4819576,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae-ch_PP-OCRv5_det_mobile.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae-ch_PP-OCRv5_det_mobile.onnx"
           ]
         },
         {
@@ -849,7 +849,7 @@
           "sha256": "5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5",
           "bytes": 16631306,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5-ch_PP-OCRv5_rec_mobile.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5-ch_PP-OCRv5_rec_mobile.onnx"
           ]
         },
         {
@@ -857,7 +857,7 @@
           "sha256": "d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b",
           "bytes": 74012,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b-ppocrv5_dict.txt"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b-ppocrv5_dict.txt"
           ]
         }
       ],
@@ -865,14 +865,14 @@
     },
     {
       "capabilityId": "ocr-basic",
-      "version": "3.8.1+ppocrv5-basic.resources.1",
+      "version": "3.8.1+ppocrv5-basic.resources.2",
       "targetTriple": "x86_64-unknown-linux-gnu",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/ocr-basic-3.8.1%2Bppocrv5-basic.resources.1-x86_64-unknown-linux-gnu.zip",
-      "archiveSha256": "852242e6210e71356492e00ec149b1dba7ecdcaa9df007a0f700a11395aa8416",
-      "manifestSha256": "f9b980db3eb15d50a69e74d3552b3095067229e12aef39f02801de5253b8c554",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/ocr-basic-3.8.1%2Bppocrv5-basic.resources.2-x86_64-unknown-linux-gnu.zip",
+      "archiveSha256": "3191e92d7a72b730af44fa6049816d24e5b68f6b6c584cef8a8b8cd4983b38e2",
+      "manifestSha256": "573281dca141e25add76c6add8ba409bddd7c031c6186eb8a6a83db7b581cfa6",
       "signingKeyId": "",
-      "compressedBytes": 200246065,
-      "installedBytes": 593959068,
+      "compressedBytes": 200246869,
+      "installedBytes": 593961720,
       "modelBytes": 22543402,
       "modelFiles": [
         {
@@ -880,7 +880,7 @@
           "sha256": "54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7",
           "bytes": 1018508,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7-ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7-ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx"
           ]
         },
         {
@@ -888,7 +888,7 @@
           "sha256": "4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae",
           "bytes": 4819576,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae-ch_PP-OCRv5_det_mobile.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae-ch_PP-OCRv5_det_mobile.onnx"
           ]
         },
         {
@@ -896,7 +896,7 @@
           "sha256": "5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5",
           "bytes": 16631306,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5-ch_PP-OCRv5_rec_mobile.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5-ch_PP-OCRv5_rec_mobile.onnx"
           ]
         },
         {
@@ -904,7 +904,7 @@
           "sha256": "d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b",
           "bytes": 74012,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b-ppocrv5_dict.txt"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b-ppocrv5_dict.txt"
           ]
         }
       ],
@@ -912,14 +912,14 @@
     },
     {
       "capabilityId": "ocr-cjk-accurate",
-      "version": "3.8.1+ppocrv5.resources.1",
+      "version": "3.8.1+ppocrv5.resources.2",
       "targetTriple": "aarch64-apple-darwin",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/ocr-cjk-accurate-3.8.1%2Bppocrv5.resources.1-aarch64-apple-darwin.zip",
-      "archiveSha256": "4ec200e0ed29f039967869f8296dce845b5b184f392a01ff7f17d595ea9080c8",
-      "manifestSha256": "22093e9e3274bfaea5b842a6848319e422c9a4ff01f021c176dcf33038067609",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/ocr-cjk-accurate-3.8.1%2Bppocrv5.resources.2-aarch64-apple-darwin.zip",
+      "archiveSha256": "18d6771d930789ca5ea1cdb20877f9a0029069c7154cc43e7576ef907eb1a1bb",
+      "manifestSha256": "8d68614c9de9167a11b3440221288b2e9a1c411b03b24e84d8faaec9d72b0e77",
       "signingKeyId": "",
-      "compressedBytes": 122164342,
-      "installedBytes": 359755264,
+      "compressedBytes": 122165119,
+      "installedBytes": 359757927,
       "modelBytes": 22543402,
       "modelFiles": [
         {
@@ -927,7 +927,7 @@
           "sha256": "54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7",
           "bytes": 1018508,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7-ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7-ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx"
           ]
         },
         {
@@ -935,7 +935,7 @@
           "sha256": "4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae",
           "bytes": 4819576,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae-ch_PP-OCRv5_det_mobile.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae-ch_PP-OCRv5_det_mobile.onnx"
           ]
         },
         {
@@ -943,7 +943,7 @@
           "sha256": "5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5",
           "bytes": 16631306,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5-ch_PP-OCRv5_rec_mobile.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5-ch_PP-OCRv5_rec_mobile.onnx"
           ]
         },
         {
@@ -951,7 +951,7 @@
           "sha256": "d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b",
           "bytes": 74012,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b-ppocrv5_dict.txt"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b-ppocrv5_dict.txt"
           ]
         }
       ],
@@ -959,14 +959,14 @@
     },
     {
       "capabilityId": "ocr-cjk-accurate",
-      "version": "3.8.1+ppocrv5.resources.1",
+      "version": "3.8.1+ppocrv5.resources.2",
       "targetTriple": "x86_64-apple-darwin",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/ocr-cjk-accurate-3.8.1%2Bppocrv5.resources.1-x86_64-apple-darwin.zip",
-      "archiveSha256": "85a9ba66a88b39331e1ca990cafbc08c3b6ea7165f6f1fc2f172b54c25299042",
-      "manifestSha256": "f7b3c70e6c0a97077e0c764e2b29fc48a36fc616837ae58fce2c855782940c99",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/ocr-cjk-accurate-3.8.1%2Bppocrv5.resources.2-x86_64-apple-darwin.zip",
+      "archiveSha256": "f5cf559f30d2d9c805b99de91e523e06874cda905395354a0a67373a10ada5d1",
+      "manifestSha256": "e4b4abb7f4fefc09be979b5ad0441ff5c8e8e02b7a13b0cbe610d8b957cf78d6",
       "signingKeyId": "",
-      "compressedBytes": 147753341,
-      "installedBytes": 448391051,
+      "compressedBytes": 147754131,
+      "installedBytes": 448393703,
       "modelBytes": 22543402,
       "modelFiles": [
         {
@@ -974,7 +974,7 @@
           "sha256": "54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7",
           "bytes": 1018508,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7-ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7-ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx"
           ]
         },
         {
@@ -982,7 +982,7 @@
           "sha256": "4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae",
           "bytes": 4819576,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae-ch_PP-OCRv5_det_mobile.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae-ch_PP-OCRv5_det_mobile.onnx"
           ]
         },
         {
@@ -990,7 +990,7 @@
           "sha256": "5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5",
           "bytes": 16631306,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5-ch_PP-OCRv5_rec_mobile.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5-ch_PP-OCRv5_rec_mobile.onnx"
           ]
         },
         {
@@ -998,7 +998,7 @@
           "sha256": "d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b",
           "bytes": 74012,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b-ppocrv5_dict.txt"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b-ppocrv5_dict.txt"
           ]
         }
       ],
@@ -1006,14 +1006,14 @@
     },
     {
       "capabilityId": "ocr-cjk-accurate",
-      "version": "3.8.1+ppocrv5.resources.1",
+      "version": "3.8.1+ppocrv5.resources.2",
       "targetTriple": "x86_64-pc-windows-msvc",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/ocr-cjk-accurate-3.8.1%2Bppocrv5.resources.1-x86_64-pc-windows-msvc.zip",
-      "archiveSha256": "9693b5c443d7f2d517a7a0dc0dc73eaad2b61f19f9d6ce54265c0847562d2129",
-      "manifestSha256": "bf349872495511489d77019d66edde2e55161e1e38d71363824c3588417c8e74",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/ocr-cjk-accurate-3.8.1%2Bppocrv5.resources.2-x86_64-pc-windows-msvc.zip",
+      "archiveSha256": "3ff418103a0b77d18c000c3db2c984c9b4db93169726e382a8d5a8d3983aa179",
+      "manifestSha256": "64efe99d70ac08a883f811d6954f4d6a1023a849ef179749183a05b6ed5e2979",
       "signingKeyId": "",
-      "compressedBytes": 115931476,
-      "installedBytes": 344733739,
+      "compressedBytes": 115932283,
+      "installedBytes": 344736448,
       "modelBytes": 22543402,
       "modelFiles": [
         {
@@ -1021,7 +1021,7 @@
           "sha256": "54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7",
           "bytes": 1018508,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7-ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7-ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx"
           ]
         },
         {
@@ -1029,7 +1029,7 @@
           "sha256": "4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae",
           "bytes": 4819576,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae-ch_PP-OCRv5_det_mobile.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae-ch_PP-OCRv5_det_mobile.onnx"
           ]
         },
         {
@@ -1037,7 +1037,7 @@
           "sha256": "5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5",
           "bytes": 16631306,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5-ch_PP-OCRv5_rec_mobile.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5-ch_PP-OCRv5_rec_mobile.onnx"
           ]
         },
         {
@@ -1045,7 +1045,7 @@
           "sha256": "d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b",
           "bytes": 74012,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b-ppocrv5_dict.txt"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b-ppocrv5_dict.txt"
           ]
         }
       ],
@@ -1053,14 +1053,14 @@
     },
     {
       "capabilityId": "ocr-cjk-accurate",
-      "version": "3.8.1+ppocrv5.resources.1",
+      "version": "3.8.1+ppocrv5.resources.2",
       "targetTriple": "x86_64-unknown-linux-gnu",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/ocr-cjk-accurate-3.8.1%2Bppocrv5.resources.1-x86_64-unknown-linux-gnu.zip",
-      "archiveSha256": "2bf6ee674eb769392e1730d9ff0fefc3d40dca7dbc2f3e9dac0da5844a1f0a71",
-      "manifestSha256": "6efb32dc4e61d4234505e6d2d9b1cb71754b201bd10450744bdd343ea3b88089",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/ocr-cjk-accurate-3.8.1%2Bppocrv5.resources.2-x86_64-unknown-linux-gnu.zip",
+      "archiveSha256": "c375c2e97415da93e8b23e667e7798637ce08ca0d63a8a36197176bb06434fea",
+      "manifestSha256": "0078133d0177291b29c3b5ee6ca16e19ba7a9009bd0684320c14c63d4e6cdfad",
       "signingKeyId": "",
-      "compressedBytes": 200246058,
-      "installedBytes": 593959118,
+      "compressedBytes": 200246875,
+      "installedBytes": 593961770,
       "modelBytes": 22543402,
       "modelFiles": [
         {
@@ -1068,7 +1068,7 @@
           "sha256": "54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7",
           "bytes": 1018508,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7-ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7-ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx"
           ]
         },
         {
@@ -1076,7 +1076,7 @@
           "sha256": "4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae",
           "bytes": 4819576,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae-ch_PP-OCRv5_det_mobile.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae-ch_PP-OCRv5_det_mobile.onnx"
           ]
         },
         {
@@ -1084,7 +1084,7 @@
           "sha256": "5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5",
           "bytes": 16631306,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5-ch_PP-OCRv5_rec_mobile.onnx"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5-ch_PP-OCRv5_rec_mobile.onnx"
           ]
         },
         {
@@ -1092,7 +1092,7 @@
           "sha256": "d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b",
           "bytes": 74012,
           "urls": [
-            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b-ppocrv5_dict.txt"
+            "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/d1979e9f794c464c0d2e0b70a7fe14dd978e9dc644c0e71f14158cdf8342af1b-ppocrv5_dict.txt"
           ]
         }
       ],
@@ -1102,7 +1102,7 @@
       "capabilityId": "office-legacy",
       "version": "26.2.4+resources.1",
       "targetTriple": "aarch64-apple-darwin",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/office-legacy-26.2.4%2Bresources.1-aarch64-apple-darwin.zip",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/office-legacy-26.2.4%2Bresources.1-aarch64-apple-darwin.zip",
       "archiveSha256": "d7eb5855cb3abcace25a96f31af44c452650ab9264a29b17fcbc7619cb1f658b",
       "manifestSha256": "3a8ace9c8f6db94fdc725fd54633fbcc4a5488a8162f59fcc23fc7b7780ef654",
       "signingKeyId": "",
@@ -1115,7 +1115,7 @@
       "capabilityId": "office-legacy",
       "version": "26.2.4+resources.1",
       "targetTriple": "x86_64-apple-darwin",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/office-legacy-26.2.4%2Bresources.1-x86_64-apple-darwin.zip",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/office-legacy-26.2.4%2Bresources.1-x86_64-apple-darwin.zip",
       "archiveSha256": "7cb52a9eb7f7f9bf65d5a261569d55bce91ec12c57603f3113d5bebb0046217a",
       "manifestSha256": "709ad58040ca5a1b623c78cef20a555a597c9ed28d549565d4e9377cb4b480f3",
       "signingKeyId": "",
@@ -1128,11 +1128,11 @@
       "capabilityId": "office-legacy",
       "version": "26.2.4+resources.1",
       "targetTriple": "x86_64-pc-windows-msvc",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/office-legacy-26.2.4%2Bresources.1-x86_64-pc-windows-msvc.zip",
-      "archiveSha256": "349c8720349911f472cac07d1aa8bad2afda5733cc4f189fad4b1eae5c394641",
-      "manifestSha256": "5beb14d560681a75192f1ba7aa5f89c7fc2decaa99a6f4a22e751fb45347826c",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/office-legacy-26.2.4%2Bresources.1-x86_64-pc-windows-msvc.zip",
+      "archiveSha256": "5135eda4b34facf3f14c08272f52446f4874f14cdee8a54697780910ec673f96",
+      "manifestSha256": "68db2501465ce19ad1ca93c5486b4807caacbb3709ef42fd17b6edeb2ca0fa29",
       "signingKeyId": "",
-      "compressedBytes": 540770205,
+      "compressedBytes": 540770233,
       "installedBytes": 1665233914,
       "modelBytes": null,
       "license": "(MPL-2.0 OR LGPL-3.0-or-later) AND PSF-2.0 AND MPL-2.0"
@@ -1141,7 +1141,7 @@
       "capabilityId": "office-legacy",
       "version": "26.2.4+resources.1",
       "targetTriple": "x86_64-unknown-linux-gnu",
-      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-14/office-legacy-26.2.4%2Bresources.1-x86_64-unknown-linux-gnu.zip",
+      "url": "https://github.com/StoneLL1/llm-wiki-desktop/releases/download/capabilities-2026-09-20/office-legacy-26.2.4%2Bresources.1-x86_64-unknown-linux-gnu.zip",
       "archiveSha256": "e5f966819de80172d055a9de6f29b5424a3991211959293b169cd63863ed4a0e",
       "manifestSha256": "fec373acee7fd4f7c912f69a260af133f0cd2fa4db0ee999b30a9eedcb13a7e0",
       "signingKeyId": "",
