@@ -553,7 +553,8 @@ mod tests {
         writeln!(
             config,
             "[include]\n  path = {}\n[includeIf \"gitdir:never/\"]\n  path = {}\n[filter \"unused\"]\n  clean = false",
-            include.display(), include.display()
+            include.to_string_lossy().replace('\\', "/"),
+            include.to_string_lossy().replace('\\', "/")
         )
         .unwrap();
         #[cfg(not(windows))]

@@ -868,17 +868,25 @@ impl FileTransaction {
         binding: &Arc<RecoveryParentBinding>,
         temporary: &Path,
     ) -> Result<Option<PathBuf>, BackendError> {
-        let pin = binding
-            .parent()
-            .join(format!(".wiki-guard-installed-{}", uuid::Uuid::new_v4()));
-        if let Err(error) = bound_hard_link(binding, temporary, &pin) {
-            return Err(hard_link_identity_proof_error(error, &pin));
+        #[cfg(unix)]
+        {
+            let pin = binding
+                .parent()
+                .join(format!(".wiki-guard-installed-{}", uuid::Uuid::new_v4()));
+            if let Err(error) = bound_hard_link(binding, temporary, &pin) {
+                return Err(hard_link_identity_proof_error(error, &pin));
+            }
+            if let Err(error) = self.track_artifact(binding, &pin) {
+                let _ = bound_remove_file(binding, &pin);
+                return Err(error);
+            }
+            Ok(Some(pin))
         }
-        if let Err(error) = self.track_artifact(binding, &pin) {
-            let _ = bound_remove_file(binding, &pin);
-            return Err(error);
+        #[cfg(not(unix))]
+        {
+            let _ = (self, binding, temporary);
+            Ok(None)
         }
-        Ok(Some(pin))
     }
 
     fn sync_candidate_pin_parent(
@@ -1462,12 +1470,20 @@ impl FileTransaction {
     }
 
     fn live_candidate_pin_matches(&self, expected: FileIdentity) -> bool {
-        self.recovery_artifacts
-            .iter()
-            .filter(|artifact| is_candidate_identity_pin(&artifact.path))
-            .any(|artifact| {
-                bound_file_identity(&artifact.binding, &artifact.path).ok() == Some(expected)
-            })
+        #[cfg(unix)]
+        {
+            self.recovery_artifacts
+                .iter()
+                .filter(|artifact| is_candidate_identity_pin(&artifact.path))
+                .any(|artifact| {
+                    bound_file_identity(&artifact.binding, &artifact.path).ok() == Some(expected)
+                })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = expected;
+            true
+        }
     }
 
     pub(super) fn rollback(&mut self) -> Result<(), BackendError> {
@@ -2293,20 +2309,28 @@ fn journal_candidate_pin_matches(
     let Some(expected) = entry.installed_identity else {
         return Ok(false);
     };
-    for relative in &journal.recovery_artifacts {
-        let artifact = safe_journal_target(root, relative)?;
-        if !is_candidate_identity_pin(&artifact) {
-            continue;
+    #[cfg(unix)]
+    {
+        for relative in &journal.recovery_artifacts {
+            let artifact = safe_journal_target(root, relative)?;
+            if !is_candidate_identity_pin(&artifact) {
+                continue;
+            }
+            let binding = bind_recovery_parent(root, &artifact)?;
+            match binding.file_identity(&artifact) {
+                Ok(actual) if actual == expected => return Ok(true),
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(io_error(error, &artifact)),
+            }
         }
-        let binding = bind_recovery_parent(root, &artifact)?;
-        match binding.file_identity(&artifact) {
-            Ok(actual) if actual == expected => return Ok(true),
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(io_error(error, &artifact)),
-        }
+        Ok(false)
     }
-    Ok(false)
+    #[cfg(not(unix))]
+    {
+        let _ = (root, journal, expected);
+        Ok(true)
+    }
 }
 
 struct InstalledOwnership {
