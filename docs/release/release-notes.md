@@ -1,29 +1,29 @@
-# LLM Wiki Desktop v2.0.3
+# LLM Wiki Desktop v2.0.4
 
-导入完整性、网页登录恢复和文档/媒体解析可靠性更新。可选能力资源同步更新，继续按需下载。
+修复导入、AI 对话、Agent、Wiki 更新与工作流中的一致性和安全性问题。
 
 ## 更新内容
 
-- 保留原始来源身份与附带资源，改进重复导入、合并及 Agent 候选提交的一致性。
-- 改进 Office、PDF、表格与结构化文档解析，减少正文与格式信息丢失。
-- 完善网页登录后恢复、文章正文提取和页面资源保留。
-- 修复长音频转写和字幕提取，支持视频关键帧 OCR 与后续内容整合。
-- 更新浏览器、文档、OCR、语音和媒体能力资源；失败或取消保留已有可用内容。
+- 修复 Agent 工具调用和导入恢复，确保来源版本、原始文件与生成候选保持一致。
+- 修复只读 Chat 会话和回答引用，避免对话过程意外修改来源内容。
+- 修复 Update Wiki 的生成、链接处理、预览、确认与撤销流程，保护外部编辑和 Git 状态。
+- 修复工作流排队、取消与结果展示，以及 Agent 辅助 Lint 的修复边界。
+- 沿用 v2.0.3 已验证的可选能力资源，继续按需下载。
 
 ## Highlights
 
-- More reliable source identity, attachment retention, and import commits.
-- Improved document fidelity, authenticated web recovery, and article extraction.
-- Long-form transcription, subtitle extraction, and video frame OCR improvements.
+- Safer Agent-assisted imports and recoverable source updates.
+- Read-only Chat behavior and more reliable answer references.
+- Safer Wiki updates, workflow execution, review, and undo.
 
 ## Download and install
 
 | Platform | Installer |
 | --- | --- |
-| macOS · Apple Silicon | [DMG](https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v2.0.3/darwin-aarch64-LLM.Wiki.Desktop_2.0.3_aarch64.dmg) |
-| macOS · Intel | [DMG](https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v2.0.3/darwin-x86_64-LLM.Wiki.Desktop_2.0.3_x64.dmg) |
-| Windows · x64 | [Setup EXE](https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v2.0.3/windows-x86_64-LLM.Wiki.Desktop_2.0.3_x64-setup.exe) |
-| Linux · x64 | [AppImage](https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v2.0.3/linux-x86_64-LLM.Wiki.Desktop_2.0.3_amd64.AppImage) |
+| macOS · Apple Silicon | [DMG](https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v2.0.4/darwin-aarch64-LLM.Wiki.Desktop_2.0.4_aarch64.dmg) |
+| macOS · Intel | [DMG](https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v2.0.4/darwin-x86_64-LLM.Wiki.Desktop_2.0.4_x64.dmg) |
+| Windows · x64 | [Setup EXE](https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v2.0.4/windows-x86_64-LLM.Wiki.Desktop_2.0.4_x64-setup.exe) |
+| Linux · x64 | [AppImage](https://github.com/StoneLL1/llm-wiki-desktop/releases/download/app-v2.0.4/linux-x86_64-LLM.Wiki.Desktop_2.0.4_amd64.AppImage) |
 
 The `.app.tar.gz` files and `latest.json` support automatic updates. `CHECKSUMS.sha256` covers the public desktop downloads. Optional engines install on demand from the download locations embedded in this version. Offline installation requires both the program ZIP and its companion model files. Network access depends on the actual resource host; a GitHub download is not a guarantee of domestic network availability.
 
@@ -33,12 +33,12 @@ The `.app.tar.gz` files and `latest.json` support automatic updates. `CHECKSUMS.
 
 当前公开资源托管在 GitHub，未配置国内镜像，不能保证所有国内网络直连。
 
-## Updating from v0.2.2
+## Updating from v2.0.3
 
-Use **Check for updates**, or quit the old app and install v2.0.3 over it. Keep your knowledge-base folder in place. The application identity and update-signing key are unchanged.
+Use **Check for updates**, or quit the old app and install v2.0.4 over it. Keep your knowledge-base folder in place. The application identity and update-signing key are unchanged.
 
-macOS binaries are not Apple-notarized, and Windows installers do not carry an Authenticode identity. First-launch OS warnings may appear. See [installation notes and limitations](https://github.com/StoneLL1/llm-wiki-desktop/blob/app-v2.0.3/docs/release/known-limitations.md).
+macOS binaries are not Apple-notarized, and Windows installers do not carry an Authenticode identity. First-launch OS warnings may appear. See [installation notes and limitations](https://github.com/StoneLL1/llm-wiki-desktop/blob/app-v2.0.4/docs/release/known-limitations.md).
 
 Source CI, resource download verification, updater-signature verification, and installation and launch checks on all four supported targets precede desktop publication. Hosted checks do not constitute a completed interactive upgrade and rollback test on every supported operating system.
 
-[Full changelog](https://github.com/StoneLL1/llm-wiki-desktop/compare/app-v0.2.2...app-v2.0.3) · [Quick start](https://github.com/StoneLL1/llm-wiki-desktop#get-started)
+[Full changelog](https://github.com/StoneLL1/llm-wiki-desktop/compare/app-v2.0.3...app-v2.0.4) · [Quick start](https://github.com/StoneLL1/llm-wiki-desktop#get-started)

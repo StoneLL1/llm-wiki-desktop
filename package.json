@@ -1,6 +1,6 @@
 {
   "name": "llm-wiki-desktop",
-  "version": "2.0.3",
+  "version": "2.0.4",
   "packageManager": "npm@10.9.8",
   "private": true,
   "description": "Local-first desktop knowledge base: import, wiki, graph, and AI-assisted curation (Tauri v2 + React + Rust)",
