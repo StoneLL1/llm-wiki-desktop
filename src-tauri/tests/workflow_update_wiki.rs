@@ -986,6 +986,8 @@ async fn real_low_risk_runner_completes_all_stages_consumes_source_and_commits()
     GitService
         .initialize_repository(&context, "initial")
         .unwrap();
+    #[cfg(windows)]
+    let initial_head = GitService.repository_status(&context).unwrap().head;
     let tasks = TaskService::default();
     let coordinator = WorkflowCoordinator::default();
     let run = enqueue_update(
@@ -1030,7 +1032,9 @@ async fn real_low_risk_runner_completes_all_stages_consumes_source_and_commits()
             completed.error
         );
         assert!(context.wiki_dir.join("concepts/工作流成功.md").is_file());
-        assert!(!GitService.repository_status(&context).unwrap().has_changes);
+        let status = GitService.repository_status(&context).unwrap();
+        assert_eq!(status.head, initial_head);
+        assert!(status.has_changes);
     }
     #[cfg(not(windows))]
     {
