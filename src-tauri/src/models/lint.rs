@@ -206,6 +206,9 @@ pub struct LintReport {
     pub issues: Vec<LintIssue>,
     pub generated_at: String,
     pub scanned_pages: usize,
+    /// Absent on old reports: coverage is unknown, never inferred as passed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<HealthCheckCoverage>,
 }
 
 /// The shape the `wiki-lint` Skill emits inside its fenced JSON block. The
@@ -653,6 +656,8 @@ pub struct LintBatchOutcome {
     pub needs_confirmation: Vec<LintBatchConfirmation>,
     /// Issues the batch could not handle (non-fixable, stale, missing hash).
     pub skipped: Vec<LintBatchSkip>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified_report: Option<LintReport>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -733,6 +738,8 @@ pub struct LintFixOutcome {
     pub final_commit: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_action: Option<crate::models::confirmation::PendingAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_report: Option<LintReport>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -786,6 +793,7 @@ mod tests {
             checkpoint: Some("abc123".into()),
             final_commit: Some("def456".into()),
             pending_action: None,
+            verified_report: None,
         };
         let value = serde_json::to_value(&applied).unwrap();
         assert_eq!(value["kind"], json!("applied"));
@@ -808,6 +816,7 @@ mod tests {
                 expires_at: None,
                 checkpoint_hash: None,
             }),
+            verified_report: None,
         };
         let value = serde_json::to_value(&needs).unwrap();
         assert_eq!(value["kind"], json!("needs_confirmation"));

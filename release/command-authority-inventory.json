@@ -170,6 +170,7 @@
     {
       "name": "apply_lint_fix",
       "source": "src-tauri/src/commands/lint_commands.rs",
+      "authorityFunction": "apply_lint_fix_sync",
       "classifications": [
         "mutation"
       ],
@@ -179,6 +180,7 @@
     {
       "name": "apply_lint_fixes",
       "source": "src-tauri/src/commands/lint_commands.rs",
+      "authorityFunction": "apply_lint_fixes_sync",
       "classifications": [
         "mutation"
       ],
@@ -1558,6 +1560,7 @@
     {
       "name": "rollback_agent_lint_repair",
       "source": "src-tauri/src/commands/lint_commands.rs",
+      "authorityFunction": "rollback_agent_lint_repair_sync",
       "classifications": [
         "mutation"
       ],
@@ -1576,6 +1579,7 @@
     {
       "name": "run_local_lint",
       "source": "src-tauri/src/commands/lint_commands.rs",
+      "authorityFunction": "run_local_lint_sync",
       "classifications": [
         "mutation"
       ],

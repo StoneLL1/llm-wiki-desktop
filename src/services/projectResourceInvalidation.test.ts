@@ -59,6 +59,14 @@ describe("project resource invalidation", () => {
 
   it("maps backend events to conservative feature-level invalidations", () => {
     expect(projectResourcesForBackendEvent({
+      ...terminalEvent("workflow"), eventType: "workflow_updated",
+      payload: { kind: "health_check", operation: { kind: "built_in" }, displayStatus: "cancelled" },
+    })).toEqual(["lint-history"]);
+    expect(projectResourcesForBackendEvent({
+      ...terminalEvent("workflow"), eventType: "workflow_updated",
+      payload: { kind: "health_check", operation: { kind: "agent_lint_repair" }, displayStatus: "completed" },
+    })).toEqual(["wiki", "graph", "lint-history"]);
+    expect(projectResourcesForBackendEvent({
       ...terminalEvent("wiki_compile"),
       eventType: "wiki_changed",
     })).toEqual(["wiki", "graph"]);

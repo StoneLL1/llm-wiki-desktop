@@ -91,6 +91,8 @@ export interface LintReport {
   issues: LintIssue[];
   generatedAt: string;
   scannedPages: number;
+  /** Missing on old reports; rule coverage must then be shown as unknown. */
+  coverage?: HealthCheckCoverage | null;
 }
 
 export interface DeepLintReport {
@@ -198,7 +200,8 @@ export interface HealthCheckCoverage {
   wikiPages: number;
   deepCoveredPages?: number | null;
   deepTruncated?: boolean;
-  notApplicableRules: string[];
+  /** The backend omits this key when no rules are N/A. */
+  notApplicableRules?: string[];
 }
 
 export type HealthCheckDeepStatus = "not_requested" | "pending" | "completed" | "failed";
@@ -325,6 +328,7 @@ export interface LintFixOutcome {
   checkpoint?: string;
   finalCommit?: string;
   pendingAction?: PendingAction;
+  verifiedReport?: LintReport | null;
 }
 
 export interface ApplyLintFixRequest {
@@ -379,6 +383,7 @@ export interface LintBatchOutcome {
   applied: LintFixOutcome[];
   needsConfirmation: LintBatchConfirmation[];
   skipped: LintBatchSkip[];
+  verifiedReport?: LintReport | null;
 }
 
 // --- lint-ignore (.app/lint-ignore.json) ---------------------------------

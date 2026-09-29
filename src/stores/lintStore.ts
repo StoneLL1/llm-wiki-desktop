@@ -215,6 +215,8 @@ export interface LintState {
     rootPath: string,
     options?: { preserveBatchConfirmations?: boolean },
   ) => Promise<void>;
+  adoptVerifiedReport: (projectId: string, rootPath: string, report: LintReport) => void;
+  invalidateAfterRestore: (projectId: string, rootPath: string) => void;
   selectIssue: (issueId: string | null) => void;
   setMode: (mode: LintMode) => void;
   setSafetyPrefs: (prefs: Partial<LintSafetyPrefs>) => void;
@@ -297,6 +299,49 @@ const historyResource = createProjectResourceController<LintHistoryEntry[]>("lin
 
 export const useLintStore = create<LintState>((set, get) => ({
   ...initial,
+
+  invalidateAfterRestore: (projectId, rootPath) => {
+    const current = useProjectStore.getState().currentProject;
+    if (current.projectId !== projectId || current.rootPath !== rootPath) return;
+    ++lintOperationEpoch;
+    set((state) => ({
+      localReport: null,
+      deepReport: null,
+      loadingLocal: false,
+      healthReport: state.healthReport?.execution ? {
+        ...state.healthReport,
+        execution: { ...state.healthReport.execution, freshness: "stale" },
+      } : state.healthReport,
+      selectedIssueId: null,
+      fixStatus: {},
+      fixConfirm: null,
+      batchConfirmations: [],
+      batchRunning: false,
+      activeHistoryId: null,
+      agentRepairSelection: [],
+      agentRepairSelectionReportId: null,
+      agentRepairPreparation: null,
+      agentRepairPending: false,
+      agentRepairProjectId: null,
+      agentRepairRootPath: null,
+      agentRepairCanonicalIdentityKey: null,
+      agentRepairIdentityRevision: null,
+    }));
+  },
+
+  adoptVerifiedReport: (projectId, rootPath, report) => {
+    const current = useProjectStore.getState().currentProject;
+    if (current.projectId !== projectId || current.rootPath !== rootPath) return;
+    set((state) => ({
+      localReport: report,
+      activeHistoryId: null,
+      healthReport: state.healthReport?.execution ? {
+        ...state.healthReport,
+        execution: { ...state.healthReport.execution, freshness: "stale" },
+      } : state.healthReport,
+    }));
+    void get().loadHistory({ projectId, projectRootPath: rootPath });
+  },
 
   runLocalLint: async (projectId, rootPath, options) => {
     if (!hasTauri()) return;

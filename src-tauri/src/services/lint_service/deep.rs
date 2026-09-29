@@ -637,6 +637,7 @@ mod tests {
             issues: Vec::new(),
             generated_at: "2026-07-04T00:00:00Z".into(),
             scanned_pages: 144,
+            coverage: None,
         };
 
         let snapshot = LintService::default()

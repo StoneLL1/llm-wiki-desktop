@@ -614,6 +614,7 @@ impl SettingsService {
             lifecycle: AgentLintRepairAttestationLifecycle::QueuedAuthorized,
             descriptor_digest: None,
             mutation_journal: None,
+            original_path_hashes: BTreeMap::new(),
             terminal_result_digest: None,
             terminal_result_json: None,
             terminal_task_status: None,
@@ -688,6 +689,7 @@ impl SettingsService {
                     lifecycle: AgentLintRepairAttestationLifecycle::Cancelled,
                     descriptor_digest: None,
                     mutation_journal: None,
+                    original_path_hashes: BTreeMap::new(),
                     terminal_result_digest: None,
                     terminal_result_json: None,
                     terminal_task_status: None,
@@ -850,6 +852,28 @@ impl SettingsService {
         pre_mutation_path_hashes: BTreeMap<String, Option<String>>,
         affected_path_hashes: BTreeMap<String, Option<String>>,
     ) -> Result<AgentLintRepairAttestation, BackendError> {
+        self.begin_agent_lint_repair_mutation_journal_with_original_hashes(
+            task_id,
+            operation_digest,
+            descriptor_digest,
+            checkpoint_hash,
+            pre_mutation_path_hashes,
+            BTreeMap::new(),
+            affected_path_hashes,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_agent_lint_repair_mutation_journal_with_original_hashes(
+        &self,
+        task_id: &str,
+        operation_digest: &str,
+        descriptor_digest: &str,
+        checkpoint_hash: &str,
+        pre_mutation_path_hashes: BTreeMap<String, Option<String>>,
+        original_path_hashes: BTreeMap<String, Option<String>>,
+        affected_path_hashes: BTreeMap<String, Option<String>>,
+    ) -> Result<AgentLintRepairAttestation, BackendError> {
         require_valid_repair_mutation_journal_inputs(
             descriptor_digest,
             checkpoint_hash,
@@ -858,6 +882,8 @@ impl SettingsService {
         if pre_mutation_path_hashes
             .keys()
             .ne(affected_path_hashes.keys())
+            || (!original_path_hashes.is_empty()
+                && original_path_hashes.keys().ne(affected_path_hashes.keys()))
         {
             return Err(agent_lint_repair_attestation_state_invalid());
         }
@@ -865,6 +891,7 @@ impl SettingsService {
             phase: AgentLintRepairMutationPhase::Applying,
             checkpoint_hash: checkpoint_hash.to_string(),
             pre_mutation_path_hashes,
+            original_path_hashes,
             affected_path_hashes,
             final_commit: None,
         };
@@ -873,8 +900,21 @@ impl SettingsService {
             if item.descriptor_digest.as_deref() != Some(descriptor_digest) {
                 return Err(agent_lint_repair_attestation_state_invalid());
             }
+            for (path, original) in &next.original_path_hashes {
+                if item
+                    .original_path_hashes
+                    .get(path)
+                    .is_some_and(|known| known != original)
+                {
+                    return Err(agent_lint_repair_attestation_state_invalid());
+                }
+            }
             match item.mutation_journal.as_ref() {
-                None => item.mutation_journal = Some(next),
+                None => {
+                    item.original_path_hashes
+                        .extend(next.original_path_hashes.clone());
+                    item.mutation_journal = Some(next);
+                }
                 Some(existing)
                     if existing.phase == AgentLintRepairMutationPhase::Applying
                         && existing.checkpoint_hash == checkpoint_hash
@@ -884,6 +924,17 @@ impl SettingsService {
                             .keys()
                             .all(|path| next.affected_path_hashes.contains_key(path)) =>
                 {
+                    if existing
+                        .original_path_hashes
+                        .iter()
+                        .any(|(path, original)| {
+                            next.original_path_hashes.get(path) != Some(original)
+                        })
+                    {
+                        return Err(agent_lint_repair_attestation_state_invalid());
+                    }
+                    item.original_path_hashes
+                        .extend(next.original_path_hashes.clone());
                     item.mutation_journal = Some(next);
                 }
                 Some(_) => return Err(agent_lint_repair_attestation_state_invalid()),
@@ -2496,6 +2547,7 @@ mod tests {
                     lifecycle: AgentLintRepairAttestationLifecycle::Cancelled,
                     descriptor_digest: None,
                     mutation_journal: None,
+                    original_path_hashes: BTreeMap::new(),
                     terminal_result_digest: None,
                     terminal_result_json: None,
                     terminal_task_status: None,

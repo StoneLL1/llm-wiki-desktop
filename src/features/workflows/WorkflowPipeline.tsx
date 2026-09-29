@@ -19,10 +19,13 @@ export function WorkflowPipeline({
   const { t, i18n } = useTranslation();
   const [technicalStagesOpen, setTechnicalStagesOpen] = useState(false);
   const language = i18n?.resolvedLanguage ?? i18n?.language ?? "en";
-  const currentStage = stages.find((stage) => stage.id === currentStageId)
-    ?? stages.find((stage) => stage.status === "running" || stage.status === "waiting" || stage.status === "failed")
+  const live = displayStatus === "running" || displayStatus === "queued" || displayStatus === "waiting_for_confirmation";
+  const currentStage = (live ? stages.find((stage) => stage.id === currentStageId) : null)
+    ?? stages.find((stage) => stage.status === "failed")
+    ?? (!live ? [...stages].reverse().find((stage) => stage.status === "completed") : stages.find((stage) => stage.status === "running" || stage.status === "waiting"))
     ?? null;
-  const overallValue = displayStatus === "completed" ? stages.length : null;
+  const overallValue = displayStatus === "completed" ? stages.length
+    : !live ? stages.filter((stage) => stage.status === "completed" || stage.status === "skipped").length : null;
   const overallValueText = currentStage
     ? t("workflows.pipeline.overallValue", {
         current: currentStage.ordinal,
@@ -31,7 +34,7 @@ export function WorkflowPipeline({
       })
     : t("workflows.pipeline.overallIdle", { total: stages.length });
 
-  if (kind) {
+  if (kind && stages.length > 0 && !(kind === "health_check" && stages.some((stage) => stage.id.startsWith("run_agent_") || stage.id === "create_checkpoint"))) {
     const groupsByKind = {
       update_wiki: [
         { labelKey: "workflows.updatePhase.prepare", ids: ["analyze_sources", "create_checkpoint"] },
@@ -57,11 +60,12 @@ export function WorkflowPipeline({
       <ol className="workflow-pipeline">
         {groups.map((group, index) => {
           const members = stages.filter((stage) => group.ids.includes(stage.id));
-          const active = members.find((stage) => ["running", "waiting", "failed"].includes(stage.status));
-          const status = active?.status ?? (members.length > 0 && members.every((stage) => stage.status === "skipped")
+          const active = members.find((stage) => stage.status === "failed" || (live && ["running", "waiting"].includes(stage.status)));
+          const status = active?.status ?? (!live && members.some((stage) => stage.status === "running" || stage.status === "waiting") ? "stopped"
+            : members.length > 0 && members.every((stage) => stage.status === "skipped")
             ? "skipped"
             : members.length > 0 && members.every((stage) => ["completed", "skipped"].includes(stage.status)) ? "completed" : "pending");
-          return <li key={group.labelKey} className={workflowStageStatusClass(status)}>
+          return <li key={group.labelKey} className={workflowStageStatusClass(status === "stopped" ? "skipped" : status)}>
             <span className="workflow-phase-node" aria-hidden="true">
               {status === "completed" ? <Check size={13} /> : status === "failed" ? <X size={13} /> : index + 1}
             </span>
@@ -100,9 +104,10 @@ export function WorkflowPipeline({
       </div>
       <ol className="workflow-pipeline">
         {stages.map((stage) => {
-          const Icon = stage.status === "completed"
+          const status = !live && (stage.status === "running" || stage.status === "waiting") ? "stopped" : stage.status;
+          const Icon = status === "completed"
             ? Check
-            : stage.status === "failed"
+            : status === "failed"
               ? X
               : stage.status === "waiting"
                 ? Clock3
@@ -113,15 +118,15 @@ export function WorkflowPipeline({
             || stage.status === "failed";
           const duration = workflowDurationMs(stage.startedAt, stage.completedAt);
           return (
-            <li className={workflowStageStatusClass(stage.status)} key={stage.id}>
-              <details data-stage-status={stage.status} open={expanded}>
+            <li className={workflowStageStatusClass(status === "stopped" ? "skipped" : stage.status)} key={stage.id}>
+              <details data-stage-status={status} open={expanded}>
                 <summary aria-current={stage.id === currentStage?.id ? "step" : undefined}>
                   <span className="workflow-pipeline__marker"><Icon aria-hidden="true" size={12} /></span>
                   <span className="workflow-pipeline__heading">
                     <span className="font-medium">{t(stage.labelKey)}</span>
                     <span className="workflow-pipeline__meta">
                       {duration !== null ? <span>{formatDuration(duration, language, t)}</span> : null}
-                      <span>{t(`workflows.stageStatus.${stage.status}`)}</span>
+                      <span>{t(`workflows.stageStatus.${status}`)}</span>
                     </span>
                   </span>
                 </summary>

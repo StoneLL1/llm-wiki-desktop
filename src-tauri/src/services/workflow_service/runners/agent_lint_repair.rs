@@ -12,6 +12,7 @@ use crate::models::confirmation::{
     ConfirmationExecution, ConfirmationRegistry, PendingAction, PendingActionType, RiskLevel,
 };
 use crate::models::git::CheckpointPurpose;
+use crate::models::layout::ProjectMarkdownRootRole;
 use crate::models::lint::{
     AgentLintRepairCorrelation, AgentLintRepairFinding, AgentLintRepairOutcome,
     AgentLintRepairRequest, AgentLintRepairRoundOutput, AgentLintRepairRoundSummary,
@@ -513,7 +514,12 @@ where
     }
     let app_root = context.layout.app_state_root.as_deref().unwrap_or(".app");
     let graph_cache_path = format!("{}/graph-cache.json", app_root.trim_end_matches('/'));
-    let mut history_paths = authorized_path_hashes.keys().cloned().collect::<Vec<_>>();
+    // A later round may receive explicit approval to edit another existing
+    // Wiki page. Capture those original bytes before the first Agent launch;
+    // this private snapshot remains immutable for the entire operation.
+    let baseline_hashes = snapshot_repair_wiki_hashes(context, services.file_store)?;
+    let mut history_paths = baseline_hashes.keys().cloned().collect::<Vec<_>>();
+    history_paths.extend(authorized_path_hashes.keys().cloned());
     history_paths.push(graph_cache_path);
     history_paths.sort();
     history_paths.dedup();
@@ -521,6 +527,19 @@ where
         services
             .git_service
             .capture_history_files(context, &history_paths, None)?;
+    for (path, expected) in &baseline_hashes {
+        let actual = history_files
+            .get(path)
+            .and_then(Option::as_deref)
+            .map(hex_sha256);
+        if actual.as_deref() != Some(expected.as_str()) {
+            return Err(repair_error(
+                "LINT_REPAIR_BATCH_STALE",
+                format!("A Wiki page changed before history capture: {path}"),
+                WorkflowProjectMutationState::NotModified,
+            ));
+        }
+    }
     for (path, expected) in authorized_path_hashes {
         let actual = history_files
             .get(path)
@@ -558,7 +577,6 @@ where
             WorkflowProjectMutationState::NotModified,
         )
     })?;
-    let baseline_hashes = CompileService::snapshot_wiki(context)?;
     let mut descriptor = PersistedAgentLintRepairCandidate {
         schema_version: REPAIR_DESCRIPTOR_SCHEMA_VERSION,
         task_id: run.task_id.clone(),
@@ -592,6 +610,7 @@ where
         index_refresh_warnings: Vec::new(),
         terminal_affected_path_hashes: BTreeMap::new(),
         final_commit: None,
+        manual_review_ready: false,
     };
     bind_persisted_descriptor(services, run, &descriptor, None)?;
     sink.complete(CREATE_CHECKPOINT).map_err(task_error)?;
@@ -607,6 +626,26 @@ where
         authorize_boundary,
         execute_round,
     )
+}
+
+fn snapshot_repair_wiki_hashes(
+    context: &ProjectContext,
+    file_store: &FileStore,
+) -> Result<HashMap<String, String>, BackendError> {
+    let mut hashes = HashMap::new();
+    for absolute in context.layout.list_markdown_files(
+        &context.root,
+        &[
+            ProjectMarkdownRootRole::Wiki,
+            ProjectMarkdownRootRole::Mixed,
+        ],
+    )? {
+        let path = context.to_project_relative(&absolute)?;
+        if context.resolve_wiki_write_path(&path).is_ok() {
+            hashes.insert(path.clone(), file_store.file_hash(context, &path)?);
+        }
+    }
+    Ok(hashes)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -626,7 +665,7 @@ where
     F: FnMut(&AgentLintRepairRequest, &Path, &str) -> Result<String, BackendError>,
 {
     for round in descriptor.completed_round.saturating_add(1)..=MAX_REPAIR_ROUNDS {
-        if descriptor.unresolved_finding_ids.is_empty() {
+        if descriptor.unresolved_finding_ids.is_empty() || descriptor.manual_review_ready {
             skip_rounds(
                 services.task_service,
                 &run.task_id,
@@ -635,20 +674,19 @@ where
             )?;
             break;
         }
+        let prepare_stage = round_stage("prepare_round", round);
+        let sink =
+            WorkflowStageSink::new(services.task_service, services.coordinator, &run.task_id);
+        sink.start(&prepare_stage).map_err(task_error)?;
         // A previously applied round is part of the repair-owned baseline for
         // every later launch. Revalidate it before invoking the Agent so an
         // external edit can never be absorbed into a later candidate/commit.
         ensure_repair_head_and_paths(context, run, descriptor, services)?;
-        let prepare_stage = round_stage("prepare_round", round);
         let agent_stage = round_stage("run_agent", round);
         let validate_stage = round_stage("validate_candidate", round);
         let review_stage = round_stage("review_risk", round);
         let apply_stage = round_stage("apply_changes", round);
         let recheck_stage = round_stage("recheck_lint", round);
-        let sink =
-            WorkflowStageSink::new(services.task_service, services.coordinator, &run.task_id);
-
-        sink.start(&prepare_stage).map_err(task_error)?;
         let findings = selected_findings
             .iter()
             .filter(|finding| descriptor.unresolved_finding_ids.contains(&finding.id))
@@ -750,6 +788,15 @@ where
             &recheck_stage,
             authorize_boundary,
         )?;
+        if descriptor.manual_review_ready {
+            skip_rounds(
+                services.task_service,
+                &run.task_id,
+                round.saturating_add(1),
+                MAX_REPAIR_ROUNDS,
+            )?;
+            break;
+        }
     }
     finalize_repair(context, run, services, descriptor, authorize_boundary)
 }
@@ -785,6 +832,8 @@ struct PersistedAgentLintRepairCandidate {
     index_refresh_warnings: Vec<String>,
     terminal_affected_path_hashes: BTreeMap<String, Option<String>>,
     final_commit: Option<String>,
+    #[serde(default)]
+    manual_review_ready: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1346,13 +1395,7 @@ fn build_round_request(
     );
     read_only_roots.sort();
     read_only_roots.dedup();
-    let optional = |path: &str| -> Result<Option<String>, BackendError> {
-        if file_store.exists(context, path) {
-            file_store.read_markdown(context, path).map(Some)
-        } else {
-            Ok(None)
-        }
-    };
+    let (purpose, schema) = read_repair_guidance(context, file_store)?;
     let request = AgentLintRepairRequest {
         schema_version: WIKI_LINT_SCHEMA_VERSION,
         operation: crate::models::lint::AgentLintRepairOperation::Repair,
@@ -1366,8 +1409,8 @@ fn build_round_request(
         writable_paths: authorized_path_hashes.keys().cloned().collect(),
         creatable_roots: vec![wiki_root],
         read_only_roots,
-        purpose: optional("purpose.md")?,
-        schema: optional("schema.md")?,
+        purpose,
+        schema,
         language: language.to_string(),
     };
     LintService::validate_agent_lint_repair_round_lineage(
@@ -1375,6 +1418,36 @@ fn build_round_request(
         &descriptor.selected_finding_ids,
     )?;
     Ok(request)
+}
+
+fn read_repair_guidance(
+    context: &ProjectContext,
+    file_store: &FileStore,
+) -> Result<(Option<String>, Option<String>), BackendError> {
+    let optional = |path: Option<&str>| -> Result<Option<String>, BackendError> {
+        match path {
+            Some(path) if file_store.exists(context, path) => {
+                file_store.read_markdown(context, path).map(Some)
+            }
+            _ => Ok(None),
+        }
+    };
+    Ok((
+        optional(
+            context
+                .layout
+                .purpose_context
+                .as_ref()
+                .and_then(|doc| doc.read_path.as_deref()),
+        )?,
+        optional(
+            context
+                .layout
+                .schema_context
+                .as_ref()
+                .and_then(|doc| doc.read_path.as_deref()),
+        )?,
+    ))
 }
 
 fn current_manifest_hashes(
@@ -1603,51 +1676,69 @@ where
                 .map(|hash| (path.clone(), hash))
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
-    services
-        .settings_service
-        .begin_agent_lint_repair_mutation_journal_with_pre_hashes(
-            &run.task_id,
+    let has_round_changes =
+        !candidate.manifest.files.is_empty() || !candidate.manifest.deletions.is_empty();
+    let applied = if has_round_changes {
+        let original_hashes = original_repair_path_hashes(
+            context,
+            run,
+            services,
+            descriptor,
             &operation_digest,
-            &descriptor_digest,
-            &descriptor.checkpoint_hash,
-            pre_round_hashes.clone(),
-            expected_post_hashes.clone(),
+            &pre_round_hashes,
         )?;
-    services
-        .task_service
-        .set_task_cancellable(&run.task_id, false)
-        .map_err(task_error)?;
-    let applied = match CompileService::apply_confirmed_lint_repair_manifest(
-        context,
-        &candidate.manifest,
-        &candidate.current_hashes,
-    ) {
-        Ok(applied) => applied,
-        Err(error) => {
-            let _ = services
-                .task_service
-                .set_task_cancellable(&run.task_id, true);
-            let current_hashes = expected_post_hashes
-                .keys()
-                .map(|path| {
-                    services
-                        .file_store
-                        .file_hash_if_exists(context, path)
-                        .map(|hash| (path.clone(), hash))
-                })
-                .collect::<Result<BTreeMap<_, _>, _>>()?;
-            verified_partial_apply_hashes(
-                &pre_round_hashes,
-                &expected_post_hashes,
-                &current_hashes,
+        services
+            .settings_service
+            .begin_agent_lint_repair_mutation_journal_with_original_hashes(
+                &run.task_id,
+                &operation_digest,
+                &descriptor_digest,
+                &descriptor.checkpoint_hash,
+                pre_round_hashes.clone(),
+                original_hashes,
+                expected_post_hashes.clone(),
             )?;
-            return Err(error);
-        }
+        services
+            .task_service
+            .set_task_cancellable(&run.task_id, false)
+            .map_err(task_error)?;
+        let applied = match CompileService::apply_confirmed_lint_repair_manifest(
+            context,
+            &candidate.manifest,
+            &candidate.current_hashes,
+        ) {
+            Ok(applied) => applied,
+            Err(error) => {
+                let _ = services
+                    .task_service
+                    .set_task_cancellable(&run.task_id, true);
+                let current_hashes = expected_post_hashes
+                    .keys()
+                    .map(|path| {
+                        services
+                            .file_store
+                            .file_hash_if_exists(context, path)
+                            .map(|hash| (path.clone(), hash))
+                    })
+                    .collect::<Result<BTreeMap<_, _>, _>>()?;
+                verified_partial_apply_hashes(
+                    &pre_round_hashes,
+                    &expected_post_hashes,
+                    &current_hashes,
+                )?;
+                return Err(error);
+            }
+        };
+        services
+            .task_service
+            .set_task_cancellable(&run.task_id, true)
+            .map_err(task_error)?;
+        applied
+    } else {
+        // A valid skipped/needs_review round still receives deterministic
+        // recheck, but has no write intent and therefore no empty WAL.
+        Vec::new()
     };
-    services
-        .task_service
-        .set_task_cancellable(&run.task_id, true)
-        .map_err(task_error)?;
     merge_accumulated_manifest(&mut descriptor.accumulated_manifest, &candidate.manifest);
     descriptor.affected_paths.extend(applied.iter().cloned());
     descriptor.affected_paths.sort();
@@ -1722,6 +1813,18 @@ where
         &before_ids,
         &after_ids,
     )?;
+    let verified_progress = assessment
+        .correlation
+        .resolved_finding_ids
+        .iter()
+        .any(|id| !descriptor.resolved_finding_ids.contains(id));
+    let retryable_unresolved = assessment
+        .correlation
+        .unresolved_finding_ids
+        .iter()
+        .any(|id| deterministic_before.contains(id.as_str()));
+    descriptor.manual_review_ready =
+        !retryable_unresolved || !verified_progress || applied.is_empty();
     merge_correlation(descriptor, &assessment.correlation);
     descriptor.unresolved_finding_ids = assessment.correlation.unresolved_finding_ids.clone();
     descriptor.completed_round = candidate.round;
@@ -1941,14 +2044,23 @@ where
                 .map(|hash| (path.clone(), hash))
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let original_hashes = original_repair_path_hashes(
+        context,
+        run,
+        services,
+        descriptor,
+        &operation_digest,
+        &pre_finalization_hashes,
+    )?;
     services
         .settings_service
-        .begin_agent_lint_repair_mutation_journal_with_pre_hashes(
+        .begin_agent_lint_repair_mutation_journal_with_original_hashes(
             &run.task_id,
             &operation_digest,
             &descriptor_digest,
             &descriptor.checkpoint_hash,
             pre_finalization_hashes,
+            original_hashes,
             affected_path_hashes.clone(),
         )?;
     services
@@ -1978,17 +2090,9 @@ where
     }
     let final_checkpoint = match with_agent_lint_git_cancellation(services, &run.task_id, || {
         if descriptor.schema_version >= 2 {
-            let mut paths = descriptor
-                .authorized_path_hashes
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>();
-            paths.push(graph_cache_path.clone());
-            paths.sort();
-            paths.dedup();
             let files = services
                 .git_service
-                .capture_history_files(context, &paths, None)?;
+                .capture_history_files(context, &commit_paths, None)?;
             for (path, expected) in &affected_path_hashes {
                 let actual = files.get(path).and_then(Option::as_deref).map(hex_sha256);
                 if &actual != expected {
@@ -2162,6 +2266,23 @@ fn rollback_attested_repair_journal(
             &journal.checkpoint_hash,
             &rollback_paths,
         )?;
+        for (path, bytes) in &before {
+            let captured = bytes.as_deref().map(hex_sha256);
+            match journal.original_path_hashes.get(path) {
+                Some(original) if original == &captured => {}
+                None if captured.is_some() => {
+                    // An older operation may have captured this exact file in
+                    // its private before ref, even without the newer map.
+                }
+                _ => {
+                    return Err(repair_error(
+                        "LINT_REPAIR_BEFORE_STATE_UNKNOWN",
+                        format!("The original state of {path} cannot be proven; current bytes were preserved."),
+                        WorkflowProjectMutationState::Modified,
+                    ));
+                }
+            }
+        }
         let current = services
             .git_service
             .capture_history_files(context, &rollback_paths, None)?;
@@ -2180,6 +2301,19 @@ fn rollback_attested_repair_journal(
         let restore = CompileService::prepare_history_restore(context, &before, &current)?;
         CompileService::restore_prepared_history_outputs(context, &restore)?;
         return Ok(rollback_paths);
+    }
+    if !journal.original_path_hashes.is_empty()
+        || matches!(
+            &run.operation,
+            WorkflowOperation::AgentLintRepair { expected_git_head, .. }
+                if expected_git_head != &journal.checkpoint_hash
+        )
+    {
+        return Err(repair_error(
+            "LINT_REPAIR_BEFORE_STATE_UNKNOWN",
+            "The private before snapshot is missing or changed; repair files were preserved for manual recovery.",
+            WorkflowProjectMutationState::Modified,
+        ));
     }
     let allowed_noise = task_state_noise_paths(&run.task_id);
     let changed = services.git_service.changed_paths(context)?;
@@ -2247,6 +2381,73 @@ fn rollback_attested_repair_journal(
         )?;
     }
     Ok(rollback_paths)
+}
+
+fn original_repair_path_hashes(
+    context: &ProjectContext,
+    run: &WorkflowRun,
+    services: &AgentLintRepairExecutionServices<'_>,
+    descriptor: &PersistedAgentLintRepairCandidate,
+    operation_digest: &str,
+    pre_hashes: &BTreeMap<String, Option<String>>,
+) -> Result<BTreeMap<String, Option<String>>, BackendError> {
+    let paths = pre_hashes.keys().cloned().collect::<Vec<_>>();
+    let before =
+        services
+            .git_service
+            .read_history_files(context, &descriptor.checkpoint_hash, &paths)?;
+    let receipt = services
+        .settings_service
+        .get_agent_lint_repair_attestation(
+            &run.canonical_identity_key,
+            &run.identity_revision,
+            &run.task_id,
+            operation_digest,
+        )?;
+    let previous = receipt.mutation_journal.as_ref();
+    let mut originals = BTreeMap::new();
+    for path in paths {
+        let captured = before.get(&path).and_then(Option::as_deref).map(hex_sha256);
+        let original = if let Some(original) =
+            previous.and_then(|journal| journal.original_path_hashes.get(&path))
+        {
+            if original != &captured {
+                return Err(repair_error(
+                    "LINT_REPAIR_BEFORE_STATE_UNKNOWN",
+                    format!("The recovery snapshot no longer proves the original state of {path}."),
+                    WorkflowProjectMutationState::Modified,
+                ));
+            }
+            original.clone()
+        } else {
+            // An existing file absent from the immutable before ref was
+            // created externally after the checkpoint, unless this operation
+            // already wrote it. A legacy WAL without an original entry is
+            // insufficient to prove the latter case.
+            if captured.is_none()
+                && (pre_hashes[&path].is_some() || descriptor.affected_paths.contains(&path))
+            {
+                return Err(repair_error(
+                    "LINT_REPAIR_BEFORE_STATE_UNKNOWN",
+                    format!("The original state of {path} was not captured before repair."),
+                    WorkflowProjectMutationState::NotModified,
+                ));
+            }
+            if captured.is_some()
+                && !descriptor.affected_paths.contains(&path)
+                && captured != pre_hashes[&path]
+            {
+                return Err(repair_error(
+                    "LINT_REPAIR_BATCH_STALE",
+                    format!("A repair path changed after its immutable before snapshot: {path}"),
+                    WorkflowProjectMutationState::NotModified,
+                ));
+            }
+            captured
+        };
+        originals.insert(path, original);
+    }
+    Ok(originals)
 }
 
 fn journal_allows_uncommitted_hash(
@@ -2437,24 +2638,7 @@ fn finish_repair_error(
             };
             error = repair_error(&error.code, error.message, project_mutation_state);
             let _ = services.task_service.set_error(&run.task_id, error.clone());
-            let current = services.task_service.get_workflow_run(&run.task_id)?;
-            let stage_id = current
-                .stages
-                .iter()
-                .find(|stage| {
-                    stage.status == crate::models::workflow::WorkflowStageStatus::Running
-                        || stage.status == crate::models::workflow::WorkflowStageStatus::Waiting
-                })
-                .map(|stage| stage.id.clone())?;
-            let summary = workflow_error_summary(&error);
-            return WorkflowStageSink::new(
-                services.task_service,
-                services.coordinator,
-                &run.task_id,
-            )
-            .fail_with_result(&stage_id, summary, result)
-            .ok()
-            .and_then(|(_, next)| next);
+            return fail_repair_with_result(run, services, &error, result);
         }
         Err(settlement_error) => {
             error = repair_error(
@@ -2465,18 +2649,21 @@ fn finish_repair_error(
                 ),
                 mutation_state_from_error(&settlement_error),
             );
+            let _ = services.task_service.set_error(&run.task_id, error.clone());
+            return services
+                .coordinator
+                .fail_agent_lint_repair_between_stages_and_claim_next(
+                    services.task_service,
+                    &run.task_id,
+                    workflow_error_summary(&error),
+                    empty_repair_result(run, AgentLintRepairOutcome::Interrupted),
+                )
+                .ok()
+                .and_then(|(_, next)| next);
         }
     }
     let _ = services.task_service.set_error(&run.task_id, error.clone());
     let current = services.task_service.get_workflow_run(&run.task_id)?;
-    let stage_id = current
-        .stages
-        .iter()
-        .find(|stage| {
-            stage.status == crate::models::workflow::WorkflowStageStatus::Running
-                || stage.status == crate::models::workflow::WorkflowStageStatus::Waiting
-        })
-        .map(|stage| stage.id.clone())?;
     if current.display_status
         == crate::models::workflow::WorkflowDisplayStatus::WaitingForConfirmation
     {
@@ -2484,15 +2671,44 @@ fn finish_repair_error(
             .task_service
             .clear_workflow_pending_action(&run.task_id);
     }
-    let summary = workflow_error_summary(&error);
-    WorkflowStageSink::new(services.task_service, services.coordinator, &run.task_id)
-        .fail_with_result(
-            &stage_id,
-            summary,
-            empty_repair_result(run, AgentLintRepairOutcome::Interrupted),
-        )
-        .ok()
-        .and_then(|(_, next)| next)
+    fail_repair_with_result(
+        run,
+        services,
+        &error,
+        empty_repair_result(run, AgentLintRepairOutcome::Interrupted),
+    )
+}
+
+fn fail_repair_with_result(
+    run: &WorkflowRun,
+    services: &AgentLintRepairExecutionServices<'_>,
+    error: &BackendError,
+    result: WorkflowResult,
+) -> Option<WorkflowRun> {
+    let current = services.task_service.get_workflow_run(&run.task_id)?;
+    let summary = workflow_error_summary(error);
+    if let Some(stage_id) = current
+        .stages
+        .iter()
+        .find(|stage| stage.status == crate::models::workflow::WorkflowStageStatus::Running)
+        .map(|stage| stage.id.clone())
+    {
+        WorkflowStageSink::new(services.task_service, services.coordinator, &run.task_id)
+            .fail_with_result(&stage_id, summary, result)
+            .ok()
+            .and_then(|(_, next)| next)
+    } else {
+        services
+            .coordinator
+            .fail_agent_lint_repair_between_stages_and_claim_next(
+                services.task_service,
+                &run.task_id,
+                summary,
+                result,
+            )
+            .ok()
+            .and_then(|(_, next)| next)
+    }
 }
 
 fn workflow_error_summary(error: &BackendError) -> WorkflowErrorSummary {
@@ -3001,9 +3217,42 @@ fn repair_error(
 
 #[cfg(test)]
 mod tests {
-    use super::{journal_allows_uncommitted_hash, verified_partial_apply_hashes};
+    use super::{
+        journal_allows_uncommitted_hash, read_repair_guidance, verified_partial_apply_hashes,
+    };
+    use crate::models::layout::ProjectContextDocument;
+    use crate::models::paths::ProjectContext;
     use crate::models::settings::{AgentLintRepairMutationJournal, AgentLintRepairMutationPhase};
+    use crate::services::FileStore;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn compatible_repair_guidance_uses_layout_documents_instead_of_root_lookalikes() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".app/compat")).unwrap();
+        std::fs::write(root.path().join("purpose.md"), "stale root purpose").unwrap();
+        std::fs::write(root.path().join("schema.md"), "stale root schema").unwrap();
+        std::fs::write(
+            root.path().join(".app/compat/purpose.md"),
+            "current purpose",
+        )
+        .unwrap();
+        std::fs::write(root.path().join(".app/compat/schema.md"), "current schema").unwrap();
+        let mut context = ProjectContext::new("compatible", root.path().to_path_buf());
+        context.layout.purpose_context = Some(ProjectContextDocument {
+            read_path: Some(".app/compat/purpose.md".into()),
+            write_path: None,
+            inferred: Some(false),
+        });
+        context.layout.schema_context = Some(ProjectContextDocument {
+            read_path: Some(".app/compat/schema.md".into()),
+            write_path: None,
+            inferred: Some(false),
+        });
+        let (purpose, schema) = read_repair_guidance(&context, &FileStore).unwrap();
+        assert_eq!(purpose.as_deref(), Some("current purpose"));
+        assert_eq!(schema.as_deref(), Some("current schema"));
+    }
 
     #[test]
     fn partial_apply_journal_accepts_only_an_exact_pre_or_post_hash_per_path() {
@@ -3034,6 +3283,7 @@ mod tests {
             phase: AgentLintRepairMutationPhase::Applying,
             checkpoint_hash: "checkpoint".into(),
             pre_mutation_path_hashes: pre,
+            original_path_hashes: BTreeMap::new(),
             affected_path_hashes: post,
             final_commit: None,
         };

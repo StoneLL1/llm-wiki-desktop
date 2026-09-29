@@ -35,6 +35,7 @@ import {
   workflowArtifactTypeKey,
   workflowDateTimeLabel,
   workflowKindKey,
+  workflowRunTitleKey,
   workflowRouteKey,
   workflowStatusKey,
 } from "./workflowPresentation";
@@ -235,7 +236,7 @@ export function WorkflowsRightPanel() {
           <>
             <section className="workflow-context-section">
               <div className="workflow-context-kicker"><Layers3 aria-hidden="true" size={13} />{t("workflows.context.selection")}</div>
-              <h3>{t(workflowKindKey(selectedRun.kind))}</h3>
+              <h3>{t(workflowRunTitleKey(selectedRun))}</h3>
               <code className="workflow-context-task-id">{selectedRun.taskId.slice(0, 8)}</code>
               <StatusLabel status={selectedRun.displayStatus} />
               <details className="workflow-context-details">
@@ -289,7 +290,7 @@ export function WorkflowsRightPanel() {
             <ul className="workflow-context-list">
               {historyRuns.slice(0, 5).map((item) => (
                 <li key={item.taskId}>
-                  <span>{t(workflowKindKey(item.kind))}</span>
+                  <span>{t(workflowRunTitleKey(item))}</span>
                   <StatusLabel status={item.displayStatus} />
                   <time dateTime={item.updatedAt}>{workflowDateTimeLabel(item.updatedAt, i18n.language)}</time>
                 </li>
@@ -312,9 +313,9 @@ export function WorkflowsRightPanel() {
             <section className="workflow-context-section">
               <h3><GitBranch aria-hidden="true" size={13} />{t("workflows.context.queue")}</h3>
               {!contextSummary ? <p>{t("workflows.context.summaryUnavailable")}</p> : queued.length === 0 ? <p>{t("workflows.context.queueEmpty")}</p> : queued.map((item) => (
-                <button aria-label={t("workflows.context.openQueuedRun", { workflow: t(workflowKindKey(item.kind)), taskId: item.taskId })} className="workflow-context-queue" data-workflow-return-key={`context-queue:${item.taskId}`} disabled={workflowOperationPending(operations, `task:${item.taskId}:open`)} key={item.taskId} onClick={() => void openRun(item.taskId)} type="button">
+                <button aria-label={t("workflows.context.openQueuedRun", { workflow: t(workflowRunTitleKey(item)), taskId: item.taskId })} className="workflow-context-queue" data-workflow-return-key={`context-queue:${item.taskId}`} disabled={workflowOperationPending(operations, `task:${item.taskId}:open`)} key={item.taskId} onClick={() => void openRun(item.taskId)} type="button">
                   <span>{item.queuePosition === null ? EMPTY_VALUE : number.format(item.queuePosition)}</span>
-                  <span>{t(workflowKindKey(item.kind))}</span>
+                  <span>{t(workflowRunTitleKey(item))}</span>
                 </button>
               ))}
             </section>

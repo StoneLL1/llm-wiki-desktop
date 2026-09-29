@@ -355,52 +355,170 @@ pub fn rewrite_wikilinks(body: &str, old_stem: &str, new_stem: &str) -> (String,
 /// deduplicated, order preserved. Heading anchors (`[[#section]]`) yield the
 /// empty string and are skipped.
 pub fn extract_wikilinks(body: &str) -> Vec<String> {
-    let bytes = body.as_bytes();
     let mut targets: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let mut i = 0;
-    while i + 1 < bytes.len() {
-        if bytes[i] == b'[' && bytes[i + 1] == b'[' {
-            let start = i + 2;
-            let mut depth = 2;
-            let mut j = start;
-            while j < bytes.len() {
-                match bytes[j] {
-                    b'[' => depth += 1,
-                    b']' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            break;
-                        }
-                    }
-                    _ => {}
+    for link in wikilink_spans(body) {
+        if seen.insert(link.target.to_ascii_lowercase()) {
+            targets.push(link.target);
+        }
+    }
+    targets
+}
+
+/// Byte ranges in the original Markdown body. Every Lint edit uses these same
+/// ranges as the scanner, so examples in code cannot be mistaken for links.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WikilinkSpan {
+    pub start: usize,
+    pub end: usize,
+    pub target: String,
+    pub label: String,
+}
+
+pub fn wikilink_spans(body: &str) -> Vec<WikilinkSpan> {
+    let mut found = Vec::new();
+    let mut offset = 0;
+    let mut fence: Option<(u8, usize)> = None;
+    let mut code_ticks = 0;
+    for line in body.split_inclusive('\n') {
+        let bytes = line.as_bytes();
+        let indent = bytes.iter().take_while(|&&byte| byte == b' ').count();
+        if indent <= 3 && indent < bytes.len() && matches!(bytes[indent], b'`' | b'~') {
+            let marker = bytes[indent];
+            let count = bytes[indent..]
+                .iter()
+                .take_while(|&&byte| byte == marker)
+                .count();
+            if let Some((open_marker, open_count)) = fence {
+                if marker == open_marker && count >= open_count {
+                    fence = None;
                 }
-                j += 1;
+                offset += line.len();
+                continue;
             }
-            if j < bytes.len() && depth == 0 {
-                // j points to the final `]` that brought depth to 0; the
-                // preceding `]` (at j-1) is the first closing bracket, so
-                // the true inner content is [start..j-1).
-                let end = j.saturating_sub(1);
-                let inner = &body[start..end];
-                let target = inner
-                    .split('|')
-                    .next()
-                    .unwrap_or(inner)
-                    .split('#')
-                    .next()
-                    .unwrap_or(inner)
-                    .trim();
-                if !target.is_empty() && seen.insert(target.to_ascii_lowercase()) {
-                    targets.push(target.to_string());
-                }
-                i = j + 1;
+            if count >= 3 && code_ticks == 0 {
+                fence = Some((marker, count));
+                offset += line.len();
                 continue;
             }
         }
-        i += 1;
+        if fence.is_some() {
+            offset += line.len();
+            continue;
+        }
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            if bytes[i] == b'`' {
+                let count = bytes[i..].iter().take_while(|&&byte| byte == b'`').count();
+                if code_ticks == 0 {
+                    code_ticks = count;
+                } else if code_ticks == count {
+                    code_ticks = 0;
+                }
+                i += count;
+                continue;
+            }
+            if code_ticks == 0 && bytes[i..].starts_with(b"[[") {
+                let mut depth = 2;
+                let mut j = i + 2;
+                while j < bytes.len() && depth > 0 {
+                    if bytes[j] == b'[' {
+                        depth += 1;
+                    } else if bytes[j] == b']' {
+                        depth -= 1;
+                    }
+                    j += 1;
+                }
+                if depth == 0 && j >= i + 4 {
+                    let end = j;
+                    let inner = &line[i + 2..end - 2];
+                    let (destination, alias) = inner.split_once('|').unwrap_or((inner, ""));
+                    let target = destination.split('#').next().unwrap_or("").trim();
+                    if !target.is_empty() {
+                        found.push(WikilinkSpan {
+                            start: offset + i,
+                            end: offset + end,
+                            target: target.to_string(),
+                            label: if alias.is_empty() {
+                                target.to_string()
+                            } else {
+                                alias.to_string()
+                            },
+                        });
+                    }
+                    i = end;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        offset += line.len();
     }
-    targets
+    found
+}
+
+/// Mark Markdown prose bytes that can contain live links. This deliberately
+/// excludes fenced and inline code as well as escaped punctuation.
+pub fn markdown_prose_mask(body: &str) -> Vec<bool> {
+    let mut visible = vec![false; body.len()];
+    let mut offset = 0;
+    let mut fence: Option<(u8, usize)> = None;
+    let mut code_ticks = 0;
+    for line in body.split_inclusive('\n') {
+        let bytes = line.as_bytes();
+        let indent = bytes.iter().take_while(|&&byte| byte == b' ').count();
+        if indent <= 3 && indent < bytes.len() && matches!(bytes[indent], b'`' | b'~') {
+            let marker = bytes[indent];
+            let count = bytes[indent..]
+                .iter()
+                .take_while(|&&byte| byte == marker)
+                .count();
+            if let Some((open_marker, open_count)) = fence {
+                if marker == open_marker && count >= open_count {
+                    fence = None;
+                }
+                offset += line.len();
+                continue;
+            }
+            if count >= 3 && code_ticks == 0 {
+                fence = Some((marker, count));
+                offset += line.len();
+                continue;
+            }
+        }
+        if fence.is_some() {
+            offset += line.len();
+            continue;
+        }
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                visible[offset + i] = true;
+                i += 2;
+                continue;
+            }
+            if bytes[i] == b'`' {
+                let count = bytes[i..].iter().take_while(|&&byte| byte == b'`').count();
+                if code_ticks == 0 {
+                    code_ticks = count;
+                } else if code_ticks == count {
+                    code_ticks = 0;
+                }
+                i += count;
+                continue;
+            }
+            if code_ticks == 0 {
+                visible[offset + i] = true;
+            }
+            i += 1;
+        }
+        offset += line.len();
+    }
+    visible
 }
 
 /// Approximate word count. Splits body (excluding code fences) on whitespace.
@@ -586,12 +704,20 @@ mod tests {
 
     #[test]
     fn extract_wikilinks_ignores_code_spans_partial() {
-        // The parser does not skip inline code; it only scans `[[ ]]`. That is
-        // acceptable because raw `[[ ]]` inside inline code is rare. We assert
-        // normal text extraction works.
+        // Both links are ordinary prose.
         let body = "link [[target-a]] and [[target-b]]";
         let result = extract_wikilinks(body);
         assert_eq!(result, vec!["target-a", "target-b"]);
+    }
+
+    #[test]
+    fn wikilink_ranges_skip_fences_inline_code_and_escapes() {
+        let body = "Real [[lost|label]] and `[[lost]]` and \\[[lost]]\n```md\n[[lost]]\n```\nMore [[lost#part]].";
+        let links = wikilink_spans(body);
+        assert_eq!(links.len(), 2);
+        assert_eq!(&body[links[0].start..links[0].end], "[[lost|label]]");
+        assert_eq!(&body[links[1].start..links[1].end], "[[lost#part]]");
+        assert_eq!(extract_wikilinks(body), vec!["lost"]);
     }
 
     #[test]

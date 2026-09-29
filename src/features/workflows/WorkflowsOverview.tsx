@@ -17,6 +17,7 @@ import {
   workflowDateTimeLabel,
   workflowKindDescriptionKey,
   workflowKindKey,
+  workflowRunTitleKey,
   workflowStatusKey,
 } from "./workflowPresentation";
 import { WorkflowStatus } from "./WorkflowStatus";
@@ -189,13 +190,13 @@ function RecentRunRow({ run, language, pending, onOpen }: {
       </div>
       <div className="min-w-0">
         <div className="workflow-recent-row__heading">
-          <h3>{t(workflowKindKey(run.kind))}</h3>
+          <h3>{t(workflowRunTitleKey(run))}</h3>
           <WorkflowStatus className="workflow-recent-row__status" status={run.displayStatus} />
         </div>
         <time dateTime={run.updatedAt}>{dateTimeLabel}</time>
       </div>
       <button
-        aria-label={`${t("workflows.action.view")}: ${t(workflowKindKey(run.kind))}, ${t(workflowStatusKey(run.displayStatus))}, ${dateTimeLabel}`}
+        aria-label={`${t("workflows.action.view")}: ${t(workflowRunTitleKey(run))}, ${t(workflowStatusKey(run.displayStatus))}, ${dateTimeLabel}`}
         className="btn btn--ghost btn--sm"
         data-workflow-return-key={`recent:${run.taskId}`}
         disabled={pending}

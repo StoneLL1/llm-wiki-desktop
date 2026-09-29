@@ -11,7 +11,7 @@ import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { captureProjectScope, isProjectScopeCurrent } from "../../stores/projectScope";
 import { isAgentLintRepairEligible } from "../../types/lint";
-import type { LintIssue, LintIssueType } from "../../types/lint";
+import type { LintIssue, LintIssueType, LintReport } from "../../types/lint";
 import { AgentLintRepairPanel } from "./AgentLintRepairPanel";
 import { LintBatchConfirmDialog } from "./LintBatchConfirmDialog";
 import { HealthCheckReportSummary } from "./HealthCheckReportSummary";
@@ -98,9 +98,9 @@ export function LintView() {
   const onGitConfigured = useCallback(() => {
     gitPreflight.clearError();
     const state = useLintStore.getState();
-    if (/^(GIT_|VERSION_)/.test(state.errorCode ?? "")) useLintStore.setState({ error: null, errorCode: null, errorDetails: null });
+    if (/^GIT_/.test(state.errorCode ?? "") || (state.errorCode?.startsWith("VERSION_") && state.errorCode !== "VERSION_EMPTY")) useLintStore.setState({ error: null, errorCode: null, errorDetails: null });
   }, [gitPreflight.clearError]);
-  const gitError = gitPreflight.error ?? (error && /^(GIT_|VERSION_)/.test(errorCode ?? "") ? { code: errorCode, message: error, details: errorDetails } : null);
+  const gitError = gitPreflight.error ?? (error && (/^GIT_/.test(errorCode ?? "") || (errorCode?.startsWith("VERSION_") && errorCode !== "VERSION_EMPTY")) ? { code: errorCode, message: error, details: errorDetails } : null);
   useEffect(() => { resumeIntent.current = null; }, [projectId, rootPath]);
   const layoutRef = useRef<HTMLDivElement>(null);
   const issueListScrollRef = useRouteScrollRestoration(projectId, rootPath, "lint:issues");
@@ -208,10 +208,9 @@ export function LintView() {
   );
   const passedRules = useMemo(() => {
     if (!localReport && !healthReport) return [];
-    if ((localReport?.scannedPages ?? healthReport?.coverage.scannedPages ?? 0) === 0) return [];
-    const notApplicable = new Set(
-      healthReport?.coverage.notApplicableRules as LintIssueType[] | undefined,
-    );
+    const coverage = localReport ? localReport.coverage : healthReport?.coverage;
+    if (!coverage || coverage.scannedPages === 0) return [];
+    const notApplicable = new Set(coverage.notApplicableRules as LintIssueType[] | undefined);
     const ignoredRules = new Set(ignores.map((entry) => entry.rule));
     return PASSED_RULES.filter(
       (rule) => !presentRules.has(rule) && !notApplicable.has(rule) && !ignoredRules.has(rule),
@@ -273,8 +272,9 @@ export function LintView() {
     });
   };
 
-  const refreshAfterFix = (applied: boolean) => {
-    void runLocalLint(projectId, rootPath, {
+  const refreshAfterFix = (applied: boolean, verifiedReport?: LintReport | null) => {
+    if (verifiedReport) useLintStore.getState().adoptVerifiedReport(projectId, rootPath, verifiedReport);
+    else void runLocalLint(projectId, rootPath, {
       preserveBatchConfirmations: useLintStore.getState().batchConfirmations.length > 0,
     });
     if (applied && safetyPrefs.recompile) triggerRecompile();
@@ -320,7 +320,7 @@ export function LintView() {
     const outcome = await applyFix(projectId, rootPath, issue, expectedHash);
     if (outcome?.kind === "applied" && isProjectScopeCurrent(scope)) {
       if (outcome.operationId) setLastOperation({ projectKey: `${projectId}\0${rootPath}`, id: outcome.operationId });
-      refreshAfterFix(true);
+      refreshAfterFix(true, outcome.verifiedReport);
     }
   };
 
@@ -329,7 +329,7 @@ export function LintView() {
     void confirmHighRisk(projectId, rootPath, expectedHash).then((outcome) => {
       if (outcome?.kind === "applied" && isProjectScopeCurrent(scope)) {
       if (outcome.operationId) setLastOperation({ projectKey: `${projectId}\0${rootPath}`, id: outcome.operationId });
-      refreshAfterFix(true);
+      refreshAfterFix(true, outcome.verifiedReport);
     }
     });
   };
@@ -411,7 +411,8 @@ export function LintView() {
           parts.push(t("lint.batch.pending", { count: outcome.needsConfirmation.length }));
         }
         setNotice(parts.join(" · ") || null);
-        void runLocalLint(projectId, rootPath, {
+        if (outcome.verifiedReport) useLintStore.getState().adoptVerifiedReport(projectId, rootPath, outcome.verifiedReport);
+        else void runLocalLint(projectId, rootPath, {
           preserveBatchConfirmations: outcome.needsConfirmation.length > 0,
         });
         if (outcome.applied.length > 0 && safetyPrefs.recompile) triggerRecompile();
@@ -571,7 +572,9 @@ export function LintView() {
         />
 
         <footer className="lint-footer">
-          {localReport || healthReport ? <LintPassedSection passedRules={passedRules} /> : null}
+          {localReport || healthReport ? <LintPassedSection passedRules={passedRules}
+            notApplicableRules={PASSED_RULES.filter((rule) => (localReport ? localReport.coverage : healthReport?.coverage)?.notApplicableRules?.includes(rule))}
+            coverageUnknown={!(localReport ? localReport.coverage : healthReport?.coverage)} /> : null}
           <div className="lint-footer__tools">
             <button ref={historyButtonRef} type="button" className="btn btn--ghost btn--sm"
               aria-pressed={managementView === "history"} aria-label={t("lint.history.title")}

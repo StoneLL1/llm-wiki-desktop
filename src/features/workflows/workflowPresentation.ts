@@ -32,6 +32,12 @@ export function workflowKindKey(kind: WorkflowKind): string {
   return `workflows.kind.${kind}`;
 }
 
+export function workflowRunTitleKey(run: Pick<WorkflowRun, "kind" | "operation">): string {
+  return run.operation.kind === "agent_lint_repair"
+    ? "workflows.kind.agent_lint_repair"
+    : workflowKindKey(run.kind);
+}
+
 export function workflowKindDescriptionKey(kind: WorkflowKind): string {
   return `workflows.kind.${kind}.description`;
 }

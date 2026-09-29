@@ -69,11 +69,21 @@ describe("LintView", () => {
 
   it("does not count an ignored rule or an unscanned report as passed", () => {
     useProjectStore.setState({ currentProject: PROJECT } as never);
-    useLintStore.setState({ localReport: { generatedAt: "2026-09-09T00:00:00Z", scannedPages: 1, issues: [] },
+    useLintStore.setState({ localReport: { generatedAt: "2026-09-09T00:00:00Z", scannedPages: 1, issues: [],
+      coverage: { scannedPages: 1, sourcePages: 0, wikiPages: 1, notApplicableRules: [] } },
       ignores: [{ path: "wiki/a.md", rule: "missing_frontmatter", createdAt: "2026-09-09" }] });
     const { container } = render(<LintView />);
     expect(container.querySelector(".lint-summary")?.textContent).toContain("Passed4");
     expect(screen.queryByText("Frontmatter complete")).not.toBeInTheDocument();
+  });
+
+  it("renders persisted health coverage when the backend omits an empty N/A list", () => {
+    useProjectStore.setState({ currentProject: PROJECT } as never);
+    useLintStore.setState({ localReport: { generatedAt: "2026-09-29T00:00:00Z", scannedPages: 1,
+      issues: [], coverage: { scannedPages: 1, sourcePages: 0, wikiPages: 1 } } });
+    const { container } = render(<LintView />);
+    expect(container.querySelector(".lint-summary")?.textContent).toContain("Passed5");
+    expect(screen.queryByText("Rule coverage unknown for this report")).not.toBeInTheDocument();
   });
 
   it("distinguishes a clean report from not having run a check", () => {
@@ -82,7 +92,7 @@ describe("LintView", () => {
     const { container } = render(<LintView />);
     expect(screen.getByText("No issues found in this report.")).toBeInTheDocument();
     expect(container.querySelector(".lint-summary")?.textContent).toContain("Passed0");
-    expect(container.querySelector(".lint-passed")).toBeNull();
+    expect(screen.getByText("Rule coverage unknown for this report")).toBeInTheDocument();
   });
 
   it("exposes a resizable lint details splitter", () => {
@@ -139,6 +149,7 @@ describe("LintView", () => {
         ],
         generatedAt: "2026-06-20T00:00:00Z",
         scannedPages: 1,
+        coverage: { scannedPages: 1, sourcePages: 0, wikiPages: 1, notApplicableRules: [] },
       },
     });
     useProjectStore.setState({ currentProject: PROJECT } as never);
@@ -168,6 +179,7 @@ describe("LintView", () => {
         ],
         generatedAt: "2026-06-20T00:00:00Z",
         scannedPages: 1,
+        coverage: { scannedPages: 1, sourcePages: 0, wikiPages: 1, notApplicableRules: [] },
       },
     });
     useProjectStore.setState({ currentProject: PROJECT } as never);
@@ -302,6 +314,7 @@ describe("LintView", () => {
         ],
         generatedAt: "2026-06-20T00:00:00Z",
         scannedPages: 1,
+        coverage: { scannedPages: 1, sourcePages: 0, wikiPages: 1, notApplicableRules: [] },
       },
     });
     useProjectStore.setState({ currentProject: PROJECT } as never);
@@ -361,6 +374,7 @@ describe("LintView", () => {
     expect(screen.getByRole("button", { name: "Deep 1" })).toBeInTheDocument();
     expect(screen.getAllByText("wiki/主题.md")).toHaveLength(1);
     expect(screen.queryByText("index.md consistent")).not.toBeInTheDocument();
+    expect(screen.getByText("N/A · index.md consistent")).toBeInTheDocument();
     fireEvent.click(screen.getByText("wiki/主题.md").closest("button")!);
     expect(screen.getAllByText("Local").length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText("Agent").length).toBeGreaterThanOrEqual(1);
