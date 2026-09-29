@@ -54,11 +54,11 @@
   "currentSnapshot": {
     "status": "project_facts_batch4_green",
     "total": 226,
-    "sync": 110,
-    "async": 116,
+    "sync": 106,
+    "async": 120,
     "importTotal": 60,
     "importSync": 0,
-    "blockingSync": 104,
+    "blockingSync": 100,
     "measuredAt": "2026-09-09",
     "sourceCommit": "CONTAINING_COMMIT"
   },
@@ -1405,7 +1405,7 @@
       "command": "run_local_lint",
       "module": "lint_commands",
       "classification": "BlockingRead",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May read, enumerate, parse, hash, or diff local persisted state and therefore must not execute synchronously on the GUI command thread."
     },
     {
@@ -1440,7 +1440,7 @@
       "command": "rollback_agent_lint_repair",
       "module": "lint_commands",
       "classification": "BlockingMutation",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
     },
     {
@@ -1468,14 +1468,14 @@
       "command": "apply_lint_fix",
       "module": "lint_commands",
       "classification": "BlockingMutation",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
     },
     {
       "command": "apply_lint_fixes",
       "module": "lint_commands",
       "classification": "BlockingMutation",
-      "currentExecution": "sync",
+      "currentExecution": "async",
       "rationale": "May mutate durable state, credentials, Git, project authority, or a contended service lock and therefore must not execute synchronously on the GUI command thread."
     },
     {

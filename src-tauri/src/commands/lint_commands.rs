@@ -3,7 +3,7 @@ use std::fs;
 use std::io::Read;
 
 use sha2::{Digest, Sha256};
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 use crate::app_state::{AppState, ProjectWriteRootKind};
 use crate::errors::BackendError;
@@ -32,7 +32,7 @@ use crate::models::workflow::{
 use crate::services::{
     agent_lint_repair_attestation_digest, canonical_json, project_identity,
     resolve_workflow_persistence_binding, workflow_baseline_for_scope, workflow_fingerprint,
-    AgentService, EnqueueWorkflow,
+    AgentService, BlockingWorkClass, EnqueueWorkflow,
 };
 
 const AGENT_LINT_REPAIR_CONFIRMATION_TTL_MINUTES: i64 = 15;
@@ -41,11 +41,21 @@ fn agent_lint_repair_expires_at(now: chrono::DateTime<chrono::Utc>) -> String {
     (now + chrono::Duration::minutes(AGENT_LINT_REPAIR_CONFIRMATION_TTL_MINUTES)).to_rfc3339()
 }
 
-/// Run the deterministic local lint pass. Synchronous — it never calls a
-/// model and completes in a single wiki scan.
+/// Scan and report publication can traverse a large vault and must not hold
+/// the GUI command thread.
 #[tauri::command]
-pub fn run_local_lint(
-    state: State<'_, AppState>,
+pub async fn run_local_lint(
+    app: AppHandle,
+    request: RunLocalLintRequest,
+) -> Result<LintReport, BackendError> {
+    crate::commands::runtime::run_blocking(app, BlockingWorkClass::HeavyIo, move |app| {
+        run_local_lint_sync(&app.state::<AppState>(), request)
+    })
+    .await
+}
+
+fn run_local_lint_sync(
+    state: &AppState,
     request: RunLocalLintRequest,
 ) -> Result<LintReport, BackendError> {
     let context = state.resolve_project_context(&request.project_id, &request.project_root_path)?;
@@ -1280,8 +1290,18 @@ fn lint_repair_error(code: &'static str, message: &'static str) -> BackendError 
 /// The backend task result, project identity, current HEAD, and every affected
 /// path hash are revalidated before the scoped rollback commit is created.
 #[tauri::command]
-pub fn rollback_agent_lint_repair(
-    state: State<'_, AppState>,
+pub async fn rollback_agent_lint_repair(
+    app: AppHandle,
+    request: RollbackAgentLintRepairRequest,
+) -> Result<AgentLintRepairRollbackResult, BackendError> {
+    crate::commands::runtime::run_blocking(app, BlockingWorkClass::HeavyIo, move |app| {
+        rollback_agent_lint_repair_sync(&app.state::<AppState>(), request)
+    })
+    .await
+}
+
+fn rollback_agent_lint_repair_sync(
+    state: &AppState,
     request: RollbackAgentLintRepairRequest,
 ) -> Result<AgentLintRepairRollbackResult, BackendError> {
     state.with_current_project_write_access(
@@ -1399,11 +1419,36 @@ pub fn rollback_agent_lint_repair(
                 .history_snapshot(context, &run.task_id, "after")?
                 .as_deref()
                 == Some(final_commit.as_str());
+            if !private_history && !receipt.original_path_hashes.is_empty() {
+                return Err(lint_repair_error(
+                    "LINT_REPAIR_BEFORE_STATE_UNKNOWN",
+                    "The private repair history is missing or changed; current files were preserved.",
+                ));
+            }
             let private_before = if private_history {
                 Some(state.git_service.read_history_files(context, &checkpoint_hash, &rollback_paths)?)
             } else {
                 None
             };
+            if let Some(before) = private_before.as_ref() {
+                for path in &rollback_paths {
+                    let captured = before
+                        .get(path)
+                        .and_then(|bytes| bytes.as_deref())
+                        .map(|bytes| format!("{:x}", Sha256::digest(bytes)));
+                    match receipt.original_path_hashes.get(path) {
+                        Some(original) if original == &captured => {}
+                        None if captured.is_some() => {} // Older complete snapshot proves these bytes.
+                        None if matches!(run.operation, WorkflowOperation::AgentLintRepair { ref authorized_path_hashes, .. } if authorized_path_hashes.get(path) == Some(&None)) => {}
+                        _ => {
+                            return Err(lint_repair_error(
+                                "LINT_REPAIR_BEFORE_STATE_UNKNOWN",
+                                "The original state of a repair path cannot be proven; its current bytes were preserved.",
+                            ));
+                        }
+                    }
+                }
+            }
             let undo_started = if private_history {
                 state.git_service.history_snapshot(context, &run.task_id, "undo-started")?
             } else {
@@ -1570,8 +1615,18 @@ pub async fn read_lint_history_report(
 /// Apply (or plan) a single lint fix. Safe fixes apply under a Git checkpoint;
 /// high-risk fixes return a `PendingAction` until confirmed.
 #[tauri::command]
-pub fn apply_lint_fix(
-    state: State<'_, AppState>,
+pub async fn apply_lint_fix(
+    app: AppHandle,
+    request: ApplyLintFixRequest,
+) -> Result<LintFixOutcome, BackendError> {
+    crate::commands::runtime::run_blocking(app, BlockingWorkClass::HeavyIo, move |app| {
+        apply_lint_fix_sync(&app.state::<AppState>(), request)
+    })
+    .await
+}
+
+fn apply_lint_fix_sync(
+    state: &AppState,
     request: ApplyLintFixRequest,
 ) -> Result<LintFixOutcome, BackendError> {
     if request.confirm_high_risk {
@@ -1668,8 +1723,18 @@ pub fn apply_lint_fix(
 /// unified review. Each confirmation is registered here so the existing
 /// `apply_lint_fix(confirm_high_risk=true, action_id)` path can execute it.
 #[tauri::command]
-pub fn apply_lint_fixes(
-    state: State<'_, AppState>,
+pub async fn apply_lint_fixes(
+    app: AppHandle,
+    request: ApplyLintFixesBatchRequest,
+) -> Result<LintBatchOutcome, BackendError> {
+    crate::commands::runtime::run_blocking(app, BlockingWorkClass::HeavyIo, move |app| {
+        apply_lint_fixes_sync(&app.state::<AppState>(), request)
+    })
+    .await
+}
+
+fn apply_lint_fixes_sync(
+    state: &AppState,
     request: ApplyLintFixesBatchRequest,
 ) -> Result<LintBatchOutcome, BackendError> {
     state.with_current_project_write_access(

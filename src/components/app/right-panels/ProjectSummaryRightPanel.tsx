@@ -64,9 +64,9 @@ export function ProjectSummaryRightPanel({ currentProject }: RightPanelHostProps
             <dt className="font-medium text-[var(--text-muted)]">{t("rightpanel.path.root")}</dt>
             <dd className="m-0 truncate font-mono text-[11.5px] text-[var(--text-primary)]">{currentProject.rootPath}</dd>
             <dt className="font-medium text-[var(--text-muted)]">{t("rightpanel.path.schema")}</dt>
-            <dd className="m-0 font-mono text-[11.5px]">{health.hasSchema ? "schema.md" : "—"}</dd>
+            <dd className="m-0 font-mono text-[11.5px]">{authority?.layout.schemaContext?.readPath ?? (health.hasSchema ? "schema.md" : "—")}</dd>
             <dt className="font-medium text-[var(--text-muted)]">{t("rightpanel.path.purpose")}</dt>
-            <dd className="m-0 font-mono text-[11.5px]">{health.hasPurpose ? "purpose.md" : "—"}</dd>
+            <dd className="m-0 font-mono text-[11.5px]">{authority?.layout.purposeContext?.readPath ?? (health.hasPurpose ? "purpose.md" : "—")}</dd>
           </dl>
         </div>
 

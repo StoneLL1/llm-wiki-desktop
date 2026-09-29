@@ -5,6 +5,7 @@ import { ArrowLeft, ChevronRight, FileText, History, LoaderCircle, RefreshCw, Ro
 import { LazyActionableErrorNotice } from "../../components/app/LazyActionableErrorNotice";
 import { captureProjectScope, invalidateProjectResources, isProjectScopeCurrent } from "../../stores/projectScope";
 import { useNavigationStore } from "../../stores/navigationStore";
+import { useLintStore } from "../../stores/lintStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { refreshProjectFacts } from "../../stores/projectFactsStore";
 import type { PendingAction } from "../../types/backend";
@@ -158,7 +159,8 @@ export function VersionHistorySettings({ project }: { project: ProjectSummary })
     try {
       await confirmVersionAction(action.id, confirmed);
       if (confirmed) {
-        invalidateProjectResources({ projectId: request.projectId, rootPath: request.projectRootPath }, ["wiki", "graph"]);
+        invalidateProjectResources({ projectId: request.projectId, rootPath: request.projectRootPath }, selectedId ? ["wiki", "graph", "lint-history"] : ["wiki", "graph"]);
+        if (selectedId) useLintStore.getState().invalidateAfterRestore(request.projectId, request.projectRootPath);
         void refreshProjectFacts({ projectId: request.projectId, rootPath: request.projectRootPath }, ["git"]);
       }
       if (current()) { setPending(null); setRevision((value) => value + 1); }

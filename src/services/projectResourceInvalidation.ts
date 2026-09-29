@@ -1,9 +1,17 @@
 import type { BackendEvent, BackendTask } from "../types/task";
+import type { WorkflowRun } from "../types/workflow";
 import type { ProjectResourceKind } from "../lib/projectResourceFreshness";
 
 export function projectResourcesForBackendEvent(event: BackendEvent): ProjectResourceKind[] {
   if (event.eventType === "wiki_changed") return ["wiki", "graph"];
   if (event.eventType === "graph_updated") return ["graph"];
+  if (event.eventType === "workflow_updated") {
+    const run = event.payload as Partial<WorkflowRun> | null;
+    if (!run || !["completed", "cancelled", "failed", "interrupted"].includes(run.displayStatus ?? "")) return [];
+    if (run.operation?.kind === "agent_lint_repair") return ["wiki", "graph", "lint-history"];
+    if (run.kind === "health_check") return ["lint-history"];
+    return [];
+  }
   if (![
     "task_completed",
     "task_failed",

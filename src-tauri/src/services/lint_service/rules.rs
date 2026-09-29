@@ -290,8 +290,12 @@ pub fn health_source_paths(context: &ProjectContext) -> Result<Vec<String>, Back
 /// Case-insensitive lookup from note-name/title/alias -> page path, mirroring
 /// `graph_service::build_target_lookup`. Replicated here to avoid coupling
 /// lint to graph internals.
-pub(super) fn register_page_targets(lookup: &mut HashMap<String, String>, page: &WikiPageMeta) {
-    for key in resolution_keys(page) {
+pub(super) fn register_page_targets(
+    context: &ProjectContext,
+    lookup: &mut HashMap<String, String>,
+    page: &WikiPageMeta,
+) {
+    for key in resolution_keys(context, page) {
         lookup
             .entry(key)
             .and_modify(|existing| {
@@ -304,20 +308,28 @@ pub(super) fn register_page_targets(lookup: &mut HashMap<String, String>, page: 
     }
 }
 
-fn resolution_keys(page: &WikiPageMeta) -> Vec<String> {
+fn resolution_keys(context: &ProjectContext, page: &WikiPageMeta) -> Vec<String> {
     let mut keys = Vec::new();
     let normalized_path = page.path.replace('\\', "/").to_ascii_lowercase();
     // Wikilinks may use a project-relative path (`concepts/x`) or the
     // canonical `wiki/concepts/x.md` path. Register both forms, with and
     // without the Markdown suffix, in addition to title/alias lookup.
     keys.push(normalized_path.clone());
-    if let Some(without_root) = normalized_path.strip_prefix("wiki/") {
-        keys.push(without_root.to_string());
+    for root in &context.layout.markdown_roots {
+        if let Some(without_root) =
+            normalized_path.strip_prefix(&format!("{}/", root.path.to_ascii_lowercase()))
+        {
+            keys.push(without_root.to_string());
+        }
     }
     if let Some(without_ext) = normalized_path.strip_suffix(".md") {
         keys.push(without_ext.to_string());
-        if let Some(without_root) = without_ext.strip_prefix("wiki/") {
-            keys.push(without_root.to_string());
+        for root in &context.layout.markdown_roots {
+            if let Some(without_root) =
+                without_ext.strip_prefix(&format!("{}/", root.path.to_ascii_lowercase()))
+            {
+                keys.push(without_root.to_string());
+            }
         }
     }
     if let Some(stem) = file_stem(&page.path) {
@@ -372,19 +384,31 @@ pub(super) fn resource_exists(context: &ProjectContext, page_path: &str, source:
     if normalized.contains("://") || is_absolute_resource_ref(&normalized) {
         return true;
     }
-    source_path_candidates(page_path, &normalized)
-        .into_iter()
-        .filter_map(|candidate| normalize_resource_path(&candidate))
-        .any(|candidate| {
-            context
-                .resolve_project_path(&candidate)
-                .map(|p| p.exists())
-                .unwrap_or(false)
-        })
+    source_path_candidates_with_root(
+        page_path,
+        &normalized,
+        context.layout.wiki_write_root.as_deref(),
+    )
+    .into_iter()
+    .filter_map(|candidate| normalize_resource_path(&candidate))
+    .any(|candidate| {
+        context
+            .resolve_project_path(&candidate)
+            .map(|p| p.exists())
+            .unwrap_or(false)
+    })
 }
 
 pub(super) fn source_path_candidates(page_path: &str, source: &str) -> Vec<String> {
-    let normalized = source
+    source_path_candidates_with_root(page_path, source, Some("wiki"))
+}
+
+pub(super) fn source_path_candidates_with_root(
+    page_path: &str,
+    source: &str,
+    wiki_root: Option<&str>,
+) -> Vec<String> {
+    let source = source
         .trim()
         .trim_matches('<')
         .trim_matches('>')
@@ -392,17 +416,47 @@ pub(super) fn source_path_candidates(page_path: &str, source: &str) -> Vec<Strin
         .next()
         .unwrap_or_default()
         .replace('\\', "/");
+    let Some(normalized) = decode_percent_path_once(&source) else {
+        return Vec::new();
+    };
+    if is_absolute_resource_ref(&normalized) {
+        return Vec::new();
+    }
     let mut candidates = Vec::new();
     if let Some(folder) = page_path.rsplit_once('/').map(|(folder, _)| folder) {
         candidates.push(format!("{folder}/{normalized}"));
     }
     candidates.push(normalized.clone());
-    if normalized.starts_with("sources/") {
-        candidates.push(format!("wiki/{normalized}"));
-    } else if !normalized.contains('/') {
-        candidates.push(format!("wiki/sources/{normalized}"));
+    if let Some(root) = wiki_root {
+        let prefix = if root == "." {
+            String::new()
+        } else {
+            format!("{root}/")
+        };
+        if normalized.starts_with("sources/") {
+            candidates.push(format!("{prefix}{normalized}"));
+        } else if !normalized.contains('/') {
+            candidates.push(format!("{prefix}sources/{normalized}"));
+        }
     }
     candidates
+}
+
+fn decode_percent_path_once(source: &str) -> Option<String> {
+    let bytes = source.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = |b: u8| (b as char).to_digit(16).map(|value| value as u8);
+            result.push((hex(*bytes.get(i + 1)?)? << 4) | hex(*bytes.get(i + 2)?)?);
+            i += 3;
+        } else {
+            result.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(result).ok()
 }
 
 pub(super) fn is_absolute_resource_ref(value: &str) -> bool {
@@ -432,13 +486,37 @@ pub(super) fn normalize_resource_path(path: &str) -> Option<String> {
 
 pub(super) fn extract_local_resource_refs(body: &str) -> Vec<String> {
     let mut refs = Vec::new();
+    let prose = crate::utils::markdown_utils::markdown_prose_mask(body);
     let mut cursor = 0usize;
     while let Some(relative_start) = body[cursor..].find("](") {
         let start = cursor + relative_start + 2;
-        let Some(relative_end) = body[start..].find(')') else {
+        let opening = body[..start - 2].rfind('[');
+        if !prose[start - 2] || !prose[start - 1] || !opening.is_some_and(|opening| prose[opening])
+        {
+            cursor = start;
+            continue;
+        }
+        let mut depth = 1;
+        let mut end = start;
+        for (offset, ch) in body[start..].char_indices() {
+            if ch == '(' {
+                depth += 1;
+            }
+            if ch == ')' {
+                depth -= 1;
+            }
+            if depth == 0 {
+                end = start + offset;
+                break;
+            }
+        }
+        if depth != 0 {
             break;
-        };
-        let end = start + relative_end;
+        }
+        if !prose[end] {
+            cursor = end + 1;
+            continue;
+        }
         let mut destination = body[start..end].trim();
         if let Some(rest) = destination.strip_prefix('<') {
             if let Some(close) = rest.find('>') {
@@ -499,7 +577,7 @@ fn schema_source_issues(
         }
     }
 
-    if let Some(expected) = expected_page_type_for_path(path) {
+    if let Some(expected) = expected_page_type_for_path(context, path) {
         if let Some(actual) = recognized_page_type(&normalized_type) {
             if actual != expected {
                 issues.push(local_issue(
@@ -636,8 +714,14 @@ fn recognized_page_type(normalized: &str) -> Option<WikiPageType> {
     }
 }
 
-fn expected_page_type_for_path(path: &str) -> Option<WikiPageType> {
-    let wiki_relative = path.strip_prefix("wiki/").unwrap_or(path);
+fn expected_page_type_for_path(context: &ProjectContext, path: &str) -> Option<WikiPageType> {
+    let wiki_relative = context
+        .layout
+        .wiki_write_root
+        .as_deref()
+        .filter(|root| *root != ".")
+        .and_then(|root| path.strip_prefix(&format!("{root}/")))
+        .unwrap_or(path);
     let first = wiki_relative.split('/').next().unwrap_or("");
     match first {
         "entities" => Some(WikiPageType::Entity),
@@ -677,6 +761,7 @@ pub(super) fn severity_rank(severity: LintSeverity) -> u8 {
 mod tests {
     use super::super::test_support::{seed_clean_vault, tmp_context, write_file};
     use super::super::LintService;
+    use super::{extract_local_resource_refs, resource_exists};
     use crate::models::lint::{Fixability, LintIssueSource, LintIssueType, LintSeverity};
     use crate::services::SearchService;
 
@@ -1095,6 +1180,35 @@ mod tests {
                 )
         }));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn encoded_and_parenthesized_resource_paths_resolve_once_inside_project() {
+        let (context, root) = tmp_context("encoded-resource");
+        write_file(&context, "wiki/concepts/page.md", "# Page\n");
+        std::fs::create_dir_all(root.join("wiki/assets")).unwrap();
+        std::fs::write(root.join("wiki/assets/sample image(1).svg"), "<svg/>").unwrap();
+        let refs = extract_local_resource_refs(
+            "![a](../assets/sample%20image(1).svg) ![b](<../assets/sample%20image(1).svg>)",
+        );
+        assert_eq!(refs.len(), 2);
+        assert!(refs.iter().all(|source| resource_exists(
+            &context,
+            "wiki/concepts/page.md",
+            source
+        )));
+        assert!(!resource_exists(
+            &context,
+            "wiki/concepts/page.md",
+            "%2e%2e/%2e%2e/%2e%2e/outside.md"
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resource_examples_in_code_are_not_scanned() {
+        let body = "![real](assets/real.svg) `![inline](assets/missing.svg)`\n```md\n![fenced](assets/missing.svg)\n```\n\\[escaped](assets/missing.svg)\n";
+        assert_eq!(extract_local_resource_refs(body), vec!["assets/real.svg"]);
     }
 
     #[test]

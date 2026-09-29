@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use llm_wiki_desktop_lib::errors::BackendError;
 use llm_wiki_desktop_lib::models::agent::AgentKind;
 use llm_wiki_desktop_lib::models::confirmation::ConfirmationRegistry;
+use llm_wiki_desktop_lib::models::graph::GraphData;
 use llm_wiki_desktop_lib::models::lint::{
     AgentLintRepairDeclaredChange, AgentLintRepairDeclaredChangeOperation, AgentLintRepairFinding,
     AgentLintRepairFindingResult, AgentLintRepairFindingStatus, AgentLintRepairOperation,
@@ -120,19 +121,7 @@ impl Fixture {
         issue_type: DeepLintIssueType,
         message: &str,
     ) -> llm_wiki_desktop_lib::models::workflow::WorkflowRun {
-        let identity = project_identity(&self.context.root).unwrap();
-        let page_hash = self
-            .file_store
-            .file_hash_if_exists(&self.context, "wiki/concepts/page.md")
-            .unwrap()
-            .unwrap();
-        let expected_git_head = self
-            .git_service
-            .repository_status(&self.context)
-            .unwrap()
-            .head
-            .unwrap_or_else(|| "0".repeat(40));
-        let finding = AgentLintRepairFinding {
+        self.enqueue_findings(vec![AgentLintRepairFinding {
             id: finding_id.into(),
             issue_type,
             severity: LintSeverity::Warning,
@@ -140,19 +129,41 @@ impl Fixture {
             message: message.into(),
             evidence: None,
             suggested_action: None,
-        };
+        }])
+    }
+
+    fn enqueue_findings(
+        &self,
+        mut findings: Vec<AgentLintRepairFinding>,
+    ) -> llm_wiki_desktop_lib::models::workflow::WorkflowRun {
+        findings.sort_by(|left, right| left.id.cmp(&right.id));
+        let identity = project_identity(&self.context.root).unwrap();
+        let authorized_path_hashes = findings
+            .iter()
+            .map(|finding| {
+                (
+                    finding.path.clone(),
+                    self.file_store
+                        .file_hash_if_exists(&self.context, &finding.path)
+                        .unwrap(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let expected_git_head = self
+            .git_service
+            .repository_status(&self.context)
+            .unwrap()
+            .head
+            .unwrap_or_else(|| "0".repeat(40));
         let operation = WorkflowOperation::AgentLintRepair {
             preparation_id: "repair-preparation".into(),
             preparation_revision: "repair-preparation-revision".into(),
             report_id: "health-report".into(),
             selection_revision: "selection-revision".into(),
-            selected_finding_ids: vec![finding.id.clone()],
-            selected_findings: vec![finding],
+            selected_finding_ids: findings.iter().map(|finding| finding.id.clone()).collect(),
+            selected_findings: findings,
             skill: WikiLintSkillRef::builtin(),
-            authorized_path_hashes: BTreeMap::from([(
-                "wiki/concepts/page.md".into(),
-                Some(page_hash),
-            )]),
+            authorized_path_hashes,
             expected_git_head,
         };
         let execution_options = WorkflowExecutionOptions {
@@ -232,6 +243,33 @@ fn output(
             path: "wiki/concepts/page.md".into(),
             operation: AgentLintRepairDeclaredChangeOperation::Update,
         }],
+        summary: format!("round {}", request.round),
+    };
+    format!("```json\n{}\n```", serde_json::to_string(&value).unwrap())
+}
+
+fn output_with_changes(
+    request: &llm_wiki_desktop_lib::models::lint::AgentLintRepairRequest,
+    status: AgentLintRepairFindingStatus,
+    declared_changes: Vec<AgentLintRepairDeclaredChange>,
+) -> String {
+    let value = AgentLintRepairRoundOutput {
+        schema_version: WIKI_LINT_SCHEMA_VERSION,
+        operation: AgentLintRepairOperation::Repair,
+        skill: WikiLintSkillRef::builtin(),
+        report_id: request.report_id.clone(),
+        selection_revision: request.selection_revision.clone(),
+        round: request.round,
+        finding_results: request
+            .findings
+            .iter()
+            .map(|finding| AgentLintRepairFindingResult {
+                finding_id: finding.id.clone(),
+                status,
+                message: "candidate evaluated".into(),
+            })
+            .collect(),
+        declared_changes,
         summary: format!("round {}", request.round),
     };
     format!("```json\n{}\n```", serde_json::to_string(&value).unwrap())
@@ -390,6 +428,14 @@ fn happy_path_uses_one_agent_round_and_private_history() {
         }
         other => panic!("unexpected result: {other:?}"),
     }
+    let graph: GraphData = serde_json::from_slice(
+        &fs::read(fixture.context.app_dir.join("graph-cache.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        graph.content_hash.is_empty(),
+        "Agent repair must leave a parseable stale cache so project trust survives"
+    );
 }
 
 #[test]
@@ -617,7 +663,7 @@ fn unrelated_staged_and_unstaged_edits_survive_private_repair_history() {
 }
 
 #[test]
-fn unresolved_round_three_is_manual_and_never_invokes_round_four() {
+fn unresolved_without_verified_progress_stops_after_one_round() {
     let fixture = Fixture::new(true);
     let run = fixture.enqueue();
     let invocations = AtomicUsize::new(0);
@@ -642,7 +688,7 @@ fn unresolved_round_three_is_manual_and_never_invokes_round_four() {
         },
     );
 
-    assert_eq!(invocations.load(Ordering::SeqCst), 3);
+    assert_eq!(invocations.load(Ordering::SeqCst), 1);
     let completed = fixture.task_service.get_workflow_run(&run.task_id).unwrap();
     let terminal_diff = agent_lint_repair_terminal_file_diff_page(
         &fixture.context,
@@ -655,7 +701,7 @@ fn unresolved_round_three_is_manual_and_never_invokes_round_four() {
     .unwrap()
     .unwrap();
     assert_eq!(terminal_diff.path, "wiki/concepts/page.md");
-    assert!(terminal_diff.diff.contains("Still unresolved 3"));
+    assert!(terminal_diff.diff.contains("Still unresolved 1"));
     match completed.result.unwrap() {
         WorkflowResult::AgentLintRepair {
             outcome,
@@ -664,7 +710,7 @@ fn unresolved_round_three_is_manual_and_never_invokes_round_four() {
             ..
         } => {
             assert_eq!(outcome, AgentLintRepairOutcome::ManualReviewRequired);
-            assert_eq!(rounds.len(), 3);
+            assert_eq!(rounds.len(), 1);
             assert_eq!(
                 unresolved_finding_ids,
                 ["missing_source:wiki/concepts/page.md"]
@@ -704,7 +750,7 @@ fn agent_attempted_claim_never_resolves_a_semantic_finding_without_backend_proof
         },
     );
 
-    assert_eq!(invocations.load(Ordering::SeqCst), 3);
+    assert_eq!(invocations.load(Ordering::SeqCst), 1);
     let completed = fixture.task_service.get_workflow_run(&run.task_id).unwrap();
     match completed.result.unwrap() {
         WorkflowResult::AgentLintRepair {
@@ -899,23 +945,26 @@ fn failure_after_an_applied_round_uses_the_durable_journal_to_restore_the_batch(
         "Possible duplicate topic",
     );
     let invocations = AtomicUsize::new(0);
+    let authorizations = AtomicUsize::new(0);
 
     run_agent_lint_repair_with_round_executor(
         &fixture.context,
         run.clone(),
         &fixture.services(),
         "en",
-        || Ok(()),
-        |request, workspace, _| {
-            invocations.fetch_add(1, Ordering::SeqCst);
-            if request.round == 2 {
+        || {
+            if authorizations.fetch_add(1, Ordering::SeqCst) == 2 {
                 return Err(BackendError::new(
-                    "TEST_AGENT_FAILURE",
-                    "Injected failure after round one was applied.",
+                    "TEST_FINALIZE_FAILURE",
+                    "Injected failure after the applied round.",
                     true,
                     true,
                 ));
             }
+            Ok(())
+        },
+        |request, workspace, _| {
+            invocations.fetch_add(1, Ordering::SeqCst);
             fs::write(
                 workspace.join("wiki/concepts/page.md"),
                 "---\ntitle: Page\ntype: concept\n---\n\n# Page\n\nRound one edit\n",
@@ -925,7 +974,7 @@ fn failure_after_an_applied_round_uses_the_durable_journal_to_restore_the_batch(
         },
     );
 
-    assert_eq!(invocations.load(Ordering::SeqCst), 2);
+    assert_eq!(invocations.load(Ordering::SeqCst), 1);
     assert_eq!(
         fs::read_to_string(fixture.context.root.join("wiki/concepts/page.md"))
             .unwrap()
@@ -1284,14 +1333,14 @@ fn descriptor_cas_mismatch_after_apply_still_consumes_the_durable_wal() {
         DeepLintIssueType::DuplicateTopic,
         "Possible duplicate topic",
     );
+    let authorizations = AtomicUsize::new(0);
     run_agent_lint_repair_with_round_executor(
         &fixture.context,
         run.clone(),
         &fixture.services(),
         "en",
-        || Ok(()),
-        |request, workspace, _| {
-            if request.round == 2 {
+        || {
+            if authorizations.fetch_add(1, Ordering::SeqCst) == 2 {
                 let descriptor_path = std::env::temp_dir()
                     .join("llm-wiki-desktop")
                     .join(&run.task_id)
@@ -1312,6 +1361,9 @@ fn descriptor_cas_mismatch_after_apply_still_consumes_the_durable_wal() {
                     true,
                 ));
             }
+            Ok(())
+        },
+        |request, workspace, _| {
             fs::write(
                 workspace.join("wiki/concepts/page.md"),
                 "---\ntitle: Page\ntype: concept\n---\n\n# Page\n\nRound one edit\n",
@@ -1385,5 +1437,675 @@ fn project_owned_candidate_tamper_never_rebinds_the_exact_review() {
     assert_eq!(
         fs::read_to_string(fixture.context.root.join("wiki/concepts/page.md")).unwrap(),
         before
+    );
+}
+
+#[test]
+fn first_round_skipped_or_needs_review_without_diff_finishes_without_empty_wal() {
+    for status in [
+        AgentLintRepairFindingStatus::Skipped,
+        AgentLintRepairFindingStatus::NeedsReview,
+    ] {
+        let fixture = Fixture::new(true);
+        let path = fixture.context.root.join("wiki/concepts/page.md");
+        let original = fs::read(&path).unwrap();
+        let run = fixture.enqueue_finding(
+            "duplicate_topic:wiki/concepts/page.md",
+            DeepLintIssueType::DuplicateTopic,
+            "Needs judgment",
+        );
+        let invocations = AtomicUsize::new(0);
+        run_agent_lint_repair_with_round_executor(
+            &fixture.context,
+            run.clone(),
+            &fixture.services(),
+            "en",
+            || Ok(()),
+            |request, _, _| {
+                invocations.fetch_add(1, Ordering::SeqCst);
+                Ok(output_with_changes(request, status, Vec::new()))
+            },
+        );
+        assert_eq!(invocations.load(Ordering::SeqCst), 1);
+        assert_eq!(fs::read(&path).unwrap(), original);
+        let completed = fixture.task_service.get_workflow_run(&run.task_id).unwrap();
+        assert_eq!(
+            completed.display_status,
+            WorkflowDisplayStatus::Completed,
+            "{:?}",
+            completed.error
+        );
+        assert!(
+            matches!(completed.result, Some(WorkflowResult::AgentLintRepair {
+            outcome: AgentLintRepairOutcome::ManualReviewRequired,
+            ref affected_paths,
+            ..
+        }) if affected_paths.is_empty())
+        );
+    }
+}
+
+#[test]
+fn applied_round_then_empty_round_or_net_zero_result_keeps_history() {
+    for return_to_original in [false, true] {
+        let fixture = Fixture::new(true);
+        let page_path = fixture.context.root.join("wiki/concepts/page.md");
+        let original = fs::read(&page_path).unwrap();
+        let other = "wiki/concepts/other.md";
+        fs::write(
+            fixture.context.root.join(other),
+            "---\ntitle: Other\ntype: concept\n---\n\n# Other\n\nNo source yet\n",
+        )
+        .unwrap();
+        let run = fixture.enqueue_findings(vec![
+            AgentLintRepairFinding {
+                id: "missing_source:wiki/concepts/page.md".into(),
+                issue_type: DeepLintIssueType::MissingSource,
+                severity: LintSeverity::Warning,
+                path: "wiki/concepts/page.md".into(),
+                message: "First missing source".into(),
+                evidence: None,
+                suggested_action: None,
+            },
+            AgentLintRepairFinding {
+                id: format!("missing_source:{other}"),
+                issue_type: DeepLintIssueType::MissingSource,
+                severity: LintSeverity::Warning,
+                path: other.into(),
+                message: "Second missing source".into(),
+                evidence: None,
+                suggested_action: None,
+            },
+        ]);
+        let calls = AtomicUsize::new(0);
+        run_agent_lint_repair_with_round_executor(
+            &fixture.context,
+            run.clone(),
+            &fixture.services(),
+            "en",
+            || Ok(()),
+            |request, workspace, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                if request.round == 1 {
+                    fs::write(workspace.join("wiki/concepts/page.md"),
+                        "---\ntitle: Page\ntype: concept\nsources:\n  - wiki/sources/source-a.md\n---\n\n# Page\n\nCited first page\n\n> Sources: [[wiki/sources/source-a.md]]\n").unwrap();
+                    Ok(output_with_changes(
+                        request,
+                        AgentLintRepairFindingStatus::Attempted,
+                        vec![AgentLintRepairDeclaredChange {
+                            path: "wiki/concepts/page.md".into(),
+                            operation: AgentLintRepairDeclaredChangeOperation::Update,
+                        }],
+                    ))
+                } else if return_to_original {
+                    fs::write(workspace.join("wiki/concepts/page.md"), &original).unwrap();
+                    Ok(output_with_changes(
+                        request,
+                        AgentLintRepairFindingStatus::Skipped,
+                        vec![AgentLintRepairDeclaredChange {
+                            path: "wiki/concepts/page.md".into(),
+                            operation: AgentLintRepairDeclaredChangeOperation::Update,
+                        }],
+                    ))
+                } else {
+                    Ok(output_with_changes(
+                        request,
+                        AgentLintRepairFindingStatus::NeedsReview,
+                        vec![],
+                    ))
+                }
+            },
+        );
+        let completed = fixture.task_service.get_workflow_run(&run.task_id).unwrap();
+        assert_eq!(
+            completed.display_status,
+            WorkflowDisplayStatus::Completed,
+            "{:?}",
+            completed.error
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(
+            matches!(completed.result, Some(WorkflowResult::AgentLintRepair {
+            outcome: AgentLintRepairOutcome::PartiallyCompleted | AgentLintRepairOutcome::ManualReviewRequired,
+            ref rounds,
+            ..
+        }) if rounds.len() == 2),
+            "{:?}",
+            completed.result
+        );
+        assert!(fixture
+            .git_service
+            .history_snapshot(&fixture.context, &run.task_id, "after")
+            .unwrap()
+            .is_some());
+        if return_to_original {
+            assert_eq!(fs::read(&page_path).unwrap(), original);
+        }
+    }
+}
+
+#[test]
+fn additional_existing_page_is_restored_byte_for_byte_after_confirmed_apply_fails() {
+    let fixture = Fixture::new(true);
+    let extra = "wiki/concepts/额外 页面.md";
+    let original = b"---\r\ntitle: Existing\r\ntype: concept\r\n---\r\n\r\n# Existing\r\n\r\nUncommitted original\r\n";
+    fs::write(fixture.context.root.join(extra), original).unwrap();
+    let before_head = fixture
+        .git_service
+        .repository_status(&fixture.context)
+        .unwrap()
+        .head;
+    let before_index = fs::read(fixture.context.root.join(".git/index")).unwrap();
+    let run = fixture.enqueue_finding(
+        "duplicate_topic:wiki/concepts/page.md",
+        DeepLintIssueType::DuplicateTopic,
+        "Needs judgment",
+    );
+    run_agent_lint_repair_with_round_executor(
+        &fixture.context,
+        run.clone(),
+        &fixture.services(),
+        "en",
+        || Ok(()),
+        |request, workspace, _| {
+            fs::write(
+                workspace.join(extra),
+                "---\ntitle: Existing\ntype: concept\n---\n\n# Changed\n",
+            )
+            .unwrap();
+            Ok(output_with_changes(
+                request,
+                AgentLintRepairFindingStatus::Attempted,
+                vec![AgentLintRepairDeclaredChange {
+                    path: extra.into(),
+                    operation: AgentLintRepairDeclaredChangeOperation::Update,
+                }],
+            ))
+        },
+    );
+    assert_eq!(
+        fixture
+            .task_service
+            .get_workflow_run(&run.task_id)
+            .unwrap()
+            .display_status,
+        WorkflowDisplayStatus::WaitingForConfirmation
+    );
+    let authorizations = AtomicUsize::new(0);
+    let failure = confirm_agent_lint_repair_review_with_round_executor(
+        &fixture.context,
+        &run.task_id,
+        &fixture.services(),
+        "en",
+        || {
+            if authorizations.fetch_add(1, Ordering::SeqCst) == 1 {
+                return Err(BackendError::new(
+                    "TEST_FINALIZE_FAILURE",
+                    "after confirmed apply",
+                    true,
+                    true,
+                ));
+            }
+            Ok(())
+        },
+        |_, _, _| unreachable!("no progress should retry"),
+    )
+    .unwrap_err();
+    assert_eq!(failure.error.code, "TEST_FINALIZE_FAILURE");
+    assert_eq!(
+        fs::read(fixture.context.root.join(extra)).unwrap(),
+        original
+    );
+    assert_eq!(
+        fixture
+            .git_service
+            .repository_status(&fixture.context)
+            .unwrap()
+            .head,
+        before_head
+    );
+    assert_eq!(
+        fs::read(fixture.context.root.join(".git/index")).unwrap(),
+        before_index
+    );
+    let terminal = fixture.task_service.get_workflow_run(&run.task_id).unwrap();
+    assert_eq!(terminal.display_status, WorkflowDisplayStatus::Failed);
+    assert!(matches!(
+        terminal.result,
+        Some(WorkflowResult::AgentLintRepair {
+            outcome: AgentLintRepairOutcome::RolledBack,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn restart_restores_second_confirmed_existing_page_from_persisted_before_state() {
+    let fixture = Fixture::new(true);
+    let extra = "wiki/concepts/重启 页面.md";
+    let original =
+        b"---\r\ntitle: Restart\r\ntype: concept\r\n---\r\n\r\n# Restart\r\n\r\nOriginal bytes\r\n";
+    fs::write(fixture.context.root.join(extra), original).unwrap();
+    let run = fixture.enqueue_finding(
+        "duplicate_topic:wiki/concepts/page.md",
+        DeepLintIssueType::DuplicateTopic,
+        "Needs judgment",
+    );
+    run_agent_lint_repair_with_round_executor(
+        &fixture.context,
+        run.clone(),
+        &fixture.services(),
+        "en",
+        || Ok(()),
+        |request, workspace, _| {
+            fs::write(
+                workspace.join(extra),
+                "---\ntitle: Restart\ntype: concept\n---\n\n# Changed\n",
+            )
+            .unwrap();
+            Ok(output_with_changes(
+                request,
+                AgentLintRepairFindingStatus::Attempted,
+                vec![AgentLintRepairDeclaredChange {
+                    path: extra.into(),
+                    operation: AgentLintRepairDeclaredChangeOperation::Update,
+                }],
+            ))
+        },
+    );
+    let authorizations = AtomicUsize::new(0);
+    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = confirm_agent_lint_repair_review_with_round_executor(
+            &fixture.context,
+            &run.task_id,
+            &fixture.services(),
+            "en",
+            || {
+                if authorizations.fetch_add(1, Ordering::SeqCst) == 1 {
+                    panic!("simulated process termination after confirmed write");
+                }
+                Ok(())
+            },
+            |_, _, _| unreachable!(),
+        );
+    }));
+    assert!(crashed.is_err());
+    assert_ne!(
+        fs::read(fixture.context.root.join(extra)).unwrap(),
+        original
+    );
+    let recovered_tasks = TaskService::default();
+    recovered_tasks
+        .recover_tasks(&fixture.context.root)
+        .unwrap();
+    let interrupted = recovered_tasks.get_workflow_run(&run.task_id).unwrap();
+    assert_eq!(
+        interrupted.display_status,
+        WorkflowDisplayStatus::Interrupted
+    );
+    let recovered_services = AgentLintRepairExecutionServices {
+        agent_service: &fixture.agent_service,
+        lint_service: &fixture.lint_service,
+        git_service: &fixture.git_service,
+        file_store: &fixture.file_store,
+        bookmark_service: &fixture.bookmark_service,
+        search_service: &fixture.search_service,
+        confirmation_registry: &fixture.confirmation_registry,
+        settings_service: &fixture.settings_service,
+        task_service: &recovered_tasks,
+        coordinator: &fixture.coordinator,
+    };
+    let settled = reconcile_agent_lint_repair_after_recovery(
+        &fixture.context,
+        &interrupted,
+        &recovered_services,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        fs::read(fixture.context.root.join(extra)).unwrap(),
+        original
+    );
+    assert!(matches!(
+        settled.result,
+        Some(WorkflowResult::AgentLintRepair {
+            outcome: AgentLintRepairOutcome::RolledBack,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn completed_second_confirmed_page_has_exact_undo_bytes() {
+    let fixture = Fixture::new(true);
+    let extra = "wiki/concepts/撤销 页面.md";
+    let original =
+        b"---\r\ntitle: Undo\r\ntype: concept\r\n---\r\n\r\n# Undo\r\n\r\nLocal draft\r\n";
+    fs::write(fixture.context.root.join(extra), original).unwrap();
+    let run = fixture.enqueue_finding(
+        "duplicate_topic:wiki/concepts/page.md",
+        DeepLintIssueType::DuplicateTopic,
+        "Needs judgment",
+    );
+    run_agent_lint_repair_with_round_executor(
+        &fixture.context,
+        run.clone(),
+        &fixture.services(),
+        "en",
+        || Ok(()),
+        |request, workspace, _| {
+            fs::write(
+                workspace.join(extra),
+                "---\ntitle: Undo\ntype: concept\n---\n\n# Rewritten\n",
+            )
+            .unwrap();
+            Ok(output_with_changes(
+                request,
+                AgentLintRepairFindingStatus::NeedsReview,
+                vec![AgentLintRepairDeclaredChange {
+                    path: extra.into(),
+                    operation: AgentLintRepairDeclaredChangeOperation::Update,
+                }],
+            ))
+        },
+    );
+    confirm_agent_lint_repair_review_with_round_executor(
+        &fixture.context,
+        &run.task_id,
+        &fixture.services(),
+        "en",
+        || Ok(()),
+        |_, _, _| unreachable!(),
+    )
+    .unwrap_or_else(|failure| panic!("confirmation failed: {}", failure.error.message));
+    let completed = fixture.task_service.get_workflow_run(&run.task_id).unwrap();
+    assert_eq!(completed.display_status, WorkflowDisplayStatus::Completed);
+    let WorkflowResult::AgentLintRepair {
+        checkpoint_hash: Some(before_hash),
+        final_commit: Some(after_hash),
+        ..
+    } = completed.result.unwrap()
+    else {
+        panic!("missing history")
+    };
+    let paths = vec![extra.to_string()];
+    let before = fixture
+        .git_service
+        .read_history_files(&fixture.context, &before_hash, &paths)
+        .unwrap();
+    let after = fixture
+        .git_service
+        .read_history_files(&fixture.context, &after_hash, &paths)
+        .unwrap();
+    assert_eq!(before[extra], Some(original.to_vec()));
+    assert_eq!(
+        after[extra],
+        Some(fs::read(fixture.context.root.join(extra)).unwrap())
+    );
+    let receipt = fixture
+        .settings_service
+        .get_agent_lint_repair_attestation(
+            &run.canonical_identity_key,
+            &run.identity_revision,
+            &run.task_id,
+            &agent_lint_repair_attestation_digest(
+                &run,
+                &WorkflowExecutionOptions {
+                    preparation_revision: "repair-preparation-revision".into(),
+                    operation: run.operation.clone(),
+                    ..WorkflowExecutionOptions::default()
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(receipt.original_path_hashes[extra].is_some());
+    let restore = llm_wiki_desktop_lib::services::CompileService::prepare_history_restore(
+        &fixture.context,
+        &before,
+        &after,
+    )
+    .unwrap();
+    llm_wiki_desktop_lib::services::CompileService::restore_prepared_history_outputs(
+        &fixture.context,
+        &restore,
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(fixture.context.root.join(extra)).unwrap(),
+        original
+    );
+}
+
+#[test]
+fn safe_new_page_is_in_final_history_and_preserved_for_manual_review() {
+    let fixture = Fixture::new(true);
+    let new_page = "wiki/concepts/新 页面.md";
+    let run = fixture.enqueue_finding(
+        "duplicate_topic:wiki/concepts/page.md",
+        DeepLintIssueType::DuplicateTopic,
+        "Needs judgment",
+    );
+    run_agent_lint_repair_with_round_executor(
+        &fixture.context,
+        run.clone(),
+        &fixture.services(),
+        "en",
+        || Ok(()),
+        |request, workspace, _| {
+            fs::write(
+                workspace.join(new_page),
+                "---\ntitle: New\ntype: concept\n---\n\n# New\n\nSynthetic page\n",
+            )
+            .unwrap();
+            Ok(output_with_changes(
+                request,
+                AgentLintRepairFindingStatus::NeedsReview,
+                vec![AgentLintRepairDeclaredChange {
+                    path: new_page.into(),
+                    operation: AgentLintRepairDeclaredChangeOperation::Create,
+                }],
+            ))
+        },
+    );
+    if fixture
+        .task_service
+        .get_workflow_run(&run.task_id)
+        .unwrap()
+        .display_status
+        == WorkflowDisplayStatus::WaitingForConfirmation
+    {
+        confirm_agent_lint_repair_review_with_round_executor(
+            &fixture.context,
+            &run.task_id,
+            &fixture.services(),
+            "en",
+            || Ok(()),
+            |_, _, _| unreachable!("no unverifiable retry"),
+        )
+        .unwrap_or_else(|failure| panic!("confirmation failed: {}", failure.error.message));
+    }
+    let completed = fixture.task_service.get_workflow_run(&run.task_id).unwrap();
+    assert_eq!(
+        completed.display_status,
+        WorkflowDisplayStatus::Completed,
+        "{:?}",
+        completed.error
+    );
+    assert!(
+        matches!(completed.result, Some(WorkflowResult::AgentLintRepair {
+        outcome: AgentLintRepairOutcome::ManualReviewRequired,
+        ref affected_paths,
+        ..
+    }) if affected_paths.contains(&new_page.to_string()))
+    );
+    let before_hash = fixture
+        .git_service
+        .history_snapshot(&fixture.context, &run.task_id, "before")
+        .unwrap()
+        .unwrap();
+    let after_hash = fixture
+        .git_service
+        .history_snapshot(&fixture.context, &run.task_id, "after")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        fixture
+            .git_service
+            .read_history_files(&fixture.context, &before_hash, &[new_page.into()])
+            .unwrap()[new_page],
+        None
+    );
+    assert_eq!(
+        fixture
+            .git_service
+            .read_history_files(&fixture.context, &after_hash, &[new_page.into()])
+            .unwrap()[new_page],
+        Some(fs::read(fixture.context.root.join(new_page)).unwrap())
+    );
+}
+
+#[test]
+fn recovery_conflict_preserves_external_bytes_and_finishes_failed_task() {
+    let fixture = Fixture::new(true);
+    let run = fixture.enqueue_finding(
+        "duplicate_topic:wiki/concepts/page.md",
+        DeepLintIssueType::DuplicateTopic,
+        "Needs judgment",
+    );
+    let authorizations = AtomicUsize::new(0);
+    let external = b"---\ntitle: External\ntype: concept\n---\n\n# External edit\n";
+    run_agent_lint_repair_with_round_executor(
+        &fixture.context,
+        run.clone(),
+        &fixture.services(),
+        "en",
+        || {
+            if authorizations.fetch_add(1, Ordering::SeqCst) == 2 {
+                fs::write(fixture.context.root.join("wiki/concepts/page.md"), external).unwrap();
+                return Err(BackendError::new(
+                    "TEST_FINALIZE_FAILURE",
+                    "external edit after apply",
+                    true,
+                    true,
+                ));
+            }
+            Ok(())
+        },
+        |request, workspace, _| {
+            fs::write(
+                workspace.join("wiki/concepts/page.md"),
+                "---\ntitle: Page\ntype: concept\n---\n\n# Agent edit\n",
+            )
+            .unwrap();
+            Ok(output(request, AgentLintRepairFindingStatus::Attempted))
+        },
+    );
+    assert_eq!(
+        fs::read(fixture.context.root.join("wiki/concepts/page.md")).unwrap(),
+        external
+    );
+    let failed = fixture.task_service.get_workflow_run(&run.task_id).unwrap();
+    assert_eq!(failed.display_status, WorkflowDisplayStatus::Failed);
+    assert_eq!(failed.error.unwrap().code, "LINT_REPAIR_ROLLBACK_FAILED");
+}
+
+#[test]
+fn missing_private_before_ref_preserves_applied_bytes_for_manual_recovery() {
+    let fixture = Fixture::new(true);
+    let run = fixture.enqueue_finding(
+        "duplicate_topic:wiki/concepts/page.md",
+        DeepLintIssueType::DuplicateTopic,
+        "Needs judgment",
+    );
+    let authorizations = AtomicUsize::new(0);
+    let changed = b"---\ntitle: Page\ntype: concept\n---\n\n# Applied edit\n";
+    run_agent_lint_repair_with_round_executor(
+        &fixture.context,
+        run.clone(),
+        &fixture.services(),
+        "en",
+        || {
+            if authorizations.fetch_add(1, Ordering::SeqCst) == 2 {
+                let reference = format!("refs/llm-wiki/operations/{}/before", run.task_id);
+                assert!(std::process::Command::new("git")
+                    .args(["update-ref", "-d", &reference])
+                    .current_dir(&fixture.context.root)
+                    .status()
+                    .unwrap()
+                    .success());
+                return Err(BackendError::new(
+                    "TEST_FINALIZE_FAILURE",
+                    "lost private before ref",
+                    true,
+                    true,
+                ));
+            }
+            Ok(())
+        },
+        |request, workspace, _| {
+            fs::write(workspace.join("wiki/concepts/page.md"), changed).unwrap();
+            Ok(output(request, AgentLintRepairFindingStatus::Attempted))
+        },
+    );
+    assert_eq!(
+        fs::read(fixture.context.root.join("wiki/concepts/page.md")).unwrap(),
+        changed
+    );
+    let failed = fixture.task_service.get_workflow_run(&run.task_id).unwrap();
+    assert_eq!(failed.display_status, WorkflowDisplayStatus::Failed);
+    assert_eq!(failed.error.unwrap().code, "LINT_REPAIR_ROLLBACK_FAILED");
+}
+
+#[test]
+fn cancellation_after_apply_restores_original_bytes_and_ends_task() {
+    let fixture = Fixture::new(true);
+    let path = fixture.context.root.join("wiki/concepts/page.md");
+    let original = fs::read(&path).unwrap();
+    let run = fixture.enqueue_finding(
+        "duplicate_topic:wiki/concepts/page.md",
+        DeepLintIssueType::DuplicateTopic,
+        "Needs judgment",
+    );
+    let authorizations = AtomicUsize::new(0);
+    run_agent_lint_repair_with_round_executor(
+        &fixture.context,
+        run.clone(),
+        &fixture.services(),
+        "en",
+        || {
+            if authorizations.fetch_add(1, Ordering::SeqCst) == 2 {
+                fixture.task_service.request_cancel(&run.task_id).unwrap();
+                return Err(BackendError::new(
+                    "AGENT_CANCELLED",
+                    "cancel at finalization",
+                    true,
+                    false,
+                ));
+            }
+            Ok(())
+        },
+        |request, workspace, _| {
+            fs::write(
+                workspace.join("wiki/concepts/page.md"),
+                "---\ntitle: Page\ntype: concept\n---\n\n# Temporary agent edit\n",
+            )
+            .unwrap();
+            Ok(output(request, AgentLintRepairFindingStatus::Attempted))
+        },
+    );
+    assert_eq!(fs::read(&path).unwrap(), original);
+    let cancelled = fixture.task_service.get_workflow_run(&run.task_id).unwrap();
+    assert_eq!(cancelled.display_status, WorkflowDisplayStatus::Cancelled);
+    assert!(
+        matches!(
+            cancelled.result,
+            Some(WorkflowResult::AgentLintRepair {
+                outcome: AgentLintRepairOutcome::RolledBack,
+                ..
+            })
+        ),
+        "{:?}",
+        cancelled.result
     );
 }

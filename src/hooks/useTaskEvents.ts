@@ -118,6 +118,20 @@ export function useTaskEvents(): void {
           service.projectResourcesForBackendEvent(event),
           true,
         );
+        if (event.eventType === "workflow_updated") {
+          const run = event.payload as { operation?: { kind?: string }; displayStatus?: string };
+          if (run.operation?.kind === "agent_lint_repair" && ["completed", "failed", "cancelled", "interrupted"].includes(run.displayStatus ?? "")) {
+            void import("../stores/lintStore").then(({ useLintStore }) => {
+              if (!isProjectScopeCurrent(scopeEpoch)) return;
+              useLintStore.setState((state) => ({
+                healthReport: state.healthReport?.execution ? {
+                  ...state.healthReport,
+                  execution: { ...state.healthReport.execution, freshness: "stale" },
+                } : state.healthReport,
+              }));
+            });
+          }
+        }
         const latestAuthority = useProjectStore.getState().authority;
         const authorityStillMatches = factsScopeMatches
           && latestAuthority?.projectId === scope.projectId

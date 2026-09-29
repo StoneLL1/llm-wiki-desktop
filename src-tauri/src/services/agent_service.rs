@@ -2908,8 +2908,28 @@ fn harden_agent_environment(
             true,
         )
     })?;
-    let runtime_home = workspace.join("runtime-home");
-    let runtime_temp = workspace.join("runtime-temp");
+    // Lint repair validates every candidate file. Its CLI runtime belongs to
+    // the same task lease, but outside the candidate subtree. Other Agent
+    // callers retain their existing workspace-owned runtime layout.
+    let runtime_root =
+        lint_repair_runtime_root(workspace)?.unwrap_or_else(|| workspace.to_path_buf());
+    if runtime_root != workspace {
+        ensure_private_directory(&runtime_root).map_err(|_| {
+            BackendError::new(
+                "LINT_AGENT_WORKSPACE_INVALID",
+                "The isolated lint repair runtime root is unsafe.",
+                false,
+                true,
+            )
+        })?;
+    }
+    let runtime_home = runtime_root.join("runtime-home");
+    let runtime_temp = runtime_root.join("runtime-temp");
+    let runtime_cache = if runtime_root == workspace {
+        runtime_home.join(".cache")
+    } else {
+        runtime_root.join("runtime-cache")
+    };
     ensure_private_directory(&runtime_home).map_err(|_| {
         BackendError::new(
             "IMPORT_AGENT_WORKSPACE_INVALID",
@@ -2922,6 +2942,14 @@ fn harden_agent_environment(
         BackendError::new(
             "IMPORT_AGENT_WORKSPACE_INVALID",
             "The isolated Agent runtime temp directory is not a real private directory.",
+            false,
+            true,
+        )
+    })?;
+    ensure_private_directory(&runtime_cache).map_err(|_| {
+        BackendError::new(
+            "IMPORT_AGENT_WORKSPACE_INVALID",
+            "The isolated Agent runtime cache is not a real private directory.",
             false,
             true,
         )
@@ -2960,11 +2988,56 @@ fn harden_agent_environment(
         .env("USERPROFILE", &runtime_home)
         .env("TEMP", &runtime_temp)
         .env("TMP", &runtime_temp)
+        .env("TMPDIR", &runtime_temp)
+        .env("XDG_CACHE_HOME", &runtime_cache)
+        .env("npm_config_cache", &runtime_cache)
+        .env(
+            "NODE_COMPILE_CACHE",
+            runtime_cache.join("node-compile-cache"),
+        )
         .env("NO_COLOR", "1");
     if let Some((name, path)) = credential_directory {
         command.env(name, path);
     }
     Ok(())
+}
+
+fn lint_repair_runtime_root(workspace: &Path) -> Result<Option<PathBuf>, BackendError> {
+    if workspace.file_name().and_then(|name| name.to_str()) != Some("candidate") {
+        return Ok(None);
+    }
+    let Some(task_root) = workspace.parent() else {
+        return Ok(None);
+    };
+    let owner = std::env::temp_dir()
+        .join("llm-wiki-desktop")
+        .join("lint-repair");
+    if task_root.parent() != Some(owner.as_path()) {
+        return Ok(None);
+    }
+    let invalid = || {
+        BackendError::new(
+            "LINT_AGENT_WORKSPACE_INVALID",
+            "The lint repair candidate is not inside its verified task lease.",
+            false,
+            true,
+        )
+    };
+    validate_private_directory(task_root).map_err(|_| invalid())?;
+    let marker = task_root.join("lint-repair-workspace.json");
+    let metadata = std::fs::symlink_metadata(&marker).map_err(|_| invalid())?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(invalid());
+    }
+    let canonical_owner = owner.canonicalize().map_err(|_| invalid())?;
+    let canonical_task = task_root.canonicalize().map_err(|_| invalid())?;
+    let canonical_candidate = workspace.canonicalize().map_err(|_| invalid())?;
+    if canonical_task.parent() != Some(canonical_owner.as_path())
+        || canonical_candidate.parent() != Some(canonical_task.as_path())
+    {
+        return Err(invalid());
+    }
+    Ok(Some(task_root.join("runtime")))
 }
 
 fn executable_identity(path: &Path) -> Option<ExecutableIdentity> {
@@ -5561,6 +5634,185 @@ mod tests {
         );
         assert!(hermes_profile.contains_key("HERMES_OAUTH_FILE"));
         assert!(!hermes_profile.contains_key("OPENCLAW_PROFILE"));
+    }
+
+    #[test]
+    fn lint_repair_runtime_is_a_task_sibling_of_the_candidate() {
+        let owner = std::env::temp_dir()
+            .join("llm-wiki-desktop")
+            .join("lint-repair");
+        std::fs::create_dir_all(&owner).unwrap();
+        let mut homes = Vec::new();
+        for _ in 0..2 {
+            let task = owner.join(format!("{}-round-1", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&task).unwrap();
+            let candidate = task.join("candidate");
+            std::fs::create_dir(&candidate).unwrap();
+            std::fs::write(task.join("lint-repair-workspace.json"), b"{}").unwrap();
+            let mut command = Command::new("claude");
+            harden_agent_environment(&mut command, &candidate, Some(AgentKind::Claude)).unwrap();
+            let env = command
+                .get_envs()
+                .filter_map(|(key, value)| {
+                    value.map(|value| (key.to_string_lossy().into_owned(), value.to_os_string()))
+                })
+                .collect::<HashMap<_, _>>();
+            for key in [
+                "HOME",
+                "TEMP",
+                "TMP",
+                "TMPDIR",
+                "XDG_CACHE_HOME",
+                "npm_config_cache",
+                "NODE_COMPILE_CACHE",
+            ] {
+                assert!(
+                    PathBuf::from(&env[key]).starts_with(task.join("runtime")),
+                    "{key}"
+                );
+                assert!(!PathBuf::from(&env[key]).starts_with(&candidate), "{key}");
+            }
+            homes.push(env["HOME"].clone());
+            assert!(!candidate.join("runtime-home").exists());
+            assert!(!candidate.join("runtime-temp").exists());
+            std::fs::remove_dir_all(&task).unwrap();
+        }
+        assert_ne!(
+            homes[0], homes[1],
+            "distinct tasks need separate runtime homes"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    #[ignore = "requires the installed, signed-in Claude CLI and makes one synthetic Agent request"]
+    fn real_claude_lint_repair_keeps_runtime_outside_validated_candidate() {
+        use crate::models::lint::{
+            AgentLintRepairFinding, AgentLintRepairOperation, AgentLintRepairRequest,
+            DeepLintIssueType, LintSeverity, WikiLintSkillRef, WIKI_LINT_SCHEMA_VERSION,
+        };
+        use crate::services::{CompileService, GitService, LintService};
+
+        let temp = tempfile::tempdir().unwrap();
+        let context = ProjectContext::new("synthetic-claude-lint", temp.path().to_path_buf());
+        std::fs::create_dir_all(temp.path().join("wiki/concepts")).unwrap();
+        std::fs::create_dir_all(temp.path().join("wiki/sources")).unwrap();
+        let page = "wiki/concepts/测试 页面.md";
+        let before = b"---\ntitle: Test Page\ntype: concept\n---\n\n# Test Page\n\nThis note states the sample retention period is 30 days.\n";
+        std::fs::write(temp.path().join(page), before).unwrap();
+        std::fs::write(
+            temp.path().join("wiki/sources/sample.md"),
+            "---\ntitle: Sample\ntype: source\n---\n\n# Sample\n\nThe synthetic retention period is 30 days.\n",
+        ).unwrap();
+        GitService
+            .initialize_repository(&context, "Synthetic Claude lint test")
+            .unwrap();
+        let task_id = format!("{}-round-1", uuid::Uuid::new_v4());
+        let request = AgentLintRepairRequest {
+            schema_version: WIKI_LINT_SCHEMA_VERSION,
+            operation: AgentLintRepairOperation::Repair,
+            skill: WikiLintSkillRef::builtin(),
+            report_id: "synthetic-report".into(),
+            selection_revision: "synthetic-selection".into(),
+            round: 1,
+            max_rounds: 3,
+            findings: vec![AgentLintRepairFinding {
+                id: format!("missing_source:{page}"),
+                issue_type: DeepLintIssueType::MissingSource,
+                severity: LintSeverity::Warning,
+                path: page.into(),
+                message: "The 30-day statement lacks a citation to wiki/sources/sample.md".into(),
+                evidence: Some("The source explicitly confirms the synthetic 30-day value.".into()),
+                suggested_action: Some("Add a source citation to wiki/sources/sample.md in this page without changing the 30-day value.".into()),
+            }],
+            prior_rounds: vec![],
+            writable_paths: vec![page.into()],
+            creatable_roots: vec!["wiki".into()],
+            read_only_roots: vec!["raw".into(), "wiki/sources".into()],
+            purpose: None,
+            schema: None,
+            language: "en".into(),
+        };
+        let lease = LintService::create_repair_workspace(&context, &task_id, &request).unwrap();
+        let prompt = format!(
+            "{}\n\nThis is a synthetic test. The source is explicit: cite wiki/sources/sample.md in the selected page and preserve the 30-day fact. Edit only the candidate page and return the required structured result.",
+            LintService::build_agent_lint_repair_prompt(&request).unwrap()
+        );
+        let agent = AgentService::default();
+        let prepared = agent
+            .prepare_lint_repair(AgentKind::Claude, false, lease.workspace(), &prompt)
+            .unwrap();
+        let tasks = TaskService::default();
+        let task = tasks.create_task(
+            TaskType::DeepLint,
+            Some(context.project_id.clone()),
+            "Synthetic Claude repair".into(),
+            true,
+        );
+        let raw = agent
+            .run_prepared_lint_streaming(&prepared, &tasks, &task.id)
+            .unwrap();
+        let runtime_root = lease.task_root().join("runtime");
+        let runtime_files = count_files(&runtime_root);
+        assert!(
+            runtime_files > 0,
+            "Claude did not produce observable runtime files"
+        );
+        assert!(!lease.workspace().join("runtime-home").exists());
+        assert!(!lease.workspace().join("runtime-temp").exists());
+        let output = LintService::parse_agent_lint_repair_round_output(&raw, &request).unwrap();
+        let candidate =
+            LintService::validate_repair_workspace(&context, &lease, &request, &output).unwrap();
+        assert!(candidate
+            .manifest
+            .files
+            .iter()
+            .any(|file| file.path == page));
+        let current = candidate
+            .manifest
+            .files
+            .iter()
+            .map(|file| {
+                (
+                    file.path.clone(),
+                    FileStore
+                        .file_hash_if_exists(&context, &file.path)
+                        .unwrap()
+                        .unwrap(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let applied = CompileService::apply_confirmed_lint_repair_manifest(
+            &context,
+            &candidate.manifest,
+            &current,
+        )
+        .unwrap();
+        assert!(applied.contains(&page.to_string()));
+        assert_ne!(std::fs::read(temp.path().join(page)).unwrap(), before);
+        println!("real_claude_candidate_validated=true runtime_file_count={runtime_files} applied_paths={applied:?}");
+        drop(lease);
+        assert!(
+            !runtime_root.exists(),
+            "the task lease must clean its runtime files"
+        );
+
+        fn count_files(root: &Path) -> usize {
+            let Ok(entries) = std::fs::read_dir(root) else {
+                return 0;
+            };
+            entries
+                .filter_map(Result::ok)
+                .map(|entry| {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        count_files(&path)
+                    } else {
+                        1
+                    }
+                })
+                .sum()
+        }
     }
 
     #[cfg(unix)]

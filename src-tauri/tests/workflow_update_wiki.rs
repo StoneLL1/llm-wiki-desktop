@@ -13,6 +13,7 @@ use llm_wiki_desktop_lib::models::compile::{
     CompilePageType, CompilePlan, CompilePlanItem, CompileRoute, ResolvedCompileRoute,
 };
 use llm_wiki_desktop_lib::models::confirmation::ConfirmationExecution;
+use llm_wiki_desktop_lib::models::graph::GraphData;
 use llm_wiki_desktop_lib::models::paths::ProjectContext;
 use llm_wiki_desktop_lib::models::workflow::{
     UpdateWikiMode, WorkflowDisplayStatus, WorkflowExecutionOptions, WorkflowKind, WorkflowRoute,
@@ -1084,10 +1085,13 @@ async fn real_low_risk_runner_completes_all_stages_consumes_source_and_commits()
             .pages
             .iter()
             .any(|page| page.path == "wiki/concepts/工作流成功.md"));
-        let graph: serde_json::Value =
+        let graph: GraphData =
             serde_json::from_slice(&fs::read(context.app_dir.join("graph-cache.json")).unwrap())
                 .unwrap();
-        assert_eq!(graph["status"], "stale");
+        assert!(
+            graph.content_hash.is_empty(),
+            "the valid cache must rebuild on the next graph request"
+        );
         let head = GitService.repository_status(&context).unwrap().head;
         let (scope, _) = source_scope(&context);
         let repeated = enqueue_update(

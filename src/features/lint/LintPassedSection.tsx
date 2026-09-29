@@ -27,26 +27,31 @@ const PASSED_RULE_LABEL: Record<LintIssueType, string> = {
 interface LintPassedSectionProps {
   /** Deterministic local rules that did not fire this scan. */
   passedRules: LintIssueType[];
+  notApplicableRules?: LintIssueType[];
+  coverageUnknown?: boolean;
 }
 
-export function LintPassedSection({ passedRules }: LintPassedSectionProps) {
+export function LintPassedSection({ passedRules, notApplicableRules = [], coverageUnknown = false }: LintPassedSectionProps) {
   const { t } = useTranslation();
   const labeled = passedRules
     .map((rule) => PASSED_RULE_LABEL[rule])
     .filter(Boolean);
+  const notApplicable = notApplicableRules.map((rule) => PASSED_RULE_LABEL[rule]).filter(Boolean);
 
-  if (labeled.length === 0) return null;
+  if (labeled.length === 0 && notApplicable.length === 0 && !coverageUnknown) return null;
 
   return (
     <details className="lint-passed lint-disclosure">
-      <summary className="lint-passed__label">{t("lint.passed.title")} · {labeled.length}</summary>
+      <summary className="lint-passed__label">{labeled.length > 0 ? `${t("lint.passed.title")} · ${labeled.length}` : t("lint.passed.coverage")}</summary>
       <div className="lint-passed__badges">
+        {coverageUnknown ? <span className="badge">{t("lint.passed.unknown")}</span> : null}
         {labeled.map((key) => (
           <span key={key} className="badge badge--success">
             <Check size={11} aria-hidden="true" />
             {t(key)}
           </span>
         ))}
+        {notApplicable.map((key) => <span key={`na-${key}`} className="badge">{t("lint.passed.notApplicable", { rule: t(key) })}</span>)}
       </div>
     </details>
   );

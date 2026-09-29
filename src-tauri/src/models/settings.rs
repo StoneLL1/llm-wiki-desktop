@@ -271,6 +271,9 @@ pub struct AgentLintRepairAttestation {
     /// receipt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mutation_journal: Option<AgentLintRepairMutationJournal>,
+    /// First-write states survive journal retirement for safe completed undo.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub original_path_hashes: BTreeMap<String, Option<String>>,
     /// Digest of the exact terminal workflow result. Only the dedicated
     /// completion transition may set this value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -294,6 +297,10 @@ pub struct AgentLintRepairMutationJournal {
     /// its intended post value below; any third value is an external edit.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub pre_mutation_path_hashes: BTreeMap<String, Option<String>>,
+    /// Immutable state before this operation first wrote each path. A missing
+    /// entry in an older receipt is unknown, not proof that a file was absent.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub original_path_hashes: BTreeMap<String, Option<String>>,
     pub affected_path_hashes: BTreeMap<String, Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_commit: Option<String>,

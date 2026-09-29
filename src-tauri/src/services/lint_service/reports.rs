@@ -32,7 +32,7 @@ impl LintService {
         Ok(format!("{:x}", Sha256::digest(canonical.as_bytes())))
     }
 
-    fn persist_local_report_unchecked(
+    pub(super) fn persist_local_report_unchecked(
         &self,
         context: &ProjectContext,
         report: &LintReport,
@@ -59,7 +59,10 @@ impl LintService {
             &format!("{LINT_REPORTS_DIR}/{id}.json"),
             &persisted,
         )?;
-        self.record_history_entry_locked(context, entry.clone())?;
+        let removed = self.record_history_entry_locked(context, entry.clone())?;
+        // Publication is durable. Pruning is optional garbage collection;
+        // a failed delete must never turn a successful report into a failure.
+        let _ = self.prune_report_bodies(context, &removed);
         Ok(entry)
     }
 
@@ -111,7 +114,8 @@ impl LintService {
             &format!("{LINT_REPORTS_DIR}/{task_id}.json"),
             &persisted,
         )?;
-        self.record_history_entry_locked(context, entry.clone())?;
+        let removed = self.record_history_entry_locked(context, entry.clone())?;
+        let _ = self.prune_report_bodies(context, &removed);
         Ok(entry)
     }
 
@@ -402,8 +406,11 @@ impl LintService {
             .write_json_atomic(context, &report_path, &persisted)?;
         let committed = self
             .record_history_entry_locked(context, entry.clone())
-            .and_then(|_| validate());
-        if let Err(error) = committed {
+            .and_then(|removed| validate().map(|_| removed));
+        let removed = if let Ok(removed) = committed {
+            removed
+        } else {
+            let error = committed.unwrap_err();
             // A failed deep-result update must not erase the already durable
             // local portion. Restore both prior metadata objects under the lock.
             if let Some(previous) = previous {
@@ -412,10 +419,15 @@ impl LintService {
                 self.file_store
                     .write_json_atomic(context, LINT_HISTORY_PATH, &previous_history)?;
             } else {
-                self.rollback_health_check_report_locked(context, &report.report_id)?;
+                self.rollback_health_check_report_locked(
+                    context,
+                    &report.report_id,
+                    &previous_history,
+                )?;
             }
             return Err(error);
-        }
+        };
+        let _ = self.prune_report_bodies(context, &removed);
         Ok(entry)
     }
 
@@ -423,6 +435,7 @@ impl LintService {
         &self,
         context: &ProjectContext,
         report_id: &str,
+        previous_history: &LintHistoryFile,
     ) -> Result<(), BackendError> {
         reject_report_id(report_id)?;
         let path =
@@ -437,10 +450,8 @@ impl LintService {
                 )
             })?;
         }
-        let mut history = self.load_history(context)?;
-        history.entries.retain(|entry| entry.id != report_id);
         self.file_store
-            .write_json_atomic(context, LINT_HISTORY_PATH, &history)
+            .write_json_atomic(context, LINT_HISTORY_PATH, previous_history)
     }
 
     fn load_history(&self, context: &ProjectContext) -> Result<LintHistoryFile, BackendError> {
@@ -482,7 +493,7 @@ impl LintService {
         &self,
         context: &ProjectContext,
         entry: LintHistoryEntry,
-    ) -> Result<(), BackendError> {
+    ) -> Result<Vec<String>, BackendError> {
         let mut file = self.load_history(context)?;
         let previous_ids: std::collections::HashSet<String> = file
             .entries
@@ -504,8 +515,7 @@ impl LintService {
             .into_iter()
             .filter(|id| !retained_ids.contains(id.as_str()))
             .collect();
-        self.prune_report_bodies(context, &removed_ids)?;
-        Ok(())
+        Ok(removed_ids)
     }
 
     fn prune_report_bodies(
@@ -849,6 +859,7 @@ mod tests {
             issues: Vec::new(),
             generated_at: "2026-07-04T00:00:00Z".into(),
             scanned_pages: 2,
+            coverage: None,
         };
 
         let entry = service.persist_local_report(&context, &report).unwrap();
@@ -870,6 +881,41 @@ mod tests {
     }
 
     #[test]
+    fn local_coverage_round_trips_and_legacy_absence_stays_unknown() {
+        let (context, root) = tmp_context("local-coverage-roundtrip");
+        let service = LintService::default();
+        let report = LintReport {
+            issues: Vec::new(),
+            generated_at: "2026-09-29T00:00:00Z".into(),
+            scanned_pages: 1,
+            coverage: Some(HealthCheckCoverage {
+                scanned_pages: 1,
+                source_pages: 1,
+                wiki_pages: 0,
+                deep_covered_pages: None,
+                deep_truncated: false,
+                not_applicable_rules: vec!["index_drift".into()],
+            }),
+        };
+        let entry = service.persist_local_report(&context, &report).unwrap();
+        assert_eq!(
+            service
+                .read_lint_history_report(&context, &entry.id)
+                .unwrap()
+                .local_report
+                .unwrap()
+                .coverage,
+            report.coverage
+        );
+        let legacy: LintReport = serde_json::from_value(serde_json::json!({
+            "issues": [], "generatedAt": "2026-09-28T00:00:00Z", "scannedPages": 1,
+        }))
+        .unwrap();
+        assert!(legacy.coverage.is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn lint_history_is_limited_to_newest_fifty_entries() {
         let (context, root) = tmp_context("history-limit");
         let service = LintService::default();
@@ -878,6 +924,7 @@ mod tests {
                 issues: Vec::new(),
                 generated_at: format!("2026-07-04T00:{index:02}:00Z"),
                 scanned_pages: 1,
+                coverage: None,
             };
             service.persist_local_report(&context, &report).unwrap();
         }
@@ -1246,6 +1293,55 @@ mod tests {
             .unwrap()
             .entries
             .is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_publication_at_capacity_keeps_every_previous_report_body() {
+        let (context, root) = tmp_context("health-full-history-rollback");
+        let service = LintService::default();
+        for index in 0..50 {
+            let report = health_report(
+                &format!("old-{index:02}"),
+                true,
+                format!("2026-09-28T00:{index:02}:00Z"),
+            );
+            service
+                .store_health_check_report(&context, &report)
+                .unwrap();
+        }
+        let before = std::fs::read(context.app_dir.join("lint-history.json")).unwrap();
+        let calls = Cell::new(0);
+        let new_report = health_report("new-failed", true, "2026-09-29T00:00:00Z".into());
+        service
+            .store_health_check_report_guarded(&context, &new_report, || {
+                calls.set(calls.get() + 1);
+                if calls.get() == 2 {
+                    Err(BackendError::new(
+                        "INJECTED",
+                        "post-publish validation",
+                        true,
+                        true,
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+        assert_eq!(
+            std::fs::read(context.app_dir.join("lint-history.json")).unwrap(),
+            before
+        );
+        for index in 0..50 {
+            assert!(context
+                .app_dir
+                .join(format!("lint-reports/old-{index:02}.json"))
+                .exists());
+        }
+        assert!(!context
+            .app_dir
+            .join("lint-reports/new-failed.json")
+            .exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -10,7 +10,7 @@ use crate::models::lint::{
 use crate::models::paths::ProjectContext;
 use crate::models::wiki::WikiPageMeta;
 use crate::services::SearchService;
-use crate::utils::markdown_utils::extract_wikilinks;
+use crate::utils::markdown_utils::wikilink_spans;
 use crate::utils::time_utils::now_rfc3339;
 
 use super::deep::{
@@ -273,7 +273,7 @@ impl LintService {
             let content = search.read_page(context, path, &HashSet::new())?;
             // Source-only roots are valid link destinations even though their
             // faithful documents do not participate in derived-Wiki rules.
-            register_page_targets(&mut lookup, &content.meta);
+            register_page_targets(context, &mut lookup, &content.meta);
             input_hashes.insert(path.clone(), Some(content.meta.hash.clone()));
             if Some(path.as_str()) == purpose_path(context) {
                 purpose = Some(
@@ -310,9 +310,13 @@ impl LintService {
                     continue;
                 }
                 let mut present = false;
-                for candidate in source_path_candidates(path, &resource)
-                    .into_iter()
-                    .filter_map(|candidate| normalize_resource_path(&candidate))
+                for candidate in super::rules::source_path_candidates_with_root(
+                    path,
+                    &resource,
+                    context.layout.wiki_write_root.as_deref(),
+                )
+                .into_iter()
+                .filter_map(|candidate| normalize_resource_path(&candidate))
                 {
                     let evidence = input_hashes
                         .entry(format!("resource-exists://{candidate}"))
@@ -448,7 +452,12 @@ impl LintService {
                     .and_then(|lines| lines.get(&target.trim().to_ascii_lowercase()))
                     .copied()
                     .map(|line| LintRange { line, column: None });
-                issue.fixability = Fixability::HighRisk;
+                issue.fixability =
+                    if Some(page.path.as_str()) == context.layout.activity_log_path.as_deref() {
+                        Fixability::None
+                    } else {
+                        Fixability::HighRisk
+                    };
                 issue.suggested_action =
                     Some("Remove the link or fix the target to match an existing page.".into());
                 issues.push(issue);
@@ -513,6 +522,14 @@ impl LintService {
                 issues,
                 generated_at: now_rfc3339(),
                 scanned_pages: paths.len(),
+                coverage: Some(crate::models::lint::HealthCheckCoverage {
+                    scanned_pages: paths.len(),
+                    source_pages: source_paths.len(),
+                    wiki_pages,
+                    deep_covered_pages: None,
+                    deep_truncated: false,
+                    not_applicable_rules: not_applicable_rules.clone(),
+                }),
             },
             input_hashes,
             input_fingerprint,
@@ -643,15 +660,22 @@ where
     F: FnMut() -> Result<(), BackendError>,
 {
     let mut lines = HashMap::new();
-    for (index, line) in body.lines().enumerate() {
+    for (index, _) in body.lines().enumerate() {
         if index % 256 == 0 {
             checkpoint()?;
         }
-        for target in extract_wikilinks(line) {
-            lines
-                .entry(target.to_ascii_lowercase())
-                .or_insert(index + 1);
-        }
+    }
+    let mut scanned = 0;
+    let mut line = 1;
+    for link in wikilink_spans(body) {
+        line += body.as_bytes()[scanned..link.start]
+            .iter()
+            .filter(|&&b| b == b'\n')
+            .count();
+        scanned = link.start;
+        lines
+            .entry(link.target.to_ascii_lowercase())
+            .or_insert(line);
     }
     Ok(lines)
 }

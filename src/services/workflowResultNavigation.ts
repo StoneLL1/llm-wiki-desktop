@@ -45,6 +45,18 @@ export async function openWorkflowResultDetails(
   }
 
   if (result.kind === "agent_lint_repair") {
+    // Repair results carry verified finding ids, but no published Health
+    // report. Rescan this project's final files and mark prior deep evidence
+    // stale; never present the pre-repair report as the current result.
+    const lint = useLintStore.getState();
+    if (lint.fixConfirm || lint.batchConfirmations.length > 0) {
+      throw new Error("WORKFLOW_LINT_CONFIRMATION_ACTIVE");
+    }
+    await lint.runLocalLint(project.projectId, project.rootPath);
+    navigation.assertCurrent();
+    const refreshed = useLintStore.getState();
+    if (refreshed.error) throw new Error(refreshed.error);
+    if (!refreshed.localReport) throw new Error("WORKFLOW_LINT_RESULT_UNAVAILABLE");
     useNavigationStore.getState().setActiveView("lint");
     return;
   }

@@ -464,6 +464,32 @@ impl WorkflowCoordinator {
         Ok((failed, next))
     }
 
+    pub(crate) fn fail_agent_lint_repair_between_stages_and_claim_next(
+        &self,
+        tasks: &TaskService,
+        task_id: &str,
+        error: WorkflowErrorSummary,
+        result: WorkflowResult,
+    ) -> Result<(WorkflowRun, Option<WorkflowRun>), String> {
+        let queue = self.task_queue(tasks, task_id)?;
+        let _operation = queue
+            .lock()
+            .map_err(|_| "Workflow project queue is unavailable")?;
+        let owner = tasks
+            .get_workflow_run(task_id)
+            .ok_or_else(|| format!("Workflow not found: {task_id}"))?;
+        if is_terminal(&owner) {
+            return Ok((owner, None));
+        }
+        let failed = tasks.fail_agent_lint_repair_between_stages(task_id, error, result)?;
+        let next = self.claim_next_locked(
+            tasks,
+            &owner.canonical_identity_key,
+            &owner.identity_revision,
+        )?;
+        Ok((failed, next))
+    }
+
     pub fn finish_cancelled_and_claim_next(
         &self,
         tasks: &TaskService,

@@ -15,6 +15,7 @@ import {
   presentWorkflowResult,
   workflowActionTypeKey,
   workflowKindKey,
+  workflowRunTitleKey,
   workflowPrerequisiteActionKey,
   workflowRiskKey,
   type WorkflowResultValue,
@@ -166,7 +167,7 @@ export function WorkflowTaskDetail({
     <div className="workflow-detail">
       <div className="workflow-detail__heading">
         <div>
-          <h2 data-workflow-surface-title tabIndex={-1}>{t(workflowKindKey(run.kind))}</h2>
+          <h2 data-workflow-surface-title tabIndex={-1}>{t(workflowRunTitleKey(run))}</h2>
           <p><span className="font-mono">{run.taskId.slice(0, 8)}</span></p>
         </div>
         <WorkflowStatus className="workflow-detail__status" status={run.displayStatus} />

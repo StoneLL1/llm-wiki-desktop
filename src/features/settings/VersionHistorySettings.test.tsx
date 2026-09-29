@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import "../../i18n";
 import { useProjectStore } from "../../stores/projectStore";
 import { useNavigationStore } from "../../stores/navigationStore";
+import { useLintStore } from "../../stores/lintStore";
 import { VersionHistorySettings } from "./VersionHistorySettings";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -14,6 +15,7 @@ const operation = { summary, before: "before", after: "after", beforeHashes: { "
 const calls = (name: string) => mockedInvoke.mock.calls.filter(([command]) => command === name);
 
 beforeEach(() => {
+  useLintStore.getState().reset();
   useProjectStore.setState({ currentProject: project, authority: null } as never);
   useNavigationStore.setState({ versionHistoryTarget: null });
   mockedInvoke.mockReset();
@@ -25,6 +27,22 @@ beforeEach(() => {
     if (command === "prepare_version_action") return { id: "confirmation", affectedPaths: ["wiki/a.md", "wiki/b.md"] };
     return undefined;
   });
+});
+
+it("invalidates displayed Lint evidence after restoring a version", async () => {
+  useLintStore.setState({
+    localReport: { issues: [], generatedAt: "2026-09-09T12:00:00Z", scannedPages: 1 },
+    healthReport: { reportId: "health", execution: { freshness: "current" } },
+    loadingLocal: true,
+  } as never);
+  useNavigationStore.setState({ versionHistoryTarget: { operationId: "repair" } });
+  render(<VersionHistorySettings project={project as never} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Undo operation" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Confirm restore" }));
+  await waitFor(() => expect(calls("confirm_version_action")).toHaveLength(1));
+  expect(useLintStore.getState().localReport).toBeNull();
+  expect(useLintStore.getState().loadingLocal).toBe(false);
+  expect(useLintStore.getState().healthReport?.execution?.freshness).toBe("stale");
 });
 
 it("loads summaries first and only reads the selected file, then focuses confirmation", async () => {

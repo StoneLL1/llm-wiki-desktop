@@ -2586,6 +2586,50 @@ impl TaskService {
         })
     }
 
+    /// An error can occur after one stage completed and before the next was
+    /// started. Persist the terminal result without inventing a running stage.
+    pub(crate) fn fail_agent_lint_repair_between_stages(
+        &self,
+        id: &str,
+        error: WorkflowErrorSummary,
+        result: WorkflowResult,
+    ) -> Result<WorkflowRun, String> {
+        if !matches!(result, WorkflowResult::AgentLintRepair { .. }) {
+            return Err("Only Agent lint repair may use this terminal path".into());
+        }
+        self.mutate_workflow(id, |task, workflow| {
+            if !matches!(
+                workflow.execution_options.operation,
+                crate::models::workflow::WorkflowOperation::AgentLintRepair { .. }
+            ) {
+                return Err("The workflow is not an Agent lint repair".into());
+            }
+            if task.status != TaskStatus::WaitingForConfirmation {
+                validate_transition(&task.status, &TaskStatus::Failed)?;
+            }
+            let now = Utc::now().to_rfc3339();
+            for stage in &mut workflow.stages {
+                if matches!(
+                    stage.status,
+                    WorkflowStageStatus::Running | WorkflowStageStatus::Waiting
+                ) {
+                    stage.status = WorkflowStageStatus::Failed;
+                    stage.completed_at = Some(now.clone());
+                }
+                stage.decision = None;
+            }
+            workflow.error = Some(error);
+            workflow.result = Some(result);
+            workflow.pending_action = None;
+            workflow.current_stage_id = None;
+            workflow.queue_position = None;
+            workflow.continuation_required = false;
+            task.status = TaskStatus::Failed;
+            task.cancellable = false;
+            Ok(())
+        })
+    }
+
     pub fn wait_workflow_stage(
         &self,
         id: &str,
@@ -5018,6 +5062,7 @@ mod tests {
     use crate::services::{EnqueueWorkflow, WorkflowCoordinator};
     use crate::tasks::task_events::CapturedEvent;
     use crate::tasks::task_model::LogLevel;
+    use std::collections::BTreeMap;
     use std::sync::{Arc, Barrier, Mutex};
 
     fn workflow_request(root: &Path, task_state_root: Option<PathBuf>) -> EnqueueWorkflow {
@@ -8029,5 +8074,107 @@ mod tests {
 
         let t = service.get_task(&task.id).unwrap();
         assert_eq!(t.status, TaskStatus::Cancelled);
+    }
+
+    #[test]
+    fn agent_repair_failure_between_stages_releases_queue_once() {
+        use crate::models::lint::{
+            AgentLintRepairFinding, AgentLintRepairOutcome, DeepLintIssueType, LintSeverity,
+            WikiLintSkillRef,
+        };
+        use crate::models::workflow::{
+            WorkflowDisplayStatus, WorkflowOperation, WorkflowProjectMutationState,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let service = TaskService::default();
+        let coordinator = WorkflowCoordinator::default();
+        let mut request = workflow_request(root.path(), None);
+        let finding = AgentLintRepairFinding {
+            id: "duplicate_topic:wiki/page.md".into(),
+            issue_type: DeepLintIssueType::DuplicateTopic,
+            severity: LintSeverity::Warning,
+            path: "wiki/page.md".into(),
+            message: "synthetic".into(),
+            evidence: None,
+            suggested_action: None,
+        };
+        request.execution_options.operation = WorkflowOperation::AgentLintRepair {
+            preparation_id: "prep".into(),
+            preparation_revision: "prep-1".into(),
+            report_id: "report".into(),
+            selection_revision: "selection".into(),
+            selected_finding_ids: vec![finding.id.clone()],
+            selected_findings: vec![finding],
+            skill: WikiLintSkillRef::builtin(),
+            authorized_path_hashes: BTreeMap::from([("wiki/page.md".into(), Some("a".repeat(64)))]),
+            expected_git_head: "b".repeat(40),
+        };
+        let first = created_workflow(coordinator.enqueue(&service, request.clone()).unwrap());
+        service
+            .start_workflow_stage(&first.task_id, "read")
+            .unwrap();
+        service
+            .complete_workflow_stage(&first.task_id, "read")
+            .unwrap();
+        assert!(service
+            .get_workflow_run(&first.task_id)
+            .unwrap()
+            .stages
+            .iter()
+            .all(|stage| stage.status != WorkflowStageStatus::Running));
+        request.baseline_fingerprint = "second".into();
+        let second = created_workflow(coordinator.enqueue(&service, request.clone()).unwrap());
+        request.baseline_fingerprint = "third".into();
+        let third = created_workflow(coordinator.enqueue(&service, request).unwrap());
+        let result = WorkflowResult::AgentLintRepair {
+            outcome: AgentLintRepairOutcome::Interrupted,
+            resolved_finding_ids: vec![],
+            unresolved_finding_ids: vec![],
+            introduced_finding_ids: vec![],
+            skipped_finding_ids: vec![],
+            rounds: vec![],
+            affected_paths: vec![],
+            affected_path_hashes: BTreeMap::new(),
+            checkpoint_hash: None,
+            final_commit: None,
+            diff_available: false,
+            rollback_available: false,
+            index_refresh_warnings: vec![],
+        };
+        let error = WorkflowErrorSummary {
+            code: "TEST_STAGE_GAP".into(),
+            message_key: "test".into(),
+            recoverable: true,
+            user_action_required: true,
+            suggested_action: None,
+            project_mutation_state: WorkflowProjectMutationState::Unknown,
+        };
+        let (failed, claimed) = coordinator
+            .fail_agent_lint_repair_between_stages_and_claim_next(
+                &service,
+                &first.task_id,
+                error.clone(),
+                result.clone(),
+            )
+            .unwrap();
+        assert_eq!(failed.display_status, WorkflowDisplayStatus::Failed);
+        assert_eq!(failed.error, Some(error.clone()));
+        assert_eq!(claimed.unwrap().task_id, second.task_id);
+        let (_, repeated) = coordinator
+            .fail_agent_lint_repair_between_stages_and_claim_next(
+                &service,
+                &first.task_id,
+                error,
+                result,
+            )
+            .unwrap();
+        assert!(repeated.is_none());
+        assert_eq!(
+            service
+                .get_workflow_run(&third.task_id)
+                .unwrap()
+                .display_status,
+            WorkflowDisplayStatus::Queued
+        );
     }
 }

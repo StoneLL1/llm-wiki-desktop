@@ -13,6 +13,7 @@ import {
   workflowDurationMs,
   workflowHistoryOutcomeLabel,
   workflowKindKey,
+  workflowRunTitleKey,
   workflowStatusKey,
 } from "./workflowPresentation";
 import { WorkflowStatus } from "./WorkflowStatus";
@@ -90,12 +91,12 @@ export function WorkflowHistoryView({ runs, onBack, onOpen, onRetry, onLoadMore,
           const canRetry = run.displayStatus === "failed" || run.displayStatus === "interrupted";
           const attemptLabel = t("workflows.history.retryAttempt", { count: run.retry?.attemptNumber ?? 1 });
           const dateLabel = workflowDateTimeLabel(run.updatedAt, language);
-          const retryLabel = `${t("workflows.action.retry")}: ${t(workflowKindKey(run.kind))} · ${attemptLabel} · ${dateLabel} · #${run.taskId.slice(-8)}`;
+          const retryLabel = `${t("workflows.action.retry")}: ${t(workflowRunTitleKey(run))} · ${attemptLabel} · ${dateLabel} · #${run.taskId.slice(-8)}`;
           return <div className="workflow-history__row" data-attempt-group={groupKey} key={run.taskId} role="listitem">
             <button className="workflow-history__run" disabled={workflowOperationPending(operations, `task:${run.taskId}:open`)} onClick={() => onOpen(run.taskId)} type="button">
               <span className="workflow-history__attempt">{attemptLabel}</span>
               <span className="workflow-history__heading">
-                <span>{t(workflowKindKey(run.kind))}</span>
+                <span>{t(workflowRunTitleKey(run))}</span>
                 <WorkflowStatus className="workflow-history__status" status={run.displayStatus} />
               </span>
               {outcome ? <span className="workflow-history__outcome">{outcome}</span> : <span className="workflow-history__outcome workflow-muted">{t("workflows.history.outcome.unavailable")}</span>}

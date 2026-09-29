@@ -1695,6 +1695,17 @@ describe("Workflows overview", () => {
     expect(screen.getByRole("progressbar", { name: "workflows.healthPhase.local" })).toHaveAttribute("max", "65");
   });
 
+  it("shows repair stages and stops cancelled Health activity", () => {
+    const repair = { id: "run_agent_1", ordinal: 2, status: "running" as const, labelKey: "stage.agent", startedAt: null, completedAt: null, currentItem: "wiki/主题.md", progress: { current: 1, total: 3 }, decision: null };
+    const { container, rerender } = render(<WorkflowPipeline kind="health_check" displayStatus="running" stages={[repair]} />);
+    expect(container.querySelector('.workflow-grouped-pipeline')).toBeNull();
+    expect(container.querySelector('details[data-stage-status="running"]')).toBeInTheDocument();
+    rerender(<WorkflowPipeline kind="health_check" displayStatus="cancelled" stages={[repair]} />);
+    expect(container.querySelector('details[data-stage-status="stopped"]')).toBeInTheDocument();
+    expect(screen.getByText("workflows.stageStatus.stopped")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "workflows.pipeline.overallProgress" })).toHaveAttribute("value", "0");
+  });
+
   it("shows optional Health deep checks as skipped and keeps technical stages disclosed", () => {
     const { container } = render(<WorkflowPipeline kind="health_check" displayStatus="completed" stages={[
       { id: "deep_check", ordinal: 4, status: "skipped", labelKey: "stage.deep", startedAt: null, completedAt: null, currentItem: null, progress: null, decision: null },
@@ -2067,6 +2078,7 @@ describe("Workflows overview", () => {
     });
     const view = render(<WorkflowTaskDetail run={repairRun} controller={{} as WorkflowsController} queuedRuns={[]} onOpenLogs={vi.fn()} />);
 
+    expect(screen.getByRole("heading", { name: "workflows.kind.agent_lint_repair", level: 2 })).toBeInTheDocument();
     expect(view.container.querySelectorAll(".workflow-file-diff")).toHaveLength(100);
     expect(workflowApiMocks.getWorkflowFileDiff).not.toHaveBeenCalled();
     fireEvent.click(view.container.querySelector(".workflow-file-diff summary")!);

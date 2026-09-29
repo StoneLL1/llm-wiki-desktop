@@ -2427,6 +2427,7 @@ mod tests {
         use super::super::test_support::{tmp_context, write_file};
         for (case, path) in [
             ("raw", "raw/secret.md"),
+            ("app", ".app/secret.md"),
             ("source", "wiki/sources/source.md"),
             ("skill", "skills/wiki-lint/SKILL.md"),
             ("request", ".lint-input/request.json"),
@@ -2434,6 +2435,8 @@ mod tests {
             ("schema", ".lint-input/schema.md"),
             ("non-markdown", "wiki/asset.bin"),
             ("unknown", "unknown/page.md"),
+            ("fake-runtime-home", "runtime-home/.npm/_logs/fake.log"),
+            ("fake-runtime-temp", "runtime-temp/node-compile-cache/fake"),
         ] {
             let (context, root) = tmp_context(&format!("repair-protected-{case}"));
             write_file(&context, "wiki/concepts/existing.md", "# Existing");

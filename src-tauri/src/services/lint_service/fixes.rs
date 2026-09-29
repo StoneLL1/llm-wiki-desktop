@@ -1,4 +1,3 @@
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use unicode_normalization::UnicodeNormalization;
 
@@ -12,10 +11,9 @@ use crate::models::lint::{
 use crate::models::paths::ProjectContext;
 use crate::models::version_history::VersionOperationKind;
 use crate::models::wiki::WikiPageType;
-use crate::services::file_store::FileStore;
 use crate::services::{GitService, VersionHistoryService, WriteMode};
 use crate::utils::markdown_utils::{
-    extract_title, parse_frontmatter, split_frontmatter, Frontmatter,
+    extract_title, parse_frontmatter, split_frontmatter, wikilink_spans, Frontmatter,
 };
 use crate::utils::safe_project_dir::remove_project_file;
 
@@ -78,36 +76,17 @@ impl LintService {
             action.affected_paths = fix_affected_paths(context, &issue.path);
         }
         if outcome.kind == LintFixOutcomeKind::Applied {
-            // Capture the exact post-write state before verification/final
-            // commit. If an external editor changes a path while verification
-            // or Git is running, rollback must preserve that newer content
-            // instead of restoring HEAD over it.
-            let post_write_hashes = self.capture_path_hashes(context, &outcome.affected_paths)
+            let verified = self
+                .verify_local_fixes(context, &[issue])
                 .map_err(|error| {
-                    BackendError::new(
-                        "LINT_FIX_POST_HASH_FAILED",
-                        format!(
-                            "The fix was written, but its post-write state could not be verified: {}",
-                            error.message
-                        ),
-                        true,
-                        true,
+                    Self::rollback_after_failure_guarded(
+                        context,
+                        git_service,
+                        outcome.operation_id.as_deref(),
+                        &outcome.affected_paths,
+                        error,
                     )
-                    .with_details(serde_json::json!({
-                        "affectedPaths": &outcome.affected_paths,
-                        "cause": error,
-                    }))
                 })?;
-            if let Err(error) = self.verify_local_fixes(context, &[issue]) {
-                return Err(Self::rollback_after_failure_guarded(
-                    context,
-                    git_service,
-                    outcome.operation_id.as_deref(),
-                    &outcome.affected_paths,
-                    &post_write_hashes,
-                    error,
-                ));
-            }
             outcome.final_commit = match self.finalize_result(
                 context,
                 git_service,
@@ -122,11 +101,19 @@ impl LintService {
                         git_service,
                         outcome.operation_id.as_deref(),
                         &outcome.affected_paths,
-                        &post_write_hashes,
                         error,
                     ))
                 }
             };
+            if self
+                .verify_health_inputs(context, &verified.input_hashes, |_| Ok(()))
+                .unwrap_or(false)
+                && self
+                    .persist_local_report_unchecked(context, &verified.report)
+                    .is_ok()
+            {
+                outcome.verified_report = Some(verified.report);
+            }
         }
         Ok(outcome)
     }
@@ -147,6 +134,7 @@ impl LintService {
             operation_id: checkpoint,
             final_commit: None,
             pending_action: None,
+            verified_report: None,
         })
     }
 
@@ -173,6 +161,7 @@ impl LintService {
                     &target,
                     Some(preview),
                 )),
+                verified_report: None,
             });
         }
         let (affected_paths, checkpoint) =
@@ -184,6 +173,7 @@ impl LintService {
             operation_id: checkpoint,
             final_commit: None,
             pending_action: None,
+            verified_report: None,
         })
     }
 
@@ -211,6 +201,7 @@ impl LintService {
                     &issue.message,
                     Some(preview),
                 )),
+                verified_report: None,
             });
         }
         let (affected_paths, checkpoint) =
@@ -222,6 +213,7 @@ impl LintService {
             operation_id: checkpoint,
             final_commit: None,
             pending_action: None,
+            verified_report: None,
         })
     }
 
@@ -290,7 +282,6 @@ impl LintService {
         let new_contents = format!("{header}{}", raw);
 
         let affected_paths = fix_affected_paths(context, path);
-        let mut expected_after = self.capture_path_hashes(context, &affected_paths)?;
         let checkpoint = self.resolve_operation(
             context,
             git_service,
@@ -306,7 +297,6 @@ impl LintService {
             &new_contents,
             WriteMode::OverwriteIfHashMatches(expected.to_string()),
         )?;
-        expected_after.insert(path.to_string(), Some(hash_text(&new_contents)));
         if let Err(error) = invalidate_graph_cache(context) {
             return Err(if shared_operation.is_none() {
                 Self::rollback_after_failure_guarded(
@@ -314,15 +304,11 @@ impl LintService {
                     git_service,
                     checkpoint.as_deref(),
                     &affected_paths,
-                    &expected_after,
                     error,
                 )
             } else {
-                attach_post_write_hashes(error, &expected_after)
+                error
             });
-        }
-        if let Some(path) = context.layout.graph_cache_path.as_deref() {
-            expected_after.insert(path.into(), None);
         }
         if let Err(error) = append_fix_log(context, path, "added frontmatter") {
             return Err(if shared_operation.is_none() {
@@ -331,15 +317,11 @@ impl LintService {
                     git_service,
                     checkpoint.as_deref(),
                     &affected_paths,
-                    &expected_after,
                     error,
                 )
             } else {
-                attach_post_write_hashes(error, &expected_after)
+                error
             });
-        }
-        if let Some(path) = context.layout.activity_log_path.as_deref() {
-            expected_after.insert(path.into(), hash_relative_path(context, path));
         }
 
         Ok((affected_paths, checkpoint))
@@ -391,7 +373,6 @@ impl LintService {
         }
 
         let affected_paths = fix_affected_paths(context, path);
-        let mut expected_after = self.capture_path_hashes(context, &affected_paths)?;
         let checkpoint = self.resolve_operation(
             context,
             git_service,
@@ -419,7 +400,6 @@ impl LintService {
             &new_contents,
             WriteMode::OverwriteIfHashMatches(expected.to_string()),
         )?;
-        expected_after.insert(path.to_string(), Some(hash_text(&new_contents)));
         if let Err(error) = invalidate_graph_cache(context) {
             return Err(if shared_operation.is_none() {
                 Self::rollback_after_failure_guarded(
@@ -427,15 +407,11 @@ impl LintService {
                     git_service,
                     checkpoint.as_deref(),
                     &affected_paths,
-                    &expected_after,
                     error,
                 )
             } else {
-                attach_post_write_hashes(error, &expected_after)
+                error
             });
-        }
-        if let Some(path) = context.layout.graph_cache_path.as_deref() {
-            expected_after.insert(path.into(), None);
         }
         if let Err(error) =
             append_fix_log(context, path, &format!("removed dead link [[{target}]]"))
@@ -446,15 +422,11 @@ impl LintService {
                     git_service,
                     checkpoint.as_deref(),
                     &affected_paths,
-                    &expected_after,
                     error,
                 )
             } else {
-                attach_post_write_hashes(error, &expected_after)
+                error
             });
-        }
-        if let Some(path) = context.layout.activity_log_path.as_deref() {
-            expected_after.insert(path.into(), hash_relative_path(context, path));
         }
 
         Ok((affected_paths, checkpoint))
@@ -483,7 +455,6 @@ impl LintService {
         context.resolve_wiki_write_path(path)?;
         let new_contents = regenerate_index(context)?;
         let affected_paths = fix_affected_paths(context, path);
-        let mut expected_after = self.capture_path_hashes(context, &affected_paths)?;
         let checkpoint = self.resolve_operation(
             context,
             git_service,
@@ -499,7 +470,6 @@ impl LintService {
             &new_contents,
             WriteMode::OverwriteIfHashMatches(expected.to_string()),
         )?;
-        expected_after.insert(path.to_string(), Some(hash_text(&new_contents)));
         if let Err(error) = invalidate_graph_cache(context) {
             return Err(if shared_operation.is_none() {
                 Self::rollback_after_failure_guarded(
@@ -507,15 +477,11 @@ impl LintService {
                     git_service,
                     checkpoint.as_deref(),
                     &affected_paths,
-                    &expected_after,
                     error,
                 )
             } else {
-                attach_post_write_hashes(error, &expected_after)
+                error
             });
-        }
-        if let Some(path) = context.layout.graph_cache_path.as_deref() {
-            expected_after.insert(path.into(), None);
         }
         if let Err(error) = append_fix_log(context, path, "regenerated index") {
             return Err(if shared_operation.is_none() {
@@ -524,15 +490,11 @@ impl LintService {
                     git_service,
                     checkpoint.as_deref(),
                     &affected_paths,
-                    &expected_after,
                     error,
                 )
             } else {
-                attach_post_write_hashes(error, &expected_after)
+                error
             });
-        }
-        if let Some(path) = context.layout.activity_log_path.as_deref() {
-            expected_after.insert(path.into(), hash_relative_path(context, path));
         }
 
         Ok((affected_paths, checkpoint))
@@ -694,12 +656,23 @@ impl LintService {
         &self,
         context: &ProjectContext,
         issues: &[&LintIssue],
-    ) -> Result<(), BackendError> {
-        if issues.is_empty() {
-            return Ok(());
+    ) -> Result<super::HealthLocalScan, BackendError> {
+        let scan = self.run_health_scan(
+            context,
+            &crate::services::SearchService::default(),
+            false,
+            |_| Ok(()),
+        )?;
+        if !scan.current {
+            return Err(BackendError::new(
+                "LINT_FIX_VERIFY_CHANGED",
+                "Markdown changed during fix verification.",
+                true,
+                true,
+            ));
         }
-        let report = self.run_local_lint(context, &crate::services::SearchService::default())?;
-        let remaining_ids = report
+        let remaining_ids = scan
+            .report
             .issues
             .iter()
             .map(|issue| issue.id.as_str())
@@ -719,23 +692,7 @@ impl LintService {
                 "path": issue.path,
             })));
         }
-        Ok(())
-    }
-
-    fn capture_path_hashes(
-        &self,
-        context: &ProjectContext,
-        paths: &[String],
-    ) -> Result<HashMap<String, Option<String>>, BackendError> {
-        paths
-            .iter()
-            .map(|path| {
-                Ok((
-                    path.clone(),
-                    self.file_store.file_hash_if_exists(context, path)?,
-                ))
-            })
-            .collect()
+        Ok(scan)
     }
 
     fn rollback_after_failure_guarded(
@@ -743,7 +700,6 @@ impl LintService {
         _git_service: &GitService,
         operation_id: Option<&str>,
         paths: &[String],
-        _expected_after: &HashMap<String, Option<String>>,
         error: BackendError,
     ) -> BackendError {
         let Some(id) = operation_id else {
@@ -841,7 +797,6 @@ impl LintService {
         let mut applied: Vec<LintFixOutcome> = Vec::new();
         let mut needs_confirmation: Vec<LintBatchConfirmation> = Vec::new();
         let mut skipped: Vec<LintBatchSkip> = Vec::new();
-        let mut batch_post_write_hashes: HashMap<String, Option<String>> = HashMap::new();
 
         let safe: Vec<&LintIssue> = issues
             .iter()
@@ -898,29 +853,6 @@ impl LintService {
                 shared_operation.as_deref(),
             ) {
                 Ok((affected_paths, _)) => {
-                    let hashes = self.capture_path_hashes(context, &affected_paths).map_err(|error| {
-                        Self::rollback_after_failure_guarded(
-                            context,
-                            git_service,
-                            shared_operation.as_deref(),
-                            &safe_checkpoint_paths,
-                            &batch_post_write_hashes,
-                            BackendError::new(
-                                "LINT_FIX_POST_HASH_FAILED",
-                                format!(
-                                    "A batch fix was written, but its post-write state could not be verified: {}",
-                                    error.message
-                                ),
-                                true,
-                                true,
-                            )
-                            .with_details(serde_json::json!({
-                                "path": issue.path,
-                                "cause": error,
-                            })),
-                        )
-                    })?;
-                    batch_post_write_hashes.extend(hashes);
                     applied.push(LintFixOutcome {
                         kind: LintFixOutcomeKind::Applied,
                         affected_paths,
@@ -931,20 +863,10 @@ impl LintService {
                         operation_id: shared_operation.clone(),
                         final_commit: None,
                         pending_action: None,
+                        verified_report: None,
                     });
                 }
                 Err(err) => {
-                    if let Some(post_write_hashes) = err
-                        .details
-                        .as_ref()
-                        .and_then(|details| details.get("postWriteHashes"))
-                    {
-                        if let Ok(hashes) = serde_json::from_value::<HashMap<String, Option<String>>>(
-                            post_write_hashes.clone(),
-                        ) {
-                            batch_post_write_hashes.extend(hashes);
-                        }
-                    }
                     if err.code == "FILE_CHANGED_DURING_WRITE" {
                         // Preserve the raced file, but undo earlier batch
                         // writes under the shared checkpoint so a race cannot
@@ -966,7 +888,6 @@ impl LintService {
                                 git_service,
                                 shared_operation.as_deref(),
                                 &prior_paths,
-                                &batch_post_write_hashes,
                                 err.clone(),
                             );
                             if rollback_error.code == "LINT_FIX_ROLLBACK_FAILED" {
@@ -988,7 +909,6 @@ impl LintService {
                         git_service,
                         shared_operation.as_deref(),
                         &safe_checkpoint_paths,
-                        &batch_post_write_hashes,
                         err,
                     ));
                 }
@@ -997,16 +917,22 @@ impl LintService {
 
         // Verify the completed batch once, against the final page set. Every
         // successful write still shares the same guarded rollback boundary.
-        if let Err(error) = self.verify_local_fixes(context, &safe_ready) {
-            return Err(Self::rollback_after_failure_guarded(
-                context,
-                git_service,
-                shared_operation.as_deref(),
-                &safe_checkpoint_paths,
-                &batch_post_write_hashes,
-                error,
-            ));
-        }
+        let verified = if safe_ready.is_empty() {
+            None
+        } else {
+            Some(
+                self.verify_local_fixes(context, &safe_ready)
+                    .map_err(|error| {
+                        Self::rollback_after_failure_guarded(
+                            context,
+                            git_service,
+                            shared_operation.as_deref(),
+                            &safe_checkpoint_paths,
+                            error,
+                        )
+                    })?,
+            )
+        };
 
         let mut confirmation_paths = std::collections::HashSet::new();
         for issue in issues {
@@ -1106,7 +1032,6 @@ impl LintService {
                     git_service,
                     shared_operation.as_deref(),
                     &safe_checkpoint_paths,
-                    &batch_post_write_hashes,
                     error,
                 ))
             }
@@ -1114,6 +1039,17 @@ impl LintService {
         for outcome in &mut applied {
             outcome.final_commit = final_commit.clone();
         }
+        let verified_report = verified.and_then(|scan| {
+            if !self
+                .verify_health_inputs(context, &scan.input_hashes, |_| Ok(()))
+                .unwrap_or(false)
+            {
+                return None;
+            }
+            self.persist_local_report_unchecked(context, &scan.report)
+                .ok()
+                .map(|_| scan.report)
+        });
 
         Ok(LintBatchOutcome {
             checkpoint: Self::operation_checkpoint(context, shared_operation.as_deref())?,
@@ -1122,6 +1058,7 @@ impl LintService {
             applied,
             needs_confirmation,
             skipped,
+            verified_report,
         })
     }
 
@@ -1180,26 +1117,6 @@ impl LintService {
     ) -> Result<LintBatchOutcome, BackendError> {
         self.apply_fixes_batch_unchecked(context, git_service, issues, expected_hashes)
     }
-}
-
-/// Preserve the post-write CAS baselines when a shared-checkpoint item fails
-/// after its markdown write. The batch caller can then roll back this item
-/// together with earlier safe writes instead of treating it as an untouched
-/// path and leaving a partial mutation on disk.
-fn attach_post_write_hashes(
-    mut error: BackendError,
-    expected_after: &HashMap<String, Option<String>>,
-) -> BackendError {
-    let mut details = match error.details.take() {
-        Some(serde_json::Value::Object(details)) => details,
-        _ => serde_json::Map::new(),
-    };
-    details.insert(
-        "postWriteHashes".into(),
-        serde_json::to_value(expected_after).unwrap_or_else(|_| serde_json::json!({})),
-    );
-    error.details = Some(serde_json::Value::Object(details));
-    error
 }
 
 fn validate_scan_hash(issue: &LintIssue, expected: &str) -> Result<(), BackendError> {
@@ -1399,32 +1316,25 @@ fn strip_wikilink(raw: &str, target: &str) -> String {
         .replace(char::from(92), "/")
         .to_ascii_lowercase();
     let split = split_frontmatter(raw);
-    let mut cursor = raw.len() - split.body.len();
+    let body_start = raw.len() - split.body.len();
+    let mut cursor = body_start;
     let mut out = String::with_capacity(raw.len());
     out.push_str(&raw[..cursor]);
-    while let Some(relative_start) = raw[cursor..].find("[[") {
-        let start = cursor + relative_start;
+    for link in wikilink_spans(&split.body) {
+        let start = body_start + link.start;
+        let end = body_start + link.end;
         out.push_str(&raw[cursor..start]);
-        let Some(relative_end) = raw[start + 2..].find("]]") else {
-            out.push_str(&raw[start..]);
-            return out;
-        };
-        let end = start + 2 + relative_end;
-        let inner = &raw[start + 2..end];
-        let (destination, alias) = inner.split_once("|").unwrap_or((inner, ""));
-        let base = destination
-            .split_once("#")
-            .map_or(destination, |(base, _)| base);
-        let normalized_base = base
+        let normalized_base = link
+            .target
             .trim()
             .replace(char::from(92), "/")
             .to_ascii_lowercase();
         if normalized_base == wanted {
-            out.push_str(if alias.is_empty() { base.trim() } else { alias });
+            out.push_str(&link.label);
         } else {
-            out.push_str(&raw[start..end + 2]);
+            out.push_str(&raw[start..end]);
         }
-        cursor = end + 2;
+        cursor = end;
     }
     out.push_str(&raw[cursor..]);
     out
@@ -1443,16 +1353,6 @@ fn markdown_label(value: &str) -> String {
         .replace('\n', " ")
         .trim()
         .to_string()
-}
-
-fn hash_relative_path(context: &ProjectContext, path: &str) -> Option<String> {
-    FileStore.file_hash_if_exists(context, path).ok().flatten()
-}
-
-fn hash_text(contents: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(contents.as_bytes());
-    format!("{:x}", hasher.finalize())
 }
 
 /// Render a bounded, deterministic text diff for confirmation previews. The
@@ -1529,6 +1429,14 @@ fn fix_affected_paths(context: &ProjectContext, path: &str) -> Vec<String> {
 }
 
 fn validate_fix_path(context: &ProjectContext, path: &str) -> Result<(), BackendError> {
+    if Some(path) == context.layout.activity_log_path.as_deref() {
+        return Err(BackendError::new(
+            "LINT_FIX_NOT_AUTO",
+            "The activity log is app-owned history; edit legacy links manually after review.",
+            true,
+            true,
+        ));
+    }
     context.resolve_wiki_write_path(path).map_err(|error| {
         BackendError::new(
             "LINT_FIX_PATH_OUT_OF_SCOPE",
@@ -1661,7 +1569,12 @@ fn append_fix_log(
         return Ok(());
     }
     let stamp = chrono::Utc::now().format("%Y-%m-%d %H:%M").to_string();
-    let line = format!("- [{}] {} · lint ({})\n", stamp, relative_path, action);
+    let line = format!(
+        "- [{}] {} · lint (`{}`)\n",
+        stamp,
+        relative_path,
+        action.replace('`', "'")
+    );
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .open(&log_path)
@@ -1966,6 +1879,11 @@ mod tests {
         context.wiki_dir = root.join("知识库");
         let path = "知识库/concepts/版本v1..v2.md";
         write_file(&context, path, "# 版本\n");
+        write_file(
+            &context,
+            "知识库/concepts/引导.md",
+            "---\ntype: concept\n---\n# 引导\n[[concepts/版本v1..v2]]\n",
+        );
         write_file(&context, "知识库/目录.md", "# 目录\n[[ghost]]\n");
         write_file(&context, ".app/compat/活动.md", "# 活动\n");
         write_file(&context, ".app/compat/graph.json", "{}");
@@ -1976,6 +1894,11 @@ mod tests {
         let report = service
             .run_local_lint(&context, &SearchService::default())
             .unwrap();
+        assert!(!report
+            .issues
+            .iter()
+            .any(|issue| issue.issue_type == LintIssueType::DeadLink
+                && issue.target.as_deref() == Some("concepts/版本v1..v2")));
         let issue = report
             .issues
             .iter()
@@ -2215,6 +2138,79 @@ mod tests {
             strip_wikilink("see [[Ghost#intro]] and [[ghost#x|the ghost]].", "ghost"),
             "see Ghost and the ghost."
         );
+    }
+
+    #[test]
+    fn strip_wikilink_edits_only_active_links() {
+        let raw = "Real [[lost|label]] and `[[lost]]` and \\[[lost]]\n~~~md\n[[lost]]\n~~~\nMore [[lost#part]].";
+        assert_eq!(
+            strip_wikilink(raw, "lost"),
+            "Real label and `[[lost]]` and \\[[lost]]\n~~~md\n[[lost]]\n~~~\nMore lost."
+        );
+    }
+
+    #[test]
+    fn dead_link_preview_apply_and_recheck_leave_code_and_log_clean() {
+        let (context, root) = tmp_context("dead-link-code-log");
+        let before = "---\ntype: concept\n---\n# Page\nReal [[ghost|label]] and `[[ghost]]` and \\[[ghost]]\n```md\n[[ghost]]\n```\n";
+        write_file(&context, "wiki/concepts/page.md", before);
+        write_file(&context, "wiki/index.md", "# Index\n");
+        write_file(&context, "wiki/log.md", "# Log\n");
+        let git = GitService;
+        git.initialize_repository(&context, "init").unwrap();
+        let service = LintService::default();
+        let report = service
+            .run_local_lint(&context, &SearchService::default())
+            .unwrap();
+        let issue = report
+            .issues
+            .iter()
+            .find(|issue| {
+                issue.issue_type == LintIssueType::DeadLink && issue.path == "wiki/concepts/page.md"
+            })
+            .unwrap();
+        assert_eq!(
+            report
+                .issues
+                .iter()
+                .filter(|issue| issue.issue_type == LintIssueType::DeadLink
+                    && issue.path == "wiki/concepts/page.md")
+                .count(),
+            1
+        );
+        let preview = service
+            .apply_fix(&context, &git, issue, false, issue.scan_hash.as_deref())
+            .unwrap();
+        let after = preview
+            .pending_action
+            .unwrap()
+            .preview
+            .unwrap()
+            .after
+            .unwrap();
+        assert!(after.contains("Real label and `[[ghost]]` and \\[[ghost]]"));
+        assert!(after.contains("```md\n[[ghost]]\n```"));
+        let applied = service
+            .apply_fix(&context, &git, issue, true, issue.scan_hash.as_deref())
+            .unwrap();
+        assert_eq!(applied.kind, LintFixOutcomeKind::Applied);
+        assert!(applied.verified_report.is_some());
+        assert_eq!(
+            std::fs::read_to_string(root.join("wiki/concepts/page.md")).unwrap(),
+            after
+        );
+        assert!(std::fs::read_to_string(root.join("wiki/log.md"))
+            .unwrap()
+            .contains("`removed dead link [[ghost]]`"));
+        let recheck = service
+            .run_local_lint(&context, &SearchService::default())
+            .unwrap();
+        assert!(!recheck
+            .issues
+            .iter()
+            .any(|issue| issue.issue_type == LintIssueType::DeadLink
+                && issue.target.as_deref() == Some("ghost")));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// Count commits on HEAD; used to prove the batch creates one shared
