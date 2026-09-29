@@ -81,6 +81,21 @@ impl GraphData {
             layout: None,
         }
     }
+
+    /// Keep a parseable cache after Wiki writes while forcing the next graph
+    /// request to rebuild it. The fixed fallback timestamp also makes repeated
+    /// preparation and finalization produce identical bytes for history checks.
+    pub fn invalidated(previous: Option<Self>) -> Self {
+        let mut data = previous.unwrap_or_else(|| Self {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            content_hash: String::new(),
+            built_at: "1970-01-01T00:00:00Z".into(),
+            layout: None,
+        });
+        data.content_hash.clear();
+        data
+    }
 }
 
 /// Returned by `get_graph`: tells the UI whether the data came from cache and

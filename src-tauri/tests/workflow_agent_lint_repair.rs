@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use llm_wiki_desktop_lib::errors::BackendError;
 use llm_wiki_desktop_lib::models::agent::AgentKind;
 use llm_wiki_desktop_lib::models::confirmation::ConfirmationRegistry;
+use llm_wiki_desktop_lib::models::graph::GraphData;
 use llm_wiki_desktop_lib::models::lint::{
     AgentLintRepairDeclaredChange, AgentLintRepairDeclaredChangeOperation, AgentLintRepairFinding,
     AgentLintRepairFindingResult, AgentLintRepairFindingStatus, AgentLintRepairOperation,
@@ -427,6 +428,14 @@ fn happy_path_uses_one_agent_round_and_private_history() {
         }
         other => panic!("unexpected result: {other:?}"),
     }
+    let graph: GraphData = serde_json::from_slice(
+        &fs::read(fixture.context.app_dir.join("graph-cache.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        graph.content_hash.is_empty(),
+        "Agent repair must leave a parseable stale cache so project trust survives"
+    );
 }
 
 #[test]

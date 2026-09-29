@@ -12,6 +12,7 @@ use crate::models::confirmation::{
     ActionPreview, ConfirmationExecution, PendingAction, PendingActionType, RiskLevel,
 };
 use crate::models::git::CheckpointPurpose;
+use crate::models::graph::GraphData;
 use crate::models::paths::ProjectContext;
 use crate::models::task::{BackendTask, TaskResult, TaskResultReference, TaskStatus, TaskType};
 use crate::services::import_v2::source_registry::SourceRegistry;
@@ -386,19 +387,12 @@ fn finish_compile(
     // best-effort follow-up metadata: a failure must never roll the pages back
     // while leaving consumption recorded.
     let graph_path = context.app_dir.join("graph-cache.json");
-    let mut graph_cache = if graph_path.exists() {
+    let graph_cache = GraphData::invalidated(
         state
             .file_store
-            .read_json_file::<serde_json::Value>(&graph_path)
-            .unwrap_or_else(|_| serde_json::json!({}))
-    } else {
-        serde_json::json!({})
-    };
-    if !graph_cache.is_object() {
-        graph_cache = serde_json::json!({});
-    }
-    let graph_object = graph_cache.as_object_mut().expect("object normalized");
-    graph_object.insert("status".into(), serde_json::Value::String("stale".into()));
+            .read_json_file::<GraphData>(&graph_path)
+            .ok(),
+    );
     if let Err(error) =
         state
             .file_store

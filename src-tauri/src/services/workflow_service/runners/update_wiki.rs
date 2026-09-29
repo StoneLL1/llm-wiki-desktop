@@ -19,6 +19,7 @@ use crate::models::confirmation::{
 };
 #[cfg(test)]
 use crate::models::git::CheckpointPurpose;
+use crate::models::graph::GraphData;
 use crate::models::paths::ProjectContext;
 use crate::models::task::TaskStatus;
 use crate::models::workflow::{
@@ -1714,25 +1715,12 @@ pub(crate) fn refresh_workflow_wiki_indexes(
 pub(crate) fn workflow_stale_graph_cache_value(
     context: &ProjectContext,
     file_store: &FileStore,
-) -> serde_json::Value {
+) -> GraphData {
     let graph_path = context
         .root
         .join(workflow_graph_cache_relative_path(context));
-    let mut graph_cache = if graph_path.exists() {
-        file_store
-            .read_json_file::<serde_json::Value>(&graph_path)
-            .unwrap_or_else(|_| serde_json::json!({}))
-    } else {
-        serde_json::json!({})
-    };
-    if !graph_cache.is_object() {
-        graph_cache = serde_json::json!({});
-    }
-    graph_cache
-        .as_object_mut()
-        .expect("graph cache was normalized")
-        .insert("status".into(), serde_json::Value::String("stale".into()));
-    graph_cache
+    let previous = file_store.read_json_file::<GraphData>(&graph_path).ok();
+    GraphData::invalidated(previous)
 }
 
 pub(crate) fn workflow_graph_cache_relative_path(context: &ProjectContext) -> String {
