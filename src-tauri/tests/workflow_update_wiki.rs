@@ -722,6 +722,7 @@ fn delete_overwrite_broad_rewrite_and_conflict_review_is_persisted_as_waiting() 
     }
     sink.start("review_risk").unwrap();
     let candidate = CompileCandidate {
+        source_dependencies: Vec::new(),
         source_outcomes: vec![llm_wiki_desktop_lib::models::compile::CompileSourceOutcome {
             source_version,
             source_path: "raw/extracted/资料.md".into(),
@@ -2148,4 +2149,568 @@ async fn interrupted_publication_and_partial_undo_have_durable_recovery() {
     );
     assert!(!root.join("wiki/concepts/工作流成功.md").exists());
     fs::remove_dir_all(root).unwrap();
+}
+
+fn regression_v2_project(
+    consumed: bool,
+    second: bool,
+) -> (
+    tempfile::TempDir,
+    ProjectContext,
+    Vec<WorkflowSourceVersionRef>,
+) {
+    use llm_wiki_desktop_lib::services::import_v2::source_finalization::{
+        finalize_source, CandidateMetadata, FinalizationInput,
+    };
+    use llm_wiki_desktop_lib::services::import_v2::source_registry::{
+        SourceIndex, SourceManifest, SourcePointer,
+    };
+    use std::collections::BTreeMap;
+    let root = tempfile::tempdir().unwrap();
+    let context = ProjectContext::new("audit-v2", root.path().to_path_buf());
+    for directory in [
+        ".app/tasks",
+        ".app/compile",
+        "wiki/concepts",
+        "wiki/sources",
+    ] {
+        fs::create_dir_all(root.path().join(directory)).unwrap();
+    }
+    for (path, text) in [
+        ("purpose.md", "# Purpose\n"),
+        ("schema.md", "# Schema\n"),
+        ("wiki/index.md", "# Index\n"),
+        ("wiki/overview.md", "# Overview\n"),
+        ("wiki/log.md", "# Log\n"),
+    ] {
+        fs::write(root.path().join(path), text).unwrap();
+    }
+    let mut index = SourceIndex {
+        schema_version: 3,
+        by_content_hash: BTreeMap::new(),
+        by_locator: BTreeMap::new(),
+    };
+    let mut refs = vec![];
+    for (i, name) in ["资料", "第二"]
+        .iter()
+        .enumerate()
+        .take(if second { 2 } else { 1 })
+    {
+        let raw = include_str!("../../tests/fixtures/import-v2/source-manifest-v3.json")
+            .replace("source-contract", &format!("source-audit-{i}"))
+            .replace("version-contract", &format!("version-audit-{i}"));
+        let mut manifest: SourceManifest = serde_json::from_str(&raw).unwrap();
+        manifest.wiki_path = format!("wiki/sources/local/{name}.md");
+        manifest.versions[0].content_hash = if i == 0 {
+            "a".repeat(64)
+        } else {
+            "b".repeat(64)
+        };
+        if !consumed {
+            manifest.compiled_consumptions.clear();
+        }
+        let version = manifest.versions[0].clone();
+        let candidate = CandidateMetadata {
+            source_kind: manifest.source_kind.clone(),
+            title: manifest.title.clone(),
+            canonical_url: manifest.canonical_url.clone(),
+            platform: manifest.platform.clone(),
+            platform_content_id: manifest.platform_content_id.clone(),
+            author: manifest.author.clone(),
+            published_at: manifest.published_at.clone(),
+            language: manifest.language.clone(),
+        };
+        let finalized = finalize_source(FinalizationInput {
+            candidate_markdown: b"# Source\n\nSelected source content.\n",
+            candidate: &candidate,
+            source_id: &manifest.source_id,
+            version_id: &version.version_id,
+            content_hash: &version.content_hash,
+            imported_at: &version.created_at,
+            quality: &version.quality,
+            restricted: false,
+        })
+        .unwrap();
+        manifest.versions[0].human_edit_hash = Some(finalized.human_edit_hash);
+        for path in [&manifest.wiki_path, &version.baseline_path] {
+            let absolute = root.path().join(path);
+            fs::create_dir_all(absolute.parent().unwrap()).unwrap();
+            fs::write(absolute, &finalized.bytes).unwrap();
+        }
+        let reference = WorkflowSourceVersionRef {
+            source_id: manifest.source_id.clone(),
+            version_id: version.version_id.clone(),
+        };
+        let pointer = SourcePointer {
+            source_id: reference.source_id.clone(),
+            version_id: reference.version_id.clone(),
+        };
+        index
+            .by_content_hash
+            .insert(version.content_hash.clone(), pointer.clone());
+        index
+            .by_locator
+            .insert(format!("file:/audit-{i}.md"), pointer);
+        FileStore
+            .write_json_atomic(
+                &context,
+                &format!(".app/sources/{}.json", manifest.source_id),
+                &manifest,
+            )
+            .unwrap();
+        refs.push(reference);
+    }
+    FileStore
+        .write_json_atomic(&context, ".app/source-index-v2.json", &index)
+        .unwrap();
+    (root, context, refs)
+}
+
+#[tokio::test]
+async fn regression_deferred_v2_review_preserves_deferred_metadata() {
+    use llm_wiki_desktop_lib::services::undo_update_wiki_history;
+    let (_root, context, refs) = regression_v2_project(false, true);
+    let deferred_path = context.root.join(".app/sources/source-audit-1.json");
+    let deferred_before = fs::read(&deferred_path).unwrap();
+    let consumed_path = context.root.join(".app/sources/source-audit-0.json");
+    let consumed_before = fs::read(&consumed_path).unwrap();
+    let harness = UpdateHarness::new(Arc::new(DeferredSourceAgent));
+    let run = enqueue_update_sources(
+        &context,
+        &harness.tasks,
+        &harness.coordinator,
+        UpdateWikiMode::ChangedSources,
+        refs,
+        AgentKind::Claude,
+    );
+    run_update_wiki(&context, run.clone(), &harness.services()).await;
+    let waiting = harness.tasks.get_workflow_run(&run.task_id).unwrap();
+    assert_eq!(
+        waiting.display_status,
+        WorkflowDisplayStatus::WaitingForConfirmation,
+        "{:?}",
+        waiting.error
+    );
+    confirm_update_wiki_review(&context, &run.task_id, &harness.services()).unwrap();
+    assert!(context.root.join("wiki/concepts/工作流成功.md").is_file());
+    let record: CompileConsumptionRecord = FileStore
+        .read_json_file(
+            &context
+                .root
+                .join(format!(".app/compile/{}.json", run.task_id)),
+        )
+        .unwrap();
+    assert_eq!(record.source_versions.len(), 1);
+    assert_eq!(record.source_versions[0].source_id, "source-audit-0");
+    assert_eq!(fs::read(&deferred_path).unwrap(), deferred_before);
+    let completed = harness.tasks.get_workflow_run(&run.task_id).unwrap();
+    assert!(
+        undo_update_wiki_history(
+            &context,
+            &completed,
+            &FileStore,
+            &harness.bookmarks,
+            &harness.search,
+            &harness.tasks
+        )
+        .unwrap()
+        .undone
+    );
+    assert_eq!(fs::read(&deferred_path).unwrap(), deferred_before);
+    assert_eq!(fs::read(&consumed_path).unwrap(), consumed_before);
+    assert!(!context.root.join("wiki/concepts/工作流成功.md").exists());
+}
+
+#[tokio::test]
+async fn regression_full_recompile_consumed_v2_publishes_new_consumption() {
+    use llm_wiki_desktop_lib::services::undo_update_wiki_history;
+    let (_root, context, refs) = regression_v2_project(true, false);
+    let metadata_path = context.root.join(".app/sources/source-audit-0.json");
+    let before = fs::read(&metadata_path).unwrap();
+    let harness = UpdateHarness::new(Arc::new(SuccessfulAgent { delete_path: None }));
+    let run = enqueue_update_sources(
+        &context,
+        &harness.tasks,
+        &harness.coordinator,
+        UpdateWikiMode::FullRecompile,
+        refs,
+        AgentKind::Claude,
+    );
+    run_update_wiki(&context, run.clone(), &harness.services()).await;
+    let waiting = harness.tasks.get_workflow_run(&run.task_id).unwrap();
+    assert_eq!(
+        waiting.display_status,
+        WorkflowDisplayStatus::WaitingForConfirmation,
+        "{:?}",
+        waiting.error
+    );
+    confirm_update_wiki_review(&context, &run.task_id, &harness.services()).unwrap();
+    assert!(context.root.join("wiki/concepts/工作流成功.md").is_file());
+    let previous: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    let after: serde_json::Value =
+        serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+    assert_eq!(
+        after["compiledConsumptions"][0],
+        previous["compiledConsumptions"][0]
+    );
+    assert_eq!(after["compiledConsumptions"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        after["compiledConsumptions"][1]["compileTaskId"],
+        run.task_id
+    );
+    let completed = harness.tasks.get_workflow_run(&run.task_id).unwrap();
+    assert!(
+        undo_update_wiki_history(
+            &context,
+            &completed,
+            &FileStore,
+            &harness.bookmarks,
+            &harness.search,
+            &harness.tasks
+        )
+        .unwrap()
+        .undone
+    );
+    assert_eq!(fs::read(&metadata_path).unwrap(), before);
+}
+
+struct HistoricalSourceAgent;
+impl ProcessRunner for HistoricalSourceAgent {
+    fn find_executable(&self, command: &str) -> Option<PathBuf> {
+        SuccessfulAgent { delete_path: None }.find_executable(command)
+    }
+    fn run_with_timeout(
+        &self,
+        command: &str,
+        args: &[&str],
+        timeout: Duration,
+    ) -> Result<String, BackendError> {
+        SuccessfulAgent { delete_path: None }.run_with_timeout(command, args, timeout)
+    }
+    fn run_capture(&self, invocation: &AgentInvocation) -> Result<(String, String), BackendError> {
+        SuccessfulAgent { delete_path: None }.run_capture(invocation)
+    }
+    fn run_task_streaming(
+        &self,
+        invocation: &AgentInvocation,
+        _tasks: &TaskService,
+        _task_id: &str,
+    ) -> Result<String, BackendError> {
+        let raw = SuccessfulAgent { delete_path: None }.structured_output(invocation)?;
+        if invocation
+            .stdin
+            .as_deref()
+            .is_some_and(|prompt| prompt.contains("--- Accepted CompilePlan ---"))
+        {
+            assert!(invocation
+                .stdin
+                .as_deref()
+                .unwrap()
+                .contains("# Historical original evidence"));
+            assert!(invocation
+                .stdin
+                .as_deref()
+                .unwrap()
+                .contains("wiki/sources/local/article_39.md"));
+            let mut manifest: CompileManifest = serde_json::from_str(&raw).unwrap();
+            for file in &mut manifest.files {
+                if file.path == "wiki/concepts/工作流成功.md" {
+                    file.content = file
+                        .content
+                        .replace("  - 资料.md", "  - 资料.md\n  - article_39.md");
+                }
+            }
+            return Ok(serde_json::to_string(&manifest).unwrap());
+        }
+        let mut plan: CompilePlan = serde_json::from_str(&raw).unwrap();
+        plan.items[0].source_ids.push("article_39.md".into());
+        plan.items[0].risk_flags = vec!["broad rewrite".into()];
+        Ok(serde_json::to_string(&plan).unwrap())
+    }
+}
+
+#[tokio::test]
+async fn regression_historical_reference_survives_review_recovery() {
+    for mutate in [false, true] {
+        let (context, root) = project("historical-source");
+        fs::create_dir_all(root.join("wiki/sources/local")).unwrap();
+        let historical_path = root.join("wiki/sources/local/article_39.md");
+        fs::write(&historical_path, "# Historical original evidence\n").unwrap();
+        fs::write(root.join("wiki/concepts/prior.md"), "---\ntype: concept\nsources: [article_39.md]\n---\n# Prior\n\n> Sources: [Old](../sources/local/article_39.md)\n").unwrap();
+        fs::write(
+            root.join("wiki/index.md"),
+            "# Index\n- [[concepts/prior]]\n",
+        )
+        .unwrap();
+        let source = CompileService::list_source_versions(&context)
+            .unwrap()
+            .into_iter()
+            .find(|source| {
+                CompileService::resolve_source_versions(&context, std::slice::from_ref(source))
+                    .unwrap()[0]
+                    .workspace_path
+                    .ends_with("/资料.md")
+            })
+            .unwrap();
+        let selected = WorkflowSourceVersionRef {
+            source_id: source.source_id.clone(),
+            version_id: source.version_id.clone(),
+        };
+        let harness = UpdateHarness::new(Arc::new(HistoricalSourceAgent));
+        let run = enqueue_update(
+            &context,
+            &harness.tasks,
+            &harness.coordinator,
+            UpdateWikiMode::ChangedSources,
+            selected,
+        );
+        run_update_wiki(&context, run.clone(), &harness.services()).await;
+        let waiting = harness.tasks.get_workflow_run(&run.task_id).unwrap();
+        assert_eq!(
+            waiting.display_status,
+            WorkflowDisplayStatus::WaitingForConfirmation,
+            "{:?}",
+            waiting.error
+        );
+        if mutate {
+            fs::write(&historical_path, "# Edited after generation\n").unwrap();
+            assert!(!update_wiki_candidate_is_valid(&run.task_id, &root));
+            assert!(restore_update_wiki_confirmation(
+                &context,
+                &waiting,
+                &harness.tasks,
+                &harness.confirmations
+            )
+            .is_err());
+            assert!(
+                confirm_update_wiki_review(&context, &run.task_id, &harness.services()).is_err()
+            );
+            assert!(!root.join("wiki/concepts/工作流成功.md").exists());
+        } else {
+            restore_update_wiki_confirmation(
+                &context,
+                &waiting,
+                &harness.tasks,
+                &harness.confirmations,
+            )
+            .unwrap();
+            confirm_update_wiki_review(&context, &run.task_id, &harness.services()).unwrap();
+            let record: CompileConsumptionRecord = FileStore
+                .read_json_file(&root.join(format!(".app/compile/{}.json", run.task_id)))
+                .unwrap();
+            assert_eq!(record.source_versions, vec![source]);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+struct DecisionsOnlyAgent {
+    covered: bool,
+}
+impl ProcessRunner for DecisionsOnlyAgent {
+    fn find_executable(&self, command: &str) -> Option<PathBuf> {
+        SuccessfulAgent { delete_path: None }.find_executable(command)
+    }
+    fn run_with_timeout(
+        &self,
+        command: &str,
+        args: &[&str],
+        timeout: Duration,
+    ) -> Result<String, BackendError> {
+        SuccessfulAgent { delete_path: None }.run_with_timeout(command, args, timeout)
+    }
+    fn run_capture(&self, invocation: &AgentInvocation) -> Result<(String, String), BackendError> {
+        SuccessfulAgent { delete_path: None }.run_capture(invocation)
+    }
+    fn run_task_streaming(
+        &self,
+        invocation: &AgentInvocation,
+        _tasks: &TaskService,
+        _task_id: &str,
+    ) -> Result<String, BackendError> {
+        assert!(
+            !invocation
+                .stdin
+                .as_deref()
+                .unwrap()
+                .contains("--- Accepted CompilePlan ---"),
+            "No page generation is needed for source decisions only"
+        );
+        Ok(serde_json::json!({
+            "summary": "No page edits needed", "items": [], "sourceDecisions": [{
+                "sourceId": "资料.md", "status": if self.covered { "already_covered" } else { "deferred" },
+                "reason": if self.covered { "Existing page covers the selected evidence" } else { "Needs more evidence" },
+                "evidencePath": if self.covered { Some("wiki/concepts/existing.md") } else { None },
+                "evidenceExcerpt": if self.covered { Some("Selected source content.") } else { None }
+            }]
+        }).to_string())
+    }
+}
+
+#[tokio::test]
+async fn regression_decisions_only_review_and_undo_preserve_wiki_and_pending_sources() {
+    use llm_wiki_desktop_lib::services::undo_update_wiki_history;
+    for covered in [false, true] {
+        let (_root, context, refs) = regression_v2_project(false, false);
+        fs::write(
+            context.root.join("wiki/concepts/existing.md"),
+            "---\ntype: concept\nsources: [资料.md]\n---\n# Existing\nSelected source content.\n",
+        )
+        .unwrap();
+        let wiki_before = CompileService::snapshot_wiki(&context).unwrap();
+        let metadata_path = context.root.join(".app/sources/source-audit-0.json");
+        let metadata_before = fs::read(&metadata_path).unwrap();
+        let harness = UpdateHarness::new(Arc::new(DecisionsOnlyAgent { covered }));
+        let run = enqueue_update_sources(
+            &context,
+            &harness.tasks,
+            &harness.coordinator,
+            UpdateWikiMode::ChangedSources,
+            refs,
+            AgentKind::Claude,
+        );
+        run_update_wiki(&context, run.clone(), &harness.services()).await;
+        let waiting = harness.tasks.get_workflow_run(&run.task_id).unwrap();
+        assert_eq!(
+            waiting.display_status,
+            WorkflowDisplayStatus::WaitingForConfirmation,
+            "{:?}",
+            waiting.error
+        );
+        restore_update_wiki_confirmation(
+            &context,
+            &waiting,
+            &harness.tasks,
+            &harness.confirmations,
+        )
+        .unwrap();
+        let (completed, _) =
+            confirm_update_wiki_review(&context, &run.task_id, &harness.services()).unwrap();
+        let record: CompileConsumptionRecord = FileStore
+            .read_json_file(
+                &context
+                    .root
+                    .join(format!(".app/compile/{}.json", run.task_id)),
+            )
+            .unwrap();
+        assert_eq!(record.source_versions.len(), usize::from(covered));
+        assert_eq!(
+            CompileService::snapshot_wiki(&context).unwrap(),
+            wiki_before
+        );
+        if !covered {
+            assert_eq!(fs::read(&metadata_path).unwrap(), metadata_before);
+        }
+        assert!(
+            undo_update_wiki_history(
+                &context,
+                &completed,
+                &FileStore,
+                &harness.bookmarks,
+                &harness.search,
+                &harness.tasks
+            )
+            .unwrap()
+            .undone
+        );
+        assert_eq!(fs::read(&metadata_path).unwrap(), metadata_before);
+        assert_eq!(
+            CompileService::snapshot_wiki(&context).unwrap(),
+            wiki_before
+        );
+    }
+}
+
+#[tokio::test]
+async fn regression_mixed_registry_keeps_legacy_evidence_without_consuming_it() {
+    let (_root, context, refs) = regression_v2_project(false, false);
+    fs::write(
+        context.app_dir.join("source-index.json"),
+        r#"{"sources":{"raw/sources/missing.txt":["raw/extracted/missing.md"]}}"#,
+    )
+    .unwrap();
+    fs::write(
+        context.root.join("wiki/sources/local/article_39.md"),
+        "# Historical original evidence\n",
+    )
+    .unwrap();
+    fs::write(
+        context.root.join("wiki/concepts/prior.md"),
+        "---\ntype: concept\nsources: [article_39.md]\n---\n# Prior\n",
+    )
+    .unwrap();
+    fs::write(
+        context.root.join("wiki/index.md"),
+        "# Index\n[[concepts/prior]]\n",
+    )
+    .unwrap();
+    let harness = UpdateHarness::new(Arc::new(HistoricalSourceAgent));
+    let run = enqueue_update_sources(
+        &context,
+        &harness.tasks,
+        &harness.coordinator,
+        UpdateWikiMode::ChangedSources,
+        refs,
+        AgentKind::Claude,
+    );
+    run_update_wiki(&context, run.clone(), &harness.services()).await;
+    let waiting = harness.tasks.get_workflow_run(&run.task_id).unwrap();
+    assert_eq!(
+        waiting.display_status,
+        WorkflowDisplayStatus::WaitingForConfirmation,
+        "{:?}",
+        waiting.error
+    );
+    restore_update_wiki_confirmation(&context, &waiting, &harness.tasks, &harness.confirmations)
+        .unwrap();
+    confirm_update_wiki_review(&context, &run.task_id, &harness.services()).unwrap();
+    let record: CompileConsumptionRecord = FileStore
+        .read_json_file(
+            &context
+                .root
+                .join(format!(".app/compile/{}.json", run.task_id)),
+        )
+        .unwrap();
+    assert_eq!(record.source_versions.len(), 1);
+    assert_eq!(record.source_versions[0].source_id, "source-audit-0");
+}
+
+#[tokio::test]
+async fn regression_broken_legacy_index_is_isolated_until_legacy_evidence_is_requested() {
+    for needs_legacy in [false, true] {
+        let (_root, context, refs) = regression_v2_project(false, false);
+        fs::write(
+            context.app_dir.join("source-index.json"),
+            b"{ broken legacy index",
+        )
+        .unwrap();
+        let agent: Arc<dyn ProcessRunner> = if needs_legacy {
+            Arc::new(HistoricalSourceAgent)
+        } else {
+            Arc::new(SuccessfulAgent { delete_path: None })
+        };
+        let harness = UpdateHarness::new(agent);
+        let run = enqueue_update_sources(
+            &context,
+            &harness.tasks,
+            &harness.coordinator,
+            UpdateWikiMode::ChangedSources,
+            refs,
+            AgentKind::Claude,
+        );
+        run_update_wiki(&context, run.clone(), &harness.services()).await;
+        let result = harness.tasks.get_workflow_run(&run.task_id).unwrap();
+        if needs_legacy {
+            assert_eq!(result.display_status, WorkflowDisplayStatus::Failed);
+            assert!(!context.root.join("wiki/concepts/工作流成功.md").exists());
+        } else {
+            assert_eq!(
+                result.display_status,
+                WorkflowDisplayStatus::Completed,
+                "{:?}",
+                result.error
+            );
+            assert!(context.root.join("wiki/concepts/工作流成功.md").exists());
+        }
+    }
 }

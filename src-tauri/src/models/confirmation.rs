@@ -267,6 +267,8 @@ pub enum ConfirmationExecution {
         plan: crate::models::compile::CompilePlan,
         manifest: crate::models::compile::CompileManifest,
         source_versions: Vec<crate::models::compile::SourceVersionRef>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        source_dependencies: Vec<crate::models::compile::CompileSourceDependency>,
         current_hashes: Vec<(String, String)>,
         checkpoint_hash: Option<String>,
     },

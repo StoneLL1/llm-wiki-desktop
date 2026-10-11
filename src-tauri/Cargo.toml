@@ -54,6 +54,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 quick-xml = "0.36"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 unicode-normalization = "0.1"
+serde-saphyr = { version = "1", default-features = false, features = ["deserialize"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -86,6 +86,29 @@ pub struct CompileCandidate {
     pub manifest: CompileManifest,
     #[serde(default)]
     pub source_outcomes: Vec<CompileSourceOutcome>,
+    /// Backend-bound historical evidence. It never expands the consumption scope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_dependencies: Vec<CompileSourceDependency>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompileSourceDependency {
+    pub source_version: SourceVersionRef,
+    pub project_path: String,
+    pub workspace_path: String,
+    pub file_hash: String,
+}
+
+impl CompileCandidate {
+    /// Only accepted outcomes enter the receipt and its metadata write set.
+    pub fn consumed_source_versions(&self) -> Vec<SourceVersionRef> {
+        self.source_outcomes
+            .iter()
+            .filter(|outcome| outcome.status != CompileSourceOutcomeStatus::Deferred)
+            .map(|outcome| outcome.source_version.clone())
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

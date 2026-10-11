@@ -215,6 +215,7 @@ async fn run_compile(
         )
         .await?;
         let route = candidate.route.legacy_kind();
+        let source_dependencies = candidate.source_dependencies;
         let plan = candidate.plan;
         let manifest = candidate.manifest;
         state.require_current_execution_epoch(context, &execution_lease)?;
@@ -239,8 +240,9 @@ async fn run_compile(
                 true,
             ));
         }
+        let known_sources = CompileService::bound_source_refs(context, &revalidated, &source_dependencies)?;
         let backup = CompileService::backup_outputs(context, &manifest)?;
-        let applied = match CompileService::apply_manifest(context, &manifest, Some(&plan), &baseline) {
+        let applied = match CompileService::apply_manifest_for_sources(context, &manifest, Some(&plan), &baseline, &known_sources) {
             Ok(applied) => applied,
             Err(error) => {
                 let _ = CompileService::restore_outputs(context, &backup);
@@ -265,7 +267,7 @@ async fn run_compile(
             };
             state.confirmation_registry.register_with_execution(action.clone(), Some(ConfirmationExecution::CompileMerge {
                 project_id: request.project_id.clone(), root_path: request.project_root_path.clone(), task_id: task_id.into(), route,
-                plan, manifest, source_versions,
+                plan, manifest, source_versions, source_dependencies,
                 current_hashes, checkpoint_hash: checkpoint.commit_hash.clone(),
             }))?;
             state.task_service.set_result(task_id, TaskResult { summary: "Compile requires conflict confirmation.".into(), affected_paths: applied.affected_paths, reference: None, pending_action: Some(action) }).map_err(task_error)?;
@@ -622,6 +624,7 @@ pub fn resolve_compile_conflict(
         plan,
         manifest,
         source_versions,
+        source_dependencies,
         current_hashes,
         checkpoint_hash,
     } = stored.execution.ok_or_else(|| {
@@ -689,6 +692,10 @@ pub fn resolve_compile_conflict(
             global_risk_flags: plan.global_risk_flags.clone(),
             source_decisions: plan.source_decisions.clone(),
         };
+        let hashes: HashMap<String, String> = current_hashes.into_iter().collect();
+        let known_sources =
+            CompileService::bound_source_refs(context, &revalidated, &source_dependencies)?;
+        let backup = CompileService::backup_outputs(context, &resolved_manifest)?;
         state
             .confirmation_registry
             .confirm(&request.action_id, ConfirmationStatus::Confirmed)?;
@@ -696,13 +703,12 @@ pub fn resolve_compile_conflict(
             .task_service
             .transition_status(&task_id, TaskStatus::Running)
             .map_err(task_error)?;
-        let hashes: HashMap<String, String> = current_hashes.into_iter().collect();
-        let backup = CompileService::backup_outputs(context, &resolved_manifest)?;
-        let affected_paths = match CompileService::apply_confirmed_manifest(
+        let affected_paths = match CompileService::apply_confirmed_manifest_for_sources(
             context,
             &resolved_manifest,
             (!accepted_plan.items.is_empty()).then_some(&accepted_plan),
             &hashes,
+            &known_sources,
         ) {
             Ok(paths) => paths,
             Err(error) => {
@@ -762,6 +768,7 @@ pub fn confirm_compile_action(
         plan,
         manifest,
         source_versions,
+        source_dependencies,
         current_hashes,
         checkpoint_hash,
     } = stored.execution.ok_or_else(|| {
@@ -781,10 +788,10 @@ pub fn confirm_compile_action(
         ));
     };
     state.with_current_project_write_access(&project_id, &root_path, |_permit, context| {
-        state
-            .confirmation_registry
-            .confirm(&request.action_id, status)?;
         if !request.confirmed {
+            state
+                .confirmation_registry
+                .confirm(&request.action_id, status)?;
             state
                 .task_service
                 .cancel_task(&task_id)
@@ -804,10 +811,6 @@ pub fn confirm_compile_action(
                 true,
             ));
         }
-        state
-            .task_service
-            .transition_status(&task_id, TaskStatus::Running)
-            .map_err(task_error)?;
         let revalidated = CompileService::resolve_source_versions(context, &source_versions)?;
         if revalidated.iter().any(|source| source.already_consumed) {
             return Err(BackendError::new(
@@ -817,22 +820,24 @@ pub fn confirm_compile_action(
                 true,
             ));
         }
-        if let Err(error) =
-            ensure_checkpoint_head(&state, context, &task_id, checkpoint_hash.as_deref())
-        {
-            let _ = state.task_service.set_error(&task_id, error.clone());
-            let _ = state
-                .task_service
-                .transition_status(&task_id, TaskStatus::Failed);
-            return Err(error);
-        }
+        ensure_checkpoint_head(&state, context, &task_id, checkpoint_hash.as_deref())?;
         let hashes: HashMap<String, String> = current_hashes.into_iter().collect();
+        let known_sources =
+            CompileService::bound_source_refs(context, &revalidated, &source_dependencies)?;
         let backup = CompileService::backup_outputs(context, &manifest)?;
-        let affected_paths = match CompileService::apply_confirmed_manifest(
+        state
+            .confirmation_registry
+            .confirm(&request.action_id, status)?;
+        state
+            .task_service
+            .transition_status(&task_id, TaskStatus::Running)
+            .map_err(task_error)?;
+        let affected_paths = match CompileService::apply_confirmed_manifest_for_sources(
             context,
             &manifest,
             Some(&plan),
             &hashes,
+            &known_sources,
         ) {
             Ok(paths) => paths,
             Err(error) => {

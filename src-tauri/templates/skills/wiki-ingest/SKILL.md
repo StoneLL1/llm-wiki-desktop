@@ -36,7 +36,7 @@ Name each derived page after the **concept** it covers, never after a source fil
 
 ## Cite sources (two ways, on every derived page)
 
-1. Frontmatter `sources: ["<original-source-filename>"]` — the machine join key the graph uses. List every original the page draws from.
+1. Frontmatter `sources: ["wiki/sources/.../original.md"]` — the machine join key the graph uses. List every original the page draws from, using its exact project-relative path from the accepted plan. Historical evidence explicitly requested in the plan is supplied before page generation; it does not become a selected input for consumption.
 2. A human-readable `> Sources:` line near the top or bottom, with Markdown links to the originals (e.g. `../sources/my-article.md`) or `[[sources/my-article]]`.
 
 ## Process

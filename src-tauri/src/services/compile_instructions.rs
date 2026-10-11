@@ -18,7 +18,7 @@ pub fn shared_compile_instruction_set() -> CompileInstructionSet {
     CompileInstructionSet {
         source_protection: "wiki/sources/ holds verbatim imported originals. Read and cite these authoritative sources, but never create, modify, delete, recreate, summarize, or mirror any file under wiki/sources/.",
         derived_page_policy: "Generate only derived wiki pages under wiki/entities/, wiki/concepts/, wiki/synthesis/, or wiki/comparisons/. Derived pages synthesize across sources, avoid one-source-one-page summaries, and are named after the concept they cover, never after a source filename.",
-        source_traceability: "Every derived page must cite sources two ways: frontmatter `sources: [\"<original-source-filename>\"]` listing every original used, and a human-readable `> Sources:` line with Markdown links or wikilinks to the originals.",
+        source_traceability: "Every derived page must cite sources two ways: frontmatter `sources: [\"wiki/sources/.../original.md\"]` listing every original used by its exact full project-relative path, and a human-readable `> Sources:` line with Markdown links or wikilinks to the originals.",
         decision_rules: "Decision Rules: create when a genuinely new concept, entity, synthesis, or comparison page is needed; update when new evidence materially changes an existing page; merge when a new source has the same core thesis as an existing derived page; add see-also cross-links when content spans related but distinct topics; annotate conflicts when sources disagree instead of hiding them; Cascade after material changes by scanning and updating affected pages before refreshing index and overview.",
         structural_files: "Maintain wiki/index.md, wiki/overview.md, and wiki/log.md. Compile output must not consist only of these structural pages; structural updates must reflect the derived pages changed by the compile.",
         no_delete_policy: "Never delete pages. If a page appears obsolete, record it in wiki/log.md for user review.",
@@ -37,6 +37,7 @@ pub fn render_compile_core_instructions_with_policy(allow_reviewable_deletions: 
         set.no_delete_policy
     };
     [
+        "Source scope: selected Source files are the only inputs to consume. You may retain a target page's existing Source citations. Historical Sources cited by the supplied existing Wiki pages may be requested explicitly in each plan item's sourceIds; the backend resolves and supplies their original bodies before generation as read-only evidence. Never cite arbitrary unselected Sources or derived Wiki pages as originals. Use exact full project-relative paths, not Source UUIDs or ambiguous filenames.",
         set.source_protection,
         set.derived_page_policy,
         set.source_traceability,

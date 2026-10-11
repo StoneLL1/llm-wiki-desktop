@@ -1,12 +1,9 @@
 //! Pure Markdown helpers for the wiki reader/editor/search pipeline.
 //!
-//! These intentionally avoid pulling in a YAML crate or a Markdown AST: the
-//! real sample vault uses a small, stable subset of frontmatter (scalar keys,
-//! inline `[a, b]` lists, and block `- item` lists), and a hand-rolled parser
-//! is enough to surface titles, tags, sources, aliases, and outgoing
-//! `[[wikilink]]` targets. The models layer maps these raw strings onto typed
-//! DTOs; nothing here depends on `crate::models` to keep the dependency arrow
-//! one-way.
+//! YAML is decoded before projecting titles, tags, sources and aliases onto
+//! the reader's scalar/list model. Generated output uses the strict parser;
+//! readers retain best-effort display for malformed legacy pages. Nothing
+//! here depends on `crate::models`, keeping the dependency arrow one-way.
 
 use std::collections::HashMap;
 
@@ -154,6 +151,86 @@ impl Frontmatter {
 
 /// Parse a frontmatter YAML body into a best-effort ordered key/value map.
 pub fn parse_frontmatter(raw: &str) -> Frontmatter {
+    parse_frontmatter_checked(raw).unwrap_or_else(|_| parse_frontmatter_legacy(raw))
+}
+
+/// Strict YAML for generated output; readers retain best-effort display of old malformed pages.
+pub fn parse_frontmatter_checked(raw: &str) -> Result<Frontmatter, String> {
+    struct OrderedFrontmatter(Frontmatter);
+    impl<'de> serde::Deserialize<'de> for OrderedFrontmatter {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct Visitor;
+            impl<'de> serde::de::Visitor<'de> for Visitor {
+                type Value = OrderedFrontmatter;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("a frontmatter mapping")
+                }
+                fn visit_map<M: serde::de::MapAccess<'de>>(
+                    self,
+                    mut map: M,
+                ) -> Result<Self::Value, M::Error> {
+                    let mut result = Frontmatter::empty();
+                    let mut keys = std::collections::HashSet::new();
+                    while let Some((key, value)) = map.next_entry::<String, serde_json::Value>()? {
+                        if !keys.insert(Frontmatter::normalize_key(&key)) {
+                            return Err(serde::de::Error::custom("duplicate frontmatter key"));
+                        }
+                        let scalar = |value: &serde_json::Value| match value {
+                            serde_json::Value::String(value) => Some(value.clone()),
+                            serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+                                Some(value.to_string())
+                            }
+                            serde_json::Value::Null => Some(String::new()),
+                            _ => None,
+                        };
+                        if key.eq_ignore_ascii_case("sources")
+                            && !value
+                                .as_array()
+                                .is_some_and(|items| items.iter().all(serde_json::Value::is_string))
+                        {
+                            return Err(serde::de::Error::custom(
+                                "sources must be a list of strings",
+                            ));
+                        }
+                        let parsed = if let serde_json::Value::Array(values) = &value {
+                            let items = values
+                                .iter()
+                                .map(&scalar)
+                                .collect::<Option<Vec<_>>>()
+                                .ok_or_else(|| {
+                                    serde::de::Error::custom(
+                                        "frontmatter lists must contain scalars",
+                                    )
+                                })?;
+                            FrontmatterValue::List(items)
+                        } else if let Some(value) = scalar(&value) {
+                            FrontmatterValue::Scalar(value)
+                        } else {
+                            // Nested metadata is not part of the reader's scalar/list projection.
+                            if key.eq_ignore_ascii_case("sources") {
+                                return Err(serde::de::Error::custom(
+                                    "sources must be a list of strings",
+                                ));
+                            }
+                            continue;
+                        };
+                        result.entries.push((key, parsed));
+                    }
+                    Ok(OrderedFrontmatter(result))
+                }
+            }
+            deserializer.deserialize_map(Visitor)
+        }
+    }
+    if raw.trim().is_empty() {
+        return Ok(Frontmatter::empty());
+    }
+    serde_saphyr::from_str::<OrderedFrontmatter>(raw)
+        .map(|value| value.0)
+        .map_err(|error| error.to_string())
+}
+
+fn parse_frontmatter_legacy(raw: &str) -> Frontmatter {
     let mut fm = Frontmatter::empty();
     if raw.trim().is_empty() {
         return fm;
@@ -629,6 +706,33 @@ pub fn snippet_for_query(body: &str, query_lower: &str, radius: usize) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn yaml_source_lists_preserve_quoted_delimiters_escapes_and_comments() {
+        for raw in [
+            "sources: [\"研究,笔记.md\", 'l''article.md'] # evidence",
+            "sources:\n  - \"研究,笔记.md\" # evidence\n  - 'l''article.md'",
+            "sources: [\n  \"研究,笔记.md\",\n  'l''article.md'\n]",
+        ] {
+            let parsed = parse_frontmatter_checked(raw).unwrap();
+            assert_eq!(
+                parsed.get_list("sources"),
+                vec!["研究,笔记.md", "l'article.md"]
+            );
+            assert_eq!(
+                parse_frontmatter(raw).get_list("sources"),
+                parsed.get_list("sources")
+            );
+        }
+        for invalid in [
+            "sources: [a.md]\nsources: [b.md]",
+            "sources: [1]",
+            "sources: {path: a.md}",
+            "sources: [\"unterminated]",
+        ] {
+            assert!(parse_frontmatter_checked(invalid).is_err(), "{invalid}");
+        }
+    }
 
     #[test]
     fn splits_frontmatter_and_body() {

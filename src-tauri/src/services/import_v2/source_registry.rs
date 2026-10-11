@@ -476,6 +476,16 @@ impl SourceRegistry {
         files: &FileStore,
         record: &CompileConsumptionRecord,
     ) -> Result<PreparedCompileConsumption, BackendError> {
+        Self::prepare_compile_consumption_with_policy(context, files, record, false)
+    }
+
+    /// Recompiling is a new task receipt, not a duplicate submission of an old task.
+    pub(crate) fn prepare_compile_consumption_with_policy(
+        context: &ProjectContext,
+        files: &FileStore,
+        record: &CompileConsumptionRecord,
+        allow_recompile: bool,
+    ) -> Result<PreparedCompileConsumption, BackendError> {
         let record_path = format!(".app/compile/{}.json", record.compile_task_id);
         let record_absolute = context.resolve_project_path(&record_path)?;
         if record_absolute.exists() {
@@ -518,6 +528,7 @@ impl SourceRegistry {
             if manifest.compiled_consumptions.iter().any(|entry| {
                 entry.version_id == reference.version_id
                     && entry.content_hash == reference.content_hash
+                    && (!allow_recompile || entry.compile_task_id == record.compile_task_id)
             }) {
                 return Err(compile_source_version_changed());
             }
@@ -3060,6 +3071,69 @@ mod tests {
             .unwrap();
         assert_eq!(record.schema_version, 1);
         assert_eq!(record.source_versions, consumed);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn full_recompile_requires_a_new_task_and_preserves_previous_consumption() {
+        let (context, root) = super::super::test_support::test_context("recompile-consumption");
+        let files = FileStore;
+        let (_, reference) = persist_compile_fixture(&context, &files);
+        let record = CompileConsumptionRecord {
+            schema_version: 1,
+            compile_task_id: "first".into(),
+            route: CompileRoute::Byok,
+            consumed_at: "2026-10-11T00:00:00Z".into(),
+            source_versions: vec![reference],
+            affected_paths: vec!["wiki/index.md".into()],
+            checkpoint: None,
+        };
+        SourceRegistry::record_compile_consumption(&context, &files, &record).unwrap();
+        let repeated = CompileConsumptionRecord {
+            compile_task_id: "second".into(),
+            ..record.clone()
+        };
+        assert_eq!(
+            SourceRegistry::prepare_compile_consumption(&context, &files, &repeated)
+                .err()
+                .unwrap()
+                .code,
+            "COMPILE_SOURCE_VERSION_INVALID"
+        );
+        SourceRegistry::prepare_compile_consumption_with_policy(&context, &files, &repeated, true)
+            .unwrap()
+            .commit(&context)
+            .unwrap();
+        let manifest =
+            SourceRegistry::read_manifest(&context, &files, ".app/sources/source-1.json").unwrap();
+        assert_eq!(
+            manifest
+                .compiled_consumptions
+                .iter()
+                .map(|entry| entry.compile_task_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+        assert_eq!(
+            SourceRegistry::prepare_compile_consumption_with_policy(
+                &context, &files, &repeated, true
+            )
+            .err()
+            .unwrap()
+            .code,
+            "COMPILE_CONSUMPTION_EXISTS"
+        );
+        // Even a missing receipt cannot authorize consuming twice for the same task.
+        std::fs::remove_file(context.app_dir.join("compile/second.json")).unwrap();
+        assert_eq!(
+            SourceRegistry::prepare_compile_consumption_with_policy(
+                &context, &files, &repeated, true
+            )
+            .err()
+            .unwrap()
+            .code,
+            "COMPILE_SOURCE_VERSION_INVALID"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
