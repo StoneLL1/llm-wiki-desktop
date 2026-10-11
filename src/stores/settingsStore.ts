@@ -5,7 +5,7 @@ import { registerProjectScopeResetHandler } from "./projectScopeResetRegistry";
 import { activateLocale, LANGUAGE_STORAGE_KEY } from "../i18n";
 import { applyColorThemePresetToRoot } from "../lib/colorThemePresets";
 import { createProjectResourceController } from "../lib/projectResourceFreshness";
-import type { ChatConvenienceAuthorization, Settings, ThemePreference } from "../types/settings";
+import type { ChatConvenienceAuthorization, GlobalPreferences, GlobalPreferencesPatch, Settings, ThemePreference } from "../types/settings";
 import {
   captureProjectScope,
   isProjectScopeCurrent,
@@ -67,9 +67,36 @@ export const defaultSettings: Settings = {
   manualEditProtection: true,
   rawSourcesImmutable: true,
   agentDefault: null,
+  aiDefaultRoute: null,
   llmProviders: [],
   template: "general",
 };
+
+const globalPreferenceKeys = [
+  "language", "theme", "colorThemePreset", "density", "uiFont", "readingFont", "codeFont",
+  "agentOutputLanguage", "closeBehavior", "systemNotifications", "notificationClickBehavior",
+  "maxConcurrentTasks", "startupBehavior", "defaultProjectLocation", "externalEditor",
+  "associateMdFiles", "associateWikiFolders",
+] as const satisfies readonly (keyof GlobalPreferences)[];
+
+function pickGlobalPreferences(settings: Settings): GlobalPreferences {
+  return Object.fromEntries(globalPreferenceKeys.map((key) => [key, settings[key]])) as unknown as GlobalPreferences;
+}
+
+function mergeGlobalPatch(settings: GlobalPreferences, patch: GlobalPreferencesPatch): GlobalPreferences {
+  return {
+    ...settings,
+    ...patch,
+    systemNotifications: { ...settings.systemNotifications, ...patch.systemNotifications },
+  };
+}
+
+function applyVisualPreferences(settings: GlobalPreferences) {
+  applyThemePreference(settings.theme);
+  applyColorThemePresetPreference(settings.colorThemePreset, settings.theme);
+  applyDensityPreference(settings.density);
+  applyFontPreference({ ui: settings.uiFont, reading: settings.readingFont, code: settings.codeFont });
+}
 
 let activeColorThemePreference: Pick<Settings, "colorThemePreset" | "theme"> = {
   colorThemePreset: defaultSettings.colorThemePreset,
@@ -236,6 +263,20 @@ async function applyLanguagePreference(
 let languagePreferenceEpoch = 0;
 let settingsLoadEpoch = 0;
 let settingsSaveEpoch = 0;
+let globalLoadEpoch = 0;
+let globalSaveEpoch = 0;
+let globalSaveQueue: Promise<unknown> = Promise.resolve();
+let projectSaveQueue: Promise<unknown> = Promise.resolve();
+let committedGlobalPreferences: GlobalPreferences | null = null;
+const pendingGlobalPatches = new Map<number, GlobalPreferencesPatch>();
+
+function visibleGlobalPreferences(): GlobalPreferences {
+  let preferences = committedGlobalPreferences ?? pickGlobalPreferences(defaultSettings);
+  for (const patch of pendingGlobalPatches.values()) {
+    preferences = mergeGlobalPatch(preferences, patch);
+  }
+  return preferences;
+}
 
 export interface SettingsState {
   settings: Settings;
@@ -243,6 +284,12 @@ export interface SettingsState {
   chatConvenienceSaving: boolean;
   loading: boolean;
   saving: boolean;
+  globalLoading: boolean;
+  globalSaving: boolean;
+  globalLoaded: boolean;
+  globalError: string | null;
+  loadGlobalSettings: () => Promise<Settings>;
+  persistGlobalPatch: (patch: GlobalPreferencesPatch) => Promise<Settings>;
   loadedProjectKey: string | null;
   error: string | null;
   loadSettings: (projectId: string, projectRootPath: string) => Promise<Settings>;
@@ -280,6 +327,100 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   saving: false,
   loadedProjectKey: null,
   error: null,
+  globalLoading: false,
+  globalSaving: false,
+  globalLoaded: false,
+  globalError: null,
+
+  loadGlobalSettings: async () => {
+    const epoch = ++globalLoadEpoch;
+    const saveEpoch = globalSaveEpoch;
+    const isCurrent = () => epoch === globalLoadEpoch && saveEpoch === globalSaveEpoch;
+    set({ globalLoading: true, globalError: null });
+    try {
+      // Read after already queued writes so a refresh cannot publish the
+      // pre-save file contents after the final pending layer disappears.
+      await globalSaveQueue;
+      if (!isCurrent()) return get().settings;
+      const preferences = hasTauri()
+        ? await invoke<GlobalPreferences>("get_global_preferences")
+        : pickGlobalPreferences(get().settings);
+      if (!isCurrent()) return get().settings;
+      committedGlobalPreferences = preferences;
+      const visible = visibleGlobalPreferences();
+      const languageEpoch = ++languagePreferenceEpoch;
+      await applyLanguagePreference(visible.language, () => isCurrent() && languageEpoch === languagePreferenceEpoch);
+      if (!isCurrent()) return get().settings;
+      applyVisualPreferences(visible);
+      set((state) => ({ settings: { ...state.settings, ...visible }, globalLoaded: true }));
+      return get().settings;
+    } catch (error) {
+      if (isCurrent()) set({ globalError: errorMessage(error) });
+      return get().settings;
+    } finally {
+      if (epoch === globalLoadEpoch) set({ globalLoading: false });
+    }
+  },
+
+  persistGlobalPatch: async (patch) => {
+    const epoch = ++globalSaveEpoch;
+    globalLoadEpoch += 1;
+    if (pendingGlobalPatches.size === 0) committedGlobalPreferences = pickGlobalPreferences(get().settings);
+    pendingGlobalPatches.set(epoch, patch);
+    const visible = visibleGlobalPreferences();
+    const languageEpoch = ++languagePreferenceEpoch;
+    set((state) => ({
+      settings: { ...state.settings, ...visible },
+      globalLoading: false,
+      globalSaving: true,
+      globalError: null,
+    }));
+    applyVisualPreferences(visible);
+    // Locale loading is presentation work, not a prerequisite to persisting.
+    // A slow language chunk must not block a later user choice or disk write.
+    const localeReady = applyLanguagePreference(visible.language, () => languageEpoch === languagePreferenceEpoch)
+      .catch((error: unknown) => {
+        if (languageEpoch === languagePreferenceEpoch) set({ globalError: errorMessage(error) });
+        throw error;
+      });
+    const saving = globalSaveQueue.then(async () => {
+      try {
+        const saved = hasTauri()
+          ? await invoke<GlobalPreferences>("patch_global_preferences", { patch })
+          : mergeGlobalPatch(committedGlobalPreferences!, patch);
+        committedGlobalPreferences = saved;
+        pendingGlobalPatches.delete(epoch);
+        const next = visibleGlobalPreferences();
+        set((state) => ({
+          settings: { ...state.settings, ...next },
+          globalSaving: pendingGlobalPatches.size > 0,
+          globalLoaded: true,
+        }));
+        applyVisualPreferences(next);
+        return get().settings;
+      } catch (error) {
+        pendingGlobalPatches.delete(epoch);
+        const previousLanguage = get().settings.language;
+        const next = visibleGlobalPreferences();
+        set((state) => ({
+          settings: { ...state.settings, ...next },
+          globalSaving: pendingGlobalPatches.size > 0,
+          globalError: errorMessage(error),
+        }));
+        applyVisualPreferences(next);
+        if (next.language !== previousLanguage) {
+          const rollbackEpoch = ++languagePreferenceEpoch;
+          void applyLanguagePreference(next.language, () => rollbackEpoch === languagePreferenceEpoch)
+            .catch(() => undefined);
+        }
+        throw error;
+      }
+    });
+    // A rejected save does not poison the queue. Its caller still receives rejection.
+    globalSaveQueue = saving.catch(() => undefined);
+    const [saved] = await Promise.all([saving, localeReady]);
+    return saved;
+  },
 
   loadSettings: async (projectId, projectRootPath) => {
     if (get().saving) return get().settings;
@@ -293,34 +434,32 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     const projectKey = `${projectId}:${projectRootPath}`;
     set({ loading: true, error: null });
     try {
-      const settings = hasTauri()
+      const loaded = hasTauri()
         ? await invoke<Settings>("get_settings", {
             request: { projectId, projectRootPath },
           })
         : defaultSettings;
       if (!isCurrentLoad()) return get().settings;
-      const languageApplied = await applyLanguagePreference(
-        settings.language,
-        isCurrentLoad,
-      );
-      if (!languageApplied || !isCurrentLoad()) {
-        if (isCurrentLoad()) set({ loading: false });
-        return get().settings;
-      }
-      applyThemePreference(settings.theme);
-      applyColorThemePresetPreference(settings.colorThemePreset, settings.theme);
-      applyDensityPreference(settings.density);
-      applyFontPreference({
-        ui: settings.uiFont,
-        reading: settings.readingFont,
-        code: settings.codeFont,
-      });
+      const globals = get().globalLoaded || get().globalSaving
+        ? pickGlobalPreferences(get().settings)
+        : pickGlobalPreferences(loaded);
+      const settings = { ...defaultSettings, ...loaded, ...globals };
+      if (!get().globalSaving) committedGlobalPreferences = globals;
+      const globalEpoch = globalSaveEpoch;
+      const isCurrentPresentation = () => isCurrentLoad() && globalEpoch === globalSaveEpoch;
+      await applyLanguagePreference(settings.language, isCurrentPresentation);
+      if (!isCurrentLoad()) return get().settings;
+      const next = isCurrentPresentation()
+        ? settings
+        : { ...settings, ...pickGlobalPreferences(get().settings) };
+      applyVisualPreferences(next);
       set({
-        settings,
+        settings: next,
         loading: false,
         loadedProjectKey: projectKey,
+        globalLoaded: true,
       });
-      return settings;
+      return next;
     } catch (error) {
       if (!isCurrentLoad()) return get().settings;
       set({ loading: false, error: errorMessage(error) });
@@ -405,7 +544,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       if (isProjectScopeCurrent(scope) && chatAuthorizationResource.isCurrent(requestEpoch)) {
         set({ chatConvenienceAuthorization: fallback, error: errorMessage(error) });
       }
-      return fallback;
+      throw error;
     } finally {
       if (isProjectScopeCurrent(scope) && chatAuthorizationResource.isCurrent(requestEpoch)) {
         set({ chatConvenienceSaving: false });
@@ -422,93 +561,71 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       chatAuthorizationResource.reset();
     } catch (error) {
       set({ error: errorMessage(error) });
+      throw error;
     }
   },
 
   persistPatch: async (projectId, projectRootPath, patch) => {
+    const globalPatch: GlobalPreferencesPatch = {};
+    const projectPatch = { ...patch };
+    for (const key of globalPreferenceKeys) {
+      if (key in patch) {
+        Object.assign(globalPatch, { [key]: patch[key] });
+        delete projectPatch[key];
+      }
+    }
+    const globalSaving = Object.keys(globalPatch).length > 0
+      ? get().persistGlobalPatch(globalPatch)
+      : Promise.resolve(get().settings);
+    if (Object.keys(projectPatch).length === 0) return globalSaving;
+
     const scope = captureProjectScope();
     const saveEpoch = ++settingsSaveEpoch;
-    const previous = get().settings;
-    const next = { ...previous, ...patch };
-    const languageEpoch = ++languagePreferenceEpoch;
-    const isCurrentRequest = () =>
-      isProjectScopeCurrent(scope)
-      && saveEpoch === settingsSaveEpoch
-      && languageEpoch === languagePreferenceEpoch;
-    set({ settings: next, loading: false, saving: true, error: null });
-    applyThemePreference(next.theme);
-    applyColorThemePresetPreference(next.colorThemePreset, next.theme);
-    applyDensityPreference(next.density);
-    applyFontPreference({
-      ui: next.uiFont,
-      reading: next.readingFont,
-      code: next.codeFont,
-    });
-    try {
-      const languageApplied = await applyLanguagePreference(next.language, isCurrentRequest);
-      if (!languageApplied || !isCurrentRequest()) {
-        if (isCurrentRequest()) set({ saving: false });
-        return get().settings;
-      }
-
-      if (!hasTauri()) {
-        set({ saving: false });
-        return next;
-      }
-
-      const saved = await invoke<Settings>("save_settings", {
-        request: { projectId, projectRootPath, settings: next },
-      });
-      if (!isCurrentRequest()) return get().settings;
-      if (saved.language !== next.language) {
-        const languageApplied = await applyLanguagePreference(saved.language, isCurrentRequest);
-        if (!languageApplied || !isCurrentRequest()) return get().settings;
-      }
-      applyThemePreference(saved.theme);
-      applyColorThemePresetPreference(saved.colorThemePreset, saved.theme);
-      applyDensityPreference(saved.density);
-      applyFontPreference({
-        ui: saved.uiFont,
-        reading: saved.readingFont,
-        code: saved.codeFont,
-      });
-      set({
-        settings: saved,
-        saving: false,
-        loadedProjectKey: `${projectId}:${projectRootPath}`,
-      });
-      return saved;
-    } catch (error) {
-      if (!isCurrentRequest()) return get().settings;
-      set({ settings: previous, saving: false, error: errorMessage(error) });
-      applyThemePreference(previous.theme);
-      applyColorThemePresetPreference(previous.colorThemePreset, previous.theme);
-      applyDensityPreference(previous.density);
-      applyFontPreference({
-        ui: previous.uiFont,
-        reading: previous.readingFont,
-        code: previous.codeFont,
-      });
+    const isCurrentRequest = () => isProjectScopeCurrent(scope) && saveEpoch === settingsSaveEpoch;
+    set({ loading: false, saving: true, error: null });
+    const saving = projectSaveQueue.then(async () => {
+      // Read the committed state at dispatch time so queued patches do not
+      // carry failed optimistic project values into later saves.
+      if (!isProjectScopeCurrent(scope)) return get().settings;
+      const next = { ...get().settings, ...projectPatch };
       try {
-        await applyLanguagePreference(previous.language, isCurrentRequest);
-      } catch {
-        // The previous locale was already active; retain it if its chunk cannot be reloaded.
+        const saved = hasTauri()
+          ? await invoke<Settings>("save_project_settings", {
+              request: { projectId, projectRootPath, settings: next },
+            })
+          : next;
+        if (isProjectScopeCurrent(scope)) {
+          set((state) => ({
+            settings: { ...saved, ...pickGlobalPreferences(state.settings) },
+            saving: !isCurrentRequest(),
+            loadedProjectKey: `${projectId}:${projectRootPath}`,
+          }));
+        }
+        return get().settings;
+      } catch (error) {
+        if (isProjectScopeCurrent(scope)) {
+          set({ saving: !isCurrentRequest(), error: errorMessage(error) });
+        }
+        throw error;
       }
-      return previous;
-    }
+    });
+    projectSaveQueue = saving.catch(() => undefined);
+    const [saved] = await Promise.all([saving, globalSaving]);
+    return saved;
   },
 
   reset: () => {
     settingsLoadEpoch += 1;
     settingsSaveEpoch += 1;
-    languagePreferenceEpoch += 1;
     chatAuthorizationResource.reset();
     set((state) => ({
       settings: {
-        ...state.settings,
-        agentDefault: null,
-        llmProviders: [],
-        template: "general",
+        ...defaultSettings,
+        ...pickGlobalPreferences(state.settings),
+        checkUpdates: state.settings.checkUpdates,
+        updateFrequency: state.settings.updateFrequency,
+        autoDownloadUpdates: state.settings.autoDownloadUpdates,
+        promptChangelogBeforeInstall: state.settings.promptChangelogBeforeInstall,
       },
       loading: false,
       saving: false,

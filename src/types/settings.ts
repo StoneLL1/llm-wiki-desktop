@@ -1,6 +1,7 @@
 import type { AgentKind } from "./agent";
 import type { LlmProviderConfig, LlmProviderKind } from "./llm";
 import type { ProjectTemplate } from "./project";
+import type { WorkflowRouteSelection } from "./workflow";
 
 export type ThemePreference = "light" | "dark" | "auto";
 export type ColorThemePresetId =
@@ -72,6 +73,7 @@ export interface Settings {
   manualEditProtection: boolean;
   rawSourcesImmutable: boolean;
   agentDefault: AgentKind | null;
+  aiDefaultRoute: WorkflowRouteSelection | null;
   llmProviders: LlmProviderConfig[];
   template: ProjectTemplate;
 }
@@ -93,3 +95,28 @@ export interface ProviderSecretStatusRequest {
   bindingRevision: number;
   expectedCanonicalOrigin: string;
 }
+
+/** App preferences with no project access requirement. Update settings use their own API. */
+export type GlobalPreferences = Pick<Settings,
+  | "language"
+  | "theme"
+  | "colorThemePreset"
+  | "density"
+  | "uiFont"
+  | "readingFont"
+  | "codeFont"
+  | "agentOutputLanguage"
+  | "closeBehavior"
+  | "systemNotifications"
+  | "notificationClickBehavior"
+  | "maxConcurrentTasks"
+  | "startupBehavior"
+  | "defaultProjectLocation"
+  | "externalEditor"
+  | "associateMdFiles"
+  | "associateWikiFolders"
+>;
+
+export type GlobalPreferencesPatch = Partial<Omit<GlobalPreferences, "systemNotifications">> & {
+  systemNotifications?: Partial<SystemNotificationPrefs>;
+};

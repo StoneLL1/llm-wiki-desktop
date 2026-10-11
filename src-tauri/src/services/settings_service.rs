@@ -10,7 +10,8 @@ use crate::models::paths::ProjectContext;
 use crate::models::settings::{
     AgentLintRepairAttestation, AgentLintRepairAttestationLifecycle,
     AgentLintRepairMutationJournal, AgentLintRepairMutationPhase, ChatConvenienceAuthorization,
-    CloseBehavior, GlobalSettingsFile, GlobalUiPreferences, ProjectSettingsFile, Settings,
+    CloseBehavior, GlobalPreferences, GlobalPreferencesPatch, GlobalSettingsFile, GlobalUiPreferences,
+    ProjectSettingsFile, Settings,
 };
 use crate::models::update::{
     update_error, GlobalUpdatePreferences, SaveGlobalUpdatePreferences, UpdateInstallReceipt,
@@ -67,7 +68,20 @@ impl SettingsService {
         context: &ProjectContext,
         settings: &Settings,
     ) -> Result<Settings, BackendError> {
-        self.save_settings_internal(context, settings, false)
+        self.save_settings_internal(context, settings, false, true)
+    }
+
+    /// Save project preferences without trusting the caller's global snapshot.
+    /// Global UI and update state are owned by their dedicated patch APIs.
+    pub fn save_project_settings(
+        &self,
+        context: &ProjectContext,
+        settings: &Settings,
+    ) -> Result<Settings, BackendError> {
+        let mut settings = settings.clone();
+        // The frontend Settings DTO does not expose the import policy.
+        settings.import_agent_policy = self.read_settings(context)?.import_agent_policy;
+        self.save_settings_internal(context, &settings, false, false)
     }
 
     fn save_settings_internal(
@@ -75,29 +89,32 @@ impl SettingsService {
         context: &ProjectContext,
         settings: &Settings,
         allow_provider_binding_update: bool,
+        write_global_preferences: bool,
     ) -> Result<Settings, BackendError> {
         let store = FileStore;
         store.ensure_absolute_dir(self.config_write_root(), &self.config_dir)?;
         let _guard = self.lock_global_settings()?;
-        let mut global = settings.to_global_file();
-        let existing_global = self.read_global_settings()?;
-        global.check_updates = existing_global.check_updates;
-        global.update_frequency = existing_global.update_frequency;
-        global.auto_download_updates = existing_global.auto_download_updates;
-        global.prompt_changelog_before_install = existing_global.prompt_changelog_before_install;
-        global.last_update_checked_at = existing_global.last_update_checked_at;
-        global.dismissed_update_offer_id = existing_global.dismissed_update_offer_id;
-        global.dismissed_update_version = existing_global.dismissed_update_version;
-        global.update_install_receipt = existing_global.update_install_receipt;
-        global.chat_convenience_authorizations = existing_global.chat_convenience_authorizations;
-        global.agent_lint_repair_attestations = existing_global.agent_lint_repair_attestations;
-        global.remote_provider_disclosure_revision =
-            existing_global.remote_provider_disclosure_revision;
-        store.write_json_atomic_absolute(
-            self.config_write_root(),
-            &self.global_settings_path(),
-            &global,
-        )?;
+        if write_global_preferences {
+            let mut global = settings.to_global_file();
+            let existing_global = self.read_global_settings()?;
+            global.check_updates = existing_global.check_updates;
+            global.update_frequency = existing_global.update_frequency;
+            global.auto_download_updates = existing_global.auto_download_updates;
+            global.prompt_changelog_before_install = existing_global.prompt_changelog_before_install;
+            global.last_update_checked_at = existing_global.last_update_checked_at;
+            global.dismissed_update_offer_id = existing_global.dismissed_update_offer_id;
+            global.dismissed_update_version = existing_global.dismissed_update_version;
+            global.update_install_receipt = existing_global.update_install_receipt;
+            global.chat_convenience_authorizations = existing_global.chat_convenience_authorizations;
+            global.agent_lint_repair_attestations = existing_global.agent_lint_repair_attestations;
+            global.remote_provider_disclosure_revision =
+                existing_global.remote_provider_disclosure_revision;
+            store.write_json_atomic_absolute(
+                self.config_write_root(),
+                &self.global_settings_path(),
+                &global,
+            )?;
+        }
         let settings_path =
             project_state_path(context, context.layout.settings_path.as_deref(), "settings")?;
         let agent_config_path = project_state_path(
@@ -175,7 +192,7 @@ impl SettingsService {
         let mut settings = self.read_settings(context)?;
         settings.import_agent_policy = policy.clone();
         settings.agent_default = local_agent_kind;
-        self.save_settings(context, &settings)?;
+        self.save_settings_internal(context, &settings, false, false)?;
         Ok(policy)
     }
 
@@ -193,7 +210,7 @@ impl SettingsService {
     ) -> Result<Settings, BackendError> {
         let mut settings = self.read_settings(context)?;
         settings.llm_providers = providers;
-        self.save_settings(context, &settings)
+        self.save_settings_internal(context, &settings, false, false)
     }
 
     pub fn save_provider(
@@ -209,7 +226,7 @@ impl SettingsService {
         settings
             .llm_providers
             .sort_by_key(|item| item.provider.credential_account().to_string());
-        self.save_settings(context, &settings)
+        self.save_settings_internal(context, &settings, false, false)
     }
 
     pub fn save_provider_with_binding(
@@ -233,7 +250,7 @@ impl SettingsService {
         settings
             .provider_credential_bindings
             .sort_by_key(|item| item.provider_kind.binding_slug().to_string());
-        self.save_settings_internal(context, &settings, true)
+        self.save_settings_internal(context, &settings, true, false)
     }
 
     pub fn provider_credential_binding(
@@ -260,6 +277,20 @@ impl SettingsService {
         self.read_global_settings()
             .map(|settings| settings.close_behavior)
             .unwrap_or_default()
+    }
+
+    pub fn read_global_preferences(&self) -> Result<GlobalPreferences, BackendError> {
+        Ok(GlobalPreferences::from(&self.read_global_settings()?))
+    }
+
+    pub fn patch_global_preferences(
+        &self,
+        patch: GlobalPreferencesPatch,
+    ) -> Result<GlobalPreferences, BackendError> {
+        self.try_mutate_global_settings(|settings| {
+            patch.apply(settings);
+            Ok(GlobalPreferences::from(&*settings))
+        })
     }
 
     pub fn read_global_ui_preferences(&self) -> Result<GlobalUiPreferences, BackendError> {
@@ -1413,7 +1444,8 @@ mod tests {
         AgentLintRepairAttestationLifecycle, AgentLintRepairMutationPhase,
     };
     use crate::models::settings::{
-        CloseBehavior, GlobalSettingsFile, GlobalUiPreferences, Settings, ThemePreference,
+        CloseBehavior, GlobalPreferencesPatch, GlobalSettingsFile, GlobalUiPreferences, Settings, ThemePreference,
+        SystemNotificationPrefsPatch,
         UpdateFrequency,
     };
     use crate::models::update::{
@@ -2653,6 +2685,93 @@ mod tests {
             .get("remoteProviderDisclosureRevision")
             .is_none());
 
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn global_partial_patch_preserves_unrelated_preferences_and_private_state() {
+        let (context, root, config_dir) = tmp_paths("global-patch-merge");
+        let service = SettingsService::with_config_dir(config_dir.clone());
+        service.set_chat_convenience_authorization(&context, true).unwrap();
+        service.save_global_update_preferences(SaveGlobalUpdatePreferences {
+            check_updates: false,
+            update_frequency: UpdateFrequency::Never,
+            auto_download_updates: true,
+            prompt_changelog_before_install: false,
+        }).unwrap();
+        service.try_mutate_global_settings(|global| {
+            global.ui_font = "Custom UI".into();
+            global.remote_provider_disclosure_revision = Some("accepted-v2".into());
+            global.system_notifications.on_long_task_progress = true;
+            Ok(())
+        }).unwrap();
+        let before = service.read_global_settings().unwrap();
+        // Preferences remain writable even without any available project folder.
+        std::fs::remove_dir_all(&root).unwrap();
+        let saved = service.patch_global_preferences(GlobalPreferencesPatch {
+            language: Some("zh-CN".into()),
+            close_behavior: Some(CloseBehavior::Ask),
+            system_notifications: Some(SystemNotificationPrefsPatch {
+                on_task_completed: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }).unwrap();
+        let after = service.read_global_settings().unwrap();
+        assert_eq!(saved.language, "zh-CN");
+        assert_eq!(saved.close_behavior, CloseBehavior::Ask);
+        assert!(!saved.system_notifications.on_task_completed);
+        assert!(saved.system_notifications.on_task_failed);
+        assert!(saved.system_notifications.on_long_task_progress);
+        assert_eq!(after.ui_font, before.ui_font);
+        assert_eq!(after.check_updates, before.check_updates);
+        assert_eq!(after.update_frequency, before.update_frequency);
+        assert_eq!(after.auto_download_updates, before.auto_download_updates);
+        assert_eq!(after.chat_convenience_authorizations, before.chat_convenience_authorizations);
+        assert_eq!(after.remote_provider_disclosure_revision, before.remote_provider_disclosure_revision);
+        assert!(!root.exists());
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn concurrent_global_patches_merge_under_the_file_lock() {
+        let (_context, root, config_dir) = tmp_paths("global-patch-concurrency");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let handles: Vec<_> = [
+            GlobalPreferencesPatch { language: Some("zh-CN".into()), ..Default::default() },
+            GlobalPreferencesPatch { theme: Some(ThemePreference::Dark), ..Default::default() },
+        ].into_iter().map(|patch| {
+            let barrier = barrier.clone();
+            let config_dir = config_dir.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                SettingsService::with_config_dir(config_dir).patch_global_preferences(patch).unwrap();
+            })
+        }).collect();
+        barrier.wait();
+        for handle in handles { handle.join().unwrap(); }
+        let saved = SettingsService::with_config_dir(config_dir.clone()).read_global_preferences().unwrap();
+        assert_eq!(saved.language, "zh-CN");
+        assert_eq!(saved.theme, ThemePreference::Dark);
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn project_save_cannot_overwrite_a_more_recent_global_preference() {
+        let (context, root, config_dir) = tmp_paths("project-global-isolation");
+        let service = SettingsService::with_config_dir(config_dir.clone());
+        let mut old_snapshot = service.read_settings(&context).unwrap();
+        service.patch_global_preferences(GlobalPreferencesPatch {
+            theme: Some(ThemePreference::Dark),
+            ..Default::default()
+        }).unwrap();
+        old_snapshot.context_window = 128_000;
+        let saved = service.save_project_settings(&context, &old_snapshot).unwrap();
+        assert_eq!(saved.theme, ThemePreference::Dark);
+        assert_eq!(saved.context_window, 128_000);
+        assert_eq!(service.read_global_preferences().unwrap().theme, ThemePreference::Dark);
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(config_dir).unwrap();
     }

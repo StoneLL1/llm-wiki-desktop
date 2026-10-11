@@ -28,7 +28,7 @@
   "projectFactsBatch0Target": {
     "status": "green",
     "requiredExecution": "async",
-    "reviewedCommandTotal": 226,
+    "reviewedCommandTotal": 232,
     "targetBlockingSyncCeiling": 130
   },
   "projectFactsBatch4Target": {
@@ -53,12 +53,12 @@
   },
   "currentSnapshot": {
     "status": "project_facts_batch4_green",
-    "total": 226,
-    "sync": 106,
-    "async": 120,
+    "total": 232,
+    "sync": 108,
+    "async": 124,
     "importTotal": 60,
     "importSync": 0,
-    "blockingSync": 100,
+    "blockingSync": 101,
     "measuredAt": "2026-09-09",
     "sourceCommit": "CONTAINING_COMMIT"
   },
@@ -1645,6 +1645,48 @@
       "classification": "BlockingMutation",
       "currentExecution": "async",
       "rationale": "Reads or writes bounded local recovery records and Git snapshots through the HeavyIo blocking worker; never runs filesystem work on the GUI command thread."
+    },
+    {
+      "command": "get_window_close_state",
+      "module": "window_commands",
+      "classification": "PureMemory",
+      "currentExecution": "sync",
+      "rationale": "Reads the pending close intent and in-memory task snapshot."
+    },
+    {
+      "command": "resolve_window_close",
+      "module": "window_commands",
+      "classification": "ProcessOrMedia",
+      "currentExecution": "sync",
+      "rationale": "Resolves the native window lifecycle action; quit reserves the in-memory write barrier before requesting application exit. Does not wait for a process or perform filesystem I/O."
+    },
+    {
+      "command": "get_global_preferences",
+      "module": "settings_commands",
+      "classification": "BlockingRead",
+      "currentExecution": "async",
+      "rationale": "Reads application preferences independently of project access on the metadata worker."
+    },
+    {
+      "command": "patch_global_preferences",
+      "module": "settings_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "async",
+      "rationale": "Serializes a typed application-only preferences patch under global settings authority on the metadata worker."
+    },
+    {
+      "command": "save_project_settings",
+      "module": "settings_commands",
+      "classification": "BlockingMutation",
+      "currentExecution": "async",
+      "rationale": "Validates project write authority and saves project-only settings without replacing global preferences."
+    },
+    {
+      "command": "open_notification_preferences",
+      "module": "desktop_preferences_commands",
+      "classification": "ProcessOrMedia",
+      "currentExecution": "async",
+      "rationale": "Opens a fixed operating-system notification preferences destination on the metadata worker; accepts no URL or executable input."
     }
   ],
   "workflowAsyncTarget": {

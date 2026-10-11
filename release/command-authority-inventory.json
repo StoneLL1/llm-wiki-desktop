@@ -2269,6 +2269,60 @@
       ],
       "projectScoped": true,
       "writeAuthority": "ProjectWritePermit"
+    },
+    {
+      "name": "get_global_preferences",
+      "source": "src-tauri/src/commands/settings_commands.rs",
+      "classifications": [
+        "read"
+      ],
+      "projectScoped": false
+    },
+    {
+      "name": "get_window_close_state",
+      "source": "src-tauri/src/commands/window_commands.rs",
+      "classifications": [
+        "read"
+      ],
+      "projectScoped": false
+    },
+    {
+      "name": "open_notification_preferences",
+      "source": "src-tauri/src/commands/desktop_preferences_commands.rs",
+      "classifications": [
+        "mutation",
+        "external-process"
+      ],
+      "projectScoped": false,
+      "writeAuthority": "FixedSystemPreferencesDestination"
+    },
+    {
+      "name": "patch_global_preferences",
+      "source": "src-tauri/src/commands/settings_commands.rs",
+      "classifications": [
+        "mutation"
+      ],
+      "projectScoped": false,
+      "writeAuthority": "AppGlobalSettingsAuthority"
+    },
+    {
+      "name": "resolve_window_close",
+      "source": "src-tauri/src/commands/window_commands.rs",
+      "classifications": [
+        "mutation",
+        "external-process"
+      ],
+      "projectScoped": false,
+      "writeAuthority": "NativeWindowLifecycle"
+    },
+    {
+      "name": "save_project_settings",
+      "source": "src-tauri/src/commands/settings_commands.rs",
+      "classifications": [
+        "mutation"
+      ],
+      "projectScoped": true,
+      "writeAuthority": "ProjectWritePermit"
     }
   ],
   "serviceAuthorityContracts": [

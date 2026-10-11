@@ -13,10 +13,12 @@ export function App() {
   const currentProject = useProjectStore((state) => state.currentProject);
   const bootstrap = useProjectStore((state) => state.bootstrap);
   const loadSettings = useSettingsStore((state) => state.loadSettings);
+  const loadGlobalSettings = useSettingsStore((state) => state.loadGlobalSettings);
 
   useEffect(() => {
+    void loadGlobalSettings();
     void bootstrap();
-  }, [bootstrap]);
+  }, [bootstrap, loadGlobalSettings]);
 
   useEffect(() => {
     if (currentProject.projectId && currentProject.rootPath) {

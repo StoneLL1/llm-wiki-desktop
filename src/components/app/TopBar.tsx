@@ -2,7 +2,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { ChevronDown, Download, FolderOpen, FolderSearch, LayoutDashboard, RotateCcw, Search, Settings, Trash2 } from "lucide-react";
 import { type KeyboardEvent as ReactKeyboardEvent, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { activateLocale, LANGUAGE_STORAGE_KEY } from "../../i18n";
 import { compactPath } from "../../lib/pathDisplay";
 import { useNavigationStore } from "../../stores/navigationStore";
 import { useProjectStore } from "../../stores/projectStore";
@@ -46,7 +45,7 @@ export function TopBar() {
   const clearAmbiguousProjectIntent = useProjectStore((state) => state.clearAmbiguousProjectIntent);
   const recentProjects = useProjectStore((state) => state.recentProjects);
   const removeRecentProject = useProjectStore((state) => state.removeRecentProject);
-  const persistPatch = useSettingsStore((state) => state.persistPatch);
+  const persistGlobalPatch = useSettingsStore((state) => state.persistGlobalPatch);
   const pushToast = useToastStore((state) => state.pushToast);
   const openUpdateDialog = useUpdateStore((state) => state.openDialog);
   const updateStatus = useUpdateStore((state) => state.uiStatus);
@@ -75,34 +74,12 @@ export function TopBar() {
 
   const setLanguage = async (language: "en" | "zh-CN") => {
     const requestEpoch = ++languageRequestEpoch.current;
-    const requestProjectId = currentProject.projectId;
-    const requestRootPath = currentProject.rootPath;
-    const isCurrentRequest = () => {
-      const activeProject = useProjectStore.getState().currentProject;
-      return requestEpoch === languageRequestEpoch.current
-        && activeProject.projectId === requestProjectId
-        && activeProject.rootPath === requestRootPath;
-    };
-    if (hasProject) {
-      const saved = await persistPatch(requestProjectId, requestRootPath, {
-        language,
-      });
-      if (!isCurrentRequest()) return;
-      if (saved.language !== language) {
+    try {
+      await persistGlobalPatch({ language });
+    } catch {
+      if (requestEpoch === languageRequestEpoch.current) {
         pushToast("error", t("settings.language.loadError"));
       }
-      return;
-    }
-    try {
-      const activated = await activateLocale(language);
-      if (!activated || !isCurrentRequest()) return;
-      try {
-        window.localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
-      } catch {
-        /* localStorage may be unavailable in an embedded preview. */
-      }
-    } catch {
-      if (isCurrentRequest()) pushToast("error", t("settings.language.loadError"));
     }
   };
 

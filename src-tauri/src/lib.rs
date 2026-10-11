@@ -166,6 +166,7 @@ fn observe_workflow_adapter_error(task_id: &str, phase: &str, message: &str) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(services::window_lifecycle::WindowLifecycle::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -668,7 +669,10 @@ pub fn run() {
                         }
                     }
                     "quit" => {
-                        app_handle.exit(0);
+                        let _ = commands::window_commands::request_window_close(
+                            app_handle,
+                            services::window_lifecycle::WindowCloseIntent::Quit,
+                        );
                     }
                     _ => {}
                 })
@@ -688,19 +692,31 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Intercept window close to minimize to tray (default behavior).
+            // All close choices preserve the native window until the lifecycle
+            // controller has either hidden it or explicitly confirmed app exit.
             if let Some(window) = app.get_webview_window("main") {
                 let window_clone = window.clone();
                 window.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                         let close_behavior =
                             crate::services::SettingsService::default().read_close_behavior();
-                        if matches!(
-                            close_behavior,
-                            crate::models::settings::CloseBehavior::MinimizeToTray
-                        ) {
-                            api.prevent_close();
-                            let _ = window_clone.hide();
+                        api.prevent_close();
+                        match close_behavior {
+                            crate::models::settings::CloseBehavior::MinimizeToTray => {
+                                let _ = window_clone.hide();
+                            }
+                            crate::models::settings::CloseBehavior::Ask => {
+                                let _ = commands::window_commands::request_window_close(
+                                    window_clone.app_handle(),
+                                    services::window_lifecycle::WindowCloseIntent::Ask,
+                                );
+                            }
+                            crate::models::settings::CloseBehavior::Quit => {
+                                let _ = commands::window_commands::request_window_close(
+                                    window_clone.app_handle(),
+                                    services::window_lifecycle::WindowCloseIntent::Quit,
+                                );
+                            }
                         }
                     }
                     if let tauri::WindowEvent::Focused(focused) = event {
@@ -722,6 +738,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::window_commands::get_window_close_state,
+            commands::window_commands::resolve_window_close,
             commands::agent_commands::detect_agents,
             commands::app_capability_commands::list_app_capabilities_v1,
             commands::app_capability_commands::list_app_tasks_v1,
@@ -908,6 +926,10 @@ pub fn run() {
             commands::search_commands::search_wiki,
             commands::settings_commands::get_settings,
             commands::settings_commands::save_settings,
+            commands::settings_commands::get_global_preferences,
+            commands::settings_commands::patch_global_preferences,
+            commands::settings_commands::save_project_settings,
+            commands::desktop_preferences_commands::open_notification_preferences,
             commands::settings_commands::get_global_ui_preferences,
             commands::settings_commands::save_global_ui_preferences,
             commands::settings_commands::get_provider_secret_status,

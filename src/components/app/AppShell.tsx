@@ -41,6 +41,11 @@ const AppCapabilityController = lazy(async () => {
   return { default: module.AppCapabilityController };
 });
 
+const WindowCloseController = lazy(async () => {
+  const module = await import("./WindowCloseController");
+  return { default: module.WindowCloseController };
+});
+
 function useNarrowDesktop() {
   const [narrow, setNarrow] = useState(() =>
     typeof window.matchMedia === "function"
@@ -281,6 +286,7 @@ export function AppShell() {
       <UpdateController />
       <Suspense fallback={null}>
         <AppCapabilityController />
+        <WindowCloseController />
       </Suspense>
       {showRightPanelDialog
         ? createPortal(

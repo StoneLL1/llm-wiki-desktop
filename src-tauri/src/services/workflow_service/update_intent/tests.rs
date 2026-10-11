@@ -2,6 +2,78 @@ use super::*;
 use crate::services::import_v2::source_registry::{SourceIndex, SourceManifest, SourcePointer};
 use std::collections::BTreeMap;
 
+#[test]
+fn ai_default_route_is_consistent_between_update_options_and_queued_intent() {
+    use crate::models::llm::{LlmProviderConfig, LlmProviderKind};
+    let root = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let context = ProjectContext::new("default-route", root.path().to_path_buf());
+    let settings_service = SettingsService::with_config_dir(config.path().to_path_buf());
+    let mut settings = crate::models::settings::Settings {
+        ai_default_route: Some(WorkflowRouteSelection::Byok {
+            provider: LlmProviderKind::Ollama,
+        }),
+        agent_default: Some(AgentKind::Codex),
+        llm_providers: vec![LlmProviderConfig {
+            provider: LlmProviderKind::Ollama,
+            model: "local-model".into(),
+            base_url: "http://localhost:11434".into(),
+            context_window: 32_000,
+            enabled: true,
+        }],
+        ..Default::default()
+    };
+    FileStore
+        .write_json_atomic(&context, ".app/settings.json", &settings.to_project_file())
+        .unwrap();
+    let options = WorkflowService::default()
+        .update_wiki_options(&context, &settings_service)
+        .unwrap();
+    assert_eq!(options.default_route, settings.ai_default_route);
+    assert!(matches!(
+        configured_route(&context, &settings_service, None).unwrap(),
+        WorkflowRoute::Byok {
+            provider: LlmProviderKind::Ollama,
+            ..
+        }
+    ));
+    assert!(matches!(
+        configured_route(
+            &context,
+            &settings_service,
+            Some(&WorkflowRouteSelection::Agent {
+                agent: AgentKind::Claude
+            })
+        )
+        .unwrap(),
+        WorkflowRoute::Agent {
+            agent: AgentKind::Claude,
+            ..
+        }
+    ));
+    settings.llm_providers[0].enabled = false;
+    FileStore
+        .write_json_atomic(&context, ".app/settings.json", &settings.to_project_file())
+        .unwrap();
+    assert_eq!(
+        configured_route(&context, &settings_service, None)
+            .unwrap_err()
+            .code,
+        "WORKFLOW_ROUTE_UNAVAILABLE"
+    );
+    settings.ai_default_route = None;
+    FileStore
+        .write_json_atomic(&context, ".app/settings.json", &settings.to_project_file())
+        .unwrap();
+    assert!(matches!(
+        configured_route(&context, &settings_service, None).unwrap(),
+        WorkflowRoute::Agent {
+            agent: AgentKind::Codex,
+            ..
+        }
+    ));
+}
+
 fn metadata_fixture() -> (tempfile::TempDir, ProjectContext, WorkflowSourceVersionRef) {
     let root = tempfile::tempdir().unwrap();
     let context = ProjectContext::new("来源目录", root.path().to_path_buf());

@@ -57,7 +57,7 @@ export function useProviderWorkflow(
       mounted.current = false;
     };
   }, []);
-  const testEpoch = useRef(0);
+  const testEpochs = useRef(new Map<LlmProviderKind, number>());
   const refresh = capabilities.refresh;
 
   const saveProvider = useCallback(
@@ -159,12 +159,13 @@ export function useProviderWorkflow(
         return { ok: false, message: t("provider.testUnavailable") };
       }
       const requestKey = projectKey;
-      const epoch = ++testEpoch.current;
+      const epoch = (testEpochs.current.get(config.provider) ?? 0) + 1;
+      testEpochs.current.set(config.provider, epoch);
       try {
         const result = await invoke<ProviderTestResult>("test_llm_provider", {
           request: boundRequest(config.provider),
         });
-        if (latestProjectKey.current !== requestKey || testEpoch.current !== epoch) {
+        if (!mounted.current || latestProjectKey.current !== requestKey || testEpochs.current.get(config.provider) !== epoch) {
           return { ok: false, message: t("provider.testUnavailable") };
         }
         return result;

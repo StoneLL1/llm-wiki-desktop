@@ -199,7 +199,7 @@ describe("settingsStore chat convenience authorization", () => {
     });
   });
 
-  it("falls back to disabled authorization when setting fails", async () => {
+  it("rejects a failed mutation and keeps disabled authorization for a different project", async () => {
     useSettingsStore.setState({
       chatConvenienceAuthorization: {
         enabled: true,
@@ -210,17 +210,16 @@ describe("settingsStore chat convenience authorization", () => {
     });
     invokeMock.mockRejectedValueOnce(new Error("backend unavailable"));
 
-    const authorization = await useSettingsStore
-      .getState()
-      .setChatConvenienceAuthorization("project-b", "D:/wiki-b", true);
+    await expect(useSettingsStore.getState()
+      .setChatConvenienceAuthorization("project-b", "D:/wiki-b", true)).rejects.toThrow("backend unavailable");
 
-    expect(authorization).toMatchObject({
+    expect(useSettingsStore.getState().chatConvenienceAuthorization).toMatchObject({
       enabled: false,
       confirmedAt: "",
       projectId: "project-b",
       rootPathFingerprint: "",
     });
-    expect(useSettingsStore.getState().chatConvenienceAuthorization).toEqual(authorization);
+    expect(useSettingsStore.getState().chatConvenienceSaving).toBe(false);
   });
 
   it("revokes all authorizations through the backend command", async () => {

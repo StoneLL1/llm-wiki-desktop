@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   isPermissionGranted,
@@ -17,7 +18,24 @@ import type { WorkflowDisplayStatus, WorkflowRun, WorkflowRunSummary } from "../
 
 const loadWorkflowNotifications = () => import("./workflowNotifications");
 
-type NotificationPermissionState = "unknown" | "granted" | "denied";
+export type NotificationPermissionState = "unknown" | "granted" | "denied";
+
+/** Read the plugin's permission state without opening a prompt. Desktop
+ * runtimes may report availability without checking OS banner permissions. */
+export async function readNotificationPermission(): Promise<NotificationPermissionState> {
+  if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return "unknown";
+  return await isPermissionGranted() ? "granted" : "denied";
+}
+
+export async function sendTestNotification(): Promise<boolean> {
+  if (await readNotificationPermission() !== "granted") return false;
+  // The plugin JS helper returns void on desktop and cannot surface native
+  // errors. Await the notify command so failures reach the settings panel.
+  await invoke("plugin:notification|notify", {
+    options: { title: "LLM Wiki Desktop", body: i18next.t("settings.notification.testBody") },
+  });
+  return true;
+}
 
 let permissionEpoch = 0;
 let permissionState: { epoch: number; value: NotificationPermissionState } = {

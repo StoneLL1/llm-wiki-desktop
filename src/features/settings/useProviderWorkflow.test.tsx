@@ -9,7 +9,7 @@ import {
   resetProjectFactsStoreForTests,
   useProjectFactsStore,
 } from "../../stores/projectFactsStore";
-import type { LlmProviderConfig, ProviderStatus } from "../../types/llm";
+import type { LlmProviderConfig, ProviderStatus, ProviderTestResult } from "../../types/llm";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 
@@ -63,6 +63,43 @@ beforeEach(() => {
 });
 
 describe("useProviderWorkflow", () => {
+  it("keeps concurrent connection tests independent for different providers", async () => {
+    const openAiConfig: LlmProviderConfig = { ...config, provider: "open_ai", model: "gpt-test", baseUrl: "https://api.openai.com" };
+    capabilities.providers.push({
+      ...status,
+      config: openAiConfig,
+      credentialBinding: { ...status.credentialBinding!, providerKind: "open_ai", canonicalOrigin: "https://api.openai.com" },
+    });
+    let finishAnthropic!: (result: ProviderTestResult) => void;
+    let finishOpenAi!: (result: ProviderTestResult) => void;
+    invokeMock
+      .mockReturnValueOnce(new Promise<ProviderTestResult>((resolve) => { finishAnthropic = resolve; }))
+      .mockReturnValueOnce(new Promise<ProviderTestResult>((resolve) => { finishOpenAi = resolve; }));
+    const { result } = renderHook(() => useProviderWorkflow(project, capabilities));
+    const anthropic = result.current.testProvider(config);
+    const openAi = result.current.testProvider(openAiConfig);
+    finishOpenAi({ ok: true, message: "OpenAI connected" });
+    finishAnthropic({ ok: true, message: "Anthropic connected" });
+    await expect(openAi).resolves.toEqual({ ok: true, message: "OpenAI connected" });
+    await expect(anthropic).resolves.toEqual({ ok: true, message: "Anthropic connected" });
+  });
+
+  it("suppresses superseded tests for the same provider and tests from a previous project", async () => {
+    let finishFirst!: (result: ProviderTestResult) => void;
+    let finishSecond!: (result: ProviderTestResult) => void;
+    invokeMock
+      .mockReturnValueOnce(new Promise<ProviderTestResult>((resolve) => { finishFirst = resolve; }))
+      .mockReturnValueOnce(new Promise<ProviderTestResult>((resolve) => { finishSecond = resolve; }));
+    const { result, rerender } = renderHook(({ current }) => useProviderWorkflow(current, capabilities), { initialProps: { current: project } });
+    const first = result.current.testProvider(config);
+    const second = result.current.testProvider(config);
+    finishFirst({ ok: true, message: "Outdated success" });
+    await expect(first).resolves.toMatchObject({ ok: false });
+    rerender({ current: { ...project, projectId: "project-b", rootPath: "D:/wiki/project-b" } });
+    finishSecond({ ok: true, message: "Previous project success" });
+    await expect(second).resolves.toMatchObject({ ok: false });
+  });
+
   it("invalidates the original project without refreshing it after a project switch", async () => {
     invokeMock.mockResolvedValueOnce([status]);
     await ensureProjectFacts(

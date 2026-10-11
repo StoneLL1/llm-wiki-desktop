@@ -1,7 +1,10 @@
 use llm_wiki_desktop_lib::{
     models::{
-        agent::AgentKind, import_v2_agent::AgentAssistancePolicy, llm::LlmProviderKind,
+        agent::AgentKind,
+        import_v2_agent::AgentAssistancePolicy,
+        llm::LlmProviderKind,
         paths::ProjectContext,
+        settings::{GlobalPreferencesPatch, ThemePreference},
     },
     services::{SecretService, SettingsService},
 };
@@ -12,6 +15,7 @@ fn policy_defaults_updates_and_never_persists_provider_secrets() {
     let config = tempfile::tempdir().unwrap();
     let context = ProjectContext::new("project-policy", project.path().to_path_buf());
     let service = SettingsService::with_config_dir(config.path().to_path_buf());
+    let global_path = config.path().join("settings.json");
     let secrets = SecretService::memory();
     let marker = "sk-import-agent-policy-secret-marker";
     secrets.set(LlmProviderKind::OpenAi, marker).unwrap();
@@ -32,11 +36,41 @@ fn policy_defaults_updates_and_never_persists_provider_secrets() {
     let loaded = service.read_settings(&context).unwrap();
     assert_eq!(loaded.import_agent_policy, policy);
     assert_eq!(loaded.agent_default, Some(AgentKind::Codex));
+    assert!(
+        !global_path.exists(),
+        "saving a project policy must not create application preferences"
+    );
+
+    service
+        .patch_global_preferences(GlobalPreferencesPatch {
+            language: Some("zh-CN".into()),
+            theme: Some(ThemePreference::Dark),
+            ..Default::default()
+        })
+        .unwrap();
+    let global_before = std::fs::read(&global_path).unwrap();
+    let updated_policy = AgentAssistancePolicy {
+        max_attempts_per_item: 3,
+    };
+    service
+        .set_import_agent_policy(&context, updated_policy.clone(), Some(AgentKind::Claude))
+        .unwrap();
+
+    let loaded = service.read_settings(&context).unwrap();
+    assert_eq!(loaded.import_agent_policy, updated_policy);
+    assert_eq!(loaded.agent_default, Some(AgentKind::Claude));
+    assert_eq!(loaded.language, "zh-CN");
+    assert_eq!(loaded.theme, ThemePreference::Dark);
+    assert_eq!(
+        std::fs::read(&global_path).unwrap(),
+        global_before,
+        "updating a project policy must leave existing application preferences untouched"
+    );
 
     for path in [
         project.path().join(".app/settings.json"),
         project.path().join(".app/agent-config.json"),
-        config.path().join("settings.json"),
+        global_path,
     ] {
         let text = std::fs::read_to_string(path).unwrap().to_ascii_lowercase();
         assert!(!text.contains(marker));

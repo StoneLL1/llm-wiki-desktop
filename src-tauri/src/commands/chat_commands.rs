@@ -21,7 +21,7 @@ use crate::models::paths::ProjectContext;
 use crate::models::task::{
     BackendTask, TaskActivity, TaskActivityStatus, TaskResult, TaskStatus, TaskType,
 };
-use crate::models::workflow::WorkflowFilesystemAccess;
+use crate::models::workflow::{WorkflowFilesystemAccess, WorkflowRouteSelection};
 use crate::services::{
     AgentService, CandidateChange, ChatIntent, ConvenienceAuditStatus, LlmService, RetrievalContext,
 };
@@ -311,15 +311,26 @@ async fn run_chat_send(
             label: Some("Retrieving local context".into()),
         },
     );
-    let language = state
-        .settings_service
-        .read_settings(context)
-        .map(|settings| settings.language)
-        .unwrap_or_else(|_| "en".to_string());
+    let settings = state.settings_service.read_settings(context)?;
+    let (route, agent, provider) = effective_chat_route_selection(
+        request.route,
+        request.agent,
+        request.provider,
+        settings.ai_default_route.as_ref(),
+    );
+    let request = SendChatMessageRequest {
+        route,
+        agent,
+        provider,
+        ..request
+    };
+    let language = settings.language;
     let intent = state
         .chat_convenience_service
         .classify_chat_intent(&request.content);
-    if should_use_convenience_flow(request.convenience_enabled, intent) {
+    if request.route != CompileRoutePreference::Byok
+        && should_use_convenience_flow(request.convenience_enabled, intent)
+    {
         if state.chat_service.is_memory_project(context) {
             return Err(BackendError::new(
                 "PROJECT_WRITE_READ_ONLY",
@@ -1139,6 +1150,45 @@ enum ResolvedRoute {
     Byok(LlmProviderConfig),
 }
 
+/// Resolve user choices before any Agent-only convenience behavior. A concrete
+/// project default is an explicit route commitment, not an Auto fallback hint.
+fn effective_chat_route_selection(
+    preference: CompileRoutePreference,
+    agent: Option<AgentKind>,
+    provider: Option<LlmProviderKind>,
+    default: Option<&WorkflowRouteSelection>,
+) -> (
+    CompileRoutePreference,
+    Option<AgentKind>,
+    Option<LlmProviderKind>,
+) {
+    let default_agent = match default {
+        Some(WorkflowRouteSelection::Agent { agent }) => Some(*agent),
+        _ => None,
+    };
+    let default_provider = match default {
+        Some(WorkflowRouteSelection::Byok { provider }) => Some(*provider),
+        _ => None,
+    };
+    match preference {
+        CompileRoutePreference::Agent => (preference, agent.or(default_agent), None),
+        CompileRoutePreference::Byok => (preference, None, provider.or(default_provider)),
+        CompileRoutePreference::Auto => {
+            if let Some(agent) = agent {
+                (CompileRoutePreference::Agent, Some(agent), None)
+            } else if let Some(provider) = provider {
+                (CompileRoutePreference::Byok, None, Some(provider))
+            } else if let Some(agent) = default_agent {
+                (CompileRoutePreference::Agent, Some(agent), None)
+            } else if let Some(provider) = default_provider {
+                (CompileRoutePreference::Byok, None, Some(provider))
+            } else {
+                (CompileRoutePreference::Auto, None, None)
+            }
+        }
+    }
+}
+
 fn resolve_route(
     state: &AppState,
     context: &ProjectContext,
@@ -1147,22 +1197,24 @@ fn resolve_route(
     explicit_provider: Option<LlmProviderKind>,
 ) -> Result<ResolvedRoute, BackendError> {
     let agent_config = AgentService::load_config(context)?;
-    let providers = LlmService::list_providers(context)?;
     let selected_agent = explicit_agent.or(agent_config.default_agent);
     let usable_agent = selected_agent.filter(|kind| {
-        AgentService::supports_read_only_project_chat(*kind)
-            && state
-                .agent_service
-                .detect_agents(Some(*kind))
-                .iter()
-                .any(|info| info.kind == *kind && info.state == AgentDetectionState::Installed)
+        preference != CompileRoutePreference::Byok
+            && AgentService::supports_read_only_project_chat(*kind)
+            && state.agent_service.detect_agent(*kind, true).state == AgentDetectionState::Installed
     });
-    let selected_provider = select_provider(
-        context,
-        explicit_provider,
-        &providers,
-        &state.secret_service,
-    )?;
+    let selected_provider = if preference == CompileRoutePreference::Agent || usable_agent.is_some()
+    {
+        None
+    } else {
+        let providers = LlmService::list_providers(context)?;
+        select_provider(
+            context,
+            explicit_provider,
+            &providers,
+            &state.secret_service,
+        )?
+    };
     decide_route(preference, usable_agent, selected_provider)
 }
 
@@ -1790,6 +1842,87 @@ mod tests {
             ResolvedRoute::Byok(config) => assert_eq!(config.provider, LlmProviderKind::Ollama),
             other => panic!("expected BYOK fallback, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn ai_default_chat_route_is_concrete_and_never_falls_back_when_unavailable() {
+        let (preference, agent, provider) = effective_chat_route_selection(
+            CompileRoutePreference::Auto,
+            None,
+            None,
+            Some(&WorkflowRouteSelection::Agent {
+                agent: AgentKind::Codex,
+            }),
+        );
+        assert_eq!(preference, CompileRoutePreference::Agent);
+        assert_eq!(agent, Some(AgentKind::Codex));
+        assert_eq!(provider, None);
+        assert_eq!(
+            decide_route(preference, None, Some(byok(LlmProviderKind::Ollama)))
+                .unwrap_err()
+                .code,
+            "AGENT_UNAVAILABLE"
+        );
+
+        let (preference, agent, provider) = effective_chat_route_selection(
+            CompileRoutePreference::Auto,
+            None,
+            None,
+            Some(&WorkflowRouteSelection::Byok {
+                provider: LlmProviderKind::Anthropic,
+            }),
+        );
+        assert_eq!(preference, CompileRoutePreference::Byok);
+        assert_eq!(agent, None);
+        assert_eq!(provider, Some(LlmProviderKind::Anthropic));
+        assert_eq!(
+            decide_route(preference, Some(AgentKind::Codex), None)
+                .unwrap_err()
+                .code,
+            "LLM_PROVIDER_MISSING"
+        );
+    }
+
+    #[test]
+    fn ai_default_chat_route_yields_to_single_use_choices_and_preserves_legacy_auto() {
+        let default = WorkflowRouteSelection::Byok {
+            provider: LlmProviderKind::OpenAi,
+        };
+        assert_eq!(
+            effective_chat_route_selection(
+                CompileRoutePreference::Auto,
+                Some(AgentKind::Claude),
+                None,
+                Some(&default)
+            ),
+            (CompileRoutePreference::Agent, Some(AgentKind::Claude), None),
+        );
+        assert_eq!(
+            effective_chat_route_selection(
+                CompileRoutePreference::Byok,
+                None,
+                Some(LlmProviderKind::Ollama),
+                Some(&default)
+            ),
+            (
+                CompileRoutePreference::Byok,
+                None,
+                Some(LlmProviderKind::Ollama)
+            ),
+        );
+        assert_eq!(
+            effective_chat_route_selection(
+                CompileRoutePreference::Agent,
+                None,
+                None,
+                Some(&default)
+            ),
+            (CompileRoutePreference::Agent, None, None),
+        );
+        assert_eq!(
+            effective_chat_route_selection(CompileRoutePreference::Auto, None, None, None),
+            (CompileRoutePreference::Auto, None, None),
+        );
     }
 
     #[test]

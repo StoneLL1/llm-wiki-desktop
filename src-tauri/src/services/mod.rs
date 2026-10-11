@@ -133,3 +133,5 @@ pub(crate) use workflow_service::{
 
 #[cfg(test)]
 pub(crate) use workflow_service::update_wiki_review_can_inline;
+#[cfg(any(feature = "gui", test))]
+pub mod window_lifecycle;
