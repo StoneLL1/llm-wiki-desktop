@@ -19,14 +19,12 @@ use llm_wiki_desktop_lib::models::workflow::{
     UpdateWikiMode, WorkflowDisplayStatus, WorkflowExecutionOptions, WorkflowKind, WorkflowRoute,
     WorkflowScope, WorkflowSourceVersionRef, WorkflowStageStatus,
 };
-#[cfg(not(windows))]
-use llm_wiki_desktop_lib::services::confirm_update_wiki_review;
 use llm_wiki_desktop_lib::services::{
-    persist_update_wiki_review, restore_update_wiki_confirmation, run_update_wiki,
-    update_wiki_candidate_is_valid, update_wiki_decision_review, workflow_baseline_for_scope,
-    workflow_stages, AgentInvocation, AgentService, BookmarkService, CompileExecutionServices,
-    CompileService, EnqueueWorkflow, FileStore, GitService, LlmService, ProcessRunner,
-    SearchService, SecretService, SettingsService, UpdateWikiExecutionServices,
+    confirm_update_wiki_review, persist_update_wiki_review, restore_update_wiki_confirmation,
+    run_update_wiki, update_wiki_candidate_is_valid, update_wiki_decision_review,
+    workflow_baseline_for_scope, workflow_stages, AgentInvocation, AgentService, BookmarkService,
+    CompileExecutionServices, CompileService, EnqueueWorkflow, FileStore, GitService, LlmService,
+    ProcessRunner, SearchService, SecretService, SettingsService, UpdateWikiExecutionServices,
     WorkflowCoordinator, WorkflowStageSink,
 };
 use llm_wiki_desktop_lib::tasks::TaskService;
